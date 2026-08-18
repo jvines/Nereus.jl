@@ -1,0 +1,13 @@
+# Outputs never live in the repo — they belong in the artifact store.
+/results/
+/logs/
+**/plots_*/
+*.nc
+*.png
+*.pdf
+.DS_Store
+# Manifest.toml IS committed: bundle builds must be reproducible. A worktree
+# without it re-resolves and fails (OptimizationBase/OptimizationOptimJL).
+
+# Run outputs dropped in test/ — results, profiles, markers. Not tests.
+test/*.txt

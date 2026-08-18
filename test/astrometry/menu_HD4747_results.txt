@@ -1,0 +1,4 @@
+# HD 4747 menu  (ref Peretti+2019: a=10.01 e=0.736 i=47.3 M=70.0 MJ)
+ptemcee   62s logZ=268.0     a=10.17/10.01 e=0.735/0.736 i=49.7/47 M=67.6/70.0  a:✓ e:✓ i:✓ M:✓  ✅ RECOVERED
+pt        38s logZ=-4408512.3 a=10.16/10.01 e=0.735/0.736 i=49.7/47 M=67.6/70.0  a:✓ e:✓ i:✓ M:✓  ✅ RECOVERED
+nested    56s logZ=-282.6    a=10.23/10.01 e=0.736/0.736 i=50.1/47 M=67.7/70.0  a:✓ e:✓ i:✓ M:✓  ✅ RECOVERED

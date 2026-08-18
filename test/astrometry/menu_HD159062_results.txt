@@ -1,0 +1,4 @@
+# HD 159062 menu  (ref orvara/Brandt: a=58 e=0.11 i=62 M_sec=0.608)
+ptemcee   55s logZ=178.5     a=57.9/58 e=0.091/0.11 i=62.2/62 M=0.6069/0.6080  a:✓ e:✓ i:✓ M:✓  ✅ RECOVERED
+pt        41s logZ=-8217590.8 a=47.4/58 e=0.359/0.11 i=58.3/62 M=0.5984/0.6080  a:✓ e:✗ i:✓ M:✓  ⚠ MISMATCH
+nested    31s logZ=-340.6    a=41.4/58 e=0.753/0.11 i=28.5/62 M=0.4918/0.6080  a:✗ e:✗ i:✗ M:✗  ⚠ MISMATCH

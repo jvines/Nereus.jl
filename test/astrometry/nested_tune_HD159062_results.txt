@@ -1,0 +1,5 @@
+# nested HD159062 tuning  (ref a=58 e=0.11 i=62 M=0.608; menu used dlogz=0.5 → MISMATCH)
+nlive=1500 dlogz=0.10 s1      38s logZ=-340.6    a=41.4 e=0.753 i=28.4 M=0.4914  ⚠ MISMATCH
+nlive=1500 dlogz=0.05 s1      29s logZ=-340.6    a=41.4 e=0.753 i=28.4 M=0.4908  ⚠ MISMATCH
+nlive=3000 dlogz=0.10 s1      82s logZ=-322.4    a=43.8 e=0.485 i=47.4 M=0.4493  ⚠ MISMATCH
+nlive=1500 dlogz=0.10 s7      75s logZ=-194.8    a=50.1 e=0.285 i=59.3 M=0.6229  ⚠ MISMATCH
