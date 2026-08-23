@@ -162,18 +162,78 @@ function _target_from(channels::AbstractVector, planets; M_pri = nothing,
 end
 
 # ---------------------------------------------------------------------------
+# Input-shape validation for the fit_* entry points
+# ---------------------------------------------------------------------------
+#
+# Every fit_* function takes a PER-INSTRUMENT MAPPING, not flat vectors:
+# `Dict("HARPS" => (t=..., rv=..., rv_err=...))`. Passing the vectors directly
+# is the obvious first guess and it used to die four frames down inside a
+# generator with `type Array has no field t`, which says nothing about what the
+# caller should have written.
+#
+# Validated here for the same reason `features.jl` validates its payloads: a
+# MethodError from deep in dispatch is unreadable, and this is the first call
+# anyone makes. The check is shape-only — it never touches values — so it costs
+# nothing and cannot reject a legitimate table.
+function _require_instrument_map(payload, kind::String, required::NTuple{N,Symbol}) where {N}
+    ex = kind == "RV" ?
+        """Dict("HARPS" => (t = bjd, rv = rv, rv_err = err))""" :
+        """Dict("TESS" => (t = bjd, flux = f, flux_err = ferr))"""
+
+    if payload isa AbstractVector || payload isa Tuple
+        throw(ArgumentError(
+            "fit_$(lowercase(kind)): expected a per-instrument mapping, got a " *
+            "$(typeof(payload)). Name your instrument:\n    $ex"))
+    end
+
+    pairs_ = payload isa AbstractDict ?
+        [(String(k), v) for (k, v) in payload] :
+        [(String(k), getfield(payload, k)) for k in propertynames(payload)]
+
+    isempty(pairs_) && throw(ArgumentError("fit_$(lowercase(kind)): no data given"))
+
+    for (name, tbl) in pairs_
+        # A bare vector here means the caller passed columns where instruments
+        # belong — `(t=..., rv=...)` instead of `Dict("X" => (t=..., rv=...))`.
+        if tbl isa AbstractVector || tbl isa Number
+            throw(ArgumentError(
+                "fit_$(lowercase(kind)): \"$name\" maps to a $(typeof(tbl)), not a " *
+                "table of columns. This usually means the columns were passed " *
+                "directly instead of being nested under an instrument name:" *
+                "\n    $ex"))
+        end
+        have = tbl isa AbstractDict ? Set(Symbol.(keys(tbl))) : Set(propertynames(tbl))
+        miss = [f for f in required if !(f in have)]
+        isempty(miss) || throw(ArgumentError(
+            "fit_$(lowercase(kind)): instrument \"$name\" is missing " *
+            join(string.(miss), ", ") * " (has " *
+            join(sort(string.(collect(have))), ", ") * ")\n    $ex"))
+    end
+    return payload
+end
+
+# ---------------------------------------------------------------------------
 # Entry points — one per technique
 # ---------------------------------------------------------------------------
 
 """
     fit_rv(rv; planets, engine, stopping, output_dir, ...)
 
-Fit radial velocities alone. `planets` is an integer for a fixed-dimension fit
-or a range for trans-dimensional model selection over planet count.
+Fit radial velocities alone.
+
+`rv` is a PER-INSTRUMENT mapping, not flat columns — the instrument name is
+what the jitter and offset terms are keyed on, so there is no unnamed form:
+
+    fit_rv(Dict("HARPS" => (t = bjd, rv = rv, rv_err = err)))
+    fit_rv(Dict("HARPS" => (...), "HIRES" => (...)); planets = 2)
+
+`planets` is an integer for a fixed-dimension fit or a range for
+trans-dimensional model selection over planet count.
 """
 function fit_rv(rv; planets = 1, engine = Dict("engine" => "pt"),
                 stopping = nothing, output_dir = nothing, noise = nothing,
                 trend_order = 0, kwargs...)
+    _require_instrument_map(rv, "RV", (:t, :rv, :rv_err))
     ch = _as_channel(rv, "RV")
     if !(planets isa NamedTuple)
         d = collect(values(get(ch, "data", Dict())))
@@ -190,14 +250,21 @@ end
 """
     fit_transit(phot; planets, limb_darkening, rho_star, gravity_darkening, ...)
 
-Fit transit photometry alone. `gravity_darkening=true` selects the oblate
-von Zeipel/Barnes model (GD_SOURCE), which constrains stellar inclination i*
-separately from λ — unreachable from a symmetric transit.
+Fit transit photometry alone.
+
+`phot` is a PER-INSTRUMENT mapping, as for `fit_rv`:
+
+    fit_transit(Dict("TESS" => (t = bjd, flux = f, flux_err = ferr)))
+
+`gravity_darkening=true` selects the oblate von Zeipel/Barnes model
+(GD_SOURCE), which constrains stellar inclination i* separately from λ —
+unreachable from a symmetric transit.
 """
 function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
                      rho_star = nothing, gravity_darkening = false,
                      engine = Dict("engine" => "pt"), stopping = nothing,
                      output_dir = nothing, kwargs...)
+    _require_instrument_map(phot, "transit", (:t, :flux, :flux_err))
     tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_transit")
 end
