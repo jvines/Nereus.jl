@@ -414,9 +414,23 @@ function tomogram_pooled(nights;
             n, d = _mf_numden(R, gref, t, Tc, P, a_Rs, inc, vsini, λv)
             num .+= n; den .+= d
         end
-        s = @. ifelse(den > 0, num / sqrt(max(den, 1e-30)), 0.0)
-        σ = std(s)
-        return σ > 0 ? s ./ σ : s
+        # RETURNED RAW. An earlier version divided by `std(s)` to express the
+        # peak in units of the scan's own spread, and that silently destroyed
+        # the permutation test below.
+        #
+        # `std(s)` is not a noise scale. The shadow is broad in lambda -- angles
+        # near the truth match the track partially -- so a real signal lifts a
+        # wide region of the scan and raises its dispersion along with its peak.
+        # Dividing one by the other therefore cancels the signal: on an injected
+        # shadow at S/N 91, permuting the frames dropped the raw peak 2.53x and
+        # the divisor 2.50x, leaving 3.027 against a null of 2.993. The p-value
+        # was pinned near 0.5 at every signal strength ever tested.
+        #
+        # `den` is already the right normaliser and is what remains: it is the
+        # template's own norm, built from the transit geometry alone with no
+        # data in it, so it does not move when the frames are shuffled and the
+        # comparison against the null means what it says.
+        return @. ifelse(den > 0, num / sqrt(max(den, 1e-30)), 0.0)
     end
 
     tot = pooled_score(Rs)
