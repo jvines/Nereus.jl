@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Export RVs for a given star_id from the exoautomata postgres DB into
-the PROTEUS CSV schema used by the test/ fit scripts.
+the Nereus CSV schema used by the test/ fit scripts.
 
 Columns match `test/data/hd18599.csv`:
     bjd, rv, rv_error,
@@ -25,7 +25,7 @@ Filters:
 - is_disabled = FALSE, is_outlier = FALSE
 - order by BJD ascending
 
-Outlier rejection at fit time is handled by PROTEUS's per-instrument
+Outlier rejection at fit time is handled by Nereus's per-instrument
 5σ MAD filter, NOT here — this script just dumps the raw clean data.
 """
 import argparse
