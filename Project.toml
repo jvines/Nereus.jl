@@ -39,6 +39,7 @@ NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
 NbodyGradient = "69f646f0-5709-4f35-9e52-1656edff0883"
 NestedSamplers = "41ceaf6f-1696-4a54-9b49-2e7a9ec3782e"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+OptimizationOptimJL = "36348300-93cb-4f02-beb5-3c3902f8871e"
 PairPlots = "43a3c2be-4208-490b-832a-a21dcd55d7da"
 ParetoSmooth = "a68b5a21-f429-434e-8bfa-46b447300aac"
 Pathfinder = "b1d3bc72-d0e7-4279-b92f-7fa5d6d2d454"
@@ -94,6 +95,17 @@ NCDatasets = "0.14.15"
 NbodyGradient = "0.2.3"
 NestedSamplers = "0.8, 0.9"
 Optim = "2.0.1"
+# Not imported anywhere — a direct dep ONLY to carry this compat bound.
+# OptimizationOptimJL 0.4.18 calls OptimizationBase.supports_sense (added in
+# OptimizationBase 5.1) while relaxing its own declared compat from
+# "5.1.0 - 5" back to "5", so the registry permits the broken pair
+# 0.4.18 + OptimizationBase 5.0.0 — and a fresh `Pkg.add(url=...)` resolves
+# exactly there and `using Nereus` dies inside Pathfinder's precompile. Our dev
+# Manifest never sees it (pinned at 0.4.10 from before the call existed), which
+# is why the package worked here and failed for a clean install. 0.4.19 keeps
+# the bad bound, hence the upper cap. Drop this dep+bound when upstream
+# publishes a version requiring OptimizationBase >= 5.1 again.
+OptimizationOptimJL = "0.4.10 - 0.4.17"
 PairPlots = "3.0.3"
 ParetoSmooth = "0.7.16"
 Pathfinder = "0.9 - 0.9.30"
