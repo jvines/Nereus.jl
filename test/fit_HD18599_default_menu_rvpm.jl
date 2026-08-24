@@ -16,7 +16,11 @@ BLAS.set_num_threads(1)
 
 const REPO_ROOT = abspath(joinpath(@__DIR__, "..", ".."))
 const RV_FILE   = joinpath(@__DIR__, "data", "hd18599.csv")
-const LC_FILE   = joinpath(REPO_ROOT, "data", "HD18599", "HD18599_cleaned_lc.csv")
+# The cleaned TESS light curve is an 11 MB product that does not ship with the
+# package. HD18599_LC selects it; the old default resolved to <repo>/../../data,
+# which after the rename lands outside any checkout.
+const LC_FILE   = get(ENV, "HD18599_LC",
+                      joinpath(REPO_ROOT, "data", "HD18599", "HD18599_cleaned_lc.csv"))
 const P_REF, T0_REF, DUR = 4.1374685534602405, 2458354.5857470357, 0.067
 const M_S, R_S, P_ROT = 0.807, 0.798, 8.74
 const PAPER = Set(["HARPS_PRE", "HARPS_POST", "FEROS"])
@@ -139,6 +143,53 @@ BETAS = haskey(ENV,"SIGMA_LOGL_RV") ? let σll=parse(Float64,ENV["SIGMA_LOGL_RV"
     b
 end : nothing
 BETAS !== nothing && (N_TEMPS=length(BETAS))
+# MEASURE_SIGMA_LOGL_RV=<chains.nc>: report the number the cold-dense ladder
+# needs, from a pilot, instead of guessing it.
+#
+# It must be the RV log-likelihood ALONE. The saved `lp` is the full log
+# posterior and is dominated by the ~25k-point transit term (mean ~8.6e4 on this
+# target), so its spread says nothing about the tempered problem — with
+# untemper_transit the transit sits outside the tempered target entirely.
+# Reported robustly (IQR/1.349) as well as by std, because a pilot chain still
+# carries burn-in draws and the two differ by ~8x when it does.
+if haskey(ENV, "MEASURE_SIGMA_LOGL_RV")
+  let
+    chp = ENV["MEASURE_SIGMA_LOGL_RV"]
+    chM, _ = Nereus.load_chains(chp)
+    cnM = names(chM, :parameters)
+    nm  = params.config.noise_models
+    lls = Float64[]
+    ndraw = size(chM, 1) * size(chM, 3)
+    draw_stride = max(1, ndraw ÷ 4000)          # cap the cost; 4k draws is plenty
+    k = 0
+    for c in 1:size(chM, 3), i in 1:size(chM, 1)
+        k += 1; k % draw_stride == 0 || continue
+        tds = TransDimState(; max_planets=1, n_noise=length(nm))
+        tds.planet_active[1] = true; tds.n_planets_active = 1
+        for j in 1:length(nm)
+            col = Symbol("noise_active_$j")
+            (col in cnM && Array(chM[col])[i, 1, c] > 0.5) && (tds.noise_active[j] = true)
+        end
+        th = Theta{Float64}(params; td=tds)
+        for pn in params.layout.unfrozen_names
+            Symbol(pn) in cnM && set_param!(th, pn, Array(chM[Symbol(pn)])[i, 1, c])
+        end
+        v = try Nereus.rv_log_likelihood(th, data) catch; NaN end
+        isfinite(v) && push!(lls, v)
+    end
+    if isempty(lls)
+        println("MEASURE_SIGMA_LOGL_RV: no finite draws"); exit(1)
+    end
+    sd  = std(lls)
+    iqr = (quantile(lls, 0.75) - quantile(lls, 0.25)) / 1.349
+    @printf("sigma(logL_RV) over %d draws:  std=%.2f   robust(IQR/1.349)=%.2f\n",
+            length(lls), sd, iqr)
+    @printf("  -> SIGMA_LOGL_RV=%.1f   (robust value; cold-end delta_beta = 1/sigma = %.2e)\n",
+            iqr, 1/iqr)
+  end
+  exit(0)
+end
+
 @printf("RVPM menu run: %d temps × %d walkers × %d+%d (seed=%d)\n",N_TEMPS,N_WALKERS,N_STEPS,N_BURNIN,SEED)
 t0=time()
 res=sample_transdim_ptemcee(target, data; td=td, n_temps=N_TEMPS, n_walkers=N_WALKERS, n_steps=N_STEPS,
