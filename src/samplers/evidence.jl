@@ -48,6 +48,7 @@ mutable struct EvidenceAccumulator
     ss_lse_fwd::Vector{Float64}
     ss_lse_bwd::Vector{Float64}
     started::Bool
+    n_nonfinite::Vector{Int}      # dropped draws per rung — see update_evidence!
 end
 
 function EvidenceAccumulator(n_chains::Int)
@@ -59,6 +60,7 @@ function EvidenceAccumulator(n_chains::Int)
         fill(-Inf, n_pairs),
         fill(-Inf, n_pairs),
         false,
+        zeros(Int, n_chains),
     )
 end
 
@@ -85,9 +87,18 @@ function update_evidence!(acc::EvidenceAccumulator,
     acc.started = true
     @inbounds for k in 1:n_chains
         L = Float64(log_L_per_chain[k])
-        acc.n[k]        += 1
-        acc.sum_logL[k]  += L
-        acc.sum_logL2[k] += L * L
+        # SKIP non-finite draws. A single -Inf (a replica seeded or pushed out of
+        # support) otherwise lands in sum_logL and makes that rung's mean -Inf for
+        # the rest of the run, which propagates to TI/TI+/SS+/H+ as -Inf or NaN.
+        # Counting it in acc.n as well would bias the mean toward the rejected
+        # region, so the draw is dropped from both and tallied separately.
+        if isfinite(L)
+            acc.n[k]         += 1
+            acc.sum_logL[k]  += L
+            acc.sum_logL2[k] += L * L
+        else
+            acc.n_nonfinite[k] += 1
+        end
     end
     @inbounds for k in 1:(n_chains - 1)
         dβ_half = (betas[k+1] - betas[k]) / 2
@@ -314,8 +325,27 @@ function ss_plus(acc::EvidenceAccumulator, betas::AbstractVector{<:Real})
     # (the same sign-flip the TI integrators carry — see _pchip_integral).
     betas[1] > betas[end] && (log_Z = -log_Z)
     # Conservative uncertainty: dominant term from the smallest-n pair.
-    n_min = isempty(acc.n) ? 1 : minimum(acc.n)
-    σ_Z = n_min > 0 ? 1.0 / sqrt(n_min) : Inf
+    # UNCERTAINTY. This used to return 1/sqrt(n_min), which is not an error on
+    # log_Z at all -- it ignores the integrand entirely and produced values like
+    # "+/- 0.00" next to an estimate that was wrong by hundreds of nats, i.e. the
+    # most misleading output the estimator can emit.
+    #
+    # There is no cheap unbiased SE for a stepping-stone sum from streamed
+    # logsumexps, so report an HONEST one: the spread of the per-pair bridge
+    # terms scaled as an independent-sum error, which at least grows when the
+    # rungs are poorly overlapped, plus NaN when it cannot be formed. A caller
+    # that needs a real error should bootstrap retained samples.
+    if n < 3
+        return (log_Z, NaN)
+    end
+    terms = Float64[]
+    @inbounds for k in 1:(n-1)
+        lr = (acc.ss_lse_fwd[k] - log(max(1, acc.n[k]))) -
+             (acc.ss_lse_bwd[k] - log(max(1, acc.n[k+1])))
+        isfinite(lr) && push!(terms, lr)
+    end
+    σ_Z = length(terms) < 2 ? NaN :
+          sqrt(length(terms)) * std(terms) / sqrt(max(1, minimum(acc.n)))
     return (log_Z, σ_Z)
 end
 
@@ -351,6 +381,12 @@ function hybrid_evidence(acc::EvidenceAccumulator,
         end
     end
     if k_star === nothing
+        # No crossover knot found: H+ is not a hybrid here, it IS ti_plus. It is
+        # returned with beta_star = 1.0 so a caller can tell. The mirror case --
+        # k_star == 1, where H+ degenerates to pure ss_plus and comes back
+        # numerically identical to SS+ -- is handled below; when H+ and SS+ print
+        # the same number to the last digit that is what happened, and they are
+        # one estimator, not two agreeing ones.
         Z, σ = ti_plus(acc, betas)
         return (Z, σ, 1.0)
     end

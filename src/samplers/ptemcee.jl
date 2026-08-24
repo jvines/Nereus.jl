@@ -221,6 +221,7 @@ function sample_ptemcee(
     n_steps::Int = 2000,
     n_burnin::Int = 1000,
     betas::Union{Nothing,AbstractVector} = nothing,
+    beta_min::Real = 1e-4,
     stretch_a::Real = 2.0,
     init::Union{Nothing,Vector{Float64}} = nothing,
     init_strategy::Symbol = :prior,
@@ -287,8 +288,21 @@ function sample_ptemcee(
     n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
     n_walkers_eff % 2 == 1 && (n_walkers_eff += 1)
 
+    # Geometric ladder across [beta_min, 1], matching sample_transdim_ptemcee.
+    #
+    # This used to be hardcoded (1/sqrt(5))^i with no beta_min, which puts the
+    # hottest rung at 5^(-(n_temps-1)/2) — 0.04 at the default 5 temps. TI and
+    # TI+ integrate <logL> only over [beta_min, 1] and ss_plus telescopes
+    # Z(beta_min)->Z(1); neither adds the [0, beta_min] head, so that head was
+    # silently dropped. Measured on the HD 18599 joint fit it is worth ~715 nats
+    # between 5 and 10 rungs — an evidence error far larger than any model
+    # comparison it would be used for.
+    #
+    # sample_transdim_ptemcee already took beta_min and built the ladder this
+    # way; the fixed-dim sampler did not even accept the argument, so the two
+    # returned incomparable evidences for the same problem.
     βs = betas === nothing ?
-         Float64[(1 / sqrt(5))^i for i in 0:(n_temps - 1)] :
+         Float64[Float64(beta_min)^(i / max(1, n_temps - 1)) for i in 0:(n_temps - 1)] :
          copy(betas)
     length(βs) == n_temps || throw(ArgumentError(
         "Provided `betas` has length $(length(βs)), expected $n_temps"))
@@ -714,7 +728,24 @@ function sample_ptemcee(
     # numbers in the result (log_z relative, log_z_laplace absolute).
     laplace_check = !(untemper_transit && !isempty(data.t_phot))
     log_z_laplace = mode_laplace_evidence(target, chains)
-    if laplace_check && isfinite(log_z_laplace) && isfinite(log_z) &&
+
+    # A NON-FINITE tempered evidence is the loudest possible failure and used to
+    # be the quietest: the switch below is gated on isfinite(log_z), so -Inf or
+    # NaN skipped the check entirely and propagated into res.log_evidence with no
+    # warning at all. One -Inf log-likelihood on any rung is enough to produce it
+    # (see the guard in update_evidence!). Handle it first and explicitly.
+    if !isfinite(log_z)
+        if isfinite(log_z_laplace)
+            @warn "sample_ptemcee: tempered evidence is $(log_z) — a rung saw a " *
+                  "non-finite log-likelihood or never moved. Reporting " *
+                  "log_evidence = mode-Laplace instead." laplace = log_z_laplace
+            log_z = log_z_laplace
+        else
+            @warn "sample_ptemcee: BOTH the tempered evidence ($(log_z)) and the " *
+                  "mode-Laplace cross-check are non-finite. log_evidence is not " *
+                  "usable for this run; do not quote it."
+        end
+    elseif laplace_check && isfinite(log_z_laplace) &&
        abs(log_z - log_z_laplace) > laplace_switch_tol
         min_swap = isempty(acc_swap) ? NaN : minimum(acc_swap)
         @warn "sample_ptemcee: tempered evidence disagrees with mode-Laplace by " *
