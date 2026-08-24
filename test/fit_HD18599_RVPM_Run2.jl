@@ -47,7 +47,18 @@ const J_MAG       = 8.064
 const K_MAG       = 7.629
 const A_B         = 0.3
 
-const PAPER_INSTRUMENTS = Set(["HARPS_PRE", "HARPS_POST", "FEROS"])
+# RV_INSTRUMENTS restricts which spectrographs enter the fit. Default is the
+# paper's three.
+#
+# This exists as a control, not a convenience. The three are wildly unbalanced --
+# HARPS_POST contributes 99 of the 115 velocities, HARPS_PRE 7 and FEROS 9 -- so
+# a four-indicator decorrelation fits 6 free parameters (4 coefficients + offset
+# + jitter) against 7 and 9 points respectively. Any evidence gain from adding
+# indicators has to be checked against HARPS_POST alone, where the sample can
+# actually support four coefficients, before it is read as a statement about
+# activity indicators rather than about over-fitting 16 points.
+const PAPER_INSTRUMENTS = Set(String.(split(
+    get(ENV, "RV_INSTRUMENTS", "HARPS_PRE,HARPS_POST,FEROS"), ",")))
 
 println("="^70)
 println("HD 18599 — paper Run 2 replication (activities only, no ARMA)")
@@ -124,6 +135,8 @@ inst_str = inst_str[keep_rv]
 # This puts the activity indicator on the same scale as the RV residual
 # variability. Using raw RV (γ-dominated) inflates BIS by ~γ/σ_RV and
 # lets the BIS regression eat the Keplerian signal.
+const ACTIVITY_NORM = get(ENV, "ACTIVITY_NORM", "rms")   # "rms" = paper; "peak_rv" = legacy
+
 function per_instrument_normalize!(v::Vector{Float64},
                                     rv_vec::Vector{Float64},
                                     inst::Vector{Int})
@@ -136,15 +149,37 @@ function per_instrument_normalize!(v::Vector{Float64},
         for k in finite_idx
             v[k] -= μ
         end
-        v_max = maximum(abs, @view v[finite_idx])
-        v_max == 0 && continue
-        # Step 4 — rescale to MEAN-SUBTRACTED RV peak (EMPEROR convention)
-        rv_inst = @view rv_vec[idx]
-        rv_mu = mean(rv_inst)
-        rv_max_ins = maximum(abs, rv_inst .- rv_mu)
-        rv_max_ins == 0 && continue
-        for k in finite_idx
-            v[k] = v[k] / v_max * rv_max_ins
+        # ACTIVITY_NORM selects the scaling. THE PAPER USES "rms".
+        #
+        # Vines et al. 2023 (MNRAS 518, 2627), Table 7 footnote (double-dagger):
+        #   "Activity indices were mean subtracted and normalized to their RMS."
+        # That makes the regressor dimensionless with unit RMS, so the fitted
+        # coefficient C carries the units of the RV and is directly the m/s
+        # amplitude of the activity term. The paper's Table 9 values
+        # (C_FEROS = 0.2 +/- 0.8, C_HARPS_pre = 1.0, C_HARPS_post = -2.1) are on
+        # that scale.
+        #
+        # "peak_rv" is what this script did before: divide by the PEAK |indicator|
+        # and then rescale by that instrument's peak mean-subtracted |RV|. That is
+        # a different, per-instrument-varying scale, and it is why the recovered
+        # coefficients disagreed with the paper in magnitude AND sign while K came
+        # out at 5.9 instead of 11.
+        if ACTIVITY_NORM == "rms"
+            rms = sqrt(sum(abs2, @view v[finite_idx]) / length(finite_idx))
+            rms == 0 && continue
+            for k in finite_idx
+                v[k] /= rms
+            end
+        else
+            v_max = maximum(abs, @view v[finite_idx])
+            v_max == 0 && continue
+            rv_inst = @view rv_vec[idx]
+            rv_mu = mean(rv_inst)
+            rv_max_ins = maximum(abs, rv_inst .- rv_mu)
+            rv_max_ins == 0 && continue
+            for k in finite_idx
+                v[k] = v[k] / v_max * rv_max_ins
+            end
         end
     end
     return v
