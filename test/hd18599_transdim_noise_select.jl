@@ -100,7 +100,7 @@ if USE_PHOT
     isfile(lcpath) || error("HD 18599 light curve not found at $lcpath — " *
                             "set HD18599_LC to the cleaned TESS LC csv")
     lc = load_tess_lc(lcpath)
-    pad = parse(Float64, get(ENV, "PAD", "3.0"))
+    pad = parse(Float64, get(ENV, "TRANSIT_WINDOW_PAD", "3.0"))
     w = window_to_transits(lc.t, lc.flux, lc.flux_err, [P_REF], [Tc_b], [dur_b]; pad=pad)
     @printf("RVPM: windowed LC %d → %d phot pts (±%.1f·dur around b)\n",
             length(lc.t), length(w.t), pad)
@@ -183,7 +183,7 @@ if haskey(ENV,"PLOT_FROM")
     chp = ENV["PLOT_FROM"]; pdir = joinpath(dirname(chp), "plots"); mkpath(pdir)
     chP,_ = Nereus.load_chains(chp)
     fold_only = haskey(ENV,"FOLD_ONLY")
-    cm = parse(Float64, get(ENV,"CREDMASS","0.85"))
+    cm = parse(Float64, get(ENV,"CREDIBLE_MASS","0.85"))
     sp = haskey(ENV,"SAVE_PDF")
     # plots/models/RV_phasefold_P1  (GP-subtracted default; named by the fn)
     try
@@ -215,8 +215,8 @@ end
 
 # SCITAB=<chains.nc>: build the model-conditioned, unit-tagged fitted science
 # table and dump it as JSON (chunk 1 of the output-package build).
-if haskey(ENV,"SCITAB")
-    chP,_ = Nereus.load_chains(ENV["SCITAB"])
+if haskey(ENV,"SCIENCE_TABLES_FROM")
+    chP,_ = Nereus.load_chains(ENV["SCIENCE_TABLES_FROM"])
     fit_e, fit_c = Nereus.science_fitted(chP, params)
     der_e, der_c = Nereus.science_derived(chP, params; T_eff=5060.0)  # HD18599 K2 dwarf
     @printf("\n--- FITTED (%d params, conditioned on %s, Np=%d) ---\n",
@@ -232,7 +232,7 @@ if haskey(ENV,"SCITAB")
     end
     @printf("\nstellar assumed: %s\n", der_c["stellar"])
     # chunk 3: write all formats + model selection
-    tdir = joinpath(dirname(ENV["SCITAB"]), "tables")
+    tdir = joinpath(dirname(ENV["SCIENCE_TABLES_FROM"]), "tables")
     fp = Nereus.write_science_table(tdir, "fitted", fit_e, fit_c; title="HD 18599 fitted parameters")
     dp = Nereus.write_science_table(tdir, "derived", der_e, der_c; title="HD 18599 derived parameters")
     ms = Nereus.science_model_selection(chP, params)
@@ -244,9 +244,9 @@ end
 
 # SCIOUT=<chains.nc>: assemble the full return-JSON contract (chunk 4) + write
 # tables, then dump the JSON top-level structure.
-if haskey(ENV,"SCIOUT")
+if haskey(ENV,"SCIENCE_OUTPUT_FROM")
     import JSON3
-    chp = ENV["SCIOUT"]
+    chp = ENV["SCIENCE_OUTPUT_FROM"]
     chP,_ = Nereus.load_chains(chp)
     summ = Nereus.science_summary(dirname(chp), chP, params, data;
                                    n_walkers=160, T_eff=5060.0)
@@ -265,8 +265,8 @@ end
 
 # POSTSCI=<chains.nc>: render the three posterior-plot variants (raw/parameters/
 # histograms) for planet 1 (chunk 5).
-if haskey(ENV,"POSTSCI")
-    chp = ENV["POSTSCI"]; od = joinpath(dirname(chp), "plots")
+if haskey(ENV,"POSTERIOR_SCIENCE_PLOTS_FROM")
+    chp = ENV["POSTERIOR_SCIENCE_PLOTS_FROM"]; od = joinpath(dirname(chp), "plots")
     chP,_ = Nereus.load_chains(chp)
     Nereus.plot_posteriors_raw(chP, params; output=od, planet=1)
     Nereus.plot_posteriors_parameters(chP, params; output=od, planet=1)
@@ -281,15 +281,15 @@ end
 # on their active mask (inactive-slot junk no longer poisons R̂/ESS).
 if haskey(ENV,"CONV_FROM")
     chP,_ = Nereus.load_chains(ENV["CONV_FROM"])
-    nweff = parse(Int, get(ENV,"NWEFF","160"))
+    nweff = parse(Int, get(ENV,"N_WALKERS_EFFECTIVE","160"))
     Nereus.convergence_report(chP, nweff; model_params=params)
     exit(0)
 end
 
-NT=parse(Int,get(ENV,"NT","12")); NW=parse(Int,get(ENV,"NW","128"))
-NS=parse(Int,get(ENV,"NS","20000")); NB=parse(Int,get(ENV,"NB","8000"))
-NTRY=parse(Int,get(ENV,"NTRY","10")); NREF=parse(Int,get(ENV,"NREF","15"))
-@printf("trans-dim noise select: %d temps × %d walkers × %d+%d (NTRY=%d NREF=%d)\n",NT,NW,NS,NB,NTRY,NREF)
+N_TEMPS=parse(Int,get(ENV,"N_TEMPS","12")); N_WALKERS=parse(Int,get(ENV,"N_WALKERS","128"))
+N_STEPS=parse(Int,get(ENV,"N_STEPS","20000")); N_BURNIN=parse(Int,get(ENV,"N_BURNIN","8000"))
+N_BIRTH_TRIES=parse(Int,get(ENV,"N_BIRTH_TRIES","10")); N_BIRTH_REFINE=parse(Int,get(ENV,"N_BIRTH_REFINE","15"))
+@printf("trans-dim noise select: %d temps × %d walkers × %d+%d (N_BIRTH_TRIES=%d N_BIRTH_REFINE=%d)\n",N_TEMPS,N_WALKERS,N_STEPS,N_BURNIN,N_BIRTH_TRIES,N_BIRTH_REFINE)
 t0=time()
 # ADAPTIVE LADDER, on by default. A fixed geometric ladder from beta_min to 1
 # is adequate for the RV-only likelihood (114 points) and fails outright for
@@ -298,13 +298,13 @@ t0=time()
 # acceptance collapses to ~0.001 at the cold end. With the ladder frozen the
 # cold chains never communicate, R-hat runs to 4.5, and the model posterior
 # inverts to a model the separate-runs check says loses by 38 nats.
-# ADAPT=0 restores the old fixed ladder; BETAMIN tunes the cold end.
-ADAPT = get(ENV, "ADAPT", "1") != "0"
-BETAMIN = parse(Float64, get(ENV, "BETAMIN", "1e-4"))
-@printf("ladder: %s, beta_min=%.1e\n", ADAPT ? "ADAPTIVE" : "fixed geometric", BETAMIN)
-res=sample_transdim_ptemcee(target, data; td=td, n_temps=NT, n_walkers=NW, n_steps=NS,
-    n_burnin=NB, n_birth_tries=NTRY, n_birth_refine=NREF, seed=42, show_progress=true,
-    adapt_ladder=ADAPT, beta_min=BETAMIN)
+# ADAPT_LADDER=0 restores the old fixed ladder; BETA_MIN tunes the cold end.
+ADAPT_LADDER = get(ENV, "ADAPT_LADDER", "1") != "0"
+BETA_MIN = parse(Float64, get(ENV, "BETA_MIN", "1e-4"))
+@printf("ladder: %s, beta_min=%.1e\n", ADAPT_LADDER ? "ADAPTIVE" : "fixed geometric", BETA_MIN)
+res=sample_transdim_ptemcee(target, data; td=td, n_temps=N_TEMPS, n_walkers=N_WALKERS, n_steps=N_STEPS,
+    n_burnin=N_BURNIN, n_birth_tries=N_BIRTH_TRIES, n_birth_refine=N_BIRTH_REFINE, seed=42, show_progress=true,
+    adapt_ladder=ADAPT_LADDER, beta_min=BETA_MIN)
 @printf("done in %.1f min  logZ=%.2f\n", (time()-t0)/60, res.log_evidence)
 @printf("noise toggles accepted/proposed per temp (cold→hot): %s\n",
         join(string.(res.noise_td_accepted, "/", res.noise_td_proposed), " "))

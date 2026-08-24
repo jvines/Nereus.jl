@@ -111,13 +111,13 @@ target=NereusTarget(params, data; unconstrained=false)
 td=TransDimConfig(; max_kplanet=1, planets=false, noise=true,
     toggleable=toggle, noise_exclusion_groups=[toggle])
 
-NT=parse(Int,get(ENV,"NT","12")); NW=parse(Int,get(ENV,"NW","128"))
-NS=parse(Int,get(ENV,"NS","20000")); NB=parse(Int,get(ENV,"NB","8000"))
-NTRY=parse(Int,get(ENV,"NTRY","12")); NREF=parse(Int,get(ENV,"NREF","18"))
-@printf("JOINT trans-dim noise select: %d temps × %d walkers × %d+%d\n",NT,NW,NS,NB)
+N_TEMPS=parse(Int,get(ENV,"N_TEMPS","12")); N_WALKERS=parse(Int,get(ENV,"N_WALKERS","128"))
+N_STEPS=parse(Int,get(ENV,"N_STEPS","20000")); N_BURNIN=parse(Int,get(ENV,"N_BURNIN","8000"))
+N_BIRTH_TRIES=parse(Int,get(ENV,"N_BIRTH_TRIES","12")); N_BIRTH_REFINE=parse(Int,get(ENV,"N_BIRTH_REFINE","18"))
+@printf("JOINT trans-dim noise select: %d temps × %d walkers × %d+%d\n",N_TEMPS,N_WALKERS,N_STEPS,N_BURNIN)
 t0=time()
-res=sample_transdim_ptemcee(target, data; td=td, n_temps=NT, n_walkers=NW, n_steps=NS,
-    n_burnin=NB, n_birth_tries=NTRY, n_birth_refine=NREF, seed=42, show_progress=true)
+res=sample_transdim_ptemcee(target, data; td=td, n_temps=N_TEMPS, n_walkers=N_WALKERS, n_steps=N_STEPS,
+    n_burnin=N_BURNIN, n_birth_tries=N_BIRTH_TRIES, n_birth_refine=N_BIRTH_REFINE, seed=42, show_progress=true)
 @printf("done in %.1f min  logZ=%.2f\n", (time()-t0)/60, res.log_evidence)
 
 ch=res.chains; cn=names(ch,:parameters); nm=params.config.noise_models

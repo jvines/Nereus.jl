@@ -8,7 +8,7 @@
 # LC windowed to b's transits (never binned).
 #
 # Run: julia --project=. -t 8 Nereus.jl/test/fit_HD18599_default_menu_rvpm.jl
-# Env: NT NW NS NB SEED.
+# Env: N_TEMPS N_WALKERS N_STEPS N_BURNIN SEED.
 
 using Nereus, MCMCChains, DelimitedFiles, Statistics, Printf, Random
 using LinearAlgebra: BLAS
@@ -79,7 +79,7 @@ data = Data(; t_rv=bjd, rv=rv, rv_err=rverr, rv_inst=rv_inst,
               t_phot=t_phot, flux=flux, flux_err=flux_err, phot_inst=phot_inst)
 ic = InstrumentConfig(rv=inm, pm=["TESS"])
 menu = default_noise_menu(data; indicators=String.(chs),
-    include_activity_gp = get(ENV,"AGP","1") != "0")
+    include_activity_gp = get(ENV,"INCLUDE_ACTIVITY_GP","1") != "0")
 @printf("Menu: %d toggleable (+%d always-on)\n", length(menu.toggleable),
         length(menu.noise_models)-length(menu.toggleable))
 
@@ -103,7 +103,7 @@ any(m->m isa ActivityGP, menu.toggleable) && (pri["gp_act_period"]=NormalPrior(P
 # EPRIOR=vines applies Jose's published eccentricity prior (Vines+2023):
 # external N(0, 0.3^2) on the DERIVED e, per planet, on top of the flat
 # sesinw/secosw parametrization.
-extp = get(ENV,"EPRIOR","") == "vines" ?
+extp = get(ENV,"ECC_PRIOR","") == "vines" ?
     [ExternalPrior(:ecc, NormalPrior(0.0, 0.3), true)] : ExternalPrior[]
 isempty(extp) || println("external e prior: N(0, 0.3^2) on ecc (Vines+2023)")
 params=Params(; max_kplanet=1, planet_modes=[RVPM], instruments=ic, data=data,
@@ -115,8 +115,8 @@ target=NereusTarget(params, data; unconstrained=false)
 td=TransDimConfig(; max_kplanet=1, planets=false, noise=true,
     toggleable=menu.toggleable, noise_exclusion_groups=menu.exclusion_groups)
 
-NT=parse(Int,get(ENV,"NT","12")); NW=parse(Int,get(ENV,"NW","100"))
-NS=parse(Int,get(ENV,"NS","4000")); NB=parse(Int,get(ENV,"NB","2000")); SEED=parse(Int,get(ENV,"SEED","42"))
+N_TEMPS=parse(Int,get(ENV,"N_TEMPS","12")); N_WALKERS=parse(Int,get(ENV,"N_WALKERS","100"))
+N_STEPS=parse(Int,get(ENV,"N_STEPS","4000")); N_BURNIN=parse(Int,get(ENV,"N_BURNIN","2000")); SEED=parse(Int,get(ENV,"SEED","42"))
 # COLD-DENSE explicit ladder.
 #
 # SIGMA_LOGL_RV is the measured standard deviation of the RV log-likelihood at
@@ -138,21 +138,21 @@ BETAS = haskey(ENV,"SIGMA_LOGL_RV") ? let σll=parse(Float64,ENV["SIGMA_LOGL_RV"
     @printf("cold-dense ladder: %d rungs, beta_2=%.3f (sigma_ll=%.0f)\n", length(b), b[2], σll)
     b
 end : nothing
-BETAS !== nothing && (NT=length(BETAS))
-@printf("RVPM menu run: %d temps × %d walkers × %d+%d (seed=%d)\n",NT,NW,NS,NB,SEED)
+BETAS !== nothing && (N_TEMPS=length(BETAS))
+@printf("RVPM menu run: %d temps × %d walkers × %d+%d (seed=%d)\n",N_TEMPS,N_WALKERS,N_STEPS,N_BURNIN,SEED)
 t0=time()
-res=sample_transdim_ptemcee(target, data; td=td, n_temps=NT, n_walkers=NW, n_steps=NS,
+res=sample_transdim_ptemcee(target, data; td=td, n_temps=N_TEMPS, n_walkers=N_WALKERS, n_steps=N_STEPS,
     betas=BETAS,
-    n_burnin=NB, n_birth_tries=10, n_birth_refine=15, seed=SEED, show_progress=true, adapt_ladder=true,
+    n_burnin=N_BURNIN, n_birth_tries=10, n_birth_refine=15, seed=SEED, show_progress=true, adapt_ladder=true,
     # Transit held in the UNTEMPERED reference: the 16k-point transit term dominates
     # σ(logL) (hence Δβ·σ, hence swap acceptance) but is identical across every
     # noise-menu member, so tempering it costs swaps and buys nothing. Valid here
     # because planets=false ⇒ L_transit is model-invariant. β=1 target unchanged.
-    untemper_transit = parse(Bool, get(ENV, "UNTEMPER", "true")))
+    untemper_transit = parse(Bool, get(ENV, "UNTEMPER_TRANSIT", "true")))
 @printf("done in %.1f min  logZ=%.2f\n", (time()-t0)/60, res.log_evidence)
 
 ch=res.chains; cn=names(ch,:parameters)
-outd=get(ENV,"OUTD","results/HD18599_menu_rvpm_bounded"); mkpath(outd)
+outd=get(ENV,"OUTPUT_DIR","results/HD18599_menu_rvpm_bounded"); mkpath(outd)
 save_chains(joinpath(outd,"chains.nc"), ch, params; data=data)
 @printf("saved → %s/chains.nc\n", outd)
 

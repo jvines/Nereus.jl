@@ -9,7 +9,7 @@
 # offers GP/AGP/Matérn descriptions so the data can pick.
 #
 # Run:  julia --project=. -t 10 Nereus.jl/test/fit_HD18599_default_menu.jl
-# Env:  NT NW NS NB (temps/walkers/steps/burnin), SEED.
+# Env:  N_TEMPS N_WALKERS N_STEPS N_BURNIN (temps/walkers/steps/burnin), SEED.
 
 using Nereus, MCMCChains, DelimitedFiles, Statistics, Printf, Random
 using LinearAlgebra: BLAS
@@ -102,13 +102,13 @@ target=NereusTarget(params, data; unconstrained=false)
 td=TransDimConfig(; max_kplanet=1, planets=false, noise=true,
     toggleable=menu.toggleable, noise_exclusion_groups=menu.exclusion_groups)
 
-NT=parse(Int,get(ENV,"NT","8")); NW=parse(Int,get(ENV,"NW","128"))
-NS=parse(Int,get(ENV,"NS","5000")); NB=parse(Int,get(ENV,"NB","2500"))
+N_TEMPS=parse(Int,get(ENV,"N_TEMPS","8")); N_WALKERS=parse(Int,get(ENV,"N_WALKERS","128"))
+N_STEPS=parse(Int,get(ENV,"N_STEPS","5000")); N_BURNIN=parse(Int,get(ENV,"N_BURNIN","2500"))
 SEED=parse(Int,get(ENV,"SEED","42"))
-@printf("trans-dim menu run: %d temps × %d walkers × %d+%d burnin (seed=%d)\n",NT,NW,NS,NB,SEED)
+@printf("trans-dim menu run: %d temps × %d walkers × %d+%d burnin (seed=%d)\n",N_TEMPS,N_WALKERS,N_STEPS,N_BURNIN,SEED)
 t0=time()
-res=sample_transdim_ptemcee(target, data; td=td, n_temps=NT, n_walkers=NW, n_steps=NS,
-    n_burnin=NB, n_birth_tries=10, n_birth_refine=15, seed=SEED, show_progress=true,
+res=sample_transdim_ptemcee(target, data; td=td, n_temps=N_TEMPS, n_walkers=N_WALKERS, n_steps=N_STEPS,
+    n_burnin=N_BURNIN, n_birth_tries=10, n_birth_refine=15, seed=SEED, show_progress=true,
     adapt_ladder=true)   # temp-swap was 0.001 at cold on the fixed ladder
 @printf("done in %.1f min  logZ=%.2f\n", (time()-t0)/60, res.log_evidence)
 

@@ -38,9 +38,9 @@ params=Params(; max_kplanet=1, planet_modes=[RVPM], instruments=ic, data=data, M
   priors=pri, noise_models=NoiseModel[CeleriteRotation()])   # FIXED noise, no trans-dim
 tgt=NereusTarget(params, data; unconstrained=false)
 @printf("Free params: %d (fixed CeleriteRotation, RVPM)\n", n_unfrozen(params))
-NT=parse(Int,get(ENV,"NT","10")); NW=parse(Int,get(ENV,"NW","100")); NS=parse(Int,get(ENV,"NS","4000")); NB=parse(Int,get(ENV,"NB","2000"))
+N_TEMPS=parse(Int,get(ENV,"N_TEMPS","10")); N_WALKERS=parse(Int,get(ENV,"N_WALKERS","100")); N_STEPS=parse(Int,get(ENV,"N_STEPS","4000")); N_BURNIN=parse(Int,get(ENV,"N_BURNIN","2000"))
 t0=time()
-res=sample_ptemcee(tgt, data; n_temps=NT, n_walkers=NW, n_steps=NS, n_burnin=NB, init_strategy=:map_scatter, seed=42)
+res=sample_ptemcee(tgt, data; n_temps=N_TEMPS, n_walkers=N_WALKERS, n_steps=N_STEPS, n_burnin=N_BURNIN, init_strategy=:map_scatter, seed=42)
 K=vec(Array(res.chains[:K_k1])); gp=vec(Array(res.chains[:gp_period])); gs=vec(Array(res.chains[:gp_sigma]))
 @printf("done %.1f min\nPLANET b: K=%.2f  16/50/84=%.2f/%.2f/%.2f  frac(8<K<14)=%.2f  | gp_period=%.2f gp_sigma=%.1f\n",
   (time()-t0)/60, median(K), quantile(K,0.16), quantile(K,0.5), quantile(K,0.84), mean(8 .<K.<14), median(gp), median(gs))

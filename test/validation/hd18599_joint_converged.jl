@@ -77,8 +77,8 @@ params=Params(; max_kplanet=1, planet_modes=[RVPM], instruments=ic, data=data, M
     priors=pri, noise_models=NoiseModel[ActivityDecorrelation(indicators=[adkey[c] for c in chs])],
     stability=:none)
 
-NT=parse(Int,get(ENV,"NT","16")); NW=parse(Int,get(ENV,"NW","200"))
-NS=parse(Int,get(ENV,"NS","25000")); NB=parse(Int,get(ENV,"NB","6000"))   # NS = max-steps CEILING
+NT=parse(Int,get(ENV,"N_TEMPS","16")); NW=parse(Int,get(ENV,"N_WALKERS","200"))
+NS=parse(Int,get(ENV,"N_STEPS","25000")); NB=parse(Int,get(ENV,"N_BURNIN","6000"))   # NS = max-steps CEILING
 SEED=parse(Int,get(ENV,"SEED","1"))
 @printf("converged joint (run-until-converged): %d temps × %d walkers, ceiling %d, burn %d, seed %d\n", NT,NW,NS,NB,SEED)
 mkpath(OUTDIR)

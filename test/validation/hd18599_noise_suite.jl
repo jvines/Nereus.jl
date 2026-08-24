@@ -86,8 +86,8 @@ suite = [
     ("ActivityJitter",NoiseModel[ActivityJitter(indicator="log_rhk_AD")], Dict{String,PriorSpec}()),
 ]
 
-NT=parse(Int,get(ENV,"NT","14")); NW=parse(Int,get(ENV,"NW","120"))
-NS=parse(Int,get(ENV,"NS","12000")); NB=parse(Int,get(ENV,"NB","5000"))
+NT=parse(Int,get(ENV,"N_TEMPS","14")); NW=parse(Int,get(ENV,"N_WALKERS","120"))
+NS=parse(Int,get(ENV,"N_STEPS","12000")); NB=parse(Int,get(ENV,"N_BURNIN","5000"))
 results = Tuple{String,Float64,Float64,Float64,Float64,Float64,Float64}[]
 for (label, nm, extra) in suite
     pri = base_priors(); merge!(pri, extra)

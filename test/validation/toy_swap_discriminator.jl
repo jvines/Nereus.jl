@@ -22,7 +22,7 @@ params = Params(; max_kplanet=1, planet_modes=[RV_ONLY], instruments=InstrumentC
     noise_models=NoiseModel[ad], transdim_noise=true, stability=:none)
 td = TransDimConfig(; max_kplanet=1, planets=true, noise=true, toggleable=NoiseModel[ad])
 
-NS = parse(Int, get(ENV,"NS","42000")); NB = parse(Int, get(ENV,"NB","12000"))
+NS = parse(Int, get(ENV,"N_STEPS","42000")); NB = parse(Int, get(ENV,"N_BURNIN","12000"))
 @printf("LONG swap-enabled chain: %d steps, %d burnin (true P(Np=0)≈1.0, ΔlogZ≈10.4)\n", NS, NB)
 res = sample_transdim_ptemcee(NereusTarget(params,data), data; td=td, n_temps=12,
         n_walkers=64, n_steps=NS, n_burnin=NB, n_birth_tries=8, n_birth_refine=10,
