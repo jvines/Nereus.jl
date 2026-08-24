@@ -312,5 +312,14 @@ pnone = 1 - sum(occ)
 for (l,p) in zip(labels,occ); @printf("  P(%-16s) = %.3f\n", l, p); end
 @printf("  P(%-16s) = %.3f\n", "white/none", pnone)
 @printf("\nseparate-runs CHECK (model selection, sign-fixed): AD wins, +38.5 over CeleriteRotation\n")
-mkpath(joinpath(@__DIR__, "..", "results", "HD18599_transdim_select"))
-save_chains(joinpath(@__DIR__, "..", "results", "HD18599_transdim_select", "chains.nc"), ch, params; data=data)
+# OUTDIR names the run. The default keeps the historical RV-only name; the
+# RVPM artifact is a different measurement on a different parameter space and
+# must not land on top of it.
+let outdir = get(ENV, "OUTDIR",
+                 joinpath(@__DIR__, "..", "results",
+                          USE_PHOT ? "HD18599_RVPM_transdim_select"
+                                   : "HD18599_transdim_select"))
+    mkpath(outdir)
+    save_chains(joinpath(outdir, "chains.nc"), ch, params; data=data)
+    @printf("chains → %s\n", joinpath(outdir, "chains.nc"))
+end
