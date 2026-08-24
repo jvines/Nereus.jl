@@ -158,7 +158,7 @@ if haskey(ENV, "MEASURE_SIGMA_LOGL_RV")
     chM, _ = Nereus.load_chains(chp)
     cnM = names(chM, :parameters)
     nm  = params.config.noise_models
-    lls = Float64[]
+    lls = Float64[]; lls_tr = Float64[]
     ndraw = size(chM, 1) * size(chM, 3)
     draw_stride = max(1, ndraw ÷ 4000)          # cap the cost; 4k draws is plenty
     k = 0
@@ -174,14 +174,23 @@ if haskey(ENV, "MEASURE_SIGMA_LOGL_RV")
         for pn in params.layout.unfrozen_names
             Symbol(pn) in cnM && set_param!(th, pn, Array(chM[Symbol(pn)])[i, 1, c])
         end
-        v = try Nereus.rv_log_likelihood(th, data) catch; NaN end
-        isfinite(v) && push!(lls, v)
+        v  = try Nereus.rv_log_likelihood(th, data)      catch; NaN end
+        vt = try Nereus.transit_log_likelihood(th, data) catch; NaN end
+        (isfinite(v) && isfinite(vt)) && (push!(lls, v); push!(lls_tr, vt))
     end
     if isempty(lls)
         println("MEASURE_SIGMA_LOGL_RV: no finite draws"); exit(1)
     end
     sd  = std(lls)
     iqr = (quantile(lls, 0.75) - quantile(lls, 0.25)) / 1.349
+    # Decomposed exactly, not by subtracting off `lp`. What sets swap acceptance
+    # is the SPREAD of each term, not its magnitude: the transit mean is huge and
+    # irrelevant, its sigma is what would cost rungs if it were tempered.
+    tot  = lls .+ lls_tr
+    rob(x) = (quantile(x, 0.75) - quantile(x, 0.25)) / 1.349
+    @printf("  sigma(logL_transit) robust = %.2f   (mean %.1f)\n", rob(lls_tr), mean(lls_tr))
+    @printf("  sigma(logL_total)   robust = %.2f\n", rob(tot))
+    @printf("  untempering saves a factor %.2f in cold-end rung density\n", rob(tot)/iqr)
     @printf("sigma(logL_RV) over %d draws:  std=%.2f   robust(IQR/1.349)=%.2f\n",
             length(lls), sd, iqr)
     @printf("  -> SIGMA_LOGL_RV=%.1f   (robust value; cold-end delta_beta = 1/sigma = %.2e)\n",
