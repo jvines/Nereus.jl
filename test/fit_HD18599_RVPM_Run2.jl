@@ -24,10 +24,19 @@ using Random
 
 const REPO_ROOT  = abspath(joinpath(@__DIR__, "..", ".."))
 const RV_FILE    = joinpath(@__DIR__, "data", "hd18599.csv")
-const LC_FILE    = joinpath(REPO_ROOT, "data", "HD18599",
-                             "HD18599_cleaned_lc.csv")
-const OUT_DIR    = joinpath(REPO_ROOT, "Nereus.jl", "results",
-                             "HD18599_RVPM_Run2")
+# HD18599_LC selects the cleaned TESS light curve; the bare default resolves to
+# <repo>/../../data, which lands outside any checkout after the rename.
+const LC_FILE    = get(ENV, "HD18599_LC",
+                       joinpath(REPO_ROOT, "data", "HD18599",
+                                "HD18599_cleaned_lc.csv"))
+# OUTPUT_DIR overrides; otherwise the directory carries the indicator set, because
+# a different set is a DIFFERENT measurement and must not overwrite the previous
+# one in place (it silently did).
+const OUT_DIR    = get(ENV, "OUTPUT_DIR",
+                       joinpath(REPO_ROOT, "Nereus.jl", "results",
+                                "HD18599_RVPM_Run2_" *
+                                replace(get(ENV, "ACTIVITY_INDICATORS", "bis"),
+                                        "," => "-")))
 
 const P_REF       = 4.1374685534602405
 const T0_REF      = 2.4583545857470357e6
@@ -140,13 +149,33 @@ function per_instrument_normalize!(v::Vector{Float64},
     end
     return v
 end
-ind_bis = Float64[
-    let v = data_mat[i, 4]
+# ---- Activity indicators -------------------------------------------
+# ACTIVITY_INDICATORS selects which channels the decorrelation regresses on.
+# Default "bis" reproduces Vines+ 2023 Run 2 exactly (BIS only). The choice is
+# not cosmetic: BIS sits near P_rot/2 ~ P_orb on this star, so its regression
+# coefficient can absorb Keplerian amplitude, and the indicator set is the
+# single biggest lever on the recovered K.
+const IND_COL = Dict("bisector_span" => 4, "fwhm" => 6,
+                     "halpha" => 10, "log_rhk" => 12)
+const IND_ALIAS = Dict("bis" => "bisector_span", "fwhm" => "fwhm",
+                       "halpha" => "halpha", "logrhk" => "log_rhk")
+ACT_IND = [IND_ALIAS[strip(x)] for x in
+           split(get(ENV, "ACTIVITY_INDICATORS", "bis"), ",") if !isempty(strip(x))]
+@printf("Activity indicators: %s\n", join(ACT_IND, ", "))
+
+read_indicator(colno) = Float64[
+    let v = data_mat[i, colno]
         v === "" || (v isa AbstractString && strip(v) == "") ? NaN : Float64(v)
     end
     for i in 1:size(data_mat, 1)
 ]
-per_instrument_normalize!(ind_bis, rv, rv_inst)
+ind_vals = Dict{String, Vector{Float64}}()
+for nm in ACT_IND
+    v = read_indicator(IND_COL[nm])
+    per_instrument_normalize!(v, rv, rv_inst)   # same EMPEROR convention for all
+    ind_vals[nm] = v
+end
+ind_bis = ind_vals[first(ACT_IND)]              # kept for the coverage check below
 
 # ---- LC load + bin + transit-windowed subsample -----------------------
 LC_BIN_MIN = 5.0
@@ -190,7 +219,7 @@ flux_err = lc.flux_err[keep_lc]
 phot_inst = ones(Int, length(t_phot))
 
 # ---- Build joint Data + Params ---------------------------------------
-indicators = Dict("bisector_span" => ind_bis)
+indicators = ind_vals
 data = Data(;
     t_rv = bjd, rv = rv, rv_err = rv_err, rv_inst = rv_inst,
     indicators = indicators,
@@ -199,7 +228,7 @@ data = Data(;
 ic = InstrumentConfig(rv = inst_names, pm = ["TESS"])
 
 # FIXED noise config: ActivityDecorrelation only (paper Run 2).
-act = ActivityDecorrelation(indicators = ["bisector_span"])
+act = ActivityDecorrelation(indicators = ACT_IND)
 
 rv_max = maximum(abs, rv)
 priors = Dict{String, PriorSpec}()
@@ -220,10 +249,10 @@ priors["q2_TESS"]      = UniformPrior(0.0, 1.0)
 parametrization = ParametrizationConfig(time = :Tc, geom = :b_rr,
                                           use_rho_s = true)
 priors["rho_s"] = NormalPrior(2.241, 0.479, 0.1, 10.0)
-for (i, name) in enumerate(inst_names)
-    has_bis = any(j -> rv_inst[j] == i && isfinite(ind_bis[j]),
-                   eachindex(ind_bis))
-    has_bis || continue
+for (i, name) in enumerate(inst_names), ind in ACT_IND
+    v = ind_vals[ind]
+    has_ind = any(j -> rv_inst[j] == i && isfinite(v[j]), eachindex(v))
+    has_ind || continue
     # Widen from U(-1, 1) to U(-3, 3): Vines+ 2023 Run 2 reported
     # |C| > 1 in raw slope (e.g. C_HARPS_post = -2.1 in Table 9 raw
     # units, and -0.836 in normalized units, well past 1 in the
@@ -231,7 +260,7 @@ for (i, name) in enumerate(inst_names)
     # railing C_HARPS_PRE and making K unidentifiable as the BIS
     # regression couldn't grow large enough to absorb the activity
     # correctly.
-    priors["C_bisector_span_$name"] = UniformPrior(-3.0, 3.0)
+    priors["C_$(ind)_$name"] = UniformPrior(-3.0, 3.0)
 end
 
 params = Params(;
@@ -325,6 +354,25 @@ else
                  join(map(a -> @sprintf("%.2f", a), res.acceptance_within), ", "))
         @printf("  acceptance_swap   (k,k+1) = %s\n",
                  join(map(a -> @sprintf("%.2f", a), res.acceptance_swap), ", "))
+        # Full evidence stack WITH its uncertainties. A log Z quoted without one
+        # cannot support a model comparison: the gap between two configs only
+        # means something against the spread of the estimators that produced it.
+        # min(acceptance_swap) << 0.1 that will not rise with more rungs is a
+        # phase transition, and the tempered estimators are then untrustworthy —
+        # the mode-Laplace value is the fallback (see PTemceeResult docstring).
+        let e = res.evidence
+            @printf("  EVIDENCE  TI    = %10.2f\n", e.ti[1])
+            @printf("            TI+   = %10.2f +/- %.2f\n", e.ti_plus[1], e.ti_plus[2])
+            @printf("            SS+   = %10.2f +/- %.2f\n", e.ss_plus[1], e.ss_plus[2])
+            @printf("            H+    = %10.2f +/- %.2f  (beta* = %.3g)\n",
+                     e.hybrid[1], e.hybrid[2], e.hybrid_beta_star)
+            @printf("            Laplace = %8.2f   (phase-transition-immune cross-check)\n",
+                     res.log_evidence_laplace)
+            spread = maximum(x -> x[1], (e.ti_plus, e.ss_plus, e.hybrid)) -
+                     minimum(x -> x[1], (e.ti_plus, e.ss_plus, e.hybrid))
+            @printf("            estimator spread = %.2f nats;  min swap accept = %.3f\n",
+                     spread, minimum(res.acceptance_swap))
+        end
     else
         chains, log_ev, _ = sample_pt_warm(target;
             n_pathfinder_runs    = 16,
@@ -357,7 +405,7 @@ try
     corner_params = String[
         "K_k1",
         [n for n in params.layout.unfrozen_names
-         if startswith(n, "C_bisector_span")]...,
+         if startswith(n, "C_")]...,
     ]
     plot_corner(chains, params; params_to_plot = corner_params, output = OUT_DIR)
 catch e
@@ -399,12 +447,15 @@ end
 @printf("  %s\n", status)
 println("="^70)
 
-# C posteriors
-for name in inst_names
-    sym = Symbol("C_bisector_span_$name")
+# C posteriors — every fitted indicator, not just BIS. The old loop hardcoded
+# bisector_span, so a four-indicator fit silently reported a quarter of its
+# decorrelation terms and looked identical to a BIS-only one.
+for ind in ACT_IND, name in inst_names
+    sym = Symbol("C_$(ind)_$name")
     if sym in names(chains, :parameters)
         c = vec(Array(chains[:, sym, :]))
-        @printf("  C_bisector_span_%-12s = %+.4f ± %.4f\n",
-                 name, median(c), std(c))
+        m, sd = median(c), std(c)
+        @printf("  C_%-14s %-12s = %+.4f ± %.4f   (%.1f sigma)\n",
+                 ind, name, m, sd, sd > 0 ? abs(m)/sd : NaN)
     end
 end
