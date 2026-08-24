@@ -117,14 +117,21 @@ td=TransDimConfig(; max_kplanet=1, planets=false, noise=true,
 
 NT=parse(Int,get(ENV,"NT","12")); NW=parse(Int,get(ENV,"NW","100"))
 NS=parse(Int,get(ENV,"NS","4000")); NB=parse(Int,get(ENV,"NB","2000")); SEED=parse(Int,get(ENV,"SEED","42"))
-# COLD-DENSE explicit ladder (SIGLL = measured std(logL_RV | model) at beta=1).
+# COLD-DENSE explicit ladder.
+#
+# SIGMA_LOGL_RV is the measured standard deviation of the RV log-likelihood at
+# beta=1 — NOT the joint one, because untemper_transit below holds the transit
+# term outside the tempered target. Parallel-tempering swap acceptance between
+# adjacent rungs goes as exp(-delta_beta * sigma_logL), so the cold-end spacing
+# is set to 1/sigma and the ladder is built outward from there. Spacing beta
+# uniformly instead is what collapses swap acceptance on a joint fit.
 # The default geometric ladder puts beta_2 at 0.43 — with sigma(ll_RV)~20 the
 # cold gap needs Delta-beta ~ 1/sigma ~ 0.05 (beta_2 ~ 0.95), and the Vousden
 # adaptation provably cannot move it that far during burn-in (cumulative
 # log-movement ceiling ~0.2x over 2000 steps). Seed the density explicitly:
 # Delta-beta grows geometrically (r) from 1/sigma at the cold end down to
 # beta_min; Vousden then only makes small interior corrections.
-BETAS = haskey(ENV,"SIGLL") ? let σll=parse(Float64,ENV["SIGLL"]), d1=1/σll, r=1.10, βmin=1e-3
+BETAS = haskey(ENV,"SIGMA_LOGL_RV") ? let σll=parse(Float64,ENV["SIGMA_LOGL_RV"]), d1=1/σll, r=1.10, βmin=1e-3
     d=Float64[]; s=0.0; k=0
     while s < 1-βmin; push!(d, d1*r^k); s += d[end]; k += 1; end
     b=vcat(1.0, 1.0 .- cumsum(d)); b[end]=βmin

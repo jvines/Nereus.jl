@@ -291,8 +291,20 @@ NS=parse(Int,get(ENV,"NS","20000")); NB=parse(Int,get(ENV,"NB","8000"))
 NTRY=parse(Int,get(ENV,"NTRY","10")); NREF=parse(Int,get(ENV,"NREF","15"))
 @printf("trans-dim noise select: %d temps × %d walkers × %d+%d (NTRY=%d NREF=%d)\n",NT,NW,NS,NB,NTRY,NREF)
 t0=time()
+# ADAPTIVE LADDER, on by default. A fixed geometric ladder from beta_min to 1
+# is adequate for the RV-only likelihood (114 points) and fails outright for
+# RVPM: adding ~25k photometric points makes the log-likelihood range two
+# orders of magnitude larger, adjacent rungs stop overlapping, and temp-swap
+# acceptance collapses to ~0.001 at the cold end. With the ladder frozen the
+# cold chains never communicate, R-hat runs to 4.5, and the model posterior
+# inverts to a model the separate-runs check says loses by 38 nats.
+# ADAPT=0 restores the old fixed ladder; BETAMIN tunes the cold end.
+ADAPT = get(ENV, "ADAPT", "1") != "0"
+BETAMIN = parse(Float64, get(ENV, "BETAMIN", "1e-4"))
+@printf("ladder: %s, beta_min=%.1e\n", ADAPT ? "ADAPTIVE" : "fixed geometric", BETAMIN)
 res=sample_transdim_ptemcee(target, data; td=td, n_temps=NT, n_walkers=NW, n_steps=NS,
-    n_burnin=NB, n_birth_tries=NTRY, n_birth_refine=NREF, seed=42, show_progress=true)
+    n_burnin=NB, n_birth_tries=NTRY, n_birth_refine=NREF, seed=42, show_progress=true,
+    adapt_ladder=ADAPT, beta_min=BETAMIN)
 @printf("done in %.1f min  logZ=%.2f\n", (time()-t0)/60, res.log_evidence)
 @printf("noise toggles accepted/proposed per temp (cold→hot): %s\n",
         join(string.(res.noise_td_accepted, "/", res.noise_td_proposed), " "))
