@@ -412,6 +412,8 @@ else
                 n_temps, n_walkers, n_steps, n_burnin, init_strat)
         res = sample_ptemcee(target, data;
             n_temps       = n_temps,
+            beta_min      = parse(Float64, get(ENV, "HD18599_BETA_MIN", "1e-4")),
+            adapt_ladder  = get(ENV, "HD18599_ADAPT_LADDER", "0") != "0",
             n_walkers     = n_walkers,
             n_steps       = n_steps,
             n_burnin      = n_burnin,
@@ -460,6 +462,21 @@ else
     end
     mkpath(OUT_DIR)
     save_chains(joinpath(OUT_DIR, "chains.nc"), chains, params; data = data)
+
+    # Bridge-sampling evidence from the cold chain we already have. Costs
+    # n_proposal likelihood evaluations (seconds), touches no hot rung, and
+    # makes no Gaussianity assumption -- unlike mode-Laplace, and unlike the
+    # beta-path estimators whose hot end is an ill-conditioned prior
+    # expectation on this target.
+    if get(ENV, "BRIDGE", "1") != "0"
+        for prop in (:student, :gaussian)
+            b = bridge_evidence(target, chains; proposal = prop,
+                                n_proposal = parse(Int, get(ENV, "BRIDGE_N", "20000")),
+                                seed = seed)
+            @printf("  BRIDGE(%-8s) logZ = %.2f +/- %.2f   overlap=%.3f  n_post=%d n_prop=%d  iters=%d conv=%s\n",
+                    prop, b.log_z, b.se, b.overlap, b.n_post, b.n_prop, b.iters, b.converged)
+        end
+    end
 end
 
 # ---- Diagnostic plots (Nereus plotters) ------------------------------

@@ -49,6 +49,7 @@ include("samplers/rjmcmc.jl")
 include("samplers/moms.jl")     # MoMS sampler — needs rjmcmc helpers
 include("samplers/moms_ns.jl")  # MoMS-NS trans-dim nested sampler
 include("samplers/evidence.jl")  # reddemcee-style TI+/SS+/H+ — used by PT
+include("samplers/bridge.jl")        # posterior-only evidence (bridge sampling)
 include("samplers/pt.jl")
 include("samplers/pt_hmc.jl")  # Hamiltonian parallel tempering (fixed-dim, differentiable)
 include("samplers/nested.jl")
