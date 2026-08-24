@@ -89,8 +89,17 @@ for ch in chs; indicators[adkey[ch]]=load_adfmt(ch); end
 const USE_PHOT = haskey(ENV, "RVPM")
 if USE_PHOT
     Tc_b = 2458354.5857470357; dur_b = 0.07408203703703704
-    lc = load_tess_lc(joinpath(@__DIR__, "..", "..", "data", "HD18599",
-                               "HD18599_cleaned_lc.csv"))
+    # The cleaned TESS light curve is a 11 MB product that does not live in the
+    # package. HD18599_LC points at it; the default is a sibling data/ directory
+    # next to the repo. The old path resolved to <repo>/../../data, which after
+    # the rename landed outside any checkout and failed only once the RVPM
+    # branch was actually taken.
+    lcpath = get(ENV, "HD18599_LC",
+                 normpath(joinpath(@__DIR__, "..", "..", "data", "HD18599",
+                                   "HD18599_cleaned_lc.csv")))
+    isfile(lcpath) || error("HD 18599 light curve not found at $lcpath — " *
+                            "set HD18599_LC to the cleaned TESS LC csv")
+    lc = load_tess_lc(lcpath)
     pad = parse(Float64, get(ENV, "PAD", "3.0"))
     w = window_to_transits(lc.t, lc.flux, lc.flux_err, [P_REF], [Tc_b], [dur_b]; pad=pad)
     @printf("RVPM: windowed LC %d → %d phot pts (±%.1f·dur around b)\n",
