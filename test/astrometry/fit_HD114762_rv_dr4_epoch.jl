@@ -15,7 +15,8 @@
 #
 # Usage:  julia -t auto --project=. test/astrometry/fit_HD114762_rv_dr4_epoch.jl
 #   env NEREUS_GAIA_DR4_XML=<path>   reuse a local VOTable
-#   env HD114762_RV=<path>           4-col RV file: BJD RV[m/s] eRV[m/s] inst
+#   env HD114762_RV=<path>           override the bundled RV file
+#                                    (4-col: BJD RV[m/s] eRV[m/s] inst)
 #   env HD114762_ROUNDS=<n>          PT rounds (default 12; 3 = smoke)
 
 using Nereus
@@ -29,8 +30,11 @@ const PLX    = 25.36         # mas (Gaia DR3)
 const PLX_ERR = 0.30
 
 # --- RV data (BJD → MJD), split by instrument -------------------------------
-rvfile = get(ENV, "HD114762_RV", "")
-isfile(rvfile) || error("set HD114762_RV to the 4-col RV file (BJD RV eRV inst)")
+# Ships with the package (California Legacy Survey, Rosenthal+ 2021, public),
+# so the fit runs with no environment set up. HD114762_RV overrides it.
+const _RV_BUNDLED = normpath(joinpath(@__DIR__, "..", "data", "hd114762_rv.dat"))
+rvfile = get(ENV, "HD114762_RV", _RV_BUNDLED)
+isfile(rvfile) || error("RV file not found: $rvfile (set HD114762_RV to override)")
 tb = Dict{String, Vector{Float64}}()
 for line in eachline(rvfile)
     s = strip(line); (isempty(s) || startswith(s, "#")) && continue
