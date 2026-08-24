@@ -284,18 +284,55 @@ priors["q2_TESS"]      = UniformPrior(0.0, 1.0)
 parametrization = ParametrizationConfig(time = :Tc, geom = :b_rr,
                                           use_rho_s = true)
 priors["rho_s"] = NormalPrior(2.241, 0.479, 0.1, 10.0)
+# Activity-coefficient priors.
+#
+# ACTIVITY_C_PRIOR = "paper" (default) | "slope" | a number.
+#
+# THIS BOUND IS DOING SCIENCE, not housekeeping. Measured on this data set, the
+# per-instrument BIS-RV slopes are -0.831 / -0.754 / -0.879 (HARPS_pre /
+# HARPS_post / FEROS), consistent with the -0.836 of Vines et al. 2023 Table 6.
+# With the indices normalised to unit RMS, a coefficient that reaches that true
+# slope is C = slope * RMS(BIS) = -17.9 / -21.2 / -9.1.
+#
+# Let C reach those values and the planet is GONE: a fit with a bound of order
+# the RV amplitude finds C = -19.1 / -16.4 / -17.0 -- i.e. the correct slope --
+# and returns K = 5.84 +2.79/-2.95 instead of 11.9.
+#
+# That is the paper's own warning made quantitative: "the period candidate is
+# very close to the rotation period alias tracked by the BIS, [so] a
+# straightforward decorrelation is not possible since it would remove the
+# candidate signal". Table 9 reports C = 1.0 / -2.1 / 0.2, an order of magnitude
+# below full decorrelation, so Run 2 decorrelates only PARTIALLY, and that is
+# what preserves K = 11.
+#
+# "paper" therefore restricts C to the range the published fit occupies, which
+# reproduces K = 11.91 +/- 3.1 against the published 11. "slope" instead allows
+# the full measured correlation and is the honest sensitivity test: it shows how
+# much of K is BIS-degenerate. Neither is more "correct" than the other -- they
+# answer different questions, and quoting one without the other hides the
+# degeneracy.
+const C_PRIOR_MODE = get(ENV, "ACTIVITY_C_PRIOR", "paper")
+
 for (i, name) in enumerate(inst_names), ind in ACT_IND
     v = ind_vals[ind]
     has_ind = any(j -> rv_inst[j] == i && isfinite(v[j]), eachindex(v))
     has_ind || continue
-    # Widen from U(-1, 1) to U(-3, 3): Vines+ 2023 Run 2 reported
-    # |C| > 1 in raw slope (e.g. C_HARPS_post = -2.1 in Table 9 raw
-    # units, and -0.836 in normalized units, well past 1 in the
-    # current EMPEROR-rescaled BIS frame). The tight ±1 bound was
-    # railing C_HARPS_PRE and making K unidentifiable as the BIS
-    # regression couldn't grow large enough to absorb the activity
-    # correctly.
-    priors["C_$(ind)_$name"] = UniformPrior(-3.0, 3.0)
+    idx = findall(==(i), rv_inst)
+    cmax = if C_PRIOR_MODE == "paper"
+        3.0                                   # brackets Table 9's |C| <= 2.1
+    elseif C_PRIOR_MODE == "slope"
+        # allow the full measured correlation: |slope| * RMS(indicator)
+        fin = [j for j in idx if isfinite(v[j])]
+        bb  = v[fin] .- mean(v[fin])
+        rr  = rv[fin] .- mean(rv[fin])
+        rms = sqrt(sum(abs2, bb) / max(1, length(bb)))
+        sl  = sum(abs2, bb) > 0 ? sum(bb .* rr) / sum(abs2, bb) : 0.0
+        max(3.0, 2 * abs(sl) * rms)
+    else
+        parse(Float64, C_PRIOR_MODE)
+    end
+    priors["C_$(ind)_$name"] = UniformPrior(-cmax, cmax)
+    @printf("  prior C_%s_%s ~ U(%+.1f, %+.1f)  [%s]\n", ind, name, -cmax, cmax, C_PRIOR_MODE)
 end
 
 params = Params(;
