@@ -101,6 +101,7 @@ include("rm.jl")                   # Rossiter-McLaughlin (Hirano+ 2011 lite)
 include("gravity_darkening.jl")    # von Zeipel gravity-darkened transits (Barnes 2009)
 include("tomography.jl")           # Doppler tomography: the planet shadow in the line profile
 include("obliquity_joint.jl")      # joint shadow + RM-velocity obliquity fit (bespoke sampler)
+include("simulate_obliquity.jl")   # forward simulation of tomographic and RM nights
 include("obliquity.jl")            # framework-native obliquity fitting (Params/Theta + noise menu)
 include("plotting/rm_plots.jl")    # RM in-transit RV anomaly figure
 include("ttv.jl")                  # Per-transit free time offsets (TTV-A)
@@ -121,6 +122,8 @@ export
     # Joint obliquity fit (src/obliquity_joint.jl)
     RMNight, rm_anomaly, joint_obliquity_logpost, joint_obliquity_fit,
     rm_velocity_fit,
+    # Forward simulation (src/simulate_obliquity.jl)
+    simulate_tomogram, simulate_rm_night,
     # Kepler / orbit
     kepler_solve, kepler_solve!,
     true_anomaly,
