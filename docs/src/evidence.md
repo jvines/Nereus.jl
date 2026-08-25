@@ -35,8 +35,14 @@ return the Skilling estimator and (for `sample_nested_ins`) the Feroz
 importance estimator `log_z_ins`. Those do **not** use the β-ladder
 estimators on this page.
 
+Separately, `bridge_evidence` estimates log Z from **posterior samples
+alone**, never touching the prior end of the ladder. On a signal-locked
+posterior — where every β-path estimator on this page is biased — it is the
+one to use. See [Bridge sampling](#bridge-sampling--evidence-from-the-posterior-alone).
+
 This page documents the **PT family** estimators in
-`src/samplers/evidence.jl`.
+`src/samplers/evidence.jl`, plus the two cross-checks that do not temper
+(mode-Laplace and bridge sampling).
 
 ### Which samplers produce a PT `EvidenceReport`
 
@@ -361,12 +367,150 @@ minimum swap acceptance as the corroborating signature). This keeps
 tiny `minimum(res.acceptance_swap)` that will not rise with more temperatures
 is the independent tell-tale of the phase transition.
 
+## Bridge sampling — evidence from the posterior alone
+
+```julia
+br = bridge_evidence(target, chains; proposal = :student)
+br.log_z, br.se, br.overlap, br.converged
+```
+
+Every β-path estimator above integrates from the prior to the posterior, so all
+of them depend on ⟨log L⟩ at the **hot** end. On a joint RV+transit fit that
+expectation is `E_prior[log L]`, and it is tail-dominated: prior draws on
+HD 18599 give a median log L of −4.9e4 with a **minimum of −1.5e7**. No ladder
+resolves a quantity with that variance — measured, TI+ sat 118 nats from the
+truth with a self-reported error of 0.48 nats, and adding rungs, cooling
+`beta_min` or enabling the adaptive ladder all moved it **further away**. That
+is a bias that does not shrink with computation and cannot be tuned out.
+
+Bridge sampling never touches the prior end. It needs only draws you already
+have from the posterior plus a proposal you can sample and evaluate, and costs
+`n_proposal` likelihood evaluations rather than the ~1.3e7 a nested run spends
+on the same model.
+
+With `p*(θ)` the unnormalised posterior, `q(θ)` a normalised proposal,
+`{θ_i} ~ p` and `{φ_j} ~ q`, the optimal bridge (Meng & Wong 1996) solves the
+fixed point
+
+```
+           (1/N2) Σ_j  l2_j / (s1·l2_j + s2·r)
+    r  =   ───────────────────────────────────  ,   l = p*/q,  s = N/(N1+N2)
+           (1/N1) Σ_i    1   / (s1·l1_i + s2·r)
+```
+
+and `r → Z`, iterated in logs. Unlike the harmonic-mean estimator it has finite
+variance; unlike Laplace it assumes nothing about Gaussianity — `q` only has to
+**overlap** the posterior.
+
+**Requirements.**
+
+- `chains` must be the β = 1 chain in the target's own parameter space.
+- The target must be `unconstrained = true`. The proposal is Gaussian on ℝⁿ, so
+  on a bounded parametrisation most proposal draws land outside support and are
+  wasted. If your chains are in bounded space, map them through
+  `transform_forward` first — an `overlap` of 0.000 is the symptom of getting
+  this wrong.
+- `proposal = :student` (ν = 4) is the safer default over `:gaussian`. **An
+  over-narrow proposal is the one failure mode that biases bridge sampling
+  badly**, because the region where `q` has no mass never gets sampled; heavier
+  tails guard against it on a skewed posterior.
+
+**Read `overlap` and `converged` before using `log_z`.** Overlap near 1.0 means
+the proposal covers the posterior; a low value means the estimate is resting on
+a handful of draws.
+
+**Validation.** Error of **0.003 nats** against an analytic 22-dimensional
+target. On the real HD 18599 RVPM posterior, `log_z = 11466.13 ± 0.02` with
+`overlap = 1.000`, from both the Student-t and Gaussian proposals
+(11466.13 vs 11466.12) — against a mode-Laplace cross-check of ~11467 and a
+nested value of 11470, while TI+/SS+ on the same run sat 117–245 nats low.
+
+## Reference-path evidence — thermodynamic integration without the prior
+
+```julia
+rp = reference_path_evidence(target, chains)
+rp.log_z          # the number to quote (AIS)
+rp.log_z_ti       # same particles, path integral — a MIXING check
+rp.ess, rp.accept, rp.support_frac
+```
+
+Bridge sampling avoids the prior by not using a path at all. This does the
+opposite: it keeps thermodynamic integration and **moves the cold end**.
+
+Let `q` be a normalised reference fitted to the posterior — the same Gaussian /
+Student-t that [`bridge_evidence`](#bridge-sampling--evidence-from-the-posterior-alone)
+builds. Define
+
+```
+gamma_beta(y) = q(y) * exp(beta * f(y)),     f(y) = log p*(y) - log q(y)
+```
+
+so `gamma_0 = q` with `Z_0 = 1` — and `q` can be sampled **exactly**, so there is
+no equilibration problem at the cold end — while `gamma_1 = p*` with `Z_1 = Z`.
+Then
+
+```
+log Z = INT_0^1 E_{p_beta}[f] d beta
+```
+
+The path is short because `q` already resembles the posterior, so there is no
+phase transition to resolve and no expectation is ever taken under the prior.
+This is the fix for the failure documented above: it is the *path* that breaks
+TI/TI+/SS+/H+ on a signal-locked target, not the estimators, which reproduce an
+analytic log Z to <0.01 nats on a well-behaved one.
+
+**Two estimates, and their difference is a diagnostic.**
+
+- `log_z_ais` (reported as `log_z`) is annealed importance sampling,
+  `log w = SUM_k (beta_k - beta_{k-1}) f(y_{k-1})`. It is unbiased in `Z` for
+  **any** kernel leaving `p_beta` invariant, so it does not care how well the
+  particles mix.
+- `log_z_ti` integrates `E[f]` over the same particles. Path sampling **does**
+  require equilibration at each rung.
+
+Measured on the 22-D analytic target with a deliberately mismatched Student-t
+reference, TI's error runs **-3.21 / -0.79 / -0.10 / -0.02** nats at
+`n_steps` = 2 / 8 / 32 / 128, while AIS stays within 0.03 throughout. So a gap
+between them means *raise `n_steps`* (and watch `ess` rise with it) — it is not
+a second opinion on the arithmetic.
+
+Contrast TI+/SS+/H+, which all read one shared `mean_logL` array: a bias at any
+rung appears identically in all of them, which is why they agreed to 2.6 nats on
+HD 18599 while all being 147 nats wrong.
+
+**Defaults and requirements.**
+
+- `proposal = :gaussian` here, the **opposite** of `bridge_evidence`, and
+  deliberately. Bridge only needs `q` to overlap the posterior, so heavy tails
+  are free insurance. Here `q` is the cold end of a path the particles are
+  annealed along, so a much broader reference lengthens the path and costs
+  equilibration — the Student-t reference needed ~16x more `n_steps` to bring TI
+  into agreement, at no benefit to AIS.
+- As for bridge, `chains` must be the beta = 1 chain and the target must be
+  `unconstrained = true`; draws are mapped through `transform_forward` before
+  `q` is fitted.
+- `support_frac` reports the fraction of reference draws inside the target's
+  support. `log_z_ti` is returned as `NaN` when that is below 1, because
+  `E_q[f]` is then `-Inf` and the path integral is genuinely undefined. AIS is
+  unaffected — an out-of-support particle simply carries `w = 0`.
+
+**Validation.** Error **0.0001-0.0015 nats** across seeds against the analytic
+22-D target (`test/test_reference_path_evidence.jl`), with AIS and TI agreeing
+to better than 0.05 and `ess` at 511/512.
+
 ## Practical guidance
 
-- **Fixed-dim PT on a single posterior**: trust TI+ and SS+ to agree
-  within their σ. H+ should match. Take H+ (the ensemble samplers'
+- **Fixed-dim PT on a single posterior**: take H+ (the ensemble samplers'
   default headline) — or TI+ from `sample_pt`/`sample_pt_hmc` — as the
   reported value.
+
+  ⚠ **But mutual agreement between TI/TI+/SS+/H+ is NOT evidence that they are
+  right.** All four read the same shared `mean_logL[k]` array, so a bias in
+  ⟨log L⟩ at any rung appears identically in every one of them. On a measured
+  HD 18599 run the four agreed with each other to **2.6 nats while all being
+  147 nats wrong**. Corroborate against something that does not temper —
+  `bridge_evidence` or the mode-Laplace value — before quoting a number,
+  especially for a Bayes factor.
 - **Trans-dim PT**: the TI+ Richardson term blows up (PCHIP can't
   track the ⟨log L⟩(β) curvature when the integrand averages over
   multiple configs). **Trust SS+** (`res.evidence_report.ss_plus[1]`).

@@ -49,7 +49,8 @@ include("samplers/rjmcmc.jl")
 include("samplers/moms.jl")     # MoMS sampler — needs rjmcmc helpers
 include("samplers/moms_ns.jl")  # MoMS-NS trans-dim nested sampler
 include("samplers/evidence.jl")  # reddemcee-style TI+/SS+/H+ — used by PT
-include("samplers/bridge.jl")        # posterior-only evidence (bridge sampling)
+include("samplers/bridge.jl")           # posterior-only evidence (bridge sampling)
+include("samplers/reference_path.jl")   # evidence via a path from a fitted reference
 include("samplers/pt.jl")
 include("samplers/pt_hmc.jl")  # Hamiltonian parallel tempering (fixed-dim, differentiable)
 include("samplers/nested.jl")
@@ -192,7 +193,7 @@ export
     load_hgca_row, load_orvara_rv, load_orvara_relast,
     load_hip_iad, load_gost, load_gaia_dr3,
     fetch_hip_iad, fetch_gost,
-    load_tess_lc, load_vizier_rv, save_lightcurve,
+    load_tess_lc, load_vizier_rv, export_lightcurve,
     rv_log_likelihood, rv_predictions,
     transit_log_likelihood, phot_predictions,
     sky_separation, rho_s_to_a_Rs,
