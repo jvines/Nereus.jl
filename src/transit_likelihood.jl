@@ -7,6 +7,13 @@
 #
 # Limb darkening: per-instrument Kipping q1, q2 parameters.
 
+# Fixed partition size for the photometry log-likelihood reduction. A CONSTANT,
+# deliberately: making it a function of nthreads() would make the summation
+# order -- and therefore the last bits of the result -- machine-dependent, so a
+# run on 4 threads and a run on 8 would disagree at exactly the level that
+# flips trans-dimensional accept/reject decisions.
+const _PHOT_REDUCE_CHUNK = 4096
+
 # Per-task chunk of the photometry-Gaussian log-likelihood used by the
 # chunked-@spawn path in the ws-aware transit_log_likelihood. Avoids
 # the per-iteration Threads.threadid() lookup and thread-sync overhead
@@ -502,20 +509,40 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
         trends_c = _phot_trend_cache(theta, n_pm)
         inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
 
-        nT = Threads.nthreads()
-        local_total = fill(zero(T), nT)
-
-        # :dynamic — `local_total[Threads.threadid()] +=` below can lose
-        # one += per task-migration event in principle, but on 152k phot
-        # iterations with logL contributions ~O(1) each, the bias is sub-
-        # 1e-3 log units — well below MCMC noise. Using :static here is
-        # not an option because this loop is called from inside chain-
-        # parallel @spawn contexts (sample_pt's multi-chain dispatch),
-        # and `@threads :static` is illegal nested inside another threaded
-        # context. The per-thread-state cases in ptemcee/ofti are
-        # different — they corrupt mutable Theta/RNG state, not just
-        # accumulator values.
-        @inbounds Threads.@threads for i in 1:n_obs
+        # DETERMINISTIC REDUCTION. This accumulator used to be
+        # `local_total[Threads.threadid()] += ...` under `Threads.@threads`
+        # (:dynamic), which had two defects:
+        #
+        #   * a genuine lost-update race — a task may migrate between threads
+        #     BETWEEN the read and the write of `+=`, so the update is dropped
+        #     outright, not merely reordered;
+        #   * non-determinism — which thread accumulates which `i` varies per
+        #     run, so the floating-point summation order varies, and the total
+        #     moves by ~1e-3 log units between identical runs.
+        #
+        # 1e-3 is far below MCMC noise for a fixed-dimension fit, which is why
+        # it was tolerated. It is NOT below the threshold that matters for
+        # trans-dimensional sampling: a 1e-3 perturbation flips birth/death
+        # accept-reject decisions, and the resulting occupancies are not
+        # reproducible at fixed seed.
+        #
+        # The fix is to partition into FIXED-SIZE chunks and give each chunk
+        # its own slot, indexed by CHUNK rather than by thread. Each chunk sums
+        # sequentially, and the partials are combined in index order, so the
+        # result is bit-identical regardless of how tasks are scheduled AND
+        # regardless of nthreads(). Chunk size is a constant, not a function of
+        # nthreads(), or the partition itself would depend on the machine.
+        #
+        # `:static` remains unavailable here (this runs nested inside
+        # sample_pt's chain-parallel @spawn), but it is no longer needed: the
+        # correctness now comes from the indexing, not from the schedule.
+        nchunks  = cld(n_obs, _PHOT_REDUCE_CHUNK)
+        partials = fill(zero(T), nchunks)
+        @inbounds Threads.@threads for c in 1:nchunks
+            lo = (c - 1) * _PHOT_REDUCE_CHUNK + 1
+            hi = min(c * _PHOT_REDUCE_CHUNK, n_obs)
+            acc = zero(T)
+            for i in lo:hi
             t       = data.t_phot[i]
             obs     = data.flux[i]
             obs_err = data.flux_err[i]
@@ -535,11 +562,12 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
 
             var_i = obs_err * obs_err + jitter * jitter
             resid = obs - model_flux
-            local_total[Threads.threadid()] +=
-                -(log(two_pi * var_i) + resid * resid / var_i) / 2
+            acc += -(log(two_pi * var_i) + resid * resid / var_i) / 2
+            end
+            partials[c] = acc
         end
 
-        return sum(local_total)
+        return sum(partials)
     end
 
     # Serial path — needed for Stage 2 (AR/MA) sequential evaluation
