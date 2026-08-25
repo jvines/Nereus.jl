@@ -1533,7 +1533,23 @@ const _rng = MersenneTwister(1)
                     indicator_errs = Dict("bis" => bis_σ))
         @test haskey(d3.indicators, "bis")
         @test haskey(d3.indicator_errs, "bis")
-        @test d3.indicator_errs["bis"] == bis_σ
+        # `normalize_indicators` (default) rescales the indicator VALUES by
+        # their per-instrument RMS, so the errors must be divided by the SAME
+        # factor — values and uncertainties are one unit system. Asserting the
+        # errors come back verbatim would be asserting a corrupted S/N: it is
+        # what silently told ActivityGP the indicators were ~26x more precise
+        # than they are.
+        @test d3.indicator_errs["bis"] != bis_σ                    # rescaled
+        @test std(d3.indicators["bis"]) / d3.indicator_errs["bis"][1] ≈
+              std(bis) / bis_σ[1]  rtol=1e-10                      # S/N preserved
+        @test all(≈(d3.indicator_errs["bis"][1]), d3.indicator_errs["bis"])
+        # Opting out keeps both raw, which is the old verbatim contract.
+        d3raw = Data(; t_rv=t, rv=rv, rv_err=err,
+                       indicators = Dict("bis" => bis),
+                       indicator_errs = Dict("bis" => bis_σ),
+                       normalize_indicators = false)
+        @test d3raw.indicators["bis"] == bis
+        @test d3raw.indicator_errs["bis"] == bis_σ
         # Without indicator_errs, the dict is empty
         d4 = Data(; t_rv=t, rv=rv, rv_err=err,
                     indicators = Dict("bis" => bis))

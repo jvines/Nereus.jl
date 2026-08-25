@@ -151,7 +151,11 @@ _admissible() = ("SSQP"       => SSQP(1.0, 1.0 / sqrt(3), 0.2, 0.2 * sqrt(3)),  
         yj = cholesky(Symmetric(Σn)).L * randn(rng, 2n)
         rv_obs, bis_obs = yj[1:n], yj[(n+1):end]
 
-        data = Nereus.Data(; t_rv = t_rv, rv = rv_obs, rv_err = fill(σ_rv, n),
+        # Synthesised at the raw indicator scale with raw-scale truth values
+        # below, so indicator normalisation must be off or `Bc_t` is not the
+        # truth for the stored data.
+        data = Nereus.Data(; normalize_indicators = false,
+                              t_rv = t_rv, rv = rv_obs, rv_err = fill(σ_rv, n),
                               rv_inst = ones(Int, n),
                               indicators = Dict("bis" => bis_obs),
                               indicator_errs = Dict("bis" => fill(σ_bis, n)))

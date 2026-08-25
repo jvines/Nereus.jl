@@ -250,9 +250,19 @@ function Data(;
     #
     # normalize_indicators=false restores the raw values for a caller who has
     # already scaled them.
+    # The SAME per-instrument RMS must be applied to `indicator_errs`. The
+    # values and their uncertainties live in one unit system: rescaling the
+    # values alone silently changes the signal-to-noise of the indicator
+    # block. ActivityDecorrelation never reads the errors so it cannot see
+    # the difference, but ActivityGP scores the indicators as a data block
+    # with their own noise (sigma^2 = err^2 + jitter^2) and is corrupted by
+    # it -- an indicator whose RMS is 0.05 gets its values multiplied by 20
+    # while its errors stay put, so the GP is asked to fit 20x-inflated data
+    # at the original precision.
     if normalize_indicators && !isempty(ind_dict)
         for (name, vals) in ind_dict
             v = Vector{Float64}(vals)
+            e = get(ind_err_dict, name, nothing)
             for ins in unique(rv_inst_vec)
                 idx = findall(==(ins), rv_inst_vec)
                 fin = filter(k -> isfinite(v[k]), idx)
@@ -262,8 +272,12 @@ function Data(;
                 rms = sqrt(sum(abs2, @view v[fin]) / length(fin))
                 rms > 0 || continue
                 for k in fin; v[k] /= rms; end
+                # Divide the errors by the same factor. Scale only -- the
+                # median subtraction is a shift and does not affect them.
+                e === nothing || for k in idx; e[k] /= rms; end
             end
             ind_dict[name] = v
+            e === nothing || (ind_err_dict[name] = e)
         end
     end
 

@@ -304,7 +304,14 @@ end
     bc_pr = params.layout.unfrozen_priors[bc_idx]
     lo, hi = bounds(bc_pr)
     @test hi > 0 && lo < 0
-    @test abs(hi) < 1.0   # BIS data has σ ~ 0.01 → prior O(0.05–0.5)
+    # `Bc` couples the UNIT-VARIANCE latent G(t) to the BIS channel
+    # (bis = Bc·G + Br·Ġ), so Bc is the amplitude of the BIS variability in
+    # whatever units the indicator is stored in. Indicators are normalised to
+    # unit RMS by default, so the plausible Bc is O(1) and the prior must
+    # CONTAIN it — an `abs(hi) < 1.0` ceiling (which was right back when the
+    # raw σ ~ 0.01 values were stored) would sit the truth on the boundary.
+    @test hi > 1.0        # contains the unit-RMS coupling
+    @test hi < 20.0       # still informative, not effectively flat
 end
 
 @testset "ActivityGP — joint log-likelihood through rv_log_likelihood" begin
@@ -332,7 +339,7 @@ end
     rv_obs  = y_flat[1:n_obs]
     bis_obs = y_flat[(n_obs+1):end]
 
-    data = Data(; t_rv = t_rv, rv = rv_obs, rv_err = fill(σ_rv, n_obs),
+    data = Data(; normalize_indicators = false, t_rv = t_rv, rv = rv_obs, rv_err = fill(σ_rv, n_obs),
                   rv_inst = ones(Int, n_obs),
                   indicators = Dict("bis" => bis_obs),
                   indicator_errs = Dict("bis" => fill(σ_bis, n_obs)))
@@ -388,7 +395,7 @@ end
     rv_obs  = y_flat[1:n_obs]
     bis_obs = y_flat[(n_obs+1):end]
 
-    data = Data(; t_rv = t_rv, rv = rv_obs, rv_err = fill(σ_rv, n_obs),
+    data = Data(; normalize_indicators = false, t_rv = t_rv, rv = rv_obs, rv_err = fill(σ_rv, n_obs),
                   rv_inst = ones(Int, n_obs),
                   indicators = Dict("bis" => bis_obs),
                   indicator_errs = Dict("bis" => fill(σ_bis, n_obs)))
@@ -439,7 +446,7 @@ end
     rng = MersenneTwister(0)
     n = 25
     t = sort!(40.0 .* rand(rng, n))
-    data = Data(; t_rv = t, rv = 0.5 .* randn(rng, n),
+    data = Data(; normalize_indicators = false, t_rv = t, rv = 0.5 .* randn(rng, n),
                   rv_err = fill(0.5, n), rv_inst = ones(Int, n),
                   indicators = Dict("bis" => 0.005 .* randn(rng, n)),
                   indicator_errs = Dict("bis" => fill(0.005, n)))
@@ -471,7 +478,7 @@ end
     rng = MersenneTwister(0)
     n = 25
     t = sort!(40.0 .* rand(rng, n))
-    data = Data(; t_rv = t, rv = 0.5 .* randn(rng, n),
+    data = Data(; normalize_indicators = false, t_rv = t, rv = 0.5 .* randn(rng, n),
                   rv_err = fill(0.5, n), rv_inst = ones(Int, n),
                   indicators = Dict("bis" => 0.005 .* randn(rng, n)),
                   indicator_errs = Dict("bis" => fill(0.005, n)))
@@ -505,7 +512,7 @@ end
     rv = σ_rv .* randn(rng, 2 * n_per)
     bis = σ_bis .* randn(rng, 2 * n_per)
     bis_err = fill(σ_bis, 2 * n_per)
-    data = Data(; t_rv = t, rv = rv, rv_err = fill(σ_rv, 2 * n_per),
+    data = Data(; normalize_indicators = false, t_rv = t, rv = rv, rv_err = fill(σ_rv, 2 * n_per),
                   rv_inst = rv_inst,
                   indicators = Dict("bis" => bis),
                   indicator_errs = Dict("bis" => bis_err))
@@ -558,7 +565,7 @@ end
     bis = 0.01 .* randn(rng, n_obs)
     bis_err = fill(0.005, n_obs)
 
-    data = Data(; t_rv = t_rv, rv = rv, rv_err = rv_err,
+    data = Data(; normalize_indicators = false, t_rv = t_rv, rv = rv, rv_err = rv_err,
                   rv_inst = ones(Int, n_obs),
                   indicators = Dict("bis" => bis,
                                     "bisector_span" => bis),
@@ -664,7 +671,7 @@ end
     L = cholesky(Symmetric(Σ + Diagonal(σ_diag .^ 2))).L
     y_flat = L * randn(rng, 2 * n_obs)
 
-    data = Data(; t_rv = t_rv, rv = y_flat[1:n_obs],
+    data = Data(; normalize_indicators = false, t_rv = t_rv, rv = y_flat[1:n_obs],
                   rv_err = fill(σ_rv, n_obs), rv_inst = ones(Int, n_obs),
                   indicators = Dict("bis" => y_flat[(n_obs+1):end]),
                   indicator_errs = Dict("bis" => fill(σ_bis, n_obs)))
@@ -716,7 +723,7 @@ end
 end
 
 @testset "activity_gp_predict — refuses non-ActivityGP fits" begin
-    data = Data(; t_rv = collect(0.0:5.0:50.0), rv = randn(11),
+    data = Data(; normalize_indicators = false, t_rv = collect(0.0:5.0:50.0), rv = randn(11),
                   rv_err = ones(11), rv_inst = ones(Int, 11))
     ic = InstrumentConfig(rv = ["SIM"])
     params = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
@@ -750,7 +757,7 @@ end
 
     bis_obs = y_flat[(n_obs+1):end]
     function _make_params_and_theta(rv_obs, marginalize)
-        data = Data(; t_rv = t_rv, rv = rv_obs, rv_err = fill(σ_rv, n_obs),
+        data = Data(; normalize_indicators = false, t_rv = t_rv, rv = rv_obs, rv_err = fill(σ_rv, n_obs),
                       rv_inst = ones(Int, n_obs),
                       indicators = Dict("bis" => bis_obs),
                       indicator_errs = Dict("bis" => fill(σ_bis, n_obs)))
@@ -798,7 +805,7 @@ end
 @testset "indicators / indicator_errs — save_chains ↔ load_chains round-trip" begin
     rng = MersenneTwister(0)
     n = 30
-    data = Data(; t_rv = sort!(40.0 .* rand(rng, n)), rv = randn(rng, n),
+    data = Data(; normalize_indicators = false, t_rv = sort!(40.0 .* rand(rng, n)), rv = randn(rng, n),
                   rv_err = ones(n), rv_inst = ones(Int, n),
                   indicators = Dict("bis" => 0.1 .* randn(rng, n),
                                     "fwhm" => 0.5 .* randn(rng, n)),
@@ -877,7 +884,7 @@ end
     n = 30
     t = sort!(40.0 .* rand(rng, n))
     bis = 0.5 .* randn(rng, n); rhk = 0.02 .* randn(rng, n)
-    data = Data(; t_rv = t, rv = randn(rng, n), rv_err = ones(n),
+    data = Data(; normalize_indicators = false, t_rv = t, rv = randn(rng, n), rv_err = ones(n),
                   rv_inst = ones(Int, n),
                   indicators = Dict("bisector_span" => bis, "log_rhk" => rhk),
                   indicator_errs = Dict("bisector_span" => fill(0.2, n),
@@ -912,7 +919,7 @@ end
     rng = MersenneTwister(101)
     n = 25
     t_rv = sort!(40.0 .* rand(rng, n))
-    data = Data(; t_rv = t_rv, rv = randn(rng, n), rv_err = fill(0.5, n),
+    data = Data(; normalize_indicators = false, t_rv = t_rv, rv = randn(rng, n), rv_err = fill(0.5, n),
                   rv_inst = ones(Int, n),
                   indicators = Dict("bis" => 0.01 .* randn(rng, n)),
                   indicator_errs = Dict("bis" => fill(0.005, n)))
