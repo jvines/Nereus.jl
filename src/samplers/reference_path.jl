@@ -92,7 +92,8 @@ function reference_path_evidence(target::NereusTarget, chains::MCMCChains.Chains
                                  seed::Int = 1,
                                  step_scale::Real = 1.0,
                                  beta_power::Real = 3.0,
-                                 ess_threshold::Real = 0.5)
+                                 ess_threshold::Real = 0.5,
+                                 ess_target::Real = 0.95)
     names = target.params.layout.unfrozen_names
     d = length(names)
     d >= 1 || return _rp_bad(n_beta, proposal)
@@ -112,7 +113,16 @@ function reference_path_evidence(target::NereusTarget, chains::MCMCChains.Chains
     logp(y) = (a = _logdensity_parts(target, y); Float64(a[1]) + Float64(a[2]))
     return _reference_path_core(logp, Y; n_particles, n_beta, n_steps,
                                 proposal, seed, step_scale, beta_power,
-                                ess_threshold)
+                                ess_threshold, ess_target)
+end
+
+
+"ESS of a log-weight vector, ignoring non-finite (zero-weight) entries."
+function _rp_ess(logw::AbstractVector{Float64})
+    lw = filter(isfinite, logw)
+    isempty(lw) && return 0.0
+    m = maximum(lw); w = exp.(lw .- m)
+    return sum(w)^2 / sum(abs2, w)
 end
 
 _rp_bad(n_beta, proposal) =
@@ -137,7 +147,8 @@ function _reference_path_core(logp::Function, Y::AbstractMatrix{Float64};
                               seed::Int = 1,
                               step_scale::Real = 1.0,
                               beta_power::Real = 3.0,
-                              ess_threshold::Real = 0.5)
+                              ess_threshold::Real = 0.5,
+                              ess_target::Real = 0.95)
     d = size(Y, 1)
     bad = _rp_bad(n_beta, proposal)
     # A reference fitted from fewer draws than it has free covariance entries is
@@ -172,24 +183,31 @@ function _reference_path_core(logp::Function, Y::AbstractMatrix{Float64};
     # --- initialise at beta = 0: EXACT draws from q --------------------------
     P  = Matrix{Float64}(undef, d, n_particles)
     fv = Vector{Float64}(undef, n_particles)
+    # ONE draw per particle, no retry. Retrying until f is finite would be
+    # rejection sampling from q RESTRICTED to the support, i.e. drawing from
+    # q/Z_q with Z_q = P_q(supp p*) < 1 -- and the AIS/SMC identity assumes
+    # draws from the NORMALISED q with Z_0 = 1. Feeding it restricted draws
+    # makes it estimate Z/Z_q, overestimating log Z by -log Z_q. That is not
+    # hypothetical: it read +4.5 nats high against a well-conditioned bridge
+    # estimate on a 13-D RV posterior, and the sign is diagnostic, because an
+    # SMC log-Z estimate is unbiased in Z and so should skew LOW by Jensen.
+    #
+    # A particle drawn outside the support is simply a zero-weight particle: it
+    # carries w = 0 along the whole path and still counts in N.
     @inbounds for i in 1:n_particles
-        for _ in 1:200
-            y = drawq()
-            v = f(y)
-            if isfinite(v); P[:, i] = y; fv[i] = v; break; end
-            P[:, i] = y; fv[i] = v
-        end
+        y = drawq()
+        P[:, i] = y
+        fv[i] = f(y)
     end
     n_in = count(isfinite, fv)
     n_in > 0 || return bad
-    # Fraction of reference draws inside the target's support. TI along this
-    # path integrates E_{p_beta}[f], and at beta = 0 that is E_q[f], which is
-    # -Inf whenever q places mass where log p* = -Inf. So the path integral is
-    # only DEFINED when supp(q) is contained in supp(p*). A Gaussian fitted to
-    # interior draws satisfies that; a heavy-tailed Student-t generally does
-    # not. The AIS weights are unaffected (an out-of-support particle simply
-    # carries w = 0 for the whole path), which is why log_z_ais stays valid
-    # either way and is the reported value.
+    # Fraction of reference draws inside the target's support, and now a real
+    # efficiency figure: (1 - support_frac) of the particles are dead from the
+    # start, so a low value means most of the budget is wasted and the estimate
+    # rests on few particles. It also decides whether the path integral exists
+    # at all -- TI integrates E_{p_beta}[f], which at beta = 0 is E_q[f] = -Inf
+    # whenever q places mass where log p* = -Inf, so log_z_ti is reported only
+    # when this is 1. The AIS weights remain valid either way.
     support_frac = n_in / n_particles
 
     # Non-uniform beta grid. With a heavy-tailed reference, f = log p* - log q
@@ -199,25 +217,52 @@ function _reference_path_core(logp::Function, Y::AbstractMatrix{Float64};
     # concentrates rungs near 0. It does not affect the AIS weights (which are
     # exact for any schedule) -- it is what makes the TI cross-check sharp
     # enough to be worth reading.
-    betas = Float64[(k / n_beta)^beta_power for k in 0:n_beta]
+    # ADAPTIVE beta schedule. A fixed grid takes the same step everywhere, but
+    # the path is not uniformly hard: on a real posterior the early rungs (where
+    # q and the target still differ) need fine steps and the late ones do not.
+    # Fixed grids therefore either waste rungs or blow through the hard part --
+    # measured on a 13-D RV target, refining a fixed grid from 64 to 1024 rungs
+    # made ESS WORSE (1.5 -> 1.1), because the difficulty is not where the extra
+    # rungs went.
+    #
+    # Instead pick each beta so the incremental weights lose a controlled
+    # fraction of ESS (Del Moral/Jasra adaptive SMC): bisect for the largest
+    # step whose relative ESS stays at `ess_target`. `n_beta` becomes a cap on
+    # the number of rungs rather than the schedule itself.
     logw  = zeros(Float64, n_particles)   # log UNNORMALISED weights since the last resample
     logZ  = 0.0                            # accumulated log normalising constant
     n_resample = 0
-    Ef    = Vector{Float64}(undef, n_beta + 1)
-    Ef[1] = mean(filter(isfinite, fv))
+    betas_used = Float64[0.0]
+    Ef = Float64[mean(filter(isfinite, fv))]
 
-    # RWM scale: the reference already carries the posterior covariance, so the
-    # kernel proposes in its whitened frame at the usual 2.38/sqrt(d).
+    # RWM scale in the reference's whitened frame, adapted per rung toward the
+    # standard 0.234 acceptance. A fixed 2.38/sqrt(d) sat at ~0.15 here, which
+    # under-moves the particles and is exactly what biases the path integral.
     c = step_scale * 2.38 / sqrt(d)
     n_acc = 0; n_try = 0
+    β = 0.0
+    k = 0
 
-    @inbounds for k in 1:n_beta
-        dβ = betas[k+1] - betas[k]
-        β  = betas[k+1]
-        # Weight increment uses f at the CURRENT positions, before moving. The
-        # log-Z contribution is the RATIO of successive weight sums, which
-        # telescopes to the AIS estimator when no resampling happens and stays
-        # correct when it does.
+    while β < 1.0 && k < n_beta
+        k += 1
+        ess0 = _rp_ess(logw)
+        target = ess_target * max(ess0, 1.0)
+        # bisect on the increment: ESS is monotone decreasing in dbeta
+        lo, hi = 0.0, 1.0 - β
+        trial = hi
+        for _ in 1:40
+            cand = logw .+ trial .* fv
+            if _rp_ess(cand) >= target
+                lo = trial
+            else
+                hi = trial
+            end
+            trial = 0.5 * (lo + hi)
+            hi - lo < 1e-12 && break
+        end
+        dβ = max(lo, 1e-10)            # never stall
+        β  = min(1.0, β + dβ)
+
         prev = _logsumexp(logw)
         for i in 1:n_particles
             logw[i] += dβ * fv[i]
@@ -226,40 +271,32 @@ function _reference_path_core(logp::Function, Y::AbstractMatrix{Float64};
         logZ += cur - prev
 
         # Adaptive resampling. Plain AIS has no defence against weight
-        # degeneracy: measured on a real 13-D RV posterior the weights
-        # collapsed onto ONE particle (ESS 1/512) and adding beta rungs made it
-        # worse, not better -- 1.5 -> 1.2 -> 1.1 at n_beta = 64 -> 256 -> 1024.
-        # Resampling when ESS falls below a fraction of N is the standard cure
-        # and turns this into SMC; the log-Z accumulation above is already in
-        # the form that permits it.
-        lwf = filter(isfinite, logw)
-        if !isempty(lwf)
-            lwn = lwf .- maximum(lwf)
-            wn  = exp.(lwn)
-            ess_now = sum(wn)^2 / sum(abs2, wn)
-            if ess_now < ess_threshold * n_particles && length(lwf) > 1
-                # systematic resampling on the normalised weights
-                wfull = [isfinite(logw[i]) ? exp(logw[i] - maximum(lwf)) : 0.0
-                         for i in 1:n_particles]
-                tot = sum(wfull)
-                if tot > 0
-                    cw = cumsum(wfull ./ tot)
-                    u0 = rand(rng) / n_particles
-                    newP = similar(P); newf = similar(fv)
-                    j = 1
-                    for i in 1:n_particles
-                        u = u0 + (i - 1) / n_particles
-                        while j < n_particles && cw[j] < u; j += 1; end
-                        newP[:, i] = @view P[:, j]
-                        newf[i] = fv[j]
-                    end
-                    P .= newP; fv .= newf
-                    fill!(logw, 0.0)
-                    n_resample += 1
+        # degeneracy: on that same 13-D target the weights collapsed onto ONE
+        # particle (ESS 1/512). Resampling below a fraction of N is the standard
+        # cure and makes this SMC; the log-Z accumulation above already permits
+        # it.
+        if _rp_ess(logw) < ess_threshold * n_particles
+            mx = maximum(filter(isfinite, logw))
+            wfull = [isfinite(logw[i]) ? exp(logw[i] - mx) : 0.0 for i in 1:n_particles]
+            tot = sum(wfull)
+            if tot > 0
+                cw = cumsum(wfull ./ tot)
+                u0 = rand(rng) / n_particles
+                newP = similar(P); newf = similar(fv)
+                j = 1
+                for i in 1:n_particles
+                    u = u0 + (i - 1) / n_particles
+                    while j < n_particles && cw[j] < u; j += 1; end
+                    newP[:, i] = @view P[:, j]; newf[i] = fv[j]
                 end
+                P .= newP; fv .= newf
+                fill!(logw, 0.0)
+                n_resample += 1
             end
         end
+
         # move under gamma_beta:  log gamma = log q + beta*f
+        acc_k = 0; try_k = 0
         for i in 1:n_particles
             y  = @view P[:, i]
             lq = logq(y)
@@ -268,14 +305,22 @@ function _reference_path_core(logp::Function, Y::AbstractMatrix{Float64};
                 prop = y .+ c .* (Lc * randn(rng, d))
                 fp   = f(prop)
                 lgp  = isfinite(fp) ? logq(prop) + β * fp : -Inf
-                n_try += 1
+                try_k += 1
                 if isfinite(lgp) && log(rand(rng)) < lgp - lg
-                    P[:, i] = prop; fv[i] = fp; lg = lgp; n_acc += 1
+                    P[:, i] = prop; fv[i] = fp; lg = lgp; acc_k += 1
                     y = @view P[:, i]
                 end
             end
         end
-        Ef[k+1] = mean(filter(isfinite, fv))
+        n_acc += acc_k; n_try += try_k
+        # step-size adaptation toward 0.234 (Roberts/Gelman/Gilks optimal RWM)
+        if try_k > 0
+            a = acc_k / try_k
+            c *= exp(0.6 * (a - 0.234))
+            c = clamp(c, 1e-6, 10.0)
+        end
+        push!(betas_used, β)
+        push!(Ef, mean(filter(isfinite, fv)))
     end
 
     # --- the two estimates ---------------------------------------------------
@@ -287,8 +332,8 @@ function _reference_path_core(logp::Function, Y::AbstractMatrix{Float64};
     log_z_ais = logZ
     # trapezoid over the beta grid
     log_z_ti = 0.0
-    @inbounds for k in 1:n_beta
-        log_z_ti += 0.5 * (Ef[k] + Ef[k+1]) * (betas[k+1] - betas[k])
+    @inbounds for j in 1:(length(betas_used) - 1)
+        log_z_ti += 0.5 * (Ef[j] + Ef[j+1]) * (betas_used[j+1] - betas_used[j])
     end
 
     # ESS of the AIS weights — the honest precision diagnostic.
@@ -304,6 +349,7 @@ function _reference_path_core(logp::Function, Y::AbstractMatrix{Float64};
               se = se, ess = ess, n_resample = n_resample,
               support_frac = support_frac,
               n_particles = n_particles, n_effective = length(fin),
-              n_beta = n_beta, accept = n_try == 0 ? NaN : n_acc / n_try,
+              n_beta = length(betas_used) - 1,
+              accept = n_try == 0 ? NaN : n_acc / n_try,
               proposal = proposal)
 end
