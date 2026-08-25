@@ -4613,3 +4613,9 @@ include("test_locor.jl")
 include("test_locor_io.jl")
 include("test_lightcurve.jl")
 
+# Evidence estimators that do not temper from the prior, and the Rajpaul kernel
+# gradient check. All three carried assertions but were never included here.
+include("test_bridge_evidence.jl")
+include("test_reference_path_evidence.jl")
+include("test_phot_determinism.jl")
+include("verify_rajpaul_kernel_fd.jl")
