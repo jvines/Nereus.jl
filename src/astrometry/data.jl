@@ -289,16 +289,32 @@ function IADData(;
     length(psi)          == n || throw(ArgumentError("psi length mismatch"))
     all(>(0), abscissa_err) ||
         throw(ArgumentError("abscissa_err entries must be > 0"))
+    # Fail loudly on non-finite input. A NaN epoch (e.g. a NULL Gaia
+    # `obs_time_bary_corr`) otherwise propagates silently through pm_factor
+    # into a non-finite log-likelihood, which reads as a bad model rather
+    # than as bad data.
+    for (nm, v) in (("t", t), ("abscissa", abscissa), ("abscissa_err", abscissa_err),
+                    ("psi", psi))
+        all(isfinite, v) ||
+            throw(ArgumentError("IADData: $nm contains non-finite entries " *
+                                "($(count(!isfinite, v)) of $n)"))
+    end
 
     plx_fac_vec = parallax_factor === nothing ? zeros(Float64, n) :
                   Vector{Float64}(parallax_factor)
     length(plx_fac_vec) == n ||
         throw(ArgumentError("parallax_factor length mismatch"))
+    all(isfinite, plx_fac_vec) ||
+        throw(ArgumentError("IADData: parallax_factor contains non-finite entries " *
+                            "($(count(!isfinite, plx_fac_vec)) of $n)"))
 
     pm_fac_vec = pm_factor === nothing ? zeros(Float64, n) :
                  Vector{Float64}(pm_factor)
     length(pm_fac_vec) == n ||
         throw(ArgumentError("pm_factor length mismatch"))
+    all(isfinite, pm_fac_vec) ||
+        throw(ArgumentError("IADData: pm_factor contains non-finite entries " *
+                            "($(count(!isfinite, pm_fac_vec)) of $n)"))
 
     return IADData(
         Vector{Float64}(t),

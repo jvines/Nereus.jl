@@ -164,6 +164,7 @@ function _gep_build_source(cols, rows_idx)
 
     t_mjd = Float64[]; abscissa = Float64[]; abscissa_err = Float64[]
     psi = Float64[]; plx_fac = Float64[]; pm_fac = Float64[]
+    n_bad = 0                      # usable abscissa, but a non-finite epoch/angle/parallax factor
     for r in rows_idx
         times = cols[:obs_time_tcb][r]
         n = length(times)
@@ -177,15 +178,34 @@ function _gep_build_source(cols, rows_idx)
             _gep_isT(us[j]) || continue
             w = Float64(ws[j]); σ = Float64(σs[j])
             (isfinite(w) && isfinite(σ) && σ > 0) || continue
+            # EVERY quantity that reaches IADData must be finite, not just the
+            # abscissa and its error. `bc` (obs_time_bary_corr) and `pAL`
+            # (parallax_factor_al) are per-transit scalars and `θs[j]` is
+            # per-CCD; any of them NULL in the VOTable arrives here as NaN. A
+            # usable abscissa sitting alongside a NULL barycentric correction
+            # would previously push NaN into IADData.t AND pm_factor, and the
+            # constructor only checked abscissa_err > 0 — so the NaN would
+            # surface much later as a silently non-finite log-likelihood.
+            #
+            # In the DR4_RC3 pre-release this never fires: all 97 rows with a
+            # NaN barycentric correction also have NaN abscissae, so the check
+            # above already rejects them. That is a property of these 12
+            # illustrative sources, not a guarantee about the December release.
             tns = Float64(times[j]) + bc                       # barycentric-corrected ns since 2010.0
+            θ   = Float64(θs[j])
+            (isfinite(tns) && isfinite(θ) && isfinite(pAL)) || (n_bad += 1; continue)
             push!(t_mjd,        _GEP_MJD_ORIGIN + tns * _GEP_NS_TO_DAY)
             push!(pm_fac,       _GEP_TCB_ORIGIN_JYEAR + tns * _GEP_NS_TO_YR - _GEP_DR4_REF_JYEAR)
-            push!(psi,          deg2rad(Float64(θs[j])))
+            push!(psi,          deg2rad(θ))
             push!(plx_fac,      pAL)
             push!(abscissa,     w)
             push!(abscissa_err, σ)
         end
     end
+    n_bad > 0 && @warn "read_gaia_epoch_votable: dropped $n_bad CCD transit(s) with a " *
+                       "usable along-scan abscissa but a non-finite epoch, scan angle or " *
+                       "parallax factor (NULL obs_time_bary_corr / scan_pos_angle / " *
+                       "parallax_factor_al)."
     return IADData(; t = t_mjd, abscissa = abscissa, abscissa_err = abscissa_err,
                    psi = psi, parallax_factor = plx_fac, pm_factor = pm_fac)
 end
