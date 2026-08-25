@@ -50,6 +50,21 @@ using LinearAlgebra, Statistics, Random
                               n_steps = 2, proposal = :gaussian, seed = 3)
     @test abs(rq.log_z_ais - truth) < 0.10
 
+    # MISMATCHED reference. This is the case with diagnostic value: fitting q
+    # to draws from the target itself (as above) tests the reference, not the
+    # annealing, and would pass even if the path machinery were wrong. Each of
+    # these deforms q away from the target and the estimate must survive.
+    for (lbl, Yq) in (("shifted 1 sigma", Y .+ 1.0),
+                      ("scale x1.5",      1.5 .* Y),
+                      ("scale x2.5",      2.5 .* Y),
+                      ("scale x0.6",      0.6 .* Y))
+        rm = _reference_path_core(lp, Yq; n_particles = 1024, n_beta = 2000,
+                                  n_steps = 16, seed = 5)
+        @test isfinite(rm.log_z_ais)
+        @test abs(rm.log_z_ais - truth) < 0.25       # observed |err| <= 0.09
+        @test rm.n_beta > 1                          # the path did real work
+    end
+
     # Degenerate input returns cleanly rather than throwing.
     rbad = _reference_path_core(lp, Y[:, 1:3]; n_particles = 8, n_beta = 4)
     @test isnan(rbad.log_z)

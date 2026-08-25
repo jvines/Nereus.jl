@@ -415,9 +415,22 @@ variance; unlike Laplace it assumes nothing about Gaussianity — `q` only has t
   badly**, because the region where `q` has no mass never gets sampled; heavier
   tails guard against it on a skewed posterior.
 
-**Read `overlap` and `converged` before using `log_z`.** Overlap near 1.0 means
-the proposal covers the posterior; a low value means the estimate is resting on
-a handful of draws.
+**Read `overlap` and `converged` before using `log_z` — but do not mistake
+`overlap` for a certificate.** It counts the fraction of proposal draws that
+land in the target's *support*, which is not the same as the reference covering
+the posterior's *mass*. On an RV fit whose period posterior spanned its whole
+prior across 23 separate modes, `overlap` read **0.99** while a single Gaussian
+reference was covering almost none of it. A low value is decisive evidence of
+trouble; a high value is not evidence of health.
+
+⚠ **Mode coverage is the real precondition, and neither this estimator nor
+[reference-path](#reference-path-evidence--thermodynamic-integration-without-the-prior)
+can check it for you.** Both fit ONE Gaussian/Student-t to the posterior draws,
+so both are valid only when a single unimodal reference can cover the mass. On a
+multimodal posterior — an undetected planet, an unconstrained period, competing
+aliases — use nested sampling, which explores modes natively, or supply a
+mixture reference. Diagnose it directly: look at the marginal of the parameter
+you suspect (period, usually) and check it is not simply reproducing its prior.
 
 **Validation.** Error of **0.003 nats** against an analytic 22-dimensional
 target. On the real HD 18599 RVPM posterior, `log_z = 11466.13 ± 0.02` with
@@ -494,9 +507,38 @@ HD 18599 while all being 147 nats wrong.
   `E_q[f]` is then `-Inf` and the path integral is genuinely undefined. AIS is
   unaffected — an out-of-support particle simply carries `w = 0`.
 
-**Validation.** Error **0.0001-0.0015 nats** across seeds against the analytic
-22-D target (`test/test_reference_path_evidence.jl`), with AIS and TI agreeing
-to better than 0.05 and `ess` at 511/512.
+**Validation.**
+
+*Controlled target.* Error **0.0001-0.0015 nats** across seeds against the
+analytic 22-D target (`test/test_reference_path_evidence.jl`), AIS and TI
+agreeing to better than 0.05, `ess` 511/512. Critically, it also holds under a
+deliberately MISMATCHED reference -- mean shifted 1 sigma, scale x1.5, x2.5,
+x0.6 give -0.030 / -0.004 / +0.090 / -0.089 nats -- which is the case that
+matters, because fitting `q` to draws from the target itself tests the reference
+rather than the annealing.
+
+*Real signal-locked target.* 51 Peg b (1691 RVs, 5 instruments, 15 free
+parameters, P = 4.23080 +/- 0.00000 d, K = 56.16 +/- 0.24 m/s):
+
+| estimator | log Z |
+|---|---|
+| TI+ | -6073.24 |
+| SS+ | -6097.41 |
+| H+ | -6073.24 |
+| bridge (student) | -5896.91 +/- 0.03 |
+| bridge (gaussian) | -5897.04 +/- 0.03 |
+| reference-path (512 particles) | -5893.26 |
+| reference-path (2048 particles) | -5893.08 |
+
+**The tempered stack is ~176 nats low**, with TI+ and H+ agreeing to the second
+decimal while both being wrong -- the failure this page describes, measured on a
+real target rather than asserted. The two prior-free estimators agree to 3.8
+nats and reference-path is stable in particle count (ESS 1929/2048).
+
+That residual 3.8 nats between bridge and reference-path is unexplained: both
+report sigma ~ 0.03 and both are stable, so it is not sampling noise. Treat a
+Bayes factor resting on less than ~5 nats from either of them with suspicion
+until it is resolved.
 
 ## Practical guidance
 
