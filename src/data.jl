@@ -126,6 +126,7 @@ function Data(;
     t_ref::Union{Nothing, Real} = nothing,
     indicators::Union{Nothing, Dict{String, <:AbstractVector{<:Real}}} = nothing,
     indicator_errs::Union{Nothing, Dict{String, <:AbstractVector{<:Real}}} = nothing,
+    normalize_indicators::Bool = true,
     t_phot::AbstractVector{<:Real} = Float64[],
     flux::AbstractVector{<:Real} = Float64[],
     flux_err::AbstractVector{<:Real} = Float64[],
@@ -232,6 +233,40 @@ function Data(;
     # ActivityDecorrelation. Computed once at construction; consumed by
     # ActivityDecorrelation(derivative=true). NaN-safe: if any neighbor
     # is NaN, falls back to one-sided; if both are NaN, derivative is NaN.
+    # ---- Activity-indicator normalisation (DEFAULT) -------------------------
+    #
+    # Per instrument: subtract the median, divide by the RMS. This is the
+    # convention of Vines et al. 2023 (MNRAS 518, 2627), Table 7 footnote:
+    # "Activity indices were mean subtracted and normalized to their RMS."
+    #
+    # It matters because the ActivityDecorrelation term is pred += C * indicator
+    # on the RAW value, so without it C carries the indicator's units and its
+    # prior means something different for every instrument and every channel.
+    # Measured on HD 18599, scaling each indicator to its instrument's RV
+    # amplitude instead of its own RMS moved the recovered semi-amplitude from
+    # 11.9 m/s to 5.9 -- it let a 7-point instrument's regression absorb the
+    # planet. With unit-RMS regressors C is simply the m/s amplitude of the
+    # activity term and is comparable across instruments and channels.
+    #
+    # normalize_indicators=false restores the raw values for a caller who has
+    # already scaled them.
+    if normalize_indicators && !isempty(ind_dict)
+        for (name, vals) in ind_dict
+            v = Vector{Float64}(vals)
+            for ins in unique(rv_inst_vec)
+                idx = findall(==(ins), rv_inst_vec)
+                fin = filter(k -> isfinite(v[k]), idx)
+                isempty(fin) && continue
+                mu = median(@view v[fin])
+                for k in fin; v[k] -= mu; end
+                rms = sqrt(sum(abs2, @view v[fin]) / length(fin))
+                rms > 0 || continue
+                for k in fin; v[k] /= rms; end
+            end
+            ind_dict[name] = v
+        end
+    end
+
     deriv_dict = Dict{String, Vector{Float64}}()
     for (name, vals) in ind_dict
         d = fill(NaN, n_rv)

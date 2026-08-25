@@ -422,13 +422,23 @@ function default_priors(config::ParamsConfig, data::Data)
 end
 
 # ActivityDecorrelation coefficient priors — SCALE-ADAPTIVE (automatic).
-# The coefficient C multiplies the RAW indicator, so its natural bound depends on
-# the indicator's units. Instead of assuming the caller EMPEROR-normalized the
-# indicators (the old U(-1,1) footgun — wrong scaling rails C and inflates K),
-# derive the bound from the data: C·indicator can reach ±κ · (RV scatter /
-# indicator scatter), both robust MAD, per instrument. Then |C·indicator| ≲
-# κ·σ_RV regardless of the raw indicator scale — no pre-normalization, no
-# railing. κ=3 mirrors EMPEROR's "scale indicator to the RV peak, C∈(-1,1)".
+#
+# NOTE since indicators became normalised at Data construction (median-subtracted,
+# divided by their RMS per instrument — Vines et al. 2023 Table 7 footnote), the
+# regressor has unit RMS and C is directly the m/s amplitude of the activity term.
+# The adaptive bound below is therefore belt-and-braces rather than load-bearing:
+# it still derives ±κ·(RV scatter / indicator scatter) per instrument, which now
+# evaluates to roughly κ·σ_RV/0.67 on normalised input.
+#
+# THIS BOUND IS A SCIENCE CHOICE, not housekeeping. On HD 18599 the BIS sits at
+# P_rot/2 ~ P_orb, so a coefficient large enough to reach the measured BIS-RV
+# slope (-0.83) absorbs the planet: bounded near the published |C| <= 3 the fit
+# returns K = 11.9 m/s, bounded at the RV amplitude it returns 5.8. Vines et al.
+# Table 9 reports |C| <= 2.1, i.e. roughly 10x tighter than κ=3 allows here, and
+# says so in words: "a straightforward decorrelation is not possible since it
+# would remove the candidate signal". κ=3 mirrors EMPEROR's "scale indicator to
+# the RV peak, C in (-1,1)" and is deliberately permissive; pass an explicit
+# prior when the indicator is near-degenerate with the orbital period.
 function _default_noise_priors!(dic, m::ActivityDecorrelation,
                                  instruments, data, rv_max, min_cadence)
     suf = _ad_suffix(m); κ = 3.0

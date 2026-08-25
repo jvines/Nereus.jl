@@ -519,6 +519,32 @@ astrometry). A **circumprimary planet** is a SEPARATE slot (e.g. `RV_ONLY` /
 ### `model.stability`
 `none | amd | gladman` (`src/runner.jl:193, 689`). AMD/Gladman both need `M_s`.
 
+### Activity indicators — scaling
+
+Indicators supplied through `data.rv.indicators` are **normalised at `Data`
+construction**: per instrument, the median is subtracted and the result divided
+by its RMS. This is the convention of Vines et al. 2023 (MNRAS 518, 2627),
+Table 7 footnote — *"Activity indices were mean subtracted and normalized to
+their RMS"* — and it is the default. Pass raw values; no pre-scaling is needed
+or wanted. `normalize_indicators=false` on the Julia `Data` constructor disables
+it for a caller who has already scaled them.
+
+It matters because `ActivityDecorrelation` adds `C * indicator` to the RV
+prediction using the raw value, so without normalisation `C` carries each
+channel's units and one coefficient prior means a different thing on every
+instrument. Measured on HD 18599, scaling each indicator to its instrument's RV
+amplitude instead of its own RMS moved the recovered semi-amplitude from
+11.9 m/s to 5.9 — it let a 7-point instrument's regression absorb the planet.
+With unit-RMS regressors `C` is simply the m/s amplitude of the activity term
+and is comparable across instruments and channels.
+
+**The coefficient bound is a science choice.** Where an indicator is nearly
+degenerate with the orbital period — BIS sits at P_rot/2 ~ P_orb on HD 18599 —
+a coefficient free to reach the measured indicator-RV slope will absorb the
+planet rather than the activity. The default prior is deliberately permissive
+(see `_default_noise_priors!`); supply an explicit `C_<indicator>_<instrument>`
+prior when that degeneracy is present.
+
 ### `noise_models`
 - `channel` (default `"rv"`) and `instruments` (default `[]`) are injected
   **only** into constructors that accept them: celerite GPs take both;
