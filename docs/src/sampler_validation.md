@@ -442,7 +442,8 @@ GLS used to default to a baseline-sized frequency grid with a 1000-resample
 bootstrap FAP — intractable on real long-baseline RV (a 19-yr ε Eri set
 drives ~3.5×10⁵ frequencies × 1000 bootstraps ≈ hours, blowing
 `run_job`'s wall-clock). It now **caps the grid at ≤ 20 000 frequencies**
-and uses the **analytic** Cumming-2004 FAP
+and uses the **analytic** FAP (LombScargle.jl's `fap`/`fapinv`, i.e.
+`fap_method = :analytic`) rather than the bootstrap
 ([`src/diagnostics/ppc.jl`](https://github.com/jvines/Nereus/blob/main/Nereus.jl/src/diagnostics/ppc.jl):
 
 ```julia

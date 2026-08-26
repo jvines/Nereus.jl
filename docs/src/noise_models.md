@@ -9,10 +9,16 @@ compose under well-defined rules:
 |---|---|---|---|
 | 1 | `MeanModifier` | Additive correction to the mean RV (activity decorrelation, activity jitter) | Composes freely with Stage 2 and 3 |
 | 2 | `SequentialNoise` | Sequential correlation in the residuals (AR, MA, ARMA) | Mutually exclusive with a global Stage 3 GP on the same channel |
-| 3 | `CovarianceNoise` | Full covariance structure (Celerite GPs, `ActivityGP`) | One global per channel **or** multiple per-instrument with disjoint instrument sets |
+| 3 | `CovarianceNoise` | Full covariance structure (Celerite GPs, `MaternGP`, `ActivityGP`) | One global per channel **or** multiple per-instrument with disjoint instrument sets |
+| 3+ | `AdditiveCovariance` | Low-rank blocks **added** to whatever covariance is already there (`NightlyOffset`, `HarmonicBlock`) | Factored through the base's own solve+logdet via Woodbury, so it never trips the "at most one Stage 3" rule |
 
-`IndicatorFloor` is a special fourth kind (a bare `NoiseModel`, not in any
-of the three stages) — it scores the **activity-indicator data block** so a
+`StudentT` is different again: it changes the **likelihood family** rather
+than the covariance, replacing the Gaussian on each residual with a heavy-tailed
+Student-t. It is orthogonal to the stages and hard-incompatible with all of them
+(see below).
+
+`IndicatorFloor` is a special extra kind (a bare `NoiseModel`, not in any
+of the stages) — it scores the **activity-indicator data block** so a
 trans-dim selection that includes `ActivityGP` is well-posed (see below).
 
 There are two ways to configure noise models.
@@ -42,11 +48,12 @@ params = Params(;
 ]
 ```
 
-`run_job` recognises these `kind`s (`_NOISE_TYPES` in `src/runner.jl:779`):
+`run_job` recognises thirteen `kind`s (`_NOISE_TYPES`, `src/runner.jl:916`):
 `CeleriteRotation`, `CeleriteSHO`, `CeleriteRotationFM17`,
 `ActivityDecorrelation`, `ARModel`, `MAModel`, `ActivityJitter`,
-`ActivityGP`. The top-level `channel`/`instruments` are injected only into
-constructors that accept them (`src/runner.jl:826-835`): the Celerite GPs
+`ActivityGP`, `ErrorScale`, `NightlyOffset`, `HarmonicBlock`, `StudentT`,
+`MaternGP`. The top-level `channel`/`instruments` are injected only into
+constructors that accept them (`src/runner.jl:980-983`): the Celerite GPs
 take both, `ARModel`/`MAModel` take `channel` only, `ActivityGP` takes
 `channels` (note the plural — supply it in `kwargs`), and the
 `MeanModifier`s take neither. `IndicatorFloor` is **not** in `_NOISE_TYPES`
@@ -600,6 +607,129 @@ The per-instrument form is useful when activity manifests differently
 across spectrographs (different wavelength coverage → different
 sensitivity to facular vs spot regions). Uncovered instruments fall
 back to white noise.
+
+## The parametric middle ground
+
+Between "white noise with a jitter term" and "a full GP" sit models that are
+cheap, interpretable, and often the right answer. All five are trans-dim
+toggleable.
+
+### `ErrorScale` — the errors are miscalibrated
+
+```julia
+ErrorScale(; instruments = String[])       # empty = all RV instruments
+```
+
+`σ_i² → f_ins² · σ_i²`, one parameter `errscale_<ins>` per instrument.
+
+This is a **distinct hypothesis** from additive jitter, not a variant of it:
+"the pipeline's quoted errors are miscalibrated" (a multiplicative rescale of
+the *formal* error) versus "there is an extra, constant noise source" (an
+additive `σ_jit²`). Motivated by archival formal errors found to be off by up
+to two orders of magnitude.
+
+The two are partially degenerate on homoscedastic errors but **separable on
+heteroscedastic ones**: `f` scales each point proportionally to its quoted
+error, jitter adds a flat floor.
+
+White-class treatment. When active for an instrument it **replaces** that
+instrument's additive jitter (`var = f²σ_formal²`, no `+σ_jit²`) — the
+alternative, not an addition. Put it in a `noise_exclusion_groups` entry with
+any other white treatment so the trans-dim menu carries at most one. Composes
+with a base GP: `f²σ_i²` feeds the GP's diagonal too. Stage 1.
+
+### `NightlyOffset` — grouped calibration offsets
+
+```julia
+NightlyOffset(; channel = :rv, instruments = String[], gap = 0.5)
+```
+
+Every point in one observing night of one instrument shares a draw
+`δ_night ~ N(0, σ_night²)`, marginalised analytically into a per-night
+**rank-one block** on the covariance. One parameter `night_sigma_<ins>` per
+instrument. `gap` (days) is what separates one night from the next.
+
+The right model for a nightly-varying wavelength-calibration or
+sky-subtraction offset — a real effect that a white jitter term describes
+badly, because it is shared *within* a night and independent *between* them.
+
+### `HarmonicBlock` — coherent activity at the rotation period
+
+```julia
+HarmonicBlock(; channel = :rv, instruments = String[], nharm = 3)
+```
+
+A phase-**coherent** activity signal at `P_rot` plus `nharm−1` harmonics
+(`P_rot, P_rot/2, …, P_rot/nharm`), with the cos/sin amplitudes marginalised
+analytically rather than sampled. Fits a fitted `harm_period`.
+
+**With an external frequency comb** the block switches to fixed frequencies (in
+cycles/day) and `harm_period` is neither used nor allocated. That case is for a
+host whose variability is a known set of coherent oscillation modes — a γ Dor
+or δ Sct pulsator — whose frequencies were measured elsewhere over a long
+baseline. Those are determined far better (~1e-5 /d over years of photometry)
+than an RV or transit fit could ever constrain, so they are fixed while the
+**amplitudes and phases stay marginalised**, which is the point.
+
+Pre-subtracting a fitted oscillation model instead would throw away the
+amplitude uncertainty; marginalising keeps it in the error budget.
+
+### `MaternGP` — short-memory correlated noise
+
+```julia
+MaternGP(; channel = :rv, instruments = String[])
+```
+
+Matérn-3/2 on the RV residuals — the short-memory class, distinct from the
+oscillatory `CeleriteSHO` and the rotation kernels. Parameters `matern_sigma`
+(amplitude, `k(0) = σ²`) and `matern_rho` (length scale, days).
+
+Uses the **exact** semiseparable (S+LEAF) Matérn-3/2 — rank-2, midpoint-centred
+generators — not the cusped celerite2 `Matern32Term` approximation, scored
+through the O(N) solver. Composes with `NightlyOffset` / `HarmonicBlock` via a
+semiseparable-base Woodbury. Stage 3.
+
+> On sparse RV a free-length-scale Matérn is a capable interpolator and can
+> absorb a real signal. `default_noise_menu` leaves it off by default
+> (`include_matern = true` to add it) for that reason.
+
+### `StudentT` — heavy tails instead of a Gaussian
+
+```julia
+StudentT(; channel = :rv)
+```
+
+Each residual scored as `r_i ~ t_ν(0, σ_i²)` instead of Gaussian — the
+outlier-class representative. One parameter `studentt_nu`; `ν → ∞` recovers the
+Gaussian, small `ν` fattens the tails to absorb outliers **without a hard clip**.
+
+⚠ **White-branch only, enforced hard.** A Student-t likelihood is not a
+covariance: it destroys the Gaussian (semiseparable) marginalisation that every
+GP / `AdditiveCovariance` path relies on, and the scale-mixture augmentation
+that would restore it adds N latent scales — rejected for a trans-dim sampler.
+So `StudentT` must **never** combine with a `CovarianceNoise`,
+`AdditiveCovariance` or `SequentialNoise`. Construction rejects it outside
+trans-dim; inside trans-dim any such state scores `−Inf` at evaluation, so put
+them in a `noise_exclusion_groups` entry. It is the third mutually-exclusive
+white treatment alongside jitter and `ErrorScale`.
+
+### Building the menu
+
+`default_noise_menu(data; ...)` assembles a trans-dim-ready set with the
+exclusion groups already wired:
+
+```julia
+menu = default_noise_menu(data)
+menu.noise_models          # -> Vector{NoiseModel}
+```
+
+Defaults reflect what actually earns its place rather than what exists:
+`include_matern`, `include_studentt`, `include_harmonic`, `include_nightly`
+and `include_ad_ffprime` are all **off**, `include_activity_gp` is **on**. The
+off-by-default ones are documented at the call site with why — Student-t never
+fires and brings evaluation-incompatibility handling, the harmonic block is
+redundant with the rotation GP, FF′ is redundant with linear AD and costs
+twelve dimensions.
 
 ## Composition rules
 

@@ -118,6 +118,32 @@ central differences with one-sided endpoints), so
 `ActivityDecorrelation(indicators = ["bisector_span"], derivative = true)`
 works out of the box. See [Noise models](noise_models.md).
 
+### Indicators are normalised by default
+
+```julia
+Data(; ..., normalize_indicators = true)     # the default
+```
+
+Each indicator is **median-subtracted and divided by its RMS, per
+instrument**, before the derivatives are built. This is the
+[Vines et al. 2023](https://ui.adsabs.harvard.edu/abs/2023MNRAS.518.1935V/abstract)
+Table 7 convention, and it is the default because it is what makes an
+`ActivityDecorrelation` coefficient mean anything.
+
+Two consequences worth knowing:
+
+- **A decorrelation coefficient `C_<ind>_<inst>` is in m/s per RMS of the
+  indicator**, not per raw unit. That is what makes coefficients comparable
+  across indicators measured in different units, and across instruments whose
+  pipelines scale an indicator differently.
+- **The coefficient prior means the same thing for every indicator.** Without
+  normalisation a prior wide enough for a BIS in m/s is absurd for a
+  dimensionless S-index, and no single default can serve both.
+
+Set `normalize_indicators = false` to keep raw units — in which case you must
+set the coefficient priors yourself, per indicator, in the indicator's own
+units.
+
 ### The indicator-error convention
 
 `ActivityDecorrelation` only needs the indicator *values*. The

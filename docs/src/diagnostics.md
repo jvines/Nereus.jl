@@ -113,6 +113,62 @@ the inference output for paper appendices.
 Lower-level: returns `Dict` of per-config statistics for programmatic
 use (e.g., feeding into a paper-figure script).
 
+### The derived-quantity helpers
+
+`summarize_derived` is built from standalone functions you can call directly on
+scalars — useful for a quick number without a chain:
+
+| function | gives |
+|---|---|
+| `planet_mass(M_s, K, P, e, inc_deg)` | companion mass |
+| `planet_radius`, `planet_radius_earth`, `radius_from_depth` | radius from the radius ratio or transit depth |
+| `planet_density`, `planet_density_earth` | bulk density |
+| `semimajor_axis_au(P, M_s)`, `semimajor_axis_from_rho` | orbital separation |
+| `equilibrium_temperature(T_eff, a_Rs; Ab)` | T_eq |
+| `incident_flux`, `incident_flux_earth` | insolation |
+| `esm` | emission spectroscopy metric — JWST target ranking |
+| `chen_kipping_mass` | mass from radius via the Chen & Kipping relation |
+| `mass_function`, `msec_from_K` | the RV mass function and its inversion |
+| `stellar_mass_from_density` | host mass from `rho_s` |
+| `inclination_deg`, `sky_separation`, `a_from_P` | geometry conversions |
+| `kepler_solve`, `tp_to_tc`, `ew_to_sesinw`, `kipping_q_to_u` | element and parametrisation conversions |
+
+`compute_derived` / `DerivedParams` are the chain-level versions.
+
+> `rho_s` is in **solar** units, not g/cm³.
+
+## Candidate vetting — the promotion gate
+
+```julia
+v = vet_candidate(t, rv, rv_err, P, K, e;
+                  residual   = resid,          # OTHER planets + gamma/trend removed
+                  indicators = Dict("bis" => bis, "halpha" => ha),
+                  P_rot      = 12.3,
+                  occupancy  = 0.94, dlnZ = 8.1)
+
+v.decision      # :promote | :reject | :ambiguous
+v.reasons       # which vetoes failed, in words
+```
+
+`CandidateVerdict` reports a decision plus the individual vetoes —
+`detection`, `activity_indicator`, `rotation`, `alias`, `coherence`,
+`physicality` — so you can see *which* test killed a candidate rather than
+just that something did.
+
+Two things to get right:
+
+- **`residual` should have the other planets and the offsets/trend removed.**
+  It defaults to the raw `rv`, which is only correct for a single-planet
+  system; on a multi-planet fit the coherence test then runs on a series still
+  containing the other signals.
+- **`occ_min` and `dlnZ_min` are thresholds you calibrate to a target
+  false-positive rate**, not universal constants. The defaults are a starting
+  point.
+
+`coherence_discriminant` / `CoherenceResult` are the underlying test — a
+genuine Keplerian keeps its phase across the baseline; an activity signal does
+not.
+
 ## Posterior predictive checks
 
 ### `posterior_predictive_check(chains, params, data; n_draws=500, rng, pgram=true, acf=true, pgram_period_min=1.0, pgram_period_max=nothing)`

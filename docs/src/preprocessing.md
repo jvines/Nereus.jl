@@ -670,7 +670,8 @@ set = find_rv_planets(t, rv, rv_err;
 ```
 
 Backends:
-- `:gls`   — `LombScargle.jl` with Cumming 2004 analytic FAPs
+- `:gls`   — `LombScargle.jl`; FAP thresholds from `fapinv`, bootstrap by
+  default (`fap_method = :analytic` opts into the analytic form)
 - `:bgls`  — Bayesian GLS ([Mortier+ 2015](https://ui.adsabs.harvard.edu/abs/2015A&A...573A.101M/abstract))
 - `:sbgls` — Stacked BGLS, 2-D map vs growing N-obs (Mortier &
   Collier Cameron 2017)

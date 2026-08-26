@@ -108,7 +108,7 @@ out of the box (no special sampler handling needed). The dedicated
 RM diagnostic plot is `rm_anomaly` (`plot_rm`).
 
 This page does not re-document model/plot config — see
-[Job config](JOB_CONFIG.md) — but note these sampler-adjacent additions:
+[Job config](../JOB_CONFIG.md) — but note these sampler-adjacent additions:
 
 - New plots: `rm_anomaly`, `transit_overlay` (`plot_transit_overlay_fit`,
   per-transit QC gallery), `rv_components` (`plot_rv_components`, RV model

@@ -1,19 +1,35 @@
 # Nereus
 
-**Planet Recovery Omni-Tool for Exoplanet Unified Sampling.**
+tra**N**s-dimensional **E**vidence and **R**ecovery for **E**xoplanets by m**U**lti-observable **S**ampling.
 
 Nereus is a Julia-native Bayesian inference toolkit for exoplanet
-characterisation and detection from radial velocities, transit
-photometry, and astrometry. Built for speed, flexibility, and
-trans-dimensional model selection.
+detection and characterisation. Radial velocities, transit photometry,
+absolute and relative astrometry, Rossiter–McLaughlin, Doppler
+tomography, transit timing and double-lined binaries all enter **one
+likelihood**, so any combination of them can constrain one system
+jointly.
 
-Unlike traditional codes where you choose the number of planets and
-the noise model up front, Nereus explores those choices for you.
-Trans-dimensional samplers (reversible-jump MCMC, MoMS variable
-selection, parallel tempering) jump between models of different
-dimensionality during the run, so the posterior naturally tells you
-how many planets the data supports and which noise prescription best
-fits the residual structure.
+**Most orbit codes fit a model you specify. Nereus samples over the
+model.** You do not choose the number of planets, the noise
+prescription, or which observable constrains which companion up front —
+trans-dimensional samplers move between models of different
+dimensionality during the run, and the posterior tells you:
+
+- **how many companions** the data supports — the classic
+  trans-dimensional problem;
+- **which noise description** wins, from a menu of correlated-noise
+  models competing under role-based exclusion groups, so two
+  descriptions of the same stellar signal cannot both be active;
+- **which observable constrains which companion**, per planet. A
+  companion the RVs establish beyond doubt can be astrometrically
+  undetected; forcing the coupling on makes every fit report an
+  inclination — and therefore a "dynamical mass" — whether or not the
+  astrometry constrained one.
+
+Occupancy over those configurations is read directly as P(M | D). Several
+trans-dimensional engines are available (parallel tempering, MoMS
+variable selection, reversible-jump MCMC); tempered trans-dim PT is the
+workhorse.
 
 This is version `0.2.0`.
 
@@ -143,6 +159,18 @@ This is version `0.2.0`.
   (`summarize_fitted`, `summarize_derived`), and NetCDF chain I/O
   (`save_chains` / `load_chains`) readable from Julia and Python. →
   [Diagnostics & I/O](diagnostics.md)
+- **Obliquity three ways** — Rossiter–McLaughlin (ARoME, Reloaded, and
+  the legacy flux-weighted kernel), Doppler tomography of the planet
+  shadow in the line profile, and the gravity-darkened transit model,
+  which is the only one of the three that reaches the true 3-D
+  obliquity from a single dataset. Forward simulators for both RM and
+  tomography nights share the fitted model, so a feasibility estimate
+  cannot drift from what the fit would do. →
+  [Obliquity](obliquity.md)
+- **Closed-form astrometric model selection** — the 5p/7p/9p solution
+  ladder with exact evidences and proper priors at ~22 µs per rung, for
+  Hipparcos IAD and Gaia DR4 epoch data alike. →
+  [Solution ladder](solution_ladder.md)
 - **One JSON/dict entry point** — `run_job` is the single
   config-driven dispatcher used from Docker, Python (juliacall), and
   the CLI. It returns a JSON contract (science numbers + figure
@@ -150,10 +178,23 @@ This is version `0.2.0`.
 
 ## Where to start
 
-If you've never used Nereus, read [Quick start](quickstart.md) first
-— it walks through a complete RV characterisation and a trans-dim
-planet search end-to-end. Then dip into whichever subject is relevant
-to your problem.
+There are three ways in, and they are three interfaces to one engine
+rather than three engines:
+
+1. **[The `fit_*` API](api.md)** — one function per technique
+   (`fit_rv`, `fit_transit`, `fit_astrometry`, `fit_joint`, `fit_rm`,
+   `fit_ttv`, `fit_binary`, `fit_tomography`). Data in its natural
+   shape, sensible defaults, one result triple back. **Start here.**
+2. **[`build_target` + a sampler](quickstart.md)** — build the model
+   yourself and call the sampler directly, when you want control over
+   the parametrisation and priors.
+3. **[`run_job`](examples.md)** — a single JSON/Dict config, for
+   pipelines and non-Julia callers.
+
+If you've never used Nereus, read [Quick start](quickstart.md) after
+the API page — it walks through a complete RV characterisation and a
+trans-dim planet search end-to-end. Then dip into whichever subject is
+relevant to your problem.
 
 If you want one place to look up "what does kwarg X do on
 `sample_pt_warm`?", every sampler has a kwarg reference in

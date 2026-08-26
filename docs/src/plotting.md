@@ -12,7 +12,7 @@ PDF companion. Nereus is on version `0.2.0`.
 
 In a production pipeline you almost never call the plotters directly —
 you list them in `cfg.output.plots` and let
-[`Nereus.run_job`](runner.md) dispatch them. The plot surface is the
+[`Nereus.run_job`](../JOB_CONFIG.md) dispatch them. The plot surface is the
 set of names in `_KNOWN_PLOTS` (`src/runner.jl`); anything else is a
 schema error. Every plot is **data-aware**: each one silently no-ops
 (returns `nothing`, nothing written) if the data/fit it needs is
@@ -119,7 +119,7 @@ The selection logic (`_dispatch_plot(..., "auto", ...)`):
 
 PPC (`ppc.png`/`ppc.json`), detection limits
 (`detection_limits.png`/`.nc`), and LOO/WAIC are **separate**
-`output` toggles, not entries in `plots` — see [`run_job`](runner.md).
+`output` toggles, not entries in `plots` — see [`run_job`](../JOB_CONFIG.md).
 
 ---
 
@@ -606,7 +606,7 @@ plot_pacf_sectors(rot; filename = "figs/pacf_sectors.png", save_pdf = true)
 `plot_detection_limits(res; filename, save_pdf)` renders the Bayesian
 `K_lim(P)` upper-limit curve from `detection_limits(...)`. In `run_job`
 this is wired through the `output.detection_limits*` toggles (default
-ON for PT samplers), not the `plots` list — see [`run_job`](runner.md).
+ON for PT samplers), not the `plots` list — see [`run_job`](../JOB_CONFIG.md).
 
 ---
 
