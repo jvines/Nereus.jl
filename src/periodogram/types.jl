@@ -26,7 +26,8 @@ end
     GLSPgram
 
 Generalized Lomb-Scargle periodogram (Zechmeister & Kürster 2009).
-FAP thresholds via the Cumming 2004 analytic estimate.
+FAP thresholds from LombScargle.jl `fapinv` — bootstrap by default,
+analytic on request (see `gls_periodogram`'s `fap_method`).
 """
 struct GLSPgram <: Periodogram
     frequencies::Vector{Float64}

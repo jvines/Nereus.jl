@@ -404,20 +404,8 @@ function _theta_from_chain_summary(chains_flat::Dict{Symbol, Vector{Float64}},
     return theta
 end
 
-function _mode_int(v::AbstractVector{<:Real})
-    counts = Dict{Int, Int}()
-    @inbounds for x in v
-        k = Int(round(x))
-        counts[k] = get(counts, k, 0) + 1
-    end
-    best_k, best_c = 0, -1
-    for (k, c) in counts
-        if c > best_c
-            best_k, best_c = k, c
-        end
-    end
-    return best_k
-end
+# `_mode_int` lives in reporting.jl (included first); this file used to carry
+# a byte-identical copy specialised to AbstractVector{<:Real}.
 
 function _theta_from_row(chains_flat::Dict{Symbol, Vector{Float64}},
                           idx::Int, params::Params)

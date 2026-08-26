@@ -1,7 +1,12 @@
 # Chain I/O: save/load posterior chains + metadata as NetCDF (.nc).
 # Compatible with Python arviz.from_netcdf() for cross-language plotting.
 
-using NCDatasets
+# Narrow import: a bare `using NCDatasets` also pulls in its `bounds`, which
+# collides with the `bounds` accessor/kwarg used elsewhere in Nereus. `import`
+# keeps the module binding available for qualified `NCDatasets.Dataset(...)`
+# calls; the `using` line brings in only the helpers used unqualified.
+import NCDatasets
+using NCDatasets: defDim, defVar, dimnames
 using MCMCChains
 
 """

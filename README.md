@@ -1,6 +1,6 @@
 # Nereus.jl
 
-**N**ested-**E**vidence **R**ecovery of **E**xoplanets by **U**nified **S**ampling.
+tra**N**s-dimensional **E**vidence and **R**ecovery for **E**xoplanets by m**U**lti-observable **S**ampling.
 
 Radial velocities, transits, absolute and relative astrometry,
 Rossiter–McLaughlin, Doppler tomography and transit timing under a single

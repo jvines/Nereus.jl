@@ -159,8 +159,7 @@ function astrom_logZ(iad::IADData, order::Int;
 
     S⁻¹ = 1 ./ (prior_sigma .^ 2)
     M   = A + Diagonal(S⁻¹)
-    ch  = cholesky(Symmetric(M); check = false)
-    issuccess(ch) || return -Inf      # degenerate design (missing plx/pm factors)
+    ch  = cholesky(Symmetric(M))  # PD by construction (XᵀWX ⪰ 0 plus S⁻¹ ≻ 0)
 
     quad     = dot(v, ch \ v)
     log_detW = -2 * sum(log, iad.abscissa_err)
@@ -243,11 +242,12 @@ function astrom_solution(iad::IADData, order::Int;
     Xw = X .* w
     M  = X' * Xw + Diagonal(1 ./ (prior_sigma .^ 2))
     v  = Xw' * y
-    ch = cholesky(Symmetric(M); check = false)
-    issuccess(ch) || throw(ArgumentError(
-        "design is rank-deficient at order $order — parallax_factor and " *
-        "pm_factor must be supplied, not left at their zero defaults"))
-
+    # M = XᵀWX + S⁻¹ is positive definite for any finite, positive prior_sigma
+    # even when X is rank-deficient, so this factorisation cannot fail and
+    # needs no guard. A rank-deficient design instead shows up in the RESULT:
+    # the unconstrained coefficients come back at exactly 0 with sigma at
+    # exactly the prior width (and ladder_probabilities returns ~[1/3,1/3,1/3]).
+    ch  = cholesky(Symmetric(M))
     q   = ch \ v
     cov = inv(ch)
     r   = y .- X * q

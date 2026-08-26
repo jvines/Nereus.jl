@@ -314,9 +314,11 @@ end
 end
 
 # Mass-function constant in Nereus units: K^3 [m³/s³] · P [days] ·
-# (1−e²)^(3/2) → f_M [M_sun]. Defined in astrometry/projection.jl;
-# we re-import the value here for use in planet_K under :M_sec_driven.
-const _F_M_FACTOR = 1.0367e-16
+# (1−e²)^(3/2) → f_M [M_sun]. Defined ONCE, in astrometry/projection.jl,
+# as _SEC_PER_DAY / (2π · G · M_sun). Do not re-declare it here: a second
+# `const` in this file is a redefinition whose winner depends on include
+# order, and the literal that used to sit here (1.0367e-16) disagreed with
+# the computed value by 0.083%.
 
 """
     planet_K_A(theta, k) -> value

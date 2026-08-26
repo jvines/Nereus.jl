@@ -11,3 +11,11 @@
 
 # Run outputs dropped in test/ — results, profiles, markers. Not tests.
 test/*.txt
+
+# eventual-paper findings; deliberately not committed
+paper/
+
+# Local validation studies on real data — not tests, not tracked.
+# These are runs against real light curves / RV sets that live outside the
+# repo; they carry no assertions and are not part of the test suite.
+studies/

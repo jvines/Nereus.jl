@@ -11,7 +11,12 @@ using DelimitedFiles
 using Printf
 using Statistics: median
 using FITSIO
-using NCDatasets
+# Narrow import: a bare `using NCDatasets` also pulls in its `bounds`, which
+# collides with the `bounds` accessor/kwarg used elsewhere in Nereus. `import`
+# keeps the module binding available for qualified `NCDatasets.Dataset(...)`
+# calls; the `using` line brings in only the helpers used unqualified.
+import NCDatasets
+using NCDatasets: defDim, defVar, dimnames
 
 """
     load_tess_lc(csv_path; trim_window=nothing) -> NamedTuple
@@ -114,11 +119,22 @@ end
 # =====================================================================
 
 """
-    save_lightcurve(path, t, flux, flux_err; metadata=Dict(), format=:auto,
-                    time_col=:bjd_tdb, flux_col=:flux, flux_err_col=:flux_err,
-                    overwrite=true)
+    export_lightcurve(path, t, flux, flux_err; metadata=Dict(), format=:auto,
+                      time_col=:bjd_tdb, flux_col=:flux, flux_err_col=:flux_err,
+                      overwrite=true)
 
-Write a (cleaned) light curve to disk in CSV, NetCDF, or FITS format.
+Write a (cleaned) light curve to disk in CSV, NetCDF, or FITS format, for
+handing to another tool.
+
+Distinct from [`save_lightcurve`](@ref), which writes Nereus's own NetCDF
+product (detrended flux, trend, mask, sector ids, segments, attributes) for
+round-tripping back into `load_lightcurve`. This one is an INTERCHANGE writer:
+three formats, arbitrary `metadata`, no Nereus-specific arrays.
+
+(The two used to share the name `save_lightcurve`. Because `String` is more
+specific than `AbstractString`, the NetCDF method won every call made with a
+normal string path and this one was unreachable — passing `metadata=` raised a
+MethodError.)
 Format is auto-detected from the file extension when `format=:auto`:
 `.csv` → `:csv`, `.nc` → `:nc`, `.fits` → `:fits`. Pass an explicit
 `format` symbol to override.
@@ -138,7 +154,7 @@ Format is auto-detected from the file extension when `format=:auto`:
 `metadata` accepts string, numeric, or vector values. NetCDF and FITS
 formats preserve types; CSV serialises everything to text.
 """
-function save_lightcurve(path::AbstractString,
+function export_lightcurve(path::AbstractString,
                           t::AbstractVector{<:Real},
                           flux::AbstractVector{<:Real},
                           flux_err::AbstractVector{<:Real};

@@ -13,10 +13,16 @@ using Random
 
 _vec(x) = Float64.(collect(x))
 
+# Accept either key form. `_pget` already reads Symbol- and String-keyed
+# payloads, and the JSON transport delivers Strings — so checking only Symbols
+# made every op reject the very payload shape it was written for.
+_haskey2(p::AbstractDict, k) = haskey(p, k) || haskey(p, String(k))
+_haskey2(p, k) = haskey(p, k)
+
 function _need(p, keys...)
     for k in keys
-        haskey(p, k) || error("missing required argument $(k). Got: " *
-                              join(sort!(String.(collect(Base.keys(p)))), ", "))
+        _haskey2(p, k) || error("missing required argument $(k). Got: " *
+                                join(sort!(String.(collect(Base.keys(p)))), ", "))
     end
 end
 
@@ -47,34 +53,34 @@ _nt(x) = x
 
 function act_detect_transits(p)
     _need(p, :t, :flux, :flux_err)
-    t = _vec(p.t)
+    t = _vec(_pget(p, :t))
     kw = _kw(p, ["t", "flux", "flux_err"])
     dk = Dict{Symbol,Any}(pairs(_nt(get(kw, :detrend_kwargs, Dict()))))
     if get(kw, :detrend, :savgol) === :savgol && !haskey(dk, :window_length)
         dk[:window_length] = _savgol_window(t)
     end
     kw[:detrend_kwargs] = NamedTuple(dk)
-    r = find_transits(t, _vec(p.flux), _vec(p.flux_err); kw...)
+    r = find_transits(t, _vec(_pget(p, :flux)), _vec(_pget(p, :flux_err)); kw...)
     return _as_dict(r)
 end
 
 function act_detect_rv_planets(p)
     _need(p, :t, :rv, :rv_err)
-    r = find_rv_planets(_vec(p.t), _vec(p.rv), _vec(p.rv_err);
+    r = find_rv_planets(_vec(_pget(p, :t)), _vec(_pget(p, :rv)), _vec(_pget(p, :rv_err));
                         _kw(p, ["t", "rv", "rv_err"])...)
     return _as_dict(r)
 end
 
 function act_detect_rotation(p)
     _need(p, :t, :flux, :flux_err)
-    r = find_rotation_period(_vec(p.t), _vec(p.flux), _vec(p.flux_err);
+    r = find_rotation_period(_vec(_pget(p, :t)), _vec(_pget(p, :flux)), _vec(_pget(p, :flux_err));
                              _kw(p, ["t", "flux", "flux_err"])...)
     return _as_dict(r)
 end
 
 function act_detect_segments(p)
     _need(p, :t)
-    return Dict("segments" => find_segments(_vec(p.t); _kw(p, ["t"])...))
+    return Dict("segments" => find_segments(_vec(_pget(p, :t)); _kw(p, ["t"])...))
 end
 
 # --- detrending --------------------------------------------------------------
@@ -83,19 +89,58 @@ for (name, fn) in (("savgol", :detrend_savgol), ("notch", :detrend_notch),
                    ("locor", :detrend_locor))
     @eval function $(Symbol("act_detrend_", name))(p)
         _need(p, :t, :flux, :flux_err)
-        t = _vec(p.t)
+        t = _vec(_pget(p, :t))
         kw = _kw(p, ["t", "flux", "flux_err"])
         $(QuoteNode(fn)) === :detrend_savgol && !haskey(kw, :window_length) &&
             (kw[:window_length] = _savgol_window(t))
-        r = $fn(t, _vec(p.flux), _vec(p.flux_err); kw...)
+        r = $fn(t, _vec(_pget(p, :flux)), _vec(_pget(p, :flux_err)); kw...)
         return _as_dict(r)
     end
 end
 
+# `detrend_gp` dispatches on the kernel TYPE (via `_kernel_coefs`) and never
+# reads the kernel's channel/instruments fields, so default construction is
+# right here. Kinds resolve through the same `_NOISE_TYPES` registry `run_job`
+# uses, so the two routes cannot drift apart on kernel names.
+const _DETREND_GP_KERNELS = ("CeleriteSHO", "CeleriteRotation",
+                             "CeleriteRotationFM17")
+
+"""
+Build the `CovarianceNoise` kernel for `detrend.gp` from a JSON-able spec:
+either a bare kind string (`"CeleriteSHO"`) or `{"kind": ..., "kwargs": {...}}`.
+"""
+function _detrend_gp_kernel(spec)
+    if spec isa AbstractString
+        kind, kwargs = String(spec), Dict{Symbol,Any}()
+    elseif spec isa AbstractDict
+        kd = Dict(String(k) => v for (k, v) in pairs(spec))
+        haskey(kd, "kind") || error("detrend.gp: `kernel` object needs a " *
+                                    "\"kind\" key. Got: " *
+                                    join(sort!(collect(keys(kd))), ", "))
+        kind   = String(kd["kind"])
+        kwargs = Dict{Symbol,Any}(Symbol(k) => v
+                                  for (k, v) in pairs(get(kd, "kwargs", Dict())))
+    else
+        error("detrend.gp: `kernel` must be a kind string or an object with " *
+              "a \"kind\" key; got $(typeof(spec))")
+    end
+    kind in _DETREND_GP_KERNELS || error(
+        "detrend.gp: kernel must be one of " *
+        join(_DETREND_GP_KERNELS, ", ") * "; got $(repr(kind)). " *
+        "(ActivityGP is a multivariate RV+indicator model, not a light-curve " *
+        "detrending kernel.)")
+    return _NOISE_TYPES[kind](; kwargs...)
+end
+
 function act_detrend_gp(p)
-    _need(p, :t, :flux, :flux_err)
-    error("detrend.gp needs a CovarianceNoise model; pass one via the noise " *
-          "menu rather than raw JSON — not yet wired")
+    _need(p, :t, :flux, :flux_err, :kernel)
+    # `_pget` (not `p.field`) so the op works with the Dict payloads the JSON
+    # transport and the tomogram ops already use, as well as a NamedTuple.
+    kernel = _detrend_gp_kernel(_pget(p, :kernel))
+    kw = _kw(p, ["t", "flux", "flux_err", "kernel"])
+    r = detrend_gp(_vec(_pget(p, :t)), _vec(_pget(p, :flux)),
+                   _vec(_pget(p, :flux_err)), kernel; kw...)
+    return _as_dict(r)
 end
 
 # --- diagnostics -------------------------------------------------------------
@@ -103,14 +148,16 @@ end
 
 function _load(p)
     _need(p, :chains_path)
-    chains, meta = load_chains(String(p.chains_path))
+    chains, meta = load_chains(String(_pget(p, :chains_path)))
     return chains, meta
 end
 
-function act_diag_loo(p)
-    error("diagnostics.loo needs the Params/Data of the original fit; call it " *
-          "through the session that produced the chains — not yet wired")
-end
+# NOTE: there is deliberately no `diagnostics.loo` feature op. `compute_loo`
+# needs the Params AND Data of the original fit to re-evaluate the pointwise
+# likelihood, and `load_chains` recovers neither — a chains file carries the
+# draws plus NetCDF attributes, not the model layout, priors, noise models or
+# the observations. So LOO cannot cross the JSON feature boundary; call
+# `compute_loo(chains, params, data)` in the session that produced the fit.
 
 function act_diag_ess_rhat(p)
     chains, _ = _load(p)
@@ -308,6 +355,7 @@ const FEATURE_ACTIONS = Dict{String, Function}(
     "detrend.savgol"        => act_detrend_savgol,
     "detrend.notch"         => act_detrend_notch,
     "detrend.locor"         => act_detrend_locor,
+    "detrend.gp"            => act_detrend_gp,
     "diagnostics.ess_rhat"  => act_diag_ess_rhat,
     "tomogram.ccf_profile"       => act_tomo_ccf_profile,
     "tomogram.residuals"         => act_tomo_residuals,

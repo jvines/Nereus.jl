@@ -4,7 +4,7 @@
 # 3:1 data/residual panels, per-instrument markers/colors.
 
 using CairoMakie
-using Colors: colorant
+using Colors: @colorant_str
 
 # =====================================================================
 # Style constants (ported from emperors_canvas.py __config())

@@ -15,8 +15,11 @@
 # new off-values which are then rejected via the spike-and-slab prior
 # at the next MoMS evaluation).
 #
-# Currently supports planet trans-dim only — noise-model toggling is
-# not yet wired in (TODO: mirror sample_moms' `_noise_move!`).
+# Supports planet trans-dim, noise-model trans-dim, or both: `td.planets`
+# and `td.noise` are independent, and at least one must be set. Noise
+# toggling has its own annealed birth (`n_noise_bridge`/`n_noise_relax`),
+# its own swap move (`noise_swap`), and per-temperature accept/propose
+# accounting in `noise_td_proposed`/`noise_td_accepted`.
 
 using Random: AbstractRNG, MersenneTwister
 using Statistics: median, quantile
@@ -131,9 +134,9 @@ selection on planet count.
 # Required
 - `target::NereusTarget`
 - `data::Data`
-- `td::TransDimConfig` — trans-dim configuration. Must have
-  `planets = true` (noise toggling is not yet supported in this
-  sampler).
+- `td::TransDimConfig` — trans-dim configuration. Must have at least one
+  of `planets = true` or `noise = true`; both together is the usual case
+  (joint planet-count and noise-model selection).
 
 # Trans-dim kwargs
 - `inclusion_prior::Float64 = 0.5` — Bernoulli prior P(γ_k = 1).

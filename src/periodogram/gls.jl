@@ -1,43 +1,17 @@
 # GLS wrapper around LombScargle.jl.
 #
-# FAP thresholds via the Cumming (2004) analytic estimate:
-#   FAP(z) ≈ M · exp(-z) · (1 - z)^((N-3)/2)  for the GLS power.
-# We invert numerically — given a target FAP, root-find the power
-# threshold. This matches what `wasp47_gls_check.jl` already does and is
-# the standard for "exoplanet-paper" GLS plots.
+# FAP thresholds come from LombScargle.jl's `fapinv`, via a BOOTSTRAP by
+# default (`fap_method = :bootstrap`) with an `:analytic` opt-in.
+#
+# There used to be a homebrew Cumming-2004 inversion here. It was removed
+# because it used the Horne & Baliunas independent-frequency count M — a
+# function of N only, ignoring the searched band — which came out ~10x
+# over-confident: a measured false-alarm rate of 0.46 at a nominal 0.05.
+# Do not reintroduce it.
 
 # Qualified import only — keeps `power`/`freq` from polluting Nereus's
 # top-level namespace where we define our own `power(::Periodogram)`.
 import LombScargle as _LS
-
-"""
-    _cumming_fap(z, N_obs, M_indep)
-
-Cumming 2004 analytic FAP for normalized GLS power `z` (in [0, 1]) at
-`N_obs` samples and `M_indep` independent frequencies. Saturates at 1.
-"""
-@inline function _cumming_fap(z::Real, N_obs::Int, M_indep::Real)
-    z = clamp(Float64(z), 0.0, 1.0 - 1e-12)
-    p_single = (1.0 - z) ^ ((N_obs - 3) / 2)
-    return clamp(1.0 - (1.0 - p_single) ^ M_indep, 0.0, 1.0)
-end
-
-"Invert Cumming 2004 numerically — find power z such that FAP(z) = fap."
-function _cumming_power_for_fap(fap::Real, N_obs::Int, M_indep::Real)
-    fap = clamp(Float64(fap), 1e-12, 1.0 - 1e-12)
-    # Binary-search on z ∈ (0, 1)
-    lo, hi = 0.0, 1.0 - 1e-12
-    for _ in 1:60
-        mid = 0.5 * (lo + hi)
-        f_mid = _cumming_fap(mid, N_obs, M_indep)
-        if f_mid > fap
-            lo = mid
-        else
-            hi = mid
-        end
-    end
-    return 0.5 * (lo + hi)
-end
 
 """
     _gls_core(t, y, err, freqs) -> (power_vec, n_obs)
