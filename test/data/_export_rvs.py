@@ -16,9 +16,9 @@ Connection: uses libpq environment variables (PGHOST, PGUSER, PGPASSWORD,
 PGDATABASE — set these from the exoautomata creds before running).
 
 Usage:
-    PGHOST=192.168.0.50 PGUSER=... PGDATABASE=... \\
+    PGHOST=<db-host> PGUSER=... PGDATABASE=... \\
         python3 _export_rvs.py --star-id 9303 --out hd33636.csv
-    PGHOST=192.168.0.50 PGUSER=... PGDATABASE=... \\
+    PGHOST=<db-host> PGUSER=... PGDATABASE=... \\
         python3 _export_rvs.py --star-id 4793 --out eps_eri.csv
 
 Filters:
@@ -77,7 +77,7 @@ def main():
     args = ap.parse_args()
 
     conn = psycopg2.connect(
-        host=os.environ.get("PGHOST", "192.168.0.50"),
+        host=os.environ["PGHOST"],
         port=int(os.environ.get("PGPORT", "5432")),
         user=os.environ["PGUSER"],
         password=os.environ.get("PGPASSWORD", ""),
