@@ -760,9 +760,12 @@ Mode B path keeps the formulation honest for short-period regimes.
 Without HGCA, GOST alone is uninformative (no paired multi-epoch
 reference) and returns 0.
 
-Future Gaia DR4 epoch astrometry would warrant a real per-transit
-Gaussian against `data.gost`; that needs a `GaiaEpochData` type that
-isn't in Nereus yet.
+If you have real Gaia DR4 *epoch* astrometry, do not route it here:
+GOST is only a predicted scan plan (when Gaia looked, at what angle),
+with no measured abscissae to fit. Load the published per-CCD
+along-scan measurements with [`read_gaia_epoch_votable`](@ref) and fit them
+through [`iad_log_likelihood`](@ref), which takes DR4 epoch data
+directly — the DR4 abscissa model is the Hipparcos-IAD model.
 """
 function gost_log_likelihood(theta::Theta{T}, data) where {T<:Real}
     gost = data.gost

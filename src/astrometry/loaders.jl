@@ -359,9 +359,10 @@ different names, override the `*_col` keywords.
   - `:mjd`: already in MJD, used as-is.
 
 The `along_scan_pos` column is optional: if missing, GOSTData is
-constructed with along-scan position = 0 (the field is consumed by
-the GOST stub likelihood as an observed value but the stub returns
-0 anyway; see `gost_log_likelihood`).
+constructed with along-scan position = 0. Nothing reads it as an
+observed value: GOST is a scan-geometry auxiliary and contributes
+through the HGCA/DR3 window-average, not through a likelihood of its
+own (see [`gost_log_likelihood`](@ref)).
 
 Whitespace tolerance: tokens are stripped and double-quotes removed.
 """
