@@ -463,8 +463,28 @@ along a β-path and so recovers from a bad reference, while bridge consumes
 
 **Check the chain's ESS before quoting a bridge value**, and prefer
 [reference-path](#reference-path-evidence--thermodynamic-integration-without-the-prior)
-when `n_eff` is not comfortably above `d(d+3)/2`. A well-mixed chain is not a
-concern: at `n_eff ≳ 1000` the two agree to hundredths of a nat.
+when `n_eff` is not comfortably above `d(d+3)/2`.
+
+⚠ **Adequate ESS is necessary, not sufficient — and there is an open
+discrepancy on real targets.** On the analytic target above the two estimators
+agree to hundredths of a nat once the chain is well mixed. On the real 51 Peg
+posterior (1691 RVs, 15 parameters, `n_eff` ≈ 9000 against 135 parameters in
+`q`) they do **not**: bridge reads −5899.4 and reference-path −5894.8, a gap of
+**4.6 nats**. Both are internally converged and neither's error bar covers it:
+
+  - bridge is stable across proposals — Gaussian −5899.480, Student-t
+    −5899.383 (0.10 nats apart), `se` ≈ 0.03, `overlap` = 1.0000;
+  - reference-path is stable across resolutions — −5894.773 at 1024
+    particles, −5894.909 at 2048 with more steps (0.14 nats apart), ESS
+    84–92%.
+
+Ruled out as causes: low effective sample size, restricted support
+(`support_frac` = 0.990), non-finite draws being filtered (0 of 80 000),
+proposal tail weight, and chain mixing. The cause is not currently known, so
+on a real multi-instrument RV posterior treat **a few nats as the systematic
+floor** on any single prior-free log Z, quote which estimator produced it, and
+do not read a Bayes factor of that size as meaningful unless both estimators
+agree on it.
 
 **Validation.** Error of **0.003 nats** against an analytic 22-dimensional
 target. On the real HD 18599 RVPM posterior, `log_z = 11466.13 ± 0.02` with
