@@ -768,50 +768,19 @@ through [`iad_log_likelihood`](@ref), which takes DR4 epoch data
 directly — the DR4 abscissa model is the Hipparcos-IAD model.
 """
 function gost_log_likelihood(theta::Theta{T}, data) where {T<:Real}
-    gost = data.gost
-    gost === nothing && return zero(T)
-    n = n_gost(gost)
-    n == 0 && return zero(T)
-
-    # Forward-model the projection so the call path is exercised, then
-    # discard the result (stub). This keeps the function autodiff-clean
-    # even before a real likelihood lands — a user adding `data.gost`
-    # cannot accidentally NaN the log-density.
-    M_pri = astrom_M_pri(theta)
-    plx   = astrom_plx(theta)
-    t_ref = data.t_ref
-
-    # Pre-build per-planet orbits once (see iad_log_likelihood comment)
-    active_ks = Int[]
-    orbs      = Any[]
-    M_secs    = T[]
-    for k in planet_indices(theta)
-        block = theta.params.layout.planet_blocks[k]
-        has_AS(block) || continue
-        # Per-planet astrometric coupling. A companion the RV has established
-        # can still be astrometrically undetected; when the mask says so it
-        # contributes NO reflex here, and its inc/Omega carry their priors.
-        # Defaults true, so fixed-dim behaviour is unchanged.
-        is_planet_as_active(theta, k) || continue
-        orb_k, M_sec_k = _planet_orbit(theta, k, M_pri, plx, t_ref)
-        push!(active_ks, k)
-        push!(orbs, orb_k)
-        push!(M_secs, M_sec_k)
-    end
-
-    Δη_sink = zero(T)
-    @inbounds for j in 1:n
-        t_j = gost.t[j]
-        ψ_j = gost.psi[j]
-        for ki in eachindex(active_ks)
-            Δra, Δdec = star_reflex_offset(orbs[ki], t_j, M_secs[ki])
-            Δη_sink += along_scan_projection(Δra, Δdec, ψ_j)
-        end
-    end
-    # TODO: replace with htof port — for now return 0 regardless of
-    # the forward model. Multiplying by zero keeps autodiff happy and
-    # documents the intent ("evaluated, then discarded").
-    return zero(T) * Δη_sink
+    # Unconditionally zero: GOST carries no measurement to fit (the struct is
+    # t, psi, parallax_factor, along_scan_pos -- a scan plan, not abscissae).
+    # Its information enters through gost_window_avg_pm / gost_5param_fit on
+    # the HGCA, DR3 and G23H paths instead. `Data(...)` warns when GOST is
+    # supplied without one of those, so an inert GOST is never silent.
+    #
+    # This used to forward-model every scan epoch and multiply the result by
+    # zero, "to keep the call path exercised". That cost one Kepler solve per
+    # epoch per active planet on EVERY astrometric likelihood evaluation --
+    # astrom_log_likelihood sums this term unconditionally -- and it was not
+    # even safe: `zero(T) * Δη_sink` is NaN when the forward model returns NaN
+    # or Inf, so the loop introduced exactly the failure it claimed to prevent.
+    return zero(T)
 end
 
 # ---------------------------------------------------------------------
