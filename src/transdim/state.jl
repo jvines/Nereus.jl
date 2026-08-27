@@ -127,7 +127,12 @@ end
 # --- Noise mask operations --------------------------------------------
 
 """
-    activate_noise!(tds, i) -> tds
+    activate_noise!(tds::TransDimState, i::Int) -> tds
+
+Switch noise component `i` ON in the trans-dimensional state, in place.
+
+Bounds-checked. Query with [`is_noise_active`](@ref); mutually exclusive
+sets are enforced through `noise_exclusion_groups`, not here.
 """
 function activate_noise!(tds::TransDimState, i::Int)
     @boundscheck 1 ≤ i ≤ length(tds.noise_active) || throw(BoundsError(tds.noise_active, i))
@@ -150,7 +155,13 @@ end
 active_noise(tds::TransDimState) = findall(tds.noise_active)
 
 """
-    is_noise_active(tds, i) -> Bool
+    is_noise_active(tds::TransDimState, i::Int) -> Bool
+
+Whether noise component `i` is switched ON in the current trans-dimensional
+state.
+
+Across a run the fraction of samples with a component active is its
+occupancy, read as P(model | data). Toggle with [`activate_noise!`](@ref).
 """
 is_noise_active(tds::TransDimState, i::Int) = tds.noise_active[i]
 
@@ -231,10 +242,28 @@ function activate_as!(tds::TransDimState, k::Int)
     @boundscheck 1 ≤ k ≤ length(tds.as_active) || throw(BoundsError(tds.as_active, k))
     tds.as_active[k] = true; return tds
 end
+"""
+    deactivate_as!(tds::TransDimState, k::Int) -> tds
+
+Switch planet `k`'s astrometric contribution OFF, in place.
+
+A companion the RVs have established can still be astrometrically
+undetected; deactivating it means it contributes no reflex to the
+astrometric likelihood, and its inclination and node carry their priors
+rather than being constrained. Query with [`is_as_active`](@ref).
+"""
 function deactivate_as!(tds::TransDimState, k::Int)
     @boundscheck 1 ≤ k ≤ length(tds.as_active) || throw(BoundsError(tds.as_active, k))
     tds.as_active[k] = false; return tds
 end
+"""
+    is_as_active(tds::TransDimState, k::Int) -> Bool
+
+Whether planet `k` currently contributes an astrometric reflex.
+
+Defaults to `true` for indices past the tracked range, so fixed-dimension
+behaviour is unchanged. See [`deactivate_as!`](@ref).
+"""
 @inline is_as_active(tds::TransDimState, k::Int) =
     k ≤ length(tds.as_active) ? tds.as_active[k] : true
 

@@ -48,6 +48,17 @@ const RM_A_SOURCE   = :RM_A  # ARoME CCF-Gaussian-fit RM (Boué+ 2013, Eq. 15)
 const GD_SOURCE     = :GD    # gravity-darkened transit (von Zeipel; Barnes 2009)
 const TTV_SOURCE    = :TTV   # per-transit free time offsets (TTV-A)
 const TTV_NB_SOURCE = :TTV_NB # N-body-predicted TTVs (TTV-C, TTVFaster)
+"""
+    SB_SOURCE
+
+Data-source flag for an **SB2 double-lined binary orbit**: one Keplerian
+carrying two RV semi-amplitudes (`K_A` for the primary, anti-phase `K_B`
+for the secondary) plus luminous-companion photocenter astrometry.
+
+Kept distinct from a planet on purpose -- period ordering, stability
+checks and RM counting all skip an SB2 component. Use it through
+[`BINARY`](@ref) or [`BINARY_RV`](@ref).
+"""
 const SB_SOURCE     = :SB    # SB2 binary orbit — two RV amplitudes (K_A primary,
                              # anti-phase K_B secondary) + luminous-companion
                              # photocenter astrometry. Distinct from a planet so
@@ -94,28 +105,157 @@ end
 # Factory constants. These are PlanetDataSources, NOT enum values, but
 # they satisfy the same user-facing role — callers that wrote
 # `planet_modes=[RVPM, RV_ONLY]` keep working unchanged.
+"""
+    RV_ONLY :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RV_ONLY = PlanetDataSources(RV_SOURCE)
+"""
+    PM_ONLY :: PlanetDataSources
+
+Planet model driven by:
+
+  - transit photometry
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const PM_ONLY = PlanetDataSources(PM_SOURCE)
+"""
+    RVPM :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM    = PlanetDataSources(RV_SOURCE, PM_SOURCE)
+"""
+    RVAS :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - astrometry (absolute + relative)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVAS    = PlanetDataSources(RV_SOURCE, AS_SOURCE)
+"""
+    RVPMAS :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - astrometry (absolute + relative)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPMAS  = PlanetDataSources(RV_SOURCE, PM_SOURCE, AS_SOURCE)
 # RM variants — Rossiter-McLaughlin requires both RV and PM (need a
 # transit window + in-transit RV observations).
+"""
+    RVPM_RM :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - the Rossiter-McLaughlin anomaly (Hirano+ 2011)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM_RM   = PlanetDataSources(RV_SOURCE, PM_SOURCE, RM_SOURCE)
+"""
+    RVPMAS_RM :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - astrometry (absolute + relative)
+  - the Rossiter-McLaughlin anomaly (Hirano+ 2011)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPMAS_RM = PlanetDataSources(RV_SOURCE, PM_SOURCE, AS_SOURCE, RM_SOURCE)
 # Reloaded RM (Cegla+ 2016) — same lambda/v_sin_i_star slots as Hirano,
 # but the in-transit RV anomaly is computed by intensity-weighted
 # integration over the planet's sky-plane disk (more accurate at high
 # rr or high impact parameter; reduces to Hirano in the small-planet
 # limit).
+"""
+    RVPM_RM_R :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - the reloaded Rossiter-McLaughlin anomaly (Cegla+ 2016)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM_RM_R   = PlanetDataSources(RV_SOURCE, PM_SOURCE, RM_R_SOURCE)
+"""
+    RVPMAS_RM_R :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - astrometry (absolute + relative)
+  - the reloaded Rossiter-McLaughlin anomaly (Cegla+ 2016)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPMAS_RM_R = PlanetDataSources(RV_SOURCE, PM_SOURCE, AS_SOURCE, RM_R_SOURCE)
 
 # ARoME CCF formulation (Boué+ 2013 Eq. 15) — the RM anomaly a Gaussian fit to a
 # CCF actually measures. Adds two system-level line-width parameters,
 # `sigma_ccf` (out-of-transit CCF Gaussian dispersion) and `beta_p` (sub-planet
 # line width). Prefer this over RVPM_RM whenever v·sin i ≳ β_p.
+"""
+    RVPM_RM_A :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - the ARoME CCF Rossiter-McLaughlin anomaly (Boue+ 2013)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM_RM_A   = PlanetDataSources(RV_SOURCE, PM_SOURCE, RM_A_SOURCE)
+"""
+    RVPMAS_RM_A :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - astrometry (absolute + relative)
+  - the ARoME CCF Rossiter-McLaughlin anomaly (Boue+ 2013)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPMAS_RM_A = PlanetDataSources(RV_SOURCE, PM_SOURCE, AS_SOURCE, RM_A_SOURCE)
 
 # Gravity-darkened transit (von Zeipel 1924; Barnes 2009). A rotating star is
@@ -131,14 +271,99 @@ const RVPMAS_RM_A = PlanetDataSources(RV_SOURCE, PM_SOURCE, AS_SOURCE, RM_A_SOUR
 #     v_eq = v_sin_i_star / sin(i_star)  ->  omega = v_eq / v_crit
 # Low i_star therefore means a fast rotator seen pole-on and STRONG darkening,
 # which is what makes this a measurement of i_star rather than a degeneracy.
+"""
+    RVPM_GD :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - a gravity-darkened transit (Barnes 2009)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM_GD    = PlanetDataSources(RV_SOURCE, PM_SOURCE, GD_SOURCE)
+"""
+    RVPM_RM_GD :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - the Rossiter-McLaughlin anomaly (Hirano+ 2011)
+  - a gravity-darkened transit (Barnes 2009)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM_RM_GD = PlanetDataSources(RV_SOURCE, PM_SOURCE, RM_SOURCE, GD_SOURCE)
+"""
+    PM_GD :: PlanetDataSources
+
+Planet model driven by:
+
+  - transit photometry
+  - a gravity-darkened transit (Barnes 2009)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const PM_GD      = PlanetDataSources(PM_SOURCE, GD_SOURCE)
 # TTV variants — per-transit free time offsets. Requires PM (need
 # transit observations to fit transit-time offsets against).
+"""
+    RVPM_TTV :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - per-transit free timing offsets (TTV-A)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM_TTV     = PlanetDataSources(RV_SOURCE, PM_SOURCE, TTV_SOURCE)
+"""
+    RVPMAS_TTV :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - astrometry (absolute + relative)
+  - per-transit free timing offsets (TTV-A)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPMAS_TTV   = PlanetDataSources(RV_SOURCE, PM_SOURCE, AS_SOURCE, TTV_SOURCE)
+"""
+    RVPM_RM_TTV :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - the Rossiter-McLaughlin anomaly (Hirano+ 2011)
+  - per-transit free timing offsets (TTV-A)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM_RM_TTV  = PlanetDataSources(RV_SOURCE, PM_SOURCE, RM_SOURCE, TTV_SOURCE)
+"""
+    PM_TTV :: PlanetDataSources
+
+Planet model driven by:
+
+  - transit photometry
+  - per-transit free timing offsets (TTV-A)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const PM_TTV       = PlanetDataSources(PM_SOURCE, TTV_SOURCE)
 # TTV-C (N-body via TTVFaster). Same shape as TTV_SOURCE downstream,
 # but δts are PREDICTED at each likelihood eval from the mutual
@@ -146,14 +371,73 @@ const PM_TTV       = PlanetDataSources(PM_SOURCE, TTV_SOURCE)
 # No per-transit free parameters — `ttv_n_transits[k]` only sizes the
 # predicted-Tc grid. Needs ≥ 2 planets carrying :TTV_NB for any signal;
 # otherwise the prediction collapses to zero.
+"""
+    RVPM_TTV_NB :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - N-body-predicted TTVs (TTV-C, TTVFaster)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPM_TTV_NB    = PlanetDataSources(RV_SOURCE, PM_SOURCE, TTV_NB_SOURCE)
+"""
+    RVPMAS_TTV_NB :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - transit photometry
+  - astrometry (absolute + relative)
+  - N-body-predicted TTVs (TTV-C, TTVFaster)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const RVPMAS_TTV_NB  = PlanetDataSources(RV_SOURCE, PM_SOURCE, AS_SOURCE, TTV_NB_SOURCE)
+"""
+    PM_TTV_NB :: PlanetDataSources
+
+Planet model driven by:
+
+  - transit photometry
+  - N-body-predicted TTVs (TTV-C, TTVFaster)
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const PM_TTV_NB      = PlanetDataSources(PM_SOURCE, TTV_NB_SOURCE)
 
 # SB2 double-lined binary orbit (companion star). RV in BOTH components + the
 # photocenter astrometry; no transit (the binary doesn't eclipse — only the
 # circumprimary planet transits, as its own RVPM*/RM block).
+"""
+    BINARY :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - astrometry (absolute + relative)
+  - an SB2 double-lined binary orbit
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const BINARY    = PlanetDataSources(RV_SOURCE, AS_SOURCE, SB_SOURCE)
+"""
+    BINARY_RV :: PlanetDataSources
+
+Planet model driven by:
+
+  - radial velocities
+  - an SB2 double-lined binary orbit
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
 const BINARY_RV = PlanetDataSources(RV_SOURCE, SB_SOURCE)   # RV-only SB2 (no astrometry)
 
 """
@@ -165,16 +449,89 @@ Convenience predicates. Equivalent to `:RV in modes` / `:PM in modes`
 / `:AS in modes`.
 """
 @inline has_rv(modes::PlanetDataSources) = RV_SOURCE in modes
+"""
+    has_pm(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes transit photometry.
+
+See [`PlanetDataSources`](@ref) for the set itself and the named
+combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
+"""
 @inline has_pm(modes::PlanetDataSources) = PM_SOURCE in modes
+"""
+    has_as(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes astrometry.
+
+See [`PlanetDataSources`](@ref) for the set itself and the named
+combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
+"""
 @inline has_as(modes::PlanetDataSources) = AS_SOURCE in modes
+"""
+    has_rm(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes the Hirano+ 2011 Rossiter-McLaughlin anomaly.
+
+See [`PlanetDataSources`](@ref) for the set itself and the named
+combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
+"""
 @inline has_rm(modes::PlanetDataSources) = RM_SOURCE in modes
+"""
+    has_rm_r(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes the reloaded (Cegla+ 2016) Rossiter-McLaughlin anomaly.
+
+See [`PlanetDataSources`](@ref) for the set itself and the named
+combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
+"""
 @inline has_rm_r(modes::PlanetDataSources) = RM_R_SOURCE in modes
+"""
+    has_rm_a(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes the ARoME (Boue+ 2013) Rossiter-McLaughlin anomaly.
+
+See [`PlanetDataSources`](@ref) for the set itself and the named
+combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
+"""
 @inline has_rm_a(modes::PlanetDataSources) = RM_A_SOURCE in modes
+"""
+    has_any_rm(modes::PlanetDataSources) -> Bool
+
+Whether ANY Rossiter-McLaughlin formulation is active -- Hirano,
+reloaded (Cegla+ 2016) or ARoME (Boue+ 2013).
+
+Use this rather than testing the three separately when the question is
+"does this planet carry RM parameters at all".
+"""
 @inline has_any_rm(modes::PlanetDataSources) =
     has_rm(modes) || has_rm_r(modes) || has_rm_a(modes)
 @inline has_gd(modes::PlanetDataSources) = GD_SOURCE in modes
+"""
+    has_ttv(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes per-transit free timing offsets (TTV-A).
+
+See [`PlanetDataSources`](@ref) for the set itself and the named
+combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
+"""
 @inline has_ttv(modes::PlanetDataSources) = TTV_SOURCE in modes
+"""
+    has_ttv_nb(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes N-body-predicted TTVs (TTV-C).
+
+See [`PlanetDataSources`](@ref) for the set itself and the named
+combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
+"""
 @inline has_ttv_nb(modes::PlanetDataSources) = TTV_NB_SOURCE in modes
+"""
+    has_sb(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes an SB2 double-lined binary orbit.
+
+See [`PlanetDataSources`](@ref) for the set itself and the named
+combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
+"""
 @inline has_sb(modes::PlanetDataSources) = SB_SOURCE in modes   # SB2 binary orbit
 
 # =====================================================================
@@ -267,7 +624,19 @@ end
 
 InstrumentConfig(; rv=String[], pm=String[]) = InstrumentConfig(rv, pm)
 
+"""
+    n_rv_instruments(ic::InstrumentConfig) -> Int
+
+Number of distinct RV instruments in the configuration -- the count of
+per-instrument offset/jitter slot pairs the layout allocates.
+"""
 n_rv_instruments(ic::InstrumentConfig) = length(ic.rv_names)
+"""
+    n_pm_instruments(ic::InstrumentConfig) -> Int
+
+Number of distinct photometry instruments in the configuration -- the
+count of per-instrument baseline/jitter/dilution slots allocated.
+"""
 n_pm_instruments(ic::InstrumentConfig) = length(ic.pm_names)
 
 # =====================================================================
@@ -511,6 +880,15 @@ struct SB2Block <: PlanetBlock
 end
 
 # Predicate helpers for hot-path dispatch.
+"""
+    has_K(block) -> Bool
+
+Whether this planet's parameter block carries an RV semi-amplitude `K`.
+
+False for a photometry-only block, which constrains geometry but no RV
+reflex. Dispatches on the block type, so it answers what was actually
+allocated rather than what the data-source set requested.
+"""
 @inline has_K(::RVOnlyBlock)  = true
 @inline has_K(::RVPMBlock)    = true
 @inline has_K(::PMOnlyBlock)  = false
@@ -518,6 +896,15 @@ end
 @inline has_K(::RVPMASBlock)  = true
 @inline has_K(::SB2Block)     = true
 
+"""
+    has_geometry(block) -> Bool
+
+Whether this planet's parameter block carries transit geometry --
+radius ratio, impact parameter, and the rest of the transit shape.
+
+True only for blocks fed by photometry; an RV-only or RV+astrometry
+block has an orbit but no transit, so there is no geometry to fit.
+"""
 @inline has_geometry(::PMOnlyBlock) = true
 @inline has_geometry(::RVPMBlock)   = true
 @inline has_geometry(::RVOnlyBlock) = false

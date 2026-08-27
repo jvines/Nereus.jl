@@ -775,9 +775,24 @@ end
 # RV systemic accessors
 # =====================================================================
 
+"""
+    rv_gamma(theta, ins_idx) -> Real
+
+Systemic RV offset gamma for RV instrument `ins_idx`.
+
+Reads the fitted value straight out of `theta` by slot index.
+"""
 @inline rv_gamma(theta::Theta, ins_idx::Int) =
     theta.values[theta.params.layout.systemic.rv_gamma[ins_idx]]
 
+"""
+    rv_sigma(theta, ins_idx) -> Real
+
+RV jitter sigma for RV instrument `ins_idx`, added in quadrature to
+the reported uncertainties.
+
+Reads the fitted value straight out of `theta` by slot index.
+"""
 @inline rv_sigma(theta::Theta, ins_idx::Int) =
     theta.values[theta.params.layout.systemic.rv_sigma[ins_idx]]
 
@@ -785,11 +800,26 @@ end
 # RV trend accessors
 # =====================================================================
 
+"""
+    rv_dvdt(theta) -> Real
+
+Linear RV trend coefficient dv/dt (a long-period companion or
+instrumental drift).
+
+Reads the fitted value straight out of `theta` by slot index.
+"""
 @inline function rv_dvdt(theta::Theta)
     idx = theta.params.layout.systemic.dvdt
     return theta.values[idx]
 end
 
+"""
+    rv_d2vdt2(theta) -> Real
+
+Quadratic RV trend coefficient d2v/dt2.
+
+Reads the fitted value straight out of `theta` by slot index.
+"""
 @inline function rv_d2vdt2(theta::Theta)
     idx = theta.params.layout.systemic.d2vdt2
     return theta.values[idx]
@@ -799,12 +829,35 @@ end
 # PM systemic accessors
 # =====================================================================
 
+"""
+    pm_offset(theta, ins_idx) -> Real
+
+Photometric baseline flux offset for photometry instrument `ins_idx`.
+
+Reads the fitted value straight out of `theta` by slot index.
+"""
 @inline pm_offset(theta::Theta, ins_idx::Int) =
     theta.values[theta.params.layout.systemic.pm_offset[ins_idx]]
 
+"""
+    pm_jitter(theta, ins_idx) -> Real
+
+Photometric jitter for instrument `ins_idx`, added in quadrature to the
+reported flux uncertainties.
+
+Reads the fitted value straight out of `theta` by slot index.
+"""
 @inline pm_jitter(theta::Theta, ins_idx::Int) =
     theta.values[theta.params.layout.systemic.pm_jitter[ins_idx]]
 
+"""
+    pm_dilution(theta, ins_idx) -> Real
+
+Third-light dilution factor for photometry instrument `ins_idx` -- the
+contaminating flux fraction that shallows the observed transit depth.
+
+Reads the fitted value straight out of `theta` by slot index.
+"""
 @inline pm_dilution(theta::Theta, ins_idx::Int) =
     theta.values[theta.params.layout.systemic.pm_dilution[ins_idx]]
 

@@ -346,6 +346,16 @@ end
 # is declared but not implemented is worse than an absent one: the client
 # advertises it, the user calls it, and it fails deep in Julia.
 
+"""
+    FEATURE_ACTIONS :: Dict{String, Function}
+
+Name-to-implementation table for the standalone feature operations —
+detection, detrending, and diagnostics that run outside a fit. Keys are the
+dotted action names a job config may request (`"detect.transits"`,
+`"detrend.savgol"`, ...); values are the functions that carry them out.
+
+`keys(FEATURE_ACTIONS)` is the authoritative list of available actions.
+"""
 const FEATURE_ACTIONS = Dict{String, Function}(
     "detect.transits"       => act_detect_transits,
     "detect.rv_planets"     => act_detect_rv_planets,

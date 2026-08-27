@@ -23,9 +23,60 @@
 #   Diaz et al. 2016, A&A 585, A134 — activity-dependent jitter (concept)
 #   Feng et al. 2016, MNRAS 461, 2440 — activity-dependent jitter (RJ model, Eq. 16)
 
+"""
+    NoiseModel
+
+Root of the noise-model hierarchy. Every noise component is one of three
+subtypes, and which one it is fixes how it composes with the others:
+[`MeanModifier`](@ref) (stage 1), [`SequentialNoise`](@ref) (stage 2) and
+[`CovarianceNoise`](@ref) (stage 3), plus [`AdditiveCovariance`](@ref),
+which corrects a stage-3 covariance rather than replacing it.
+
+Attach models per channel through `build_target`'s `noise=` keyword; in a
+trans-dimensional run the components are switched on and off and their
+occupancies read as P(model | data). See the noise-model guide for the
+catalogue and `noise_exclusion_groups` for mutually exclusive sets.
+"""
 abstract type NoiseModel end
+
+"""
+    MeanModifier <: NoiseModel
+
+Stage 1 — an additive correction to the mean RV model, not to its
+covariance. Any number may be active at once; they compose freely.
+
+Activity-indicator decorrelation (`ActivityDecorrelation`, Dumusque+ 2012)
+is the canonical case: it adds `C_j[inst] * indicator_j(t)` to the model
+and leaves the likelihood's covariance untouched.
+"""
 abstract type MeanModifier <: NoiseModel end
+
+"""
+    SequentialNoise <: NoiseModel
+
+Stage 2 — sequential correlation applied to the residuals (AR, MA, or both
+together as ARMA; Tuomi+ 2013). Multiple components are allowed.
+
+Orders are fixed when the component is constructed: a trans-dimensional run
+toggles whole components on and off, it does not select the order. **Mutually
+exclusive with [`CovarianceNoise`](@ref)** — a GP absorbs the same correlated
+noise, which makes AR/MA redundant and the pair degenerate.
+"""
 abstract type SequentialNoise <: NoiseModel end
+
+"""
+    CovarianceNoise <: NoiseModel
+
+Stage 3 — the covariance structure of the likelihood itself (celerite
+kernels, the Rajpaul+ 2015 multivariate ActivityGP). **At most one may be
+active per channel**, and it is mutually exclusive with
+[`SequentialNoise`](@ref). White noise is the implicit default when none is
+given.
+
+To correct a covariance rather than replace it, use
+[`AdditiveCovariance`](@ref), which composes on top of whatever base is
+already in place.
+"""
 abstract type CovarianceNoise <: NoiseModel end
 
 #   Stage 3b (AdditiveCovariance): a low-rank / diagonal correction ADDED
@@ -36,6 +87,19 @@ abstract type CovarianceNoise <: NoiseModel end
 #           trips the "at most one CovarianceNoise" rule. These are the
 #           parametric intermediate models between white and GP: nightly
 #           calibration offsets, marginalized rotation-harmonic blocks.
+"""
+    AdditiveCovariance <: NoiseModel
+
+Stage 3b — a low-rank or diagonal correction ADDED on top of whatever base
+covariance the channel already carries (white by default, or one
+[`CovarianceNoise`](@ref) GP).
+
+These are the parametric models between white noise and a full GP: nightly
+calibration offsets, marginalized rotation-harmonic blocks. Because they are
+applied through Woodbury — `Σ = B + FΛFᵀ`, factored through the base's own
+solve and logdet — they compose freely with the base and with each other,
+and never trip the "at most one CovarianceNoise" rule.
+"""
 abstract type AdditiveCovariance <: NoiseModel end
 
 """

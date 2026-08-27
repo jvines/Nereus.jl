@@ -370,6 +370,12 @@ end
 Number of RV observations.
 """
 n_rv(data::Data) = length(data.t_rv)
+"""
+    n_phot(data::Data) -> Int
+
+Number of photometric data points across every instrument, at native
+cadence (the light curve is never binned).
+"""
 n_phot(data::Data) = length(data.t_phot)
 """
     has_astrometry(data) -> Bool

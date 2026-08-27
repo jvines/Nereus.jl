@@ -437,6 +437,27 @@ struct EvidenceReport
     hybrid_beta_star::Float64
 end
 
+"""
+    evidence_report(acc::EvidenceAccumulator, betas) -> EvidenceReport
+
+Bundle the four β-path evidence estimators accumulated over a tempering
+ladder into one result: `ti`, `ti_plus`, `ss_plus` and `hybrid`, each a
+`(log_Z, sigma)` tuple, plus `hybrid_beta_star`, the knot where H+ switches
+from TI+ to SS+.
+
+`acc` is the [`EvidenceAccumulator`](@ref) filled during the run; `betas`
+is the inverse-temperature ladder it was filled against.
+
+!!! warning "Agreement between these four is not a check"
+    All four read the same shared `mean_logL` array, so a bias in
+    `<log L>` at any rung appears identically in every one of them. On a
+    measured run the four agreed to 2.6 nats while all being 147 nats
+    wrong. Corroborate against an estimator that does not temper --
+    [`bridge_evidence`](@ref), [`reference_path_evidence`](@ref) or
+    [`mode_laplace_evidence`](@ref) -- before quoting a number.
+
+See the evidence guide for which estimator to report per sampler.
+"""
 function evidence_report(acc::EvidenceAccumulator, betas::AbstractVector{<:Real})
     n = length(betas)
     mean_logL = [acc.sum_logL[k] / max(1, acc.n[k]) for k in 1:n]

@@ -11,6 +11,22 @@
 # Method-specific extras (FAP thresholds for GLS, convergence flags
 # for L1, the 2D matrix for SBGLS, etc.) live on the concrete type.
 
+"""
+    Periodogram
+
+Common supertype for every periodogram result — GLS, BGLS, SBGLS, L1, TLS —
+so downstream plotting and peak extraction stay method-agnostic.
+
+Every concrete subtype exposes:
+
+  - `.frequencies :: Vector{Float64}` — [1/day]
+  - `.periods     :: Vector{Float64}` — [day]
+  - `power_array(p) -> Vector{Float64}` — the y-axis quantity for plotting
+  - `.peaks       :: Vector{PgramPeak}`
+
+Method-specific extras live on the concrete type: analytic FAP thresholds
+for GLS, convergence flags for L1, the 2D power matrix for SBGLS.
+"""
 abstract type Periodogram end
 
 "A single periodogram peak. Period in days, power in the method's

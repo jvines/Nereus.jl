@@ -26,6 +26,29 @@ export run_job
 # Entry points
 # =====================================================================
 
+"""
+    run_job(config_path::AbstractString) -> Dict
+    run_job(cfg::AbstractDict) -> Dict
+
+Run an end-to-end fit from a single job config and return the summary dict.
+
+The one entry point used by the Dockerised batch workers and by Python
+(juliacall) callers -- the latter can pass arrays inline through the `Dict`
+form and skip disk entirely. Both forms write `summary.json`, `chains.nc`
+and the plot set into the config's `output_dir`, *and* return the summary,
+so nothing has to be read back to inspect a result.
+
+The config selects the sampler by name through [`ENGINES`](@ref), the
+feature operations through [`FEATURE_ACTIONS`](@ref), and carries the data,
+priors, noise models and stopping rules for the run.
+
+The full schema is documented in `docs/JOB_CONFIG.md`.
+
+```julia
+summary = run_job("configs/hd18599.json")
+summary = run_job(Dict("engine" => "ptemcee", "output_dir" => "out", ...))
+```
+"""
 run_job(config_path::AbstractString) = run_job(JSON3.read(read(config_path,
                                                                 String); jsonlines = false))
 

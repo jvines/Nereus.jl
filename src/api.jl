@@ -28,6 +28,17 @@ import MCMCChains
 # One table, so adding a sampler means adding one line here and one dataclass
 # in engines.py. Anything not in this table is rejected by name, with the list.
 
+"""
+    ENGINES :: Dict{String, Function}
+
+Name-to-sampler table backing the `engine=` string accepted by
+[`run_job`](@ref) and the higher-level fit entry points. Keys are the
+strings a JSON job config may use; values are the `sample_*` functions
+themselves, so `ENGINES["ptemcee"]` is `sample_ptemcee`.
+
+`keys(ENGINES)` is the authoritative list of what this build supports —
+prefer it over a hardcoded list when validating user input.
+"""
 const ENGINES = Dict{String, Function}(
     "pt"                => sample_pt,
     "pt_warm"           => sample_pt_warm,
@@ -99,6 +110,23 @@ const SYMBOL_OPTIONS = Set{Symbol}([
 # Stopping — uniform across engines, separate from sampler-specific knobs
 # ---------------------------------------------------------------------------
 
+"""
+    Stopping(; max_seconds=nothing, max_evals=nothing, ess_min=nothing,
+               rhat_max=nothing, logz_tol=nothing, check_every=500)
+
+Engine-independent stopping rules, checked every `check_every` iterations.
+
+Every field defaults to `nothing`, meaning "do not stop on this criterion";
+the run then ends on the sampler's own step count. Set any combination:
+
+  - `max_seconds`, `max_evals` — budget caps, honoured by every engine.
+  - `ess_min`, `rhat_max` — convergence gates on the WORST science
+    parameter, so a poorly-constrained nuisance cannot stall the run.
+  - `logz_tol` — for the nested engines, the remaining-evidence tolerance.
+
+Kept separate from the sampler-specific keywords deliberately, so the same
+budget can be handed to any engine in [`ENGINES`](@ref) unchanged.
+"""
 Base.@kwdef struct Stopping
     max_seconds::Union{Nothing,Float64} = nothing
     max_evals::Union{Nothing,Int}       = nothing

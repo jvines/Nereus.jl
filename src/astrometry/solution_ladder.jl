@@ -259,7 +259,17 @@ function astrom_solution(iad::IADData, order::Int;
             order = order)
 end
 
-"Parameter names in design-column order."
+"""
+    ASTROM_PARAM_NAMES :: Vector{String}
+
+Astrometric parameter names in design-matrix column order, covering the full
+9-parameter ladder: the 5-parameter solution (position offsets, parallax,
+proper motion), then acceleration (7-parameter), then jerk (9-parameter).
+
+Column `k` of an astrometric design matrix corresponds to
+`ASTROM_PARAM_NAMES[k]`, so a solution of order `n` uses the first `n`
+entries. Use it to label a fitted solution rather than re-deriving the order.
+"""
 const ASTROM_PARAM_NAMES = ["dra_cosdec", "ddec", "parallax",
                             "pmra_cosdec", "pmdec",
                             "accel_ra", "accel_dec",

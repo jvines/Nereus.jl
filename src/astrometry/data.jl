@@ -116,6 +116,12 @@ function RelAstromData(;
     )
 end
 
+"""
+    n_relast(d::RelAstromData) -> Int
+
+Number of relative-astrometry epochs (separation/position-angle or
+(dRA, dDec) measurements of a resolved companion).
+"""
 n_relast(d::RelAstromData) = length(d.t)
 
 """
@@ -326,6 +332,16 @@ function IADData(;
     )
 end
 
+"""
+    n_iad(d::IADData) -> Int
+
+Number of along-scan abscissa measurements in an intermediate
+astrometric data set.
+
+Covers Hipparcos IAD and Gaia DR4 epoch astrometry alike -- the DR4
+per-CCD abscissa model is the Hipparcos-IAD model, so both load into
+`IADData` and are counted here.
+"""
 n_iad(d::IADData) = length(d.t)
 
 """
@@ -406,6 +422,15 @@ function GOSTData(;
     )
 end
 
+"""
+    n_gost(d::GOSTData) -> Int
+
+Number of predicted Gaia scan-plan transits.
+
+GOST is scan geometry, not measurement: these rows say when Gaia looked
+and at what angle. See [`gost_log_likelihood`](@ref) for how they enter
+the fit.
+"""
 n_gost(d::GOSTData) = length(d.t)
 
 """
@@ -501,6 +526,12 @@ function G23HData(;
     )
 end
 
+"""
+    n_g23h(::G23HData) -> Int
+
+Number of G23H constraint rows, which is always 5 -- the two proper-motion
+components at each of two epochs plus their scaled positional difference.
+"""
 n_g23h(::G23HData) = 5
 
 """
