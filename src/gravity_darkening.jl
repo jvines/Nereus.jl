@@ -32,6 +32,7 @@
 #   β      gravity-darkening exponent; 0.25 for a radiative envelope (von Zeipel),
 #          ~0.08 for convective (Lucy 1967). A9V here ⇒ radiative.
 
+const _OMEGA_CRIT_INTERNAL = sqrt(8 / 27)   # break-up in the potential below
 """
     roche_flattening(ω_frac) -> f
 
@@ -62,8 +63,6 @@ WRONG root approaching break-up — the surface equation has two roots there and
 iteration walks to the larger, unphysical one — giving r(π/2) = 1.466 instead of
 the exact 1.5.
 """
-const _OMEGA_CRIT_INTERNAL = sqrt(8 / 27)   # break-up in the potential below
-
 function roche_radius(θ::Real, ω_frac::Real)
     ω = clamp(float(ω_frac), 0.0, 1.0)
     w = ω * abs(sin(θ))

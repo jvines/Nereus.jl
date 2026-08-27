@@ -98,22 +98,6 @@ end
 # Top-level API
 # =====================================================================
 
-"""
-    posterior_predictive_check(chains, params, data;
-                                n_draws=500, rng=default_rng(),
-                                pgram=true, acf=true,
-                                pgram_period_min=1.0,
-                                pgram_period_max=nothing) -> PPCResult
-
-Sample `n_draws` rows uniformly from the posterior chain, evaluate the
-forward model at each draw, and aggregate residual diagnostics. The
-output object is the diagnostic; `plot_ppc(result)` produces the
-figure.
-
-Trans-dim chains are handled transparently — `n_planets` is read per
-draw so the residuals are computed under the actual active-K of each
-sample.
-"""
 # GP-detrend an RV residual vector before χ²: when a global covariance
 # GP (celerite or Rajpaul ActivityGP) is active, the activity lives in
 # the COVARIANCE, so a mean-model χ² double-counts it as white scatter
@@ -134,6 +118,22 @@ function _rv_gp_detrend(theta, data, resid::Vector{Float64},
     gp === nothing ? resid : resid .- gp
 end
 
+"""
+    posterior_predictive_check(chains, params, data;
+                                n_draws=500, rng=default_rng(),
+                                pgram=true, acf=true,
+                                pgram_period_min=1.0,
+                                pgram_period_max=nothing) -> PPCResult
+
+Sample `n_draws` rows uniformly from the posterior chain, evaluate the
+forward model at each draw, and aggregate residual diagnostics. The
+output object is the diagnostic; `plot_ppc(result)` produces the
+figure.
+
+Trans-dim chains are handled transparently — `n_planets` is read per
+draw so the residuals are computed under the actual active-K of each
+sample.
+"""
 function posterior_predictive_check(chains, params::Params, data::Data;
                                      n_draws::Int = 500,
                                      rng::AbstractRNG = default_rng(),

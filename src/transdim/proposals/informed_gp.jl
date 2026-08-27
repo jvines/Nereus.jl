@@ -83,20 +83,6 @@ function _gp_data_scatter(data)
     return max(1.4826 * median(abs.(y .- m)), 1e-6)
 end
 
-"""
-    _gp_hints(theta, data, nm, layout, instruments) -> Vector
-
-Informed-proposal hints for `nm`'s period and amplitude parameters. Each entry
-carries the peaks, weights and widths of a mixture in the transformed
-coordinate, plus that coordinate's Jacobian tag. Empty when nothing can be
-informed, in which case every parameter falls back to its prior.
-
-Both hints are built from the DATA only, never from `theta`. That is what makes
-them free (one cached periodogram per dataset) AND exactly reversible: a birth
-and its reverse death evaluate an identical fixed density, with no staleness
-argument required. The planet path's refresh-every-N-attempts cache cannot give
-that guarantee — a birth and death straddling a refresh see different densities.
-"""
 # OFF by default. Measured on the AD<->GP-Rot occupancy gate it made things
 # consistently WORSE at every swap rate (3.86/2.69/2.29 nats vs 3.49/2.18/1.56
 # blind) — detailed balance is exact, so that is degraded mixing, not bias:
@@ -111,6 +97,20 @@ const GP_INFORMED_BIRTH = Ref(false)
 # to separate from everything else going on in a trans-dim run.
 const AD_INFORMED_BIRTH = Ref(true)
 
+"""
+    _gp_hints(theta, data, nm, layout, instruments) -> Vector
+
+Informed-proposal hints for `nm`'s period and amplitude parameters. Each entry
+carries the peaks, weights and widths of a mixture in the transformed
+coordinate, plus that coordinate's Jacobian tag. Empty when nothing can be
+informed, in which case every parameter falls back to its prior.
+
+Both hints are built from the DATA only, never from `theta`. That is what makes
+them free (one cached periodogram per dataset) AND exactly reversible: a birth
+and its reverse death evaluate an identical fixed density, with no staleness
+argument required. The planet path's refresh-every-N-attempts cache cannot give
+that guarantee — a birth and death straddling a refresh see different densities.
+"""
 function _gp_hints(theta::Theta, data::Union{Data,Nothing}, nm,
                    layout, instruments)
     hints = NamedTuple[]

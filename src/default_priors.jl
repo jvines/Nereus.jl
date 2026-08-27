@@ -3,6 +3,12 @@
 
 using Statistics: std, mean, median
 
+# Robust (MAD-based) per-instrument RV scatter. Uses the median absolute
+# deviation, NOT std: a handful of activity/instrumental outliers inflate std
+# by factors of a few, which loosens every GP amplitude cap (∝ 3·σ_act) enough
+# for the GP to become a free interpolator (HD 18599: outlier-inflated σ let a
+# bounded SHO still reach 34 m/s and eat the planet). MAD is outlier-resistant.
+_mad_scatter(x) = isempty(x) ? 0.0 : 1.4826 * median(abs.(x .- median(x)))
 """
     _rv_activity_scatter(data, instruments, only=nothing) -> Float64
 
@@ -12,12 +18,6 @@ absolute-RV data). Amplitude-like priors (GP σ, celerite amp) must scale with
 THIS, not rv_max, or their ceilings become non-constraining (e.g. a 31 km/s
 absolute RV → a 93 km/s GP-amplitude ceiling).
 """
-# Robust (MAD-based) per-instrument RV scatter. Uses the median absolute
-# deviation, NOT std: a handful of activity/instrumental outliers inflate std
-# by factors of a few, which loosens every GP amplitude cap (∝ 3·σ_act) enough
-# for the GP to become a free interpolator (HD 18599: outlier-inflated σ let a
-# bounded SHO still reach 34 m/s and eat the planet). MAD is outlier-resistant.
-_mad_scatter(x) = isempty(x) ? 0.0 : 1.4826 * median(abs.(x .- median(x)))
 function _rv_activity_scatter(data, instruments, only::Union{Nothing,AbstractVector} = nothing)
     stds = Float64[]
     for idx in 1:length(instruments.rv_names)

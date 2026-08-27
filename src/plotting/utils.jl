@@ -172,7 +172,7 @@ function phase_fold(t::AbstractVector, P::Real, t0::Real)
 end
 
 """
-    compute_rv_model(theta, data, t_grid; include_trend=false, gamma_inst=nothing)
+    compute_rv_model_on_grid(theta, data, t_grid; include_trend=false, gamma_inst=nothing)
         -> model_on_grid
 
 Evaluate the RV model at times `t_grid` using parameters in `theta`.
@@ -479,6 +479,15 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
     return model
 end
 
+# Number of FLAT draws in a Chains object: every plotting consumer
+# flattens columns with vec(Array(...)), which is step-major over
+# (n_steps × n_chains). Index pools MUST live in this flat space —
+# `1:size(chains, 1)` only spans the FIRST WALKER of an in-memory
+# multi-walker chain (measured: an HD 18599 AGP fold rendered a stuck
+# walker-1 theta with γ ≈ 0 because the bf-cutoff pool, thresholded by
+# the GLOBAL lp max but scanned over walker 1 only, came back empty).
+_n_flat_draws(chains) = size(chains, 1) * size(chains, 3)
+
 """
     _top_lp_draw_pool(chains; bf_cutoff=10.0) -> Vector{Int}
 
@@ -493,15 +502,6 @@ filter's PURPOSE is to exclude the typical set and show the best-fit
 cluster). Falls back to all indices if `:lp` isn't in the chain or the
 cluster is empty.
 """
-# Number of FLAT draws in a Chains object: every plotting consumer
-# flattens columns with vec(Array(...)), which is step-major over
-# (n_steps × n_chains). Index pools MUST live in this flat space —
-# `1:size(chains, 1)` only spans the FIRST WALKER of an in-memory
-# multi-walker chain (measured: an HD 18599 AGP fold rendered a stuck
-# walker-1 theta with γ ≈ 0 because the bf-cutoff pool, thresholded by
-# the GLOBAL lp max but scanned over walker 1 only, came back empty).
-_n_flat_draws(chains) = size(chains, 1) * size(chains, 3)
-
 function _top_lp_draw_pool(chains; bf_cutoff::Real=10.0)
     n_flat = _n_flat_draws(chains)
     chain_names = Set(names(chains, :parameters))

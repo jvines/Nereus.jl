@@ -120,7 +120,7 @@ returns `t − δts[i+1]`; otherwise returns `t` unchanged.
 end
 
 """
-    ttv_effective_time(t, j, ttv_state, Ps, Tcs) -> t_eff
+    ttv_effective_time_r(t, r, ttv_state, Ps, Tcs) -> t_eff
 
 Lookup form for the transit-likelihood inner loop. Given that planet
 index `j` (1..n_transit) is a TTV planet at position `r` in
