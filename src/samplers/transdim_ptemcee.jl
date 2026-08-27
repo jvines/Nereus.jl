@@ -298,7 +298,6 @@ function sample_transdim_ptemcee(
                              n_obs = length(data.t_rv), n_phot = length(data.t_phot))
                  for _ in 1:n_thr]
     thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
-    thread_rngs   = [MersenneTwister(seed + 1_000_003 * t) for t in 1:n_thr]
     rng_master    = MersenneTwister(seed)
 
     # MoMS proposal strategy — shared across threads. Scales are tuned
@@ -652,7 +651,7 @@ function sample_transdim_ptemcee(
             tid = Threads.threadid()
             t = (task_idx - 1) ÷ n_walkers_eff + 1
             w = (task_idx - 1) % n_walkers_eff + 1
-            trng_s = thread_rngs[tid]
+            trng_s = MersenneTwister(_walker_seed(seed, 3, task_idx))
             @inbounds for (uf_pos, prior_ps) in cov_seed_slots
                 v = quantile(prior_ps, 0.25 + 0.5 * rand(trng_s))
                 isfinite(v) || continue
@@ -743,14 +742,24 @@ function sample_transdim_ptemcee(
     end
 
     # ---- Stretch move (continuous params only; same as fixed-dim) ----
+    # Per-walker RNGs (see sample_ptemcee): a per-thread stream makes the
+    # chain depend on the thread count at fixed seed. Trans-dim moves draw
+    # a variable number of times, which is still fine here — a task-keyed
+    # stream is consumed only by that task, in its own deterministic order.
+    rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
+    rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
+    rngs_td = [MersenneTwister(_walker_seed(seed, 4, i))
+               for i in 1:(n_temps * n_walkers_eff)]
+
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
         partner_hi = active_half === :h1 ? n_walkers_eff : half
+        task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
         Threads.@threads :static for task_idx in 1:length(tasks)
             tid = Threads.threadid()
             t, w = tasks[task_idx]
             β = βs[t]
-            trng = thread_rngs[tid]
+            trng = task_rngs[task_idx]
             buf  = thread_proposal[tid]
 
             w_partner = rand(trng, partner_lo:partner_hi)
@@ -790,7 +799,7 @@ function sample_transdim_ptemcee(
             tid = Threads.threadid()
             t = (task_idx - 1) ÷ n_walkers_eff + 1
             w = (task_idx - 1) % n_walkers_eff + 1
-            trng = thread_rngs[tid]
+            trng = rngs_td[task_idx]
             rand(trng) < td.transdim_fraction || continue
 
             theta = thread_theta[tid]

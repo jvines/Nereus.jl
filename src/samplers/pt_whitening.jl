@@ -197,7 +197,6 @@ function sample_pt_whitening(
                                    n_obs = length(data.t_rv), n_phot = length(data.t_phot))
                        for _ in 1:n_thr]
     thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
-    thread_rngs     = [MersenneTwister(seed + 1_000_003 * t) for t in 1:n_thr]
     rng_master      = MersenneTwister(seed)
 
     # Evaluate (log_prior_bounded, log_like) at a BOUNDED-space point `x`
@@ -331,14 +330,20 @@ function sample_pt_whitening(
 
     # Tempered Goodman-Weare stretch half-step (affine-invariant within
     # temp). Identical move to the validated sample_ptemcee.
+    # Per-walker RNGs (see the same fix in sample_ptemcee): a per-thread
+    # stream makes the chain depend on the thread count at fixed seed.
+    rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
+    rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
+
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
         partner_hi = active_half === :h1 ? n_walkers_eff : half
+        task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
         Threads.@threads :static for task_idx in 1:length(tasks)
             tid = Threads.threadid()
             t, w = tasks[task_idx]
             β = βs[t]
-            trng = thread_rngs[tid]
+            trng = task_rngs[task_idx]
             buf  = thread_proposal[tid]
 
             w_partner = rand(trng, partner_lo:partner_hi)

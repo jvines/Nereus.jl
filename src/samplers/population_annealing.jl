@@ -164,7 +164,6 @@ function sample_pa(
                              length(params.config.noise_models);
                              n_obs = length(data.t_rv), n_phot = length(data.t_phot))
                  for _ in 1:n_thr]
-    thread_rngs  = [MersenneTwister(seed + 1_000_003 * t) for t in 1:n_thr]
     rng_master   = MersenneTwister(seed)
 
     # Per-parameter MCMC step size from prior scale (1% of range for
@@ -353,8 +352,10 @@ function sample_pa(
         # Per-replica RNGs persisted ACROSS sweeps within this β step (so the
         # adaptive extra sweeps draw fresh randomness, not a reset stream).
         mut_seeds = rand(rng_master, UInt64, n_replicas)
-        replica_rngs = mutation_kernel === :stretch ? thread_rngs :
-                       [MersenneTwister(mut_seeds[i]) for i in 1:n_replicas]
+        # Per-replica for EVERY kernel. Keying the stretch kernel on the
+        # thread instead made the run depend on the thread count at fixed
+        # seed; a replica-keyed stream is consumed only by that replica.
+        replica_rngs = [MersenneTwister(mut_seeds[i]) for i in 1:n_replicas]
 
         # Two-half ensemble bookkeeping (stretch only).
         half = n_replicas ÷ 2
@@ -386,7 +387,7 @@ function sample_pa(
                     (half + 1, n_replicas,  1,        half))
                 Threads.@threads :static for i in active_lo:active_hi
                     tid = Threads.threadid()
-                    trng = thread_rngs[tid]
+                    trng = replica_rngs[i]
                     partner = rand(trng, partner_lo:partner_hi)
                     u = rand(trng)
                     z = ((stretch_a - 1) * u + 1)^2 / stretch_a

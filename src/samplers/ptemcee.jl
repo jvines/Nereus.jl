@@ -35,6 +35,13 @@
 # tempering. Cite Vousden+ 2016 (ptemcee), not emcee.
 
 using Random
+
+# Deterministic per-walker stream seed. Mixed arithmetically (not via
+# `hash`) so it is stable across Julia versions.
+@inline function _walker_seed(seed::Integer, half::Integer, i::Integer)
+    s = reinterpret(UInt64, Int64(seed))
+    s * 0x9e3779b97f4a7c15 + UInt64(half) * 0x517cc1b727220a95 + UInt64(i)
+end
 using MCMCChains
 using Statistics: cov, quantile
 using LinearAlgebra: cholesky, logdet, Symmetric, norm, I
@@ -333,7 +340,6 @@ function sample_ptemcee(
                        for _ in 1:n_thr]
     thread_xb       = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
     thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
-    thread_rngs     = [MersenneTwister(seed + 1_000_003 * t) for t in 1:n_thr]
     rng_master      = MersenneTwister(seed)
 
     # Evaluate (log_prior_bounded, log_like) at a BOUNDED-space point
@@ -501,14 +507,25 @@ function sample_ptemcee(
         end
     end
 
+    # One RNG per WALKER SLOT, not per thread. Task->thread assignment
+    # changes with `-t`, so drawing from a per-thread stream makes the
+    # chain depend on the thread count at fixed seed (measured: K differs
+    # in the 4th decimal between -t 2 and -t 4). Keying the stream on
+    # task_idx makes a run bit-identical across thread counts. Each task
+    # consumes exactly three draws per sweep (partner, stretch u, accept),
+    # so reusing the object across sweeps stays deterministic.
+    rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
+    rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
+
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
         partner_hi = active_half === :h1 ? n_walkers_eff : half
+        task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
         Threads.@threads :static for task_idx in 1:length(tasks)
             tid = Threads.threadid()
             t, w = tasks[task_idx]
             β = βs[t]
-            trng = thread_rngs[tid]
+            trng = task_rngs[task_idx]
             buf  = thread_proposal[tid]
 
             w_partner = rand(trng, partner_lo:partner_hi)

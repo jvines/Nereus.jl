@@ -20,7 +20,7 @@
 #   Blunt et al. 2017, AJ 153, 229 (algorithm)
 #   Blunt et al. 2020, AJ 159, 89 (orbitize! v1)
 
-using Random: MersenneTwister, AbstractRNG
+using Random: MersenneTwister, Xoshiro, AbstractRNG
 import MCMCChains
 
 """
@@ -154,14 +154,15 @@ function ofti_sample(target::NereusTarget;
     nthreads = max(1, Threads.nthreads())
     thetas       = [Theta(params)              for _ in 1:nthreads]
     x_bounds     = [zeros(Float64, n_unf)      for _ in 1:nthreads]
-    thread_rngs  = [MersenneTwister(seed + 1000*t) for t in 1:nthreads]
 
     # Per-thread closure. Same logic as before; takes the thread id so
-    # it can pick its own buffers, deterministically seeded per thread.
-    @inline function _draw_and_evaluate!(tid::Int)
+    # it can pick its own buffers. The RNG is passed IN, keyed on the
+    # attempt index rather than the thread, so the draw sequence does not
+    # depend on how many threads Julia was started with. Xoshiro (not
+    # MersenneTwister) because this constructs one per attempt.
+    @inline function _draw_and_evaluate!(tid::Int, trng)
         theta     = thetas[tid]
         x_bounded = x_bounds[tid]
-        trng      = thread_rngs[tid]
         for j in 1:n_unf
             ps = layout.unfrozen_priors[j]
             x_bounded[j] = prior_transform(rand(trng), ps)
@@ -201,7 +202,7 @@ function ofti_sample(target::NereusTarget;
     # See feedback_threading_threadid.md.
     Threads.@threads :static for attempt in 1:n_cal
         tid = Threads.threadid()
-        ll, in_bounds = _draw_and_evaluate!(tid)
+        ll, in_bounds = _draw_and_evaluate!(tid, Xoshiro(_walker_seed(seed, 5, attempt)))
         if in_bounds
             per_t_in_bounds[tid] += 1
             if isfinite(ll)
@@ -228,11 +229,12 @@ function ofti_sample(target::NereusTarget;
 
     # ---------- Pass 2: production with fixed reference (threaded) ---
     # Accept/reject is per-attempt independent; collect into per-thread
-    # accepted vectors, then concatenate. Random acceptance uses the
-    # thread's local rng (seeded above), so seeding is reproducible
-    # within a (nthreads, seed) configuration.
+    # vectors, then concatenate and re-sort into ATTEMPT order. Both the
+    # draws and the ordering are therefore independent of the thread
+    # count -- a run is reproducible from `seed` alone.
     per_t_accepted   = [Vector{Vector{Float64}}() for _ in 1:nthreads]
     per_t_loglikes   = [Float64[]                  for _ in 1:nthreads]
+    per_t_attempt    = [Int[]                      for _ in 1:nthreads]
     per_t_finite_p   = zeros(Int, nthreads)
     per_t_in_bnds_p  = zeros(Int, nthreads)
     per_t_overshoot  = zeros(Int, nthreads)
@@ -240,8 +242,9 @@ function ofti_sample(target::NereusTarget;
     pb_prod = ProgressBar("OFTI production";
                            total = n_attempts, enabled = show_progress)
     Threads.@threads :static for attempt in 1:n_attempts
-        tid = Threads.threadid()
-        ll, in_bounds = _draw_and_evaluate!(tid)
+        tid  = Threads.threadid()
+        trng = Xoshiro(_walker_seed(seed, 6, attempt))
+        ll, in_bounds = _draw_and_evaluate!(tid, trng)
         if in_bounds
             per_t_in_bnds_p[tid] += 1
             if isfinite(ll)
@@ -250,15 +253,22 @@ function ofti_sample(target::NereusTarget;
                     per_t_overshoot[tid] += 1
                     push!(per_t_accepted[tid], copy(x_bounds[tid]))
                     push!(per_t_loglikes[tid], ll)
-                elseif rand(thread_rngs[tid]) < exp(ll - log_lik_ref)
+                    push!(per_t_attempt[tid], attempt)
+                elseif rand(trng) < exp(ll - log_lik_ref)
                     push!(per_t_accepted[tid], copy(x_bounds[tid]))
                     push!(per_t_loglikes[tid], ll)
+                    push!(per_t_attempt[tid], attempt)
                 end
             end
         end
     end
     accepted        = reduce(vcat, per_t_accepted)
     log_likes       = reduce(vcat, per_t_loglikes)
+    # Restore attempt order: `reduce(vcat, ...)` concatenates thread-first,
+    # which would otherwise permute the output with the thread count.
+    ord             = sortperm(reduce(vcat, per_t_attempt))
+    accepted        = accepted[ord]
+    log_likes       = log_likes[ord]
     n_finite_prod   = sum(per_t_finite_p)
     n_in_bounds_prod= sum(per_t_in_bnds_p)
     n_overshoot     = sum(per_t_overshoot)
