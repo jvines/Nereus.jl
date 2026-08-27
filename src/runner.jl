@@ -350,6 +350,30 @@ function _validate_config(cfg::AbstractDict)
         end
     end
 
+    # ---- model.external_priors ----
+    if _has(cfg, :model) && _has(_get(cfg, :model), :external_priors)
+        for (i, e) in enumerate(_get(_get(cfg, :model), :external_priors))
+            if !_has(e, :quantity)
+                push!(errs, "model.external_priors[$i] missing `quantity`"); continue
+            end
+            q = String(_get(e, :quantity))
+            q in ("ecc", "rho_s") || push!(errs,
+                "model.external_priors[$i].quantity=`$q` unknown (known: ecc, rho_s)")
+            if !_has(e, :prior)
+                push!(errs, "model.external_priors[$i] missing `prior`"); continue
+            end
+            pr = _get(e, :prior)
+            if !_has(pr, :type)
+                push!(errs, "model.external_priors[$i].prior missing `type`")
+            else
+                pt = String(_get(pr, :type))
+                pt in _KNOWN_PRIORS || push!(errs,
+                    "model.external_priors[$i].prior.type=`$pt` unknown " *
+                    "(known: $(join(_KNOWN_PRIORS, ", ")))")
+            end
+        end
+    end
+
     # ---- noise_models ----
     if _has(cfg, :noise_models)
         for (i, nm) in enumerate(_get(cfg, :noise_models))
@@ -585,10 +609,28 @@ function _parse_rv_csv(block)
     header = vec(headers)
     col(name) = findfirst(==(name), header)
 
-    function fcol(name)
+    # Blank / "NaN" / "null" cells are normal in real activity-indicator
+    # tables (a night with no BIS, a pipeline that did not report log R'HK).
+    # `Float64(x)` on those raised a bare MethodError from deep inside the
+    # reader. Indicators tolerate NaN -- Nereus masks non-finite entries per
+    # channel -- so parse them to NaN; the core columns (time, rv, error) must
+    # not, and say which cell is bad.
+    _MISSING = ("", "nan", "NaN", "NA", "na", "null", "NULL", "-")
+    function _num(x, name, i; strict::Bool)
+        x isa Real && return Float64(x)
+        s = strip(string(x))
+        if s in _MISSING || (v = tryparse(Float64, s)) === nothing
+            strict && error("Column `$name` row $i in $path is not a number: " *
+                            "`$(s)`. Time, RV and error columns may not be blank.")
+            return NaN
+        end
+        return v
+    end
+    function fcol(name; strict::Bool = true)
         idx = col(name)
         idx === nothing && error("Column `$name` not in $path; have $header")
-        return Float64[Float64(x) for x in raw[:, idx]]
+        return Float64[_num(raw[i, idx], name, i; strict = strict)
+                       for i in axes(raw, 1)]
     end
     function scol(name)
         idx = col(name)
@@ -605,12 +647,13 @@ function _parse_rv_csv(block)
     # Indicator values from `indicator_cols`; per-indicator 1σ from a `<col>_err`
     # column when the CSV provides one (required by ActivityGP / indicator GPs).
     indicators = isempty(ind_cols) ? nothing :
-                  Dict{String, Vector{Float64}}(c => fcol(c) for c in ind_cols)
+                  Dict{String, Vector{Float64}}(c => fcol(c; strict = false)
+                                                for c in ind_cols)
     indicator_errs = nothing
     for c in ind_cols
         col("$(c)_err") === nothing && continue
         indicator_errs === nothing && (indicator_errs = Dict{String, Vector{Float64}}())
-        indicator_errs[c] = fcol("$(c)_err")
+        indicator_errs[c] = fcol("$(c)_err"; strict = false)
     end
     # Optional SB2 component tag: `component` (or `star`) column → rv_comp.
     comp = nothing
@@ -907,6 +950,17 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm)
         p_kw[:ttv_backend] = Symbol(ttv_backend)
     end
 
+    # External priors -- priors on DERIVED quantities (:ecc, :rho_s), which are
+    # not sampled slots and so cannot be expressed through `priors`. Params has
+    # always accepted these; the runner never read them, which meant a job
+    # config could not state the eccentricity prior a sparse activity-
+    # contaminated RV fit needs (uniform sesinw/secosw gives p(e) ~ e and rails
+    # e -> 1), nor an informative rho_s.
+    ext_cfg = _get(mdl, :external_priors; default = Any[])
+    if !isempty(ext_cfg)
+        p_kw[:external_priors] = [_build_external_prior(e) for e in ext_cfg]
+    end
+
     menu === nothing || (p_kw[:transdim_noise] = true)
 
     params = Params(; p_kw...)
@@ -933,6 +987,17 @@ function _build_priors(priors_cfg)
         out[String(name)] = T(args...)
     end
     return out
+end
+
+function _build_external_prior(spec)
+    q = Symbol(_get(spec, :quantity; required = true))
+    pr = _get(spec, :prior; required = true)
+    T = _PRIOR_TYPES[String(_get(pr, :type; required = true))]
+    args = collect(_get(pr, :args; default = Any[]))
+    # :ecc is per-planet, :rho_s is global; default from the quantity so a
+    # config cannot silently pair the wrong scope with the right prior.
+    per_planet = Bool(_get(spec, :per_planet; default = (q === :ecc)))
+    return ExternalPrior(q, T(args...), per_planet)
 end
 
 # ---- Noise models -----------------------------------------------------

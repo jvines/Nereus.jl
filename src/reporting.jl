@@ -556,8 +556,34 @@ end
 function _noise_model_label(::ActivityJitter)
     return "ActJitter"
 end
-function _noise_model_label(::NoiseModel)
-    return "Noise"
+function _noise_model_label(::CeleriteRotationFM17)
+    return "GP-RotFM17"
+end
+function _noise_model_label(::MaternGP)
+    return "GP-Matern"
+end
+function _noise_model_label(::IndicatorFloor)
+    return "IndFloor"
+end
+function _noise_model_label(::ErrorScale)
+    return "ErrScale"
+end
+function _noise_model_label(::StudentT)
+    return "StudentT"
+end
+function _noise_model_label(::NightlyOffset)
+    return "NightlyOff"
+end
+function _noise_model_label(m::HarmonicBlock)
+    return "Harmonic"
+end
+# Fallback: the TYPE NAME, never a shared constant. These labels are used as
+# dictionary KEYS for occupancy (science_model_selection), so two models
+# sharing one label silently overwrite each other and a model disappears from
+# the model-selection table. A new NoiseModel subtype with no method here gets
+# a distinct name rather than joining a collision.
+function _noise_model_label(m::NoiseModel)
+    return String(nameof(typeof(m)))
 end
 
 """

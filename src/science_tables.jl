@@ -308,7 +308,12 @@ function science_model_selection(chains, params::Params)
     for (i, nm) in enumerate(params.config.noise_models)
         col = Symbol("noise_active_$i")
         col in allnames || continue
-        noise[_noise_model_label(nm)] = mean(vec(Array(chains[col])) .> 0.5)
+        # Disambiguate rather than overwrite: two models of the same type (e.g.
+        # a per-instrument GP on two instruments) share a label, and keying the
+        # occupancy Dict on it would drop all but the last.
+        lbl = _noise_model_label(nm)
+        haskey(noise, lbl) && (lbl = "$(lbl)#$(i)")
+        noise[lbl] = mean(vec(Array(chains[col])) .> 0.5)
     end
     if !isempty(noise)
         best = maximum(values(noise))
