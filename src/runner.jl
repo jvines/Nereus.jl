@@ -1863,8 +1863,35 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict)
                   String(sampler_cfg)
         is_ensemble = sampler in _ENSEMBLE_SAMPLERS
 
+        # Drop parameters owned by a noise model that is NEVER active. In a
+        # trans-dim run an inactive slot holds stale junk, not posterior draws
+        # -- values that sit outside their own prior bounds -- so assessing
+        # them produced a guaranteed FAIL on a sound run. Measured on the HD
+        # 18599 artifact: every railed parameter reported belonged to a model
+        # with occupancy 0 (errscale_*, gp_*), one with a median of -5.09
+        # against a lower bound of 0.1, which no real draw can be.
+        # Partially-occupied models are left in: their columns do contain real
+        # draws, and masking per draw is a separate change.
+        chain_syms = Set(names(chains, :parameters))
+        skip = Set{Symbol}()
+        for (i, nm) in enumerate(params.config.noise_models)
+            col = Symbol("noise_active_$i")
+            col in chain_syms || continue          # not toggleable => always on
+            any(vec(Array(chains[col])) .> 0.5) && continue
+            for pn in noise_param_names(nm, params.config.instruments;
+                                        data = nothing)
+                push!(skip, Symbol(pn))
+            end
+        end
+        pnames = isempty(skip) ? nothing :
+                 [s for s in layout.unfrozen_names if Symbol(s) ∉ skip]
+        isempty(skip) || @info "fit_health: excluding $(length(skip)) parameter(s) " *
+              "of never-active noise models from the assessment (inactive-slot " *
+              "values are not posterior draws)"
+
         report = assess_fit(chains; prior_bounds = prior_bounds,
-                             ensemble = is_ensemble)
+                             ensemble = is_ensemble,
+                             param_names = pnames)
 
         summary["fit_health"] = Dict{String, Any}(
             "overall"  => String(report.overall),
