@@ -1909,6 +1909,44 @@ function _populate_summary!(summary, result, params, chains)
             collect(Float64.(getfield(result, :acceptance_transdim)))
     end
 
+    # Every evidence estimate the sampler produced, with its error, and which
+    # one `log_z` reports. A bare log_z is not quotable on its own: the
+    # tempered stack (TI/TI+/SS+/H+) shares one mean_logL array, so those four
+    # agreeing with each other is not a cross-check, and they can sit >100 nats
+    # low on a signal-locked posterior while doing so. Recording the spread is
+    # what makes a Bayes factor between two runs defensible.
+    ev = Dict{String, Any}()
+    for (key, fld) in ("bridge" => :log_evidence_bridge,
+                       "mode_laplace" => :log_evidence_laplace)
+        hasfield(typeof(result), fld) || continue
+        v = getfield(result, fld)
+        v isa Real && isfinite(v) && (ev[key] = Float64(v))
+    end
+    if hasfield(typeof(result), :evidence)
+        rep = getfield(result, :evidence)
+        for (key, fld) in ("ti" => :ti, "ti_plus" => :ti_plus,
+                           "ss_plus" => :ss_plus, "hybrid" => :hybrid)
+            hasfield(typeof(rep), fld) || continue
+            t = getfield(rep, fld)
+            (t isa Tuple && length(t) == 2 && isfinite(t[1])) || continue
+            ev[key] = Dict("log_z" => Float64(t[1]), "se" => Float64(t[2]))
+        end
+        hasfield(typeof(rep), :hybrid_beta_star) &&
+            (ev["hybrid_beta_star"] = Float64(getfield(rep, :hybrid_beta_star)))
+    end
+    if !isempty(ev)
+        # Name the headline by matching the reported value, so a reader knows
+        # which estimator `log_z` came from without re-deriving the selection logic.
+        lz = Float64(getfield(result, :log_evidence))
+        which = "tempered"
+        for (k, v) in ev
+            val = v isa Dict ? get(v, "log_z", NaN) : v
+            (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)
+        end
+        ev["reported"] = which
+        summary["evidence"] = ev
+    end
+
     # n_planets posterior (only when the chain has :n_planets)
     chain_names = Set(names(chains, :parameters))
     if :n_planets in chain_names
