@@ -231,10 +231,12 @@ const _KNOWN_STABILITY      = ("none", "amd", "gladman")
 const _KNOWN_PRIORS         = ("UniformPrior", "LogUniformPrior",
                                 "ModJeffreysPrior", "NormalPrior",
                                 "FixedPrior", "SinePrior", "BetaPrior")
-const _KNOWN_NOISE_KINDS    = ("CeleriteRotation", "CeleriteSHO",
-                                "CeleriteRotationFM17",
-                                "ActivityDecorrelation", "ARModel",
-                                "MAModel", "ActivityJitter", "ActivityGP")
+# Valid `noise_models[].kind` values. Derived from _NOISE_TYPES (defined
+# further down, so this is a function, not a const) because the hand-written
+# tuple this replaced had drifted: it omitted ErrorScale, NightlyOffset,
+# HarmonicBlock, StudentT and MaternGP, all of which the builder supports, so
+# validation rejected configs that would in fact have run.
+_known_noise_kinds() = sort!(collect(keys(_NOISE_TYPES)))
 const _KNOWN_SAMPLERS       = ("ptemcee", "transdim_ptemcee", "pt",
                                 "pt_warm", "rjmcmc", "moms", "moms_ns",
                                 "nested", "nested_ins", "nested_dynamic",
@@ -380,8 +382,9 @@ function _validate_config(cfg::AbstractDict)
             _has(nm, :kind) || (push!(errs,
                 "noise_models[$i] missing `kind`"); continue)
             k = String(_get(nm, :kind))
-            k in _KNOWN_NOISE_KINDS || push!(errs,
-                "noise_models[$i].kind=`$k` unknown (known: $(join(_KNOWN_NOISE_KINDS, ", ")))")
+            k in _known_noise_kinds() || push!(errs,
+                "noise_models[$i].kind=`$k` unknown " *
+                "(known: $(join(_known_noise_kinds(), ", ")))")
         end
     end
 
@@ -1015,6 +1018,12 @@ const _NOISE_TYPES = Dict(
     "HarmonicBlock"          => HarmonicBlock,
     "StudentT"               => StudentT,
     "MaternGP"               => MaternGP,
+    # Needed for a FAIR fixed-config comparison between AD and ActivityGP: the
+    # GP models the indicator channels, a mean-model does not, so without a
+    # floor on those channels the two evidences are computed on different data
+    # and are not comparable. default_noise_menu adds it always-on, but a
+    # hand-written `noise_models` list could not reach it.
+    "IndicatorFloor"         => IndicatorFloor,
 )
 
 "Does any constructor method of `T` accept keyword `kw` (or slurp `kwargs...`)?"
@@ -1048,16 +1057,19 @@ function _build_noise_models(nm_cfg, ic)
         kw_sym = Dict{Symbol, Any}(
             Symbol(k) => (v isa AbstractVector ? collect(v) : v)
             for (k, v) in kwargs)
-        # ActivityGP `channels` is a Vector{Symbol}; JOB_CONFIG supplies them as
-        # strings (e.g. ["bis","fwhm"]) — symbolize so the constructor's typed
-        # field accepts them instead of a TypeError.
-        haskey(kw_sym, :channels) &&
-            (kw_sym[:channels] = Symbol.(kw_sym[:channels]))
-        # ActivityGP `latent_kernel`/`backend` are Symbols; JSON supplies them
-        # as strings (e.g. "mep", "auto") — symbolize so the typed keyword
-        # constructor accepts them instead of a MethodError.
-        for k in (:latent_kernel, :backend)
-            haskey(kw_sym, k) && (kw_sym[k] = Symbol(kw_sym[k]))
+        # JSON has no Symbol, so any Symbol-typed field arrives as a String and
+        # the typed constructor raises a TypeError. Coerce from the FIELD TYPE
+        # rather than a hand-kept list of names: the list version covered
+        # `channels`/`latent_kernel`/`backend` and silently missed
+        # IndicatorFloor's `kernel`, and would miss the next one added.
+        for k in collect(keys(kw_sym))
+            hasfield(T, k) || continue
+            FT = fieldtype(T, k); v = kw_sym[k]
+            if FT === Symbol && v isa AbstractString
+                kw_sym[k] = Symbol(v)
+            elseif FT <: AbstractVector{Symbol} && v isa AbstractVector
+                kw_sym[k] = Symbol.(v)
+            end
         end
         # Inject the top-level `channel`/`instruments` ONLY into constructors
         # that accept them. The noise models are not uniform: Celerite GPs take
