@@ -80,4 +80,43 @@ using LinearAlgebra, Statistics, Random
     rpc = _reference_path_core(lp, Yc; n_particles = 1024, n_beta = 3000,
                                n_steps = 16, seed = 7)
     @test abs(rpc.log_z_ais - truth) < 0.5      # observed 0.02
+
+    # Bridge on the SAME well-mixed correlated draws. It is fine here
+    # (observed -0.012); the leg exists so the sticky case below is a
+    # contrast against a measured pass, not against nothing.
+    bridge_err(Y) = begin
+        mu = vec(mean(Y; dims = 2)); S = cov(Y; dims = 2) + 1e-8I
+        Lh = cholesky(Symmetric(S)).L
+        lq(y) = (z = Lh \ (y .- mu); -0.5*sum(abs2, z) - 0.5d*log(2π) - logdet(Lh))
+        l1 = filter(isfinite, [lp(@view Y[:, i]) - lq(@view Y[:, i]) for i in 1:size(Y, 2)])
+        l2 = Float64[]
+        for _ in 1:size(Y, 2)
+            y = mu + Lh * randn(rng, d); v = lp(y)
+            isfinite(v) && push!(l2, v - lq(y))
+        end
+        first(_bridge_iterate(l1, l2, 1000, 1e-12)) - truth
+    end
+    @test abs(bridge_err(Yc)) < 0.5
+
+    # STICKY chain: a tiny step scale, no thinning. n_eff collapses to ~20,
+    # far below the d + d(d+1)/2 = 135 parameters of the Gaussian reference,
+    # so `q` is estimated from too few independent points to be usable.
+    # Bridge consumes `q` directly and goes several nats LOW (observed
+    # -3.2); reference-path anneals away from `q` and survives (observed
+    # +0.17). Splitting the sample does NOT rescue bridge (-2.8), so this is
+    # a badly ESTIMATED reference, not training-set re-use. Documented in
+    # docs/src/evidence.md -- the guidance to check ESS rests on this.
+    Ys = Matrix{Float64}(undef, d, N)
+    y = Tinv(Lc * randn(rng, d), b); lpy = lp(y)
+    for it in 1:N
+        prop = y .+ 0.05 .* (Lc * randn(rng, d)); lpp = lp(prop)
+        if isfinite(lpp) && log(rand(rng)) < lpp - lpy; y = prop; lpy = lpp; end
+        Ys[:, it] = y
+    end
+    rps = _reference_path_core(lp, Ys; n_particles = 1024, n_beta = 3000,
+                               n_steps = 16, seed = 7)
+    be = bridge_err(Ys)
+    @info "sticky-chain evidence" bridge_err = be refpath_err = rps.log_z_ais - truth
+    @test abs(rps.log_z_ais - truth) < 1.0        # reference-path holds
+    @test abs(be) > 2 * abs(rps.log_z_ais - truth)  # bridge does not
 end

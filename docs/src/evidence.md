@@ -432,6 +432,40 @@ aliases — use nested sampling, which explores modes natively, or supply a
 mixture reference. Diagnose it directly: look at the marginal of the parameter
 you suspect (period, usually) and check it is not simply reproducing its prior.
 
+⚠ **Bridge also needs an adequate *effective* sample size, and it fails
+quietly without one.** It fits `q` from the posterior draws, so when those
+draws are strongly autocorrelated the reference is estimated from far fewer
+independent points than the draw count suggests — a `d`-dimensional Gaussian
+reference has `d + d(d+1)/2` free parameters (135 at `d = 15`), and fitting
+that from ~20 effective points gives a near-singular, badly wrong `q`.
+Measured on a curved 15-dimensional target with an **exactly known** log Z,
+varying only the chain's autocorrelation:
+
+| `n_eff` | bridge error | reference-path error |
+|--------:|-------------:|---------------------:|
+| 20 000 (i.i.d.) | −0.009 | +0.001 |
+| 1 166 | −0.012 | −0.030 |
+| 146 | −0.400 | −0.008 |
+| 22 | **−3.217** | +0.174 |
+
+The bias is one-sided (always *low*) and reaches several nats before anything
+in the returned diagnostics looks wrong.
+
+Two things this is **not**. It is not the estimator re-using its training
+draws: a split-sample variant, which fits `q` on one half and evaluates on
+the other, still errs by −2.784 at `n_eff = 22`. And it is not mere
+*displacement* of the reference — bridge is robust to that, absorbing a `q`
+shifted by 1σ or mis-scaled from ×0.6 to ×2.5 with no measurable error. The
+failure is specifically a `q` that is **poorly estimated**, and it hits
+bridge and not reference-path because reference-path anneals *away* from `q`
+along a β-path and so recovers from a bad reference, while bridge consumes
+`q` directly.
+
+**Check the chain's ESS before quoting a bridge value**, and prefer
+[reference-path](#reference-path-evidence--thermodynamic-integration-without-the-prior)
+when `n_eff` is not comfortably above `d(d+3)/2`. A well-mixed chain is not a
+concern: at `n_eff ≳ 1000` the two agree to hundredths of a nat.
+
 **Validation.** Error of **0.003 nats** against an analytic 22-dimensional
 target. On the real HD 18599 RVPM posterior, `log_z = 11466.13 ± 0.02` with
 `overlap = 1.000`, from both the Student-t and Gaussian proposals
