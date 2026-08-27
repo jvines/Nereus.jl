@@ -214,6 +214,60 @@ transit shape, not a feature you will see by eye.
 
 ---
 
+## Building the inputs
+
+`joint_obliquity_fit` takes nights directly, but the framework path — a `Data`
+plus a `Params` you can hand to any sampler — goes through two functions.
+
+```julia
+data, inst_names = obliquity_data(rm_nights; tomo_nights = tomo_nights)
+params = obliquity_params(data, inst_names;
+                          P = 2.83, Tc = 2459000.123,
+                          b = (0.30, 0.05), a_Rs = (5.6, 0.2),
+                          rr = (0.10, 0.02), vsini = (95_000.0, 3_000.0))
+```
+
+**`obliquity_data(rm_nights; tomo_nights, t_ref)`** assembles RM velocity
+nights and tomographic maps into one `Data`, with **one night mapped to one
+instrument**. That is structural, not cosmetic: each night gets its own offset
+and jitter, because a spectroscopic transit taken on a different night has its
+own velocity zero point and its own pulsation realisation. Night tags become
+the instrument names and must therefore be unique — a duplicate tag is an
+error, not a silent merge, since the two nights' offsets and jitters would
+otherwise collide.
+
+**`obliquity_params(data, inst_names; P, Tc, b, a_Rs, rr, vsini, ...)`** builds
+the parameter set. The transit-solution arguments are `(mean, sd)` tuples
+rather than scalars, and they enter as **priors, not fixed values** — an
+obliquity fit usually has no light curve of its own, so the geometry comes from
+a published solution and carries that solution's uncertainty into λ. `P` is
+pinned hard (a `NormalPrior` of fractional width `1e-6`); the ephemeris enters
+through `Mo_k1`, not a transit-time slot, so a published `sigma_Tc` is
+converted to a width `2π·sigma_Tc/P` in mean anomaly.
+
+!!! warning "`vsini` units differ between the two paths"
+    `obliquity_params` takes `vsini` in **m/s**, because it writes the
+    framework's `v_sin_i_star` slot, which lives on the RV channel (its hard
+    bounds are `100.0` to `300_000.0`). So 95 km/s is `(95_000.0, 3_000.0)`.
+
+    `joint_obliquity_fit` and `tomogram_bayes` take it in **km/s**, matching
+    the tomographic `vgrid`, and convert internally for the RV kernel
+    (`obliquity_joint.jl:163`). There 95 km/s is `(95.0, 3.0)`.
+
+    Both are self-consistent; they are simply different interfaces. Passing a
+    km/s value to `obliquity_params` lands under its 100 m/s floor and will
+    rail, rather than fail loudly.
+
+Set `arome = true` to use the ARoME CCF formulation (`RVPM_RM_A`) instead of
+Hirano; prefer it whenever `v sin i ≳ β_p`.
+
+!!! note "rm_velocity_fit is superseded"
+    `rm_velocity_fit` still exists and emits a deprecation warning. RM
+    velocities already flow through `rv_log_likelihood`, so a `Params` built
+    by `obliquity_params` covers the velocity-only case — use
+    `joint_obliquity_fit(...; use_tomogram = false)`, which keeps the
+    parameter space identical to the joint fit and so stays comparable to it.
+
 ## Joint fits
 
 ```julia
