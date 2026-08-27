@@ -778,6 +778,35 @@ function sample_ptemcee(
         end
     end
 
+    # Bridge is biased LOW when its reference `q` is estimated from too few
+    # INDEPENDENT points. `q` carries n_dim + n_dim(n_dim+1)/2 free parameters,
+    # and on a curved 15-D target with exactly known log Z bridge fell to -3.2
+    # nats at n_eff ~ 22 while reference-path held to +0.17. Splitting the
+    # sample does not rescue it (-2.8), so it is the ESTIMATE of q that is bad,
+    # not re-use of the draws -- and no diagnostic bridge returns will say so
+    # (`overlap` reads ~1 throughout). Refuse the headline rather than report a
+    # silently-low number. Well-mixed chains are unaffected: 51 Peg runs at
+    # n_eff ~ 8000 against 135 parameters.
+    if isfinite(log_z_bridge)
+        n_eff_min = try
+            minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
+        catch err
+            @debug "sample_ptemcee: ESS unavailable for the bridge guard" exception = err
+            NaN
+        end
+        n_par_q = n_dim + n_dim * (n_dim + 1) ÷ 2
+        if isfinite(n_eff_min) && n_eff_min < n_par_q
+            @warn "sample_ptemcee: dropping bridge as the headline — its " *
+                  "reference is fitted from too few effective samples " *
+                  "(min ESS $(round(Int, n_eff_min)) < $n_par_q free parameters " *
+                  "in q). Bridge is biased LOW in this regime and none of its " *
+                  "diagnostics detect it. Sample longer, or use " *
+                  "`reference_path_evidence`, which anneals away from q and is " *
+                  "unaffected." min_ess = n_eff_min n_params_in_q = n_par_q
+            log_z_bridge = NaN
+        end
+    end
+
     # A NON-FINITE tempered evidence is the loudest possible failure and used to
     # be the quietest: the switch below is gated on isfinite(log_z), so -Inf or
     # NaN skipped the check entirely and propagated into res.log_evidence with no
