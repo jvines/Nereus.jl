@@ -135,6 +135,7 @@ function run_job(cfg::AbstractDict)
 
         # --- Build summary ---------------------------------------------
         _populate_summary!(summary, result, params, chains)
+        _augment_evidence!(summary, params, data, chains)
         # Authoritative science contract: conditioned, unit-tagged fitted/derived
         # + model_selection + run_info, and the multi-format tables. Supersedes
         # the legacy unconditioned `params` block (which is inactive-slot junk in
@@ -1921,6 +1922,59 @@ end
 # =====================================================================
 # Summary writer
 # =====================================================================
+
+# Bridge sampling needs a Gaussian proposal on R^n, so it is skipped whenever
+# `target.transform === nothing` -- and run_job builds its target with
+# `unconstrained = false`, which means EVERY run_job fit silently fell through
+# to the tempered stack for its headline evidence. That is the one estimator
+# documented to sit >100 nats low on a signal-locked posterior while its four
+# variants agree with each other to a decimal.
+#
+# Rather than change the sampling geometry for every user, recompute the
+# prior-free estimators AFTER the fit against an unconstrained target built
+# from the same params and data. The chains are unchanged; only the evidence
+# block gains `bridge` (and `reference_path`), and `reported` is upgraded to
+# bridge when it is usable.
+function _augment_evidence!(summary, params, data, chains)
+    try
+        ev = get(summary, "evidence", nothing)
+        ev isa AbstractDict || return
+        chain_syms = Set(names(chains, :parameters))
+        # Trans-dim chains mix dimensions; a single Gaussian reference over a
+        # fixed R^n is not defined for them.
+        for c in chain_syms
+            sc = String(c)
+            (sc == "n_planets" || startswith(sc, "noise_active_")) || continue
+            length(unique(vec(Array(chains[c])))) > 1 && return
+        end
+        tgt = NereusTarget(params, data; unconstrained = true)
+        tgt.transform === nothing && return
+        b = bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42)
+        (b.converged && isfinite(b.log_z)) || return
+        ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
+                            "overlap" => Float64(b.overlap))
+        # Bridge is biased LOW when its reference is fitted from too few
+        # INDEPENDENT draws (see docs/src/evidence.md); q carries
+        # d + d(d+1)/2 parameters. Only promote it above the tempered value
+        # when the chain actually supports it.
+        d = length(params.layout.unfrozen_names)
+        need = d + d * (d + 1) ÷ 2
+        ess = try
+            minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
+        catch; NaN end
+        if isfinite(ess) && ess >= need
+            summary["log_z"] = Float64(b.log_z)
+            ev["reported"] = "bridge"
+        else
+            ev["bridge_not_reported"] =
+                "min ESS $(isfinite(ess) ? round(Int, ess) : "?") < $need " *
+                "parameters in the reference; bridge is biased low here"
+        end
+    catch err
+        @debug "post-fit evidence augmentation failed" exception = err
+    end
+    return
+end
 
 function _populate_summary!(summary, result, params, chains)
     summary["log_z"] = Float64(getfield(result, :log_evidence))
