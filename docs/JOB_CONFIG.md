@@ -241,7 +241,21 @@ rather than a single number trusted.
                                            //              use a gradient-free sampler
     // ttv_n_transits: free per-transit offset counts for *_TTV modes.
     //   Keys are 1-based slot indices as strings (src/runner.jl:742-746).
-    "ttv_n_transits": { "1": 30 }
+    "ttv_n_transits": { "1": 30 },
+
+    // ---- external_priors: priors on DERIVED (non-sampled) quantities ----
+    // `priors` above keys on sampled slots; these act on values computed FROM
+    // them, so they cannot be expressed there.
+    //   quantity: "ecc"    — eccentricity, per planet
+    //             "rho_s"  — stellar density, global
+    //   per_planet defaults from the quantity (true for ecc, false for rho_s).
+    // The ecc prior is not cosmetic on a sparse, activity-contaminated RV:
+    // uniform sesinw/secosw implies p(e) ∝ e, which rails e → 1.
+    "external_priors": [
+      { "quantity": "ecc",
+        "prior": { "type": "NormalPrior", "args": [0.0, 0.3] },
+        "per_planet": true }
+    ]
   },
 
   // ---- Priors — per-parameter overrides (src/runner.jl:768-776) -----
@@ -270,6 +284,12 @@ rather than a single number trusted.
   //   ARModel, MAModel                                     — autoregressive / moving-average noise (channel)
   //   ActivityJitter                                       — extra activity jitter term (MeanModifier)
   //   ActivityGP                                           — joint RV+indicator GP (channels)
+  //   IndicatorFloor                                       — always-on floor on the indicator
+  //     channels (channels + kernel: "white" | "qp"). REQUIRED for a fair fixed-config
+  //     comparison between a mean model (AD) and ActivityGP: the GP scores the indicator
+  //     channels and a mean model does not, so without a floor the two log Z values are
+  //     computed on different data and are not comparable.
+  //   ErrorScale, NightlyOffset, HarmonicBlock, StudentT, MaternGP
   // `channel`/`instruments` are injected ONLY into constructors that accept them.
   "noise_models": [
     { "kind": "CeleriteRotation", "channel": "rv", "instruments": [], "kwargs": {} },

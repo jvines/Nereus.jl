@@ -288,6 +288,29 @@ sampler names that route through the PT evidence stack are
 `"pt"`, `"pt_warm"`, `"ptemcee"`, `"transdim_ptemcee"`,
 `"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:201`, `939`–`1036`).
 
+**`summary.json` carries an `evidence` block**, not just `log_z`: every
+estimator the run produced with its standard error, plus `reported` naming
+which one `log_z` came from. Read it before quoting a number — on a measured
+HD 18599 run the four tempered estimators spanned 80 nats while TI+ reported
+`se = 186`, none of which a bare `log_z` would have shown.
+
+⚠ **`run_job` fits could not compute bridge at all until 2026-08-27.** The
+runner builds its target with `unconstrained = false`, so `target.transform`
+is `nothing` and `sample_ptemcee` skips bridge — every job silently fell
+through to the tempered stack, the one estimator that can sit >100 nats low
+while its four variants agree to a decimal. Bridge is now recomputed after the
+fit against an unconstrained target built from the same `params` and `data`
+(chains untouched), and `log_z` is promoted to it **only when the chain
+carries the effective sample size its reference needs**; otherwise bridge is
+recorded with `bridge_not_reported` saying why. Trans-dim chains are skipped —
+a single Gaussian reference over a fixed `R^n` is undefined across mixed
+dimensions.
+
+Measured on five HD 18599 fixed configurations: four shift by ≤ 6 nats between
+tempered and bridge, and ActivityGP shifts by **59.9** (−1234.6 → −1174.7) —
+the one badly mixed run (worst R-hat 3.91). If you have results from a
+`run_job` fit predating this, re-run or recompute the evidence.
+
 The same `log_z` is fed into the LOO/log-Z model-comparison summary
 (`loo_compare_log_z`, `runner.jl:1525`) so cross-run Bayes factors are
 consistent.
