@@ -16,3 +16,9 @@ The five fixed-config log Z values were also computed a second way, post-hoc
 from the saved chains against a separately constructed unconstrained target.
 Both routes agree to the digit:
   white -1141.581  AD -1038.484  AGP -1174.736  GPRot -1083.851  ErrScale -1241.749
+
+End-to-end verification (2026-08-28): job_fixed_ErrScale.json was re-run
+driven only by this tracked package -- the bundled raw table through
+prepare_data.jl, this directory's config -- writing to a scratch directory.
+Result: log_z = -1241.749349179741, bit-identical to the reference value in
+fixed_ErrScale/summary.json, reported by the same estimator (bridge).
