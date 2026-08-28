@@ -1,0 +1,30 @@
+==========================================================================
+HD 18599 (TOI-179) -- trans-dimensional noise-model selection
+==========================================================================
+
+model         occupancy   BF vs best
+AD               1.0000       1.0000
+ErrScale         0.0000       0.0000
+AGP              0.0000       0.0000
+GP-Rot           0.0000       0.0000
+
+trans-dim fit health: fail
+
+==========================================================================
+Fixed-configuration evidences (independent runs, same data)
+==========================================================================
+
+config              log Z         se estimator      health
+AD              -1038.484      0.070 bridge         fail
+GPRot           -1083.851      0.036 bridge         fail
+white           -1141.581      0.072 bridge         fail
+AGP             -1174.736      0.066 bridge         fail
+ErrScale        -1241.749      0.062 bridge         fail
+
+Delta log Z vs best (AD):
+  GPRot          -45.37
+  white         -103.10
+  AGP           -136.25
+  ErrScale      -203.27
+
+NOTE: compare Delta log Z only between rows whose `estimator` matches.

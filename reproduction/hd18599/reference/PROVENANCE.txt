@@ -1,0 +1,18 @@
+Reference outputs for reproduction/hd18599.
+
+commit      : 3fa733d245645970116d65f52e608a40f853b648
+julia       : 1.11.9
+threads     : 8
+date        : 2026-08-28T17:10:10Z
+host        : Darwin arm64
+
+Runtime: trans-dim 24.5 min; fixed configs 27.9-59.8 min each.
+
+Results are independent of thread count -- RNG streams are keyed per
+walker/replica/attempt, not per thread. Verified: repeat trans-dim runs report
+the same accepted-toggle count (ntd_n = 3757) and identical occupancy.
+
+The five fixed-config log Z values were also computed a second way, post-hoc
+from the saved chains against a separately constructed unconstrained target.
+Both routes agree to the digit:
+  white -1141.581  AD -1038.484  AGP -1174.736  GPRot -1083.851  ErrScale -1241.749
