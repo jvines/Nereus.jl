@@ -1,0 +1,1032 @@
+{
+    "fitted": {
+        "parameters": {
+            "ind_floor_lambda_e": {
+                "ci3": [
+                    66.73039515392641,
+                    400.42593588928173
+                ],
+                "railed": false,
+                "err_hi": 58.52179806766853,
+                "unit": "",
+                "occupancy": 1,
+                "value": 141.60687917097877,
+                "n_used": 1536000,
+                "err_lo": 36.93215183125338
+            },
+            "ind_floor_logrhk_amp": {
+                "ci3": [
+                    0.5757640352676778,
+                    16.043923933245974
+                ],
+                "railed": false,
+                "err_hi": 0.5838814934701158,
+                "unit": "",
+                "occupancy": 1,
+                "value": 1.1438456044194303,
+                "n_used": 1536000,
+                "err_lo": 0.2643002300660584
+            },
+            "ind_floor_period": {
+                "ci3": [
+                    1.0590195161080196,
+                    364.51205635213336
+                ],
+                "railed": true,
+                "err_hi": 191.11615004859323,
+                "unit": "",
+                "occupancy": 1,
+                "value": 8.685620136996263,
+                "n_used": 1536000,
+                "railed_bound": "lower",
+                "err_lo": 4.341475332038885
+            },
+            "ind_floor_bis_jit": {
+                "ci3": [
+                    0.18522392423261558,
+                    1.0664380700230784
+                ],
+                "railed": false,
+                "err_hi": 0.11561565757167014,
+                "unit": "",
+                "occupancy": 1,
+                "value": 0.7604005673080104,
+                "n_used": 1536000,
+                "err_lo": 0.23331168366019728
+            },
+            "C_halpha_FEROS_lin": {
+                "ci3": [
+                    -104.34738938372666,
+                    -17.57949235324488
+                ],
+                "railed": false,
+                "err_hi": 10.949100032261022,
+                "unit": "",
+                "occupancy": 1,
+                "value": -64.62805007927486,
+                "n_used": 1536000,
+                "err_lo": 9.704221938503167
+            },
+            "C_halpha_HARPS_PRE_lin": {
+                "ci3": [
+                    -30.094824393044355,
+                    30.233219720938646
+                ],
+                "railed": true,
+                "err_hi": 14.371879381902168,
+                "unit": "",
+                "occupancy": 1,
+                "value": -1.926919417003937,
+                "n_used": 1536000,
+                "railed_bound": "lower",
+                "err_lo": 9.462740297070017
+            },
+            "C_fwhm_FEROS_lin": {
+                "ci3": [
+                    -3.705166856763128,
+                    101.71879304901282
+                ],
+                "railed": false,
+                "err_hi": 12.53726687182202,
+                "unit": "",
+                "occupancy": 1,
+                "value": 52.84695712211414,
+                "n_used": 1536000,
+                "err_lo": 15.080605588172673
+            },
+            "ind_floor_bis_amp": {
+                "ci3": [
+                    0.14396265741361436,
+                    6.05376809890705
+                ],
+                "railed": true,
+                "err_hi": 0.8462882167208969,
+                "unit": "",
+                "occupancy": 1,
+                "value": 0.9367929987644918,
+                "n_used": 1536000,
+                "railed_bound": "lower",
+                "err_lo": 0.5140645544466631
+            },
+            "secosw_k1": {
+                "ci3": [
+                    -0.9105271300750399,
+                    0.8487785084787034
+                ],
+                "railed": false,
+                "err_hi": 0.4051704017278806,
+                "unit": "",
+                "occupancy": 1,
+                "value": -0.04731776084480366,
+                "n_used": 1536000,
+                "err_lo": 0.40821554859541076
+            },
+            "P_k1": {
+                "ci3": [
+                    4.1334402832399215,
+                    4.140938235231414
+                ],
+                "railed": false,
+                "err_hi": 0.0012014190257945145,
+                "unit": "d",
+                "occupancy": 1,
+                "value": 4.1369839088535985,
+                "n_used": 1536000,
+                "err_lo": 0.0014902260456981509
+            },
+            "C_bis_HARPS_PRE_lin": {
+                "ci3": [
+                    -58.204873643787565,
+                    35.24694228665052
+                ],
+                "railed": false,
+                "err_hi": 10.697459456938592,
+                "unit": "",
+                "occupancy": 1,
+                "value": -21.359799222913374,
+                "n_used": 1536000,
+                "err_lo": 8.100599633313323
+            },
+            "ind_floor_halpha_amp": {
+                "ci3": [
+                    0.4399625956065324,
+                    5.080707663491805
+                ],
+                "railed": false,
+                "err_hi": 0.4062248500815593,
+                "unit": "",
+                "occupancy": 1,
+                "value": 0.8965371808738434,
+                "n_used": 1536000,
+                "err_lo": 0.21444564420305035
+            },
+            "C_logrhk_HARPS_POST_lin": {
+                "ci3": [
+                    2.468097438588158,
+                    31.29592653581645
+                ],
+                "railed": false,
+                "err_hi": 4.8597325221756265,
+                "unit": "",
+                "occupancy": 1,
+                "value": 17.205914692929184,
+                "n_used": 1536000,
+                "err_lo": 4.262648701033553
+            },
+            "sigma_HARPS_PRE": {
+                "ci3": [
+                    0.6781852537104394,
+                    28.01319672850022
+                ],
+                "railed": false,
+                "err_hi": 6.861542896280461,
+                "unit": "m/s",
+                "occupancy": 1,
+                "value": 10.152847806032366,
+                "n_used": 1536000,
+                "err_lo": 5.366347544518652
+            },
+            "ind_floor_lambda_p": {
+                "ci3": [
+                    0.29002974339432913,
+                    9.973711913037665
+                ],
+                "railed": true,
+                "err_hi": 3.6708637646579145,
+                "unit": "",
+                "occupancy": 1,
+                "value": 1.2484397441916883,
+                "n_used": 1536000,
+                "railed_bound": "lower",
+                "err_lo": 0.7392050850355478
+            },
+            "gamma_HARPS_POST": {
+                "ci3": [
+                    0.5910577978588822,
+                    13.996615017881608
+                ],
+                "railed": false,
+                "err_hi": 2.0429538459356777,
+                "unit": "m/s",
+                "occupancy": 1,
+                "value": 8.11433409926264,
+                "n_used": 1536000,
+                "err_lo": 2.3149894815506427
+            },
+            "gamma_HARPS_PRE": {
+                "ci3": [
+                    -26.469210034510517,
+                    54.84162806861261
+                ],
+                "railed": false,
+                "err_hi": 7.636224055589315,
+                "unit": "m/s",
+                "occupancy": 1,
+                "value": 11.974022679887598,
+                "n_used": 1536000,
+                "err_lo": 9.54276947199324
+            },
+            "C_fwhm_HARPS_PRE_lin": {
+                "ci3": [
+                    -16.970356837124587,
+                    16.986513969826042
+                ],
+                "railed": true,
+                "err_hi": 8.976590817424572,
+                "unit": "",
+                "occupancy": 1,
+                "value": 4.4049720078306684,
+                "n_used": 1536000,
+                "railed_bound": "lower",
+                "err_lo": 15.146599611912627
+            },
+            "C_logrhk_HARPS_PRE_lin": {
+                "ci3": [
+                    -31.78548381774421,
+                    50.3851103749996
+                ],
+                "railed": false,
+                "err_hi": 9.096068745758867,
+                "unit": "",
+                "occupancy": 1,
+                "value": 3.709453822916383,
+                "n_used": 1536000,
+                "err_lo": 7.79255236023596
+            },
+            "sigma_FEROS": {
+                "ci3": [
+                    10.38307734595001,
+                    34.3995238455274
+                ],
+                "railed": false,
+                "err_hi": 4.2956998063279705,
+                "unit": "m/s",
+                "occupancy": 1,
+                "value": 18.531302047256037,
+                "n_used": 1536000,
+                "err_lo": 3.3653050212197932
+            },
+            "C_bis_FEROS_lin": {
+                "ci3": [
+                    -44.82327174430817,
+                    31.842126971122664
+                ],
+                "railed": false,
+                "err_hi": 10.29288086400909,
+                "unit": "",
+                "occupancy": 1,
+                "value": -6.595301379386103,
+                "n_used": 1536000,
+                "err_lo": 9.57301929854815
+            },
+            "ind_floor_fwhm_jit": {
+                "ci3": [
+                    0.27846983407600645,
+                    0.5848284502855271
+                ],
+                "railed": false,
+                "err_hi": 0.05456183128913378,
+                "unit": "",
+                "occupancy": 1,
+                "value": 0.37956522907812373,
+                "n_used": 1536000,
+                "err_lo": 0.04152325777439464
+            },
+            "ind_floor_halpha_jit": {
+                "ci3": [
+                    0.0009535321273379316,
+                    0.6077158086333494
+                ],
+                "railed": true,
+                "err_hi": 0.13960613971986355,
+                "unit": "",
+                "occupancy": 1,
+                "value": 0.022073403515749664,
+                "n_used": 1536000,
+                "railed_bound": "lower",
+                "err_lo": 0.019460821483483264
+            },
+            "C_fwhm_HARPS_POST_lin": {
+                "ci3": [
+                    -18.987703882729797,
+                    -4.203023601767974
+                ],
+                "railed": false,
+                "err_hi": 2.435578725413322,
+                "unit": "",
+                "occupancy": 1,
+                "value": -11.567047303555555,
+                "n_used": 1536000,
+                "err_lo": 2.862394350968401
+            },
+            "K_k1": {
+                "ci3": [
+                    0.034993676717276934,
+                    21.55569948611204
+                ],
+                "railed": true,
+                "err_hi": 3.210614866626937,
+                "unit": "m/s",
+                "occupancy": 1,
+                "value": 7.755982272349758,
+                "n_used": 1536000,
+                "railed_bound": "lower",
+                "err_lo": 3.468322306243836
+            },
+            "sesinw_k1": {
+                "ci3": [
+                    -0.9423320266432849,
+                    0.7950579144464407
+                ],
+                "railed": false,
+                "err_hi": 0.390404934035857,
+                "unit": "",
+                "occupancy": 1,
+                "value": -0.15663297480574218,
+                "n_used": 1536000,
+                "err_lo": 0.3543388340388955
+            },
+            "gamma_FEROS": {
+                "ci3": [
+                    68.15784740335128,
+                    155.4209984092668
+                ],
+                "railed": false,
+                "err_hi": 9.679664197849206,
+                "unit": "m/s",
+                "occupancy": 1,
+                "value": 117.4335533746648,
+                "n_used": 1536000,
+                "err_lo": 11.349387230125757
+            },
+            "sigma_HARPS_POST": {
+                "ci3": [
+                    11.000272340062473,
+                    19.01221568819421
+                ],
+                "railed": false,
+                "err_hi": 1.5143163022541781,
+                "unit": "m/s",
+                "occupancy": 1,
+                "value": 13.84144037914489,
+                "n_used": 1536000,
+                "err_lo": 1.1695639952389723
+            },
+            "C_logrhk_FEROS_lin": {
+                "ci3": [
+                    -29.700765174953055,
+                    48.84672744836038
+                ],
+                "railed": false,
+                "err_hi": 13.835491501326892,
+                "unit": "",
+                "occupancy": 1,
+                "value": 9.35328127753641,
+                "n_used": 1536000,
+                "err_lo": 13.844553378993231
+            },
+            "C_halpha_HARPS_POST_lin": {
+                "ci3": [
+                    -8.966894083546316,
+                    19.627879297972335
+                ],
+                "railed": false,
+                "err_hi": 4.88845977151064,
+                "unit": "",
+                "occupancy": 1,
+                "value": 4.006423304214475,
+                "n_used": 1536000,
+                "err_lo": 4.877183995236091
+            },
+            "ind_floor_logrhk_jit": {
+                "ci3": [
+                    0.3370376868817792,
+                    0.7741343547899157
+                ],
+                "railed": false,
+                "err_hi": 0.10675802603105511,
+                "unit": "",
+                "occupancy": 1,
+                "value": 0.5041044191859013,
+                "n_used": 1536000,
+                "err_lo": 0.0949400215727026
+            },
+            "C_bis_HARPS_POST_lin": {
+                "ci3": [
+                    -33.3443566406848,
+                    -18.635836967888544
+                ],
+                "railed": false,
+                "err_hi": 2.097788050975268,
+                "unit": "",
+                "occupancy": 1,
+                "value": -26.86337873220451,
+                "n_used": 1536000,
+                "err_lo": 2.1641322165617183
+            },
+            "Mo_k1": {
+                "ci3": [
+                    0.31299437485682885,
+                    354.48815671754244
+                ],
+                "err_hi": 90.0392160321046,
+                "unit": "deg",
+                "occupancy": 1,
+                "value": 136.24308748280492,
+                "n_used": 1536000,
+                "err_lo": 97.7660429540588
+            },
+            "ind_floor_fwhm_amp": {
+                "ci3": [
+                    0.4172497573909372,
+                    5.878438379987164
+                ],
+                "railed": false,
+                "err_hi": 0.435429575501036,
+                "unit": "",
+                "occupancy": 1,
+                "value": 0.821168609076633,
+                "n_used": 1536000,
+                "err_lo": 0.18316880990349016
+            }
+        },
+        "conditioning": {
+            "note": "stats conditioned on each component being active; occupancy field = P(component active | data)",
+            "n_planets": 1,
+            "active_noise_models": [
+                "AD"
+            ]
+        }
+    },
+    "tables": {
+        "fitted": {
+            "ecsv": "results/HD18599_artifact/transdim/tables/fitted.ecsv",
+            "json": "results/HD18599_artifact/transdim/tables/fitted.json",
+            "dat": "results/HD18599_artifact/transdim/tables/fitted.dat",
+            "csv": "results/HD18599_artifact/transdim/tables/fitted.csv",
+            "tex": "results/HD18599_artifact/transdim/tables/fitted.tex"
+        },
+        "derived": {
+            "ecsv": "results/HD18599_artifact/transdim/tables/derived.ecsv",
+            "json": "results/HD18599_artifact/transdim/tables/derived.json",
+            "dat": "results/HD18599_artifact/transdim/tables/derived.dat",
+            "csv": "results/HD18599_artifact/transdim/tables/derived.csv",
+            "tex": "results/HD18599_artifact/transdim/tables/derived.tex"
+        }
+    },
+    "figures": {
+    },
+    "ppc": {
+        "rv_outliers_3sigma": 9,
+        "rv_residual_top_peak_fap": 0.0014221962398915933,
+        "rv_residual_top_peak_power": 0.22343699090091684,
+        "n_draws": 500,
+        "rv_red_chi2_per_draw_p16": 0.04749644157498575,
+        "rv_residual_top_peak_period": 2.0778495895658002,
+        "rv_red_chi2_total": 0.0012403728820649454,
+        "rv_red_chi2_per_inst": {
+            "1": 38.7929455870848,
+            "2": 2.959255382786794,
+            "3": 1.432042777933595
+        },
+        "rv_residual_acf_lag1": 0.960753402820787,
+        "rv_red_chi2_per_draw_p50": 0.3423258632122714,
+        "rv_red_chi2_per_draw_p84": 3.641770848947157,
+        "rv_red_chi2_median_model": 4.879311662430517
+    },
+    "sampler": {
+        "acceptance_within": [
+            0.06111171875,
+            0.04093984375,
+            0.028630859375,
+            0.01988046875,
+            0.013940625,
+            0.0127890625,
+            0.011726953125,
+            0.011963671875,
+            0.013297265625,
+            0.0134828125,
+            0.01337109375,
+            0.013100390625
+        ],
+        "acceptance_transdim": [
+            0
+        ],
+        "acceptance_swap": [
+            0.000795703125,
+            0.001394921875,
+            0.0091953125,
+            0.038609375,
+            0.13511171875,
+            0.176580078125,
+            0.170550390625,
+            0.15108984375,
+            0.1753921875,
+            0.205588671875,
+            0.17621640625
+        ]
+    },
+    "plots": [
+        "results/HD18599_artifact/transdim/ppc.png",
+        "results/HD18599_artifact/transdim/detection_limits.png"
+    ],
+    "n_evals": 35714189,
+    "status": "ok",
+    "loo": {
+        "status": "skipped",
+        "error": "ArgumentError: compute_loo: model contains a CovarianceNoise (`CeleriteRotation`). PSIS-LOO supports the ActivityGP path only when `marginalize_indicators = true` (RV-conditional Gaussian with closed-form Sundararajan-Keerthi LOO). For other GP kernels, use PT log Z (TI+/SS+/H+) or strip the GP and refit."
+    },
+    "log_z": -1123.8479952657856,
+    "fit_health": {
+        "checks": {
+            "convergence": {
+                "status": "ok",
+                "message": "converged: all R-hat ≤ 1.05 (worst 1.034), all ESS ≥ 200 (min 365263.0)"
+            },
+            "multimodality": {
+                "status": "ok",
+                "message": "single chain — between-chain mode separation not assessable"
+            },
+            "prior_rail": {
+                "status": "fail",
+                "message": "prior-edge rail: ind_floor_period: 20.7% of draws within 1.0% of lower bound; ind_floor_halpha_jit: median railed at lower bound (median 0.02207, bound 0.0009407)"
+            },
+            "logpost": {
+                "status": "ok",
+                "message": "log-posterior sane (range -1158.0 … -1063.0)"
+            }
+        },
+        "overall": "fail"
+    },
+    "detection_limits": {
+        "prior_P_lo": 4.127468553460241,
+        "arrays_path": "detection_limits.nc",
+        "planet_index": 1,
+        "prior_P_hi": 4.14746855346024,
+        "confidence": 0.95,
+        "n_bins": 30
+    },
+    "config_version": "1.0",
+    "elapsed_sec": 1452.7626128196716,
+    "chains_path": "chains.nc",
+    "config_path": "",
+    "run_info": {
+        "git_hash": "18e17c1",
+        "convergence": {
+            "min_ess_param": "ind_floor_lambda_p",
+            "min_ess": 3196.089409525846,
+            "worst_rhat_param": "ind_floor_lambda_p",
+            "worst_rhat": 2.4302184743814603,
+            "n_fail": 35,
+            "assessed": true,
+            "pass": false
+        },
+        "log_evidence": -1123.8479952657856,
+        "n_evals": 35714189,
+        "stellar": {
+            "R_s": {
+                "sigma": 0.039900000000000005,
+                "assumed": true,
+                "value": 0.798
+            },
+            "M_s": {
+                "sigma": 0.08070000000000001,
+                "assumed": true,
+                "value": 0.807
+            }
+        },
+        "data_provenance": {
+            "rv": {
+                "n_per_instrument": {
+                    "HARPS_POST": 99,
+                    "HARPS_PRE": 7,
+                    "FEROS": 8
+                },
+                "n_obs": 114,
+                "baseline_days": 1772.9911174001172
+            }
+        },
+        "priors": {
+            "ind_floor_lambda_e": {
+                "lower": 1,
+                "type": "PriorSpec",
+                "upper": 1000
+            },
+            "gp_dQ": {
+                "lower": 0,
+                "type": "PriorSpec",
+                "upper": 5
+            },
+            "ind_floor_period": {
+                "lower": 1,
+                "type": "PriorSpec",
+                "upper": 365
+            },
+            "C_halpha_FEROS_lin": {
+                "lower": -186.29786384683254,
+                "type": "PriorSpec",
+                "upper": 186.29786384683254
+            },
+            "C_halpha_HARPS_PRE_lin": {
+                "lower": -30.44245306439731,
+                "type": "PriorSpec",
+                "upper": 30.44245306439731
+            },
+            "Fc": {
+                "lower": -1.5865302442720446,
+                "type": "PriorSpec",
+                "upper": 1.5865302442720446
+            },
+            "secosw_k1": {
+                "lower": -1,
+                "type": "PriorSpec",
+                "upper": 1
+            },
+            "gp_act_lambda_e": {
+                "lower": 1,
+                "type": "PriorSpec",
+                "upper": 1000
+            },
+            "gp_period": {
+                "lower": 4,
+                "type": "PriorSpec",
+                "upper": 16
+            },
+            "C_logrhk_HARPS_POST_lin": {
+                "lower": -104.93530047666998,
+                "type": "PriorSpec",
+                "upper": 104.93530047666998
+            },
+            "gamma_HARPS_PRE": {
+                "lower": -122.68587285714284,
+                "type": "PriorSpec",
+                "upper": 120.60878714285712
+            },
+            "C_fwhm_HARPS_PRE_lin": {
+                "lower": -17.03518886545846,
+                "type": "PriorSpec",
+                "upper": 17.03518886545846
+            },
+            "gp_act_jit_fwhm": {
+                "lower": 0.0016249308290778718,
+                "type": "PriorSpec",
+                "upper": 0.974958497446723
+            },
+            "sesinw_k1": {
+                "lower": -1,
+                "type": "PriorSpec",
+                "upper": 1
+            },
+            "sigma_HARPS_POST": {
+                "lower": 0,
+                "type": "PriorSpec",
+                "upper": 50
+            },
+            "errscale_HARPS_PRE": {
+                "lower": 0.1,
+                "type": "PriorSpec",
+                "upper": 10
+            },
+            "ind_floor_bis_amp": {
+                "lower": 0.051197356931280184,
+                "type": "PriorSpec",
+                "upper": 20.47894277251207
+            },
+            "Fr": {
+                "lower": -1.5865302442720446,
+                "type": "PriorSpec",
+                "upper": 1.5865302442720446
+            },
+            "gp_sigma": {
+                "lower": 0.0001,
+                "type": "PriorSpec",
+                "upper": 121.64732999999998
+            },
+            "gp_Q0": {
+                "lower": 0.1,
+                "type": "PriorSpec",
+                "upper": 10
+            },
+            "Hc": {
+                "lower": -2.8221472760691153,
+                "type": "PriorSpec",
+                "upper": 2.8221472760691153
+            },
+            "Br": {
+                "lower": -3.071841415876811,
+                "type": "PriorSpec",
+                "upper": 3.071841415876811
+            },
+            "P_k1": {
+                "lower": 4.127468553460241,
+                "type": "PriorSpec",
+                "upper": 4.14746855346024
+            },
+            "gp_act_lambda_p": {
+                "lower": 0.25,
+                "type": "PriorSpec",
+                "upper": 10
+            },
+            "gamma_HARPS_POST": {
+                "lower": -121.05576885858584,
+                "type": "PriorSpec",
+                "upper": 122.23889114141413
+            },
+            "C_bis_FEROS_lin": {
+                "lower": -100.59364867017091,
+                "type": "PriorSpec",
+                "upper": 100.59364867017091
+            },
+            "ind_floor_fwhm_jit": {
+                "lower": 0.0005288434147573482,
+                "type": "PriorSpec",
+                "upper": 2.644217073786741
+            },
+            "C_fwhm_HARPS_POST_lin": {
+                "lower": -254.35985238234682,
+                "type": "PriorSpec",
+                "upper": 254.35985238234682
+            },
+            "C_halpha_HARPS_POST_lin": {
+                "lower": -107.6895165314159,
+                "type": "PriorSpec",
+                "upper": 107.6895165314159
+            },
+            "ind_floor_logrhk_jit": {
+                "lower": 0.0009708613560473454,
+                "type": "PriorSpec",
+                "upper": 4.854306780236727
+            },
+            "errscale_FEROS": {
+                "lower": 0.1,
+                "type": "PriorSpec",
+                "upper": 10
+            },
+            "ind_floor_bis_jit": {
+                "lower": 0.0010239471386256037,
+                "type": "PriorSpec",
+                "upper": 5.119735693128018
+            },
+            "gp_act_jit_halpha": {
+                "lower": 0.04108317686646008,
+                "type": "PriorSpec",
+                "upper": 24.64990611987605
+            },
+            "gp_f": {
+                "lower": 0.01,
+                "type": "PriorSpec",
+                "upper": 0.99
+            },
+            "C_bis_HARPS_PRE_lin": {
+                "lower": -78.47648618087369,
+                "type": "PriorSpec",
+                "upper": 78.47648618087369
+            },
+            "gp_act_period": {
+                "lower": 4,
+                "type": "PriorSpec",
+                "upper": 16
+            },
+            "errscale_HARPS_POST": {
+                "lower": 0.1,
+                "type": "PriorSpec",
+                "upper": 10
+            },
+            "gp_act_jit_logrhk": {
+                "lower": 0.005186793465188656,
+                "type": "PriorSpec",
+                "upper": 3.1120760791131934
+            },
+            "sigma_FEROS": {
+                "lower": 0,
+                "type": "PriorSpec",
+                "upper": 50
+            },
+            "gamma_FEROS": {
+                "lower": -123.25799075843682,
+                "type": "PriorSpec",
+                "upper": 316.1079907584368
+            },
+            "C_logrhk_FEROS_lin": {
+                "lower": -381.2683612549307,
+                "type": "PriorSpec",
+                "upper": 381.2683612549307
+            },
+            "gp_act_jit_bis": {
+                "lower": 0.006675516999153222,
+                "type": "PriorSpec",
+                "upper": 4.005310199491933
+            },
+            "Vr": {
+                "lower": -966.5,
+                "type": "PriorSpec",
+                "upper": 966.5
+            },
+            "Mo_k1": {
+                "lower": 0,
+                "type": "PriorSpec",
+                "upper": 6.283185307179586
+            },
+            "ind_floor_fwhm_amp": {
+                "lower": 0.02644217073786741,
+                "type": "PriorSpec",
+                "upper": 10.576868295146964
+            },
+            "C_fwhm_FEROS_lin": {
+                "lower": -148.7263945341525,
+                "type": "PriorSpec",
+                "upper": 148.7263945341525
+            },
+            "Vc": {
+                "lower": -966.5,
+                "type": "PriorSpec",
+                "upper": 966.5
+            },
+            "ind_floor_halpha_amp": {
+                "lower": 0.04703578793448526,
+                "type": "PriorSpec",
+                "upper": 18.814315173794103
+            },
+            "sigma_HARPS_PRE": {
+                "lower": 0,
+                "type": "PriorSpec",
+                "upper": 50
+            },
+            "ind_floor_lambda_p": {
+                "lower": 0.25,
+                "type": "PriorSpec",
+                "upper": 10
+            },
+            "C_logrhk_HARPS_PRE_lin": {
+                "lower": -56.479648706319985,
+                "type": "PriorSpec",
+                "upper": 56.479648706319985
+            },
+            "Hr": {
+                "lower": -2.8221472760691153,
+                "type": "PriorSpec",
+                "upper": 2.8221472760691153
+            },
+            "ind_floor_halpha_jit": {
+                "lower": 0.0009407157586897052,
+                "type": "PriorSpec",
+                "upper": 4.703578793448526
+            },
+            "Lc": {
+                "lower": -2.912584068142036,
+                "type": "PriorSpec",
+                "upper": 2.912584068142036
+            },
+            "K_k1": {
+                "lower": 0,
+                "type": "PriorSpec",
+                "upper": 50
+            },
+            "Bc": {
+                "lower": -3.071841415876811,
+                "type": "PriorSpec",
+                "upper": 3.071841415876811
+            },
+            "C_bis_HARPS_POST_lin": {
+                "lower": -109.50442247354832,
+                "type": "PriorSpec",
+                "upper": 109.50442247354832
+            },
+            "ind_floor_logrhk_amp": {
+                "lower": 0.04854306780236727,
+                "type": "PriorSpec",
+                "upper": 19.417227120946908
+            }
+        }
+    },
+    "n_planets_posterior": {
+        "1": 1
+    },
+    "derived": {
+        "parameters": {
+            "a_au_k1": {
+                "ci3": [
+                    0.04174545434604437,
+                    0.051196620807800165
+                ],
+                "err_hi": 0.001509022816919392,
+                "unit": "AU",
+                "occupancy": 1,
+                "value": 0.0469604532742504,
+                "n_used": 1536000,
+                "err_lo": 0.001611734852573897
+            },
+            "omega_deg_k1": {
+                "ci3": [
+                    -179.71809049652708,
+                    179.62153547810243
+                ],
+                "err_hi": 176.8275242246686,
+                "unit": "deg",
+                "occupancy": 1,
+                "value": -53.93731820040335,
+                "n_used": 1536000,
+                "err_lo": 80.81158250553815
+            },
+            "P_yr_k1": {
+                "ci3": [
+                    0.011316742733031956,
+                    0.011337271006793742
+                ],
+                "err_hi": 3.289306025446373e-6,
+                "unit": "yr",
+                "occupancy": 1,
+                "value": 0.011326444651207662,
+                "n_used": 1536000,
+                "err_lo": 4.08001655221972e-6
+            },
+            "msini_jup_k1": {
+                "ci3": [
+                    0.00021177269639046292,
+                    0.11714277150138751
+                ],
+                "err_hi": 0.020367959551477646,
+                "unit": "M_jup",
+                "occupancy": 1,
+                "value": 0.04888597893966096,
+                "n_used": 1536000,
+                "err_lo": 0.022481531181077274
+            },
+            "a_Rs_k1": {
+                "ci3": [
+                    10.578061576640359,
+                    15.193547748672913
+                ],
+                "err_hi": 0.7852036184733286,
+                "unit": "",
+                "occupancy": 1,
+                "value": 12.64265596103299,
+                "n_used": 1536000,
+                "err_lo": 0.7314250848750508
+            },
+            "ecc_k1": {
+                "ci3": [
+                    0.0006877826353962351,
+                    0.9566944891668379
+                ],
+                "err_hi": 0.2865034360023768,
+                "unit": "",
+                "occupancy": 1,
+                "value": 0.2445923810485308,
+                "n_used": 1536000,
+                "err_lo": 0.16844177949362857
+            },
+            "msini_earth_k1": {
+                "ci3": [
+                    0.06730720809745644,
+                    37.23120606642924
+                ],
+                "err_hi": 6.473499725971379,
+                "unit": "M_earth",
+                "occupancy": 1,
+                "value": 15.537313419634078,
+                "n_used": 1536000,
+                "err_lo": 7.1452511270115195
+            }
+        },
+        "conditioning": {
+            "note": "derived per-draw with stellar (M★/R★/T_eff) uncertainty propagated; conditioned on planet active",
+            "stellar": {
+                "R_s": {
+                    "sigma": 0.039900000000000005,
+                    "assumed": true,
+                    "value": 0.798
+                },
+                "M_s": {
+                    "sigma": 0.08070000000000001,
+                    "assumed": true,
+                    "value": 0.807
+                }
+            },
+            "n_planets": 1
+        }
+    },
+    "model_selection": {
+        "noise_models": {
+            "AD": {
+                "bayes_factor_vs_best": 1,
+                "occupancy": 1
+            },
+            "ErrScale": {
+                "bayes_factor_vs_best": 0,
+                "occupancy": 0
+            },
+            "AGP": {
+                "bayes_factor_vs_best": 0,
+                "occupancy": 0
+            },
+            "GP-Rot": {
+                "bayes_factor_vs_best": 0,
+                "occupancy": 0
+            }
+        },
+        "n_planets": {
+            "1": 1
+        }
+    }
+}

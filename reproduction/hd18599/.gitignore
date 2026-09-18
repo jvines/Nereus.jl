@@ -1,0 +1,3 @@
+# Sampler outputs never belong in the tracked package (~300-800 MB each).
+*.nc
+chains/

@@ -1,0 +1,24 @@
+# Outputs never live in the repo — they belong in the artifact store.
+/results/
+/logs/
+**/plots_*/
+*.nc
+*.png
+*.pdf
+.DS_Store
+# Manifest.toml IS committed: bundle builds must be reproducible. A worktree
+# without it re-resolves and fails (OptimizationBase/OptimizationOptimJL).
+
+# Run outputs dropped in test/ — results, profiles, markers. Not tests.
+test/*.txt
+
+# eventual-paper findings; deliberately not committed
+paper/
+
+# Local validation studies on real data — not tests, not tracked.
+# These are runs against real light curves / RV sets that live outside the
+# repo; they carry no assertions and are not part of the test suite.
+studies/
+
+# James workshop data (LTT 9779) — research inputs/outputs, not package content.
+/ltt9779/

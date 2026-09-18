@@ -1,0 +1,115 @@
+{
+  "output_dir": "results/HD18599_artifact/fixed_ErrScale",
+  "seed": 42,
+  "data": {
+    "rv": {
+      "csv": "reproduction/hd18599/hd18599_clean.csv",
+      "time_col": "bjd",
+      "rv_col": "rv",
+      "err_col": "rv_err",
+      "inst_col": "instrument",
+      "indicator_cols": [
+        "bis",
+        "fwhm",
+        "halpha",
+        "logrhk"
+      ]
+    }
+  },
+  "star": {
+    "M_s": 0.807,
+    "R_s": 0.798,
+    "T_eff": 5060.0
+  },
+  "model": {
+    "max_kplanet": 1,
+    "planet_modes": [
+      "RV_ONLY"
+    ],
+    "parametrization": {
+      "mass": "K_driven",
+      "time": "Mo",
+      "ew": "sesinw"
+    },
+    "external_priors": [
+      {
+        "quantity": "ecc",
+        "prior": {
+          "type": "NormalPrior",
+          "args": [
+            0.0,
+            0.3
+          ]
+        },
+        "per_planet": true
+      }
+    ]
+  },
+  "priors": {
+    "P_k1": {
+      "type": "NormalPrior",
+      "args": [
+        4.1374685534602405,
+        0.001,
+        4.127468553460241,
+        4.14746855346024
+      ]
+    },
+    "K_k1": {
+      "type": "UniformPrior",
+      "args": [
+        0.0,
+        50.0
+      ]
+    },
+    "sesinw_k1": {
+      "type": "UniformPrior",
+      "args": [
+        -1.0,
+        1.0
+      ]
+    },
+    "secosw_k1": {
+      "type": "UniformPrior",
+      "args": [
+        -1.0,
+        1.0
+      ]
+    },
+    "Mo_k1": {
+      "type": "UniformPrior",
+      "args": [
+        0.0,
+        6.283185307179586
+      ]
+    }
+  },
+  "sampler": {
+    "name": "ptemcee",
+    "kwargs": {
+      "n_temps": 12,
+      "n_walkers": 128,
+      "n_steps": 20000,
+      "n_burnin": 8000
+    }
+  },
+  "noise_models": [
+    {
+      "kind": "ErrorScale",
+      "channel": "rv",
+      "kwargs": {}
+    },
+    {
+      "kind": "IndicatorFloor",
+      "kwargs": {
+        "channels": [
+          "bis",
+          "fwhm",
+          "halpha",
+          "logrhk"
+        ],
+        "kernel": "qp"
+      }
+    }
+  ]
+}

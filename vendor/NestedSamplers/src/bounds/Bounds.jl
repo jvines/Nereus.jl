@@ -1,0 +1,108 @@
+"""
+    NestedSamplers.Bounds
+
+This module contains the different algorithms for bounding the prior volume.
+
+The available implementations are
+* [`Bounds.NoBounds`](@ref) - no bounds on the prior volume (equivalent to a unit cube)
+* [`Bounds.Ellipsoid`](@ref) - bound using a single ellipsoid
+* [`Bounds.MultiEllipsoid`](@ref) - bound using multiple ellipsoids in an optimal cluster
+* [`Bounds.MLFriends`](@ref) - bound using a union of balls around the live points (conforms to curved/multimodal contours)
+"""
+module Bounds
+
+using LinearAlgebra
+using Random: GLOBAL_RNG, AbstractRNG
+
+using Clustering
+using Distributions: Categorical, Uniform
+using StatsBase: mean_and_cov
+using NearestNeighbors: KDTree, inrangecount, nn
+
+export AbstractBoundingSpace, rand_live, randoffset
+
+
+"""
+    Bounds.AbstractBoundingSpace{T<:Number}
+
+Abstract type for describing the bounding algorithms. For information about the interface, see the extended help (`??Bounds.AbstractBoundingSpace`)
+
+# Extended Help
+
+## Interface
+
+The following functionality defines the interface for `AbstractBoundingSpace` for an example type `::MyBounds`
+
+| Function | Required | Description |
+|---------:|:--------:|:------------|
+| `Base.rand(::AbstractRNG, ::MyBounds)` | x | Sample a single point from the prior volume |
+| `Bounds.randoffset(::AbstractRNG, ::MyBounds)` |  | Get a random offset from the center of the bounds. Required for random walk schemes, although a fallback is provided. |
+| `Base.in(point, ::MyBounds)` | x | Checks if the point is contained by the bounding space |
+| `Bounds.scale!(::MyBounds, factor)` | x | Scale the volume by the linear `factor`|
+| `Bounds.volume(::MyBounds)` | | Retrieve the current prior volume occupied by the bounds. |
+| `Bounds.fit(::Type{<:MyBounds}, points, pointvol=0)` | x | update the bounds given the new `points` each with minimum volume `pointvol`|
+| `Bounds.axes(::MyBounds)` | | Used for transforming points from the unit cube to the encompassing bound. Worth storing as a property.
+"""
+abstract type AbstractBoundingSpace{T <: Number} end
+
+Base.eltype(::AbstractBoundingSpace{T}) where {T} = T
+
+# convenience
+Base.rand(B::AbstractBoundingSpace) = rand(GLOBAL_RNG, B)
+Base.rand(B::AbstractBoundingSpace, N::Integer) = rand(GLOBAL_RNG, B, N)
+randoffset(B::AbstractBoundingSpace) = randoffset(GLOBAL_RNG, B)
+
+# fallback method
+Base.rand(rng::AbstractRNG, B::AbstractBoundingSpace, N::Integer) = reduce(hcat, rand(rng, B) for _ in 1:N)
+
+"""
+    rand_live([rng], ::AbstractBoundingSpace, us) -> (u, bound)
+
+Returns a random live point and the bounds associated with it.
+"""
+function rand_live(rng::AbstractRNG, B::AbstractBoundingSpace, us)
+    idx = rand(rng, Base.axes(us, 2))
+    u = us[:, idx]
+    return u, u ∈ B ? B : nothing
+end
+rand_live(B::AbstractBoundingSpace, us) = rand_live(GLOBAL_RNG, B, us)
+
+function Base.show(io::IO, bound::B) where {T,B <: AbstractBoundingSpace{T}}
+    base = nameof(B) |> string
+    print(io, "$base{$T}(ndims=$(ndims(bound)))")
+
+    return nothing
+end
+
+# ---------------------------------------------------
+
+"""
+    Bounds.NoBounds([T=Float64], N)
+
+Unbounded prior volume; equivalent to the unit cube in `N` dimensions. This matches the original nested sampling derivation in Skilling (2004).[^1]
+
+[^1]: John Skilling, 2004, AIP 735, 395  ["Nested Sampling"](https://aip.scitation.org/doi/abs/10.1063/1.1835238)
+"""
+struct NoBounds{T} <: AbstractBoundingSpace{T}
+    ndims::Int
+end
+NoBounds(D::Integer) = NoBounds{Float64}(D)
+NoBounds(T::Type, D::Integer) = NoBounds{T}(D)
+
+Base.ndims(B::NoBounds) = B.ndims
+
+randoffset(rng::AbstractRNG, b::NoBounds{T}) where {T} = rand(rng, Uniform(0, 1), ndims(b)) .- 0.5 .|> T
+Base.rand(rng::AbstractRNG, b::NoBounds{T}) where {T} = rand(rng, Uniform(0, 1), ndims(b)) .|> T
+Base.rand(rng::AbstractRNG, b::NoBounds{T}, N::Integer) where {T} = rand(rng, Uniform(0, 1), ndims(b), N) .|> T
+Base.in(pt, ::NoBounds) = all(p -> 0 < p < 1, pt)
+fit(::Type{<:NoBounds}, points::AbstractMatrix{T}; kwargs...) where T = 
+    NoBounds(T, size(points, 1))
+scale!(b::NoBounds, factor) = b
+volume(::NoBounds{T}) where {T} = one(T)
+axes(b::NoBounds{T}) where {T} = Diagonal(ones(T, b.ndims))
+
+include("ellipsoid.jl")
+include("multiellipsoid.jl")
+include("mlfriends.jl")
+
+end # module Bounds
