@@ -168,7 +168,12 @@ function _target_from(channels::AbstractVector, planets; M_pri = nothing,
                     "plan per sky position"))
                 gost = ch_gost
             end
-            plx    = something(get(ch, "parallax", nothing), plx)
+            # _as_prior, NOT the raw dict. fit_astrometry decodes its own
+            # `parallax` before calling here, but a parallax arriving on an AS
+            # CHANNEL (which is how fit_joint receives it) went through raw and
+            # reached build_target as a Dict, where plx is typed as a prior.
+            ch_plx = get(ch, "parallax", nothing)
+            ch_plx === nothing || (plx = _as_prior(ch_plx))
             M_pri  = something(get(ch, "m_pri", nothing), M_pri)
         elseif src in ("RM", "RM_R", "RM_A", "TOMO", "TTV", "TTV_NB", "SB")
             # handled by the technique-specific entry points below
@@ -179,7 +184,20 @@ function _target_from(channels::AbstractVector, planets; M_pri = nothing,
     # Only pass stellar mass when we actually have one: build_target types
     # M_s::Real, and an RV-only fit legitimately has no stellar mass (K-driven
     # parametrisation needs none). Passing nothing is a TypeError, not a default.
-    kw = Dict{Symbol,Any}(:planets => _planet_spec(planets), :rv => rv,
+    # Pick the default planet block from the channels actually present.
+    # `_planet_spec(n)` with no block yields planets with NO parameters at all,
+    # and build_target then refuses with "planet must declare a mass
+    # parameter". fit_rv and fit_astrometry each pass their own block, so only
+    # the multi-channel path (fit_joint) ever hit this -- which meant fit_joint
+    # could not run at all with a default planet spec.
+    #
+    # Astrometry present => a + M_sec: the whole reason to add astrometry is a
+    # TRUE mass, and a K-driven block cannot express one.
+    planet_spec = planets isa NamedTuple ? planets :
+        (iad === nothing && hgca === nothing && gost === nothing && relast === nothing) ?
+            _planet_spec(planets) :
+            _planet_spec(planets; block = default_astrom_planet())
+    kw = Dict{Symbol,Any}(:planets => planet_spec, :rv => rv,
                           :phot => phot, :iad => iad, :hgca => hgca,
                           :gost => gost, :relAST => relast, :plx => plx,
                           :trend_order => trend_order,

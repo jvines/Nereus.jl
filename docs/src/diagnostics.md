@@ -373,9 +373,35 @@ res    = detection_limits(chains, params; n_bins=30, confidence=0.95)
 plot_detection_limits(res; filename="detection_limits.png")
 ```
 
+## Detectability from the chain
+
+`detectability(chains, params, data; planet, threshold)` turns the posterior
+draws into a detection-probability map over `(period, companion mass)`. Each
+draw is a trial companion; it counts as detectable when its likelihood beats a
+no-companion model by `2 ΔlnL > threshold` (default 25, i.e. 5σ). Phase and
+inclination are marginalised by the sampling itself.
+
+```julia
+res = detectability(chains, params, data; planet = 2)
+plot_detectability(res; filename = "detectability.png")
+res.M50            # 50% detectable mass per period bin (M_sun)
+res.quantity       # :mass when the fit has an inclination, else :msini
+```
+
+The mass axis is the TRUE mass whenever the planet block carries an
+inclination, so an RV-only run (`:msini`) and a joint RV + astrometry run
+(`:mass`) can be compared on the same axes — which is the point of adding
+astrometry, since RV alone can never detect a face-on companion.
+
+The reference is the best no-companion likelihood among the nuisance values the
+draws themselves visited, with no re-optimisation. On data containing a real
+signal the null is a poor fit by construction, so the map shows that signal's
+footprint rather than survey completeness; for completeness in the
+injection-recovery sense, inject into residuals (Cumming et al. 2008).
+
 ### `plot_detection_limits(res; filename, ...)`
 
-Log-log `K_lim(P)` curve with the still-allowed region below the curve shaded.
+Log-log `K_lim(P)` curve, shaded below the curve.
 Sparse bins are flagged with an x-cross marker. Saves to `filename`
 if given.
 

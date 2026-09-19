@@ -1,6 +1,6 @@
-# Detection-limit figure: log-log K_lim(P) with the "still allowed" region
-# below the curve shaded. Optional overlay of the actual posterior on (P, K)
-# from the same chain for context.
+# Detection-limit figure: log-log K_lim(P), shaded below the curve.
+# Optional overlay of the actual posterior on (P, K) from the same chain for
+# context.
 
 using CairoMakie
 using Printf: @sprintf
@@ -12,9 +12,8 @@ using Printf: @sprintf
                            color=NEREUS_COLORS.post,
                            shade=true) -> Figure
 
-Plot `K_lim(P)` from a `DetectionLimitResult`. Log-log axes, with the
-region the data still ALLOW — below the curve — shaded (when
-`shade = true`). Anything above the curve would have been detected.
+Plot `K_lim(P)` from a `DetectionLimitResult`. Log-log axes, shaded
+below the curve (when `shade = true`).
 NaN bins (insufficient samples) are skipped so the curve breaks
 visibly across coverage gaps.
 """
@@ -49,7 +48,7 @@ function plot_detection_limits(res::DetectionLimitResult;
     K_lo_axis = K_min === nothing ? max(minimum(K_v) * 0.5, 1e-3) : Float64(K_min)
     K_hi_axis = K_max === nothing ? maximum(K_v) * 2.0 : Float64(K_max)
 
-    # Shaded "still allowed" region — band from the axis floor up to K_v.
+    # Shaded band below the curve, up to K_lim(P).
     if shade
         band!(ax, P_v, fill(K_lo_axis, length(K_v)), K_v;
                color = (color, 0.15))
@@ -71,5 +70,49 @@ function plot_detection_limits(res::DetectionLimitResult;
     xlims!(ax, minimum(P_v) * 0.9, maximum(P_v) * 1.1)
 
     filename === nothing || _save_plot(filename, fig; save_pdf=save_pdf)
+    return fig
+end
+
+"""
+    plot_detectability(res::DetectabilityResult;
+                        filename=nothing, save_pdf=false, figsize=(950, 560),
+                        colormap=:cool) -> Figure
+
+Detection-probability map from [`detectability`](@ref): period against
+companion mass, shaded by the fraction of posterior draws the data can tell
+apart from a no-companion model, with the 50% contour drawn on top.
+
+The mass axis is the true mass when the fit carries an inclination and
+`M sin i` otherwise (`res.quantity`), so a joint RV + astrometry run and an
+RV-only run can be compared directly on the same axes.
+"""
+function plot_detectability(res::DetectabilityResult;
+                             filename::Union{Nothing, AbstractString} = nothing,
+                             save_pdf::Bool = false,
+                             figsize::Tuple{Int, Int} = (950, 560),
+                             colormap = :cool)
+    set_theme!(nereus_theme())
+    fig = Figure(; size = figsize, figure_padding = (24, 16, 14, 10))
+    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10,
+               xlabel = "Period (d)",
+               ylabel = res.quantity === :mass ?
+                        "Companion mass (M_sun)" : "M sin i (M_sun)",
+               title = @sprintf("Detection probability (%.0f%% threshold: Δχ² > %g)",
+                                 100 * 0.5, res.threshold))
+
+    heatmap!(ax, res.P_centers, res.M_centers, res.fraction;
+              colormap = colormap, colorrange = (0, 1))
+    Colorbar(fig[1, 2]; colormap = colormap, limits = (0, 1),
+              label = "fraction distinguishable from no companion")
+
+    ok = isfinite.(res.M50)
+    if any(ok)
+        lines!(ax, res.P_centers[ok], res.M50[ok];
+                color = :black, linewidth = 2.5)
+        scatter!(ax, res.P_centers[ok], res.M50[ok];
+                  color = :black, markersize = 6)
+    end
+
+    filename === nothing || _save_plot(filename, fig; save_pdf = save_pdf)
     return fig
 end
