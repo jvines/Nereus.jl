@@ -127,8 +127,8 @@ Assemble a target from explicit channel specs. `build_target` already infers
 the source-flag set from which keywords are non-empty, so this is a translation
 layer, not a second model.
 """
-function _target_from(channels::AbstractVector, planets; M_pri = nothing,
-                      plx = nothing, trend_order = 0, noise_models = nothing,
+function _target_from(channels::AbstractVector, planets; M_s = NaN,
+                      trend_order = 0, noise_models = nothing,
                       priors = nothing, stability = :none)
     rv    = NamedTuple()
     phot  = NamedTuple()
@@ -168,13 +168,7 @@ function _target_from(channels::AbstractVector, planets; M_pri = nothing,
                     "plan per sky position"))
                 gost = ch_gost
             end
-            # _as_prior, NOT the raw dict. fit_astrometry decodes its own
-            # `parallax` before calling here, but a parallax arriving on an AS
-            # CHANNEL (which is how fit_joint receives it) went through raw and
-            # reached build_target as a Dict, where plx is typed as a prior.
-            ch_plx = get(ch, "parallax", nothing)
-            ch_plx === nothing || (plx = _as_prior(ch_plx))
-            M_pri  = something(get(ch, "m_pri", nothing), M_pri)
+            # No parallax/m_pri here: both are priors and belong in `priors`.
         elseif src in ("RM", "RM_R", "RM_A", "TOMO", "TTV", "TTV_NB", "SB")
             # handled by the technique-specific entry points below
         else
@@ -184,6 +178,19 @@ function _target_from(channels::AbstractVector, planets; M_pri = nothing,
     # Only pass stellar mass when we actually have one: build_target types
     # M_s::Real, and an RV-only fit legitimately has no stellar mass (K-driven
     # parametrisation needs none). Passing nothing is a TypeError, not a default.
+    # plx and M_pri are priors, so they live in `priors` and nowhere else.
+    # They used to also be keywords, which meant a prior could be specified in
+    # two places, and M_pri additionally doubled as the numeric M_s -- one name
+    # meaning two things depending on whether the fit had astrometry.
+    plx = M_pri = nothing
+    if priors !== nothing
+        pr = Dict{String,Any}(String(k) => v for (k, v) in pairs(priors))
+        haskey(pr, "plx")   && (plx   = _as_prior(pop!(pr, "plx")))
+        haskey(pr, "M_pri") && (M_pri = _as_prior(pop!(pr, "M_pri")))
+        priors = isempty(pr) ? nothing :
+                 Dict{String, PriorSpec}(k => _as_prior(v) for (k, v) in pr)
+    end
+
     # Pick the default planet block from the channels actually present.
     # `_planet_spec(n)` with no block yields planets with NO parameters at all,
     # and build_target then refuses with "planet must declare a mass
@@ -203,10 +210,8 @@ function _target_from(channels::AbstractVector, planets; M_pri = nothing,
                           :trend_order => trend_order,
                           :noise_models => noise_models, :priors => priors,
                           :stability => stability)
-    if M_pri !== nothing
-        kw[:M_pri] = M_pri
-        kw[:M_s]   = M_pri
-    end
+    M_pri === nothing || (kw[:M_pri] = M_pri)
+    isnan(M_s) || (kw[:M_s] = M_s)
     return build_target(; kw...)
 end
 
@@ -370,19 +375,22 @@ function resolve_astrometry(spec)
 end
 
 """
-    fit_astrometry(; iad, hgca, gost, relast, parallax, m_pri, planets, ...)
+    fit_astrometry(; iad, hgca, gost, relast, planets, priors, ...)
 
-Fit astrometry alone, no RV. `parallax` should be an informative prior: the
-abscissae constrain a0 ∝ M_sec·ϖ, degenerate without it.
+Fit astrometry alone, no RV.
+
+`priors["plx"]` should be INFORMATIVE: the abscissae constrain a0 ∝ M_sec·ϖ,
+so mass and parallax are degenerate without it. `priors["M_pri"]` sets the
+primary mass. Both are priors and both go in `priors` — there is no separate
+keyword for either.
 """
 function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
-                        relast = nothing, parallax = nothing, m_pri = nothing,
-                        planets = 1, engine = Dict("engine" => "pt"),
+                        relast = nothing, planets = 1,
+                        engine = Dict("engine" => "pt"),
                         stopping = nothing, output_dir = nothing, kwargs...)
     iad = resolve_astrometry(iad)
-    parallax = _as_prior(parallax)
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
-              "relast" => relast, "parallax" => parallax, "m_pri" => m_pri)
+              "relast" => relast)
     planets isa NamedTuple ||
         (planets = _planet_spec(planets; block = default_astrom_planet()))
     tgt = _target_from([ch], planets; kwargs...)

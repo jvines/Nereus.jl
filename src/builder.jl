@@ -252,15 +252,12 @@ function build_target(;
         end
     end
 
-    # M_s default for transit a/R*: numeric M_pri if user passed one,
-    # else fall back to user-supplied M_s, else NaN.
-    M_s_val = if !isnan(M_s)
-        Float64(M_s)
-    elseif M_pri isa Real
-        Float64(M_pri)
-    else
-        NaN
-    end
+    # M_s is the stellar mass used for transit a/R*. It is a STRUCTURAL
+    # CONSTANT, not a prior, and it is no longer silently back-filled from a
+    # numeric M_pri: that made one name mean two things depending on whether
+    # the fit had astrometry, and made `M_pri` half-prior half-constant.
+    # M_pri is a prior and only a prior; if you need M_s, say M_s.
+    M_s_val = isnan(M_s) ? NaN : Float64(M_s)
 
     R_s_val = isnan(R_s) ? NaN : Float64(R_s)
     nm_vec = noise_models === nothing ? NoiseModel[] :
