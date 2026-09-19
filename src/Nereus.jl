@@ -314,6 +314,7 @@ export
     PPCResult, posterior_predictive_check, plot_ppc,
     # Detection limits
     DetectionLimitResult, detection_limits, plot_detection_limits,
+    DetectabilityResult, detectability, plot_detectability,
     # PSIS-LOO / WAIC
     LooResult, compute_loo,
     # Post-fit health guard

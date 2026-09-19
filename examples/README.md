@@ -59,3 +59,19 @@ Every plot takes `(chains, params, data)` and a directory as `output`; Nereus
 names the files and puts model figures under `models/`. The two notebooks
 produce along-scan residuals, the epoch-astrometry orbit, the sky-plane orbit,
 RV time series and phase folds, and the posterior corner plot.
+
+## 03 — Python tutorial (`astronereus`)
+
+`03_python_tutorial.ipynb` covers the same science from Python, for people who do
+not have Julia and do not want it. A short tour of what Nereus samples over, then
+straight into two systems:
+
+- **Gaia-4 b** — an orbit from Gaia DR4 epoch astrometry alone (824 abscissae,
+  no RVs).
+- **HD 114762** — the same system fitted three ways: RV only (gives M sin i),
+  astrometry only (Hipparcos + Gaia DR4 as two numbered instruments), and joint.
+  The joint fit is the one that breaks sin i and turns a 35-year-old minimum mass
+  into an actual mass.
+
+Runs on a stock Python install: `pip install astronereus numpy`. The runtime is
+fetched on first use.
