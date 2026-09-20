@@ -200,7 +200,12 @@ Walkers operate in unconstrained space; bounded-space samples are
 recovered via the target's inverse transform.
 
 # Keywords
-- `n_temps::Int=5` — temperature levels.
+- `n_temps::Int=16` — temperature levels. Was 5, which is slower AND worse:
+  on the HD 114762 joint target 5 temps gave min swap acceptance 0.003 in
+  5.1 min, 16 gave 0.014 in 2.0 min, 24 gave 0.019 in 2.5 min. Better mixing
+  reaches the convergence checks sooner, so a denser ladder pays for itself.
+  Joint astrometry targets want 24 — at 16 with one seed the eccentricity
+  collapsed to 0.002 against a published 0.335, silently.
 - `n_walkers::Int=100` — walkers per temperature (≥ `2·n_dim + 2`, even).
 - `n_steps::Int=2000` — steps per walker.
 - `n_burnin::Int=1000` — burn-in discarded from posterior + evidence.
@@ -233,7 +238,7 @@ recovered via the target's inverse transform.
 function sample_pt_emcee(
     target::NereusTarget,
     data::Data;
-    n_temps::Int = 5,
+    n_temps::Int = 16,
     n_walkers::Int = 100,
     n_steps::Int = 2000,
     n_burnin::Int = 1000,
