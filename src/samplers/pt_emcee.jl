@@ -682,6 +682,16 @@ function sample_pt_emcee(
             update!(pb; n_done = step,
                     fields = (:acc => round(acc_rate, digits = 3),
                               :β1_acc => round(accept_within[1] / max(propose_within[1], 1), digits = 3),
+                              # The LADDER's health, not the move's. This is the
+                              # half that fails silently: once the rungs stop
+                              # exchanging, the cold chain is stuck in one mode
+                              # and R-hat happily certifies convergence to it.
+                              # The docstring has warned about a tiny
+                              # minimum(acceptance_swap) since the sampler was
+                              # written; the counters were right here and the
+                              # readout never showed them.
+                              :min_swap => round(minimum(accept_swap ./ max.(propose_swap, 1)),
+                                                 digits = 3),
                               :Rhat => rhat_str,    # mean/worst over science params
                               :ESS => ess_str,      # mean(bulk)/worst(tail)
                               :nevals => n_evals_atomic[]))

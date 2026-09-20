@@ -724,15 +724,22 @@ function _finish(target, engine, stopping, output_dir; op::String,
                 # _ensemble_n_walkers reads this to de-interleave per-walker traces
                 "sampler" => Dict{String,Any}("name" => spec_name,
                                               "kwargs" => spec_opts))
+            proot = joinpath(output_dir, "plots")
+            before = _png_mtimes(proot)
             _make_plots(pcfg, chains, target.params, target.data, output_dir)
             # Manifest: logical name -> path, relative to plots/ without the
-            # extension, exactly as run_job builds it.
+            # extension, exactly as run_job builds it. A bare scan also picks
+            # up figures an EARLIER fit into the same output_dir left behind,
+            # so `plots = ["corner"]` came back advertising three figures with
+            # no way to tell which were this run's. `_png_mtimes` snapshots
+            # the tree first and only files this call created or rewrote are
+            # reported; the rest stay on disk untouched.
             figs = Dict{String,Any}()
-            proot = joinpath(output_dir, "plots")
             if isdir(proot)
                 for (root, _, files) in walkdir(proot), f in files
                     endswith(f, ".png") || continue
                     full = joinpath(root, f)
+                    _is_fresh_png(full, before) || continue
                     figs[splitext(relpath(full, proot))[1]] = full
                 end
             end

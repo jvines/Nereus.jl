@@ -100,6 +100,7 @@ function run_job(cfg::AbstractDict)
         chains = result.chains
         save_chains(joinpath(out_dir, "chains.nc"), chains, params; data = data)
 
+        _plots_before = _png_mtimes(joinpath(out_dir, "plots"))
         plot_paths = _make_plots(cfg, chains, params, data, out_dir)
         summary["plots"] = plot_paths
         # figures manifest: scan the rendered plots/ tree → logical_name → path,
@@ -107,12 +108,17 @@ function run_job(cfg::AbstractDict)
         # (e.g. "models/RV_phasefold_P1", "transdim/occupancy",
         # "posteriors/raw/raw_K_k1"). Nereus stays S3-agnostic; the exoautomata
         # worker uploads these and rewrites the paths.
+        # Only figures THIS job wrote: re-running into an existing out_dir
+        # would otherwise report a previous run's leftovers as if they were
+        # current. Decided by the pre-plot mtime snapshot, not by a clock
+        # comparison -- see `_png_mtimes`.
         figs = Dict{String, Any}()
         plots_root = joinpath(out_dir, "plots")
         if isdir(plots_root)
             for (root, _, files) in walkdir(plots_root), f in files
                 endswith(f, ".png") || continue
                 full = joinpath(root, f)
+                _is_fresh_png(full, _plots_before) || continue
                 key = splitext(relpath(full, plots_root))[1]
                 figs[key] = full
             end
@@ -1484,6 +1490,79 @@ end
 # Plot dispatch
 # =====================================================================
 
+"""
+    _png_mtimes(plots_root) -> Dict{path, mtime}
+
+Snapshot of every PNG already under a run's `plots/` tree, taken immediately
+before rendering. The figure manifests are built by scanning that tree, so
+without a snapshot a run into a non-empty `output_dir` reports the PREVIOUS
+run's leftovers as its own -- `plots = ["corner"]` coming back with three
+figures. Comparing each file against its own earlier mtime, rather than
+against `time()`, needs no slack for filesystems whose mtime is coarser than
+the wall clock: back-to-back calls a second apart still separate cleanly.
+"""
+function _png_mtimes(plots_root::AbstractString)
+    seen = Dict{String, Float64}()
+    isdir(plots_root) || return seen
+    for (root, _, files) in walkdir(plots_root), f in files
+        endswith(f, ".png") || continue
+        full = joinpath(root, f)
+        try; seen[full] = stat(full).mtime; catch; end
+    end
+    return seen
+end
+
+"""Did this call create or rewrite `full`? Unstattable ⇒ keep it."""
+_is_fresh_png(full, before) = !haskey(before, full) ||
+    (try stat(full).mtime != before[full] catch; true end)
+
+"""
+    _auto_plot_kinds(chains, params, data) -> Vector{String}
+
+The plot set `"auto"` stands for, chosen from what is actually in `data`.
+
+Extracted so `_make_plots` can EXPAND "auto" into concrete names before it
+loops. Previously the whole set was dispatched from inside `_dispatch_plot`,
+which meant that one call returned a `Vector{String}` where every other call
+returns a single name or `nothing` -- and `_make_plots` `push!`ed the result
+into a `Vector{String}`, so `plots = ["auto"]` threw MethodError every single
+time, for `run_job` as much as for `fit_*`. The figures were already written
+by then and the throw is caught as a warning, so the only symptom was a stack
+trace beside a summary cheerfully reporting 28 figures.
+
+Expanding up front also means the progress bar counts real plots instead of
+sitting at 1/1 for the whole render.
+"""
+function _auto_plot_kinds(chains, params, data)
+    kinds = String["corner", "posteriors_raw", "posteriors_parameters",
+                   "posteriors_histograms", "traces_grouped"]
+    :n_planets in Set(names(chains, :parameters)) && push!(kinds, "transdim_occupancy")
+    n_rv(data) > 0           && append!(kinds, ["rv_timeseries", "rv_phasefold"])
+    # component decomposition adds over the timeseries only with multiple
+    # model pieces — ≥2 planets or a smooth (GP/AGP) activity curve.
+    (n_rv(data) > 0 && (params.config.max_kplanet ≥ 2 ||
+        any(nm -> nm isa ActivityGP || nm isa CovarianceNoise,
+            params.config.noise_models))) && push!(kinds, "rv_components")
+    n_phot(data) > 0         && append!(kinds, ["pm_timeseries", "pm_phasefold"])
+    data.relastrom !== nothing && append!(kinds, ["relastrom_timeseries",
+                                                   "relastrom_residuals"])
+    # Not inside the relastrom branch, for the reason above: any
+    # astrometry determines a sky-plane orbit.
+    has_astrometry(data)      && push!(kinds, "orbit_skyplane")
+    data.iad      !== nothing && push!(kinds, "iad_residuals")
+    data.hgca     !== nothing && push!(kinds, "hgca_pm_residuals")
+    data.g23h     !== nothing && push!(kinds, "g23h_residuals")
+    data.gost     !== nothing && push!(kinds, "pm_anomaly")
+    (n_rv(data) > 0 && has_astrometry(data)) && push!(kinds, "rv_astrom_phasefold")
+    n_phot(data) > 0 && append!(kinds, ["ttv_oc", "transit_overlay"])
+    any(has_any_rm, params.config.planet_modes) && push!(kinds, "rm_anomaly")
+    if any(nm -> nm isa ActivityGP, params.config.noise_models)
+        push!(kinds, "activity_gp_latent")
+        push!(kinds, "activity_gp_decomposition")
+    end
+    return unique(kinds)
+end
+
 function _make_plots(cfg, chains, params, data, out_dir)
     out_cfg = _get(cfg, :output; default = Dict())
     plot_list = _get(out_cfg, :plots; default = String[])
@@ -1502,16 +1581,44 @@ function _make_plots(cfg, chains, params, data, out_dir)
     # traces). The figures manifest is built by scanning this tree afterwards.
     plots_dir = joinpath(out_dir, "plots"); mkpath(plots_dir)
     nw_eff = _ensemble_n_walkers(cfg, params)   # per-walker trace de-interleave
+    # Expand "auto" here so the loop -- and the progress bar -- see real plot
+    # names. Rendering 28 figures takes a minute, and before this the sampler
+    # bar hit 100% and the caller then sat in silence with no indication that
+    # anything was still happening.
+    expanded = String[]
+    for pn in plot_list
+        String(pn) == "auto" ? append!(expanded, _auto_plot_kinds(chains, params, data)) :
+                               push!(expanded, String(pn))
+    end
+    expanded = unique(expanded)
+
     generated = String[]
-    for plot_name in plot_list
+    pb = ProgressBar("plots"; total = length(expanded),
+                      enabled = Bool(_get(out_cfg, :show_progress; default = true)))
+    for (i, plot_name) in enumerate(expanded)
+        update!(pb; n_done = i - 1, fields = (:now => String(plot_name),))
         try
             fname = _dispatch_plot(String(plot_name), chains, params, data,
                                      plots_dir, plot_kwargs; n_walkers = nw_eff)
-            fname !== nothing && push!(generated, fname)
+            # `auto` dispatches a whole SET and returns the Vector{String} of
+            # what it produced; every other kind returns one name or nothing.
+            # `push!` on the vector case threw MethodError -- Vector{String}
+            # into Vector{String} -- so `plots = ["auto"]` always failed here.
+            # The figures themselves were already on disk by then, and the
+            # throw is caught as a warning below, so the only visible symptom
+            # was a stack trace and an empty `plots` list next to a summary
+            # reporting 28 figures.
+            if fname isa AbstractVector
+                append!(generated, String.(fname))
+            elseif fname !== nothing
+                push!(generated, String(fname))
+            end
         catch err
             @warn "Plot `$plot_name` failed" exception = (err, catch_backtrace())
         end
     end
+    update!(pb; n_done = length(expanded), fields = (:now => "done",))
+    finish!(pb)
     return generated
 end
 
@@ -1579,7 +1686,15 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         end
         return "models/rv_astrom_phasefold_K*.png"
     elseif name == "orbit_skyplane"
-        data.relastrom === nothing && return nothing
+        # The orbit is traced from the CHAINS -- _theta_from_chain_row ->
+        # _planet_orbit -> _trace_orbit. `data.relastrom` is touched in exactly
+        # one place inside the plot, to overlay observed points on top of it.
+        # Gating on relastrom therefore withheld the figure from every
+        # IAD-only fit, whose sky-plane orbit IS the whole content of an
+        # astrometric solution -- and withheld it SILENTLY, so asking for
+        # plots=["orbit_skyplane"] looked like it worked and produced nothing.
+        # The requirement is an astrometric orbit; the overlay is decoration.
+        has_astrometry(data) || return nothing
         for k in 1:params.config.max_kplanet
             try
                 plot_orbit_skyplane(chains, params, data;
@@ -1733,34 +1848,10 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         end
         return "activity_gp_decomposition.png"
     elseif name == "auto"
-        # Pick the plot set automatically from what's in `data`. Each
-        # individual plot still no-ops when its required data is absent.
+        # Kept for any caller that dispatches "auto" directly; `_make_plots`
+        # expands it beforehand and never reaches here.
         produced = String[]
-        kinds = String["corner", "posteriors_raw", "posteriors_parameters",
-                       "posteriors_histograms", "traces_grouped"]
-        :n_planets in Set(names(chains, :parameters)) && push!(kinds, "transdim_occupancy")
-        n_rv(data) > 0           && append!(kinds, ["rv_timeseries", "rv_phasefold"])
-        # component decomposition adds over the timeseries only with multiple
-        # model pieces — ≥2 planets or a smooth (GP/AGP) activity curve.
-        (n_rv(data) > 0 && (params.config.max_kplanet ≥ 2 ||
-            any(nm -> nm isa ActivityGP || nm isa CovarianceNoise,
-                params.config.noise_models))) && push!(kinds, "rv_components")
-        n_phot(data) > 0         && append!(kinds, ["pm_timeseries", "pm_phasefold"])
-        data.relastrom !== nothing && append!(kinds, ["orbit_skyplane",
-                                                       "relastrom_timeseries",
-                                                       "relastrom_residuals"])
-        data.iad      !== nothing && push!(kinds, "iad_residuals")
-        data.hgca     !== nothing && push!(kinds, "hgca_pm_residuals")
-        data.g23h     !== nothing && push!(kinds, "g23h_residuals")
-        data.gost     !== nothing && push!(kinds, "pm_anomaly")
-        (n_rv(data) > 0 && has_astrometry(data)) && push!(kinds, "rv_astrom_phasefold")
-        n_phot(data) > 0 && append!(kinds, ["ttv_oc", "transit_overlay"])
-        any(has_any_rm, params.config.planet_modes) && push!(kinds, "rm_anomaly")
-        if any(nm -> nm isa ActivityGP, params.config.noise_models)
-            push!(kinds, "activity_gp_latent")
-            push!(kinds, "activity_gp_decomposition")
-        end
-        for k in unique(kinds)
+        for k in _auto_plot_kinds(chains, params, data)
             try
                 f = _dispatch_plot(k, chains, params, data, out_dir, kw; n_walkers = n_walkers)
                 f === nothing || push!(produced, f)
