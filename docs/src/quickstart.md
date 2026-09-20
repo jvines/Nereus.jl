@@ -459,17 +459,29 @@ params = Params(;
 )
 target = NereusTarget(params, data; unconstrained = true)
 
-# Parallel tempering with a Pathfinder warm start — production sampler
-# for joint RV+phot+GP. Fixed-dim (no `td`), so it returns
-# (chains, log_evidence).
-chains, log_ev = sample_pt(target;
-    init_strategy     = :pathfinder,
-    n_pathfinder_runs = 16,
-    n_rounds          = 16,
-    n_chains          = 16,
-    seed              = 42,
-    within_model      = :rwm,
+# pt_emcee is the default engine, and the right one here. Its stretch move
+# is built from the difference between two walkers, so it follows the local
+# correlation — which is what a joint RV+phot+GP posterior needs.
+res = sample_pt_emcee(target, target.data;
+    n_temps       = 16,       # 24 for joint absolute astrometry
+    n_walkers     = 100,
+    n_steps       = 3000,
+    n_burnin      = 1500,
+    init_strategy = :prior,
+    seed          = 42,
 )
+chains, log_ev = res.chains, res.log_evidence
+@assert minimum(res.acceptance_swap) > 0.01  # below this the ladder is broken
+
+# NOT `sample_pt` with `init_strategy = :pathfinder`, which this section used
+# to recommend. Two separate problems, both measured:
+#   - sample_pt explores one coordinate at a time (axis-aligned moves only),
+#     so it cannot follow a curved ridge, and it reports no convergence
+#     diagnostic at all — it fails silently.
+#   - Pathfinder's MVN approximation is poor on sharp curved ridges and seeds
+#     every replica into one spurious basin, producing pristine R-hat/ESS at a
+#     wrong orbit (see src/samplers/pt.jl:133 — HD 159062: a = 34.5 vs ~58).
+# Together they are the worst available combination for this kind of fit.
 print_results(summarize_fitted(chains, params),
               summarize_derived(chains, params))
 

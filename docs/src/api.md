@@ -213,8 +213,8 @@ would call:
 fit_astrometry(iad = Dict("catalogue" => "gaia_dr4",
                           "source_id" => 1457486023639239296),
                priors = Dict(
-                   "plx"   => Dict("dist" => "Normal", "mu" => 13.628, "sigma" => 0.021),
-                   "M_pri" => Dict("dist" => "Fixed",  "value" => 0.644)))
+                   "plx"   => Dict("type" => "normal", "mu" => 13.628, "sigma" => 0.021),
+                   "M_pri" => Dict("type" => "fixed",  "value" => 0.644)))
 
 fit_astrometry(iad = Dict("catalogue" => "hipparcos", "hip" => 27321))
 ```

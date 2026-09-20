@@ -117,6 +117,7 @@ function build_target(;
     phot_trend_order::Int = 0,
     noise_models = nothing,
     priors::Union{Nothing, Dict{String, <:PriorSpec}} = nothing,
+    external_priors::Vector{ExternalPrior} = ExternalPrior[],
 )
     isempty(planets) &&
         throw(ArgumentError("build_target: at least one planet required " *
@@ -285,6 +286,7 @@ function build_target(;
         trend_order     = trend_order,
         phot_trend_order = phot_trend_order,
         noise_models    = nm_vec,
+        external_priors = external_priors,
     )
     return NereusTarget(params, data)
 end

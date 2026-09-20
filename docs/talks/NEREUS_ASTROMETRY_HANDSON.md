@@ -385,23 +385,48 @@ is a second Keplerian, which is a different exercise.
 
 ## 3.3 What comes out
 
-At 12 rounds, ~8 minutes:
+`pt_emcee`, n_temps=24, 3000 steps, **2.7 minutes**:
 
 ```
-posterior-median per-channel logL:  RV = -200.2 (N=59)   ASTROM = -2146.1 (N=558)
-  -> RV chi2/N = 0.97
-
                  median  [+1sigma, -1sigma]      Kiefer+ 2019
-  P (d)           83.92  [+0.00, -0.00]          83.92
-  e               0.343  [+0.001, -0.002]        0.335
-  M sin i (MJup)  12.27  [+0.03, -0.04]          ~11 (the RV-only value)
-  i (deg)          4.84  [+0.08, -0.08]          6.2 +1.9 -1.3
-  M_true (Msun)   0.139  [+0.002, -0.003]        0.103 +0.030 -0.025
+  P (d)           83.96  [+0.00, -0.00]          83.92
+  e               0.333  [+0.008, -0.008]        0.335
+  M sin i (MJup)  12.57  [+0.22, -0.23]          ~11 (the RV-only value)
+  i (deg)          3.48  [+0.08, -0.08]          6.2 +1.9 -1.3
+  M_true (Msun)   0.198  [+0.003, -0.003]        0.103 +0.030 -0.025
+  plx (mas)       25.37                          prior 25.36 +/- 0.30
+  log Z        -2641.05        min swap acceptance 0.021
 ```
 
-**The slide is the last two rows.** RV alone: M sin i = 12.3 M_Jup, a giant planet. RV + DR4
-astrometry: i = 4.8 degrees, M = 0.139 M_sun, a low-mass star. +1.2 sigma from the published
-joint value.
+**The slide is the last two rows.** RV alone: M sin i = 12.6 M_Jup, a giant planet. RV + DR4
+astrometry: i = 3.5 degrees, M = 0.198 M_sun, a low-mass star.
+
+**These numbers changed in v0.4.2 and the old ones were wrong.** This fit used to run
+`sample_pt` and report M_true = 0.139 at i = 4.84, "+1.2 sigma from Kiefer". That was a
+sampler artefact. `sample_pt`'s explorer is coordinate-wise slice sampling — axis-aligned
+moves only — which cannot follow this posterior's curved ridge, and it reports no
+convergence diagnostic, so it failed silently. Two independent checks land on 0.198:
+`pt_emcee` (seed-stable across four seeds, unimodal) and `nested` (0.1997, a different
+algorithm class entirely). `sample_pt` also put the parallax at 32.95 mas against its own
+25.36 +/- 0.30 prior; `pt_emcee` returns 25.37.
+
+**So be straight about the tension.** 0.198 against Kiefer's 0.103 +0.030 is **+3.2 sigma**,
+not +1.2. It is still unambiguously a star rather than a planet, which is the point of the
+session — but do not claim agreement with the published value, because there isn't one.
+
+**Why the disagreement is probably the data, not the fit.** Kiefer used Hipparcos-Gaia
+astrometry (the long-baseline proper-motion anomaly); this notebook uses Gaia DR4 epoch
+abscissae. Different observables. The control that localises it: refit with Hipparcos IAD
+instead of DR4 and the conflict disappears —
+
+    RV only            M sin i = 11.07 MJup
+    Hipparcos IAD      M sin i = 11.36 MJup   (+2.6%, consistent)   min swap 0.067
+    Gaia DR4           M sin i = 12.57 MJup   (+13.7%)              min swap 0.021
+
+RV pins K to +/-0.15%, so a 13.7% shift in M sin i is enormous. Only the DR4 fit breaks the
+RV constraint, and the DR4 posterior is also markedly harder to sample. Something in the
+pre-release DR4 abscissae for this star is being absorbed by inflating M sin i — consistent
+with the chi2/dof note below.
 
 **Be honest about the fit quality.** The astrometric chi2/dof goes 106 -> 10.1, not -> 1. Real
 structure remains — the known wide outer companion, or a photocentre effect the point-mass

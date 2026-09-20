@@ -1331,26 +1331,50 @@ being used in the computation.
 ## 4.7 Second worked example: HD 114762, RV + DR4 jointly
 
 13 free parameters (the 7 orbital, plx, two RV offsets, two RV jitters, one RV trend),
-**8.0 minutes**:
+`pt_emcee` n_temps=24, **2.7 minutes**:
 
 ```
 RV: 24 HIRES + 35 Lick, baseline 29.3 yr
 AST: 558 DR4 along-scan abscissae
 
-posterior-median per-channel logL:  RV = -200.2 (N=59)   ASTROM = -2146.1 (N=558)
-  -> RV chi2/N = 0.97
-
 Posterior medians [+1 sigma, -1 sigma]      (Kiefer+ 2019):
-  P_days   =    83.92 [+0.00, -0.00]      (83.92)
-  e        =    0.343 [+0.001, -0.002]    (0.335)
-  M sin i  =    12.27 [+0.03, -0.04] M_J  (~11, the RV-only value)
-  i_deg    =     4.84 [+0.08, -0.08]      (6.2 +1.9 -1.3)
-  M_true   =    0.139 [+0.002, -0.003] Msun  (0.103 +0.030 -0.025, a STAR)
-           =    145.4 [+2.5, -2.8] M_J        (108 +31 -26)     -> +1.21 sigma from Kiefer+ 2019
+  P_days   =    83.96 [+0.00, -0.00]      (83.92)
+  e        =    0.333 [+0.008, -0.008]    (0.335)
+  M sin i  =    12.57 [+0.22, -0.23] M_J  (~11, the RV-only value)
+  i_deg    =     3.48 [+0.08, -0.08]      (6.2 +1.9 -1.3)
+  M_true   =    0.198 [+0.003, -0.003] Msun  (0.103 +0.030 -0.025, a STAR)
+           =    207.4 [+3.1, -3.1] M_J        (108 +31 -26)     -> +3.2 sigma from Kiefer+ 2019
+  plx      =    25.37                     (prior 25.36 +/- 0.30)
+  log Z    = -2641.05      min swap acceptance 0.021
 
-  -> RV alone: M sin i = 12.3 M_J (looks like a giant planet)
-  -> RV + DR4 astrometry: i = 4.8 deg => M = 0.139 Msun (a low-mass star)
+  -> RV alone: M sin i = 12.6 M_J (looks like a giant planet)
+  -> RV + DR4 astrometry: i = 3.5 deg => M = 0.198 Msun (a low-mass star)
 ```
+
+**Superseded numbers.** Before v0.4.2 this ran `sample_pt` and reported M_true = 0.139 at
+i = 4.84, quoted as "+1.21 sigma from Kiefer". That was a sampler artefact, not a result.
+`sample_pt` explores one coordinate at a time (axis-aligned moves only), cannot follow this
+posterior's curved ridge, and reports no convergence diagnostic — so it failed silently. It
+also returned plx = 32.95 mas against a 25.36 +/- 0.30 prior, which should have been the tell.
+`pt_emcee` (seed-stable, unimodal) and `nested` (0.1997) independently give 0.198.
+
+**The tension with Kiefer is real: +3.2 sigma, not +1.2.** Still a star, not a planet — but
+the honest framing is disagreement with the published mass, not agreement.
+
+**And it is probably the data.** Kiefer used Hipparcos-Gaia astrometry (proper-motion
+anomaly); this uses DR4 epoch abscissae. Swapping DR4 for Hipparcos IAD, everything else
+identical, removes the conflict with the RVs:
+
+```
+  RV only          M sin i = 11.07 M_J                      min swap 0.096
+  Hipparcos IAD    M sin i = 11.36 M_J  (+2.6%, consistent) min swap 0.067
+  Gaia DR4         M sin i = 12.57 M_J  (+13.7%)            min swap 0.021
+```
+
+RV constrains K to +/-0.15%, so +13.7% in M sin i is a very large excursion. Only the DR4
+fit breaks it, and the DR4 posterior is also the hardest to sample. That points at the
+pre-release DR4 abscissae for this star rather than at the model — consistent with the
+chi2/dof 106 -> 10.1 residual structure below.
 
 Same before/after treatment:
 

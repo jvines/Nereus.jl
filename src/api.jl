@@ -129,7 +129,8 @@ layer, not a second model.
 """
 function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       trend_order = 0, noise_models = nothing,
-                      priors = nothing, stability = :none)
+                      priors = nothing, stability = :none,
+                      external_priors = nothing)
     rv    = NamedTuple()
     phot  = NamedTuple()
     iad = hgca = gost = relast = nothing
@@ -209,7 +210,8 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                           :gost => gost, :relAST => relast, :plx => plx,
                           :trend_order => trend_order,
                           :noise_models => noise_models, :priors => priors,
-                          :stability => stability)
+                          :stability => stability,
+                          :external_priors => _as_external(external_priors))
     M_pri === nothing || (kw[:M_pri] = M_pri)
     isnan(M_s) || (kw[:M_s] = M_s)
     return build_target(; kw...)
@@ -553,6 +555,42 @@ PriorSpec is a Julia type. Accept both that and an already-constructed prior.
 _as_prior(x::PriorSpec) = x
 _as_prior(::Nothing) = nothing
 _as_prior(x::Real) = FixedPrior(float(x))
+"""Coerce `external_priors=` into `Vector{ExternalPrior}`.
+
+Priors on DERIVED quantities rather than sampled parameters. Only `ecc` and
+`rho_s` exist (`_VALID_EXTERNAL_QUANTITIES`). Uses the same prior spelling as
+the `priors` dict, so you never switch vocabularies mid-call:
+
+    external_priors = [Dict("quantity" => "ecc",
+                            "prior" => Dict("type" => "normal",
+                                            "mu" => 0.0, "sigma" => 0.3))]
+
+`per_planet` defaults by quantity -- true for `ecc`, false for `rho_s` -- since
+that is the only sensible choice for each, and getting it wrong is silent.
+"""
+_as_external(::Nothing) = ExternalPrior[]
+_as_external(v::Vector{ExternalPrior}) = v
+_as_external(e::Union{AbstractDict, NamedTuple}) = _as_external([e])
+function _as_external(v::AbstractVector)
+    out = ExternalPrior[]
+    for e in v
+        e isa ExternalPrior && (push!(out, e); continue)
+        d = Dict{String,Any}(String(k) => val for (k, val) in pairs(e))
+        haskey(d, "quantity") || throw(ArgumentError(
+            "external_priors entry needs a `quantity` (ecc or rho_s)"))
+        q = Symbol(String(d["quantity"]))
+        q in (:ecc, :rho_s) || throw(ArgumentError(
+            "external prior quantity $(repr(q)) unknown; use :ecc or :rho_s"))
+        haskey(d, "prior") || throw(ArgumentError(
+            "external_priors entry for $(q) needs a `prior`"))
+        pr = d["prior"]
+        spec = pr isa PriorSpec ? pr : _as_prior(pr)
+        push!(out, ExternalPrior(q, spec,
+                                 Bool(get(d, "per_planet", q === :ecc))))
+    end
+    return out
+end
+
 function _as_prior(d::AbstractDict)
     t = lowercase(String(get(d, "type", "")))
     g(k, dflt=nothing) = get(d, k, dflt)
