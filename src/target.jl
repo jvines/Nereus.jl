@@ -35,6 +35,47 @@ end
 
 # --- logdensity: direct bounded-space path (no transform) -------------
 
+"""
+    logdensity_bounded(target, x) -> Float64
+
+Log-posterior at `x` given in BOUNDED (physical) space, whatever kind of target
+this is.
+
+Use this for anything that takes parameter values out of a chain, off a plot,
+or out of your head. `LogDensityProblems.logdensity` means two different things
+depending on the target:
+
+    NereusTarget{Nothing}          ->  x is BOUNDED
+    NereusTarget{PackedTransforms} ->  x is UNCONSTRAINED
+
+and `build_target` hands you the second. Feeding it bounded values — which is
+what every chain stores — returns `-Inf` for every point, with no error and no
+hint why. That has cost real hours: a ridge walk, a claimed prior violation and
+a claimed million-nat gap, all computed by reading bounded vectors as
+unconstrained ones.
+
+Note this returns the posterior WITHOUT the change-of-variables Jacobian, which
+is what you want for comparing physical parameter values against each other.
+"""
+function logdensity_bounded(target::NereusTarget{Nothing}, x::AbstractVector)
+    return LogDensityProblems.logdensity(target, x)
+end
+
+function logdensity_bounded(target::NereusTarget{PackedTransforms},
+                            x::AbstractVector)
+    theta = Theta{Float64}(target.params)
+    set_unfrozen!(theta, x)
+    lp = log_prior(theta)
+    isfinite(lp) || return -Inf
+    ll = rv_log_likelihood(theta, target.data)
+    isfinite(ll) || return -Inf
+    lt = transit_log_likelihood(theta, target.data)
+    isfinite(lt) || return -Inf
+    ltomo = tomogram_log_likelihood(theta, target.data)
+    isfinite(ltomo) || return -Inf
+    return lp + ll + lt + ltomo
+end
+
 function LogDensityProblems.logdensity(target::NereusTarget{Nothing},
                                         x::AbstractVector)
     T = eltype(x)
@@ -72,6 +113,29 @@ end
 
 # --- logdensity: unconstrained path (packed transforms) ---------------
 
+# Fires at most once per session. The test: does `y` become finite when read
+# as BOUNDED rather than unconstrained? If so the caller almost certainly has
+# the spaces the wrong way round.
+const _SPACE_WARNED = Ref(false)
+function _warn_space_mismatch(target, y)
+    _SPACE_WARNED[] && return
+    ok = try
+        isfinite(logdensity_bounded(target, y))
+    catch
+        false
+    end
+    ok || return
+    _SPACE_WARNED[] = true
+    @warn """logdensity returned -Inf, but this point IS valid in bounded space.
+
+    `build_target` returns a NereusTarget{PackedTransforms}, whose
+    `LogDensityProblems.logdensity` expects UNCONSTRAINED coordinates. Chains
+    store BOUNDED values, so feeding draws back in gives -Inf everywhere.
+
+    Use `logdensity_bounded(target, x)` for bounded values, or
+    `transform_forward(x, target.transform)` to convert first."""
+end
+
 function LogDensityProblems.logdensity(target::NereusTarget{PackedTransforms},
                                         y::AbstractVector)
     pt = target.transform
@@ -100,7 +164,14 @@ function LogDensityProblems.logdensity(target::NereusTarget{PackedTransforms},
         isfinite(x[i]) || return convert(T, -Inf)
     end
     lj = transform_logabsdetjac_inv(y, pt)
-    isfinite(lj) || return convert(T, -Inf)
+    if !isfinite(lj)
+        # A -Inf here is legitimate for a genuinely-rejected point, but it is
+        # ALSO what you get when bounded-space values are passed to this
+        # method by mistake -- chain draws, plot coordinates, hand-written
+        # vectors. That failure is silent and has cost hours. Say so once.
+        _warn_space_mismatch(target, y)
+        return convert(T, -Inf)
+    end
 
     # Build Theta and evaluate posterior in bounded space
     theta = Theta{T}(target.params)

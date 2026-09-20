@@ -22,3 +22,8 @@ studies/
 
 # James workshop data (LTT 9779) — research inputs/outputs, not package content.
 /ltt9779/
+
+# Agent/editor local state. Kept here rather than relying on a developer's
+# global ignore: a container build has no access to that, and then BUILD_INFO
+# reports the tree dirty when it is not.
+.claude/

@@ -21,12 +21,29 @@
         )
         @test target isa NereusTarget
         @test target.params.config.parametrization.mass === :K_driven
-        @test target.params.config.M_s == 1.0
+        # M_pri does NOT back-fill M_s. The priors refactor made M_pri a
+        # prior and only a prior; if you need M_s you say M_s. Before that
+        # this line read `== 1.0`, and it kept passing by accident.
+        @test isnan(target.params.config.M_s)
         @test "P_k1" in target.params.layout.unfrozen_names
         @test "K_k1" in target.params.layout.unfrozen_names
         @test "sigma_HIRES" in target.params.layout.unfrozen_names
         @test "gamma_HIRES" in target.params.layout.unfrozen_names
         @test target.params.config.instruments.rv_names == ["HIRES"]
+
+        # ... and M_s is honoured when actually given.
+        t2 = build_target(
+            M_pri = 1.0, M_s = 1.0,
+            planets = (b = (
+                P      = LogUniformPrior(10.0, 1000.0),
+                K      = LogUniformPrior(1.0, 100.0),
+                sesinw = UniformPrior(-1.0, 1.0),
+                secosw = UniformPrior(-1.0, 1.0),
+                Mo     = UniformPrior(0.0, 2π),
+            ),),
+            rv = (HIRES = (data = _rvdat(), sigma = LogUniformPrior(0.1, 10.0)),),
+        )
+        @test t2.params.config.M_s == 1.0
         # M_pri-as-Real → FixedPrior; not in unfrozen for RV_ONLY
         @test !("M_pri" in target.params.layout.unfrozen_names)
     end

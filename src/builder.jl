@@ -224,8 +224,9 @@ function build_target(;
     priors_dict["n_p"] = FixedPrior(Float64(length(planets)))
 
     # M_pri and plx are only LAYOUT slots when the planet has astrometry
-    # (RVAS / RVPMAS). For RV-only fits, M_pri's numeric value is used
-    # for transit a/R* via M_s instead — see M_s_val below.
+    # (RVAS / RVPMAS). For RV-only fits M_pri is not a slot at all, and it
+    # does NOT supply M_s — pass M_s explicitly if a transit a/R* needs one.
+    # See M_s_val below.
     if has_astrom
         if M_pri !== nothing
             priors_dict["M_pri"] = _to_prior_spec(M_pri)

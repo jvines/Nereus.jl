@@ -282,6 +282,7 @@ export
     sample_map, MAPResult,
     sample_ess,
     ofti_sample,
+    logdensity_bounded,
     pathfinder_init,
     pathfinder_warmstart_daedalus,
     sample_pt_emcee, PTemceeResult,

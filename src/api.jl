@@ -48,7 +48,7 @@ the sampler does not accept are an ERROR, not a silent no-op: a typo'd
 `n_round` that quietly does nothing is how you lose a day.
 """
 function run_engine(target, spec::AbstractDict)
-    name = String(get(spec, "engine", "pt"))
+    name = String(get(spec, "engine", "pt_emcee"))
     fn = get(ENGINES, name, nothing)
     fn === nothing && throw(ArgumentError(
         "unknown engine $(repr(name)). Available: " *
@@ -284,7 +284,7 @@ what the jitter and offset terms are keyed on, so there is no unnamed form:
 `planets` is an integer for a fixed-dimension fit or a range for
 trans-dimensional model selection over planet count.
 """
-function fit_rv(rv; planets = 1, engine = Dict("engine" => "pt"),
+function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
                 stopping = nothing, output_dir = nothing, noise = nothing,
                 trend_order = 0, kwargs...)
     _require_instrument_map(rv, "RV", (:t, :rv, :rv_err))
@@ -298,7 +298,7 @@ function fit_rv(rv; planets = 1, engine = Dict("engine" => "pt"),
     end
     tgt = _target_from([ch], planets;
                        trend_order, noise_models = noise, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv")
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim)
 end
 
 """
@@ -316,11 +316,11 @@ unreachable from a symmetric transit.
 """
 function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
                      rho_star = nothing, gravity_darkening = false,
-                     engine = Dict("engine" => "pt"), stopping = nothing,
+                     engine = nothing, transdim = nothing, stopping = nothing,
                      output_dir = nothing, kwargs...)
     _require_instrument_map(phot, "transit", (:t, :flux, :flux_err))
     tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit")
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim)
 end
 
 """
@@ -386,7 +386,7 @@ keyword for either.
 """
 function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
                         relast = nothing, planets = 1,
-                        engine = Dict("engine" => "pt"),
+                        engine = nothing, transdim = nothing,
                         stopping = nothing, output_dir = nothing, kwargs...)
     iad = resolve_astrometry(iad)
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
@@ -394,7 +394,7 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
     planets isa NamedTuple ||
         (planets = _planet_spec(planets; block = default_astrom_planet()))
     tgt = _target_from([ch], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry")
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim)
 end
 
 
@@ -407,13 +407,13 @@ end
 Fit several techniques simultaneously. One operation for "these together",
 rather than a named function per combination.
 """
-function fit_joint(channels...; planets = 1, engine = Dict("engine" => "pt"),
+function fit_joint(channels...; planets = 1, engine = nothing, transdim = nothing,
                    stopping = nothing, output_dir = nothing, kwargs...)
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
     tgt = _target_from(collect(channels), planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint")
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim)
 end
 
 # ---------------------------------------------------------------------------
@@ -570,11 +570,50 @@ function _M_s_of(target)
     (ms === nothing || (ms isa Real && isnan(ms))) ? nothing : ms
 end
 
+"""Coerce a `transdim=` argument into a `TransDimConfig`.
+
+`max_k` comes from the built target, so `planets` is the single place the
+planet count is stated and `transdim=true` cannot disagree with it.
+
+    transdim = true                  # birth/death over 1..planets
+    transdim = 4                      # explicit max_kplanet
+    transdim = (noise = true, ...)    # full config block
+    transdim = TransDimConfig(...)    # built yourself
+"""
+_as_td(::Nothing, max_k) = nothing
+_as_td(td::TransDimConfig, max_k) = td
+_as_td(td::Bool, max_k) = td ? TransDimConfig(; max_kplanet = max_k) : nothing
+_as_td(td::Integer, max_k) = TransDimConfig(; max_kplanet = Int(td))
+function _as_td(td::Union{AbstractDict, NamedTuple}, max_k)
+    d = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(td))
+    haskey(d, :max_kplanet) || (d[:max_kplanet] = max_k)
+    return _build_transdim(d)
+end
+_as_td(td, max_k) = throw(ArgumentError(
+    "transdim must be true, an Int, a config block, or a TransDimConfig; " *
+    "got $(typeof(td))"))
+
 """Run the engine, then assemble the standard result."""
-function _finish(target, engine, stopping, output_dir; op::String)
+function _finish(target, engine, stopping, output_dir; op::String,
+                 transdim = nothing)
     t0 = time()
-    raw = run_engine(target, engine isa AbstractDict ? engine :
-                     Dict("engine" => String(engine)))
+    td = _as_td(transdim, target.params.config.max_kplanet)
+    # Engine defaults by SHAPE, so the trans-dim and fixed-dim paths are
+    # symmetric: you ask for trans-dim by saying `transdim=`, not by also
+    # having to know which sampler can do it.
+    spec = engine === nothing ?
+        Dict{String,Any}("engine" =>
+            td === nothing ? "pt_emcee" : "transdim_pt_emcee") :
+        (engine isa AbstractDict ?
+            Dict{String,Any}(String(k) => v for (k, v) in pairs(engine)) :
+            Dict{String,Any}("engine" => String(engine)))
+    if td !== nothing
+        o = Dict{Symbol,Any}(Symbol(k) => v
+                             for (k, v) in pairs(get(spec, "options", Dict())))
+        o[:td] = td
+        spec["options"] = o
+    end
+    raw = run_engine(target, spec)
     chains, log_z, extra = _normalize(raw)
     summary = Dict{String,Any}(
         "op" => op,
@@ -673,7 +712,7 @@ only be used for methods comparison.
 """
 function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arome,
                 priors::AbstractDict = Dict(), planets::Int = 1,
-                engine = Dict("engine" => "pt"), output_dir = nothing,
+                engine = nothing, transdim = nothing, output_dir = nothing,
                 parametrization = Dict("mass" => "K_driven", "time" => "Tc",
                                        "ew" => "sesinw", "geom" => "b_rr",
                                        "use_rho_s" => true),
@@ -690,6 +729,17 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
                                     "stability" => "none"),
         "priors" => Dict{String,Any}(priors),
         "sampler" => _sampler_block(engine))
+    # Config path: the transdim BLOCK is what enables trans-dim, and
+    # _dispatch_sampler defaults to transdim_pt_emcee when it sees one --
+    # so these entry points stay symmetric with fit_rv/fit_joint.
+    if transdim !== nothing
+        td = _as_td(transdim, Int(get(get(cfg, "model", Dict()), "max_kplanet", 1)))
+        cfg["transdim"] = Dict{String,Any}(
+            "max_kplanet"       => td.max_kplanet,
+            "planets"           => td.planets,
+            "noise"             => td.noise,
+            "transdim_fraction" => td.transdim_fraction)
+    end
     merge!(cfg, Dict{String,Any}(extra))
     return _run_config(cfg; op = "fit_rm")
 end
@@ -703,7 +753,7 @@ Transit timing variations. Needs photometry (or measured transit times);
 function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  nbody::Bool = false, planets::Int = 2,
                  star::AbstractDict = Dict(), priors::AbstractDict = Dict(),
-                 engine = Dict("engine" => "pt"), output_dir = nothing,
+                 engine = nothing, transdim = nothing, output_dir = nothing,
                  extra::AbstractDict = Dict())
     (phot === nothing && transit_times === nothing) && throw(ArgumentError(
         "fit_ttv needs photometry or measured transit_times"))
@@ -719,6 +769,17 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
         "priors" => Dict{String,Any}(priors),
         "sampler" => _sampler_block(engine))
     transit_times === nothing || (cfg["data"]["transit_times"] = transit_times)
+    # Config path: the transdim BLOCK is what enables trans-dim, and
+    # _dispatch_sampler defaults to transdim_pt_emcee when it sees one --
+    # so these entry points stay symmetric with fit_rv/fit_joint.
+    if transdim !== nothing
+        td = _as_td(transdim, Int(get(get(cfg, "model", Dict()), "max_kplanet", 1)))
+        cfg["transdim"] = Dict{String,Any}(
+            "max_kplanet"       => td.max_kplanet,
+            "planets"           => td.planets,
+            "noise"             => td.noise,
+            "transdim_fraction" => td.transdim_fraction)
+    end
     merge!(cfg, Dict{String,Any}(extra))
     return _run_config(cfg; op = "fit_ttv")
 end
@@ -731,7 +792,7 @@ case the component masses come from BOTH amplitudes rather than the SB1 mass
 function.
 """
 function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
-                    priors::AbstractDict = Dict(), engine = Dict("engine" => "pt"),
+                    priors::AbstractDict = Dict(), engine = nothing, transdim = nothing,
                     output_dir = nothing, extra::AbstractDict = Dict())
     mode = secondary === nothing ? "BINARY_RV" : "SB2"
     data = _data_block(; rv)
@@ -745,6 +806,17 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
                                     "stability" => "none"),
         "priors" => Dict{String,Any}(priors),
         "sampler" => _sampler_block(engine))
+    # Config path: the transdim BLOCK is what enables trans-dim, and
+    # _dispatch_sampler defaults to transdim_pt_emcee when it sees one --
+    # so these entry points stay symmetric with fit_rv/fit_joint.
+    if transdim !== nothing
+        td = _as_td(transdim, Int(get(get(cfg, "model", Dict()), "max_kplanet", 1)))
+        cfg["transdim"] = Dict{String,Any}(
+            "max_kplanet"       => td.max_kplanet,
+            "planets"           => td.planets,
+            "noise"             => td.noise,
+            "transdim_fraction" => td.transdim_fraction)
+    end
     merge!(cfg, Dict{String,Any}(extra))
     return _run_config(cfg; op = "fit_binary")
 end

@@ -1273,8 +1273,15 @@ end
 const _SAMPLER_FNS = ENGINES
 
 function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
-    smp = _get(cfg, :sampler; required = true)
-    name = String(_get(smp, :name; required = true))
+    # Default by shape: transdim_pt_emcee when a `transdim` block is present,
+    # pt_emcee otherwise. Both for the same reason -- the affine-invariant
+    # stretch move follows curved ridges, which `pt`'s coordinate-wise slice
+    # explorer cannot (it takes axis-aligned steps only) and which it fails at
+    # SILENTLY, reporting no swap acceptance and no R-hat.
+    smp = _get(cfg, :sampler; default = Dict())
+    _td_present = _get(cfg, :transdim; default = nothing) !== nothing
+    name = String(_get(smp, :name;
+                       default = _td_present ? "transdim_pt_emcee" : "pt_emcee"))
     kw = Dict{Symbol, Any}(Symbol(k) => v
                             for (k, v) in _get(smp, :kwargs; default = Dict()))
     kw[:seed] = get(kw, :seed, seed)

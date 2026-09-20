@@ -212,8 +212,9 @@ would call:
 ```julia
 fit_astrometry(iad = Dict("catalogue" => "gaia_dr4",
                           "source_id" => 1457486023639239296),
-               parallax = Dict("dist" => "Normal", "mu" => 13.628, "sigma" => 0.021),
-               m_pri = 0.644)
+               priors = Dict(
+                   "plx"   => Dict("dist" => "Normal", "mu" => 13.628, "sigma" => 0.021),
+                   "M_pri" => Dict("dist" => "Fixed",  "value" => 0.644)))
 
 fit_astrometry(iad = Dict("catalogue" => "hipparcos", "hip" => 27321))
 ```
