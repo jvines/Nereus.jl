@@ -10,7 +10,7 @@
 #
 # Budgets are intentionally small — these confirm pipeline correctness,
 # not statistical convergence. The full 2D-Gaussian quantitative
-# validations live in test_ptemcee_gaussian.jl / test_pa_gaussian.jl /
+# validations live in test_pt_emcee_gaussian.jl / test_pa_gaussian.jl /
 # test_evidence_gaussian.jl.
 
 using Test

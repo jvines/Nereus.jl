@@ -53,8 +53,8 @@ Every parallel-tempering sampler feeds the same
 | Sampler | Trans-dim? | log Z field | Full stack field | log Z headline |
 |---|---|---|---|---|
 | `sample_pt` | both | 2nd tuple element | — | TI+ (`pt.jl:545`) |
-| `sample_ptemcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`ptemcee.jl:576`) |
-| `sample_transdim_ptemcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_ptemcee.jl:1423`) |
+| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:576`) |
+| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:1423`) |
 | `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_whitening.jl:507`) |
 | `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | TI+ (`pt_hmc.jl:264`) |
 
@@ -63,12 +63,12 @@ Notes for a production reader:
 - **Field name differs by sampler.** `PTemceeResult` and
   `PTWhiteningResult` expose the bundled stack as `.evidence`
   (typed `EvidenceReport`), whereas `TransDimPTemceeResult` exposes it
-  as `.evidence_report` (typed `Any`, `transdim_ptemcee.jl:37`). The
+  as `.evidence_report` (typed `Any`, `transdim_pt_emcee.jl:37`). The
   tuple-returning samplers (`sample_pt`, `sample_pt_hmc`) put the
   scalar `log_evidence` in the tuple; `sample_pt_hmc` additionally
   returns the full `EvidenceReport` as a third element.
 - **Headline estimator differs.** The in-house ensemble samplers
-  (`ptemcee`, `transdim_ptemcee`, `pt_whitening`) pick **H+** as the
+  (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`) pick **H+** as the
   headline `log_evidence` (falling back TI+ → TI when H+ is non-finite).
   `sample_pt` and `sample_pt_hmc` report **TI+** as the headline.
   Whichever you trust, all four numbers are always in the report — read
@@ -136,7 +136,7 @@ ti_trapezoidal(mean_logL_per_temp, betas) -> log_Z
 the PT ladder is stored descending (β: 1→0, cold→hot), and integrating
 in array order would yield `∫₁⁰ = −log Z`. The function sorts ascending
 so the sign is `+log Z` regardless of ladder direction. (This sign-flip
-was a real bug — `sample_ptemcee` once reported `−log Z`, inverting
+was a real bug — `sample_pt_emcee` once reported `−log Z`, inverting
 every Bayes factor; caught by the toy-Z gate vs nested sampling on
 2026-06-13 and now regression-tested.)
 
@@ -242,10 +242,10 @@ EvidenceReport:
 
 ## Reading the evidence out of a real run
 
-Pull the full stack off the result struct (ptemcee / pt_whitening):
+Pull the full stack off the result struct (pt_emcee / pt_whitening):
 
 ```julia
-res = sample_ptemcee(target, data; n_temps = 12)
+res = sample_pt_emcee(target, data; n_temps = 12)
 res.log_evidence            # headline scalar (H+, or TI+/TI fallback)
 ev  = res.evidence          # the EvidenceReport
 ev.ti_plus, ev.ss_plus      # (log_Z, σ) pairs to compare
@@ -255,7 +255,7 @@ ev.hybrid_beta_star         # where H+ switched TI+→SS+
 For the trans-dim ensemble sampler the field is named differently:
 
 ```julia
-res = sample_transdim_ptemcee(target, data; td = td)
+res = sample_transdim_pt_emcee(target, data; td = td)
 res.log_evidence            # headline scalar
 ev  = res.evidence_report   # EvidenceReport (field typed Any)
 ```
@@ -284,7 +284,7 @@ finite (the JSON contract forbids raw `NaN`). Note that `pa`/`smc`
 population-annealing free-energy estimate, the NS family report
 Skilling/Feroz `log Z`. The
 sampler names that route through the PT evidence stack are
-`"pt"`, `"ptemcee"`, `"transdim_ptemcee"`,
+`"pt"`, `"pt_emcee"`, `"transdim_pt_emcee"`,
 `"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:241`, `1270`–`1385`).
 
 **`summary.json` carries an `evidence` block**, not just `log_z`: every
@@ -295,7 +295,7 @@ HD 18599 run the four tempered estimators spanned 80 nats while TI+ reported
 
 ⚠ **`run_job` fits could not compute bridge at all until 2026-08-27.** The
 runner builds its target with `unconstrained = false`, so `target.transform`
-is `nothing` and `sample_ptemcee` skips bridge — every job silently fell
+is `nothing` and `sample_pt_emcee` skips bridge — every job silently fell
 through to the tempered stack, the one estimator that can sit >100 nats low
 while its four variants agree to a decimal. Bridge is now recomputed after the
 fit against an unconstrained target built from the same `params` and `data`
@@ -353,7 +353,7 @@ Worse for model selection, the bias is *model-dependent* — it lives on the
 model that contains the signal, not the noise-only null — so it does **not**
 cancel in a `Δ log Z` Bayes factor.
 
-`sample_ptemcee` therefore also computes a **mode-anchored Laplace** estimate
+`sample_pt_emcee` therefore also computes a **mode-anchored Laplace** estimate
 from its own cold chain:
 
 ```
@@ -372,7 +372,7 @@ cross-check for a marginal one.
 The result carries both:
 
 ```julia
-res = sample_ptemcee(target, data; n_temps = 24)
+res = sample_pt_emcee(target, data; n_temps = 24)
 res.evidence.ti_plus[1]      # tempered estimate (raw)
 res.log_evidence_laplace     # mode-Laplace cross-check
 res.log_evidence             # the one to USE (see rule below)
@@ -641,10 +641,10 @@ until it is resolved.
   e–ω–M₀ ridge) — see [sampler validation](sampler_validation.md).
 - **Ladder length matters.** Use `≥ 10` temperatures; a too-coarse
   ladder inflates TI quadrature error and destabilises the SS+ pairs.
-  `sample_pt_hmc` and `sample_ptemcee`/`sample_pt_whitening` support
+  `sample_pt_hmc` and `sample_pt_emcee`/`sample_pt_whitening` support
   `adapt_ladder` to re-grid β by thermodynamic length (√Var log L),
   which minimises discretisation error (`pt_hmc.jl:191`,
-  `ptemcee.jl:61`).
+  `pt_emcee.jl:61`).
 - **Bayes factors across runs**: compute as `Δ log Z`, with σ combined
   in quadrature. Use the **same estimator** for both runs (e.g. both
   SS+). Through `run_job`, compare the `log_z` summary keys. **If either

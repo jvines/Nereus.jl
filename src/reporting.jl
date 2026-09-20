@@ -797,7 +797,7 @@ end
     convergence_report(chains, n_walkers; io=stdout, params=nothing,
                        rhat_max=1.1, ess_min=400) -> NamedTuple
 
-Ensemble convergence gate for a cold `sample_transdim_ptemcee` chain saved as
+Ensemble convergence gate for a cold `sample_transdim_pt_emcee` chain saved as
 `n_walkers` walkers × n_steps (walker = fast index in the flattened chain).
 Reshapes into per-walker chains and computes rank-normalized split-R̂ +
 bulk-ESS (Vehtari+ 2021, via MCMCChains) per parameter. Prints a summary with a

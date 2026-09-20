@@ -1,5 +1,27 @@
 module Nereus
 
+# Contract version for the Python client (astronereus).
+#
+# A runtime bundle is a COMPILED Nereus, cached under ~/.cache/nereus and
+# reused across client upgrades, while `daemon.jl` ships inside the pip
+# package. So a `pip install -U astronereus` leaves a stale Julia API behind
+# the new client, and the mismatch used to surface as an unreadable Julia
+# error deep in a fit -- e.g. `ArgumentError: No value arguments present` from
+# `something(::Nothing)` when the 0.3.0 priors-only client called a v0.2.2
+# runtime that still wanted `parallax=` / `m_pri=`.
+#
+# The client pings for this number on every `Session.start()` and refuses to
+# proceed on a mismatch, naming the fix. BUMP IT whenever the Python-facing
+# surface changes incompatibly: a renamed or removed keyword, a renamed
+# engine, a changed payload shape. Do NOT bump for internal refactors,
+# performance work, or additive keywords the old client simply never sends.
+#
+#   1  -- 0.2.x: fit_astrometry took `parallax=` / `m_pri=`
+#   2  -- 0.3.0: priors-only (`plx` and `M_pri` live in `priors`);
+#                engines `ptemcee`/`transdim_ptemcee` renamed to
+#                `pt_emcee`/`transdim_pt_emcee`
+const PY_API_VERSION = 2
+
 include("constants.jl")
 include("kepler.jl")
 include("orbit.jl")
@@ -59,8 +81,8 @@ include("samplers/map.jl")
 include("samplers/ess.jl")
 include("samplers/ofti.jl")
 include("samplers/pathfinder.jl")
-include("samplers/ptemcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
-include("samplers/transdim_ptemcee.jl") # trans-dim PT + MoMS variable selection
+include("samplers/pt_emcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
+include("samplers/transdim_pt_emcee.jl") # trans-dim PT + MoMS variable selection
 include("samplers/population_annealing.jl") # sequential-MC tempered sampler (Hukushima & Iba 2003)
 include("samplers/nested_ins.jl")            # importance nested sampling (Feroz+ 2013)
 include("samplers/nested_dynamic.jl")        # dynamic nested sampling (Higson+ 2019)
@@ -262,8 +284,8 @@ export
     ofti_sample,
     pathfinder_init,
     pathfinder_warmstart_daedalus,
-    sample_ptemcee, PTemceeResult,
-    sample_transdim_ptemcee, TransDimPTemceeResult,
+    sample_pt_emcee, PTemceeResult,
+    sample_transdim_pt_emcee, TransDimPTemceeResult,
     run_job,
     rm_signal, rm_signal_arome, rm_signal_at_time, planet_sky_position,
     sample_pa, PAResult,
@@ -341,7 +363,7 @@ export
 #      worker pool was OpenBLAS.
 #
 #   2. Outside juliacall, Nereus's Julia-level threading
-#      (`Threads.@threads :static` in PT / ptemcee / OFTI / PA, plus
+#      (`Threads.@threads :static` in PT / pt_emcee / OFTI / PA, plus
 #      `Threads.@spawn` chain dispatch in RJMCMC / ensemble / NUTS)
 #      already saturates the available cores at the per-chain
 #      granularity. Nested BLAS threading is pure overhead — Julia

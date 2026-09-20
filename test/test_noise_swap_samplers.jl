@@ -2,7 +2,7 @@
 # exclusion group.
 #
 # Going A -> none -> B by birth/death means accepting an intermediate state that
-# is a deep posterior minimum. transdim_ptemcee can do it on its hot chains
+# is a deep posterior minimum. transdim_pt_emcee can do it on its hot chains
 # (which is why ITS swap is gated to beta > 0.3, cold side only), but rjmcmc
 # runs at beta = 1 with no ladder and daedalus has no ladder either — without an
 # explicit within-group swap they have no mechanism at all, so a chain that
@@ -53,7 +53,7 @@ using Random, Statistics, MCMCChains
                           toggleable = NoiseModel[ad, rot],
                           noise_exclusion_groups = [NoiseModel[ad, rot]])
 
-    # `sample_rjmcmc` returns a tuple, transdim_ptemcee a struct.
+    # `sample_rjmcmc` returns a tuple, transdim_pt_emcee a struct.
     _chains(r) = r isa Tuple ? first(r) : r.chains
 
     "Per-sample activity of each group member."
@@ -81,7 +81,7 @@ using Random, Statistics, MCMCChains
         configs = Set(zip(a1, a2))
         @test length(configs) > 1
         # Exchangeable members SHOULD split occupancy roughly evenly. They do
-        # not: measured 0.4% / 99.6% (rjmcmc) and 0.9% / 99.1% (ptemcee), a
+        # not: measured 0.4% / 99.6% (rjmcmc) and 0.9% / 99.1% (pt_emcee), a
         # ~230:1 split between two models built on iid noisy copies of the same
         # signal. That is either the open entrenchment problem showing up very
         # cleanly, or two noise realisations genuinely differing by ~5 nats —
@@ -98,7 +98,7 @@ using Random, Statistics, MCMCChains
     end
 
     @testset "each sampler exposes noise_swap_rate" begin
-        for fn in (Nereus.sample_rjmcmc, Nereus.sample_transdim_ptemcee)
+        for fn in (Nereus.sample_rjmcmc, Nereus.sample_transdim_pt_emcee)
             @test :noise_swap_rate in Base.kwarg_decl(first(methods(fn)))
         end
     end
@@ -122,11 +122,11 @@ using Random, Statistics, MCMCChains
         @test any(a1) || any(a2)
     end
 
-    @testset "transdim_ptemcee unchanged by the port" begin
-        r = Nereus.sample_transdim_ptemcee(tgt, data; td = td, n_temps = 6,
+    @testset "transdim_pt_emcee unchanged by the port" begin
+        r = Nereus.sample_transdim_pt_emcee(tgt, data; td = td, n_temps = 6,
                 n_walkers = 20, n_steps = 1200, n_burnin = 400, seed = 3,
                 show_progress = false)
-        check(r, "transdim_ptemcee")
+        check(r, "transdim_pt_emcee")
     end
 
     @testset "swap preserves mutual exclusion" begin

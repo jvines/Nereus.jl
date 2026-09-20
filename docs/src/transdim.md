@@ -27,7 +27,7 @@ sampler names (`runner.jl:206`, `_SAMPLERS_REQUIRE_TD`):
 
 | Sampler | `run_job` name | Engine | Evidence | Notes |
 |---|---|---|---|---|
-| `sample_transdim_ptemcee` | `transdim_ptemcee` | PT + affine-invariant ensemble, MoMS birth/death | TI⁺/SS⁺/H⁺ from PT ladder | Planets **and** noise toggling. The blind-recovery workhorse. |
+| `sample_transdim_pt_emcee` | `transdim_pt_emcee` | PT + affine-invariant ensemble, MoMS birth/death | TI⁺/SS⁺/H⁺ from PT ladder | Planets **and** noise toggling. The blind-recovery workhorse. |
 | `sample_rjmcmc` | `rjmcmc` | Classic reversible-jump MCMC | none (`NaN`) | Single-chain or PT; full Jacobian bookkeeping. |
 | `sample_moms` | `moms` | Mixtures of Mutually Singular distributions (van den Bergh+ 2026) | none (`NaN`) | Variable selection with no dimension-jumping. |
 | `sample_daedalus` | `daedalus` | MoMS within nested sampling | nested-sampling log Z | Joint trans-dim posterior + evidence in one run. |
@@ -50,12 +50,12 @@ former `pt_warm` engine did; that engine is gone and this keyword
 replaces it (`pt.jl:129-142`). The trans-dim machinery is unaffected
 by the choice.
 
-`sample_ptemcee` is **fixed-dim only** (no `td` keyword), and
+`sample_pt_emcee` is **fixed-dim only** (no `td` keyword), and
 deliberately does **not** offer a `:pathfinder` init: Pathfinder's MVN
 approximation is poor on sharp curved ridges (Pareto k ≫ 0.5) and
 seeds every walker into one spurious basin, producing pristine-looking
 R̂ / ESS at a wrong orbit (HD 159062: a = 34.5 against a true ≈ 58,
-where prior-dispersed ptemcee recovers a ≈ 57).
+where prior-dispersed pt_emcee recovers a ≈ 57).
 
 ## `TransDimConfig`
 
@@ -153,7 +153,7 @@ Mathematically equivalent to RJMCMC under an identity dimension map,
 but with **no auxiliary variables and no Jacobian** — bookkeeping
 reduces to standard fixed-dim Metropolis-Hastings. This is the native
 move used by `sample_moms`, `sample_daedalus`, and
-`sample_transdim_ptemcee`.
+`sample_transdim_pt_emcee`.
 
 Convenience constructor:
 
@@ -186,7 +186,7 @@ User-declared mutually-exclusive noise model sets. At most one model
 per group active at any time. The proposal machinery checks the
 constraint at birth time, and walkers are rejection-resampled at
 init so no walker starts in a forbidden config
-(`transdim_ptemcee.jl:319-333`).
+(`transdim_pt_emcee.jl:319-333`).
 
 The hard typing-level exclusion (`SequentialNoise` AR/MA vs
 `CovarianceNoise` GP on the same channel) is **always** applied
@@ -224,10 +224,10 @@ trans-dim occupancy is *entrenchment-biased*, not P(M | D); the group
 restores occupancy = evidence. See
 [Noise models — exclusion groups](noise_models.md).
 
-## `sample_transdim_ptemcee` — the workhorse
+## `sample_transdim_pt_emcee` — the workhorse
 
-`sample_transdim_ptemcee` (`src/samplers/transdim_ptemcee.jl:166`)
-extends `sample_ptemcee` with MoMS variable-selection moves. Each
+`sample_transdim_pt_emcee` (`src/samplers/transdim_pt_emcee.jl:166`)
+extends `sample_pt_emcee` with MoMS variable-selection moves. Each
 walker carries its own `TransDimState` (planet activation bits + the
 toggleable-noise bits). The within-step ordering per (walker, temp)
 is: stretch ensemble move on continuous params → MoMS planet/noise
@@ -236,7 +236,7 @@ temperatures. Acceptance is tempered (`β · ΔlogL`) so hot chains
 explore the model space freely.
 
 Despite the stale `TODO` comment at the head of the file, **noise
-toggling IS wired in** (`do_noise`, `transdim_ptemcee.jl:285`):
+toggling IS wired in** (`do_noise`, `transdim_pt_emcee.jl:285`):
 birth/death of noise models, an OLS-informed AD birth, a post-burn-in
 DB-correct noise swap, and per-model post-birth refinement are all
 present.
@@ -245,7 +245,7 @@ present.
 
 | Keyword | Default | Meaning |
 |---|---|---|
-| `td::TransDimConfig` | required | trans-dim config; needs `planets` or `noise` true (`transdim_ptemcee.jl:202`) |
+| `td::TransDimConfig` | required | trans-dim config; needs `planets` or `noise` true (`transdim_pt_emcee.jl:202`) |
 | `inclusion_prior::Real` | `0.5` | Bernoulli prior P(γ\_k = 1); must be in (0, 1) |
 | `moms_init_scale::Real` | `1.0` | initial scale multiplier for the MoMS Gaussian-RW birth |
 | `informed_birth_fraction::Real` | `0.0` | fraction of births using `JointInformedBirth` (BLS + LS, depth→radius→mass→K, BLS-t0 anchoring; auto-falls back to RV-only `InformedBirth` with no photometry). Forward/reverse use the same strategy family so detailed balance holds. **Critical for finding weak / arbitrary-period planets** — `0.0` gives blind RW births that rarely land. |
@@ -268,7 +268,7 @@ acceptance, the β ladder, `n_evals`, plus **raw** per-planet
 (`noise_td_proposed`, `noise_td_accepted`) move counts — raw counts
 because a rounded rate of `0.000` reads as "frozen" even while the
 chain is transitioning (HD 18599 post-mortem,
-`transdim_ptemcee.jl:43`).
+`transdim_pt_emcee.jl:43`).
 
 ## `Params` — must match `TransDimConfig`
 
@@ -315,7 +315,7 @@ to ≲ 0.2 nats once the ladder is dense and recovery aids are on.
 ## Reading trans-dim output
 
 The chain gets these extra columns
-(`transdim_ptemcee.jl:1428-1434`):
+(`transdim_pt_emcee.jl:1428-1434`):
 
 - `:n_planets` — number of active planets per sample.
 - `:planet_active_<k>` — one boolean column per planet slot
@@ -401,7 +401,7 @@ validator enforces it for the four samplers above
 
 ```json
 {
-  "sampler": { "name": "transdim_ptemcee",
+  "sampler": { "name": "transdim_pt_emcee",
                "kwargs": { "n_temps": 10, "n_walkers": 120,
                            "n_steps": 4000, "n_burnin": 2000,
                            "informed_birth_fraction": 0.5 } },

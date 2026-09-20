@@ -46,7 +46,7 @@ The full schema is documented in `docs/JOB_CONFIG.md`.
 
 ```julia
 summary = run_job("configs/hd18599.json")
-summary = run_job(Dict("engine" => "ptemcee", "output_dir" => "out", ...))
+summary = run_job(Dict("engine" => "pt_emcee", "output_dir" => "out", ...))
 ```
 """
 run_job(config_path::AbstractString) = run_job(JSON3.read(read(config_path,
@@ -196,7 +196,7 @@ _to_dict(x) = x  # JSON3.Object behaves dict-like
 function _ensemble_n_walkers(cfg, params)
     s = _get(cfg, :sampler; default = Dict())
     name = String(_get(s, :name; default = ""))
-    name in ("ptemcee", "transdim_ptemcee", "pt", "pt_whitening") ||
+    name in ("pt_emcee", "transdim_pt_emcee", "pt", "pt_whitening") ||
         return nothing
     kw = _get(s, :kwargs; default = Dict())
     nw = Int(_get(kw, :n_walkers; default = 100))
@@ -250,7 +250,7 @@ _known_noise_kinds() = sort!(collect(keys(_NOISE_TYPES)))
 # like a posterior and is not. Use fit_* / run_engine for MAP.
 const _RUNNER_UNSUPPORTED   = Set(("map",))
 const _KNOWN_SAMPLERS       = Tuple(sort!(collect(setdiff(keys(ENGINES), _RUNNER_UNSUPPORTED))))
-const _SAMPLERS_REQUIRE_TD  = Set(("transdim_ptemcee", "rjmcmc", "moms",
+const _SAMPLERS_REQUIRE_TD  = Set(("transdim_pt_emcee", "rjmcmc", "moms",
                                     "daedalus"))
 const _KNOWN_BIRTH_STRATEGIES = ("PriorBirth", "InformedBirth",
                                   "JointInformedBirth", "DonorBirth",
@@ -1177,7 +1177,7 @@ end
 # Sampler dispatcher
 # =====================================================================
 
-const _SAMPLERS_NEED_TD = Set(["transdim_ptemcee", "rjmcmc", "moms",
+const _SAMPLERS_NEED_TD = Set(["transdim_pt_emcee", "rjmcmc", "moms",
                                 "daedalus", "pt"])
 
 # Wall-clock watchdog around `_dispatch_sampler`. The sampler runs on a
@@ -1302,11 +1302,11 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     td_block = _get(cfg, :transdim; default = nothing)
     td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
 
-    if name == "ptemcee"
-        return sample_ptemcee(target, data; kw...)
-    elseif name == "transdim_ptemcee"
-        td === nothing && error("transdim_ptemcee requires `transdim` block")
-        return sample_transdim_ptemcee(target, data; td = td, kw...)
+    if name == "pt_emcee"
+        return sample_pt_emcee(target, data; kw...)
+    elseif name == "transdim_pt_emcee"
+        td === nothing && error("transdim_pt_emcee requires `transdim` block")
+        return sample_transdim_pt_emcee(target, data; td = td, kw...)
     elseif name == "pt"
         # `pt_warm` used to be a second engine here; it is now
         # sample_pt(init_strategy = :pathfinder).
@@ -1814,7 +1814,7 @@ end
 # PT samplers preserving EMPEROR-style prior-seeded init across chains
 # × temperatures. Detection limits computed from these are honest;
 # others would give mode-biased curves.
-const _PT_PRIOR_SEEDED = Set(("ptemcee", "transdim_ptemcee", "pt"))
+const _PT_PRIOR_SEEDED = Set(("pt_emcee", "transdim_pt_emcee", "pt"))
 
 function _run_detection_limits!(cfg, chains, params::Params, data::Data,
                                  out_dir::AbstractString, summary::Dict)
@@ -1923,7 +1923,7 @@ end
 # Ensemble samplers store correlated walkers along the chain axis, so
 # `assess_fit` must split each walker's own trace rather than treat
 # walkers as independent chains.
-const _ENSEMBLE_SAMPLERS = Set(("ptemcee", "transdim_ptemcee",
+const _ENSEMBLE_SAMPLERS = Set(("pt_emcee", "transdim_pt_emcee",
                                  "pt_whitening", "pa", "smc",
                                  "ensemble", "ess"))
 

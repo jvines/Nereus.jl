@@ -38,7 +38,7 @@ A config is a `Dict` (or a JSON file passed to
 | `sampler`       | ✅ | `{name, kwargs}` |
 | `priors`        | optional | per-parameter `{type, args}`; unset params get sensible defaults |
 | `noise_models`  | optional | list of `{kind, instruments, channel, kwargs}` |
-| `transdim`      | required for `transdim_ptemcee`/`rjmcmc`/`moms`/`daedalus` | `{max_kplanet, birth_strategies, …}` |
+| `transdim`      | required for `transdim_pt_emcee`/`rjmcmc`/`moms`/`daedalus` | `{max_kplanet, birth_strategies, …}` |
 | `star`          | optional | `M_s`, `R_s`, `T_eff`, `J_mag`, `K_mag`, `Ab` (needed for derived masses/radii) |
 | `output`        | optional | `{plots, plot_kwargs, save_pdf, ppc, loo, detection_limits …}` |
 | `version`, `seed`, `n_threads`, `timeout_sec` | optional | run metadata + safety rails |
@@ -63,7 +63,7 @@ collated error message if any is wrong — see `_validate_config` in
 - **`noise_models[*].kind`**: `CeleriteRotation`, `CeleriteSHO`,
   `CeleriteRotationFM17`, `ActivityDecorrelation`, `ARModel`, `MAModel`,
   `ActivityJitter`, `ActivityGP`.
-- **`sampler.name`**: `ptemcee`, `transdim_ptemcee`, `pt`, `rjmcmc`,
+- **`sampler.name`**: `pt_emcee`, `transdim_pt_emcee`, `pt`, `rjmcmc`,
   `moms`, `daedalus`, `nested`, `nested_ins`, `nested_dynamic`,
   `pa`, `smc`, `pt_whitening`, `nuts`, `pt_hmc`, `ofti`.
 - **`output.plots`**: `rv_timeseries`, `rv_components`, `rv_phasefold`,
@@ -130,10 +130,10 @@ cfg = Dict(
      "P_k1" => Dict("type" => "LogUniformPrior", "args" => [3.0, 5.0]),  # ~4.23 d
      "K_k1" => Dict("type" => "UniformPrior",    "args" => [0.0, 120.0])),
   "noise_models" => [],
-  # ptemcee = ensemble parallel-tempering: robust to the K/e/ω geometry,
+  # pt_emcee = ensemble parallel-tempering: robust to the K/e/ω geometry,
   # prior-seeded across temps (finds weak signals), and PT-only post-fit
   # extras (detection limits) switch on automatically.
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 8, "n_walkers" => 60, "n_steps" => 4000, "n_burnin" => 2000,
      "show_progress" => false)),
   "output" => Dict("plots" => ["rv_timeseries", "rv_phasefold", "corner",
@@ -198,7 +198,7 @@ cfg = Dict(
      "q1_CHEOPS" => Dict("type" => "UniformPrior", "args" => [0.0, 1.0]),
      "q2_CHEOPS" => Dict("type" => "UniformPrior", "args" => [0.0, 1.0])),
   "noise_models" => [],
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 8, "n_walkers" => 60, "n_steps" => 3500, "n_burnin" => 2000,
      "show_progress" => false)),
   "output" => Dict("plots" => ["pm_timeseries", "pm_phasefold",
@@ -249,7 +249,7 @@ cfg = Dict(
      "rr_k1" => Dict("type" => "UniformPrior", "args" => [0.05, 0.20]),
      "b_k1"  => Dict("type" => "UniformPrior", "args" => [0.0, 1.0])),
   "noise_models" => [],
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 8, "n_walkers" => 60, "n_steps" => 3500, "n_burnin" => 2000,
      "show_progress" => false)),
   "output" => Dict("plots" => ["rv_phasefold", "pm_phasefold",
@@ -265,7 +265,7 @@ summary = run_job(cfg)
 
 For a smooth posterior with a strongly-pinned ephemeris you can also use
 `"sampler" => Dict("name" => "nuts", "kwargs" => Dict("n_chains" => 4,
-"n_samples" => 2000, "n_warmup" => 1000))`. ptemcee is the safer default
+"n_samples" => 2000, "n_warmup" => 1000))`. pt_emcee is the safer default
 for the correlated K/e/b/limb-darkening geometry, which NUTS struggles to
 mix.
 
@@ -304,7 +304,7 @@ cfg = Dict(
      # bound inc < 90° to break the i↔180−i relastrom mirror (optional)
      "inc_k1" => Dict("type" => "UniformPrior", "args" => [0.0, π/2])),
   "noise_models" => [],
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 8, "n_walkers" => 60, "n_steps" => 3500, "n_burnin" => 2000,
      "show_progress" => false)),
   "output" => Dict("plots" => ["orbit_skyplane", "relastrom_residuals",
@@ -373,7 +373,7 @@ cfg = Dict(
      "Omega_k1" => Dict("type" => "UniformPrior",    "args" => [0.0, 2π]),
      "plx"      => Dict("type" => "NormalPrior",     "args" => [310.94, 0.17, 305.0, 320.0])),
   "noise_models" => [],
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 8, "n_walkers" => 60, "n_steps" => 3000, "n_burnin" => 1800,
      "show_progress" => false)),
   "output" => Dict("plots" => ["hgca_pm_residuals", "pm_anomaly",
@@ -455,7 +455,7 @@ cfg = Dict(
      "v_sin_i_star" => Dict("type" => "NormalPrior",  "args" => [6000.0, 1500.0, 500.0, 20000.0]),
      "lambda_k1"    => Dict("type" => "UniformPrior", "args" => [-π, π])),
   "noise_models" => [],
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 8, "n_walkers" => 70, "n_steps" => 3000, "n_burnin" => 1800,
      "show_progress" => false)),
   "output" => Dict("plots" => ["rm_anomaly", "rv_phasefold", "corner"]),
@@ -505,7 +505,7 @@ cfg = Dict(
      "rr_k1" => Dict("type" => "UniformPrior", "args" => [0.05, 0.20]),
      "b_k1"  => Dict("type" => "UniformPrior", "args" => [0.0, 1.0])),
   "noise_models" => [],
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 6, "n_walkers" => 60, "n_steps" => 2500, "n_burnin" => 1500,
      "show_progress" => false)),
   "output" => Dict("plots" => ["ttv_oc", "transit_overlay", "pm_phasefold", "corner"]),
@@ -566,7 +566,7 @@ cfg = Dict(
   "noise_models" => [Dict(
      "kind" => "ActivityGP", "instruments" => ["HARPS"],
      "kwargs" => Dict("channels" => ["bis", "fwhm"], "use_derivative" => true))],
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 8, "n_walkers" => 80, "n_steps" => 1500, "n_burnin" => 1000,
      "show_progress" => false)),
   "output" => Dict("plots" => ["activity_gp_decomposition", "activity_gp_latent",
@@ -597,12 +597,12 @@ and provide matching `<col>_err` columns:
 
 ---
 
-## 9. Trans-dimensional planet search — `transdim_ptemcee`
+## 9. Trans-dimensional planet search — `transdim_pt_emcee`
 
 You don't know how many planets are in the data. Nereus searches over
 N\_p ∈ {0, …, `max_kplanet`} with reversible birth/death moves and
 returns the **occupancy** P(N\_p = k | data) — the headline trans-dim
-output. Trans-dim samplers (`transdim_ptemcee`, `rjmcmc`, `moms`,
+output. Trans-dim samplers (`transdim_pt_emcee`, `rjmcmc`, `moms`,
 `daedalus`) **require** a top-level `transdim` block.
 
 ```julia
@@ -644,7 +644,7 @@ cfg = Dict(
      "transdim_fraction" => 0.3,            # fraction of moves that are birth/death
      "birth_strategies"  => ["PriorBirth"], # or ["PriorBirth","InformedBirth"]
      "birth_weights"     => [1.0]),         # must match birth_strategies length
-  "sampler" => Dict("name" => "transdim_ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "transdim_pt_emcee", "kwargs" => Dict(
      "n_temps" => 8, "n_walkers" => 80, "n_steps" => 500, "n_burnin" => 300,
      "informed_birth_fraction" => 0.5, "n_birth_tries" => 5,
      "show_progress" => false)),
@@ -701,7 +701,7 @@ cfg = Dict(
      "K_k2"   => Dict("type" => "UniformPrior", "args" => [0.0, 80.0]),
      # + P_k1/Tc_k1/ecc_k1 (binary) and P_k2/Tc_k2/ecc_k2 (planet)
      ),
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
      "n_temps" => 10, "n_walkers" => 60, "n_steps" => 8000, "n_burnin" => 4000)),
   "output" => Dict("plots" => ["rv_timeseries", "rv_phasefold"]),
 )
@@ -752,7 +752,7 @@ the summary, never aborts the run):
   residual periodogram caps the grid at ≤ 20000 frequencies and uses an
   analytic FAP (so it stays fast on long-baseline RV).
 - **Detection limits** (`output.detection_limits`): default on for PT
-  samplers (`ptemcee`, `transdim_ptemcee`, `pt`) which keep
+  samplers (`pt_emcee`, `transdim_pt_emcee`, `pt`) which keep
   the broad prior-seeded period coverage the curve needs; off otherwise.
 - **PSIS-LOO / WAIC** (`output.loo`, default on; skipped under GP noise).
 - **Fit-health guard** (`output.fit_health`, default on): flags

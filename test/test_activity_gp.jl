@@ -442,7 +442,7 @@ end
 
 @testset "ActivityGP — sample_daedalus compatibility (smoke)" begin
     # AGP under trans-dim nested sampling: same trick as the trans-dim
-    # ptemcee test — declare AGP toggleable, run a short Daedalus.
+    # pt_emcee test — declare AGP toggleable, run a short Daedalus.
     rng = MersenneTwister(0)
     n = 25
     t = sort!(40.0 .* rand(rng, n))

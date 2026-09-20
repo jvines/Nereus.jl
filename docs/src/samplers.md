@@ -18,8 +18,8 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 
 | `sampler.name` | function | fixed/trans-dim | needs `transdim` block | gives log Z |
 |---|---|:---:|:---:|:---:|
-| `ptemcee`          | `sample_ptemcee`          | fixed | — | yes (TI⁺/SS⁺/H⁺) |
-| `transdim_ptemcee` | `sample_transdim_ptemcee` | trans | **required** | occupancy |
+| `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (TI⁺/SS⁺/H⁺) |
+| `transdim_pt_emcee` | `sample_transdim_pt_emcee` | trans | **required** | occupancy |
 | `pt`               | `sample_pt`               | both  | optional (`td`) | yes (TI⁺) |
 | `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (TI⁺) |
 | `pt_whitening`     | `sample_pt_whitening`     | fixed | — | yes |
@@ -34,7 +34,7 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 | `nuts`             | `sample_nuts`             | fixed | — | — (NaN) |
 | `ofti`             | `ofti_sample`             | fixed | — | — (NaN) |
 
-`_SAMPLERS_REQUIRE_TD = {transdim_ptemcee, rjmcmc, moms, daedalus}` — these
+`_SAMPLERS_REQUIRE_TD = {transdim_pt_emcee, rjmcmc, moms, daedalus}` — these
 error at dispatch if no `transdim` block is present. `pt` also accepts
 trans-dim (a `td=` `TransDimConfig`); the rest are fixed-dim.
 
@@ -59,7 +59,7 @@ and cannot be selected from a job config:
 
 `sample_map` and `pathfinder_init` are primarily *internal* warmstart
 machinery (used by `sample_pt`'s `init_strategy=:pathfinder`, `sample_nuts`,
-`sample_ptemcee`'s `:map_scatter`/`:pathfinder` init), but you can call them
+`sample_pt_emcee`'s `:map_scatter`/`:pathfinder` init), but you can call them
 directly.
 
 ---
@@ -68,14 +68,14 @@ directly.
 
 | Problem | Use |
 |---|---|
-| Characterise a known planet, fixed N\_p, multimodal/weak signal | `sample_ptemcee` |
+| Characterise a known planet, fixed N\_p, multimodal/weak signal | `sample_pt_emcee` |
 | Same, with gradients available, want clean TI⁺ evidence | `sample_pt_hmc` |
 | Same, smooth/unimodal, gradients available | `sample_nuts` |
 | Same, GP-heavy nuisance, Gaussian-ish prior | `sample_ess` |
 | Same, emcee-style single-temperature ensemble | `sample_ensemble` |
-| Multimodal astrometric / visual orbit (fixed-dim) | `sample_ptemcee` (prior-init) |
-| Trans-dim over N\_p (planet count) | `sample_transdim_ptemcee` |
-| Trans-dim over noise configs (model selection) | `sample_transdim_ptemcee` (`td.noise=true` + `noise_exclusion_groups`) |
+| Multimodal astrometric / visual orbit (fixed-dim) | `sample_pt_emcee` (prior-init) |
+| Trans-dim over N\_p (planet count) | `sample_transdim_pt_emcee` |
+| Trans-dim over noise configs (model selection) | `sample_transdim_pt_emcee` (`td.noise=true` + `noise_exclusion_groups`) |
 | Trans-dim variable selection without Jacobians | `sample_moms` |
 | Trans-dim + per-config evidence (Bayes-factor matrix) | `sample_daedalus` |
 | Lightweight trans-dim baseline | `sample_rjmcmc` |
@@ -85,7 +85,7 @@ directly.
 | Quick MAP / Laplace evidence / seed for PT | `sample_map` / `pathfinder_init` |
 
 For evidence on curved RV posteriors (eccentric ridges), prefer the PT/TI
-stack (`sample_ptemcee`, `sample_pt_hmc`) over NS — ellipsoidal NS bounds
+stack (`sample_pt_emcee`, `sample_pt_hmc`) over NS — ellipsoidal NS bounds
 cannot conform to a strongly-curved likelihood ridge and the log Z bias is
 structural there. See [Evidence](evidence.md).
 
@@ -130,7 +130,7 @@ The PT family is Nereus's production workhorse for any multimodal
 posterior. A β-ladder breaks cold-chain mode trapping, and evidence falls
 out via the [Evidence](evidence.md) stack.
 
-### `sample_ptemcee` — `name: "ptemcee"`
+### `sample_pt_emcee` — `name: "pt_emcee"`
 
 Parallel-tempered affine-invariant ensemble MCMC ([Vousden+ 2016](https://ui.adsabs.harvard.edu/abs/2016MNRAS.455.1919V/abstract)).
 Multiple Goodman-Weare stretch walkers per temperature. **Fixed-dim
@@ -138,7 +138,7 @@ only.** The production recoverer for fixed-N\_p multimodal / weak-signal
 targets. Walkers live in **bounded** space.
 
 ```julia
-res = sample_ptemcee(target, data;
+res = sample_pt_emcee(target, data;
     n_temps        = 5,
     n_walkers      = 100,              # auto-raised to ≥ 2·n_dim+2, made even
     n_steps        = 2000,
@@ -184,14 +184,14 @@ spans more than ~2000 log units between prior bulk and posterior peak
 
 **Target must be `unconstrained = false`** (bounded space).
 
-### `sample_transdim_ptemcee` — `name: "transdim_ptemcee"` (requires `transdim`)
+### `sample_transdim_pt_emcee` — `name: "transdim_pt_emcee"` (requires `transdim`)
 
 Trans-dim parallel-tempered ensemble with MoMS variable selection on
 planet count (and, optionally, noise-model selection). This is the
 production trans-dim recoverer (blind WASP-47 / K2-138 recovery target).
 
 ```julia
-res = sample_transdim_ptemcee(target, data; td = td,
+res = sample_transdim_pt_emcee(target, data; td = td,
     inclusion_prior         = 0.5,      # Bernoulli prior P(γ_k = 1)
     moms_init_scale         = 1.0,
     informed_birth_fraction = 0.0,      # fraction of data-informed (BLS+LS) births
@@ -290,16 +290,16 @@ not run.
     is poor (Pareto k ≫ 0.5) and *false-converges* the fit — it seeds every
     walker into one spurious basin and produces pristine-looking R̂/ESS at a
     **wrong** orbit (HD 159062, Pathfinder-seeded: a = 34.5 against a true
-    a ≈ 58). A prior-dispersed `sample_ptemcee` on the same data recovers
-    a ≈ 57 with R̂ < 1.05 in ~0.4 min. That is why `ptemcee` deliberately
+    a ≈ 58). A prior-dispersed `sample_pt_emcee` on the same data recovers
+    a ≈ 57 with R̂ < 1.05 in ~0.4 min. That is why `pt_emcee` deliberately
     keeps prior init and why `:pathfinder` is opt-in here. For a multimodal
-    fixed-dim astrometric target, reach for `sample_ptemcee` first.
+    fixed-dim astrometric target, reach for `sample_pt_emcee` first.
 
 `within_model` (`:slice`/`:rwm`) controls the within-temperature move; `:rwm`
 adapts its scale only during the first half of the rounds (diminishing
 adaptation). The β-ladder is fixed and quadratic (β₁ = 0, β_i =
 ((i−1)/(n\_chains−1))², β_N = 1) and the explorer is single-coordinate, so
-`sample_pt` struggles on ultra-sharp curved ridges where `sample_ptemcee`'s
+`sample_pt` struggles on ultra-sharp curved ridges where `sample_pt_emcee`'s
 affine-invariant ensemble does not. Returned log Z is the TI⁺ (PCHIP) estimate
 from the reddemcee-style accumulator, which starts after `n_rounds ÷ 2` warmup
 rounds; TI, SS⁺ and H⁺ are logged alongside it — see [Evidence](evidence.md).
@@ -354,7 +354,7 @@ the target with `PackedTransforms` if needed), so you can pass either.
 
 NF-coupled PT with whitening (diagonal-Gaussian) swap proposals.
 **Ensemble-per-temperature**: each temperature carries `n_walkers` walkers
-moved by the tempered Goodman-Weare stretch move (as in `sample_ptemcee`);
+moved by the tempered Goodman-Weare stretch move (as in `sample_pt_emcee`);
 adjacent-temperature swaps use a diagonal-affine *whitening* flow fit on the
 per-temperature ensemble — the distinguishing feature. The affine flow has a
 constant Jacobian that cancels, so the swap stays a standard tempered M-H
@@ -366,7 +366,7 @@ res = sample_pt_whitening(target, data;
     n_walkers      = 40,                # ≥ 2·n_dim+2, even
     n_steps        = 2000,
     n_burnin       = 500,
-    betas          = nothing,           # default: (1/√5)^i geometric (same as ptemcee)
+    betas          = nothing,           # default: (1/√5)^i geometric (same as pt_emcee)
     stretch_a      = 2.0,
     proposal_scale = 0.05,              # accepted but UNUSED (ensemble stretch move)
     warmup_swaps   = 200,               # identity swap until whitening kicks in
@@ -383,7 +383,7 @@ Returns a `WhiteningPTResult` (`chains`, `log_evidence`, `acceptance_within`,
 `acceptance_swap`, `n_evals`). The whitening flow gives a 2–5× swap-
 acceptance bump on multimodal posteriors with differently-scaled β
 distributions. Experimental: the diagonal flow doesn't capture full
-posterior correlation, so for paper-grade fits prefer `sample_ptemcee` /
+posterior correlation, so for paper-grade fits prefer `sample_pt_emcee` /
 `sample_pt`.
 
 **Target must be `unconstrained = false`.**
@@ -664,7 +664,7 @@ bypass the random-γ init that traps the chain in low-N\_p modes.
 
 Classic Reversible-Jump MCMC (Green 1995). Birth/death + within-model moves;
 supports parallel chains via `Threads.@spawn`. Lightweight trans-dim
-baseline; for hard targets prefer `sample_transdim_ptemcee`.
+baseline; for hard targets prefer `sample_transdim_pt_emcee`.
 
 ```julia
 chains, n_evals = sample_rjmcmc(target, data; td = td,
@@ -692,7 +692,7 @@ work. `run_job` surfaces `log_evidence = NaN`.
 
 NUTS via AdvancedHMC.jl. Gradient-based. NUTS is a **local** sampler — it
 cannot jump period-alias / disjoint modes — so chains are warm-started from a
-short ptemcee global pre-search; on genuinely multimodal targets the chains
+short pt_emcee global pre-search; on genuinely multimodal targets the chains
 scatter, R̂ stays high, and `assess_fit` flags it (NUTS fails **loud**, never
 silently merges).
 
@@ -704,7 +704,7 @@ chains = sample_nuts(target;
     target_accept = 0.8,
     ad_backend    = :ForwardDiff,      # :ForwardDiff | :Enzyme | :ReverseDiff
     compile_tape  = true,              # :ReverseDiff only
-    warm_start    = true,              # ptemcee pre-search (disjoint-mode fix)
+    warm_start    = true,              # pt_emcee pre-search (disjoint-mode fix)
     warm_temps    = 6, warm_walkers = 40, warm_steps = 400, warm_burnin = 200,
     init          = nothing,           # bounded-space point; overrides warm_start
     progress      = true,
@@ -722,7 +722,7 @@ internally if needed).
 
 Affine-invariant ensemble MCMC (Goodman & Weare 2010) via
 AffineInvariantMCMC.jl. Single-temperature — won't break mode trapping; for
-multimodal use `sample_ptemcee`. Works in unconstrained space.
+multimodal use `sample_pt_emcee`. Works in unconstrained space.
 
 ```julia
 chains = sample_ensemble(target;
@@ -826,7 +826,7 @@ Pathfinder.jl wrapper (Bayesian L-BFGS,
 [Zhang+ 2022](https://ui.adsabs.harvard.edu/abs/2021arXiv210803782Z/abstract)).
 Approximate posterior draws via a sequence of normal approximations along the
 L-BFGS trajectory. Used internally by `sample_pt`'s
-`init_strategy=:pathfinder`, `sample_nuts` warmstart, and `sample_ptemcee`'s
+`init_strategy=:pathfinder`, `sample_nuts` warmstart, and `sample_pt_emcee`'s
 `:pathfinder` init; call it directly for the Pareto-k-vetted draws.
 
 ```julia

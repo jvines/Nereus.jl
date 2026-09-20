@@ -22,7 +22,7 @@
 # needing the reddemcee TI+/SS+/H+ stack.
 #
 # This implementation:
-# - **Replicas live in BOUNDED space** (same as ptemcee).
+# - **Replicas live in BOUNDED space** (same as pt_emcee).
 # - **Adaptive β schedule** — pick the next β so the effective sample
 #   size (ESS) drops to ess_target × N. Avoids the "schedule tuning"
 #   problem of static schedules.

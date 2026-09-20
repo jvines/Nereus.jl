@@ -34,7 +34,7 @@ import MCMCChains
 Name-to-sampler table backing the `engine=` string accepted by
 [`run_job`](@ref) and the higher-level fit entry points. Keys are the
 strings a JSON job config may use; values are the `sample_*` functions
-themselves, so `ENGINES["ptemcee"]` is `sample_ptemcee`.
+themselves, so `ENGINES["pt_emcee"]` is `sample_pt_emcee`.
 
 `keys(ENGINES)` is the authoritative list of what this build supports —
 prefer it over a hardcoded list when validating user input.
@@ -492,7 +492,7 @@ default_astrom_planet(; a_lo = 0.1, a_hi = 100.0, m_lo = 1e-4, m_hi = 1.0) =
     _normalize(raw) -> (chains, log_z, extra)
 
 Samplers return different shapes: `sample_pt`/`sample_nested` a
-`(chains, log_Z)` tuple, `sample_ptemcee` a `PTemceeResult`, `sample_map` a
+`(chains, log_Z)` tuple, `sample_pt_emcee` a `PTemceeResult`, `sample_map` a
 `MAPResult` with no chains at all. Unifying that here is the whole point of a
 facade — callers should not branch on which engine they picked.
 """

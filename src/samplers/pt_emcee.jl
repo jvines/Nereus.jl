@@ -1,4 +1,4 @@
-# Parallel-tempered affine-invariant ensemble MCMC (ptemcee).
+# Parallel-tempered affine-invariant ensemble MCMC (pt_emcee).
 #
 # Vousden, Farr & Mandel 2016 (arXiv:1501.05823): tempered Goodman-Weare
 # ensemble sampler. `n_temps` temperatures × `n_walkers` walkers per
@@ -9,7 +9,7 @@
 #
 # Why alongside `sample_pt`: single-walker Pigeons PT is mathematically
 # clean but brittle on multimodal posteriors. The ensemble-per-temp
-# structure lets ptemcee exit local modes single-walker cold chains get
+# structure lets pt_emcee exit local modes single-walker cold chains get
 # stuck in — targeted fix for cases like HD 18599's
 # Keplerian/activity/eccentricity degeneracy.
 #
@@ -32,7 +32,7 @@
 #   + ETA.
 #
 # Caveat: affine-invariance of the stretch move is broken under
-# tempering. Cite Vousden+ 2016 (ptemcee), not emcee.
+# tempering. Cite Vousden+ 2016 (the `ptemcee` package), not emcee.
 
 using Random
 
@@ -46,12 +46,12 @@ using MCMCChains
 using Statistics: cov, quantile
 using LinearAlgebra: cholesky, logdet, Symmetric, norm, I
 
-export sample_ptemcee, PTemceeResult, mode_laplace_evidence
+export sample_pt_emcee, PTemceeResult, mode_laplace_evidence
 
 """
     PTemceeResult
 
-Container for a `sample_ptemcee` run.
+Container for a `sample_pt_emcee` run.
 
 # Fields
 - `chains::MCMCChains.Chains` — β=1 walkers, post-burnin, flattened, in bounded space.
@@ -193,7 +193,7 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
 end
 
 """
-    sample_ptemcee(target, data; kwargs...) -> PTemceeResult
+    sample_pt_emcee(target, data; kwargs...) -> PTemceeResult
 
 Parallel-tempered affine-invariant ensemble MCMC (Vousden+ 2016).
 Walkers operate in unconstrained space; bounded-space samples are
@@ -230,7 +230,7 @@ recovered via the target's inverse transform.
 - `thin::Int=1` — thinning factor on β=1 posterior output.
 - `show_progress::Bool=true` — display the per-step progress bar.
 """
-function sample_ptemcee(
+function sample_pt_emcee(
     target::NereusTarget,
     data::Data;
     n_temps::Int = 5,
@@ -299,7 +299,7 @@ function sample_ptemcee(
     isempty(science_cols) && (science_cols = collect(1:n_dim))   # fallback: gate on all
     diag_cadence = diag_every > 0 ? diag_every : max(200, n_steps ÷ 40)
     # Walkers live in BOUNDED space — no transform used in the move
-    # loop. The transform is irrelevant for ptemcee: M-H acceptance
+    # loop. The transform is irrelevant for pt_emcee: M-H acceptance
     # only cares about target density ratios in whatever space the
     # walkers live, and bounded space gives clean auto-reject behavior
     # via log_prior(theta) = -Inf outside support.
@@ -308,7 +308,7 @@ function sample_ptemcee(
     n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
     n_walkers_eff % 2 == 1 && (n_walkers_eff += 1)
 
-    # Geometric ladder across [beta_min, 1], matching sample_transdim_ptemcee.
+    # Geometric ladder across [beta_min, 1], matching sample_transdim_pt_emcee.
     #
     # This used to be hardcoded (1/sqrt(5))^i with no beta_min, which puts the
     # hottest rung at 5^(-(n_temps-1)/2) — 0.04 at the default 5 temps. TI and
@@ -318,7 +318,7 @@ function sample_ptemcee(
     # between 5 and 10 rungs — an evidence error far larger than any model
     # comparison it would be used for.
     #
-    # sample_transdim_ptemcee already took beta_min and built the ladder this
+    # sample_transdim_pt_emcee already took beta_min and built the ladder this
     # way; the fixed-dim sampler did not even accept the argument, so the two
     # returned incomparable evidences for the same problem.
     βs = betas === nothing ?
@@ -332,7 +332,7 @@ function sample_ptemcee(
     thread_theta    = [Theta{Float64}(params) for _ in 1:n_thr]
     # Per-thread PTWorkspace → ws-aware likelihood: no per-call Vector allocs
     # (the ~27.7 MB/eval GC thrash on data-rich fits) + per-planet flux cache +
-    # total phot-ll cache. ptemcee is the workhorse recoverer, so this speeds up
+    # total phot-ll cache. pt_emcee is the workhorse recoverer, so this speeds up
     # the whole fixed-dim menu. One ws per thread, indexed by threadid().
     thread_ws       = [PTWorkspace(params, params.config.max_kplanet,
                                    length(params.config.noise_models);
@@ -555,7 +555,7 @@ function sample_ptemcee(
     end
 
     # --- Progress bar (per-step accept rate + ETA) --------------------
-    pb = ProgressBar("ptemcee"; total = n_steps, enabled = show_progress)
+    pb = ProgressBar("pt_emcee"; total = n_steps, enabled = show_progress)
 
     # --- Live convergence readout + optional run-until-converged ------
     rhat_str = "—"; ess_str = "—"      # cached "mean/worst" displays
@@ -685,14 +685,14 @@ function sample_ptemcee(
         # ---- Run-until-converged: stop once the science params clear the
         # gate for `n_converged_checks` consecutive diagnostics ----------
         if convergence_stop && converged_at > 0
-            show_progress && @info "ptemcee: science params converged at step $converged_at " *
+            show_progress && @info "pt_emcee: science params converged at step $converged_at " *
                 "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)); stopping early"
             break
         end
     end
     show_progress && finish!(pb)
     if convergence_stop && converged_at == 0
-        @warn "ptemcee: hit max_steps=$n_steps WITHOUT meeting the convergence gate " *
+        @warn "pt_emcee: hit max_steps=$n_steps WITHOUT meeting the convergence gate " *
               "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)) on science params — " *
               "results may be unconverged (last $rhat_str Rhat, $ess_str ESS)"
     end
@@ -774,7 +774,7 @@ function sample_ptemcee(
                 bridge_overlap = b.overlap
             end
         catch err
-            @debug "sample_ptemcee: bridge evidence unavailable" exception = err
+            @debug "sample_pt_emcee: bridge evidence unavailable" exception = err
         end
     end
 
@@ -791,12 +791,12 @@ function sample_ptemcee(
         n_eff_min = try
             minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
         catch err
-            @debug "sample_ptemcee: ESS unavailable for the bridge guard" exception = err
+            @debug "sample_pt_emcee: ESS unavailable for the bridge guard" exception = err
             NaN
         end
         n_par_q = n_dim + n_dim * (n_dim + 1) ÷ 2
         if isfinite(n_eff_min) && n_eff_min < n_par_q
-            @warn "sample_ptemcee: dropping bridge as the headline — its " *
+            @warn "sample_pt_emcee: dropping bridge as the headline — its " *
                   "reference is fitted from too few effective samples " *
                   "(min ESS $(round(Int, n_eff_min)) < $n_par_q free parameters " *
                   "in q). Bridge is biased LOW in this regime and none of its " *
@@ -838,7 +838,7 @@ function sample_ptemcee(
         # period modes. A large bridge/Laplace gap is the cheapest available
         # signal that something is off; say so rather than picking silently.
         if isfinite(log_z_laplace) && abs(log_z_bridge - log_z_laplace) > bridge_warn_tol
-            @warn "sample_ptemcee: bridge and mode-Laplace disagree by " *
+            @warn "sample_pt_emcee: bridge and mode-Laplace disagree by " *
                   "$(round(abs(log_z_bridge - log_z_laplace), digits=1)) nats. " *
                   "Reporting bridge (it is the validated one), but CHECK THE " *
                   "POSTERIOR IS NOT MULTIMODAL before quoting it — a single " *
@@ -847,18 +847,18 @@ function sample_ptemcee(
         end
         log_z = log_z_bridge
     elseif isfinite(log_z_laplace)
-        @warn "sample_ptemcee: bridge evidence unavailable; falling back to " *
+        @warn "sample_pt_emcee: bridge evidence unavailable; falling back to " *
               "mode-Laplace. Treat it as indicative: on a clean unimodal target " *
               "it measured 24 nats from bridge, and it has no validation against " *
               "a known log Z." laplace = log_z_laplace
         log_z = log_z_laplace
     elseif tempered_ok
-        @warn "sample_ptemcee: neither bridge nor mode-Laplace is available. " *
+        @warn "sample_pt_emcee: neither bridge nor mode-Laplace is available. " *
               "log_evidence is the TEMPERED value, which is biased low by " *
               "10^2-10^4 nats on a signal-locked posterior and cannot detect " *
               "that it is. Do not quote it without an independent check." tempered = log_z
     else
-        @warn "sample_ptemcee: no usable evidence estimate for this run. " *
+        @warn "sample_pt_emcee: no usable evidence estimate for this run. " *
               "log_evidence is not quotable."
     end
 
@@ -868,7 +868,7 @@ function sample_ptemcee(
     if tempered_ok && isfinite(log_z) && laplace_check &&
        abs(log_z_tempered - log_z) > laplace_switch_tol
         min_swap = isempty(acc_swap) ? NaN : minimum(acc_swap)
-        @warn "sample_ptemcee: the TEMPERED stack (TI/TI+/SS+/H+ in `evidence`) " *
+        @warn "sample_pt_emcee: the TEMPERED stack (TI/TI+/SS+/H+ in `evidence`) " *
               "is $(round(abs(log_z_tempered - log_z), digits=1)) nats from the " *
               "reported log_evidence — the phase-transition signature (min swap " *
               "accept = $(round(min_swap, digits=3))). Those four share one " *

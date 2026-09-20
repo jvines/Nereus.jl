@@ -84,7 +84,7 @@ end
         -> (cand, log_accept, ll_new)
 
 Annealed reversible-jump birth of a toggleable noise model. `loglik(θ)` and `logprior(θ)` must be the SAME functions the caller uses for
-its own acceptance bookkeeping (in `transdim_ptemcee` that means
+its own acceptance bookkeeping (in `transdim_pt_emcee` that means
 `spike_slab_log_prior`, not `log_prior` — they differ by the planet-indicator
 Bernoulli terms). `beta` is the chain's temperature.
 

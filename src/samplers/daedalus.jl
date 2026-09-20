@@ -291,7 +291,7 @@ function _daedalus_init_point(target::NereusTarget, data::Data,
     layout = params.layout
 
     # Mask sized to the FULL noise-model list (consumers index by
-    # config.noise_models position; see rjmcmc/transdim_ptemcee fix) with
+    # config.noise_models position; see rjmcmc/transdim_pt_emcee fix) with
     # non-toggleables forced active.
     td_state = TransDimState(
         max_planets = td.max_kplanet,

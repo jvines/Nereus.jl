@@ -56,7 +56,7 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
     # Until proper NbodyGradient.jl Jacobian-passthrough is wired up
     # (chain-rule `tt.dtdelements` back into the Dual partials), throw
     # a clear ArgumentError so the user knows to either:
-    #   1. Use a gradient-free sampler (ptemcee / nested / MoMS).
+    #   1. Use a gradient-free sampler (pt_emcee / nested / MoMS).
     #   2. Switch to `ttv_backend=:ttvfaster` (analytic, autodiff-clean).
     if T <: ForwardDiff.Dual
         throw(ArgumentError(
@@ -65,7 +65,7 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
             "typed `T <: AbstractFloat` and does not propagate Dual " *
             "partials, so the N-body block would silently contribute " *
             "zero gradient. Either use a gradient-free sampler " *
-            "(sample_ptemcee / sample_nested / sample_daedalus / " *
+            "(sample_pt_emcee / sample_nested / sample_daedalus / " *
             "sample_pa) or switch to `ttv_backend=:ttvfaster` for the " *
             "analytic perturbative N-body model (gradient-clean)."))
     end

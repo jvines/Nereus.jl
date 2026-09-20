@@ -64,7 +64,7 @@ estimate that fails loud rather than guessing. See
 The harness is importable; the self-test only fires when the file is run
 as a program (`abspath(PROGRAM_FILE) == @__FILE__`).
 
-Run the built-in self-test (ptemcee on the easy target + nested_ins on
+Run the built-in self-test (pt_emcee on the easy target + nested_ins on
 the eccentric target):
 
 ```bash
@@ -79,7 +79,7 @@ include(joinpath(@__DIR__, "..", "test", "validation",
                  "sampler_validation.jl"))
 
 # one (sampler, generator) cell
-cell = run_one("ptemcee", "gen_rv_easy")
+cell = run_one("pt_emcee", "gen_rv_easy")
 print_cell(cell)
 
 # or build the pieces and score directly
@@ -91,7 +91,7 @@ cell = score_cell("nested_ins", "gen_rv_eccentric",
 Sweep the full matrix (every sampler × every generator):
 
 ```julia
-samplers = ["nested_ins", "pt", "ptemcee", "nested_dynamic",
+samplers = ["nested_ins", "pt", "pt_emcee", "nested_dynamic",
             "population_annealing", "smc", "nuts", "pt_whitening",
             "nested", "map"]
 gens = ["gen_rv_easy", "gen_rv_eccentric", "gen_rv_2planet"]
@@ -122,13 +122,13 @@ Convergence scoring branches on whether the sampler moves a population
 of **coupled** walkers or runs **independent** chains. The harness tags
 each sampler with `is_ensemble`:
 
-- **Ensemble** (`ptemcee`, `pt_whitening`, `population_annealing` /
+- **Ensemble** (`pt_emcee`, `pt_whitening`, `population_annealing` /
   `pa`, `smc`): walkers are coupled (affine-invariant stretch, tempered
-  ensembles, annealed populations). `ptemcee` in particular exposes each
+  ensembles, annealed populations). `pt_emcee` in particular exposes each
   *walker* as a separate `MCMCChains` "chain". A naïve
   `MCMCChains.rhat` on that object computes a **cross-walker** R-hat,
   treating N coupled walkers as N independent chains — the **wrong**
-  diagnostic, and one that spuriously flagged ptemcee's *correct*
+  diagnostic, and one that spuriously flagged pt_emcee's *correct*
   recovery as non-converged. For ensemble samplers the harness instead
   reports:
   - **ESS** (`MCMCChains.ess`, valid across coupled chains), and
@@ -183,7 +183,7 @@ excludes truth while passing naive R-hat / ESS. The current matrix has
 
 | Sampler | Status | Notes |
 |---|---|---|
-| `ptemcee` | **Solid** | Recovers all three; within-walker split-R-hat ≈ 1.01–1.09, good ESS. |
+| `pt_emcee` | **Solid** | Recovers all three; within-walker split-R-hat ≈ 1.01–1.09, good ESS. |
 | `pt` (in-house / Pigeons) | **Solid** | Recovers all three; reliable fixed-dim log Z. |
 | `nested` | **Solid** | Recovers all three at `n_live = 1500` (`bounds = :multi`, `proposal = :rslice`); very high ESS (~10⁴). At `n_live = 400` the eccentric ridge silently mis-resolved — closed by the higher default. |
 | `nested_ins` | **Solid** | Recovers all three; INS log Z stable. |
@@ -243,7 +243,7 @@ A BROAD model posterior is honest "can't tell" — fail-loud, acceptable.
 |---|---|---|---|---|
 | `rjmcmc`            | P(0)=1.00 | P(1)=1.00 | P(2)=1.00 | **Recovers** |
 | `pt` (with `td`)    | P(0)=0.99 | P(1)=0.99 | P(2)=0.98 | **Recovers** |
-| `transdim_ptemcee`  | P(0)=0.91 | P(1)=0.96 | P(2)=0.89 | **Recovers** |
+| `transdim_pt_emcee`  | P(0)=0.91 | P(1)=0.96 | P(2)=0.89 | **Recovers** |
 | `moms`              | P(0)=1.00 | P(1)=1.00 | P(2)=1.00 | **Recovers** |
 | `daedalus`           | P(0)=0.94 | P(1)=0.96 | P(2)=0.98 | **Recovers** |
 
@@ -285,10 +285,10 @@ specific plot group, and asserts two things:
   in the real on-disk layout (`plots/models/…`, `plots/corner.png`,
   `plots/traces/`, `plots/posteriors/`, `ppc.png`, `tables/…`).
 
-These run under a smoke sampler budget (`ptemcee`, 6–8 temps,
+These run under a smoke sampler budget (`pt_emcee`, 6–8 temps,
 60–80 walkers, a few thousand steps) — the goal is to certify the
 **dispatch path and the science behind each figure**, not to stress
-sampler scaling. All drivers default to `"sampler" => "ptemcee"`
+sampler scaling. All drivers default to `"sampler" => "pt_emcee"`
 because it is robust to the correlated `K`/`e`/`b`/LD geometry that
 made `nuts` non-converge on the same targets.
 
@@ -322,7 +322,7 @@ IADGOST_REPLOT=1 julia --project=Nereus.jl test/validation/validate_runjob_iad_g
 | `validate_runjob_agp_plots.jl` | RV + BIS + FWHM, **ActivityGP** | planet `K=6` under ≈8 m/s of FF′-projected rotation activity; asserts `K` within 3 m/s (planet survives the activity GP) | `activity_gp_decomposition`, `activity_gp_latent`, `rv_components`, `rv_timeseries`, `corner` |
 | `validate_runjob_astrom_plots.jl` | RV + relative astrometry (`RVAS`) | known orbit `P=900, e=0.30, inc=63°`; asserts `P/K/ecc` recovered **and `inc` within 6°** (astrometry-only → proves astrometry is in the fit), `assess_fit :convergence => :ok` | `orbit_skyplane`, `relastrom_residuals`, `relastrom_timeseries`, `rv_astrom_phasefold`, `corner` |
 | `validate_runjob_iad_gost_plots.jl` | RV + **Hipparcos IAD** + **Gaia GOST** (`RVAS`) | real ε Eri (HIP 16537) modern RV + absolute astrometry; asserts `P` near ε Eri b (within 300 d); `REPLOT` path times the full post-fit pipeline (`ppc`/`detection_limits`/`loo`/`fit_health`) on the real 968-RV / 19-yr set | `iad_residuals`, `pm_anomaly`, `rv_timeseries`, `corner` |
-| `validate_runjob_transdim.jl` | RV + transit, trans-dim (`transdim_ptemcee`, `N_p` 0..2) | strong 1-planet signal; asserts occupancy concentrates on `N_p=1` (`P(N_p=1) > 0.6`, modal) | `transdim_occupancy` |
+| `validate_runjob_transdim.jl` | RV + transit, trans-dim (`transdim_pt_emcee`, `N_p` 0..2) | strong 1-planet signal; asserts occupancy concentrates on `N_p=1` (`P(N_p=1) > 0.6`, modal) | `transdim_occupancy` |
 
 All seven drivers are tracked in the repo and pass. The injected
 forward model in each is built with `build_target` / `rv_predictions` /

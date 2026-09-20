@@ -44,7 +44,7 @@
 #
 # The fix is to give each temperature a POPULATION of walkers and move
 # them with the affine-invariant Goodman-Weare stretch (Vousden+ 2016,
-# exactly as the validated `sample_ptemcee`), which is naturally
+# exactly as the validated `sample_pt_emcee`), which is naturally
 # scale/rotation-equivariant and so handles the curved geometry. With
 # a real ensemble the per-temperature (μ, σ) are meaningful estimates
 # of the tempered distribution, so the whitening flow — the defining
@@ -53,7 +53,7 @@
 #
 # So the engine is: ENSEMBLE-per-temperature + tempered stretch within
 # temp + NF(whitening)-coupled swaps between adjacent temps. The
-# whitening flow is what distinguishes this from plain ptemcee.
+# whitening flow is what distinguishes this from plain pt_emcee.
 #
 # The whitening flow's Jacobian is a constant Π_d σ_{k+1,d} / σ_{k,d},
 # so the M-H ratio for a whitened swap is:
@@ -111,7 +111,7 @@ end
 NF-coupled PT with whitening (diagonal-Gaussian) swap proposals.
 Ensemble-per-temperature variant: each temperature carries `n_walkers`
 walkers moved by the tempered Goodman-Weare stretch move (as in
-`sample_ptemcee`); adjacent-temperature swaps use a diagonal-affine
+`sample_pt_emcee`); adjacent-temperature swaps use a diagonal-affine
 *whitening* flow fit on the per-temperature walker ensemble, which is
 the distinguishing feature of this sampler.
 
@@ -122,7 +122,7 @@ the distinguishing feature of this sampler.
 - `n_burnin::Int=500` — burn-in discarded from posterior + evidence.
 - `betas::Union{Nothing,Vector{Float64}}=nothing` — explicit β ladder
   (descending β[1]=1). Default: Vines+ 2023's `β_i = (1/√5)^i`, the same
-  ladder `sample_ptemcee` uses (geometric ladders give far more uniform
+  ladder `sample_pt_emcee` uses (geometric ladders give far more uniform
   swap acceptance than the old quadratic ladder, which over-resolved the
   hot end and starved the cold end).
 - `stretch_a::Float64=2.0` — Goodman-Weare stretch parameter.
@@ -139,7 +139,7 @@ the distinguishing feature of this sampler.
   wasted work; refreshing every few steps keeps the flow current while
   cutting the dominant cost of the swap path).
 - `init_strategy::Symbol=:prior` — walker initialization (`:prior` draws
-  each walker from the prior, matching astroEMPEROR / ptemcee).
+  each walker from the prior, matching astroEMPEROR / pt_emcee).
 - `seed::Int=1`
 - `thin::Int=1`
 - `show_progress::Bool=true`
@@ -177,7 +177,7 @@ function sample_pt_whitening(
     n_walkers_eff % 2 == 1 && (n_walkers_eff += 1)
 
     # Default ladder: β[1]=1 (cold) geometric down to a hot chain.
-    # Geometric (1/√5)^i matches the validated ptemcee ladder; the old
+    # Geometric (1/√5)^i matches the validated pt_emcee ladder; the old
     # quadratic `1 - (i/(n-1))²` ladder packed the steps at the hot end
     # and left a large β-gap at the cold end, so the cold chain was
     # effectively decoupled (swap accept ~0 with the hottest pair).
@@ -203,7 +203,7 @@ function sample_pt_whitening(
     # using thread-local Theta. Returns (-Inf, -Inf) outside the prior
     # support — caller treats this as an automatic M-H reject. log_like
     # includes external priors per Nereus convention so they get
-    # tempered too (matches ptemcee / in-house PT).
+    # tempered too (matches pt_emcee / in-house PT).
     @inline function eval_bounded!(x::AbstractVector{Float64}, tid::Int)
         theta = thread_theta[tid]
         wb = thread_ws[tid]
@@ -306,7 +306,7 @@ function sample_pt_whitening(
     lp_samples = Vector{Float64}(undef, max(n_keep_total, 1))
     keep_idx = 0
 
-    # reddemcee TI+/SS+/H+ accumulators (same evidence stack as ptemcee).
+    # reddemcee TI+/SS+/H+ accumulators (same evidence stack as pt_emcee).
     evidence_acc = EvidenceAccumulator(length(βs))
 
     accept_within  = zeros(Float64, n_temps)
@@ -329,8 +329,8 @@ function sample_pt_whitening(
     end
 
     # Tempered Goodman-Weare stretch half-step (affine-invariant within
-    # temp). Identical move to the validated sample_ptemcee.
-    # Per-walker RNGs (see the same fix in sample_ptemcee): a per-thread
+    # temp). Identical move to the validated sample_pt_emcee.
+    # Per-walker RNGs (see the same fix in sample_pt_emcee): a per-thread
     # stream makes the chain depend on the thread count at fixed seed.
     rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
     rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
@@ -419,7 +419,7 @@ function sample_pt_whitening(
 
         @inbounds for t in 1:(n_temps - 1)
             # Pick a random walker in each of the two temperatures to
-            # attempt to swap (ensemble swap, as in ptemcee).
+            # attempt to swap (ensemble swap, as in pt_emcee).
             w   = rand(rng_master, 1:n_walkers_eff)
             w2  = rand(rng_master, 1:n_walkers_eff)
             propose_swap[t] += 1
@@ -513,7 +513,7 @@ function sample_pt_whitening(
             isfinite(ev_report.ti_plus[1]) ? ev_report.ti_plus[1] :
             ev_report.ti[1]
 
-    # --- Output: walkers as separate chains (matches ptemcee) ---------
+    # --- Output: walkers as separate chains (matches pt_emcee) ---------
     param_names = Symbol.(layout.unfrozen_names)
     push!(param_names, :lp)
     samples_with_lp = hcat(samples, lp_samples)

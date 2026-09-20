@@ -1,6 +1,6 @@
 # mode_laplace_evidence, against its own stated assumption.
 #
-# It is reported by sample_ptemcee and, before today, was SUBSTITUTED IN as the
+# It is reported by sample_pt_emcee and, before today, was SUBSTITUTED IN as the
 # headline whenever the tempered path failed -- i.e. it produced the number on
 # exactly the hard runs -- while having no test coverage at all.
 #
@@ -33,7 +33,7 @@ using Random, Statistics, LinearAlgebra
         rv = (SIM = (data = (t = t, rv = rv, rv_err = er),
                      sigma = LogUniformPrior(0.5, 10.0)),),
     )
-    res = sample_ptemcee(target, target.data; n_temps = 12, n_walkers = 30,
+    res = sample_pt_emcee(target, target.data; n_temps = 12, n_walkers = 30,
                          n_steps = 2000, n_burnin = 1000, seed = 11,
                          show_progress = false)
 

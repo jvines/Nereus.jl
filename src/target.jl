@@ -56,7 +56,7 @@ function LogDensityProblems.logdensity(target::NereusTarget{Nothing},
     # combos, a Cholesky failure that returns NaN instead of -Inf,
     # numerical edge in batman / NbodyGradient). Without this guard,
     # any sampler that uses `logp(draw)` directly — Pathfinder's IS
-    # resample table, NUTS's accept/reject, ptemcee's swap proposals
+    # resample table, NUTS's accept/reject, pt_emcee's swap proposals
     # — hits `sum(weights)/sum(logp) == NaN` and aborts. Bound the
     # final result the same way `lp` / `rv_log_likelihood` are
     # bounded above.

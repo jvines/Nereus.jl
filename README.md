@@ -62,7 +62,7 @@ td = TransDimConfig(max_kplanet = 3, noise = true,
                     toggleable = menu.toggleable,
                     noise_exclusion_groups = menu.exclusion_groups)
 
-result = sample_transdim_ptemcee(NereusTarget(params, data), data; td = td)
+result = sample_transdim_pt_emcee(NereusTarget(params, data), data; td = td)
 model_probabilities(result.chains)      # P(N_planets | data)
 ```
 

@@ -1,4 +1,4 @@
-# Per-temperature planet birth/death accounting for trans-dim ptemcee.
+# Per-temperature planet birth/death accounting for trans-dim pt_emcee.
 #
 # The PT immunity argument for trans-dim model selection is that hot chains
 # see a softened likelihood, accept deaths that the cold chain cannot, and
@@ -31,7 +31,7 @@ using Nereus
     td     = TransDimConfig(max_kplanet = 2)
 
     n_temps = 3
-    res = sample_transdim_ptemcee(target, data; td = td,
+    res = sample_transdim_pt_emcee(target, data; td = td,
                                    n_temps = n_temps, n_walkers = 8,
                                    n_steps = 60, n_burnin = 30,
                                    seed = 7, show_progress = false)

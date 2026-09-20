@@ -343,17 +343,17 @@ rather than a single number trusted.
 
   // ---- Sampler (src/runner.jl:956-1074) -----------------------------
   // VALID names (src/runner.jl:201-205):
-  //   ptemcee, transdim_ptemcee, pt, rjmcmc, moms, daedalus,
+  //   pt_emcee, transdim_pt_emcee, pt, rjmcmc, moms, daedalus,
   //   nested, nested_ins, nested_dynamic, pa, smc, pt_whitening,
   //   nuts, pt_hmc, ofti
   // There is no `pt_warm` and no `backend` kwarg: the Pathfinder warm start
   // is `pt` + `init_strategy: "pathfinder"` (see "sampler" below).
-  // Trans-dim model selection (transdim_ptemcee/rjmcmc/moms/daedalus) REQUIRES
+  // Trans-dim model selection (transdim_pt_emcee/rjmcmc/moms/daedalus) REQUIRES
   // a top-level `transdim` block (src/runner.jl:206-207, 336-338).
   // kwargs that the sampler doesn't declare → hard error (src/runner.jl:918-932).
   // String kwarg values are coerced to Julia Symbols (bounds/proposal/… ; 970-972).
   "sampler": {
-    "name": "transdim_ptemcee",
+    "name": "transdim_pt_emcee",
     "kwargs": {
       "n_temps":   12,
       "n_walkers": 100,
@@ -363,7 +363,7 @@ rather than a single number trusted.
     }
   },
 
-  // ---- Trans-dim (REQUIRED iff sampler ∈ {transdim_ptemcee, rjmcmc,
+  // ---- Trans-dim (REQUIRED iff sampler ∈ {transdim_pt_emcee, rjmcmc,
   //      moms, daedalus}; src/runner.jl:1105-1124) ---------------------
   "transdim": {
     "max_kplanet": 2,                      // REQUIRED
@@ -423,7 +423,7 @@ rather than a single number trusted.
     "ppc_n_draws":   500,
 
     // Bayesian K upper-limit curve K_lim(P). Default ON for PT samplers
-    // (ptemcee/transdim_ptemcee/pt), OFF otherwise. Set true/false to
+    // (pt_emcee/transdim_pt_emcee/pt), OFF otherwise. Set true/false to
     // force. Needs RV + a P_k1 column. Per-bin arrays go to detection_limits.nc.
     "detection_limits":            true,
     "detection_limits_n_bins":     30,
@@ -580,13 +580,13 @@ prior when that degeneracy is present.
   `status="failed"` (`src/runner.jl:842`).
 
 ### `sampler`
-- Trans-dim model-selection samplers (`transdim_ptemcee`, `rjmcmc`, `moms`,
+- Trans-dim model-selection samplers (`transdim_pt_emcee`, `rjmcmc`, `moms`,
   `daedalus`) require a top-level `transdim` block. `pt` also builds a
   `transdim` block if present (`src/runner.jl:850-851`) but does not require one.
 - **The Pathfinder warm start is a `pt` kwarg, not a sampler.** There is no
   `pt_warm` name: it was never a sampler, only a Pathfinder draw followed by a
-  delegation to `pt` or `ptemcee`. Its two honest replacements are
-  `{"name": "ptemcee"}` (what the old ptemcee path did — prior-dispersed
+  delegation to `pt` or `pt_emcee`. Its two honest replacements are
+  `{"name": "pt_emcee"}` (what the old pt_emcee path did — prior-dispersed
   walkers, no Pathfinder at all) and `{"name": "pt", "kwargs":
   {"init_strategy": "pathfinder"}}` (the Pathfinder-seeded PT). `init_strategy`
   is `"prior"` (default) or `"pathfinder"`; the warm start is sized by
@@ -774,7 +774,7 @@ The smallest valid RV-only config (a single CSV, one planet, fixed-dim PT):
     "planet_modes": ["RV_ONLY"]
   },
   "sampler": {
-    "name": "ptemcee",
+    "name": "pt_emcee",
     "kwargs": { "n_temps": 10, "n_walkers": 100, "n_steps": 5000, "n_burnin": 1500 }
   },
   "output": { "plots": ["auto"] }
@@ -792,7 +792,7 @@ block:
   "data": { "rv": { "csv": "/work/in/rvs.csv" } },
   "model": { "max_kplanet": 3, "planet_modes": ["RV_ONLY", "RV_ONLY", "RV_ONLY"] },
   "sampler": {
-    "name": "transdim_ptemcee",
+    "name": "transdim_pt_emcee",
     "kwargs": { "n_temps": 12, "n_walkers": 100, "n_steps": 5000, "n_burnin": 1500 }
   },
   "transdim": {

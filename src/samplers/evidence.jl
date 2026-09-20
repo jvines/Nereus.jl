@@ -207,7 +207,7 @@ function _pchip_integral(x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
     # ∫⟨logL⟩dβ is defined from β=0 to β=1. The PT ladder is stored
     # DESCENDING (β: 1→0, cold→hot), so integrating in array order yields
     # ∫₁⁰ = −logZ. Sort ascending so the result is +logZ regardless of
-    # ladder direction — the sign-flip bug: sample_ptemcee reported −logZ,
+    # ladder direction — the sign-flip bug: sample_pt_emcee reported −logZ,
     # inverting every model-comparison Bayes factor (caught by toy-Z gate
     # vs nested sampling, 2026-06-13).
     if x[1] > x[end]

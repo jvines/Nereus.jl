@@ -20,7 +20,7 @@
 #       chain into a different alias basin; MCMCChains then merges the
 #       frozen basins into one CI that can spuriously bracket truth
 #       (false recovery). FIX: WARM-START every chain from a short
-#       ptemcee global pre-search so the unimodal/eccentric targets land
+#       pt_emcee global pre-search so the unimodal/eccentric targets land
 #       in the dominant basin and mix (honest R-hat < 1.1). On genuinely
 #       multimodal targets warm-start scatters chains across the modes,
 #       cross-chain R-hat stays high, and `assess_fit`'s multimodality
@@ -176,7 +176,7 @@ end
     _warmstart_points(target, n_chains, rng; n_temps, n_walkers, n_steps,
                       n_burnin) -> Vector{Vector{Float64}}
 
-Run a short ptemcee global pre-search and return `n_chains` HIGH-lp
+Run a short pt_emcee global pre-search and return `n_chains` HIGH-lp
 initial positions in BOUNDED space — one per NUTS chain. NUTS is a
 local sampler, so a good init is the difference between mixing in the
 true basin and freezing in an alias mode.
@@ -192,7 +192,7 @@ all chains onto the single best draw, which would manufacture a clean
 R-hat that hides the multimodality.
 
 Falls back to independent prior draws if the pre-search throws (e.g. a
-model shape ptemcee cannot init) so NUTS still runs — just without the
+model shape pt_emcee cannot init) so NUTS still runs — just without the
 warm start.
 """
 function _warmstart_points(target::NereusTarget, n_chains::Int,
@@ -205,7 +205,7 @@ function _warmstart_points(target::NereusTarget, n_chains::Int,
     n_walkers_eff += isodd(n_walkers_eff) ? 1 : 0
     seed = rand(rng, 1:typemax(Int32))
     try
-        res = sample_ptemcee(target, target.data;
+        res = sample_pt_emcee(target, target.data;
                              n_temps = n_temps, n_walkers = n_walkers_eff,
                              n_steps = n_steps, n_burnin = n_burnin,
                              init_strategy = :prior, seed = seed,
@@ -219,7 +219,7 @@ function _warmstart_points(target::NereusTarget, n_chains::Int,
         # layout.unfrozen_names.
         slot_idx = [findfirst(==(nm), pnames) for nm in layout.unfrozen_names]
         any(isnothing, slot_idx) && error(
-            "ptemcee warm-start chains missing a fitted slot")
+            "pt_emcee warm-start chains missing a fitted slot")
         lp_col = findfirst(==("lp"), pnames)
         flat = Array(ch)                 # (n_draw, n_param)
         n_draw = size(flat, 1)
@@ -232,7 +232,7 @@ function _warmstart_points(target::NereusTarget, n_chains::Int,
             isfinite(lpv) || continue
             push!(cand, x); push!(cand_lp, lpv)
         end
-        isempty(cand) && error("ptemcee warm-start produced no finite draws")
+        isempty(cand) && error("pt_emcee warm-start produced no finite draws")
         order = sortperm(cand_lp; rev = true)
         pts = Vector{Vector{Float64}}(undef, n_chains)
         for c in 1:n_chains
@@ -271,7 +271,7 @@ end
 
 Run NUTS on a `NereusTarget`. Returns posterior as `MCMCChains.Chains`.
 NUTS is a LOCAL sampler — it cannot jump period-alias / disjoint modes.
-Chains are warm-started from a short ptemcee global pre-search so the
+Chains are warm-started from a short pt_emcee global pre-search so the
 unimodal / eccentric targets land in and mix within the dominant basin;
 on genuinely multimodal targets the warm-started chains scatter across
 modes, R-hat stays high, and `assess_fit` flags the multimodality (NUTS
@@ -294,11 +294,11 @@ size / tree depth are attached to `chains.info` (see
   params / GP models), or `:ReverseDiff` (requires `import ReverseDiff`)
 - `compile_tape::Bool=true` : compile ReverseDiff tape for ~2-3x speedup
   (only applies when `ad_backend=:ReverseDiff`)
-- `warm_start::Bool=true`  : warm-start chains from a short ptemcee
+- `warm_start::Bool=true`  : warm-start chains from a short pt_emcee
   pre-search. Disable only if you pass `init` or know the target is
   trivially unimodal; with it off, independent prior-draw inits will
   freeze NUTS in disjoint modes on multi-planet RV posteriors.
-- `warm_temps`, `warm_walkers`, `warm_steps`, `warm_burnin` : ptemcee
+- `warm_temps`, `warm_walkers`, `warm_steps`, `warm_burnin` : pt_emcee
   pre-search budget (defaults 6 / 40 / 400 / 200).
 - `init::Union{Nothing, Vector{Float64}}=nothing` : initial position in
   **bounded** space (overrides `warm_start`). Transformed to
@@ -327,7 +327,7 @@ function sample_nuts(
     target_accept = Float64(target_accept)   # JSON may deliver an Int
 
     # Per-chain bounded-space init points. `init` (if given) pins every
-    # chain at the same point; otherwise warm-start from a short ptemcee
+    # chain at the same point; otherwise warm-start from a short pt_emcee
     # pre-search (the disjoint-mode fix), or fall back to independent
     # prior draws when warm_start is off.
     init_points = if init !== nothing

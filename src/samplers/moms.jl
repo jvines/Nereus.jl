@@ -145,7 +145,7 @@ function sample_moms(
     # TransDim state: 0 planets, no TOGGLEABLE noise active. Mask sized to
     # the FULL noise-model list (consumers index by config.noise_models
     # position — a length(toggleable) mask left always-on models silently
-    # inactive; see the rjmcmc/transdim_ptemcee fix), non-toggleables
+    # inactive; see the rjmcmc/transdim_pt_emcee fix), non-toggleables
     # forced active. With td.planets=false the planet set is FIXED: all
     # slots active (previously they started inactive and, with planet
     # moves gated off, a fixed-planet noise run fit ZERO planets forever).

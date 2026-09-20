@@ -128,7 +128,7 @@ function _sample_rjmcmc_one(
         n_noise = n_noise_slots,
     )
     # Non-toggleable noise models are ALWAYS active (mirrors
-    # transdim_ptemcee); toggleables start off and enter via births.
+    # transdim_pt_emcee); toggleables start off and enter via births.
     for (nm_idx, nm) in enumerate(params.config.noise_models)
         if !(td.noise && nm in td.toggleable)
             td_state.noise_active[nm_idx] = true
@@ -738,7 +738,7 @@ function _noise_move!(callback, theta::Theta, data::Data, td::TransDimConfig,
     # rjmcmc runs at beta = 1 with no ladder, so unlike the tempered samplers it
     # has NO way to cross the "none" valley that sits between two members of an
     # exclusion group: going A -> none -> B requires accepting an intermediate
-    # state that is a deep posterior minimum. transdim_ptemcee can do it on its
+    # state that is a deep posterior minimum. transdim_pt_emcee can do it on its
     # hot chains (which is why its swap is gated to beta > 0.3, cold side only);
     # here there are no hot chains, so without this move a walker that lands in
     # one member never leaves and the occupancy is NOT P(M|D).

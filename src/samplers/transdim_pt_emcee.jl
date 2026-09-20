@@ -1,6 +1,6 @@
 # Trans-dim parallel-tempered affine-invariant ensemble MCMC.
 #
-# `sample_transdim_ptemcee` extends `sample_ptemcee` with MoMS variable-
+# `sample_transdim_pt_emcee` extends `sample_pt_emcee` with MoMS variable-
 # selection moves on the planet count. Each walker maintains its own
 # `TransDimState` (which planets are active); at each step we interleave
 # the standard stretch ensemble move (operating on continuous params)
@@ -25,12 +25,12 @@ using Random: AbstractRNG, MersenneTwister
 using Statistics: median, quantile
 import MCMCChains
 
-export sample_transdim_ptemcee, TransDimPTemceeResult
+export sample_transdim_pt_emcee, TransDimPTemceeResult
 
 """
     TransDimPTemceeResult
 
-Output of `sample_transdim_ptemcee`. Same fields as `PTemceeResult`,
+Output of `sample_transdim_pt_emcee`. Same fields as `PTemceeResult`,
 plus per-sample planet activation state (concatenated as additional
 columns of `chains` — `:n_planets` plus one column per planet slot).
 """
@@ -126,7 +126,7 @@ end
 end
 
 """
-    sample_transdim_ptemcee(target, data; td, kwargs...) -> TransDimPTemceeResult
+    sample_transdim_pt_emcee(target, data; td, kwargs...) -> TransDimPTemceeResult
 
 Trans-dim parallel-tempered ensemble sampler with MoMS variable
 selection on planet count.
@@ -151,7 +151,7 @@ selection on planet count.
   weak / arbitrary-period planets — `0.0` (the old default) gives blind RW
   births that rarely land on a real period.
 
-# PT / ensemble kwargs (same as `sample_ptemcee`)
+# PT / ensemble kwargs (same as `sample_pt_emcee`)
 - `n_temps::Int = 5`
 - `n_walkers::Int = 100`
 - `n_steps::Int = 2000`
@@ -174,7 +174,7 @@ selection on planet count.
 - Tempered M-H: the MoMS acceptance uses `β · (log_L_new − log_L_old)`
   so hot chains explore more freely between models.
 """
-function sample_transdim_ptemcee(
+function sample_transdim_pt_emcee(
     target::NereusTarget,
     data::Data;
     td::TransDimConfig,
@@ -242,7 +242,7 @@ function sample_transdim_ptemcee(
     end
     betas = betas === nothing ? nothing : collect(Float64, betas)
     (td.planets || td.noise) || throw(ArgumentError(
-        "sample_transdim_ptemcee requires td.planets or td.noise = true"))
+        "sample_transdim_pt_emcee requires td.planets or td.noise = true"))
     0 < inclusion_prior < 1 || throw(ArgumentError(
         "inclusion_prior must be in (0, 1)"))
 
@@ -742,7 +742,7 @@ function sample_transdim_ptemcee(
     end
 
     # ---- Stretch move (continuous params only; same as fixed-dim) ----
-    # Per-walker RNGs (see sample_ptemcee): a per-thread stream makes the
+    # Per-walker RNGs (see sample_pt_emcee): a per-thread stream makes the
     # chain depend on the thread count at fixed seed. Trans-dim moves draw
     # a variable number of times, which is still fine here — a task-keyed
     # stream is consumed only by that task, in its own deterministic order.
@@ -1393,7 +1393,7 @@ function sample_transdim_ptemcee(
     _np_trace && println("[NP_TRACE] td.planets=$(td.planets) max_k=$max_k " *
                           "post-init Np<max=$(_np0())/$(length(td_states))")
 
-    pb = ProgressBar("td-ptemcee"; total = n_steps, enabled = show_progress)
+    pb = ProgressBar("td-pt_emcee"; total = n_steps, enabled = show_progress)
 
     for step in 1:n_steps
         do_half_step!(tasks_h1, :h1); _np_chk("h1", step)
@@ -1489,7 +1489,7 @@ function sample_transdim_ptemcee(
         end
         _np_chk("ptswap", step)
 
-        # Vousden+ 2016 adaptive ladder (matches sample_ptemcee block).
+        # Vousden+ 2016 adaptive ladder (matches sample_pt_emcee block).
         if adapt_ladder && step <= n_burnin && step % ladder_adapt_window == 0 &&
            n_temps >= 3
             γt = ladder_adapt_K / ((step / ladder_adapt_window) + ladder_adapt_ν0)

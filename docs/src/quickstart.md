@@ -4,7 +4,7 @@ This page is the shortest path from raw data to a posterior. It covers
 two entry points:
 
 1. **The library API** — `build_target` (or the explicit `Params + Data
-   + NereusTarget` chain) plus a sampler such as `sample_ptemcee`. Use
+   + NereusTarget` chain) plus a sampler such as `sample_pt_emcee`. Use
    this from an interactive Julia session.
 2. **`run_job(cfg)`** — a single config-driven dispatcher that builds
    the model, runs the sampler, renders the full plot suite, and writes
@@ -43,7 +43,7 @@ replica population. `run_job` accepts an optional `n_threads` hint in
 the config, but the actual thread count is governed by
 `JULIA_NUM_THREADS` / the `-t` flag.
 
-## The fastest result — `build_target` + `sample_ptemcee`
+## The fastest result — `build_target` + `sample_pt_emcee`
 
 `build_target` collapses the boilerplate of wiring a
 `Dict{String, PriorSpec}` with `_kN` / `_NAME` suffixes, picking the
@@ -78,7 +78,7 @@ target = build_target(
 
 # Ensemble parallel-tempering — robust to the correlated K/e geometry of
 # RV posteriors. Returns a `PTemceeResult`.
-res = sample_ptemcee(target, target.data;
+res = sample_pt_emcee(target, target.data;
     n_temps   = 8,
     n_walkers = 60,
     n_steps   = 3000,
@@ -151,7 +151,7 @@ cfg = Dict(
      "P_k1" => Dict("type" => "LogUniformPrior", "args" => [2.0, 10.0]),
      "K_k1" => Dict("type" => "ModJeffreysPrior", "args" => [0.1, 200.0])),
 
-  "sampler" => Dict("name" => "ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
       "n_temps" => 8, "n_walkers" => 60, "n_steps" => 3000,
       "n_burnin" => 1500, "show_progress" => false)),
 
@@ -219,10 +219,10 @@ Types: `UniformPrior`, `LogUniformPrior`, `ModJeffreysPrior`,
 omit is auto-generated from the data bounds.
 
 **`sampler`** — `{ "name": "<sampler>", "kwargs": {...} }`. Names:
-`ptemcee`, `transdim_ptemcee`, `pt`, `pt_hmc`, `rjmcmc`, `moms`,
+`pt_emcee`, `transdim_pt_emcee`, `pt`, `pt_hmc`, `rjmcmc`, `moms`,
 `daedalus`, `nested`, `nested_ins`, `nested_dynamic`, `pa`, `smc`,
 `pt_whitening`, `nuts`, `ofti`. The trans-dim samplers
-(`transdim_ptemcee`, `rjmcmc`, `moms`, `daedalus`) require a top-level
+(`transdim_pt_emcee`, `rjmcmc`, `moms`, `daedalus`) require a top-level
 `transdim` block. JSON strings in `kwargs` that name Julia symbols
 (e.g. `"prior"` for `init_strategy`) are coerced automatically;
 unknown kwargs for the chosen sampler are rejected with an actionable
@@ -231,7 +231,7 @@ error.
 The Pathfinder warm start is not a sampler of its own — it is `pt` with
 `"init_strategy": "pathfinder"` (plus optional `n_pathfinder_runs`,
 default 16, and `n_pathfinder_draws`, default 0 ⇒ `max(2·n_chains,
-200)`). `ptemcee` deliberately does **not** offer it: Pathfinder's MVN
+200)`). `pt_emcee` deliberately does **not** offer it: Pathfinder's MVN
 approximation is poor on sharp curved ridges (Pareto k ≫ 0.5) and seeds
 every walker into one spurious basin, producing pristine-looking R-hat /
 ESS at a wrong orbit. See [Samplers](samplers.md).
@@ -381,7 +381,7 @@ draws), and PT swaps break cold-chain mode trapping. The output tells
 you P(N\_p = k) for each k and the conditional posterior for each
 configuration.
 
-The same search via `run_job` — note `transdim_ptemcee` requires the
+The same search via `run_job` — note `transdim_pt_emcee` requires the
 `transdim` block:
 
 ```julia
@@ -392,7 +392,7 @@ cfg = Dict(
   "star" => Dict("M_s" => 1.11),
   "model" => Dict("max_kplanet" => 3,
                   "planet_modes" => ["RV_ONLY", "RV_ONLY", "RV_ONLY"]),
-  "sampler" => Dict("name" => "transdim_ptemcee", "kwargs" => Dict(
+  "sampler" => Dict("name" => "transdim_pt_emcee", "kwargs" => Dict(
       "n_temps" => 10, "n_walkers" => 100, "n_steps" => 5000, "n_burnin" => 2000)),
   "transdim" => Dict("max_kplanet" => 3,
       "birth_strategies" => ["PriorBirth", "InformedBirth"],

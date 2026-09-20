@@ -84,7 +84,7 @@ fit_rv(rv; planets = 0:4)          # trans-dimensional: model selection over cou
 An integer builds that many identical default blocks. A range hands the
 problem to the trans-dimensional layer, which sets `max_kplanet` and the
 occupancy prior — see [Trans-dimensional](transdim.md). Note a range needs a
-trans-dim engine (`transdim_ptemcee`, `rjmcmc`, `moms`) to mean anything.
+trans-dim engine (`transdim_pt_emcee`, `rjmcmc`, `moms`) to mean anything.
 
 **The default priors come from your data, not from constants.** For RV,
 `default_rv_planet` takes the period from twice the median cadence up to three
@@ -116,7 +116,7 @@ fit_rv(rv; planets = (k1 = (P = NormalPrior(4.1375, 0.001),
 
 ```julia
 fit_rv(rv; engine = "pt")                                   # by name
-fit_rv(rv; engine = Dict("engine" => "ptemcee",
+fit_rv(rv; engine = Dict("engine" => "pt_emcee",
                          "options" => Dict("n_temps" => 16,
                                            "n_walkers" => 40)))
 ```
@@ -124,8 +124,8 @@ fit_rv(rv; engine = Dict("engine" => "ptemcee",
 `ENGINES` is the whole table — seventeen samplers, one line each:
 
 ```
-pt              pt_hmc         pt_whitening   ptemcee
-transdim_ptemcee               nested         nested_ins     nested_dynamic
+pt              pt_hmc         pt_whitening   pt_emcee
+transdim_pt_emcee               nested         nested_ins     nested_dynamic
 moms            daedalus       rjmcmc         nuts           map
 smc             ensemble       ess            pa
 ```
@@ -140,7 +140,7 @@ fit_rv(rv; engine = Dict("engine" => "pt",
                          "options" => Dict("init_strategy" => "pathfinder")))
 ```
 
-`ptemcee` does not take `init_strategy` and that is deliberate — see
+`pt_emcee` does not take `init_strategy` and that is deliberate — see
 [Samplers](samplers.md) for the orbit it gets wrong when you seed it that way.
 
 Two behaviours worth relying on:
@@ -154,7 +154,7 @@ Two behaviours worth relying on:
 `run_engine(target, spec)` is the same dispatcher if you already have a target.
 
 Which sampler to pick is [Samplers](samplers.md); the short version is that
-`pt` is the right default, `transdim_ptemcee` is the workhorse for model
+`pt` is the right default, `transdim_pt_emcee` is the workhorse for model
 selection, and nested sampling wants good priors.
 
 ## `Stopping`
@@ -248,7 +248,7 @@ res = fit_rv(Dict("HARPS" => (t = t1, rv = v1, rv_err = e1),
 ```julia
 res = fit_rv(rv; planets = 0:4,
              noise = default_noise_menu(data).noise_models,
-             engine = "transdim_ptemcee")
+             engine = "transdim_pt_emcee")
 ```
 
 **Joint RV + astrometry — the `M sin i` → `M` break:**

@@ -490,7 +490,7 @@ function compute_derived(chains, params::Params;
     config = params.config
     parametrization = config.parametrization
     # `chains` may be 2-D (n_iter, n_param) for legacy samplers or 3-D
-    # (n_iter, n_param, n_chain) for ptemcee's per-walker reshape.
+    # (n_iter, n_param, n_chain) for pt_emcee's per-walker reshape.
     # `vec(Array(chains[sym]))` always flattens across every chain
     # dimension, so n_samples must match that length — not size(_, 1).
     n_samples = length(vec(Array(chains[:, 1, :])))

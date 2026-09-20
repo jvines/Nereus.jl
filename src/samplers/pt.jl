@@ -130,7 +130,7 @@ function sample_pt(
     # a sampler: it computed Pathfinder draws and delegated straight back here.
     # An initialisation strategy is not an algorithm, so it is a keyword.
     #
-    # NOT offered on `ptemcee`, deliberately -- see the note there. Pathfinder's
+    # NOT offered on `pt_emcee`, deliberately -- see the note there. Pathfinder's
     # MVN approximation is poor on sharp curved ridges (Pareto k >> 0.5) and
     # seeds every walker into one spurious basin, producing pristine R-hat/ESS
     # at a wrong orbit (HD 159062: a=34.5 vs true ~58).
@@ -621,7 +621,7 @@ function _pt_noise_move!(rep::TransDimPTState, data::Data,
     # ordinary birth/death, because tempering flattens the intermediate state.
     # At beta ~ 1 that valley is deep and birth/death cannot cross it, so an
     # entrenched replica never leaves and the occupancy stops being P(M|D).
-    # Same rationale and same gate as transdim_ptemcee.
+    # Same rationale and same gate as transdim_pt_emcee.
     if beta > 0.3 && !isempty(td.noise_exclusion_groups) && rand(rng) < 0.5 &&
        _any_group_member_active(theta, td.noise_exclusion_groups)
         # Needs an active member to swap FROM; otherwise fall through to

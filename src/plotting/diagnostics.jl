@@ -31,7 +31,7 @@ function plot_trace(chains, params;
             # Multi-chain: plot each chain as a separate thin line so the
             # eye can spot stuck walkers / mode-hopping. Single-chain
             # (or flat) case: plot as one solid line. Ensemble samplers
-            # (ptemcee) stack walkers into a single long row vector with
+            # (pt_emcee) stack walkers into a single long row vector with
             # no chain axis — for those we thin to ≤3000 points so the
             # trace shows the macro trajectory rather than a black blob.
             if ndims(samp_arr) == 2 && size(samp_arr, 2) > 1
@@ -150,7 +150,7 @@ function plot_posteriors(chains, params;
         if !has_lp
             @warn "plot_posteriors: chain has no `:lp` column — skipping. " *
                   "(Pigeons PT does not emit log-posterior per draw; " *
-                  "use sample_ptemcee or sample_nuts to get :lp.)"
+                  "use sample_pt_emcee or sample_nuts to get :lp.)"
             return
         end
 

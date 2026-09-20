@@ -15,7 +15,7 @@ using Test, Nereus, Random, Statistics
 
     # --- Tripwire: no sampler may draw randomness keyed on the thread ---
     # Cheap, and it fires the moment the anti-pattern is reintroduced —
-    # unlike the subprocess check below, which only covers ptemcee.
+    # unlike the subprocess check below, which only covers pt_emcee.
     @testset "no per-thread RNG streams" begin
         srcdir  = joinpath(@__DIR__, "..", "src", "samplers")
         offenders = String[]
@@ -37,7 +37,7 @@ using Test, Nereus, Random, Statistics
     end
 
     # --- The real thing: same seed, different -t, identical output ------
-    @testset "ptemcee invariant to thread count" begin
+    @testset "pt_emcee invariant to thread count" begin
         script = """
         using Nereus, Random, Printf
         Random.seed!(7)
@@ -49,7 +49,7 @@ using Test, Nereus, Random, Statistics
                         Mo=UniformPrior(0.0,2pi)),),
             rv=(SIM=(data=(t=t,rv=rv,rv_err=fill(1.5,n)),
                      sigma=LogUniformPrior(0.5,10.0)),))
-        r = sample_ptemcee(target, target.data; n_temps=6, n_walkers=20,
+        r = sample_pt_emcee(target, target.data; n_temps=6, n_walkers=20,
                            n_steps=300, n_burnin=150, seed=42,
                            show_progress=false)
         K = vec(Array(r.chains[:, :K_k1, :]))

@@ -163,8 +163,8 @@ _dispatch_td(name, kwargs, target, data) =
         @test :n_planets in names(res.chains, :parameters)
     end
 
-    @testset "transdim_ptemcee — Int stretch_a/inclusion_prior" begin
-        res = _dispatch_td("transdim_ptemcee",
+    @testset "transdim_pt_emcee — Int stretch_a/inclusion_prior" begin
+        res = _dispatch_td("transdim_pt_emcee",
                            Dict(:stretch_a => 2, :inclusion_prior => 0.5,
                                 :n_temps => 4, :n_walkers => 20,
                                 :n_steps => 200, :n_burnin => 100,

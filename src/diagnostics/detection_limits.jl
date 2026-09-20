@@ -6,7 +6,7 @@
 # data and priors, what K could I have detected at this period?"
 #
 # Only meaningful for chains that explore the full prior range in P —
-# EMPEROR-style prior-seeded ptemcee is the canonical input. Other
+# EMPEROR-style prior-seeded pt_emcee is the canonical input. Other
 # samplers (NUTS / NS / NF-PT) concentrate around modes and would
 # produce biased limits. We don't gatekeep but warn when the chain
 # coverage is narrow.
@@ -61,7 +61,7 @@ my data and priors, anything with K above this curve at period P
 would have been detected at the stated credible level."
 
 The input chain must span the prior on P meaningfully for this to be
-honest — EMPEROR-style prior-seeded ptemcee
+honest — EMPEROR-style prior-seeded pt_emcee
 ([Vousden+ 2016](https://ui.adsabs.harvard.edu/abs/2016MNRAS.455.1919V/abstract))
 is the canonical input. NUTS / NS / NF-PT chains concentrate around
 modes and would give biased limits; the function emits a warning when
@@ -124,7 +124,7 @@ function detection_limits(chains, params::Params;
         @warn ("detection_limits: chain P range covers " *
                 "$(round(100 * span_log_chain / span_log_prior; digits = 1))% " *
                 "of the prior range — limits will only be honest inside that. " *
-                "EMPEROR-style prior-seeded ptemcee is recommended.")
+                "EMPEROR-style prior-seeded pt_emcee is recommended.")
     end
 
     # Log-spaced bins.

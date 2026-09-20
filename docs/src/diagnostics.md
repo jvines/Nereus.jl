@@ -366,7 +366,7 @@ masked out so only samples where this planet slot is active contribute.
 ```julia
 # Recommended path: prior-seeded PT (init_strategy=:prior is the default,
 # giving broad per-temperature period coverage).
-result = sample_ptemcee(target, data; n_walkers=128, n_steps=10_000,
+result = sample_pt_emcee(target, data; n_walkers=128, n_steps=10_000,
                                        n_temps=10, init_strategy=:prior)
 chains = result.chains
 res    = detection_limits(chains, params; n_bins=30, confidence=0.95)
@@ -406,7 +406,7 @@ Sparse bins are flagged with an x-cross marker. Saves to `filename`
 if given.
 
 `run_job` (`_run_detection_limits!`) auto-invokes detection limits when
-the sampler is one of `ptemcee`, `transdim_ptemcee`, or `pt`
+the sampler is one of `pt_emcee`, `transdim_pt_emcee`, or `pt`
 (the prior-seeded PT set with broad period coverage). For other
 samplers it **skips silently** — their chains concentrate around modes
 and aren't appropriate input. The stage also requires RV data and a
@@ -473,7 +473,7 @@ The checks (`src/diagnostics/fit_health.jl`):
    if any R̂ > `rhat_max` (default `1.05`) or any ESS < `ess_min`
    (default `200`). With `ensemble = true`, each walker's own trace is
    split in half and the halves stacked as the "chains" axis — so a
-   single ensemble of correlated walkers (ptemcee, PA, SMC, …) is still
+   single ensemble of correlated walkers (pt_emcee, PA, SMC, …) is still
    diagnosable instead of being treated as N independent chains (which
    gives a misleadingly low R̂).
 2. **Multimodality / non-mixing** — for every parameter, compares the
@@ -529,7 +529,7 @@ It is **fail-soft**: it only logs a verdict and records it in the
 summary; it never alters the chains or any other output. It builds
 `prior_bounds` from the model layout (hard bounds of every fitted
 parameter), and sets `ensemble = true` automatically when the sampler
-is one of `ptemcee`, `transdim_ptemcee`, `pt_whitening`, `pa`, `smc`,
+is one of `pt_emcee`, `transdim_pt_emcee`, `pt_whitening`, `pa`, `smc`,
 `ensemble`, or `ess`. The result lands in `summary.json` under
 `fit_health`:
 

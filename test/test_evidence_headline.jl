@@ -1,4 +1,4 @@
-# What sample_ptemcee reports as `log_evidence`, and the estimators behind it.
+# What sample_pt_emcee reports as `log_evidence`, and the estimators behind it.
 #
 # Measured on 51 Peg (1691 RVs, 15 free params, unimodal, P to 5 decimals --
 # the friendliest target any of these will see):
@@ -12,7 +12,7 @@
 # tempered stack is reported but never silently substituted.
 #
 # mode_laplace_evidence had NO test coverage at all before this file, despite
-# being the value sample_ptemcee substituted in whenever the tempered path
+# being the value sample_pt_emcee substituted in whenever the tempered path
 # failed -- i.e. the number it reported on exactly the hard cases came from the
 # one estimator nothing checked.
 using Test
@@ -35,7 +35,7 @@ using LinearAlgebra, Statistics, Random, Distributions, MCMCChains
         rv = (SIM = (data = (t = t, rv = rv, rv_err = er),
                      sigma = LogUniformPrior(0.5, 20.0)),),
     )
-    res = sample_ptemcee(target, target.data; n_temps = 12, n_walkers = 30,
+    res = sample_pt_emcee(target, target.data; n_temps = 12, n_walkers = 30,
                          n_steps = 1500, n_burnin = 800, seed = 7,
                          show_progress = false)
 
@@ -58,7 +58,7 @@ using LinearAlgebra, Statistics, Random, Distributions, MCMCChains
     @test res.log_evidence_bridge != res.evidence.ti_plus[1]
 
     # opting out returns the pre-existing behaviour rather than erroring
-    res2 = sample_ptemcee(target, target.data; n_temps = 12, n_walkers = 30,
+    res2 = sample_pt_emcee(target, target.data; n_temps = 12, n_walkers = 30,
                           n_steps = 1500, n_burnin = 800, seed = 7,
                           bridge_headline = false, show_progress = false)
     @test isnan(res2.log_evidence_bridge)

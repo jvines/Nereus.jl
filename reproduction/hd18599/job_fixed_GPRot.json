@@ -94,7 +94,7 @@
     }
   },
   "sampler": {
-    "name": "ptemcee",
+    "name": "pt_emcee",
     "kwargs": {
       "n_temps": 12,
       "n_walkers": 128,

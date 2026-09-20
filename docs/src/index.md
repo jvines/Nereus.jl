@@ -111,7 +111,7 @@ This is version `0.2.0`.
 - **Fifteen-plus samplers** spanning gradient HMC (`sample_nuts`),
   parallel tempering (`sample_pt`, optionally Pathfinder-warm-started
   with `init_strategy=:pathfinder`,
-  `sample_ptemcee` Vousden ensemble, `sample_pt_hmc` NUTS-in-PT,
+  `sample_pt_emcee` Vousden ensemble, `sample_pt_hmc` NUTS-in-PT,
   `sample_pt_whitening` NF-coupled), nested sampling (`sample_nested`,
   `sample_nested_ins` importance NS, `sample_nested_dynamic` dynamic
   NS), population annealing / SMC (`sample_pa`, `sample_smc`), the
@@ -119,7 +119,7 @@ This is version `0.2.0`.
   ensemble (`sample_ensemble`), OFTI (`ofti_sample`), MAP point
   estimation (`sample_map`), Pathfinder warm-starts (`pathfinder_init`),
   and the trans-dim engines (`sample_rjmcmc`, `sample_moms`,
-  `sample_daedalus`, `sample_transdim_ptemcee`). →
+  `sample_daedalus`, `sample_transdim_pt_emcee`). →
   [Samplers](samplers.md)
 - **Evidence stack** — four estimators of the Bayesian evidence
   (`log Z`, used to compare models) computed from the PT ladder:
