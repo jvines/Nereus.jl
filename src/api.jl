@@ -130,7 +130,14 @@ layer, not a second model.
 function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       trend_order = 0, noise_models = nothing,
                       priors = nothing, stability = :none,
-                      external_priors = nothing)
+                      external_priors = nothing,
+                      # Everything below build_target already supported and
+                      # _target_from simply did not forward, so it was
+                      # reachable from Julia and not from the fit_* API.
+                      parametrization = nothing, time_anchor = nothing,
+                      R_s = NaN, phot_trend_order = 0, as_names = String[],
+                      sharing = nothing, transdim_noise = false,
+                      ttv_n_transits = nothing, ttv_backend = nothing)
     rv    = NamedTuple()
     phot  = NamedTuple()
     iad = hgca = gost = relast = nothing
@@ -211,7 +218,18 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                           :trend_order => trend_order,
                           :noise_models => noise_models, :priors => priors,
                           :stability => stability,
-                          :external_priors => _as_external(external_priors))
+                          :external_priors => _as_external(external_priors),
+                          :phot_trend_order => phot_trend_order,
+                          :as_names => as_names)
+    parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
+    time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
+    isnan(R_s) || (kw[:R_s] = R_s)
+    sharing === nothing || (kw[:sharing] = Dict{Symbol,Vector{Vector{String}}}(
+        Symbol(k) => [String.(g) for g in v] for (k, v) in pairs(sharing)))
+    transdim_noise && (kw[:transdim_noise] = true)
+    ttv_n_transits === nothing || (kw[:ttv_n_transits] =
+        Dict{Int,Int}(Int(k) => Int(v) for (k, v) in pairs(ttv_n_transits)))
+    ttv_backend === nothing || (kw[:ttv_backend] = Symbol(ttv_backend))
     M_pri === nothing || (kw[:M_pri] = M_pri)
     isnan(M_s) || (kw[:M_s] = M_s)
     return build_target(; kw...)
@@ -287,6 +305,7 @@ what the jitter and offset terms are keyed on, so there is no unnamed form:
 trans-dimensional model selection over planet count.
 """
 function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 stopping = nothing, output_dir = nothing, noise = nothing,
                 trend_order = 0, kwargs...)
     _require_instrument_map(rv, "RV", (:t, :rv, :rv_err))
@@ -300,7 +319,7 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
     end
     tgt = _target_from([ch], planets;
                        trend_order, noise_models = noise, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim, plots, plot_kwargs, save_pdf)
 end
 
 """
@@ -318,11 +337,12 @@ unreachable from a symmetric transit.
 """
 function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
                      rho_star = nothing, gravity_darkening = false,
-                     engine = nothing, transdim = nothing, stopping = nothing,
+                     engine = nothing, transdim = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false, stopping = nothing,
                      output_dir = nothing, kwargs...)
     _require_instrument_map(phot, "transit", (:t, :flux, :flux_err))
     tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf)
 end
 
 """
@@ -389,6 +409,7 @@ keyword for either.
 function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
                         relast = nothing, planets = 1,
                         engine = nothing, transdim = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false,
                         stopping = nothing, output_dir = nothing, kwargs...)
     iad = resolve_astrometry(iad)
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
@@ -396,7 +417,7 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
     planets isa NamedTuple ||
         (planets = _planet_spec(planets; block = default_astrom_planet()))
     tgt = _target_from([ch], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf)
 end
 
 
@@ -410,12 +431,13 @@ Fit several techniques simultaneously. One operation for "these together",
 rather than a named function per combination.
 """
 function fit_joint(channels...; planets = 1, engine = nothing, transdim = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false,
                    stopping = nothing, output_dir = nothing, kwargs...)
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
     tgt = _target_from(collect(channels), planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf)
 end
 
 # ---------------------------------------------------------------------------
@@ -633,7 +655,8 @@ _as_td(td, max_k) = throw(ArgumentError(
 
 """Run the engine, then assemble the standard result."""
 function _finish(target, engine, stopping, output_dir; op::String,
-                 transdim = nothing)
+                 transdim = nothing, plots = nothing, plot_kwargs = nothing,
+                 save_pdf::Bool = false)
     t0 = time()
     td = _as_td(transdim, target.params.config.max_kplanet)
     # Engine defaults by SHAPE, so the trans-dim and fixed-dim paths are
@@ -651,6 +674,9 @@ function _finish(target, engine, stopping, output_dir; op::String,
         o[:td] = td
         spec["options"] = o
     end
+    spec_name = String(get(spec, "engine", "pt_emcee"))
+    spec_opts = Dict{String,Any}(String(k) => v
+                                 for (k, v) in pairs(get(spec, "options", Dict())))
     raw = run_engine(target, spec)
     chains, log_z, extra = _normalize(raw)
     summary = Dict{String,Any}(
@@ -682,6 +708,36 @@ function _finish(target, engine, stopping, output_dir; op::String,
         save_chains(joinpath(output_dir, "chains.nc"), chains, target.params;
                     data = target.data, log_evidence = log_z)
         summary["output_dir"] = output_dir
+
+        # Nereus's own figures, the same ones run_job renders. These used to be
+        # reachable ONLY by dropping to a run_job JSON config, which meant
+        # anyone wanting a phase-fold from the simple API had to rewrite their
+        # call in a different vocabulary. `plots = ["auto"]` takes the default
+        # set for whatever channels are present.
+        if plots !== nothing
+            plist = plots isa AbstractString ? [plots] : collect(plots)
+            pcfg = Dict{String,Any}(
+                "output"  => Dict{String,Any}("plots" => String.(plist),
+                                              "plot_kwargs" => plot_kwargs === nothing ?
+                                                  Dict{String,Any}() : plot_kwargs,
+                                              "save_pdf" => save_pdf),
+                # _ensemble_n_walkers reads this to de-interleave per-walker traces
+                "sampler" => Dict{String,Any}("name" => spec_name,
+                                              "kwargs" => spec_opts))
+            _make_plots(pcfg, chains, target.params, target.data, output_dir)
+            # Manifest: logical name -> path, relative to plots/ without the
+            # extension, exactly as run_job builds it.
+            figs = Dict{String,Any}()
+            proot = joinpath(output_dir, "plots")
+            if isdir(proot)
+                for (root, _, files) in walkdir(proot), f in files
+                    endswith(f, ".png") || continue
+                    full = joinpath(root, f)
+                    figs[splitext(relpath(full, proot))[1]] = full
+                end
+            end
+            summary["figures"] = figs
+        end
     end
     return (; chains, log_z, summary)
 end
@@ -750,7 +806,8 @@ only be used for methods comparison.
 """
 function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arome,
                 priors::AbstractDict = Dict(), planets::Int = 1,
-                engine = nothing, transdim = nothing, output_dir = nothing,
+                engine = nothing, transdim = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false, output_dir = nothing,
                 parametrization = Dict("mass" => "K_driven", "time" => "Tc",
                                        "ew" => "sesinw", "geom" => "b_rr",
                                        "use_rho_s" => true),
@@ -791,7 +848,8 @@ Transit timing variations. Needs photometry (or measured transit times);
 function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  nbody::Bool = false, planets::Int = 2,
                  star::AbstractDict = Dict(), priors::AbstractDict = Dict(),
-                 engine = nothing, transdim = nothing, output_dir = nothing,
+                 engine = nothing, transdim = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false, output_dir = nothing,
                  extra::AbstractDict = Dict())
     (phot === nothing && transit_times === nothing) && throw(ArgumentError(
         "fit_ttv needs photometry or measured transit_times"))
@@ -831,6 +889,7 @@ function.
 """
 function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
                     priors::AbstractDict = Dict(), engine = nothing, transdim = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false,
                     output_dir = nothing, extra::AbstractDict = Dict())
     mode = secondary === nothing ? "BINARY_RV" : "SB2"
     data = _data_block(; rv)

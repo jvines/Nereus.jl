@@ -20,7 +20,14 @@ module Nereus
 #   2  -- 0.3.0: priors-only (`plx` and `M_pri` live in `priors`);
 #                engines `ptemcee`/`transdim_ptemcee` renamed to
 #                `pt_emcee`/`transdim_pt_emcee`
-const PY_API_VERSION = 2
+#   3  -- 0.4.4: the daemon now forwards EVERY keyword, not just
+#                planets/engine/output_dir/priors, and fit_* accepts the whole
+#                model surface (plots, external_priors, transdim,
+#                parametrization, sharing, ttv_*, ...). A 0.4.4 client against
+#                an older runtime would forward `plots=` to a fit_* that has no
+#                such keyword and die on a MethodError deep in Julia -- which is
+#                the exact failure this constant exists to turn into a sentence.
+const PY_API_VERSION = 3
 
 include("constants.jl")
 include("kepler.jl")

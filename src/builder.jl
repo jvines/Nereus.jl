@@ -118,6 +118,13 @@ function build_target(;
     noise_models = nothing,
     priors::Union{Nothing, Dict{String, <:PriorSpec}} = nothing,
     external_priors::Vector{ExternalPrior} = ExternalPrior[],
+    # Params has always taken these; build_target simply never forwarded them,
+    # so they were reachable only by constructing Params by hand or through a
+    # run_job config.
+    sharing::Dict{Symbol, Vector{Vector{String}}} = Dict{Symbol, Vector{Vector{String}}}(),
+    transdim_noise::Bool = false,
+    ttv_n_transits::Dict{Int, Int} = Dict{Int, Int}(),
+    ttv_backend::Symbol = :ttvfaster,
 )
     isempty(planets) &&
         throw(ArgumentError("build_target: at least one planet required " *
@@ -287,6 +294,10 @@ function build_target(;
         phot_trend_order = phot_trend_order,
         noise_models    = nm_vec,
         external_priors = external_priors,
+        sharing         = sharing,
+        transdim_noise  = transdim_noise,
+        ttv_n_transits  = ttv_n_transits,
+        ttv_backend     = ttv_backend,
     )
     return NereusTarget(params, data)
 end

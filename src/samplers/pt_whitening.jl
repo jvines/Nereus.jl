@@ -173,8 +173,13 @@ function sample_pt_whitening(
     unfrozen_idx = layout.unfrozen_idx
 
     # Goodman-Weare: each half ≥ n_dim+1 walkers, total even.
-    n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
-    n_walkers_eff % 2 == 1 && (n_walkers_eff += 1)
+    # Bind ONCE. This used to be `n_walkers_eff = ...` followed by
+    # `n_walkers_eff += 1`, and `refresh_whiten_stats!` closes over it — a
+    # reassigned captured variable is boxed into a `Core.Box`, so the
+    # innermost accumulation of an O(n_temps·n_dim·window·n_walkers) kernel
+    # ran Any-typed. Assigning exactly once keeps it an Int.
+    _nw_raw = max(n_walkers, 2 * n_dim + 2)
+    n_walkers_eff = isodd(_nw_raw) ? _nw_raw + 1 : _nw_raw
 
     # Default ladder: β[1]=1 (cold) geometric down to a hot chain.
     # Geometric (1/√5)^i matches the validated pt_emcee ladder; the old
@@ -440,19 +445,29 @@ function sample_pt_whitening(
                 Threads.atomic_add!(n_evals_atomic, 2)
                 # Reject if either proposal lands out-of-support.
                 (isfinite(lp_yk) && isfinite(lp_ykp)) || continue
-                log_α = βs[t]     * (ll_yk  - logL_arr[t,     w])  +
-                        βs[t + 1] * (ll_ykp - logL_arr[t + 1, w2]) +
-                        (lp_yk  - logπ_arr[t,     w]) +
-                        (lp_ykp - logπ_arr[t + 1, w2])
+                # This is a SWAP: the point mapped INTO rung t+1's scale
+                # (buf_k = T(x_k)) lands at t+1, and the point mapped into
+                # rung t's scale (buf_kp1 = T⁻¹(x_{k+1})) lands at t.
+                # Writing each back to the rung it came from is not a swap —
+                # it feeds every rung its NEIGHBOUR's width, which inflates
+                # the cold marginal while leaving its median in place, and
+                # it is not an involution, so detailed balance fails.
+                # Measured on HD 4747 (16 temps, 40 walkers): the wrong
+                # placement gave σ68(M_sec) = 0.0185 against a true 0.0008,
+                # with 24/40 cold walkers off-mode.
+                log_α = βs[t]     * (ll_ykp - logL_arr[t,     w])  +
+                        βs[t + 1] * (ll_yk  - logL_arr[t + 1, w2]) +
+                        (lp_ykp - logπ_arr[t,     w]) +
+                        (lp_yk  - logπ_arr[t + 1, w2])
                 if log(rand(rng_master)) < log_α
                     for d in 1:n_dim
-                        state[t,     w,  d] = buf_k[d]
-                        state[t + 1, w2, d] = buf_kp1[d]
+                        state[t,     w,  d] = buf_kp1[d]
+                        state[t + 1, w2, d] = buf_k[d]
                     end
-                    logL_arr[t,     w]  = ll_yk
-                    logL_arr[t + 1, w2] = ll_ykp
-                    logπ_arr[t,     w]  = lp_yk
-                    logπ_arr[t + 1, w2] = lp_ykp
+                    logL_arr[t,     w]  = ll_ykp
+                    logL_arr[t + 1, w2] = ll_yk
+                    logπ_arr[t,     w]  = lp_ykp
+                    logπ_arr[t + 1, w2] = lp_yk
                     accept_swap[t] += 1
                 end
             else
