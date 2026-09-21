@@ -2106,10 +2106,10 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict)
                   "log-post). Inspect before trusting results.\n" *
                   sprint(show, MIME"text/plain"(), report)
         elseif report.overall === :warn
-            @warn "Nereus.run_job: fit health = WARN — review flagged checks.\n" *
+            @warn "Nereus: fit health = WARN — review flagged checks.\n" *
                   sprint(show, MIME"text/plain"(), report)
         else
-            @info "Nereus.run_job: fit health = OK (no red flags)."
+            @info "Nereus: fit health = OK (no red flags)."
         end
     catch err
         @warn "fit-health assessment failed (continuing)" exception = (err, catch_backtrace())

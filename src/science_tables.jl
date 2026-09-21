@@ -514,12 +514,46 @@ end
 # =====================================================================
 # Return-JSON contract assembly (the exoautomata API deliverable)
 # =====================================================================
-function _git_hash()
+"""Provenance for `run_info`: which build of Nereus produced this result.
+
+NOT `git rev-parse`. That ran in the PROCESS's working directory, which is
+wherever the caller's notebook started and has nothing to do with where Nereus
+lives. From a runtime bundle there is no repository, so it printed
+`fatal: not a git repository` to stderr on every fit -- past the try/catch,
+straight to the user's console. Worse, from inside ANY other checkout it
+succeeded and stamped that repository's commit as Nereus's provenance: a
+plausible-looking hash that means something else entirely, on a table destined
+for a paper.
+
+The package knows its own version, and a bundle ships BUILD_INFO.txt beside
+the source with the exact commit it was built from. Both are read here; the
+commit is reported when it is genuinely knowable and omitted when it is not.
+"""
+function _build_provenance()
+    info = Dict{String, Any}()
     try
-        return strip(read(`git rev-parse --short HEAD`, String))
+        info["version"] = string(pkgversion(@__MODULE__))
     catch
-        return "unknown"
     end
+    try
+        bi = normpath(joinpath(@__DIR__, "..", "BUILD_INFO.txt"))
+        if isfile(bi)
+            for line in eachline(bi)
+                k, _, v = partition_kv(line)
+                k in ("commit", "describe", "built_utc", "platform") || continue
+                isempty(v) || (info[k] = v)
+            end
+        end
+    catch
+    end
+    return info
+end
+
+"""`"commit:      abc123"` -> `("commit", "abc123")`."""
+function partition_kv(line::AbstractString)
+    i = findfirst(':', line)
+    i === nothing && return ("", "", "")
+    return (strip(line[1:i-1]), ":", strip(line[i+1:end]))
 end
 
 function _prior_block(params::Params)
@@ -592,7 +626,7 @@ function science_summary(out_dir::AbstractString, chains, params::Params, data::
     end
 
     run_info = Dict{String, Any}(
-        "git_hash" => _git_hash(),
+        "nereus" => _build_provenance(),
         "convergence" => conv,
         "priors" => _prior_block(params),
         "data_provenance" => _provenance(data, params),
