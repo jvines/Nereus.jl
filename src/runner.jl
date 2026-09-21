@@ -140,6 +140,14 @@ function run_job(cfg::AbstractDict)
         _run_fit_health!(cfg, chains, params, summary)
 
         # --- Build summary ---------------------------------------------
+        # Run health, per engine — same harvest fit_* gets.
+        try
+            summary["diagnostics"] = sampler_diagnostics(
+                String(_get(_get(cfg, :sampler; default = Dict()), :name;
+                            default = "pt_emcee")), result, chains)
+        catch err
+            summary["diagnostics"] = Dict{String,Any}("error" => sprint(showerror, err))
+        end
         _populate_summary!(summary, result, params, chains)
         _augment_evidence!(summary, params, data, chains)
         # Authoritative science contract: conditioned, unit-tagged fitted/derived

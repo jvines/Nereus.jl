@@ -138,6 +138,7 @@ include("plotting/rm_plots.jl")    # RM in-transit RV anomaly figure
 include("ttv.jl")                  # Per-transit free time offsets (TTV-A)
 include("ttv_nbody.jl")            # N-body-predicted TTVs via TTVFaster (TTV-C)
 include("ttv_nbody_full.jl")       # full ODE backend via NbodyGradient.jl
+include("sampler_diagnostics.jl") # per-engine run health, persisted into every summary
 include("engines_registry.jl")   # the ONE sampler registry; api.jl and runner.jl derive from it
 include("runner.jl")               # JSON/dict-driven batch entry point
 include("api.jl")                  # split-by-functionality public API (fit_*)
@@ -389,7 +390,8 @@ end
 
 
 # Public API surface (api.jl / features.jl)
-export fit_rv, fit_transit, fit_astrometry, fit_rm, fit_tomography,
+export sampler_diagnostics, chain_convergence,
+       fit_rv, fit_transit, fit_astrometry, fit_rm, fit_tomography,
     fit_ttv, fit_binary, fit_joint, run_engine, Stopping, ENGINES,
     FEATURE_ACTIONS, default_rv_planet, default_astrom_planet
 

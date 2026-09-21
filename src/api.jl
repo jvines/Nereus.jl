@@ -523,7 +523,11 @@ facade — callers should not branch on which engine they picked.
 function _normalize(raw)
     extra = Dict{String,Any}()
     if raw isa Tuple && length(raw) >= 2
-        return raw[1], raw[2], extra
+        # Slot 2 is log evidence for pt / pt_hmc / nested / daedalus but an
+        # EVALUATION COUNT for moms and rjmcmc, which were therefore reporting
+        # a count as their evidence. A count is an Int; evidence is a Float.
+        lz = raw[2]
+        return raw[1], (lz isa Integer ? NaN : lz), extra
     end
     # MAP: a point estimate, not a posterior. Surface its honesty flags —
     # a railed MAP is a failed fit, not a fit.
@@ -535,6 +539,12 @@ function _normalize(raw)
                             "log_posterior" => raw.log_posterior)
         return nothing, getproperty(raw, :log_evidence_laplace), extra
     end
+    # nuts, ensemble, ess and ofti return a BARE MCMCChains.Chains rather than
+    # a wrapper struct. `hasproperty(raw, :chains)` is false for one of those
+    # (its fields are value/logevidence/name_map/info), so they were handed
+    # back chains = nothing: no saved posterior, no params block, no
+    # diagnostics, from a run that had sampled perfectly well.
+    raw isa MCMCChains.Chains && return raw, NaN, extra
     ch = hasproperty(raw, :chains) ? raw.chains : nothing
     lz = hasproperty(raw, :log_evidence) ? raw.log_evidence : NaN
     for f in (:acceptance_within, :acceptance_swap, :betas, :n_evals)
@@ -686,6 +696,14 @@ function _finish(target, engine, stopping, output_dir; op::String,
         "elapsed_sec" => time() - t0,
     )
     merge!(summary, extra)
+    # Run health, per engine. Harvested from whatever the engine actually
+    # returned plus, where the chain structure supports it, R-hat and ESS --
+    # which pt_emcee has always computed for the progress bar and thrown away.
+    try
+        summary["diagnostics"] = sampler_diagnostics(spec_name, raw, chains)
+    catch err
+        summary["diagnostics"] = Dict{String,Any}("error" => sprint(showerror, err))
+    end
     summary["params"] = _summarise_params(chains, target.params)
     try
         # compute_derived(chains, params; M_s, R_s, ...) — stellar quantities
