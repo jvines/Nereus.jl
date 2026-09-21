@@ -113,14 +113,16 @@ function run_job(cfg::AbstractDict)
         # current. Decided by the pre-plot mtime snapshot, not by a clock
         # comparison -- see `_png_mtimes`.
         figs = Dict{String, Any}()
+        pdfs = Dict{String, Any}()
         plots_root = joinpath(out_dir, "plots")
         if isdir(plots_root)
             for (root, _, files) in walkdir(plots_root), f in files
-                endswith(f, ".png") || continue
+                ispng = endswith(f, ".png"); ispdf = endswith(f, ".pdf")
+                (ispng || ispdf) || continue        # save_pdf companions too
                 full = joinpath(root, f)
                 _is_fresh_png(full, _plots_before) || continue
                 key = splitext(relpath(full, plots_root))[1]
-                figs[key] = full
+                ispng ? (figs[key] = full) : (pdfs[key] = full)
             end
         end
 
@@ -162,6 +164,8 @@ function run_job(cfg::AbstractDict)
                               result = result, T_eff = _teff)
         for (k, v) in sci; k == "status" || (summary[k] = v); end
         summary["figures"] = figs
+        isempty(pdfs) || (summary["figures_pdf"] = pdfs)
+        summary["output_dir"] = out_dir     # run_job never reported it
 
         summary["elapsed_sec"] = time() - t0
         summary["config_path"] = config_path_of(cfg)

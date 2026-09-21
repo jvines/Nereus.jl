@@ -306,6 +306,7 @@ trans-dimensional model selection over planet count.
 """
 function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
+                science::Bool = true, output = nothing,
                 stopping = nothing, output_dir = nothing, noise = nothing,
                 trend_order = 0, kwargs...)
     _require_instrument_map(rv, "RV", (:t, :rv, :rv_err))
@@ -319,7 +320,7 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
     end
     tgt = _target_from([ch], planets;
                        trend_order, noise_models = noise, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim, plots, plot_kwargs, save_pdf)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim, plots, plot_kwargs, save_pdf, science, output)
 end
 
 """
@@ -338,11 +339,12 @@ unreachable from a symmetric transit.
 function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
                      rho_star = nothing, gravity_darkening = false,
                      engine = nothing, transdim = nothing,
-                plots = nothing, plot_kwargs = nothing, save_pdf = false, stopping = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false,
+                science::Bool = true, output = nothing, stopping = nothing,
                      output_dir = nothing, kwargs...)
     _require_instrument_map(phot, "transit", (:t, :flux, :flux_err))
     tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf, science, output)
 end
 
 """
@@ -410,6 +412,7 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
                         relast = nothing, planets = 1,
                         engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
+                science::Bool = true, output = nothing,
                         stopping = nothing, output_dir = nothing, kwargs...)
     iad = resolve_astrometry(iad)
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
@@ -417,7 +420,7 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
     planets isa NamedTuple ||
         (planets = _planet_spec(planets; block = default_astrom_planet()))
     tgt = _target_from([ch], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf, science, output)
 end
 
 
@@ -432,12 +435,13 @@ rather than a named function per combination.
 """
 function fit_joint(channels...; planets = 1, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
+                science::Bool = true, output = nothing,
                    stopping = nothing, output_dir = nothing, kwargs...)
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
     tgt = _target_from(collect(channels), planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output)
 end
 
 # ---------------------------------------------------------------------------
@@ -665,9 +669,27 @@ _as_td(td, max_k) = throw(ArgumentError(
 
 """Run the engine, then assemble the standard result."""
 function _finish(target, engine, stopping, output_dir; op::String,
+                science::Bool = true, output = nothing,
                  transdim = nothing, plots = nothing, plot_kwargs = nothing,
                  save_pdf::Bool = false)
     t0 = time()
+    # `Stopping` is exported, documented, and plumbed all the way through the
+    # Python client -- and NOTHING in the package consumes it. Not _finish, not
+    # run_engine, not run_job. `Stopping(max_seconds=3600)` produced an
+    # unbounded run, silently. Until it is implemented, say so: run_engine
+    # already throws on an unknown engine option because "a typo'd `n_round`
+    # that quietly does nothing is how you lose a day", and this is that same
+    # failure one level up. The convergence half IS reachable today under
+    # engine-specific names, so point at them.
+    if stopping !== nothing
+        throw(ArgumentError(
+            "`stopping` is not implemented and was being ignored silently. " *
+            "For a convergence gate use the engine's own options: " *
+            "pt_emcee takes `convergence_stop=true` with `rhat_threshold` and " *
+            "`tail_ess_threshold`; the nested family takes `dlogz`. " *
+            "There is no wall-clock cap in Nereus -- `max_seconds` has no " *
+            "implementation anywhere."))
+    end
     td = _as_td(transdim, target.params.config.max_kplanet)
     # Engine defaults by SHAPE, so the trans-dim and fixed-dim paths are
     # symmetric: you ask for trans-dim by saying `transdim=`, not by also
@@ -710,8 +732,19 @@ function _finish(target, engine, stopping, output_dir; op::String,
         # are keywords, not positional. Only pass what we actually know; the
         # derived block then contains whatever is computable.
         # summarize_derived(chains, params; M_s, ...) does the compute itself.
+        # R_s and T_eff were NOT forwarded, only M_s -- so every quantity that
+        # needs them silently never computed: planet_radius, planet_density,
+        # equilibrium_temperature, incident_flux, TSM, ESM. The values are
+        # sitting on target.params.config; nothing was reading them.
+        _cfg = target.params.config
+        _fin(x) = (x isa Real && !isnan(float(x))) ? float(x) : nothing
         summary["derived"] = chains === nothing ? Dict() :
-            summarize_derived(chains, target.params; M_s = _M_s_of(target))
+            summarize_derived(chains, target.params;
+                              M_s   = _M_s_of(target),
+                              R_s   = hasproperty(_cfg, :R_s)   ? _fin(_cfg.R_s)   : nothing,
+                              T_eff = hasproperty(_cfg, :T_eff) ? _fin(_cfg.T_eff) : nothing,
+                              J_mag = hasproperty(_cfg, :J_mag) ? _fin(_cfg.J_mag) : nothing,
+                              K_mag = hasproperty(_cfg, :K_mag) ? _fin(_cfg.K_mag) : nothing)
     catch err
         summary["derived_error"] = sprint(showerror, err)
     end
@@ -732,16 +765,30 @@ function _finish(target, engine, stopping, output_dir; op::String,
         # anyone wanting a phase-fold from the simple API had to rewrite their
         # call in a different vocabulary. `plots = ["auto"]` takes the default
         # set for whatever channels are present.
+        # One cfg for the whole post-fit block. `run_job` runs PPC, detection
+        # limits, LOO, the health guard, the bridge-evidence recompute and the
+        # science tables after every fit; `_finish` ran none of them, so the
+        # simple API -- the one the Python client actually drives -- returned
+        # `ppc = loo = fit_health = detection_limits = nothing` forever, wrote
+        # no tables in any format, and reported the tempered log_z that the
+        # code's own comment says not to trust. Those helpers all read this
+        # shape, so building it once serves plots and science alike.
+        ocfg = Dict{String,Any}(
+            "plots"       => plots === nothing ? String[] :
+                             String.(plots isa AbstractString ? [plots] : collect(plots)),
+            "plot_kwargs" => plot_kwargs === nothing ? Dict{String,Any}() : plot_kwargs,
+            "save_pdf"    => save_pdf)
+        if output !== nothing                      # caller overrides win
+            for (k, v) in pairs(output); ocfg[String(k)] = v; end
+        end
+        cfg = Dict{String,Any}(
+            "output"  => ocfg,
+            "seed"    => get(spec_opts, "seed", 1),
+            # _ensemble_n_walkers reads this to de-interleave per-walker traces
+            "sampler" => Dict{String,Any}("name" => spec_name,
+                                          "kwargs" => spec_opts))
         if plots !== nothing
-            plist = plots isa AbstractString ? [plots] : collect(plots)
-            pcfg = Dict{String,Any}(
-                "output"  => Dict{String,Any}("plots" => String.(plist),
-                                              "plot_kwargs" => plot_kwargs === nothing ?
-                                                  Dict{String,Any}() : plot_kwargs,
-                                              "save_pdf" => save_pdf),
-                # _ensemble_n_walkers reads this to de-interleave per-walker traces
-                "sampler" => Dict{String,Any}("name" => spec_name,
-                                              "kwargs" => spec_opts))
+            pcfg = cfg
             proot = joinpath(output_dir, "plots")
             before = _png_mtimes(proot)
             _make_plots(pcfg, chains, target.params, target.data, output_dir)
@@ -753,15 +800,77 @@ function _finish(target, engine, stopping, output_dir; op::String,
             # the tree first and only files this call created or rewrote are
             # reported; the rest stay on disk untouched.
             figs = Dict{String,Any}()
+            pdfs = Dict{String,Any}()
             if isdir(proot)
                 for (root, _, files) in walkdir(proot), f in files
-                    endswith(f, ".png") || continue
+                    ispng = endswith(f, ".png")
+                    # save_pdf writes a .pdf beside every .png, and the manifest
+                    # filtered on .png -- so a user who asked for publication
+                    # figures was never told where they went.
+                    ispdf = endswith(f, ".pdf")
+                    (ispng || ispdf) || continue
                     full = joinpath(root, f)
                     _is_fresh_png(full, before) || continue
-                    figs[splitext(relpath(full, proot))[1]] = full
+                    key = splitext(relpath(full, proot))[1]
+                    ispng ? (figs[key] = full) : (pdfs[key] = full)
                 end
             end
             summary["figures"] = figs
+            isempty(pdfs) || (summary["figures_pdf"] = pdfs)
+        end
+
+        # --- post-fit science, the same sequence run_job runs -------------
+        # Every one of these is fail-soft on its own; `science = false` skips
+        # the lot, which is what you want while iterating on short chains.
+        if science
+            try
+                _run_ppc!(cfg, chains, target.params, target.data, output_dir, summary)
+                _run_detection_limits!(cfg, chains, target.params, target.data,
+                                        output_dir, summary)
+                _run_loo!(cfg, chains, target.params, target.data, raw, summary)
+                _run_fit_health!(cfg, chains, target.params, summary)
+                # The evidence spread, before augmenting it. `_augment_evidence!`
+                # AUGMENTS -- it returns early unless summary["evidence"] is
+                # already a Dict -- and on this route nothing ever built one, so
+                # the bridge cross-check was being skipped silently even with
+                # the call in place. run_job gets this from _populate_summary!.
+                # A bare log_z is not quotable: the tempered stack shares one
+                # mean_logL array, so its four variants agreeing is not a
+                # cross-check and they can sit >100 nats low together.
+                _evidence_block!(summary, raw)
+                # The tempered stack sits >100 nats low on a signal-locked
+                # posterior while its four variants agree with each other to a
+                # decimal, so a bridge cross-check is not optional.
+                _augment_evidence!(summary, target.params, target.data, chains)
+                # Conditioned, unit-tagged fitted/derived + model_selection +
+                # run_info, and tables/ in json, csv, ecsv, dat and TEX.
+                # NOTE: run_job deletes summary["params"] here in favour of the
+                # science contract. `_finish` must NOT -- `JobResult.params` is
+                # the documented accessor on this path and dropping it would
+                # break every existing caller. Both blocks coexist.
+                _teff = (hasproperty(target.params.config, :T_eff) &&
+                         !isnan(target.params.config.T_eff)) ?
+                        target.params.config.T_eff : nothing
+                sci = science_summary(output_dir, chains, target.params, target.data;
+                                       n_walkers = _ensemble_n_walkers(cfg, target.params),
+                                       result = raw, T_eff = _teff)
+                for (k, v) in sci; k == "status" || (summary[k] = v); end
+            catch err
+                summary["science_error"] = sprint(showerror, err)
+            end
+        end
+
+        # Where the chains actually are. run_job reports a RELATIVE
+        # "chains_path" and no output_dir; `_finish` reported output_dir and no
+        # chains_path. Give both, absolute, on both routes.
+        summary["chains_path"] = joinpath(output_dir, "chains.nc")
+        # An on-disk record of the run. Without this a fit_* output_dir held
+        # chains.nc and nothing else: restart the kernel and the posterior
+        # summary, diagnostics, evidence and derived block were gone.
+        try
+            _write_summary(output_dir, summary)
+        catch err
+            summary["summary_write_error"] = sprint(showerror, err)
         end
     end
     return (; chains, log_z, summary)
@@ -776,6 +885,56 @@ end
 # transit geometry. These fits therefore go through the JOB_CONFIG route, which
 # does support them. The signature stays technique-shaped; the config is an
 # implementation detail the caller never sees.
+
+"""Every evidence estimate the sampler produced, with its error, and which one
+`log_z` reports. Mirrors the block `_populate_summary!` builds for run_job."""
+function _evidence_block!(summary::AbstractDict, result)
+    result === nothing && return
+    ev = Dict{String,Any}()
+    for (key, fld) in ("bridge" => :log_evidence_bridge,
+                       "mode_laplace" => :log_evidence_laplace)
+        hasproperty(result, fld) || continue
+        v = getproperty(result, fld)
+        v isa Real && isfinite(v) && (ev[key] = Float64(v))
+    end
+    for rf in (:evidence, :evidence_report)
+        hasproperty(result, rf) || continue
+        rep = getproperty(result, rf)
+        for (key, fld) in ("ti" => :ti, "ti_plus" => :ti_plus,
+                           "ss_plus" => :ss_plus, "hybrid" => :hybrid)
+            hasproperty(rep, fld) || continue
+            t = getproperty(rep, fld)
+            (t isa Tuple && length(t) == 2 && isfinite(t[1])) || continue
+            ev[key] = Dict("log_z" => Float64(t[1]), "se" => Float64(t[2]))
+        end
+        hasproperty(rep, :hybrid_beta_star) &&
+            (ev["hybrid_beta_star"] = Float64(getproperty(rep, :hybrid_beta_star)))
+        break
+    end
+    isempty(ev) && return
+    lz = get(summary, "log_z", NaN)
+    which = "tempered"
+    if lz isa Real && isfinite(lz)
+        for (k, v) in ev
+            val = v isa Dict ? get(v, "log_z", NaN) : v
+            (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)
+        end
+    end
+    ev["reported"] = which
+    summary["evidence"] = ev
+    return
+end
+
+"""Assemble the JOB_CONFIG `output` block from the fit_* plotting keywords."""
+function _output_block(plots, plot_kwargs, save_pdf, output)
+    o = Dict{String,Any}(
+        "plots"       => plots === nothing ? String[] :
+                         String.(plots isa AbstractString ? [plots] : collect(plots)),
+        "plot_kwargs" => plot_kwargs === nothing ? Dict{String,Any}() : plot_kwargs,
+        "save_pdf"    => save_pdf)
+    output === nothing || for (k, v) in pairs(output); o[String(k)] = v; end
+    return o
+end
 
 const _RM_MODE = Dict(:rm => "RVPM_RM", :reloaded => "RVPM_RM_R", :arome => "RVPM_RM_A")
 
@@ -832,7 +991,8 @@ only be used for methods comparison.
 function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arome,
                 priors::AbstractDict = Dict(), planets::Int = 1,
                 engine = nothing, transdim = nothing,
-                plots = nothing, plot_kwargs = nothing, save_pdf = false, output_dir = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false,
+                science::Bool = true, output = nothing, output_dir = nothing,
                 parametrization = Dict("mass" => "K_driven", "time" => "Tc",
                                        "ew" => "sesinw", "geom" => "b_rr",
                                        "use_rho_s" => true),
@@ -848,6 +1008,13 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
                                     "parametrization" => parametrization,
                                     "stability" => "none"),
         "priors" => Dict{String,Any}(priors),
+        # The `output` block. It was MISSING on all three config-route fits,
+        # which declared `plots`, `plot_kwargs` and `save_pdf` in their
+        # signatures and then never referenced them -- so `_make_plots` got an
+        # empty list and every RM, TTV and binary fit from Python came back
+        # with zero figures and no warning. Julia accepted the keywords
+        # because they were declared, which is what made it silent.
+        "output"  => _output_block(plots, plot_kwargs, save_pdf, output),
         "sampler" => _sampler_block(engine))
     # Config path: the transdim BLOCK is what enables trans-dim, and
     # _dispatch_sampler defaults to transdim_pt_emcee when it sees one --
@@ -874,7 +1041,8 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  nbody::Bool = false, planets::Int = 2,
                  star::AbstractDict = Dict(), priors::AbstractDict = Dict(),
                  engine = nothing, transdim = nothing,
-                plots = nothing, plot_kwargs = nothing, save_pdf = false, output_dir = nothing,
+                plots = nothing, plot_kwargs = nothing, save_pdf = false,
+                science::Bool = true, output = nothing, output_dir = nothing,
                  extra::AbstractDict = Dict())
     (phot === nothing && transit_times === nothing) && throw(ArgumentError(
         "fit_ttv needs photometry or measured transit_times"))
@@ -888,6 +1056,13 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                                     "planet_modes" => [mode],
                                     "stability" => "none"),
         "priors" => Dict{String,Any}(priors),
+        # The `output` block. It was MISSING on all three config-route fits,
+        # which declared `plots`, `plot_kwargs` and `save_pdf` in their
+        # signatures and then never referenced them -- so `_make_plots` got an
+        # empty list and every RM, TTV and binary fit from Python came back
+        # with zero figures and no warning. Julia accepted the keywords
+        # because they were declared, which is what made it silent.
+        "output"  => _output_block(plots, plot_kwargs, save_pdf, output),
         "sampler" => _sampler_block(engine))
     transit_times === nothing || (cfg["data"]["transit_times"] = transit_times)
     # Config path: the transdim BLOCK is what enables trans-dim, and
@@ -915,6 +1090,7 @@ function.
 function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
                     priors::AbstractDict = Dict(), engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
+                science::Bool = true, output = nothing,
                     output_dir = nothing, extra::AbstractDict = Dict())
     mode = secondary === nothing ? "BINARY_RV" : "SB2"
     data = _data_block(; rv)
@@ -927,6 +1103,13 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
                                     "planet_modes" => [mode],
                                     "stability" => "none"),
         "priors" => Dict{String,Any}(priors),
+        # The `output` block. It was MISSING on all three config-route fits,
+        # which declared `plots`, `plot_kwargs` and `save_pdf` in their
+        # signatures and then never referenced them -- so `_make_plots` got an
+        # empty list and every RM, TTV and binary fit from Python came back
+        # with zero figures and no warning. Julia accepted the keywords
+        # because they were declared, which is what made it silent.
+        "output"  => _output_block(plots, plot_kwargs, save_pdf, output),
         "sampler" => _sampler_block(engine))
     # Config path: the transdim BLOCK is what enables trans-dim, and
     # _dispatch_sampler defaults to transdim_pt_emcee when it sees one --
