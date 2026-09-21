@@ -854,7 +854,18 @@ function _finish(target, engine, stopping, output_dir; op::String,
                 sci = science_summary(output_dir, chains, target.params, target.data;
                                        n_walkers = _ensemble_n_walkers(cfg, target.params),
                                        result = raw, T_eff = _teff)
-                for (k, v) in sci; k == "status" || (summary[k] = v); end
+                # NOT `figures`. science_summary returns
+                #   "figures" => Dict{String,Any}()   # filled by the plotting layer
+                # as a placeholder, and copying every key blindly overwrote the
+                # manifest built above with an empty dict -- so `plots=["auto"]`
+                # rendered every figure to disk and then reported none, which
+                # reads exactly like the plots never ran. run_job dodges this by
+                # assigning summary["figures"] AFTER this loop; the order here
+                # is the other way round, so the key is skipped instead.
+                for (k, v) in sci
+                    (k == "status" || k == "figures") && continue
+                    summary[k] = v
+                end
             catch err
                 summary["science_error"] = sprint(showerror, err)
             end
