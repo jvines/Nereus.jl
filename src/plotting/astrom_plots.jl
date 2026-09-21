@@ -404,7 +404,7 @@ stays on time.
 
 Returns the `Figure`. No-op (returns empty Figure) if `data.iad` is
 nothing or has fewer transits than the marginalisation has parameters
-(5 for one instrument, 7 for two).
+(4 for one instrument, 6 for two).
 """
 function plot_iad_residuals(chains, params, data;
                              output::Union{Nothing, String} = nothing,
@@ -460,7 +460,7 @@ function plot_iad_residuals(chains, params, data;
         # worse than no diagnostic. `_iad_residuals!` also reconstructs full
         # abscissae for any instrument whose stored values are O-C residuals.
         r = Vector{Float64}(undef, n)
-        Nereus._iad_residuals!(r, iad, active_orbs, active_Msec)
+        Nereus._iad_residuals!(r, iad, active_orbs, active_Msec, plx)
 
         pos_col = Nereus._iad_pos_cols(n_inst)
         A = zeros(n_q, n_q)
@@ -1829,9 +1829,11 @@ function plot_epoch_astrometry_orbit(chains, params, data;
         model_al = [along_scan_projection(Δra_m[j], Δdec_m[j], iad.psi[j]) for j in 1:n]
 
         # Catalogue solution re-fitted to the orbit-subtracted abscissae,
-        # using the SAME design as the likelihood: a shared (ϖ, μα*, μδ) and
-        # one along-scan zero point per instrument. Built row by row rather
-        # than with `hcat`, because with two missions most of each row is zero.
+        # using the SAME design as the likelihood: a shared (μα*, μδ) and one
+        # along-scan zero point per instrument. Built row by row rather than
+        # with `hcat`, because with two missions most of each row is zero.
+        # No parallax column — it is a sampled parameter, so its term goes
+        # into the model alongside the orbit (see `_iad_residuals!`).
         st, ct = sin.(iad.psi), cos.(iad.psi)
         pos_col = Nereus._iad_pos_cols(n_inst)
         D = zeros(n, n_q)
@@ -1839,9 +1841,12 @@ function plot_epoch_astrometry_orbit(chains, params, data;
             p_j = pos_col[iad.inst[j]]
             D[j, p_j]     = st[j]
             D[j, p_j + 1] = ct[j]
-            D[j, 3] = iad.parallax_factor[j]
-            D[j, 4] = st[j] * iad.pm_factor[j]
-            D[j, 5] = ct[j] * iad.pm_factor[j]
+            D[j, 3] = st[j] * iad.pm_factor[j]
+            D[j, 4] = ct[j] * iad.pm_factor[j]
+        end
+        Δplx_m = plx - Nereus._iad_ref_common(iad)[3]
+        @inbounds for j in 1:n
+            model_al[j] += Δplx_m * iad.parallax_factor[j]
         end
         # Full abscissae: an instrument storing O-C residuals gets its
         # catalogue solution added back first (a no-op for one instrument).

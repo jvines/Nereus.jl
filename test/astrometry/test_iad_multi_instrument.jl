@@ -31,24 +31,46 @@ function _multi_iad_scenario(; with_gaia::Bool)
     t0 = jyear_to_mjd(1991.25)
     t_transits = collect(range(t0 - 365.25 * 1.4, t0 + 365.25 * 2.0, length = n))
     psi = 2π .* rand(rng, n)
+    year_phase = 2π .* (t_transits .- t0) ./ 365.25
+    parallax_factor = sin.(year_phase .- psi)
     abscissa = Vector{Float64}(undef, n); abscissa_err = fill(1.5, n)
     for j in 1:n
         Δra, Δdec = Nereus.star_reflex_offset(orb, t_transits[j], M_sec)
+        # The parallactic wobble belongs in the abscissae — real ones have it,
+        # and the likelihood now models it from the sampled `plx` instead of
+        # marginalising a free ϖ that silently absorbed its absence.
         abscissa[j] = Nereus.along_scan_projection(Δra, Δdec, psi[j]) +
+                      plx * parallax_factor[j] +
                       abscissa_err[j] * randn(rng)
     end
-    year_phase = 2π .* (t_transits .- t0) ./ 365.25
     iad = IADData(t = t_transits, abscissa = abscissa, abscissa_err = abscissa_err,
-                  psi = psi, parallax_factor = sin.(year_phase .- psi),
+                  psi = psi, parallax_factor = parallax_factor,
                   pm_factor = (t_transits .- t0) ./ 365.25)
     kw = Dict{Symbol, Any}(:iad => iad)
     if with_gaia
-        kw[:gost] = GOSTData(t = collect(range(57000.0, 58000.0, length = 30)),
-                             psi = mod.(2π .* (1:30) ./ 7, 2π),
-                             parallax_factor = sin.(2π .* (1:30) ./ 365.25))
+        gost = GOSTData(t = collect(range(57000.0, 58000.0, length = 30)),
+                        psi = mod.(2π .* (1:30) ./ 7, 2π),
+                        parallax_factor = sin.(2π .* (1:30) ./ 365.25))
+        kw[:gost] = gost
         cov = zeros(5, 5); for k in 1:5; cov[k, k] = (k <= 2 ? 0.05 : 0.02)^2; end
-        kw[:gaia_dr3] = GaiaDR3Data(params = (0.1, -0.2, 30.05, 1.5, -2.5),
-                                    cov = cov, t_ref = jyear_to_mjd(2016.0))
+        # The published Gaia five-vector must be SELF-CONSISTENT with the
+        # injected data, or it is not a constraint, it is a contradiction.
+        # The synthetic IAD has no proper motion and no frame offset, so the
+        # star's own vector is (0, 0, plx, 0, 0); what Gaia would publish is
+        # that plus the orbit's induced five-parameter shift at its epoch.
+        #
+        # This was hardcoded (0.1, -0.2, 30.05, 1.5, -2.5). The orbit actually
+        # induces (3.26, -0.40, 0.087, -3.12, -1.54) — the proper-motion terms
+        # had the WRONG SIGN, asserting μ the abscissae contradict at σ=0.02.
+        # The fit relieved ~48000 of χ² by tilting the orbit, so i = 30° beat
+        # the true i = 60° by ~800 nats. The bit-for-bit pins never caught it
+        # because they check exact values, not ordering — hence the
+        # discrimination testset added below.
+        Δq_true = gost_5param_fit(orb, gost, M_sec; t_ref = jyear_to_mjd(2016.0))
+        kw[:gaia_dr3] = GaiaDR3Data(
+            params = (Δq_true[1], Δq_true[2], plx + Δq_true[3],
+                      Δq_true[4], Δq_true[5]),
+            cov = cov, t_ref = jyear_to_mjd(2016.0))
     end
     data = Data(; t_rv = [49000.0, 49300.0], rv = [10.0, -10.0],
                 rv_err = [1.0, 1.0], kw...)
@@ -75,12 +97,27 @@ function _multi_iad_scenario(; with_gaia::Bool)
     return data, theta, (; M_sec, i_true, Ω_true)
 end
 
+# Joint-path goldens. Named so the discrimination testset below and the
+# pins above cannot drift apart silently.
+const JOINT_TRUTH = -141.26944422585404
+const JOINT_3MSEC = -34009.330489890766
+const JOINT_I30   = -205.18663898287284
+const JOINT_OMEGA = -3327.5912223098817
+
 @testset "astrometry — multi-instrument" begin
 
     # =================================================================
     # 1. Exact reduction of the n_inst == 1 path.
     #
-    # These nine values were captured from the pre-generalisation
+    # RE-PINNED 2026-09-20 when the parallax stopped being a marginalised
+    # nuisance and became the sampled `astrom_plx(theta)` (see `_iad_n_q`).
+    # The synthetic abscissae in `_multi_iad_scenario` also gained the
+    # parallactic wobble they had always been missing. Both are intentional
+    # model changes, so the old pins could not survive; the repo's tracked
+    # reproduction artifacts were computed with the OLD likelihood and need
+    # regenerating.
+    #
+    # These values were captured from the pre-generalisation
     # implementation. The marginalisation is a Cholesky solve, so a
     # reordered accumulation or a different factorisation shows up in
     # the low bits; `===` on Float64 is the only test that catches it.
@@ -89,28 +126,56 @@ end
     # =================================================================
     @testset "single instrument reduces bit-for-bit" begin
         data, theta, tr = _multi_iad_scenario(with_gaia = false)
-        @test iad_log_likelihood(theta, data) === -141.84117439397531
+        @test iad_log_likelihood(theta, data) === -141.44195364572727
         set_param!(theta, "M_sec_k1", 3 * tr.M_sec)
-        @test iad_log_likelihood(theta, data) === -192.49981481193419
+        @test iad_log_likelihood(theta, data) === -192.90766897419417
         set_param!(theta, "M_sec_k1", tr.M_sec)
         set_param!(theta, "inc_k1", deg2rad(30))
-        @test iad_log_likelihood(theta, data) === -149.12491562443807
+        @test iad_log_likelihood(theta, data) === -148.72597925980708
         set_param!(theta, "inc_k1", tr.i_true)
         set_param!(theta, "Omega_k1", tr.Ω_true + 0.5)
-        @test iad_log_likelihood(theta, data) === -144.07988058200505
+        @test iad_log_likelihood(theta, data) === -143.68078368353088
     end
 
     @testset "IAD + Gaia DR3 joint path reduces bit-for-bit" begin
         data, theta, tr = _multi_iad_scenario(with_gaia = true)
-        @test iad_log_likelihood(theta, data) === -31267.188739717589
+        @test iad_log_likelihood(theta, data) === JOINT_TRUTH
         set_param!(theta, "M_sec_k1", 3 * tr.M_sec)
-        @test iad_log_likelihood(theta, data) === -84733.476173955249
+        @test iad_log_likelihood(theta, data) === JOINT_3MSEC
         set_param!(theta, "M_sec_k1", tr.M_sec)
         set_param!(theta, "inc_k1", deg2rad(30))
-        @test iad_log_likelihood(theta, data) === -30396.62456468062
+        @test iad_log_likelihood(theta, data) === JOINT_I30
         set_param!(theta, "inc_k1", tr.i_true)
         set_param!(theta, "Omega_k1", tr.Ω_true + 0.5)
-        @test iad_log_likelihood(theta, data) === -41027.974379458588
+        @test iad_log_likelihood(theta, data) === JOINT_OMEGA
+    end
+
+    # =================================================================
+    # 1b. ORDERING, not just exact values.
+    #
+    # The pins above compare Float64s exactly and say nothing about
+    # whether the truth is preferred. That gap let a joint path in which
+    # i = 30° beat the true i = 60° by ~800 nats sit unnoticed: the pinned
+    # numbers were "right" and the science was wrong. Assert the shape of
+    # the likelihood surface, not only its values.
+    # =================================================================
+    @testset "joint path prefers the truth" begin
+        data, theta, tr = _multi_iad_scenario(with_gaia = true)
+        ll_truth = iad_log_likelihood(theta, data)
+        for i_deg in (30, 45, 75)
+            set_param!(theta, "inc_k1", deg2rad(i_deg))
+            @test ll_truth > iad_log_likelihood(theta, data)
+        end
+        set_param!(theta, "inc_k1", tr.i_true)
+        for f in (0.5, 2.0, 3.0)
+            set_param!(theta, "M_sec_k1", f * tr.M_sec)
+            @test ll_truth > iad_log_likelihood(theta, data)
+        end
+        set_param!(theta, "M_sec_k1", tr.M_sec)
+        for dΩ in (-0.5, 0.5)
+            set_param!(theta, "Omega_k1", tr.Ω_true + dΩ)
+            @test ll_truth > iad_log_likelihood(theta, data)
+        end
     end
 
     @testset "rank-deficient fallback reduces bit-for-bit" begin
@@ -272,11 +337,22 @@ end
         ll0 = iad_log_likelihood(theta0, data0)
 
         iad0 = data0.iad
-        iad_ref = IADData(t = iad0.t, abscissa = iad0.abscissa,
+        # A `:residual` instrument stores O−C against its catalogue solution,
+        # so its abscissae do NOT contain the catalogue parallax — that sits
+        # in `ref_params[3]`. Relabelling FULL abscissae as residuals while
+        # leaving the parallax in them is not the same data, and now that the
+        # parallax is modelled rather than marginalised the likelihood can
+        # tell. Subtract it to build a genuine residual dataset.
+        # The position and PM entries need no such treatment: they lie in the
+        # span of the design and the marginalisation projects them out.
+        ref_cat = (12.0, -7.0, 30.0, 179.69, -138.40)
+        iad_ref = IADData(t = iad0.t,
+                          abscissa = iad0.abscissa .-
+                                     ref_cat[3] .* iad0.parallax_factor,
                           abscissa_err = iad0.abscissa_err, psi = iad0.psi,
                           parallax_factor = iad0.parallax_factor,
                           pm_factor = iad0.pm_factor,
-                          ref_params = [(12.0, -7.0, 30.0, 179.69, -138.40)],
+                          ref_params = [ref_cat],
                           abscissa_kind = :residual)
         data_ref = Data(t_rv = data0.t_rv, rv = data0.rv, rv_err = data0.rv_err,
                         iad = iad_ref)
@@ -290,10 +366,12 @@ end
             idx = get(Dict(theta0.params.layout.name_to_idx), nm, 0)
             idx == 0 || set_param!(theta_ref, nm, theta0.values[idx])
         end
-        # Exactly equal, not merely close: with one instrument the
-        # reconstruction is skipped outright because it provably cannot
-        # move the answer, which is what keeps existing fits reproducible.
-        @test iad_log_likelihood(theta_ref, data_ref) === ll0
+        # Equal to within floating-point reassociation rather than `===`:
+        # the parallax term now moves across the subtraction (taken off the
+        # abscissae here, off the model there), so the two paths do the same
+        # arithmetic in a different order. The invariant itself still holds —
+        # declaring a reference solution cannot change the answer.
+        @test iad_log_likelihood(theta_ref, data_ref) ≈ ll0 rtol = 1e-12
     end
 
     # =================================================================
@@ -378,16 +456,19 @@ end
         pm1 = (t1 .- e1) ./ 365.25; pm2 = (t2 .- e2) ./ 365.25
         σ1 = fill(1.5, n1); σ2 = fill(0.2, n2)       # Gaia is the sharper mission
 
-        function _absc(ts, psis, σs)
+        # Parallactic wobble included: real abscissae carry it, and the
+        # likelihood now models it from the sampled plx rather than
+        # marginalising a free ϖ that hid its absence.
+        function _absc(ts, psis, σs, pfs)
             out = Vector{Float64}(undef, length(ts))
             for j in eachindex(ts)
                 Δra, Δdec = Nereus.star_reflex_offset(orb, ts[j], M_sec)
                 out[j] = Nereus.along_scan_projection(Δra, Δdec, psis[j]) +
-                         σs[j] * randn(rng)
+                         plx * pfs[j] + σs[j] * randn(rng)
             end
             return out
         end
-        a1 = _absc(t1, psi1, σ1); a2 = _absc(t2, psi2, σ2)
+        a1 = _absc(t1, psi1, σ1, pf1); a2 = _absc(t2, psi2, σ2, pf2)
 
         hip  = IADData(t = t1, abscissa = a1, abscissa_err = σ1, psi = psi1,
                        parallax_factor = pf1, pm_factor = pm1)
@@ -481,21 +562,35 @@ end
                       pm_factor = vcat(pm1, pm2),
                       inst = vcat(fill(1, n1), fill(2, n2)))
 
+        # The parallax is NOT a marginalised column any more — it is the
+        # sampled `astrom_plx(theta)`, and `_iad_residuals!` subtracts its
+        # term from the data before the solve. Mirror that here.
         n_q = Nereus._iad_n_q(2)
+        @test n_q == 6                      # 2 shared PM + 2 zero points × 2
+        r = iad.abscissa .- ϖ .* iad.parallax_factor
         A = zeros(n_q, n_q); v = zeros(n_q)
-        Nereus._iad_normal_equations!(A, v, iad, iad.abscissa, iad.pm_factor,
+        Nereus._iad_normal_equations!(A, v, iad, r, iad.pm_factor,
                                       Nereus._iad_pos_cols(2))
         q = LinearAlgebra.Symmetric(A) \ v
-        # Shared block: one parallax and one proper motion for the star,
-        # recovered across two missions with DIFFERENT time origins.
-        @test q[3] ≈ ϖ  atol = 1e-8
-        @test q[4] ≈ μα atol = 1e-8
-        @test q[5] ≈ μδ atol = 1e-8
+        # Shared block: one proper motion for the star, recovered across two
+        # missions with DIFFERENT time origins. Columns 3-4, not 4-5.
+        @test q[3] ≈ μα atol = 1e-8
+        @test q[4] ≈ μδ atol = 1e-8
         # Per-instrument zero points, each in its own frame.
         @test q[1] ≈ zp[1][1] atol = 1e-8
         @test q[2] ≈ zp[1][2] atol = 1e-8
-        @test q[6] ≈ zp[2][1] atol = 1e-8
-        @test q[7] ≈ zp[2][2] atol = 1e-8
+        @test q[5] ≈ zp[2][1] atol = 1e-8
+        @test q[6] ≈ zp[2][2] atol = 1e-8
+
+        # And the parallax must NOT be absorbable by the remaining design:
+        # feeding the UNsubtracted abscissae through leaves the zero points
+        # and PM biased, which is exactly the leakage the old free-ϖ column
+        # hid. If this ever passes, the parallax has a column again.
+        A2 = zeros(n_q, n_q); v2 = zeros(n_q)
+        Nereus._iad_normal_equations!(A2, v2, iad, iad.abscissa, iad.pm_factor,
+                                      Nereus._iad_pos_cols(2))
+        q2 = LinearAlgebra.Symmetric(A2) \ v2
+        @test !isapprox(q2[3], μα; atol = 1e-6)
     end
 
     # =================================================================

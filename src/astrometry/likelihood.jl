@@ -321,7 +321,7 @@ end
 # missions (Hipparcos IAD and Gaia DR4 epoch astrometry both live in this
 # container). The marginalised nuisance vector is then
 #
-#     q = (Δα₀¹, Δδ₀¹, ϖ, μα*, μδ, Δα₀², Δδ₀², …)      n_q = 3 + 2·n_inst
+#     q = (Δα₀¹, Δδ₀¹, μα*, μδ, Δα₀², Δδ₀², …)         n_q = 2 + 2·n_inst
 #
 # — parallax and BOTH proper-motion components SHARED across instruments,
 # only the along-scan zero point split per instrument.
@@ -353,20 +353,35 @@ end
 """
     _iad_n_q(n_inst) -> Int
 
-Size of the marginalised nuisance vector: three shared parameters
-(ϖ, μα*, μδ) plus an along-scan zero point (Δα₀, Δδ₀) per instrument.
+Size of the marginalised nuisance vector: two shared parameters
+(μα*, μδ) plus an along-scan zero point (Δα₀, Δδ₀) per instrument.
+
+The parallax is NOT in here. It used to be — a free ϖ marginalised under a
+flat prior — while `astrom_plx(theta)` supplied a SEPARATE sampled parallax
+that scaled the orbit. Two parameters for one physical quantity, fully
+decoupled: measured on HD 114762 (558 DR4 transits), the conditional ϖ̂ from
+this solve sat at 25.72-25.77 mas (Gaia DR3: 25.36 ± 0.30) and moved by
+0.05 mas while the sampled plx was swept 22 → 36 mas. The abscissae pin the
+parallax, Nereus computed that on every likelihood call, discarded it, and
+left the parallax that sets the mass free to be dragged along the
+a0 ∝ M_sec·ϖ degeneracy — which is why the published run lands 25σ off an
+informative Normal(25.36, 0.30) prior. See `_iad_residuals!`, where the
+sampled parallax now enters the model deterministically instead.
 """
-@inline _iad_n_q(n_inst::Int) = 3 + 2 * n_inst
+@inline _iad_n_q(n_inst::Int) = 2 + 2 * n_inst
 
 """
     _iad_pos_cols(n_inst) -> Vector{Int}
 
 First zero-point column of each instrument. Instrument 1 sits at columns
-1-2 (ahead of the shared block at 3-5) so that `n_inst == 1` reduces to
-the historical five-column layout exactly; every later instrument follows
-the shared block.
+1-2, ahead of the shared proper-motion block at 3-4; every later
+instrument follows the shared block.
+
+Was `2m + 2` when the shared block was three wide (ϖ, μα*, μδ). The
+parallax column is gone — see `_iad_n_q` — so the shared block is two wide
+and later instruments start one column earlier.
 """
-_iad_pos_cols(n_inst::Int) = Int[m == 1 ? 1 : 2m + 2 for m in 1:n_inst]
+_iad_pos_cols(n_inst::Int) = Int[m == 1 ? 1 : 2m + 1 for m in 1:n_inst]
 
 # Accumulate into the upper triangle only — `Symmetric(A)` reads that half.
 @inline function _iad_acc!(A::AbstractMatrix, i::Int, j::Int, val)
@@ -480,7 +495,7 @@ function _iad_active_orbits(theta::Theta{T}, M_pri, plx, t_ref) where {T<:Real}
 end
 
 """
-    _iad_residuals!(r, iad, orbs, M_secs) -> r
+    _iad_residuals!(r, iad, orbs, M_secs, plx) -> r
 
 `r_i = w_i − Δη_orbit_i`, where `w_i` is the FULL along-scan abscissa
 (the stored value plus its instrument's catalogue solution, when the
@@ -493,8 +508,14 @@ independently of which time origin the design columns use. The two differ
 by a constant in the instrument's zero-point span, which the
 marginalisation absorbs.
 """
-function _iad_residuals!(r::AbstractVector{T}, iad, orbs, M_secs) where {T<:Real}
+function _iad_residuals!(r::AbstractVector{T}, iad, orbs, M_secs, plx) where {T<:Real}
     ref_off, needs_ref = _iad_ref_offsets(iad)
+    # The shared block means "correction to `ref_c`" (see `_iad_ref_common`),
+    # so the parallax the model has to supply is the correction implied by the
+    # SAMPLED parallax, not its absolute value. For a single absolute
+    # instrument (Gaia epoch data) `ref_c` is all zeros and this is just
+    # `plx · plx_factor`.
+    Δplx = plx - _iad_ref_common(iad)[3]
     @inbounds for j in eachindex(r)
         t_j = iad.t[j]
         ψ_j = iad.psi[j]
@@ -503,6 +524,9 @@ function _iad_residuals!(r::AbstractVector{T}, iad, orbs, M_secs) where {T<:Real
             Δra, Δdec = star_reflex_offset(orbs[ki], t_j, M_secs[ki])
             Δη_mod += along_scan_projection(Δra, Δdec, ψ_j)
         end
+        # Parallax is a sampled parameter, not a marginalised nuisance, so its
+        # along-scan term belongs in the model alongside the orbit reflex.
+        Δη_mod += Δplx * iad.parallax_factor[j]
         m = iad.inst[j]
         if needs_ref[m]
             s, c = sincos(ψ_j)
@@ -523,10 +547,14 @@ end
 Accumulate the weighted normal equations `A = XᵀWX`, `v = XᵀWr` for the
 multi-instrument design, plus `rᵀWr` and `Σ log σ`.
 
-Each transit contributes exactly five non-zero design entries: its own
-instrument's two zero-point columns `(sinψ, cosψ)` and the three shared
-columns `(plx_factor, sinψ·pm_factor, cosψ·pm_factor)`. Every other
-instrument's columns are zero for this row and are simply not touched.
+Each transit contributes exactly four non-zero design entries: its own
+instrument's two zero-point columns `(sinψ, cosψ)` and the two shared
+columns `(sinψ·pm_factor, cosψ·pm_factor)`. Every other instrument's
+columns are zero for this row and are simply not touched.
+
+There is no parallax column: the sampled parallax is a known quantity and
+its term `plx · plx_factor` is subtracted in `_iad_residuals!` instead of
+being marginalised away here. See `_iad_n_q`.
 
 `pm_fac` is passed in rather than read off `iad` because the joint
 Hipparcos+Gaia path re-centres it on each instrument's own mean epoch.
@@ -541,8 +569,8 @@ function _iad_normal_equations!(A::AbstractMatrix{T}, v::AbstractVector{T},
         s, c = sincos(iad.psi[j])
         pmf  = pm_fac[j]
         p    = pos_col[iad.inst[j]]
-        cols = (p, p + 1, 3, 4, 5)
-        xs   = (s, c, oftype(s, iad.parallax_factor[j]), s * pmf, c * pmf)
+        cols = (p, p + 1, 3, 4)
+        xs   = (s, c, s * pmf, c * pmf)
         σ  = iad.abscissa_err[j]
         w  = 1 / (σ * σ)
         rj = r[j]
@@ -550,10 +578,10 @@ function _iad_normal_equations!(A::AbstractMatrix{T}, v::AbstractVector{T},
         rWr += w * rj * rj
         log_sigma_sum += log(σ)
 
-        for a in 1:5
+        for a in 1:4
             wa = w * xs[a]
             v[cols[a]] += wa * rj
-            for b in a:5
+            for b in a:4
                 _iad_acc!(A, cols[a], cols[b], wa * xs[b])
             end
         end
@@ -603,7 +631,7 @@ Handles one or several instruments. `IADData` carries a per-transit
 `inst` index (Hipparcos IAD and Gaia DR4 epoch astrometry share this
 container and this likelihood), and the nuisance vector is
 
-    q = (Δα₀¹, Δδ₀¹, ϖ, μα*, μδ, Δα₀², Δδ₀², …)      n_q = 3 + 2·n_inst
+    q = (Δα₀¹, Δδ₀¹, μα*, μδ, Δα₀², Δδ₀², …)         n_q = 2 + 2·n_inst
 
 — the parallax and BOTH proper-motion components shared, only the
 along-scan zero point per instrument. Sharing μ is the entire reason to
@@ -617,17 +645,18 @@ For each transit `i = 1..n` belonging to instrument `m`:
 
   predicted_along_scan_i = Δη_orbit_i +
                            Δα0ᵐ · sin ψ_i + Δδ0ᵐ · cos ψ_i +
-                           ϖ    · plx_factor_i +
+                           ϖ_sampled · plx_factor_i +
                            μα*  · sin ψ_i · pm_factor_i +
                            μδ   · cos ψ_i · pm_factor_i
 
 where `Δη_orbit_i = Σ_k along_scan_projection(reflex_k(t_i), ψ_i)`
 sums the stellar reflex from every astrometry-bearing companion.
 
-The design row has five non-zero entries — instrument `m`'s two
-zero-point columns `(sin ψ_i, cos ψ_i)` and the three shared columns
-`(plx_factor_i, sin ψ_i · pm_factor_i, cos ψ_i · pm_factor_i)` — and
-zeros in every other instrument's columns. The orbit-corrected data is
+The design row has four non-zero entries — instrument `m`'s two
+zero-point columns `(sin ψ_i, cos ψ_i)` and the two shared columns
+`(sin ψ_i · pm_factor_i, cos ψ_i · pm_factor_i)` — and zeros in every
+other instrument's columns. The parallax is NOT marginalised: `ϖ` above
+is the sampled `astrom_plx(theta)`, subtracted into the model. The orbit-corrected data is
 `r_i = w_i − Δη_orbit_i`, with `w_i` the FULL abscissa: for an instrument
 whose abscissae are O−C residuals (Hipparcos `RES`) the catalogue
 solution in `IADData.ref_params` is added back first, so that a shared
@@ -648,8 +677,8 @@ estimates, modulo a transit-independent offset shared with any other
 model.
 
 Requires `n ≥ n_q` transits (otherwise the correction is
-underdetermined and the likelihood is undefined) — 5 for one
-instrument, 7 for two. Returns 0 if `data.iad` is `nothing` or empty.
+underdetermined and the likelihood is undefined) — 4 for one
+instrument, 6 for two. Returns 0 if `data.iad` is `nothing` or empty.
 
 With one instrument this reduces to the previous hand-unrolled 5×5
 marginalization bit for bit: same column order, same accumulation order,
@@ -663,10 +692,12 @@ function iad_log_likelihood(theta::Theta{T}, data) where {T<:Real}
     n == 0 && return zero(T)
     n_inst = n_iad_inst(iad)
     n_q    = _iad_n_q(n_inst)
-    # Need ≥ n_q transits for the marginalization to be well-posed — 5 for a
-    # single mission, 7 for two. Real Hipparcos sources have 30–150; this
-    # guard catches synthetic under-determined cases cleanly.
-    n >= n_q || return zero(T)
+    # Need MORE than n_q transits: at n == n_q the design is exactly
+    # determined, so χ²_min ≡ 0 and every orbit fits perfectly — a
+    # silent-wrong result, not a likelihood. Real Hipparcos sources have
+    # 30–150 and Gaia epoch data hundreds; this guard catches synthetic
+    # under-determined cases cleanly.
+    n > n_q || return zero(T)
 
     # If a published Gaia DR3 5-param solution is supplied alongside IAD
     # AND we have GOST scan plans for the orbit's Gaia-epoch shift,
@@ -687,7 +718,7 @@ function iad_log_likelihood(theta::Theta{T}, data) where {T<:Real}
 
     # Stage 1 — full abscissa minus orbit reflex.
     r = Vector{T}(undef, n)
-    _iad_residuals!(r, iad, orbs, M_secs)
+    _iad_residuals!(r, iad, orbs, M_secs, plx)
 
     # Stage 2 — accumulate (rᵀ W r), (Xᵀ W r), (Xᵀ W X) over the
     # multi-instrument design.
@@ -725,8 +756,8 @@ function iad_log_likelihood(theta::Theta{T}, data) where {T<:Real}
 
     # Marginalized log-likelihood:
     #   −½ χ²_min − Σ log σ_i − ½ log det A − (n − n_q)/2 · log(2π)
-    # The (n − n_q) factor reflects the absorbed catalog DOF — 5 for one
-    # instrument, 3 + 2·n_inst in general; A's log-det is the
+    # The (n − n_q) factor reflects the absorbed catalog DOF — 4 for one
+    # instrument, 2 + 2·n_inst in general; A's log-det is the
     # marginalization Jacobian (analogous to the HGCA term).
     return -0.5 * χ²_min - log_sigma_sum - 0.5 * log_det_A -
            0.5 * (n - n_q) * log_2π
@@ -865,7 +896,7 @@ function _iad_gaia_joint_log_likelihood(theta::Theta{T}, data, iad) where {T<:Re
 
     # --- Stage 1: per-transit residuals + design accumulation
     r = Vector{T}(undef, n_h)
-    _iad_residuals!(r, iad, orbs, M_secs)
+    _iad_residuals!(r, iad, orbs, M_secs, plx)
     A = zeros(T, n_q, n_q)
     v = zeros(T, n_q)
     rWr, log_sigma_sum = _iad_normal_equations!(A, v, iad, r, pm_fac, pos_col)
@@ -936,7 +967,14 @@ function _iad_gaia_joint_log_likelihood(theta::Theta{T}, data, iad) where {T<:Re
     Δt_cat = Δt_yr + δ₁
     ref_shift = (ref_c[1] + ref_c[4] * Δt_cat, ref_c[2] + ref_c[5] * Δt_cat,
                  ref_c[3], ref_c[4], ref_c[5])
-    y_minus_Δq = T[gaia.params[k] - ref_shift[k] - Δq_orb[k] for k in rows_g]
+    # The parallax is a SAMPLED parameter, not a marginalised one, so the
+    # published Gaia parallax constrains it directly: its model value moves to
+    # the residual side instead of getting a column in `P`. `ref_shift[3]`
+    # is `ref_c[3]`, so row 3 reduces to `ϖ_gaia − Δq_orb[3] − plx`. Keeping
+    # the full `Σ_g` means the ϖ-μ cross-covariance is still honoured.
+    Δplx_model = plx - ref_c[3]
+    y_minus_Δq = T[gaia.params[k] - ref_shift[k] - Δq_orb[k] -
+                   (k == 3 ? Δplx_model : zero(T)) for k in rows_g]
     Σ_g = use_pos ? gaia.cov : gaia.cov[3:5, 3:5]
 
     # Cholesky-factor Σ_g (data-only); use it to compute Σ_g⁻¹ y' and
@@ -962,19 +1000,22 @@ function _iad_gaia_joint_log_likelihood(theta::Theta{T}, data, iad) where {T<:Re
     # with one instrument and a supplied position that is exactly the 5×5
     # transport matrix this path used before (identity plus P[1,4] =
     # P[2,5] = Δt).
+    # The parallax row of the published vector reads NO column — the sampled
+    # parallax already came off in `y_minus_Δq`. The shared proper-motion
+    # block sits at columns 3-4 now that ϖ is gone (was 4-5).
     P = zeros(T, m_g, n_q)
     @inbounds if use_pos
         P[1, pos_col[1]]     = one(T)
         P[2, pos_col[1] + 1] = one(T)
-        P[3, 3] = one(T)
-        P[4, 4] = one(T)
-        P[5, 5] = one(T)
-        P[1, 4] = T(Δt_yr)
-        P[2, 5] = T(Δt_yr)
+        # row 3 = parallax: no column.
+        P[4, 3] = one(T)
+        P[5, 4] = one(T)
+        P[1, 3] = T(Δt_yr)
+        P[2, 4] = T(Δt_yr)
     else
-        P[1, 3] = one(T)
-        P[2, 4] = one(T)
-        P[3, 5] = one(T)
+        # rows_g = 3:5 → (parallax, μα*, μδ); the parallax row stays empty.
+        P[2, 3] = one(T)
+        P[3, 4] = one(T)
     end
 
     # Pᵀ Σ_g⁻¹ y' (n_q-vec)

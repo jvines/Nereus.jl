@@ -541,20 +541,29 @@
         t_transits = collect(range(t_min, t_max, length = n))
         psi = 2π .* rand(rng, n)
 
+        # Realistic-ish parallax factor: 1-yr-period oscillation projected
+        # onto each scan, NOT collinear with sin ψ / cos ψ (otherwise the
+        # design matrix is singular).
+        year_phase = 2π .* (t_transits .- t_ref_jd) ./ 365.25
+        parallax_factor = sin.(year_phase .- psi)
+        pm_factor       = (t_transits .- t_ref_jd) ./ 365.25
+
         abscissa = Vector{Float64}(undef, n)
         abscissa_err = fill(1.5, n)
         for j in 1:n
             Δra, Δdec = Nereus.star_reflex_offset(orb, t_transits[j], M_sec)
             Δη = Nereus.along_scan_projection(Δra, Δdec, psi[j])
-            abscissa[j] = Δη + abscissa_err[j] * randn(rng)
+            # The PARALLACTIC WOBBLE must be in the synthetic abscissae. It
+            # was missing here: the generator wrote orbit+noise while telling
+            # the model ϖ = 30 mas, so data and model disagreed by a 30 mas
+            # oscillation against 1.5 mas noise. That was invisible while the
+            # likelihood marginalised a free ϖ under a flat prior — the ϖ
+            # column simply absorbed it and fitted ϖ̂ ≈ 0. Now that ϖ is the
+            # sampled parameter it enters the model, so the data has to
+            # actually contain it, as real abscissae do.
+            abscissa[j] = Δη + plx * parallax_factor[j] +
+                          abscissa_err[j] * randn(rng)
         end
-
-        # Realistic-ish parallax factor: 1-yr-period oscillation projected
-        # onto each scan, NOT collinear with sin ψ / cos ψ (otherwise the
-        # 5-param design matrix is singular).
-        year_phase = 2π .* (t_transits .- t_ref_jd) ./ 365.25
-        parallax_factor = sin.(year_phase .- psi)
-        pm_factor       = (t_transits .- t_ref_jd) ./ 365.25
 
         iad = IADData(t = t_transits,
                       abscissa = abscissa,

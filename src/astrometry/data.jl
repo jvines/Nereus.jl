@@ -583,7 +583,7 @@ Number of intermediate-astrometry INSTRUMENTS in `d` -- 1 for a single
 mission, 2 for a joint Hipparcos IAD + Gaia DR4 epoch container, and so on.
 
 This is the `n_inst` that sizes the marginalisation in
-[`iad_log_likelihood`](@ref): it solves for `3 + 2*n_inst` linear nuisance
+[`iad_log_likelihood`](@ref): it solves for `2 + 2*n_inst` linear nuisance
 parameters, a shared `(ϖ, μα*, μδ)` plus one along-scan zero point per
 instrument.
 """
