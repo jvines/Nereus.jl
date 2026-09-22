@@ -153,6 +153,9 @@ the distinguishing feature of this sampler.
 - `seed::Int=1`
 - `thin::Int=1`
 - `show_progress::Bool=true`
+- `node_flip::Real=0.1` — as in `sample_pt_emcee`: the tempered
+  (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets
+  (src/samplers/node_flip.jl). `0` disables it.
 """
 function sample_pt_whitening(
     target::NereusTarget,
@@ -171,10 +174,14 @@ function sample_pt_whitening(
     seed::Int = 1,
     thin::Int = 1,
     show_progress::Bool = true,
+    node_flip::Real = 0.1,
 )
     # JSON config delivers floats-as-Int and arrays-as-JSON3.Array;
     # normalize both.
     stretch_a      = Float64(stretch_a)
+    node_flip      = Float64(node_flip)
+    0 <= node_flip <= 1 || throw(ArgumentError(
+        "node_flip is a probability; got $node_flip"))
     proposal_scale = Float64(proposal_scale)   # accepted, unused (ensemble move)
     betas = betas === nothing ? nothing : collect(Float64, betas)
     params = target.params
@@ -378,6 +385,17 @@ function sample_pt_whitening(
     rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
     rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
 
+    # Node flip for astrometry-only planets (src/samplers/node_flip.jl). Walkers
+    # here are plain bounded space, so no log-scale dimension to exclude.
+    flips = node_flip > 0 ? node_flips(params, data) : NodeFlip[]
+    rngs_flip = isempty(flips) ? MersenneTwister[] :
+        [MersenneTwister(_walker_seed(seed, 5, i)) for i in 1:(n_temps * n_walkers_eff)]
+    flip_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    flip_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    flip_proposed  = zeros(Int, n_temps)
+    flip_accepted  = zeros(Int, n_temps)
+    flip_eval(buf, t, w, tid) = eval_bounded!(buf, tid)
+
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
         partner_hi = active_half === :h1 ? n_walkers_eff : half
@@ -426,6 +444,19 @@ function sample_pt_whitening(
         @inbounds for t in 1:n_temps
             propose_within[t] += Threads.atomic_xchg!(propose_temp[t], 0)
             accept_within[t]  += Threads.atomic_xchg!(accept_temp[t],  0)
+        end
+
+        # ---- Node flip (threaded; astrometry-only planets) -----------
+        # Before the ring push, so (μ, σ) see the ensemble the flip left.
+        if !isempty(flips)
+            Threads.atomic_add!(n_evals_atomic,
+                _node_flip_sweep!(flip_eval, state, logπ_arr, logL_arr, βs, flips,
+                                  params, node_flip, rngs_flip, thread_proposal,
+                                  flip_prop_temp, flip_acc_temp))
+            @inbounds for t in 1:n_temps
+                flip_proposed[t] += Threads.atomic_xchg!(flip_prop_temp[t], 0)
+                flip_accepted[t] += Threads.atomic_xchg!(flip_acc_temp[t],  0)
+            end
         end
 
         # ---- Update sliding-window whitening statistics -------------
@@ -566,6 +597,8 @@ function sample_pt_whitening(
     end
     show_progress && finish!(pb)
     show_progress && _pt_recut_info("pt_whitening", recut_moved)
+    show_progress && _node_flip_info("pt_whitening", flips, params, flip_proposed,
+                                     flip_accepted)
 
     samples    = samples[1:keep_idx, :]
     lp_samples = lp_samples[1:keep_idx]

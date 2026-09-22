@@ -31,6 +31,9 @@
 #   is moved to the emptiest arc of the cold ensemble halfway through
 #   and at the end of burn-in (`_pt_ensemble_recut!`), so the chart is
 #   fixed for every recorded step.
+# - **Node flip** for astrometry-only planets: a tempered M-H move to the
+#   mirror (Ω + π, ω + π), the exactly degenerate solution the stretch move
+#   cannot reach (src/samplers/node_flip.jl).
 # - **Flat parallelism** across (temperature, half-ensemble walker)
 #   pairs in each half-step — n_temps × n_walkers/2 independent tasks.
 # - **Per-thread Theta, RNG, and proposal buffers** — race-free, no
@@ -403,6 +406,13 @@ in place.
   wide prior) fills its cold rung at the rate the ladder happens to rediscover
   it. Burn-in only: the recorded chain is ordinary MCMC. `false` restores the
   old behaviour.
+- `node_flip::Real=0.1` — per walker and step, the probability of proposing
+  the mirror (Ω, ω) → (Ω + π, ω + π) of each astrometry-only planet, accepted
+  with the tempered Metropolis-Hastings ratio (see src/samplers/node_flip.jl).
+  The stretch move cannot cross between those two exactly degenerate
+  solutions, and swaps alone left Gaia-4 at 61/39 where the symmetry demands
+  50/50, with R-hat 1.003. Costs one likelihood evaluation per proposal; never
+  offered to a planet with RV, transit or any other data. `0` disables it.
 """
 function sample_pt_emcee(
     target::NereusTarget,
@@ -437,9 +447,13 @@ function sample_pt_emcee(
     bridge_warn_tol::Real = 20.0,
     untemper_transit::Bool = false,
     prune_stranded::Bool = true,
+    node_flip::Real = 0.1,
 )
     # JSON delivers floats-as-Int and arrays-as-JSON3.Array; normalize.
     stretch_a       = Float64(stretch_a)
+    node_flip       = Float64(node_flip)
+    0 <= node_flip <= 1 || throw(ArgumentError(
+        "node_flip is a probability; got $node_flip"))
     ladder_adapt_ν0 = Float64(ladder_adapt_ν0)
     ladder_adapt_K  = Float64(ladder_adapt_K)
     # UNTEMPERED TRANSIT: hold the transit term in the reference measure so the
@@ -500,6 +514,9 @@ function sample_pt_emcee(
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
+    # Astrometry-only planets get the (Ω, ω) → (Ω + π, ω + π) move
+    # (src/samplers/node_flip.jl); empty, and never drawn for, anything else.
+    flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
 
     # Goodman-Weare: each half ≥ n_dim+1 walkers, total even.
     n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
@@ -737,6 +754,15 @@ function sample_pt_emcee(
     # so reusing the object across sweeps stays deterministic.
     rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
     rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
+    # Node flip: one stream per (rung, walker), same reasoning. Built only when
+    # a planet has the move, so every other fit draws exactly what it did.
+    rngs_flip = isempty(flips) ? MersenneTwister[] :
+        [MersenneTwister(_walker_seed(seed, 5, i)) for i in 1:(n_temps * n_walkers_eff)]
+    flip_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    flip_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    flip_proposed  = zeros(Int, n_temps)
+    flip_accepted  = zeros(Int, n_temps)
+    flip_eval(buf, t, w, tid) = eval_bounded!(buf, tid)
 
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
@@ -790,6 +816,18 @@ function sample_pt_emcee(
         @inbounds for t in 1:n_temps
             propose_within[t] += Threads.atomic_xchg!(propose_temp[t], 0)
             accept_within[t]  += Threads.atomic_xchg!(accept_temp[t],  0)
+        end
+
+        # ---- Node flip (threaded; astrometry-only planets) -----------
+        if !isempty(flips)
+            Threads.atomic_add!(n_evals_atomic,
+                _node_flip_sweep!(flip_eval, state, logπ_arr, logL_arr, βs, flips,
+                                  params, node_flip, rngs_flip, thread_proposal,
+                                  flip_prop_temp, flip_acc_temp))
+            @inbounds for t in 1:n_temps
+                flip_proposed[t] += Threads.atomic_xchg!(flip_prop_temp[t], 0)
+                flip_accepted[t] += Threads.atomic_xchg!(flip_acc_temp[t],  0)
+            end
         end
 
         # ---- Swap moves (serial; cheap, no likelihood evals) ---------
@@ -951,6 +989,8 @@ function sample_pt_emcee(
     end
     show_progress && finish!(pb)
     show_progress && _pt_recut_info("pt_emcee", recut_moved)
+    show_progress && _node_flip_info("pt_emcee", flips, params, flip_proposed,
+                                     flip_accepted)
     show_progress && sum(pruned) > 0 && @info "pt_emcee: burn-in moved " *
         "$(sum(pruned)) stranded walker state(s) onto their rung's mode " *
         "($(pruned[1]) at β = 1), all from a region whose total posterior mass " *

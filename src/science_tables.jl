@@ -33,8 +33,17 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "Tp" => ("BJD", false),       "Tc" => ("BJD", false),
     "b" => ("", false),           "rr" => ("", false),
     "r1" => ("", false),          "r2" => ("", false),
-    "a" => ("AU", false),         "inc" => ("deg", false),
-    "i" => ("deg", false),
+    "a" => ("AU", false),
+    # SAMPLED IN RADIANS, reported in degrees -- so the flag must be `true`.
+    # It was `false`, which means "call it deg and never convert", and every
+    # table published the raw radians under a `deg` heading: a gaia4 fit wrote
+    # `inc_k1  2.114  deg` for an inclination of 121.11 deg. The same flag
+    # drives the prior-rail check (the CI is compared against the user's prior
+    # in the units it is reported in), so that was comparing deg against rad.
+    # `inc_deg` below is a DERIVED key already in degrees and stays `false`.
+    "inc" => ("deg", true),       "i" => ("deg", true),
+    "plx" => ("mas", false),      # parallax, sampled directly in astrometry
+    "M_sec" => ("M_sun", false),  # companion mass, sampled in astrometry
     "rho_s" => ("g/cm3", false),  # fitted stellar density
     "q1" => ("", false),          "q2" => ("", false),  # Kipping LD
     # derived
@@ -391,10 +400,21 @@ const _TEX_GREEK = Dict("lambda"=>"\\lambda", "sigma"=>"\\sigma", "omega"=>"\\om
                         "alpha"=>"\\alpha", "beta"=>"\\beta", "phi"=>"\\phi",
                         "gamma"=>"\\gamma", "rho"=>"\\rho", "tau"=>"\\tau")
 
+# Checked BEFORE the lowercased lookup. Without it `Omega_k1` -- the longitude
+# of the ascending node -- was lowercased to "omega" and published as
+# $\omega$, which is the argument of periastron. Two different angles, both in
+# the same table. Only the capitals LaTeX actually defines: there is no
+# \Alpha, because a capital alpha is the letter A.
+const _TEX_GREEK_CAP = Dict("Omega"=>"\\Omega", "Lambda"=>"\\Lambda",
+                            "Gamma"=>"\\Gamma", "Delta"=>"\\Delta",
+                            "Phi"=>"\\Phi", "Psi"=>"\\Psi", "Sigma"=>"\\Sigma",
+                            "Theta"=>"\\Theta", "Pi"=>"\\Pi", "Xi"=>"\\Xi")
+
 # Render an underscore-separated suffix (e.g. an instrument name "HARPS_POST" or
 # an indicator "fwhm_AD") as a math subscript body: greek tokens become commands,
 # the rest roman, joined by thin spaces (no raw underscores → no broken math).
-_texsub(s) = join(map(t -> get(_TEX_GREEK, lowercase(t), "\\mathrm{$t}"),
+_texsub(s) = join(map(t -> get(_TEX_GREEK_CAP, String(t),
+                              get(_TEX_GREEK, lowercase(t), "\\mathrm{$t}")),
                       split(String(s), "_")), "\\,")
 
 # Generic math label when there is no dedicated symbol (gp_*, ar_*, ind_floor_*,
@@ -414,6 +434,12 @@ function _texsym(name::AbstractString)
                    "secosw"=>"\\sqrt{e}\\cos\\omega", "msini_earth"=>"M\\sin i",
                    "msini_jup"=>"M\\sin i", "mass_jup"=>"M_p", "mass_earth"=>"M_p",
                    "a_au"=>"a", "a_Rs"=>"a/R_\\star", "inc_deg"=>"i", "b"=>"b",
+                   # Sampled names. The fitted table uses these, not the
+                   # derived spellings above, and was rendering
+                   # $\mathrm{a}\,\mathrm{k1}$ / $\mathrm{inc}\,\mathrm{k1}$.
+                   "a"=>"a", "inc"=>"i", "M_sec"=>"M_{\\rm sec}",
+                   "Omega"=>"\\Omega", "lambda"=>"\\lambda", "w"=>"\\omega",
+                   "K_A"=>"K_{\\rm A}", "K_B"=>"K_{\\rm B}",
                    "rr"=>"R_p/R_\\star", "radius_jup"=>"R_p", "radius_earth"=>"R_p",
                    "density_gcc"=>"\\rho_p", "Teq"=>"T_{\\rm eq}",
                    "S_earth"=>"S", "S_Wm2"=>"S", "P_yr"=>"P")
@@ -421,6 +447,8 @@ function _texsym(name::AbstractString)
         # don't make an invalid double subscript when we append _{k}.
         return haskey(sym, base) ? "\${$(sym[base])}_{$k}\$" : _texlabel(s)
     end
+    s == "plx"   && return "\$\\varpi\$"
+    s == "rho_s" && return "\$\\rho_\\star\$"
     (mm = match(r"^gamma_(.+)$", s))            !== nothing && return "\$\\gamma_{$(_texsub(mm.captures[1]))}\$"
     (mm = match(r"^(?:sigma|jitter)_(.+)$", s)) !== nothing && return "\$\\sigma_{$(_texsub(mm.captures[1]))}\$"
     (mm = match(r"^C_(.+)$", s))                !== nothing && return "\$C_{$(_texsub(mm.captures[1]))}\$"

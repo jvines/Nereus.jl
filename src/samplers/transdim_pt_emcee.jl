@@ -331,6 +331,9 @@ selection on planet count.
 - `seed::Int = 1`
 - `thin::Int = 1`
 - `show_progress::Bool = true`
+- `node_flip::Real = 0.1` — as in `sample_pt_emcee`: the tempered
+  (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets, proposed only to
+  walkers in which the planet is active and astrometrically coupled.
 
 # Notes
 - Within-step ordering: stretch on continuous params → MoMS planet
@@ -378,8 +381,12 @@ function sample_transdim_pt_emcee(
     ladder_adapt_K::Real = 1.0,
     untemper_transit::Bool = false,
     prune_stranded::Bool = true,
+    node_flip::Real = 0.1,
 )
     # JSON may deliver floats-as-Int and arrays-as-JSON3.Array; normalize.
+    node_flip               = Float64(node_flip)
+    0 <= node_flip <= 1 || throw(ArgumentError(
+        "node_flip is a probability; got $node_flip"))
     inclusion_prior         = Float64(inclusion_prior)
     moms_init_scale         = Float64(moms_init_scale)
     informed_birth_fraction = Float64(informed_birth_fraction)
@@ -488,6 +495,9 @@ function sample_transdim_pt_emcee(
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
+    # Astrometry-only planets get the node flip (src/samplers/node_flip.jl).
+    # Same-mode slots share Ω's window, and the flip reads it from the layout.
+    flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
     dim_owner = zeros(Int, n_dim)
     for (k, blk) in enumerate(layout.planet_blocks), slot in planet_slot_indices(blk)
         d = findfirst(==(slot), unfrozen_idx)
@@ -948,6 +958,20 @@ function sample_transdim_pt_emcee(
     rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
     rngs_td = [MersenneTwister(_walker_seed(seed, 4, i))
                for i in 1:(n_temps * n_walkers_eff)]
+    # Node flip, one stream per (rung, walker); built only when a planet has
+    # the move. Offered to a walker only while the planet is active AND coupled
+    # to the astrometry: an inactive slot sits at its MoMS off-value and an
+    # uncoupled Ω is a prior draw, neither a posterior state to mirror. Neither
+    # bit changes under the flip, so the gate keeps the move reversible.
+    rngs_flip = isempty(flips) ? MersenneTwister[] :
+        [MersenneTwister(_walker_seed(seed, 5, i)) for i in 1:(n_temps * n_walkers_eff)]
+    flip_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    flip_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    flip_proposed  = zeros(Int, n_temps)
+    flip_accepted  = zeros(Int, n_temps)
+    flip_eval(buf, t, w, tid) = eval_bounded!(buf, td_states[t, w], tid)
+    flip_eligible(t, w, k) = td_states[t, w].planet_active[k] &&
+                             is_as_active(td_states[t, w], k)
 
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
@@ -1625,6 +1649,18 @@ function sample_transdim_pt_emcee(
     for step in 1:n_steps
         do_half_step!(tasks_h1, :h1); _np_chk("h1", step)
         do_half_step!(tasks_h2, :h2); _np_chk("h2", step)
+        if !isempty(flips)
+            Threads.atomic_add!(n_evals_atomic,
+                _node_flip_sweep!(flip_eval, state, logπ_arr, logL_arr, βs, flips,
+                                  params, node_flip, rngs_flip, thread_proposal,
+                                  flip_prop_temp, flip_acc_temp;
+                                  eligible = flip_eligible))
+            @inbounds for t in 1:n_temps
+                flip_proposed[t] += Threads.atomic_xchg!(flip_prop_temp[t], 0)
+                flip_accepted[t] += Threads.atomic_xchg!(flip_acc_temp[t],  0)
+            end
+            _np_chk("node_flip", step)
+        end
         do_transdim_step!(step); _np_chk("transdim", step)
 
         @inbounds for t in 1:n_temps
@@ -1801,6 +1837,8 @@ function sample_transdim_pt_emcee(
         end
     end
     show_progress && finish!(pb)
+    show_progress && _node_flip_info("td-pt_emcee", flips, params, flip_proposed,
+                                     flip_accepted)
     show_progress && sum(pruned) > 0 && @info "td-pt_emcee: burn-in moved " *
         "$(sum(pruned)) stranded walker state(s), model included, onto their " *
         "rung's mode ($(pruned[1]) at β = 1), all from a region whose total " *

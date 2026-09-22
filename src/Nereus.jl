@@ -89,6 +89,7 @@ include("samplers/map.jl")
 include("samplers/ess.jl")
 include("samplers/ofti.jl")
 include("samplers/pathfinder.jl")
+include("samplers/node_flip.jl") # astrometric (Ω, ω) → (Ω+π, ω+π) move for the PT ensembles
 include("samplers/pt_emcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
 include("samplers/transdim_pt_emcee.jl") # trans-dim PT + MoMS variable selection
 include("samplers/population_annealing.jl") # sequential-MC tempered sampler (Hukushima & Iba 2003)

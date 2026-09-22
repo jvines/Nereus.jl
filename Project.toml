@@ -1,7 +1,7 @@
 name = "Nereus"
 uuid = "c7a1e4b5-9f3d-4e8a-b2c6-5f8d9e1a3b7c"
 authors = ["Jose Vines"]
-version = "0.6.0"
+version = "0.6.1"
 
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
