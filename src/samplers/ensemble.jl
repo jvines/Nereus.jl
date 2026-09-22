@@ -75,7 +75,11 @@ function sample_ensemble(
         # Scatter around provided init point (init is in bounded space)
         length(init) == n_dim || throw(ArgumentError(
             "init length ($(length(init))) must match n_dim ($n_dim)"))
-        center = has_transform ? transform_forward(init, target.transform) : copy(init)
+        # Relabelled into the layout's circular windows first (src/circular.jl):
+        # a reused target carries moved windows, and an angle outside its own
+        # is out of support, or clamped onto the wall by transform_forward.
+        x_init = circular_relabel_point!(copy(init), params)
+        center = has_transform ? transform_forward(x_init, target.transform) : x_init
         for j in 1:n_walkers
             x0[:, j] = center .+ 1e-4 .* randn(rng, n_dim)
         end

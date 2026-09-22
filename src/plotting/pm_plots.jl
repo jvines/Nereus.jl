@@ -329,7 +329,7 @@ function plot_pm_phasefold(chains, params, data;
             if output !== nothing
                 mkpath(joinpath(output, "models"))
                 _save_plot(joinpath(output, "models",
-                            "Transit_phasefold_P$(planet)_$(ins).$fmt"), fig;
+                            "Transit_phasefold_K$(planet)_$(ins).$fmt"), fig;
                             save_pdf=save_pdf)
             end
         end

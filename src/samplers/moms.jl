@@ -74,6 +74,14 @@ warm-starting a follow-up run.
   used in the spike-and-slab log-prior (Bayes factors between N_p
   configurations are unbiased only when this is set deliberately by the
   user; default 0.5 corresponds to a uniform prior over models).
+
+Circular angles (`src/circular.jl`): with planet births on, same-mode planet
+slots share one window per angle, set before the first state is drawn. A single
+chain records its angles over the second half of warmup and moves each
+full-circle seam to the emptiest arc at the end of it, relabelling the state and
+carrying the MoMS off-values along with the window, so the stored draws live in
+one chart. With `n_chains > 1` it does not (see the note in the body); the
+output-side re-cut in `run_job` / `fit_*` covers those draws.
 """
 function sample_moms(
     target::NereusTarget,
@@ -104,28 +112,43 @@ function sample_moms(
         "informed_birth_fraction must be in [0, 1]"))
     n_chains >= 1 || throw(ArgumentError("n_chains must be ≥ 1"))
 
+    # Births re-sort planets between same-mode slots, so those slots must
+    # share one window per circular angle before any chain draws its first
+    # state or builds its off-values (src/circular.jl). Done once, here, while
+    # nothing else evaluates the target.
+    unify_circular_groups!(target.params,
+                           circular_groups(target.params; permutable = td.planets);
+                           transforms = (target.transform,))
+
     if n_chains > 1
         # Multi-chain: spawn n_chains independent samplers. Each runs
         # its own MoMSBirth strategy with its own warmup-adapted scales,
         # so the final MoMSBirth returned is from chain 1 only (kept for
         # backward compatibility — callers that need the strategies for
         # warm-starting a follow-up should call single-chain).
+        #
+        # No warmup re-cut of circular angles here. The chains run
+        # concurrently over ONE shared Params, with no point at which they
+        # all stand still: a chain that moved a window at the end of its own
+        # warmup would move it under the others mid-sweep, and their states
+        # would be outside the new support (-Inf) on the next evaluation.
+        # run_job / fit_* re-cut the returned draws, which is what the
+        # summaries read.
         per_chain_samples = max(1, cld(n_samples, n_chains))
         tasks = Vector{Task}(undef, n_chains)
         for c in 1:n_chains
             chain_seed = seed + 1000 * (c - 1)
             chain_show_progress = show_progress && (c == 1)
-            tasks[c] = Threads.@spawn sample_moms(target, data;
+            tasks[c] = Threads.@spawn _sample_moms_one(target, data;
                 td = td, n_samples = per_chain_samples,
                 n_warmup = n_warmup, seed = chain_seed,
-                n_chains = 1,
                 init_scale = init_scale,
                 target_birth_accept = target_birth_accept,
                 inclusion_prior = inclusion_prior,
                 show_progress = chain_show_progress,
-                progress_every = progress_every,
                 within_model = within_model,
                 informed_birth_fraction = informed_birth_fraction,
+                recut_circular = false,
             )
         end
         results = [fetch(t) for t in tasks]
@@ -134,6 +157,34 @@ function sample_moms(
         return chains, total_evals, results[1][3]   # strategy from chain 1
     end
 
+    return _sample_moms_one(target, data; td = td, n_samples = n_samples,
+                            n_warmup = n_warmup, seed = seed,
+                            init_scale = init_scale,
+                            target_birth_accept = target_birth_accept,
+                            inclusion_prior = inclusion_prior,
+                            show_progress = show_progress,
+                            within_model = within_model,
+                            informed_birth_fraction = informed_birth_fraction,
+                            recut_circular = true)
+end
+
+# One MoMS chain. Split from `sample_moms` only so the multi-chain branch can
+# switch the circular re-cut off; the arguments are already normalised there.
+function _sample_moms_one(
+    target::NereusTarget,
+    data::Data;
+    td::TransDimConfig,
+    n_samples::Int,
+    n_warmup::Int,
+    seed::Int,
+    init_scale::Float64,
+    target_birth_accept::Float64,
+    inclusion_prior::Float64,
+    show_progress::Bool,
+    within_model::Symbol,
+    informed_birth_fraction::Float64,
+    recut_circular::Bool,
+)
     rng    = MersenneTwister(seed)
     params = target.params
     layout = params.layout
@@ -221,6 +272,14 @@ function sample_moms(
     adapt_window      = max(50, n_warmup ÷ 20)
     adapt_iter_counter = 0
 
+    # Circular angles: record iterations circ_from+1 .. n_warmup, re-cut at
+    # the last of them (helpers at the bottom of rjmcmc.jl). Groups as
+    # `sample_moms` unified them.
+    circ_from = n_warmup - n_warmup ÷ 2
+    circ_groups = circular_groups(params; permutable = td.planets)
+    circ = recut_circular && n_samples > 0 && !isempty(circ_groups) ?
+           _CircularWarmupTrace(params, circ_groups, n_warmup ÷ 2) : nothing
+
     pb = ProgressBar("MoMS";
                        total = n_total_iter, enabled = show_progress)
 
@@ -306,6 +365,36 @@ function sample_moms(
                 adapt_iter_counter = 0
                 fill!(n_attempts_planet, 0)
                 fill!(n_accepts_planet, 0)
+            end
+        end
+
+        if circ !== nothing && circ_from < iter <= n_warmup
+            _record_circular_warmup!(circ, theta)
+            if iter == n_warmup
+                moved = _recut_circular_warmup!(circ, params, (theta,);
+                                                transforms = (target.transform,))
+                # The off-values move WITH the window rather than being
+                # relabelled, as in transdim_pt_emcee: they are the prior's
+                # median by construction (`MoMSBirth`), i.e. the old window's
+                # midpoint, and a move is needed when the posterior straddles
+                # the old seam -- which tends to put the new seam near that
+                # midpoint. Relabelled, the off-value would then sit on the new
+                # seam and centre every blind birth on the emptiest arc of the
+                # posterior. Birth and death read the same off-value and the
+                # same bounds, so the kernel stays balanced; adapted here, in
+                # warmup, like the scales.
+                for m in moved, k in eachindex(strategy.slot_indices)
+                    q = findfirst(==(m.pos), strategy.slot_indices[k])
+                    q === nothing && continue
+                    strategy.off_values[k][q] += m.shift
+                end
+                # Same density in either chart; re-evaluated only so the
+                # cached values are those of the stored point, bit for bit.
+                if !isempty(moved)
+                    log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
+                    log_L  = _eval_ll(theta, data, ctr)
+                end
+                circ = nothing
             end
         end
 

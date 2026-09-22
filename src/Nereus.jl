@@ -69,6 +69,7 @@ include("reporting.jl")
 include("science_tables.jl")  # model-conditioned, unit-tagged science tables (needs reporting.jl)
 include("transforms.jl")
 include("target.jl")
+include("circular.jl")    # full-circle angles: the 0/2π seam is a chart, moved to the emptiest arc (needs Params + PackedTransforms)
 include("builder.jl")     # high-level build_target convenience over Params + Data + NereusTarget
 include("loaders_external.jl")   # TESS LC + Vizier RV CSV loaders (data prep happens in Python sidecar; Julia just ingests)
 include("progress.jl")          # ProgressBar utility used by every sampler

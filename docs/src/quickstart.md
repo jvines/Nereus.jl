@@ -143,7 +143,7 @@ cfg = Dict(
   "model" => Dict(
      "max_kplanet"  => 1,
      "planet_modes" => ["RV_ONLY"],
-     "parametrization" => Dict("mass" => "K_driven", "time" => "Tp",
+     "parametrization" => Dict("mass" => "K_driven", "time" => "Mo",
                                "ew" => "sesinw", "geom" => "b_rr")),
 
   # Optional — auto-generated priors are used for any key you omit.

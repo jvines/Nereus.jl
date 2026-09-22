@@ -22,6 +22,15 @@
 #   acted as a soft wall near prior edges; the stretch move overshot
 #   into the smooth-but-penalized tail, killing acceptance. emcee
 #   does it the simple way.
+#   A LogUniform / ModJeffreys parameter moves in log(x + s), where its
+#   prior is exactly flat: still a hard-walled box, and the Jacobian
+#   cancels the prior's 1/(x + s), so there is no gradient to act as a
+#   wall (see the note in `sample_pt_emcee`).
+#   The exception is a full-circle angle (Mo, Ω, λ, ω under `:ew`; see
+#   src/circular.jl), whose window is a chart and not a wall: its seam
+#   is moved to the emptiest arc of the cold ensemble halfway through
+#   and at the end of burn-in (`_pt_ensemble_recut!`), so the chart is
+#   fixed for every recorded step.
 # - **Flat parallelism** across (temperature, half-ensemble walker)
 #   pairs in each half-step — n_temps × n_walkers/2 independent tasks.
 # - **Per-thread Theta, RNG, and proposal buffers** — race-free, no
@@ -43,8 +52,8 @@ using Random
     s * 0x9e3779b97f4a7c15 + UInt64(half) * 0x517cc1b727220a95 + UInt64(i)
 end
 using MCMCChains
-using Statistics: cov, quantile
-using LinearAlgebra: cholesky, logdet, Symmetric, norm, I
+using Statistics: cov, quantile, median
+using LinearAlgebra: cholesky, logdet, Symmetric, norm, I, issuccess
 
 export sample_pt_emcee, PTemceeResult, mode_laplace_evidence
 
@@ -54,7 +63,8 @@ export sample_pt_emcee, PTemceeResult, mode_laplace_evidence
 Container for a `sample_pt_emcee` run.
 
 # Fields
-- `chains::MCMCChains.Chains` — β=1 walkers, post-burnin, flattened, in bounded space.
+- `chains::MCMCChains.Chains` — β=1 walkers, post-burnin, flattened, in bounded space
+  (circular angles in the window re-charted at the end of burn-in, so contiguous).
 - `log_evidence::Float64` — evidence to USE: the TI/SS/H+ best when it agrees with
   the mode-Laplace cross-check, otherwise `log_evidence_laplace` (the tempered
   estimators fail catastrophically on phase-transition / signal-locked posteriors;
@@ -192,12 +202,155 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
      isempty(tf) ? 0.0 : minimum(tf))
 end
 
+# ------------------------------------------------------------------
+# Circular re-cut of a tempered ensemble (see src/circular.jl).
+#
+# Walkers live in bounded space, so a full-circle angle's prior window acts as
+# a wall: a posterior centred on 0 ≡ 2π burns in as two lobes at opposite ends
+# of the window, the stretch move between them proposes through the empty
+# interior and is rejected, and no rung can help -- the seam is the same wall
+# at every β. The window is only a chart, so move it: `recut_circular_param!`
+# picks the seam from the COLD walkers and moves the layout + packed priors +
+# `transforms`, then every walker at every rung is relabelled into the new
+# window. Serial, between steps, no randomness.
+#
+# The cached logπ / logL stay valid: the prior is still uniform over one
+# period (same density; only rounding in hi - lo) and the likelihood is
+# periodic in these angles (`is_circular` excludes Mo when TTVs are modelled),
+# so each walker's physical state and log-density are unchanged, up to
+# rounding in sin/cos of the shifted representative.
+#
+# Returns the unfrozen positions whose window moved, so a caller holding more
+# copies of the positions (pt_whitening's ring buffer) can relabel those too.
+# Records each new window in `moved` (name => (lo, hi)) for the run's report.
+# ------------------------------------------------------------------
+function _pt_ensemble_recut!(state::Array{Float64,3}, params::Params,
+                             circ::Vector{Int}, transforms,
+                             moved::Dict{String,NTuple{2,Float64}})
+    n_t, n_w = size(state, 1), size(state, 2)
+    dims = Int[]
+    for d in circ
+        win = recut_circular_param!(params, d, view(state, 1, :, d);
+                                    transforms = transforms)
+        win === nothing && continue
+        lo, hi = win
+        @inbounds for w in 1:n_w, t in 1:n_t
+            state[t, w, d] = circular_relabel(state[t, w, d], lo, hi)
+        end
+        moved[params.layout.unfrozen_names[d]] = (Float64(lo), Float64(hi))
+        push!(dims, d)
+    end
+    return dims
+end
+
+# ------------------------------------------------------------------
+# Stranded walkers (burn-in only).
+#
+# A stretch move proposes along the line through two walkers and never less
+# than halfway from the partner: y = x_p + z(x_w - x_p), z in [1/a, a]. A walker
+# on the no-signal plateau cannot land in a narrow mode by moving, and a walker
+# in the mode cannot copy itself over. Swaps only permute states between rungs.
+# So a rung holds as many in-mode states as the ladder has happened to find,
+# and pads the rest of its slots with plateau states that stay there.
+# Measured on an easy single-planet RV target (P = 12.3 d, K = 12 m/s, 60 RVs,
+# LogUniform(0.1, 3000) period prior, default 2000/1000 steps): the cold rung
+# filled at ~5 walkers per 100 steps, 30-50% of the recorded draws sat on the
+# plateau 70 nats down, and R-hat was 1.4-2.3.
+#
+# So during burn-in, move walkers that cannot matter onto walkers that do, as
+# Hou et al. 2012 (ApJ 745, 198) do by clustering walkers on likelihood. What
+# makes it safe to do by default is a mass bound. Per rung, A = the walkers
+# within a Gaussian-tail allowance of the best tempered density, and
+#     Z_A        ≈  best density · √det(2π Σ_A)             (Laplace over A)
+#     Z_{L^β<c}  =  ∫_{L^β<c} π L^β  ≤  c · ∫ π  =  c       (π is normalised)
+# so with log c = log Z_A - `tau`, the whole region of parameter space where
+# the tempered likelihood is below c weighs under e^-tau of A, however large
+# it is. Every walker in it is moved onto a random member of A. A plateau that
+# COULD carry mass -- a weak signal, where K ≈ 0 over the whole prior really
+# is most of the posterior -- has a likelihood within the Occam factor of the
+# peak, above c, and is left alone. So are the tails of the mode itself.
+# `state` is on the flat scale (see sample_pt_emcee), so Laplace is too: on
+# raw P a log-uniform prior's tail alone would inflate Σ_A by ~8 nats.
+#
+# Bounding the region by one of its walkers instead (sup over the group) does
+# not work: the group below any density cut always holds some tail walker of
+# the mode, 20 nats down, and the bound never clears the 70-nat plateau.
+#
+# Burn-in only, so every recorded step is ordinary MCMC. Returns the number of
+# walkers moved at each rung. Serial, draws from `rng`.
+# ------------------------------------------------------------------
+function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64},
+                             logL_arr::Matrix{Float64}, βs::Vector{Float64}, rng;
+                             tau::Float64 = 10.0)
+    n_t, n_w, d = size(state)
+    moved = zeros(Int, n_t)
+    d >= 1 || return moved
+    allow = quantile(Chisq(d), 1 - 1e-6) / 2
+    ℓ = Vector{Float64}(undef, n_w)
+    for t in 1:n_t
+        β = βs[t]
+        @inbounds for w in 1:n_w
+            v = logπ_arr[t, w] + β * logL_arr[t, w]
+            ℓ[w] = isfinite(v) ? v : -Inf
+        end
+        best = maximum(ℓ)
+        isfinite(best) || continue
+        A = findall(>=(best - allow), ℓ)
+        length(A) >= d + 2 || continue
+        C = cholesky(Symmetric(cov(view(state, t, A, :); dims = 1)); check = false)
+        issuccess(C) || continue
+        cut = best + 0.5 * d * log(2π) + 0.5 * logdet(C) - tau
+        S = [w for w in 1:n_w if !(β * logL_arr[t, w] >= cut) && ℓ[w] < best - allow]
+        isempty(S) && continue
+        # Donors from the upper half of A: its lower edge sits `allow` down
+        # (~20 nats at d = 7), far outside a d-dim typical set (~d/2 down), and
+        # a copy placed there spends the rest of burn-in relaxing back in.
+        donors = A[ℓ[A] .>= median(ℓ[A])]
+        @inbounds for w in S
+            a = donors[rand(rng, 1:length(donors))]
+            for j in 1:d
+                state[t, w, j] = state[t, a, j]
+            end
+            logπ_arr[t, w] = logπ_arr[t, a]
+            logL_arr[t, w] = logL_arr[t, a]
+        end
+        moved[t] = length(S)
+    end
+    return moved
+end
+
+# One line per run, after the progress bar: which angles were re-charted and
+# where their windows ended up. A silent move would leave the reader of a trace
+# plot wondering why Mo now spans [-3.05, 3.23) when they wrote U(0, 2π).
+function _pt_recut_info(sampler::AbstractString,
+                        moved::Dict{String,NTuple{2,Float64}})
+    isempty(moved) && return nothing
+    r(x) = round(x; digits = 2)
+    nms = sort!(collect(keys(moved)))
+    msg = if length(nms) == 1
+        lo, hi = moved[only(nms)]
+        "moved the seam of $(only(nms)) to the emptiest arc of its posterior; " *
+        "window now [$(r(lo)), $(r(hi)))"
+    else
+        "moved the seams of $(join(nms, ", ", " and ")) to the emptiest arc of " *
+        "each posterior; windows now " *
+        join(("$nm [$(r(moved[nm][1])), $(r(moved[nm][2])))" for nm in nms), ", ")
+    end
+    @info "$sampler: $msg. Still one full period under the same uniform prior, " *
+          "so this relabels the circle and changes neither the posterior nor " *
+          "the evidence."
+    return nothing
+end
+
 """
     sample_pt_emcee(target, data; kwargs...) -> PTemceeResult
 
 Parallel-tempered affine-invariant ensemble MCMC (Vousden+ 2016).
-Walkers operate in unconstrained space; bounded-space samples are
-recovered via the target's inverse transform.
+Walkers operate in bounded space; a proposal outside the prior support is
+rejected. Full-circle angles are the exception: their window is re-charted
+during burn-in so the seam sits in the emptiest arc of the posterior (see
+src/circular.jl), which moves `target.params.layout` and `target.transform`
+in place.
 
 # Keywords
 - `n_temps::Int=16` — temperature levels. Was 5, which is slower AND worse:
@@ -207,8 +360,14 @@ recovered via the target's inverse transform.
   Joint astrometry targets want 24 — at 16 with one seed the eccentricity
   collapsed to 0.002 against a published 0.335, silently.
 - `n_walkers::Int=100` — walkers per temperature (≥ `2·n_dim + 2`, even).
-- `n_steps::Int=2000` — steps per walker.
-- `n_burnin::Int=1000` — burn-in discarded from posterior + evidence.
+- `n_steps::Int=3000` — steps per walker.
+- `n_burnin::Int=2000` — burn-in discarded from posterior + evidence.
+  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`.
+  Was 2000/1000, which is too short to find a well-measured period on a
+  wide log-uniform prior and settle on it: on an easy 12.3 d RV target over
+  LogUniform(0.1, 3000), 1 of 8 seed/data combinations failed R-hat at
+  2000/1000 and several sat near 1.04; at 3000/2000 all 8 passed with
+  worst R-hat ≤ 1.010 and ESS ≥ 17k.
 - `betas::Union{Nothing,Vector{Float64}}=nothing` — explicit β ladder
   (descending β[1]=1). Default: Vines+ 2023's `β_i = (1/√5)^i`.
 - `stretch_a::Float64=2.0` — Goodman-Weare stretch parameter.
@@ -234,14 +393,24 @@ recovered via the target's inverse transform.
 - `seed::Int=1`
 - `thin::Int=1` — thinning factor on β=1 posterior output.
 - `show_progress::Bool=true` — display the per-step progress bar.
+- `prune_stranded::Bool=true` — every 50 steps through the first three quarters
+  of burn-in, move walkers stranded far below their rung's mode onto walkers in
+  it. Only walkers whose likelihood is so low that the whole region below it
+  weighs under e⁻¹⁰ of the mode (bounded by that likelihood times the
+  normalised prior) are moved, so a plateau that could carry real mass — a
+  weak signal — is left alone. The stretch move cannot bring stranded walkers
+  back itself, so without this a narrow mode (any well-measured period on a
+  wide prior) fills its cold rung at the rate the ladder happens to rediscover
+  it. Burn-in only: the recorded chain is ordinary MCMC. `false` restores the
+  old behaviour.
 """
 function sample_pt_emcee(
     target::NereusTarget,
     data::Data;
     n_temps::Int = 16,
     n_walkers::Int = 100,
-    n_steps::Int = 2000,
-    n_burnin::Int = 1000,
+    n_steps::Int = 3000,
+    n_burnin::Int = 2000,
     betas::Union{Nothing,AbstractVector} = nothing,
     beta_min::Real = 1e-4,
     stretch_a::Real = 2.0,
@@ -267,6 +436,7 @@ function sample_pt_emcee(
     bridge_n::Int = 20_000,
     bridge_warn_tol::Real = 20.0,
     untemper_transit::Bool = false,
+    prune_stranded::Bool = true,
 )
     # JSON delivers floats-as-Int and arrays-as-JSON3.Array; normalize.
     stretch_a       = Float64(stretch_a)
@@ -308,6 +478,28 @@ function sample_pt_emcee(
     # only cares about target density ratios in whatever space the
     # walkers live, and bounded space gives clean auto-reject behavior
     # via log_prior(theta) = -Inf outside support.
+    #
+    # Bounded, but on the scale each prior is flat on: a LogUniform or
+    # ModJeffreys parameter moves as y = log(x + s) (`log_scale_shift`). The
+    # Jacobian |dx/dy| = x + s cancels the prior's 1/(x + s) exactly, so inside
+    # the box the prior is as flat as a Uniform's and the box is still a hard
+    # wall -- none of the soft-wall gradient the logit transform had. What it
+    # buys: a log-uniform period prior over 0.1-3000 d scatters walkers over
+    # 4.5 decades, and a linear stretch between walkers at 12 d and 1500 d
+    # throws the short one out to hundreds of days. On an easy 12.3 d RV target
+    # the cold rung had not found the period by the end of the default burn-in.
+    # `logπ_arr` holds the prior density on this scale (log p(x) + Σ y_j over
+    # the log dimensions); draws and :lp are mapped back to x when recorded.
+    #
+    # Full-circle angles are the exception: re-charted during burn-in by
+    # `_pt_ensemble_recut!`. `circ` is computed once; `recut_moved` collects
+    # the final windows for the single end-of-run report.
+    circ        = circular_indices(params)
+    recut_moved = Dict{String,NTuple{2,Float64}}()
+    # The move scale per dimension (see above), and the pruning tally per rung.
+    flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
+                                        for ps in layout.unfrozen_priors]
+    pruned = zeros(Int, n_temps)
 
     # Goodman-Weare: each half ≥ n_dim+1 walkers, total even.
     n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
@@ -353,13 +545,20 @@ function sample_pt_emcee(
     # M-H reject. log_like includes external priors (eccentricity,
     # rho_s) per Nereus convention, so these get tempered too —
     # matches the in-house PT path's convention.
-    @inline function eval_bounded!(x::AbstractVector{Float64}, tid::Int)
+    @inline function eval_bounded!(y::AbstractVector{Float64}, tid::Int)
         theta = thread_theta[tid]
         wb = thread_ws[tid]
+        log_jac = 0.0
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
-            theta.values[idx] = x[j]
+            s = flat_shift[j]
+            if s === nothing
+                theta.values[idx] = y[j]
+            else
+                theta.values[idx] = exp(y[j]) - s
+                log_jac += y[j]
+            end
         end
-        lp = log_prior(theta)
+        lp = log_prior(theta) + log_jac
         isfinite(lp) || return (-Inf, -Inf)
         ll_rv = rv_log_likelihood(theta, data, wb)
         ll_tr = transit_log_likelihood(theta, data, wb)
@@ -402,7 +601,9 @@ function sample_pt_emcee(
         n_pf_draws = n_temps * n_walkers_eff
         map_res = sample_map(target; method = :LBFGS, maxiter = 500,
                              g_tol = 1e-6, n_starts = max(2, pf_n_runs))
-        x_map = map_res.x_map  # bounded space
+        # Bounded space, circular angles in the layout's current windows
+        # (`sample_map` may have moved them; see src/circular.jl).
+        x_map = circular_relabel_point!(copy(map_res.x_map), params)
         scatter_per_dim = Vector{Float64}(undef, n_dim)
         @inbounds for j in 1:n_dim
             ps = layout.unfrozen_priors[j]
@@ -418,6 +619,10 @@ function sample_pt_emcee(
             @inbounds for d in 1:n_dim
                 pf_d[d, j] = x_map[d] + scatter_per_dim[d] * randn(jitter_seed)
             end
+            # A circular scatter wraps instead of leaving the window: each
+            # walker retries its own column below, so an out-of-window one
+            # would never start in support.
+            circular_relabel_point!(view(pf_d, :, j), params)
         end
         pf_d
     else
@@ -433,6 +638,10 @@ function sample_pt_emcee(
     state    = Array{Float64,3}(undef, n_temps, n_walkers_eff, n_dim)
     logL_arr = fill(-Inf, n_temps, n_walkers_eff)
     logπ_arr = fill(-Inf, n_temps, n_walkers_eff)
+    # A caller's `init` is written in the user's window; a target reused after
+    # a fit carries moved circular windows, where Mo = 6.2 can sit outside
+    # [-3.05, 3.23) and fail every retry below. Relabel a copy into them.
+    x_init = init === nothing ? nothing : circular_relabel_point!(copy(init), params)
     init_seeds = rand(rng_master, UInt64, n_temps * n_walkers_eff)
     Threads.@threads :static for task_idx in 1:(n_temps * n_walkers_eff)
         tid = Threads.threadid()
@@ -459,15 +668,22 @@ function sample_pt_emcee(
                         state[t, w, d] = pf_draws[d, col]
                     end
                 end
-            elseif init !== nothing
+            elseif x_init !== nothing
                 @inbounds for d in 1:n_dim
-                    state[t, w, d] = init[d] + 1e-3 * randn(rng)
+                    state[t, w, d] = x_init[d] + 1e-3 * randn(rng)
                 end
             else
                 x_b = _draw_from_prior(target, rng)
                 @inbounds for d in 1:n_dim
                     state[t, w, d] = x_b[d]
                 end
+            end
+            # Every branch above fills x; walkers move on the flat scale.
+            @inbounds for d in 1:n_dim
+                s = flat_shift[d]
+                s === nothing && continue
+                x = state[t, w, d]
+                state[t, w, d] = x + s > 0 ? log(x + s) : -Inf
             end
             lp, ll = eval_bounded!(@view(state[t, w, :]), tid)
             if isfinite(lp) && isfinite(ll)
@@ -634,6 +850,27 @@ function sample_pt_emcee(
             βs .= new_betas
         end
 
+        # ---- Stranded walkers (serial; burn-in only) -----------------
+        # See `_pt_prune_stranded!`. Stops at 3/4 of burn-in so the moved
+        # walkers decorrelate from the ones they were copied onto, and runs
+        # before the re-cut so the seam is chosen from the cleaned cold rung.
+        if prune_stranded && step % 50 == 0 && step <= (3 * n_burnin) ÷ 4
+            pruned .+= _pt_prune_stranded!(state, logπ_arr, logL_arr, βs,
+                                           rng_master)
+        end
+
+        # ---- Circular re-cut (serial; threads idle) ------------------
+        # Halfway through burn-in, while the ensemble can still merge the
+        # two lobes a seam-centred angle burns in as; and at the end of
+        # burn-in, which fixes the chart for every recorded step (usually a
+        # no-op by then: circular_cut keeps the current seam unless another
+        # arc is clearly emptier). Relabels `state` at every rung; logπ_arr
+        # and logL_arr stay valid, see `_pt_ensemble_recut!`.
+        if !isempty(circ) && (step == n_burnin ÷ 2 || step == n_burnin)
+            _pt_ensemble_recut!(state, params, circ, (target.transform,),
+                                recut_moved)
+        end
+
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
         if step > n_burnin
             # For each (β_k, β_{k+1}) pair, feed each walker's logL
@@ -647,11 +884,18 @@ function sample_pt_emcee(
             if (step - n_burnin) % thin == 0
                 @inbounds for w in 1:n_walkers_eff
                     keep_idx += 1
-                    # Walkers already live in bounded space.
+                    # Back from the flat scale to x, and :lp with it.
+                    log_jac = 0.0
                     for d in 1:n_dim
-                        samples[keep_idx, d] = state[1, w, d]
+                        s = flat_shift[d]
+                        if s === nothing
+                            samples[keep_idx, d] = state[1, w, d]
+                        else
+                            samples[keep_idx, d] = exp(state[1, w, d]) - s
+                            log_jac += state[1, w, d]
+                        end
                     end
-                    lp_samples[keep_idx] = logπ_arr[1, w] + logL_arr[1, w]
+                    lp_samples[keep_idx] = logπ_arr[1, w] - log_jac + logL_arr[1, w]
                 end
             end
         end
@@ -706,6 +950,11 @@ function sample_pt_emcee(
         end
     end
     show_progress && finish!(pb)
+    show_progress && _pt_recut_info("pt_emcee", recut_moved)
+    show_progress && sum(pruned) > 0 && @info "pt_emcee: burn-in moved " *
+        "$(sum(pruned)) stranded walker state(s) onto their rung's mode " *
+        "($(pruned[1]) at β = 1), all from a region whose total posterior mass " *
+        "is bounded below e⁻¹⁰ of the mode's. The recorded chain is ordinary MCMC."
     if convergence_stop && converged_at == 0
         @warn "pt_emcee: hit max_steps=$n_steps WITHOUT meeting the convergence gate " *
               "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)) on science params — " *

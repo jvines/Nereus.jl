@@ -1,6 +1,33 @@
 # Public Params constructor.
 # Separated from model.jl because it depends on Data and default_priors.
 
+# A Tp or Tc prior wider than one period holds several copies of the same orbit:
+# the likelihood repeats every P, and a Uniform prior weighs every copy equally.
+# An ensemble cannot move between them -- a stretch between walkers in copies n
+# and m lands between copies -- so each walker stays in the copy it found, and
+# R-hat fails on every parameter however long the run. Measured on an easy
+# 12.3 d RV target with the old run_job default (Tp over the 929 d baseline):
+# 100 walkers spread over 46 copies, R-hat 1.9-5 with every walker in the mode.
+# Mo covers exactly one period and has no copies.
+function _warn_repeating_time_window(priors, max_kplanet::Int, time::Symbol)
+    time in (:Tp, :Tc) || return nothing
+    for k in 1:max_kplanet
+        tname, pname = "$(time)_k$k", "P_k$k"
+        (haskey(priors, tname) && haskey(priors, pname)) || continue
+        lo, hi = bounds(priors[tname])
+        P_min = bounds(priors[pname])[1]
+        (isfinite(lo) && isfinite(hi) && P_min > 0 && hi - lo > P_min) || continue
+        @warn "$tname's prior spans $(round(hi - lo, sigdigits = 4)) d, but " *
+              "$pname can be as short as $(round(P_min, sigdigits = 4)) d. The " *
+              "likelihood repeats every period, so that window holds up to " *
+              "$(floor(Int, (hi - lo) / P_min)) identical copies of the orbit; an " *
+              "ensemble sampler cannot move between them and will not converge. " *
+              "Use the Mo parametrization (time = \"Mo\", the default), or give " *
+              "$tname a prior no wider than one period."
+    end
+    return nothing
+end
+
 """
     Params(; max_kplanet, planet_modes, instruments, data, [priors], ...)
 
@@ -148,6 +175,8 @@ function Params(;
             defaults[k] = v
         end
     end
+
+    _warn_repeating_time_window(defaults, max_kplanet, parametrization.time)
 
     # Rebuild config with final priors
     config = ParamsConfig(max_kplanet, parametrization, modes_vec,

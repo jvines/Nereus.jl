@@ -65,12 +65,19 @@ function sample_ess(
 
     # Build Gaussian prior approximation from the actual prior bounds.
     # Center on init (or prior midpoint), width from prior support.
+    #
+    # The centre is `init` relabelled into the layout's circular windows
+    # (src/circular.jl): a target reused after a fit carries moved windows,
+    # and an angle centred outside its own would have most of its samples
+    # discarded as out of bounds below. The widths still read `init` as the
+    # caller wrote it, so they do not change with the chart.
+    x0 = init === nothing ? nothing : circular_relabel_point!(copy(init), params)
     centers = Vector{Float64}(undef, n_dim)
     widths = Vector{Float64}(undef, n_dim)
     for (j, ps) in enumerate(layout.unfrozen_priors)
         lo, hi = ps.lo, ps.hi
         if init !== nothing
-            centers[j] = init[j]
+            centers[j] = x0[j]
             # Width: small fraction of the init value or prior range.
             # ESS is for characterization — widths should be posterior-scale,
             # not prior-scale.

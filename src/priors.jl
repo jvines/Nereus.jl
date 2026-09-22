@@ -377,6 +377,22 @@ Hard lower and upper bounds of the prior.
 bounds(ps::PriorSpec) = (ps.lo, ps.hi)
 
 """
+    log_scale_shift(ps) -> Union{Float64, Nothing}
+
+The `s` for which the prior is flat, or nearly so, in `log(x + s)`: `0` for
+`LogUniformPrior`, the knee for `ModJeffreysPrior`. `nothing` for every other
+prior, which is measured linearly.
+
+"Within 1% of a bound" means 1% of the prior's range on that scale. Measured
+linearly, 1% of LogUniform(0.1, 3000) is 30 d, so every period under 30 d read as
+railed at the 0.1 d floor.
+"""
+log_scale_shift(ps::PriorSpec) = _log_scale_shift(ps.dist)
+_log_scale_shift(::LogUniform) = 0.0
+_log_scale_shift(d::ModJeffreys) = Float64(d.knee)
+_log_scale_shift(_) = nothing
+
+"""
     is_fixed(ps) -> Bool
 
 `true` iff the parameter is held fixed (wraps `Fixed`).

@@ -74,6 +74,14 @@
 # whitened swap improves swap acceptance by 2-5× over identity swaps on
 # multi-mode RV-PM joint posteriors where the β=0 chain explores the
 # prior box and β=1 sits in a tight mode.
+#
+# Walkers live in bounded space (prior walls auto-reject), except that a
+# full-circle angle's window is a chart, not a wall: halfway through and at
+# the end of burn-in its seam is moved to the emptiest arc of the cold
+# ensemble (`_pt_ensemble_recut!`, shared with pt_emcee; src/circular.jl).
+# The ring buffer behind (μ, σ) is relabelled with the walkers and the moved
+# coordinate's statistics refreshed, or the flow would whiten against the
+# old chart -- a σ of ~π describing two lobes that are now one.
 
 using Random
 using Statistics: mean, std
@@ -120,6 +128,8 @@ the distinguishing feature of this sampler.
 - `n_walkers::Int=40` — walkers per temperature (≥ `2·n_dim + 2`, even).
 - `n_steps::Int=2000` — MCMC iterations.
 - `n_burnin::Int=500` — burn-in discarded from posterior + evidence.
+  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`,
+  moving `target.params.layout` and `target.transform` in place.
 - `betas::Union{Nothing,Vector{Float64}}=nothing` — explicit β ladder
   (descending β[1]=1). Default: Vines+ 2023's `β_i = (1/√5)^i`, the same
   ladder `sample_pt_emcee` uses (geometric ladders give far more uniform
@@ -275,27 +285,55 @@ function sample_pt_whitening(
         ring_count[t] = min(ring_count[t] + 1, win)
     end
 
-    # Recompute (μ, σ) per temperature from the ring buffer ensemble.
-    function refresh_whiten_stats!(t::Int)
+    # Recompute (μ, σ) of coordinate `d` at temperature `t` from the ring
+    # buffer ensemble. Per coordinate so a circular re-cut can refresh just
+    # the one it relabelled.
+    function refresh_whiten_dim!(t::Int, d::Int)
         nc = ring_count[t]
         nc < 1 && return
         ntot = nc * n_walkers_eff
-        @inbounds for d in 1:n_dim
-            s1 = 0.0
-            for s in 1:nc, w in 1:n_walkers_eff
-                s1 += ring[t, s, w, d]
+        s1 = 0.0
+        @inbounds for s in 1:nc, w in 1:n_walkers_eff
+            s1 += ring[t, s, w, d]
+        end
+        m = s1 / ntot
+        s2 = 0.0
+        @inbounds for s in 1:nc, w in 1:n_walkers_eff
+            δ = ring[t, s, w, d] - m
+            s2 += δ * δ
+        end
+        v = ntot > 1 ? s2 / (ntot - 1) : 0.0
+        @inbounds μ_w[t, d] = m
+        # Floor σ so the flow never collapses a coordinate (which
+        # would map every proposal to μ and kill the swap).
+        @inbounds σ_w[t, d] = sqrt(max(v, 1e-12))
+        return
+    end
+
+    # Recompute (μ, σ) per temperature from the ring buffer ensemble.
+    function refresh_whiten_stats!(t::Int)
+        for d in 1:n_dim
+            refresh_whiten_dim!(t, d)
+        end
+    end
+
+    # Circular re-cut (see `_pt_ensemble_recut!` in pt_emcee.jl). The ring
+    # holds past positions of every rung, so relabel its filled slots for
+    # each moved coordinate (slots 1:ring_count[t] -- the ring fills in
+    # order before it wraps) and refresh that coordinate's (μ, σ). The other
+    # coordinates keep their statistics and their refresh cadence.
+    circ        = circular_indices(params)
+    recut_moved = Dict{String,NTuple{2,Float64}}()
+    function recut_whitening!()
+        for d in _pt_ensemble_recut!(state, params, circ, (target.transform,),
+                                     recut_moved)
+            lo, hi = bounds(layout.unfrozen_priors[d])
+            for t in 1:n_temps
+                @inbounds for s in 1:ring_count[t], w in 1:n_walkers_eff
+                    ring[t, s, w, d] = circular_relabel(ring[t, s, w, d], lo, hi)
+                end
+                refresh_whiten_dim!(t, d)
             end
-            m = s1 / ntot
-            s2 = 0.0
-            for s in 1:nc, w in 1:n_walkers_eff
-                δ = ring[t, s, w, d] - m
-                s2 += δ * δ
-            end
-            v = ntot > 1 ? s2 / (ntot - 1) : 0.0
-            μ_w[t, d] = m
-            # Floor σ so the flow never collapses a coordinate (which
-            # would map every proposal to μ and kill the swap).
-            σ_w[t, d] = sqrt(max(v, 1e-12))
         end
     end
 
@@ -490,6 +528,15 @@ function sample_pt_whitening(
             end
         end
 
+        # ---- Circular re-cut (serial; threads idle) ------------------
+        # Same schedule as pt_emcee: halfway through burn-in to merge the
+        # two lobes of a seam-centred angle, and at the end of burn-in to
+        # fix the chart for every recorded step. logπ_arr / logL_arr stay
+        # valid (uniform prior, periodic likelihood).
+        if !isempty(circ) && (step == n_burnin ÷ 2 || step == n_burnin)
+            recut_whitening!()
+        end
+
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
         if step > n_burnin
             @inbounds for w in 1:n_walkers_eff
@@ -518,6 +565,7 @@ function sample_pt_whitening(
         end
     end
     show_progress && finish!(pb)
+    show_progress && _pt_recut_info("pt_whitening", recut_moved)
 
     samples    = samples[1:keep_idx, :]
     lp_samples = lp_samples[1:keep_idx]

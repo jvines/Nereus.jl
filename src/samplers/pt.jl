@@ -96,6 +96,14 @@ estimate.
   initializes each replica with a fresh prior draw — fine for unimodal
   posteriors, but gets stuck in the nearest basin for multimodal
   problems (HD 159062-class). Multi-init via Pathfinder fixes this.
+
+Circular angles (`src/circular.jl`): at the end of the warmup rounds each
+full-circle seam is moved to the emptiest arc of the cold replica's recent
+history and every replica is relabelled, so the returned draws are in one
+chart. With planet births on (`td.planets`), same-mode planet slots share one
+window per angle, set before the first state is drawn and re-cut together. An
+`init` is relabelled into the current windows (a copy; the caller's matrix is
+not touched). The layout (and `target.transform`) keep the moved window.
 """
 function sample_pt(
     target::NereusTarget;
@@ -250,6 +258,14 @@ function _sample_pt_transdim(
             "init has $(size(init, 2)) columns, need ≥ n_chains = $n_chains"))
     end
 
+    # Circular angles (src/circular.jl). Every birth ends in
+    # `_sort_group_periods!`, which copies raw values between same-mode slots,
+    # so with `td.planets` on those slots share one window per angle -- set
+    # here, before any replica is drawn. Nothing else moves planet blocks: with
+    # births off every angle keeps a window of its own.
+    circ_groups = circular_groups(params; permutable = td.planets)
+    unify_circular_groups!(params, circ_groups; transforms = (target.transform,))
+
     # Initialize replicas with per-chain RNGs for thread safety
     replicas = Vector{TransDimPTState}(undef, n_chains)
     chain_rngs = [MersenneTwister(seed + c) for c in 1:n_chains]
@@ -284,9 +300,14 @@ function _sample_pt_transdim(
         end
         theta = Theta{Float64}(params; td=td_state)
         if init !== nothing
-            # Take column c of init (in bounded space) into theta.values
+            # Take column c of init (in bounded space) into theta.values,
+            # relabelled into the current circular windows: the init is written
+            # in the user's windows, or Pathfinder's, which the layout need not
+            # share any more. A copy, so the caller's matrix is left alone.
+            x0 = circular_relabel_point!(Float64[init[j, c] for j in 1:n_unfrozen],
+                                         params)
             for (j, uf_idx) in enumerate(layout.unfrozen_idx)
-                theta.values[uf_idx] = Float64(init[j, c])
+                theta.values[uf_idx] = x0[j]
             end
         else
             _init_systemics_from_prior!(theta, chain_rngs[c])
@@ -356,6 +377,18 @@ function _sample_pt_transdim(
     evidence_acc = EvidenceAccumulator(n_chains)
     evidence_warmup_rounds = max(1, n_rounds ÷ 2)
     logL_buf = Vector{Float64}(undef, n_chains)
+
+    # Circular angles (src/circular.jl): the cold replica's ACTIVE values over
+    # the second half of the warmup iterations, pooled per window group,
+    # decide where each seam goes, and every replica is relabelled at the end
+    # of the last warmup round, so the rounds that feed the evidence run in one
+    # chart. Safe here, unlike multi-chain rjmcmc / moms: all replicas live in
+    # this one loop and the re-cut runs between rounds, outside the threaded
+    # sweep.
+    warmup_iters = n_samples_per_round * (2^evidence_warmup_rounds - 1)
+    circ_from = warmup_iters - warmup_iters ÷ 2
+    circ = evidence_warmup_rounds < n_rounds && !isempty(circ_groups) ?
+           _CircularWarmupTrace(params, circ_groups, warmup_iters ÷ 2) : nothing
 
     for round in 1:n_rounds
         n_iter_this_round = n_samples_per_round * 2^(round - 1)
@@ -464,6 +497,9 @@ function _sample_pt_transdim(
                                    for ni in noise_nm_indices]
                 push!(cold_noise, ns_state)
             end
+            if circ !== nothing && circ_from < iter <= warmup_iters
+                _record_circular_warmup!(circ, rep_cold.theta)
+            end
 
             # Progress bar update — running N_p posterior + cold log-L.
             np_running = vec(cold_n_planets)
@@ -504,6 +540,29 @@ function _sample_pt_transdim(
                 end
             end
             prev_np_post = curr_np_post
+        end
+
+        if circ !== nothing && round == evidence_warmup_rounds
+            moved = _recut_circular_warmup!(circ, params,
+                                            (r.theta for r in replicas);
+                                            transforms = (target.transform,))
+            # The warmup draws already stored go into the new chart too, so
+            # the returned chain is in one chart from its first row.
+            for m in moved, s in cold_samples
+                s[m.pos] = circular_relabel(s[m.pos], m.lo, m.hi)
+            end
+            # Same density in either chart; re-evaluated only so the cached
+            # values are those of the stored point, bit for bit. Slot c's
+            # workspace, as the sweep pairs them.
+            if !isempty(moved)
+                for c in 1:n_chains
+                    rep = replicas[c]
+                    rep.log_pi = log_prior(rep.theta)
+                    rep.log_L = _eval_ll(rep.theta, data, chain_ctrs[c],
+                                         chain_ws[c])
+                end
+            end
+            circ = nothing
         end
     end
     finish!(pb)
@@ -739,6 +798,9 @@ end
 # which is a testing concern, not a user-facing choice. Exposing it as
 # `backend` put an implementation swap in the same namespace as the
 # algorithm selector; that is what this refactor removed.
+#
+# No warmup re-cut of circular angles: Pigeons owns the replicas, and in its
+# logit space the seam is at y = ±∞. The output-side re-cut is all it gets.
 function _sample_pt_pigeons(
     target::NereusTarget;
     n_rounds::Int = 15,

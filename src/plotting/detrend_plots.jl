@@ -150,6 +150,10 @@ function _save_fig(fig, base::String, fmt::Symbol; save_pdf::Bool=false)
     if fmt === :pdf || fmt === :both || save_pdf
         save(base * ".pdf", fig)
     end
+    # Same deterministic teardown as `_save_plot`; this helper writes its own
+    # files rather than going through it, so it needs the call too.
+    _RELEASE_SCENES[] && _release_scene!(fig)
+    return nothing
 end
 
 """Build the broken-axis two-panel plot. `time_offset` is subtracted

@@ -1382,9 +1382,9 @@ function plot_g23h_residuals(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_ra  = Axis(fig[1, 1]; ylabel = "Δμ_α* (mas/yr)")
+        ax_ra  = Axis(fig[1, 1]; ylabel = rich("Δμ", subscript("α*"), " (mas/yr)"))
         ax_dec = Axis(fig[2, 1]; xlabel = "MJD",
-                                   ylabel = "Δμ_δ (mas/yr)")
+                                   ylabel = rich("Δμ", subscript("δ"), " (mas/yr)"))
         linkxaxes!(ax_ra, ax_dec)
         hidexdecorations!(ax_ra; grid = false, ticks = false)
 
@@ -1558,9 +1558,9 @@ function plot_pm_anomaly(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_ra  = Axis(fig[1, 1]; ylabel = "μ_α* reflex (mas/yr)")
+        ax_ra  = Axis(fig[1, 1]; ylabel = rich("μ", subscript("α*"), " reflex (mas/yr)"))
         ax_dec = Axis(fig[2, 1]; xlabel = "MJD",
-                                   ylabel = "μ_δ reflex (mas/yr)")
+                                   ylabel = rich("μ", subscript("δ"), " reflex (mas/yr)"))
         linkxaxes!(ax_ra, ax_dec)
         hidexdecorations!(ax_ra; grid = false, ticks = false)
 

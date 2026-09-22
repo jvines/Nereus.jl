@@ -114,7 +114,8 @@ _asvec(x) = [x]
                ess_min::Int=200, rhat_max::Float64=1.05,
                ensemble::Bool=false, param_names=nothing,
                mode_ratio_max::Float64=3.0, edge_eps::Float64=0.01,
-               edge_mass_frac::Float64=0.05, lp_floor::Float64=-1e6)
+               edge_mass_frac::Float64=0.05, lp_floor::Float64=-1e6,
+               circular=nothing, log_scale=nothing, active=nothing)
         -> FitHealthReport
 
 Post-fit health screen. Runs four cheap structural checks against
@@ -137,7 +138,15 @@ checks means no red flag was raised, not that the posterior is correct.
    name to `(lo, hi)`), flags any parameter whose posterior piles up
    against a bound: median within `edge_eps` (fraction of the bound
    span) of a bound, or more than `edge_mass_frac` of draws within that
-   margin. `:fail`.
+   margin. `:fail`. Parameters in `log_scale` are measured on
+   `log(x + s)` — bounds, margin and draws alike — so the 1% is 1% of a
+   log-uniform prior's decades, not of its linear span. Parameters named
+   in `circular` are full-circle
+   angles: their draws are first relabelled into the `prior_bounds`
+   window, which should be the chart the ENGINE sampled in. A pile-up
+   there means the engine could not carry the angle across that seam and
+   the draws beyond it are missing; an engine that moved its seam off the
+   posterior shows none.
 4. **Log-posterior sanity** — if an `:lp` / `:log_density` column
    exists, flags values below `lp_floor` (default `-1e6`) as corrupt.
 
@@ -150,6 +159,19 @@ checks means no red flag was raised, not that the posterior is correct.
   columns, excluding obvious bookkeeping columns (`:lp`, `:n_p`,
   `noise_active_*`, …).
 - `ensemble` : ensemble-aware convergence (see check 1).
+- `circular` : names (`Symbol` or `String`) of full-circle angles —
+  Uniform over exactly one period, e.g. `circular_names(params)`.
+  Measured in their `prior_bounds` window by the rail check (see
+  check 3). `nothing` treats every parameter as linear.
+- `log_scale` : `Dict` param ⇒ shift `s`, for parameters whose prior is
+  flat in `log(x + s)` — `0` for LogUniform, the knee for ModJeffreys; see
+  [`log_scale_shift`](@ref). Unlisted parameters are measured linearly.
+- `active` : `Dict` param ⇒ Bool vector over the flattened draws, for
+  trans-dim parameters that exist only where their planet or noise model is
+  active. Every check then uses only those draws: in the other draws the
+  column holds a parked value, not a posterior draw, and assessing it failed
+  sound trans-dim runs on convergence and rails. Masked convergence is per
+  parameter, the active draws in order split in half.
 
 See also [`FitHealthReport`](@ref), [`FitHealthCheck`](@ref).
 """
@@ -164,19 +186,26 @@ function assess_fit(
     edge_eps::Float64 = 0.01,
     edge_mass_frac::Float64 = 0.05,
     lp_floor::Float64 = -1e6,
+    circular = nothing,
+    log_scale = nothing,
+    active = nothing,
 )
     # ----- which parameters to assess -------------------------------
     names_to_check = _resolve_param_names(chains, param_names)
+    masks = _active_masks(chains, active)
 
     checks = FitHealthCheck[]
     push!(checks, _check_convergence(chains, names_to_check;
                                      ess_min = ess_min, rhat_max = rhat_max,
-                                     ensemble = ensemble))
+                                     ensemble = ensemble, active = masks))
     push!(checks, _check_multimodality(chains, names_to_check;
-                                       mode_ratio_max = mode_ratio_max))
+                                       mode_ratio_max = mode_ratio_max,
+                                       active = masks))
     push!(checks, _check_prior_rail(chains, names_to_check, prior_bounds;
                                     edge_eps = edge_eps,
-                                    edge_mass_frac = edge_mass_frac))
+                                    edge_mass_frac = edge_mass_frac,
+                                    circular = circular,
+                                    log_scale = log_scale, active = masks))
     push!(checks, _check_logpost(chains; lp_floor = lp_floor))
 
     overall = _worst(c.status for c in checks)
@@ -198,15 +227,19 @@ explored a different basin.
 `map_point` may be a `Vector{<:Real}` aligned with the checked
 parameters, a `Dict` (param ⇒ value), or a [`MAPResult`](@ref) (its
 `x_map` + `param_names` are used). Extra `kwargs` are forwarded to the
-chain-only [`assess_fit`](@ref).
+chain-only [`assess_fit`](@ref). `circular` names full-circle angles
+(period 2π): they are exempt from the rail check, and the MAP distance
+for them is the shortest arc, since the optimizer may return a different
+representative of the same angle than the chart the chains are in.
 """
 function assess_fit(map_point, chains::MCMCChains.Chains;
                     nsigma::Float64 = 5.0,
-                    param_names = nothing, kwargs...)
-    base = assess_fit(chains; param_names = param_names, kwargs...)
+                    param_names = nothing, circular = nothing, kwargs...)
+    base = assess_fit(chains; param_names = param_names, circular = circular,
+                      kwargs...)
     names_to_check = _resolve_param_names(chains, param_names)
     mapcheck = _check_map_consistency(map_point, chains, names_to_check;
-                                      nsigma = nsigma)
+                                      nsigma = nsigma, circular = circular)
 
     checks = vcat(base.checks, mapcheck)
     overall = _worst(c.status for c in checks)
@@ -234,6 +267,22 @@ end
 _to_sym(x::Symbol) = x
 _to_sym(x::AbstractString) = Symbol(x)
 
+# `active` (param ⇒ Bool mask over the flattened draws, in `vec(Array(chains[p]))`
+# order) as Dict{Symbol,BitVector}. A mask that does not match the chain length
+# is a caller bug: silently ignoring it would assess junk as if it were draws.
+function _active_masks(chains::MCMCChains.Chains, active)
+    out = Dict{Symbol, BitVector}()
+    active === nothing && return out
+    n = size(chains, 1) * size(chains, 3)
+    for (k, v) in active
+        length(v) == n || throw(ArgumentError(
+            "assess_fit: active mask for $(k) has $(length(v)) entries, " *
+            "the chain has $n draws"))
+        out[_to_sym(k)] = BitVector(v)
+    end
+    return out
+end
+
 function _resolve_param_names(chains::MCMCChains.Chains, param_names)
     allnames = names(chains, :parameters)
     if param_names === nothing
@@ -250,32 +299,47 @@ end
 
 function _check_convergence(chains, names_to_check;
                             ess_min::Int, rhat_max::Float64,
-                            ensemble::Bool)
+                            ensemble::Bool,
+                            active::Dict{Symbol, BitVector} = Dict{Symbol, BitVector}())
     if isempty(names_to_check)
         return FitHealthCheck(:convergence, :warn,
             "no fitted parameters to assess for convergence")
     end
 
-    # Subset to the parameters of interest.
-    sub = chains[:, names_to_check, :]
-
-    # Ensemble-aware reshaping: a single ensemble of correlated walkers
-    # is not N independent chains, so treating walkers as chains gives a
-    # misleadingly low R-hat. Instead split each walker's own trace in
-    # half and stack the halves as the "chains" axis (rank-split-R-hat
-    # applied within-walker). With multiple genuine chains this is still
-    # valid and only sharpens the diagnostic.
-    diag_chains = ensemble ? _ensemble_split(sub) : sub
+    # Masked (trans-dim) parameters are assessed one at a time on their active
+    # draws, in draw order, split in half; the rest together as before.
+    plain  = [p for p in names_to_check if !haskey(active, p)]
+    masked = [p for p in names_to_check if haskey(active, p)]
 
     local ess_col, rhat_col, pnames
     try
-        tbl = MCMCChains.ess_rhat(diag_chains; kind = :rank)
-        # ChainDataFrame indexing returns a scalar when there is a single
-        # parameter; coerce every column to a Vector so the loop below is
-        # uniform.
-        pnames = _asvec(tbl[:, :parameters])
-        ess_col = _asvec(tbl[:, :ess])
-        rhat_col = _asvec(tbl[:, :rhat])
+        pnames, ess_col, rhat_col = Any[], Any[], Any[]
+        if !isempty(plain)
+            # Ensemble-aware reshaping: a single ensemble of correlated walkers
+            # is not N independent chains, so treating walkers as chains gives a
+            # misleadingly low R-hat. Instead split each walker's own trace in
+            # half and stack the halves as the "chains" axis (rank-split-R-hat
+            # applied within-walker). With multiple genuine chains this is still
+            # valid and only sharpens the diagnostic.
+            sub = chains[:, plain, :]
+            diag_chains = ensemble ? _ensemble_split(sub) : sub
+            tbl = MCMCChains.ess_rhat(diag_chains; kind = :rank)
+            # ChainDataFrame indexing returns a scalar when there is a single
+            # parameter; coerce every column to a Vector so the loop below is
+            # uniform.
+            append!(pnames, _asvec(tbl[:, :parameters]))
+            append!(ess_col, _asvec(tbl[:, :ess]))
+            append!(rhat_col, _asvec(tbl[:, :rhat]))
+        end
+        for p in masked
+            v = vec(Array(chains[p]))[active[p]]
+            length(v) >= 4 || continue
+            one = MCMCChains.Chains(reshape(v, :, 1, 1), [p])
+            tbl = MCMCChains.ess_rhat(_ensemble_split(one); kind = :rank)
+            push!(pnames, p)
+            push!(ess_col, only(_asvec(tbl[:, :ess])))
+            push!(rhat_col, only(_asvec(tbl[:, :rhat])))
+        end
     catch err
         return FitHealthCheck(:convergence, :warn,
             "could not compute ESS / R-hat ($(typeof(err))); " *
@@ -362,7 +426,8 @@ end
 # medians scatter far more than any single chain's width, and the ratio
 # blows up. We flag the largest such ratio.
 
-function _check_multimodality(chains, names_to_check; mode_ratio_max::Float64)
+function _check_multimodality(chains, names_to_check; mode_ratio_max::Float64,
+                              active::Dict{Symbol, BitVector} = Dict{Symbol, BitVector}())
     nchains = length(MCMCChains.chains(chains))
     if nchains < 2
         return FitHealthCheck(:multimodality, :ok,
@@ -379,8 +444,14 @@ function _check_multimodality(chains, names_to_check; mode_ratio_max::Float64)
     for p in names_to_check
         mat = Array(chains[p])          # (n_iter, n_chain)
         size(mat, 2) < 2 && continue
-        chain_medians = [median(@view mat[:, k]) for k in 1:size(mat, 2)]
-        within_stds = [std(@view mat[:, k]) for k in 1:size(mat, 2)]
+        # Each chain's own active draws (all of them for an unmasked param).
+        cols = haskey(active, p) ?
+            [mat[reshape(active[p], size(mat))[:, k], k] for k in 1:size(mat, 2)] :
+            [mat[:, k] for k in 1:size(mat, 2)]
+        cols = filter(c -> length(c) >= 2, cols)
+        length(cols) < 2 && continue
+        chain_medians = [median(c) for c in cols]
+        within_stds = [std(c) for c in cols]
         between = std(chain_medians)             # spread of mode centres
         within = mean(within_stds)               # typical chain width
 
@@ -424,9 +495,29 @@ end
 # posterior median sits within `edge_eps` (fraction of the bound span)
 # of a finite bound, OR if more than `edge_mass_frac` of its draws are
 # within that margin of a bound.
+#
+# "Span" is on the scale the prior is flat on (`log_scale`). Measured linearly,
+# 1% of the default LogUniform(0.1, 3000) period prior is 30 d, and a clean
+# posterior at P = 12.3 d was reported as "railed at lower bound 0.1".
+#
+# Full-circle angles (`circular`) are NOT exempt, they are measured in the chart
+# the engine sampled in: `prior_bounds` carries that window (taken before
+# recenter_circular! moved it for reporting) and the draws are relabelled into
+# it first. A seam is not an edge of the support, but an engine that cannot
+# cross one truncates the posterior there just as surely. Measured on a
+# posterior centred on Mo = 0: NUTS (logit chart) returned only the sliver
+# below 2π and nested sampling (unit cube) only the part above 0 -- both
+# honestly flagged by this check before the seam work, and both would have
+# passed silently had circular params simply been exempted. An engine that moved
+# its seam to the emptiest arc shows no pile-up there and passes.
+
+_sym_set(::Nothing) = Set{Symbol}()
+_sym_set(xs) = Set{Symbol}(_to_sym(x) for x in xs)
 
 function _check_prior_rail(chains, names_to_check, prior_bounds;
-                           edge_eps::Float64, edge_mass_frac::Float64)
+                           edge_eps::Float64, edge_mass_frac::Float64,
+                           circular = nothing, log_scale = nothing,
+                           active::Dict{Symbol, BitVector} = Dict{Symbol, BitVector}())
     if prior_bounds === nothing
         return FitHealthCheck(:prior_rail, :ok,
             "no prior_bounds given — rail check skipped")
@@ -438,22 +529,36 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
         lo, hi = float(v[1]), float(v[2])
         bounds_sym[_to_sym(k)] = (lo, hi)
     end
+    shifts = Dict{Symbol, Float64}()
+    log_scale === nothing || for (k, v) in log_scale
+        v === nothing || (shifts[_to_sym(k)] = float(v))
+    end
 
     offenders = Pair{String, Float64}[]   # param => fraction at edge (or NaN for median rail)
     rail_msgs = String[]
     present = Set(names(chains, :parameters))
+    circ = _sym_set(circular)
+    seam_msgs = String[]
 
     for p in names_to_check
         haskey(bounds_sym, p) || continue
         p in present || continue
-        lo, hi = bounds_sym[p]
-        (isfinite(lo) && isfinite(hi) && hi > lo) || continue
-        span = hi - lo
-        margin = edge_eps * span
+        lo0, hi0 = bounds_sym[p]
+        (isfinite(lo0) && isfinite(hi0) && hi0 > lo0) || continue
 
         samp = vec(Array(chains[p]))
+        haskey(active, p) && (samp = samp[active[p]])
         isempty(samp) && continue
-        med = median(samp)
+        is_circ = p in circ
+        is_circ && (samp = [circular_relabel(x, lo0, hi0) for x in samp])
+        med0 = median(samp)
+        # Measure on the scale the prior is flat on (see `log_scale_shift`).
+        s = is_circ ? nothing : get(shifts, p, nothing)
+        (s === nothing || lo0 + s > 0) || (s = nothing)
+        lo, hi, med = s === nothing ? (lo0, hi0, med0) :
+                      (log(lo0 + s), log(hi0 + s), log(med0 + s))
+        s === nothing || (samp = [log(max(x + s, lo0 + s)) for x in samp])
+        margin = edge_eps * (hi - lo)
         n = length(samp)
         n_lo = count(x -> (x - lo) <= margin, samp)
         n_hi = count(x -> (hi - x) <= margin, samp)
@@ -463,19 +568,29 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
         med_rail_lo = (med - lo) <= margin
         med_rail_hi = (hi - med) <= margin
 
-        if med_rail_lo || med_rail_hi
+        if is_circ && (med_rail_lo || med_rail_hi ||
+                       frac_lo > edge_mass_frac || frac_hi > edge_mass_frac)
+            f = max(frac_lo, frac_hi)
+            push!(seam_msgs,
+                  "$(p): $(round(100f, digits=1))% of draws within " *
+                  "$(round(100edge_eps, digits=1))% of the seam of the window " *
+                  "the sampler used [$(round(lo0, sigdigits=4)), " *
+                  "$(round(hi0, sigdigits=4))]")
+            push!(offenders, string(p) => f)
+        elseif med_rail_lo || med_rail_hi
             which = med_rail_lo ? "lower" : "upper"
             push!(rail_msgs,
                   "$(p): median railed at $(which) bound " *
-                  "(median $(round(med, sigdigits=4)), bound " *
-                  "$(round(med_rail_lo ? lo : hi, sigdigits=4)))")
+                  "(median $(round(med0, sigdigits=4)), bound " *
+                  "$(round(med_rail_lo ? lo0 : hi0, sigdigits=4)))")
             push!(offenders, string(p) => (med_rail_lo ? frac_lo : frac_hi))
         elseif frac_lo > edge_mass_frac || frac_hi > edge_mass_frac
             f = max(frac_lo, frac_hi)
             which = frac_lo >= frac_hi ? "lower" : "upper"
             push!(rail_msgs,
                   "$(p): $(round(100f, digits=1))% of draws within " *
-                  "$(round(100edge_eps, digits=1))% of $(which) bound")
+                  "$(round(100edge_eps, digits=1))% of $(which) bound" *
+                  (s === nothing ? "" : " (in log space)"))
             push!(offenders, string(p) => f)
         end
     end
@@ -484,7 +599,16 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
         return FitHealthCheck(:prior_rail, :ok,
             "no parameter railed against a prior bound")
     else
-        msg = "prior-edge rail: " * join(rail_msgs, "; ")
+        parts = String[]
+        isempty(rail_msgs) || push!(parts, "prior-edge rail: " * join(rail_msgs, "; "))
+        isempty(seam_msgs) || push!(parts,
+            "full-circle angle cut by its seam: " * join(seam_msgs, "; ") *
+            " — 0 ≡ 2π is not an edge, but this engine could not carry the " *
+            "angle across it, so the draws on the far side are missing. Use an " *
+            "engine that moves the seam (pt_emcee, pt_whitening, " *
+            "transdim_pt_emcee, pt) or write the prior window so the posterior " *
+            "is interior (e.g. U(-π, π) for an angle near 0)")
+        msg = join(parts, "; ")
         return FitHealthCheck(:prior_rail, :fail, msg,
                               sort(offenders; by = x -> -x[2]))
     end
@@ -543,7 +667,8 @@ function _map_pairs(m::AbstractVector{<:Real}, names_to_check)
     return [(names_to_check[i], float(m[i])) for i in eachindex(m)]
 end
 
-function _check_map_consistency(map_point, chains, names_to_check; nsigma::Float64)
+function _check_map_consistency(map_point, chains, names_to_check; nsigma::Float64,
+                                circular = nothing)
     # MAPResult support without a hard type dependency in this file.
     pairs = if map_point isa Dict || map_point isa AbstractVector{<:Real}
         _map_pairs(map_point, names_to_check)
@@ -557,6 +682,7 @@ function _check_map_consistency(map_point, chains, names_to_check; nsigma::Float
     end
 
     present = Set(names(chains, :parameters))
+    circ = _sym_set(circular)
     offenders = Pair{String, Float64}[]
     worst_z = 0.0
     worst_name = ""
@@ -573,7 +699,11 @@ function _check_map_consistency(map_point, chains, names_to_check; nsigma::Float
         q16 = quantile(samp, 0.16)
         q84 = quantile(samp, 0.84)
         rsig = (q84 - q16) / 2
-        z = rsig > 0 ? abs(val - med) / rsig : (val == med ? 0.0 : Inf)
+        # A full-circle angle: the MAP may sit in another representative of the
+        # same angle (6.26 against a chain charted around 0.0), and the linear
+        # distance would call that a 100σ miss. Shortest arc instead.
+        d = sym in circ ? rem2pi(val - med, RoundNearest) : val - med
+        z = rsig > 0 ? abs(d) / rsig : (d == 0 ? 0.0 : Inf)
         if z > worst_z
             worst_z = z
             worst_name = string(sym)

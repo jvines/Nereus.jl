@@ -135,14 +135,19 @@ out via the [Evidence](evidence.md) stack.
 Parallel-tempered affine-invariant ensemble MCMC ([Vousden+ 2016](https://ui.adsabs.harvard.edu/abs/2016MNRAS.455.1919V/abstract)).
 Multiple Goodman-Weare stretch walkers per temperature. **Fixed-dim
 only.** The production recoverer for fixed-N\_p multimodal / weak-signal
-targets. Walkers live in **bounded** space.
+targets. Walkers live in **bounded** space, on the scale each prior is flat
+on: a `LogUniformPrior` parameter moves in `log x`, a `ModJeffreysPrior` one
+in `log(x + knee)`. Draws are reported in `x`. During burn-in, walkers stranded
+in a region whose total posterior mass is provably below e⁻¹⁰ of the mode's
+are moved onto the mode (`prune_stranded`); the recorded chain is ordinary MCMC.
 
 ```julia
 res = sample_pt_emcee(target, data;
     n_temps        = 5,
     n_walkers      = 100,              # auto-raised to ≥ 2·n_dim+2, made even
-    n_steps        = 2000,
-    n_burnin       = 1000,
+    n_steps        = 3000,
+    n_burnin       = 2000,
+    prune_stranded = true,             # burn-in only; see the docstring
     betas          = nothing,          # default: Vines+ (1/√5)^i, descending β[1]=1
     stretch_a      = 2.0,
     init           = nothing,          # bounded-space point; else init_strategy
@@ -194,14 +199,15 @@ production trans-dim recoverer (blind WASP-47 / K2-138 recovery target).
 res = sample_transdim_pt_emcee(target, data; td = td,
     inclusion_prior         = 0.5,      # Bernoulli prior P(γ_k = 1)
     moms_init_scale         = 1.0,
-    informed_birth_fraction = 0.0,      # fraction of data-informed (BLS+LS) births
+    informed_birth_fraction = 0.5,      # data-informed (BLS+LS) births; 0 misses easy planets
     target_birth_accept     = 0.234,
     n_birth_refine          = 0,        # per-slot refinement steps after birth
     n_birth_tries           = 1,        # multi-try births per move
-    n_temps                 = 5,
+    n_temps                 = 16,
     n_walkers               = 100,      # auto-raised to ≥ 2·n_dim+2
-    n_steps                 = 2000,
-    n_burnin                = 1000,
+    n_steps                 = 3000,
+    n_burnin                = 2000,
+    prune_stranded          = true,     # burn-in only; moves the model too
     betas                   = nothing,
     beta_min                = 1e-4,     # geometric ladder β_i = beta_min^(i/(N-1))
     stretch_a               = 2.0,

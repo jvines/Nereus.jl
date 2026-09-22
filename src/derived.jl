@@ -473,6 +473,13 @@ struct DerivedParams
     values::Dict{String, Vector{Float64}}
 end
 
+# Angle draws in radians -> degrees, relabelled into the one-period window whose
+# seam sits in the emptiest arc of the `active` draws, median in
+# [lo_ref, lo_ref + 360). See `circular_contiguous` (src/circular.jl).
+_contiguous_deg(x_rad, active, lo_ref = -180.0) =
+    circular_contiguous(rad2deg.(x_rad); period = 360.0, lo_ref = lo_ref,
+                        mask = active)
+
 """
     compute_derived(chains, params; M_s=nothing, R_s=nothing,
                      T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0)
@@ -482,6 +489,13 @@ Returns a vector of `DerivedParams`, one per planet.
 
 Stellar parameters (M_s, R_s, T_eff) can be scalars or distributions
 (vectors of samples matching the chain length).
+
+The angles `omega_deg` and `lambda_deg` come back as ONE contiguous interval
+per planet (seam in the emptiest arc), so they may run past the ends of their
+window; `lambda_abs_deg` is folded into [0, 180] and never does. The median
+sits in [-180, 180), except for an angle that is itself a sampled circular
+parameter (`w_k` under `:ew`, `lambda_k`): that one keeps the prior window the
+user wrote, as the fitted table does.
 """
 function compute_derived(chains, params::Params;
                           M_s = nothing, R_s = nothing,
@@ -525,6 +539,14 @@ function compute_derived(chains, params::Params;
         ld_u["u1_" * label] = first.(uu)
         ld_u["u2_" * label] = last.(uu)
     end
+
+    # Where a derived angle's degrees window starts. One that IS a sampled
+    # circular parameter takes the user's own window, like the fitted table:
+    # U(0, 2π) reads ~350°, not ~-10°. An atan-derived ω (sesinw/secosw,
+    # esinw/ecosw) has no window of its own and is reported in [-180, 180).
+    circ = circular_names(params)
+    _deg_lo_ref(name) = name in circ && Symbol(name) in chain_param_syms ?
+                        rad2deg(config.priors[name].lo) : -180.0
 
     kplanet = config.max_kplanet
     for k in 1:kplanet
@@ -585,6 +607,11 @@ function compute_derived(chains, params::Params;
             P = sqrt.(a_au_s .^ 3 ./ max.(mpri_s .+ msec_s, 1e-6)) .* 365.25
         end
 
+        # Draws where planet k exists. Only these vote on where the seam of a
+        # derived angle goes: an inactive slot's ω/λ is stale junk.
+        pa_sym = Symbol("planet_active_$k")
+        active = pa_sym in chain_syms ? vec(Array(chains[pa_sym])) .> 0.5 : nothing
+
         # Eccentricity + omega (derived from parametrization)
         # Handle frozen eccentricity params (not in chains)
         if parametrization.ew === :sesinw
@@ -614,7 +641,14 @@ function compute_derived(chains, params::Params;
                 fill(get_param(Theta{Float64}(params), "w_k$k"), n_samples)
         end
         derived["ecc"] = e
-        derived["omega_deg"] = rad2deg.(w)
+        # atan puts ω in (-180, 180], so an ω near ±180 came back as two lobes
+        # at opposite ends of the range -- the split the sampled Mo had at 0/2π
+        # -- and its median and quantiles were meaningless. Under :ew the chain
+        # ω may also sit in a window the samplers moved (src/circular.jl).
+        # Relabel into one interval at the source, so the science tables, the
+        # summary and reporting all read the same contiguous draws. `w` itself
+        # stays in radians for the transit durations below (sin ω is periodic).
+        derived["omega_deg"] = _contiguous_deg(w, active, _deg_lo_ref("w_k$k"))
 
         # Semi-amplitude (RV planets). Under :a_driven / :M_sec_driven the RV
         # amplitude is DERIVED from the sampled mass, so there is no K_k slot —
@@ -720,10 +754,15 @@ function compute_derived(chains, params::Params;
             lam_sym = Symbol("lambda_k$k")
             if lam_sym in chain_param_syms
                 lam = vec(Array(chains[lam_sym]))
-                derived["lambda_deg"] = rad2deg.(lam)
+                # One interval, like omega_deg: a retrograde λ ≈ ±180 was split.
+                derived["lambda_deg"] = _contiguous_deg(lam, active,
+                                                        _deg_lo_ref("lambda_k$k"))
                 # |lambda| > 90 deg is a retrograde orbit; report the folded
                 # angle too since that is what population studies compare.
-                derived["lambda_abs_deg"] = abs.(rad2deg.(lam))
+                # Folded, not periodic, so never made contiguous: it is taken
+                # from λ wrapped into [-π, π], because the chain value may sit
+                # in a moved window where a bare abs() reads 200° for -160°.
+                derived["lambda_abs_deg"] = abs.(rad2deg.(rem2pi.(lam, RoundNearest)))
                 if :i_star in chain_param_syms
                     ist = vec(Array(chains[:i_star]))
                     n_psi = min(length(lam), length(ist), length(inc_d))

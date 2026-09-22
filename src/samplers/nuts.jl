@@ -211,6 +211,21 @@ function _warmstart_points(target::NereusTarget, n_chains::Int,
                              init_strategy = :prior, seed = seed,
                              show_progress = false)
         ch = res.chains
+        # Re-chart every full-circle angle from the WHOLE post-burn-in
+        # pre-search (src/circular.jl) before NUTS sees the target. NUTS
+        # samples in the logit chart, where the 0/2π seam is a wall at y = ±∞
+        # it cannot cross. Measured on a posterior centred on Mo = 0: without
+        # a moved chart all four chains came back confined to the sliver below
+        # 2π, 358° ± 2° against the true 7° ± 5°; with a converged pre-search
+        # (warm_steps = 3000) the seam moved off the posterior and NUTS matched
+        # pt_emcee. The chart is only as good as the pre-search: the default
+        # 400 steps had not located Mo there, and a seam cut from unconverged
+        # draws can still land in the posterior -- fit_health's rail check,
+        # measured in the window NUTS sampled in, reports that case. Moving
+        # the chart before NUTS starts (and before its step size and metric
+        # adapt) is exact, and the init points below come from the relabelled
+        # draws.
+        recenter_circular!(ch, target.params; transforms = (target.transform,))
         pnames = String.(names(ch, :parameters))
         # `Array(ch)` collapses the walker axis into the iteration axis,
         # giving a flat (n_draw × n_param) matrix — exactly the pooled
@@ -329,9 +344,13 @@ function sample_nuts(
     # Per-chain bounded-space init points. `init` (if given) pins every
     # chain at the same point; otherwise warm-start from a short pt_emcee
     # pre-search (the disjoint-mode fix), or fall back to independent
-    # prior draws when warm_start is off.
+    # prior draws when warm_start is off. A caller's `init` is relabelled
+    # into the layout's circular windows first (src/circular.jl): a target
+    # reused after a fit carries moved windows, and an angle written in the
+    # user's window would otherwise reach transform_forward outside its own,
+    # which clamps it onto the wall.
     init_points = if init !== nothing
-        [copy(init) for _ in 1:n_chains]
+        [circular_relabel_point!(copy(init), target.params) for _ in 1:n_chains]
     elseif warm_start
         _warmstart_points(target, n_chains, rng;
                           n_temps = warm_temps, n_walkers = warm_walkers,

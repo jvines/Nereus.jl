@@ -25,6 +25,11 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "ecc" => ("", false),         "e" => ("", false),
     "w" => ("deg", true),         "omega" => ("deg", true),
     "Mo" => ("deg", true),        "M0" => ("deg", true),
+    # Ω and λ are sampled in radians like ω and Mo, and were published as raw
+    # radians. Only the exact bases match (sci_param_unit takes everything
+    # before `_k<n>` as the base), so `gp_act_lambda_e`, `ind_floor_lambda_p`
+    # and the ARMA `ma_omega_<j>` coefficients never pick these up.
+    "Omega" => ("deg", true),     "lambda" => ("deg", true),
     "Tp" => ("BJD", false),       "Tc" => ("BJD", false),
     "b" => ("", false),           "rr" => ("", false),
     "r1" => ("", false),          "r2" => ("", false),
@@ -112,7 +117,16 @@ function sci_param_entry(chains, params::Params, name::AbstractString)
     samp = mask === nothing ? v : v[mask]
     (isempty(samp) || occ < 0.01) && return nothing
     unit, is_ang = sci_param_unit(name, params)
-    is_ang && (samp = rad2deg.(mod2pi.(samp)))   # report angles in [0,360) deg
+    # rad2deg ONLY. This used to be rad2deg(mod2pi(x)), and mod2pi re-splits a
+    # contiguous posterior at 0/360: it already broke ω ≈ 0 for w_k under :ew,
+    # whose prior is (-π, π), and it would undo the seam re-chart of
+    # src/circular.jl for any angle whose median sits near 0. A circular
+    # parameter arrives contiguous with its median inside the user's window
+    # (recenter_circular! ran before anything reads the chains). Any other
+    # angle must not be wrapped at all: its walls are real (a non-uniform or
+    # multi-period prior) or the likelihood is not periodic in it (Mo under
+    # TTVs), so its values are already the right ones.
+    is_ang && (samp = rad2deg.(samp))
     return (stats = ParamStats(samp), unit = unit, occupancy = occ,
             n_used = length(samp))
 end
@@ -134,8 +148,15 @@ end
 # A param "rails" against its prior when its 3σ CI piles up at a bound (within 1%
 # of the prior span) — i.e. the prior, not the data, sets that edge → the value is
 # prior-dominated and must not be read as a measurement.
-function _railed(ci3, lo, hi)
+#
+# `shift` (see `log_scale_shift`) puts the span on the scale the prior is flat on.
+# Measured linearly, every period under 30 d on LogUniform(0.1, 3000) railed.
+function _railed(ci3, lo, hi, shift = nothing)
     (isfinite(lo) && isfinite(hi) && hi > lo) || return (false, "")
+    if shift !== nothing && lo + shift > 0
+        g(x) = log(max(x, lo) + shift)
+        ci3, lo, hi = (g(ci3[1]), g(ci3[2])), g(lo), g(hi)
+    end
     tol = 0.01 * (hi - lo)
     (ci3[1] - lo) < tol && return (true, "lower")
     (hi - ci3[2]) < tol && return (true, "upper")
@@ -168,7 +189,8 @@ function science_fitted(chains, params::Params)
     end
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
-    for (i, name) in enumerate(params.layout.unfrozen_names)
+    circ = circular_names(params)
+    for name in params.layout.unfrozen_names
         Symbol(name) in allnames || continue
         # skip planet params for planets beyond the winning count
         pidx = _param_planet_index(name, max_kp)
@@ -176,11 +198,21 @@ function science_fitted(chains, params::Params)
         e = sci_param_entry(chains, params, name)
         e === nothing && continue
         d = sci_entry_dict(e)
-        # flag params whose 3σ CI rails against a (non-angle) prior bound
+        # Flag params whose 3σ CI rails against a prior bound. A full-circle
+        # angle has no bound to rail against -- its window is a chart whose seam
+        # was moved off the posterior -- so it is never flagged. Every other
+        # angle keeps real walls (an arc, a non-uniform prior, Mo under TTVs) and
+        # is checked against the user's prior in the degrees its CI is reported
+        # in. This used to skip every angle, which was harmless while Ω and λ
+        # were not registered as angles; now that they are, a narrow-arc λ prior
+        # would have silently lost its flag.
         _, is_ang = sci_param_unit(name, params)
-        if !is_ang
-            lo, hi = bounds(params.layout.unfrozen_priors[i])
-            rail, side = _railed(d["ci3"], lo, hi)
+        if !(name in circ)
+            ps = params.config.priors[name]
+            lo, hi = bounds(ps)
+            is_ang && ((lo, hi) = (rad2deg(lo), rad2deg(hi)))
+            rail, side = _railed(d["ci3"], lo, hi,
+                                 is_ang ? nothing : log_scale_shift(ps))
             d["railed"] = rail
             rail && (d["railed_bound"] = side)
         end
@@ -556,15 +588,24 @@ function partition_kv(line::AbstractString)
     return (strip(line[1:i-1]), ":", strip(line[i+1:end]))
 end
 
+# The priors AS THE USER WROTE THEM, from `config.priors`. The layout is what the
+# samplers evaluate, and for a full-circle angle its window may have been moved
+# so the seam sits off the posterior (src/circular.jl): the same density over a
+# different chart. Reporting that would hand the user bounds they never wrote --
+# Mo_k1 on [-3.1, 3.2] for a posterior at 0.05 under their U(0, 2π). Circular
+# parameters are marked, since their bounds are a seam and a value at one of
+# them is not railed.
 function _prior_block(params::Params)
     out = Dict{String, Any}()
-    layout = params.layout
-    for (i, name) in enumerate(layout.unfrozen_names)
-        pr = layout.unfrozen_priors[i]
+    circ = circular_names(params)
+    for name in params.layout.unfrozen_names
+        pr = params.config.priors[name]
         lo, hi = bounds(pr)
-        out[name] = Dict{String, Any}(
+        d = Dict{String, Any}(
             "type" => string(nameof(typeof(pr))),
             "lower" => lo, "upper" => hi)
+        name in circ && (d["circular"] = true)
+        out[name] = d
     end
     return out
 end

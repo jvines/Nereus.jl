@@ -750,9 +750,12 @@ function _param_planet_index(name::String, max_kp::Int)
             # Ensure it's a planet param, not a noise param that happens to
             # have _k in its name
             base = name[1:end-length(suffix)]
+            # Omega and lambda belong to planet k as much as Mo does: left out,
+            # an inactive trans-dim slot's drifting value was reported with the
+            # active draws and voted on where recenter_circular! puts the seam.
             if base in ("P", "K", "sesinw", "secosw", "esinw", "ecosw",
                         "ecc", "w", "Mo", "Tp", "Tc", "b", "rr", "r1", "r2",
-                        "a")
+                        "a", "Omega", "lambda")
                 return k
             end
         end
@@ -793,6 +796,51 @@ function _noise_active_in_mask(chains, noise_cols, mask::BitVector)
     return result
 end
 
+# Component-ordered copies of the planet-slot columns (see `convergence_report`):
+# name ⇒ (values, active mask), with `planet_active_k` ⇒ (Nₚ ≥ k, nothing).
+# Empty unless the chain is trans-dim over ≥ 2 EXCHANGEABLE slots: same mode and
+# the same prior on every slot parameter. Per-slot priors (a common way to break
+# label switching, e.g. P_k1 in 1-10 d, P_k2 in 10-100 d) make the slot labels
+# meaningful, and reordering by period would then be wrong.
+function _canonical_slot_columns(chains, allp, model_params, nflat::Int)
+    out = Dict{Symbol, Tuple{Vector{Float64}, Union{Nothing, BitVector}}}()
+    model_params === nothing && return out
+    modes = model_params.config.planet_modes
+    K = length(modes)
+    (K >= 2 && allequal(modes)) || return out
+    acts = [Symbol("planet_active_$k") for k in 1:K]
+    all(in(allp), acts) || return out
+    # Base names shared by every slot: "P" from "P_k1", …
+    bases = [String(m.captures[1]) for m in
+             (match(r"^(.*)_k1$", String(p)) for p in allp) if m !== nothing]
+    filter!(b -> all(k -> Symbol("$(b)_k$k") in allp, 1:K), bases)
+    pri = model_params.config.priors
+    for b in bases, k in 2:K
+        (haskey(pri, "$(b)_k1") && haskey(pri, "$(b)_k$k")) || continue
+        pri["$(b)_k1"] == pri["$(b)_k$k"] || return out
+    end
+    key = "P" in bases ? "P" : (isempty(bases) ? nothing : first(bases))
+    key === nothing && return out
+    A = hcat((vec(Array(chains[a])) .> 0.5 for a in acts)...)          # nflat × K
+    X = Dict(b => hcat((vec(Array(chains[Symbol("$(b)_k$k")])) for k in 1:K)...)
+             for b in bases)
+    Y = Dict(b => copy(X[b]) for b in bases)
+    n_on = vec(sum(A; dims = 2))
+    @inbounds for i in 1:nflat
+        on = sort!(findall(view(A, i, :)); by = k -> X[key][i, k])
+        for (j, k) in enumerate(on), b in bases
+            Y[b][i, j] = X[b][i, k]
+        end
+    end
+    for b in bases, k in 1:K
+        out[Symbol("$(b)_k$k")] = (Y[b][:, k], BitVector(n_on .>= k))
+    end
+    for k in 1:K
+        out[acts[k]] = (Float64.(n_on .>= k), nothing)
+    end
+    return out
+end
+
 """
     convergence_report(chains, n_walkers; io=stdout, params=nothing,
                        rhat_max=1.1, ess_min=400) -> NamedTuple
@@ -830,6 +878,18 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
     end
     # per-walker flat indices into the length-`nflat` vec, layout-aware.
     _widx(w) = walker_fast ? (w:n_walkers:nflat) : (((w - 1) * nsteps + 1):(w * nsteps))
+
+    # Label switching is not non-convergence. With exchangeable planet slots
+    # (every slot the same mode) the same planet can sit in slot 1 in one walker
+    # and slot 2 in another, and a walker keeps its labelling -- births sort by
+    # period, deaths do not compact. Per-slot R̂ then reads the slot assignment as
+    # disjoint modes: on an easy one-planet RV target with max 2 slots the report
+    # said FAIL (slot-2 R̂ 2.8, planet_active R̂ 1.10) on a posterior with the
+    # planet in every draw. So assess components, not slots: in each draw the
+    # active planets are relabelled into the lowest slots in period order, and
+    # slot k is "active" when at least k planets are. Values only; the sampler's
+    # labelling is untouched.
+    canon = _canonical_slot_columns(chains, allp, model_params, nflat)
 
     # Active mask for a param: trans-dim component params (noise-model / planet)
     # are only DEFINED when their component is active — when inactive their slot
@@ -882,8 +942,7 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
     keep=Symbol[]; rh=Float64[]; es=Float64[]; fr=Float64[]; gate_ess=Bool[]
     n_fixed=0; n_inactive=0
     for p in pnames
-        v = vec(Array(chains[p]))
-        mask = _active_mask(p)
+        v, mask = haskey(canon, p) ? canon[p] : (vec(Array(chains[p])), _active_mask(p))
         if mask === nothing
             (maximum(v) - minimum(v) < 1e-12) && (n_fixed += 1; continue)  # frozen
             r, e, _ = _cond_rhat_ess(v, nothing)

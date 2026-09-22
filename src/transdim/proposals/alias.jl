@@ -133,6 +133,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     # Match slots by position (both blocks have same param ordering)
     n_match = min(length(our_slots), length(donor_slots))
     jitter_scale = 0.01
+    circ = circular_indices(theta.params)
 
     for i in 1:n_match
         donor_val = Float64(donor.values[donor_slots[i]])
@@ -141,7 +142,13 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
         if uf_pos !== nothing
             lo, hi = bounds(layout.unfrozen_priors[uf_pos])
             jittered = donor_val + jitter_scale * (hi - lo) * randn(rng)
-            jittered = clamp(jittered, lo, hi)
+            # A circular angle wraps instead: the clamp piles every jitter that
+            # crosses the seam onto the window edge -- a point mass, and a phase
+            # or node the donor never had. Wrapped, the jitter is a wrapped
+            # Gaussian, a function of circular distance only, so it is symmetric
+            # whichever window slot k (or the donor's slot) is charted in.
+            jittered = uf_pos in circ ? circular_relabel(jittered, lo, hi) :
+                                        clamp(jittered, lo, hi)
             new_values[our_slots[i]] = convert(T, jittered)
         else
             new_values[our_slots[i]] = convert(T, donor_val)
@@ -169,6 +176,8 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
 
     # Symmetric proposal → log_q_ratio is just combinatorial
     # (+log(G): forward slot choice uniform over mode-group slots).
+    # The symmetry is the jitter kernel's: exact for circular slots (wrapped
+    # above), broken only where a clamp at a real wall bit.
     p_birth, _ = _birth_death_probs(n_active, max_k)
     _, p_death_new = _birth_death_probs(n_active + 1, max_k)
     log_q_ratio = log(p_death_new) - log(n_active + 1) - log(p_birth) + log(G)

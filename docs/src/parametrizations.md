@@ -162,7 +162,7 @@ transiently propose `s²+c² > 1`.
 The single time slot (`t`) is named and decoded per this choice
 (`src/model.jl:729`; conversions `src/orbit.jl:160`–`208`):
 
-- `:Mo` (default in the Julia API) — sample mean anomaly `M₀` at the
+- `:Mo` (the default, in the Julia API and run_job) — sample mean anomaly `M₀` at the
   reference epoch `t_ref` (= `data.t_ref`, the data median). Best
   conditioning for poorly-constrained periods (mid-baseline anchor
   reduces P–Tp covariance). `mo_to_tp` (`src/orbit.jl:165`).
@@ -173,6 +173,16 @@ The single time slot (`t`) is named and decoded per this choice
   `Tc` directly, and `Tp` becomes derived via `tc_to_tp`
   (`src/orbit.jl:184`, transit at `f = π/2 − ω`). Required for the
   `ttv_oc` plot (it reads `Tc_kN` by name).
+
+!!! warning "Keep a Tp or Tc prior within one period"
+    The likelihood repeats every period, so a `Tp`/`Tc` prior wider than
+    `P` holds several identical copies of the orbit, and the default one
+    spans the whole data baseline. Ensemble samplers cannot move between
+    copies: on a 12.3 d RV target with a 929 d window the walkers spread
+    over 46 copies and R-hat stayed at 1.9–5 with every walker in the mode.
+    `Params` warns when a window is wider than the shortest period the `P`
+    prior allows. Use `Mo`, or a prior no wider than one period around a
+    known epoch.
 
 ### `geom::Symbol` — transit geometry parametrisation
 
@@ -273,7 +283,7 @@ maps only these keys, with these accepted string values:
 | run_job key | accepted strings | maps to | default |
 |---|---|---|---|
 | `mass` | `K_driven`, `M_sec_driven`, `a_driven` | `:K_driven` / `:M_sec_driven` / `:a_driven` | `K_driven` |
-| `time` | `Tp`, `Tc`, `Mo` | `:Tp` / `:Tc` / `:Mo` | **`Tp`** |
+| `time` | `Tp`, `Tc`, `Mo` | `:Tp` / `:Tc` / `:Mo` | `Mo` |
 | `ew` | `sesinw`, `ew` | `:sesinw` / `:ew` | `sesinw` |
 | `geom` | `b_rr` | `:b_rr` | `b_rr` |
 | `marginalize_gamma` | `true` / `false` | bool | `false` |
@@ -297,8 +307,6 @@ maps only these keys, with these accepted string values:
     - `ew = :esinw` and `geom = :r1r2` are valid in Julia but **absent
       from the run_job string maps** (`_EW_PARAM`, `_GEOM_PARAM`,
       `src/runner.jl:687`–`688`).
-    - The run_job `time` default is `Tp`, whereas the Julia
-      `ParametrizationConfig` default is `:Mo`.
     - The schema validator advertises `geom = "b_r"`
       (`src/runner.jl:191`) and the map yields `:b_r`, but
       `ParametrizationConfig` only accepts `:b_rr`/`:r1r2` — passing

@@ -98,6 +98,19 @@ function run_job(cfg::AbstractDict)
 
         # --- Save outputs ----------------------------------------------
         chains = result.chains
+        # Re-chart every full-circle angle (Mo, Ω, λ; ω under :ew) before
+        # anything reads a draw: seam into the emptiest arc of its posterior,
+        # median inside the user's window. Without it a posterior centred on
+        # 0 ≡ 2π reached chains.nc, the plots, fit_health and the science tables
+        # as two lobes at opposite ends of the window, and every median and
+        # quantile of it was garbage. In place, so `result.chains` -- which
+        # sampler_diagnostics and LOO read below -- is still this same object.
+        # The timeout path throws before this point; there are no chains to fix.
+        # The window the engine SAMPLED in is kept for fit_health: a seam the
+        # engine could not cross only shows in that chart.
+        sampled_windows = circular_windows(params)
+        chains isa MCMCChains.Chains &&
+            recenter_circular!(chains, params; transforms = (target.transform,))
         save_chains(joinpath(out_dir, "chains.nc"), chains, params; data = data)
 
         _plots_before = _png_mtimes(joinpath(out_dir, "plots"))
@@ -105,7 +118,7 @@ function run_job(cfg::AbstractDict)
         summary["plots"] = plot_paths
         # figures manifest: scan the rendered plots/ tree → logical_name → path,
         # where logical_name is the path relative to plots/ without extension
-        # (e.g. "models/RV_phasefold_P1", "transdim/occupancy",
+        # (e.g. "models/RV_phasefold_K1", "transdim/occupancy",
         # "posteriors/raw/raw_K_k1"). Nereus stays S3-agnostic; the exoautomata
         # worker uploads these and rewrites the paths.
         # Only figures THIS job wrote: re-running into an existing out_dir
@@ -125,6 +138,7 @@ function run_job(cfg::AbstractDict)
                 ispng ? (figs[key] = full) : (pdfs[key] = full)
             end
         end
+        _warn_unmatched_plot_patterns(plot_paths, figs)
 
         # --- Posterior predictive checks (default on; fail-soft) -------
         _run_ppc!(cfg, chains, params, data, out_dir, summary)
@@ -139,7 +153,7 @@ function run_job(cfg::AbstractDict)
         # Flags silently-wrong posteriors (disjoint modes, railed bounds,
         # corrupt log-post) as a logged warning + summary entry. Never
         # alters the chains or the rest of the output.
-        _run_fit_health!(cfg, chains, params, summary)
+        _run_fit_health!(cfg, chains, params, summary; sampled_windows)
 
         # --- Build summary ---------------------------------------------
         # Run health, per engine — same harvest fit_* gets.
@@ -951,9 +965,14 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     pm = [_PLANET_MODES[m] for m in modes_str]
 
     par = _get(mdl, :parametrization; default = Dict())
+    # `time` defaults to Mo, as ParametrizationConfig and fit_* always have. It
+    # was Tp here, whose default prior spans the whole baseline and so holds
+    # baseline/P copies of the orbit; the ensemble cannot mix across them (see
+    # `_warn_repeating_time_window`), and a default job on an easy 12.3 d
+    # target never converged.
     parametrization = ParametrizationConfig(
         mass = _MASS_MODE[String(_get(par, :mass; default = "K_driven"))],
-        time = _TIME_ANCHOR[String(_get(par, :time; default = "Tp"))],
+        time = _TIME_ANCHOR[String(_get(par, :time; default = "Mo"))],
         ew   = _EW_PARAM[String(_get(par, :ew; default = "sesinw"))],
         geom = _GEOM_PARAM[String(_get(par, :geom; default = "b_rr"))],
         marginalize_gamma = Bool(_get(par, :marginalize_gamma; default = false)),
@@ -1528,6 +1547,47 @@ end
 _is_fresh_png(full, before) = !haskey(before, full) ||
     (try stat(full).mtime != before[full] catch; true end)
 
+_re_escape(s) = replace(String(s), r"([.\\^$|?*+()\[\]{}])" => s"\\\1")
+
+"""
+    _glob_regex(pattern) -> Regex
+
+Compile one of the `summary["plots"]` patterns. `*` matches within a single
+path segment and never crosses `/`, so `posteriors/raw/*.png` does NOT match
+`posteriors/raw/planets/raw_a_k1.png` — which is exactly how several of these
+patterns came to name files no run has ever produced.
+"""
+_glob_regex(pattern) =
+    Regex("^" * join((_re_escape(p) for p in split(String(pattern), '*')), "[^/]*") * raw"$")
+
+"""
+    _warn_unmatched_plot_patterns(patterns, figs)
+
+Each branch of `_dispatch_plot` hand-writes the glob describing what it just
+wrote, and those strings drift from the writers they describe: `rv_phased_K*`,
+`pm_phased_*_K*` and the three `posteriors/<kind>/*` entries all advertised
+paths that matched nothing, for as long as they existed. Nothing caught it
+because `summary["figures"]` is scanned off disk and looked perfectly healthy
+next to them.
+
+So check the advertised patterns against the figures this run actually wrote,
+and say so when one matches nothing. Warn only -- a kind whose every attempt
+was caught and swallowed legitimately produces no file, and that is worth a
+line in the log but never worth failing a finished fit over.
+"""
+function _warn_unmatched_plot_patterns(patterns, figs)
+    isempty(figs) && return nothing          # nothing rendered; nothing to check
+    keys_ = collect(keys(figs))
+    for pat in patterns
+        stem = replace(String(pat), r"\.png$" => "")
+        rx = _glob_regex(stem)
+        any(k -> occursin(rx, replace(k, '\\' => '/')), keys_) && continue
+        @warn "plot pattern in `summary[\"plots\"]` matched no figure this run \
+               wrote -- it is probably stale relative to the writer" pattern = pat
+    end
+    return nothing
+end
+
 """
     _auto_plot_kinds(chains, params, data) -> Vector{String}
 
@@ -1607,6 +1667,14 @@ function _make_plots(cfg, chains, params, data, out_dir)
     generated = String[]
     pb = ProgressBar("plots"; total = length(expanded),
                       enabled = Bool(_get(out_cfg, :show_progress; default = true)))
+    # These figures are written and dropped, so tear each scene down as soon
+    # as it is on disk instead of leaving it to Makie's finalizer -- which
+    # runs `free` inside `@async` and races itself when several are in flight
+    # (see `_release_scene!`). Restored in the `finally` so an interactive
+    # session that calls a plot function directly is unaffected.
+    _prev_release = _RELEASE_SCENES[]
+    _RELEASE_SCENES[] = true
+    try
     for (i, plot_name) in enumerate(expanded)
         update!(pb; n_done = i - 1, fields = (:now => String(plot_name),))
         try
@@ -1628,6 +1696,9 @@ function _make_plots(cfg, chains, params, data, out_dir)
         catch err
             @warn "Plot `$plot_name` failed" exception = (err, catch_backtrace())
         end
+    end
+    finally
+        _RELEASE_SCENES[] = _prev_release
     end
     update!(pb; n_done = length(expanded), fields = (:now => "done",))
     finish!(pb)
@@ -1671,7 +1742,7 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
                 @warn "rv_phasefold K$k failed" exception = err
             end
         end
-        return "models/rv_phased_K*.png"
+        return "models/RV_phasefold_K*.png"
     elseif name == "pm_timeseries"
         n_phot(data) > 0 || return nothing
         plot_pm_timeseries(chains, params, data; output = out_dir, kw...)
@@ -1686,7 +1757,7 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
                 @warn "pm_phasefold K$k failed" exception = err
             end
         end
-        return "models/pm_phased_*_K*.png"
+        return "models/Transit_phasefold_K*_*.png"
     elseif name == "rv_astrom_phasefold"
         (n_rv(data) > 0 && has_astrometry(data)) || return nothing
         for k in 1:params.config.max_kplanet
@@ -1822,16 +1893,16 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         :lp in Set(names(chains, :parameters)) || return nothing
         plot_posteriors_raw(chains, params; output = out_dir,
                             save_pdf = get(kw, :save_pdf, false))
-        return "posteriors/raw/*.png"
+        return "posteriors/raw/*/*.png"
     elseif name == "posteriors_parameters"
         :lp in Set(names(chains, :parameters)) || return nothing
         plot_posteriors_parameters(chains, params; output = out_dir,
                             save_pdf = get(kw, :save_pdf, false))
-        return "posteriors/parameters/*.png"
+        return "posteriors/parameters/*/*.png"
     elseif name == "posteriors_histograms"
         plot_posteriors_histograms(chains, params; output = out_dir,
                             save_pdf = get(kw, :save_pdf, false))
-        return "posteriors/histograms/*.png"
+        return "posteriors/histograms/*/*.png"
     elseif name == "traces_grouped"
         plot_traces_grouped(chains, params; output = out_dir,
                             save_pdf = get(kw, :save_pdf, false), n_walkers = n_walkers)
@@ -2041,17 +2112,25 @@ const _ENSEMBLE_SAMPLERS = Set(("pt_emcee", "transdim_pt_emcee",
 # logs a verdict and records it in the summary. Builds the prior bounds
 # from the model layout so the prior-edge rail check is exercised. See
 # `src/diagnostics/fit_health.jl`.
-function _run_fit_health!(cfg, chains, params::Params, summary::Dict)
+function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
+                          sampled_windows = nothing)
     out_cfg = _to_dict(_get(cfg, :output; default = Dict()))
     Bool(_get(out_cfg, :fit_health; default = true)) || return
 
     try
-        # Hard prior bounds for every fitted parameter, keyed by name.
+        # Hard prior bounds for every fitted parameter, keyed by name. A
+        # full-circle angle is checked in the window the engine sampled in
+        # (`circular_windows` before recenter_circular!), not the reporting
+        # window: that is where a seam the engine could not cross shows.
         layout = params.layout
         prior_bounds = Dict{Symbol, Tuple{Float64, Float64}}()
+        log_scale = Dict{Symbol, Float64}()
         for (nm, ps) in zip(layout.unfrozen_names, layout.unfrozen_priors)
-            lo, hi = bounds(ps)
+            lo, hi = sampled_windows !== nothing && haskey(sampled_windows, nm) ?
+                     sampled_windows[nm] : bounds(ps)
             prior_bounds[Symbol(nm)] = (Float64(lo), Float64(hi))
+            s = log_scale_shift(ps)
+            s === nothing || (log_scale[Symbol(nm)] = s)
         end
 
         # `sampler` config is a block ({name, kwargs}), not a bare string — pull
@@ -2063,35 +2142,58 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict)
                   String(sampler_cfg)
         is_ensemble = sampler in _ENSEMBLE_SAMPLERS
 
-        # Drop parameters owned by a noise model that is NEVER active. In a
-        # trans-dim run an inactive slot holds stale junk, not posterior draws
-        # -- values that sit outside their own prior bounds -- so assessing
-        # them produced a guaranteed FAIL on a sound run. Measured on the HD
-        # 18599 artifact: every railed parameter reported belonged to a model
-        # with occupancy 0 (errscale_*, gp_*), one with a median of -5.09
-        # against a lower bound of 0.1, which no real draw can be.
-        # Partially-occupied models are left in: their columns do contain real
-        # draws, and masking per draw is a separate change.
-        chain_syms = Set(names(chains, :parameters))
+        # Trans-dim: a planet's or noise model's parameters are posterior draws
+        # only where that component is active; elsewhere the column holds a
+        # parked value. Every check is run on the active draws only (`active`),
+        # and a component active in under 1% of draws -- the science tables'
+        # threshold for "not meaningfully constrained" -- is not assessed.
+        # Measured: on the HD 18599 artifact every railed parameter belonged
+        # to a never-active noise model (one with a median of -5.09 against a
+        # lower bound of 0.1); on an easy 12.3 d RV target with max 2 planets,
+        # slot 2 (active in 0.2% of draws) failed R-hat at 1.56 on a posterior
+        # that found the planet in every draw.
+        # And assess planets, not slots: with exchangeable slots the same planet
+        # sits in slot 1 for some walkers and slot 2 for others, and a slot
+        # column then mixes components (see `_canonical_slot_columns`). Measured
+        # on the easy 12.3 d target, max 2 planets: slot 2 failed R-hat at 1.11
+        # on a posterior with the planet in >95% of draws.
+        canon = _canonical_slot_columns(chains, names(chains, :parameters), params,
+                                        size(chains, 1) * size(chains, 3))
+        if !isempty(canon)
+            arr = Array(chains.value.data)            # (iter, var, chain)
+            vars = names(chains)
+            for (j, v) in enumerate(vars)
+                haskey(canon, v) || continue
+                arr[:, j, :] .= reshape(canon[v][1], size(arr, 1), size(arr, 3))
+            end
+            chains = MCMCChains.Chains(arr, vars)
+        end
+        active = Dict{Symbol, BitVector}()
         skip = Set{Symbol}()
-        for (i, nm) in enumerate(params.config.noise_models)
-            col = Symbol("noise_active_$i")
-            col in chain_syms || continue          # not toggleable => always on
-            any(vec(Array(chains[col])) .> 0.5) && continue
-            for pn in noise_param_names(nm, params.config.instruments;
-                                        data = nothing)
-                push!(skip, Symbol(pn))
+        for nm in layout.unfrozen_names
+            mask = haskey(canon, Symbol(nm)) ? canon[Symbol(nm)][2] :
+                   sci_active_mask(chains, params, nm)
+            mask === nothing && continue
+            if count(mask) < 0.01 * length(mask)
+                push!(skip, Symbol(nm))
+            elseif !all(mask)
+                active[Symbol(nm)] = BitVector(mask)
             end
         end
         pnames = isempty(skip) ? nothing :
                  [s for s in layout.unfrozen_names if Symbol(s) ∉ skip]
-        isempty(skip) || @info "fit_health: excluding $(length(skip)) parameter(s) " *
-              "of never-active noise models from the assessment (inactive-slot " *
-              "values are not posterior draws)"
+        isempty(skip) || @info "fit_health: not assessing $(length(skip)) " *
+              "parameter(s) of components active in under 1% of draws " *
+              "(their columns are parked values, not posterior draws)"
 
+        # Full-circle angles are relabelled into that window before the rail
+        # check (src/circular.jl).
         report = assess_fit(chains; prior_bounds = prior_bounds,
                              ensemble = is_ensemble,
-                             param_names = pnames)
+                             param_names = pnames,
+                             circular = circular_names(params),
+                             log_scale = log_scale,
+                             active = active)
 
         summary["fit_health"] = Dict{String, Any}(
             "overall"  => String(report.overall),

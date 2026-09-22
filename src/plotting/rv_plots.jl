@@ -367,7 +367,7 @@ Classic double-lined SB2 phase-fold on the binary period: primary
 (component 1) points fold onto +K_A and secondary (component 2) onto
 −K_B (anti-phase), two model curves crossing at the systemic velocity.
 The circumprimary planet is subtracted from the primary. Saved as
-`models/rv_sb2_binary_fold_P<binary_k>.<fmt>`.
+`models/rv_sb2_binary_fold_K<binary_k>.<fmt>`.
 """
 function plot_rv_sb2_binary_fold(chains, params, data; binary_k::Int=1, output=nothing,
                                   fmt::Symbol=:png, save_pdf::Bool=false, figsize=FIG_RV,
@@ -418,7 +418,7 @@ function plot_rv_sb2_binary_fold(chains, params, data; binary_k::Int=1, output=n
         _tight_ylims!(ax_r, residuals; pad_frac=0.30, symmetric=true)
         if output !== nothing
             mkpath(joinpath(output, "models"))
-            _save_plot(joinpath(output, "models", "rv_sb2_binary_fold_P$binary_k.$fmt"), fig;
+            _save_plot(joinpath(output, "models", "rv_sb2_binary_fold_K$binary_k.$fmt"), fig;
                        save_pdf=save_pdf, px_per_unit=3)
         end
         return fig
@@ -751,7 +751,7 @@ function plot_rv_phasefold(chains, params, data;
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
-            _save_plot(joinpath(output, "models", "RV_phasefold_P$planet.$fmt"), fig;
+            _save_plot(joinpath(output, "models", "RV_phasefold_K$planet.$fmt"), fig;
                         save_pdf=save_pdf, px_per_unit=3)
         end
         return fig

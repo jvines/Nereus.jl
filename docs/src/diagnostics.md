@@ -488,7 +488,8 @@ The checks (`src/diagnostics/fit_health.jl`):
    fraction of the bound span) of a bound, **or** more than
    `edge_mass_frac` (default `0.05`) of draws within that margin.
    `:fail`. Without `prior_bounds` the check is skipped (`:ok`, "no
-   prior_bounds given"). This is the `map` / `PA` catcher.
+   prior_bounds given"). This is the `map` / `PA` catcher. Parameters
+   named in `circular` are measured in their own window (see below).
 4. **Log-posterior sanity** — if a `:lp` / `:log_density` / `:logp`
    column exists, flags non-finite values and finite values below
    `lp_floor` (default `-1e6`) as corrupt. This is the corrupt-logZ
@@ -497,6 +498,18 @@ The checks (`src/diagnostics/fit_health.jl`):
 Bookkeeping columns (`:lp`, `:n_p`, `noise_active_*`, `:weights`, …)
 are excluded from the per-parameter checks automatically; restrict the
 checked set with `param_names`.
+
+`circular` (default `nothing`) names the full-circle angles, as
+`Symbol`s or `String`s — normally `circular_names(params)`: `Mo`, `Omega`,
+`lambda` and, under `:ew`, `w`, when the prior is Uniform over exactly one
+period (`src/circular.jl` lists the exclusions, e.g. `Mo` under TTVs). Their
+draws are relabelled into the `prior_bounds` window before the rail check,
+and `run_job` / `fit_*` pass the window the ENGINE sampled in. 0 ≡ 2π is not
+an edge of the support, but an engine that cannot cross it truncates the
+posterior there: NUTS (logit chart) and the nested samplers (unit cube) do on
+a posterior centred on the seam, and the check reports "full-circle angle cut
+by its seam". An engine that moved its seam to the emptiest arc of the
+posterior shows no pile-up there and passes.
 
 There is a second method that also screens a **MAP / point estimate**
 for consistency with the posterior bulk:
@@ -510,7 +523,11 @@ parameters, a `Dict` (param ⇒ value), or a `MAPResult` (its `x_map` +
 `param_names` are used). Any parameter where the MAP lands more than
 `nsigma` robust σ (half the central-68% width) from the per-parameter
 median `:fail`s — a sign the optimizer found a spurious mode or railed
-against a bound while MCMC explored a different basin.
+against a bound while MCMC explored a different basin. `circular` is
+honoured here too: the MAP distance for those angles is the shortest
+arc, since the optimizer may return another representative of the same
+angle (6.26 against chains charted around 0.0 is a 0.02 rad miss, not a
+100σ one).
 
 `FitHealthReport` has a `text/plain` show method that prints each
 check's icon, name, and message, plus a loud banner when `overall` is
@@ -528,7 +545,8 @@ display(report)     # full per-check breakdown
 It is **fail-soft**: it only logs a verdict and records it in the
 summary; it never alters the chains or any other output. It builds
 `prior_bounds` from the model layout (hard bounds of every fitted
-parameter), and sets `ensemble = true` automatically when the sampler
+parameter), passes `circular = circular_names(params)`, and sets
+`ensemble = true` automatically when the sampler
 is one of `pt_emcee`, `transdim_pt_emcee`, `pt_whitening`, `pa`, `smc`,
 `ensemble`, or `ess`. The result lands in `summary.json` under
 `fit_health`:

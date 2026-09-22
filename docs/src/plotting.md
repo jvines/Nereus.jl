@@ -43,9 +43,9 @@ produced.
 |------|-------|----------|-----------------------------------|
 | `rv_timeseries`            | RV data                         | `plot_rv_timeseries`            | `models/rv_timeseries.png` |
 | `rv_components`            | RV data                         | `plot_rv_components`            | `models/rv_components.png` |
-| `rv_phasefold`             | RV data                         | `plot_rv_phasefold` (per planet)| `models/rv_phased_K*.png` |
+| `rv_phasefold`             | RV data                         | `plot_rv_phasefold` (per planet)| `models/RV_phasefold_K*.png` |
 | `pm_timeseries`            | photometry                      | `plot_pm_timeseries` (per inst) | `models/pm_timeseries_*.png` |
-| `pm_phasefold`             | photometry                      | `plot_pm_phasefold` (per planet)| `models/pm_phased_*_K*.png` |
+| `pm_phasefold`             | photometry                      | `plot_pm_phasefold` (per planet)| `models/Transit_phasefold_K*_*.png` |
 | `transit_overlay`          | photometry                      | `plot_transit_overlay_fit`      | `models/transit_overlay_K*.png` |
 | `rm_anomaly`               | a planet with an `*_RM` mode    | `plot_rm`                       | `models/rm_anomaly_K*.png` |
 | `ttv_oc`                   | photometry                      | `plot_ttv_oc`                   | `models/ttv_oc.png` |
@@ -156,7 +156,7 @@ to skip saving.
     primary (γ + K_A + planet) and secondary (γ − K_B). Saved as
     `models/rv_sb2_timeseries.png`. Likewise `plot_rv_phasefold` on the
     binary slot draws the classic **double-lined** fold (primary +K_A vs
-    secondary −K_B, crossing at γ; `models/rv_sb2_binary_fold_P<k>.png`),
+    secondary −K_B, crossing at γ; `models/rv_sb2_binary_fold_K<k>.png`),
     and on a circumprimary planet slot folds only the primary points.
 
 ### `plot_rv_components(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity)`
@@ -186,7 +186,7 @@ contribution; `robust_ylim` clips outliers from the y-range.
 For trans-dim chains a requested `planet > modal_np` is **not** in the
 winning model, so it's skipped with a warning.
 
-`run_job` loops `k = 1:max_kplanet`, writing `models/rv_phased_K<k>.png`.
+`run_job` loops `k = 1:max_kplanet`, writing `models/RV_phasefold_K<k>.png`.
 
 ---
 
@@ -210,7 +210,7 @@ model overlaid, with a residual panel. `phase_window` defaults to
 `(-0.025, 0.025)` — right for short-period hot-Jupiter / sub-Neptune
 transits; widen for long-duration or grazing transits. `n_bins` (auto
 if `nothing`) controls the binned overlay; `credmass` (default `0.85`)
-the band. `run_job` loops planets → `models/pm_phased_*_K<k>.png`.
+the band. `run_job` loops planets → `models/Transit_phasefold_K<k>_*.png`.
 
 ### `plot_transit_overlay_fit(chains, params, data; planet, half_window, min_pts, output, fmt, save_pdf)`
 

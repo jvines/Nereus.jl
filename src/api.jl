@@ -711,6 +711,14 @@ function _finish(target, engine, stopping, output_dir; op::String,
                                  for (k, v) in pairs(get(spec, "options", Dict())))
     raw = run_engine(target, spec)
     chains, log_z, extra = _normalize(raw)
+    # The re-chart run_job does (src/circular.jl), before sampler_diagnostics,
+    # the params and derived blocks, chains.nc or a plot reads a draw. In place,
+    # so `raw.chains` stays the same object and the engine result agrees with
+    # the chains returned. MAP has no chains and nothing to re-chart. The
+    # window the engine sampled in is kept for fit_health (see run_job).
+    sampled_windows = circular_windows(target.params)
+    chains isa MCMCChains.Chains &&
+        recenter_circular!(chains, target.params; transforms = (target.transform,))
     summary = Dict{String,Any}(
         "op" => op,
         "status" => "ok",
@@ -828,7 +836,8 @@ function _finish(target, engine, stopping, output_dir; op::String,
                 _run_detection_limits!(cfg, chains, target.params, target.data,
                                         output_dir, summary)
                 _run_loo!(cfg, chains, target.params, target.data, raw, summary)
-                _run_fit_health!(cfg, chains, target.params, summary)
+                _run_fit_health!(cfg, chains, target.params, summary;
+                                 sampled_windows)
                 # The evidence spread, before augmenting it. `_augment_evidence!`
                 # AUGMENTS -- it returns early unless summary["evidence"] is
                 # already a Dict -- and on this route nothing ever built one, so

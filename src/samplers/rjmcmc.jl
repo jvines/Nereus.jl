@@ -30,6 +30,14 @@ Run a standalone RJMCMC sampler for trans-dimensional inference.
 - `seed::Int=1` — base random seed; chain `c` uses `seed + 1000*(c-1)`
 - `initial_scale::Float64=0.01` — initial Gaussian proposal scale
 - `target_accept::Float64=0.234` — target acceptance rate for within-model
+
+Circular angles (`src/circular.jl`): with planet births on, same-mode planet
+slots share one window per angle, set before the first state is drawn. A single
+chain records its angles over the second half of warmup and moves each
+full-circle seam to the emptiest arc at the end of it, so the stored draws live
+in one chart. With `n_chains > 1` it does not -- see the note in the body -- and
+the output-side re-cut in `run_job` / `fit_*` is what makes those draws
+contiguous.
 """
 function sample_rjmcmc(
     target::NereusTarget,
@@ -54,6 +62,14 @@ function sample_rjmcmc(
     noise_swap_rate = Float64(noise_swap_rate)
     0.0 <= noise_swap_rate <= 1.0 ||
         throw(ArgumentError("noise_swap_rate must be in [0, 1]"))
+    # Births re-sort planets between same-mode slots, so those slots must
+    # share one window per circular angle before any chain draws its first
+    # state (src/circular.jl). Only births move planet blocks here: the alias
+    # jump keeps its slot and noise moves touch no planet. Done once, here,
+    # while nothing else evaluates the target.
+    unify_circular_groups!(target.params,
+                           circular_groups(target.params; permutable = td.planets);
+                           transforms = (target.transform,))
     if n_chains == 1
         return _sample_rjmcmc_one(target, data; td=td, n_samples=n_samples,
                                    n_warmup=n_warmup, seed=seed,
@@ -67,6 +83,13 @@ function sample_rjmcmc(
     # Multi-chain: spawn n_chains independent chains. Total samples is
     # divided across chains; each chain runs full warmup independently
     # (warmup is per-chain to give each its own adapted proposal scale).
+    #
+    # No warmup re-cut of circular angles here. The chains run concurrently
+    # over ONE shared Params, with no point at which they all stand still: a
+    # chain that moved a window at the end of its own warmup would move it
+    # under the others mid-sweep, and their states would be outside the new
+    # support (-Inf) on the next evaluation. run_job / fit_* re-cut the
+    # returned draws, which is what the summaries read.
     per_chain_samples = max(1, cld(n_samples, n_chains))
     tasks = Vector{Task}(undef, n_chains)
     for c in 1:n_chains
@@ -86,6 +109,7 @@ function sample_rjmcmc(
             noise_swap_rate = noise_swap_rate,
             show_progress = chain_show_progress,
             progress_every = progress_every,
+            recut_circular = false,
         )
     end
     results = [fetch(t) for t in tasks]
@@ -110,6 +134,7 @@ function _sample_rjmcmc_one(
     noise_swap_rate::Float64 = 0.5,
     show_progress::Bool,
     progress_every::Int,
+    recut_circular::Bool = true,   # false when other chains share `params`
 )
     rng = MersenneTwister(seed)
     params = target.params
@@ -195,6 +220,14 @@ function _sample_rjmcmc_one(
     sample_idx = 0
     t_start = time()
 
+    # Circular angles: record iterations circ_from+1 .. n_warmup, re-cut at
+    # the last of them (see the section at the bottom of this file). Groups
+    # as `sample_rjmcmc` unified them.
+    circ_from = n_warmup - n_warmup ÷ 2
+    circ_groups = circular_groups(params; permutable = td.planets)
+    circ = recut_circular && n_samples > 0 && !isempty(circ_groups) ?
+           _CircularWarmupTrace(params, circ_groups, n_warmup ÷ 2) : nothing
+
     pb = ProgressBar("RJMCMC";
                        total = n_total_iter, enabled = show_progress)
 
@@ -247,6 +280,21 @@ function _sample_rjmcmc_one(
                                 log_pi, log_L, within_ws; ctr=ctr) do new_lpi, new_lL
                 log_pi = new_lpi
                 log_L = new_lL
+            end
+        end
+
+        if circ !== nothing && circ_from < iter <= n_warmup
+            _record_circular_warmup!(circ, theta)
+            if iter == n_warmup
+                moved = _recut_circular_warmup!(circ, params, (theta,);
+                                                transforms = (target.transform,))
+                # Same density in either chart; re-evaluated only so the
+                # cached values are those of the stored point, bit for bit.
+                if !isempty(moved)
+                    log_pi = log_prior(theta)
+                    log_L = _eval_ll(theta, data, ctr)
+                end
+                circ = nothing
             end
         end
 
@@ -1082,4 +1130,111 @@ function _select_strategy(td::TransDimConfig, rng::AbstractRNG)
         end
     end
     return td.birth_strategies[end]
+end
+
+# =====================================================================
+# Circular-angle re-cut for the single-walker samplers (pt, rjmcmc, moms)
+#
+# These hold ONE state per replica or chain, and a single point says nothing
+# about where a posterior's emptiest arc is, so the seam move of
+# src/circular.jl needs a history: the cold state's angles over the second
+# half of warmup. The window is re-cut once, at the end of warmup, and every
+# live state is relabelled into it, so all production draws share one chart.
+#
+# The unit is a `circular_groups` group, not a parameter. With `td.planets` on,
+# all three birth planets, and every birth ends in `_sort_group_periods!`, which
+# copies raw Mo / Ω / ω between same-mode slots; with a window per slot a birth
+# sorted into a slot whose window excludes the value dies on the prior while
+# its reverse death does not, and the N_p posterior is biased. So same-mode
+# slots are unified at sampler start and re-cut together, from their pooled
+# draws. With births off every group is one parameter. Only ACTIVE draws vote:
+# an inactive planet's slots hold stale values or MoMS off-values, and an
+# astrometrically uncoupled companion's Ω is a prior draw (`is_as_active`);
+# nothing constrains either.
+#
+# Nothing else these samplers cache depends on where the window sits: slice
+# widths (`_prior_widths`) and the RWM σ start from the prior SPAN, which the
+# move keeps, and the workspace likelihood caches are keyed on hashes of the
+# quantities they were computed from, so a relabel cannot leave one stale.
+# =====================================================================
+
+"""
+    _CircularWarmupTrace(params, groups, n_record; cap = 2000)
+
+Bounded warmup history of the circular parameters in one cold state, pooled
+per group of `groups` ([`circular_groups`](@ref)). Fed once per iteration over
+`n_record` iterations, it keeps every `cld(n_record, cap)`-th state, so at most
+`cap` draws per member, spread over the whole window rather than bunched at its
+start.
+"""
+mutable struct _CircularWarmupTrace
+    groups::Vector{Vector{Tuple{Int,Int}}}   # (unfrozen position, owning planet)
+    slots::Vector{Vector{Int}}               # theta slot of each member
+    node::Vector{Vector{Bool}}               # member is an Ω
+    draws::Vector{Vector{Float64}}           # pooled history, one per group
+    every::Int
+    tick::Int
+end
+
+function _CircularWarmupTrace(params::Params, groups, n_record::Integer;
+                              cap::Int = 2000)
+    L = params.layout
+    slots = [Int[L.unfrozen_idx[d] for (d, _) in grp] for grp in groups]
+    node  = [Bool[startswith(L.unfrozen_names[d], "Omega_") for (d, _) in grp]
+             for grp in groups]
+    return _CircularWarmupTrace(collect(groups), slots, node,
+                                [Float64[] for _ in groups],
+                                max(1, cld(Int(n_record), cap)), 0)
+end
+
+function _record_circular_warmup!(tr::_CircularWarmupTrace, theta::Theta)
+    isempty(tr.groups) && return tr
+    tr.tick += 1
+    (tr.tick - 1) % tr.every == 0 || return tr
+    td = theta.td
+    @inbounds for g in eachindex(tr.groups), (j, (_, k)) in enumerate(tr.groups[g])
+        if td !== nothing
+            k <= length(td.planet_active) && !td.planet_active[k] && continue
+            tr.node[g][j] && !is_as_active(td, k) && continue
+        end
+        push!(tr.draws[g], Float64(theta.values[tr.slots[g][j]]))
+    end
+    return tr
+end
+
+"""
+    _recut_circular_warmup!(tr, params, states; transforms = ())
+        -> Vector{@NamedTuple{pos::Int, lo::Float64, hi::Float64, shift::Float64}}
+
+Re-cut each traced group from its pooled warmup history
+([`recut_circular_group!`](@ref)) and relabel every member's value in every
+`Theta` of `states` -- ALL the sampler's live states, hot replicas and inactive
+slots included -- into the member's new window. Returns one entry per member
+that moved: its unfrozen position, new `(lo, hi)`, and `shift = lo_new -
+lo_old`, so the caller can relabel whatever else it keeps (stored draws), shift
+the MoMS off-values, and refresh its cached log-densities before the next
+evaluation. Must run where no other task is evaluating the target: the layout
+is shared by every `Theta` built from `params`.
+"""
+function _recut_circular_warmup!(tr::_CircularWarmupTrace, params::Params, states;
+                                 transforms = ())
+    L = params.layout
+    moved = @NamedTuple{pos::Int, lo::Float64, hi::Float64, shift::Float64}[]
+    for g in eachindex(tr.groups)
+        grp, draws = tr.groups[g], tr.draws[g]
+        old_lo = Float64[L.unfrozen_priors[d].lo for (d, _) in grp]
+        win = isempty(draws) ? nothing :
+              recut_circular_group!(params, grp, draws; transforms)
+        empty!(draws)
+        win === nothing && continue
+        for (j, (d, _)) in enumerate(grp)
+            lo, hi = bounds(L.unfrozen_priors[d])
+            s = tr.slots[g][j]
+            for th in states
+                th.values[s] = circular_relabel(th.values[s], lo, hi)
+            end
+            push!(moved, (pos = d, lo = lo, hi = hi, shift = lo - old_lo[j]))
+        end
+    end
+    return moved
 end

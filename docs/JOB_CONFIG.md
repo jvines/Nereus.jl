@@ -216,7 +216,7 @@ rather than a single number trusted.
 
     "parametrization": {                   // src/runner.jl:708-715, _KNOWN_PARAMETRIZATIONS
       "mass": "K_driven",                  // K_driven | M_sec_driven | a_driven
-      "time": "Tp",                        // Tp | Tc | Mo
+      "time": "Mo",                        // Mo (default) | Tp | Tc. Tp/Tc: keep the prior within one period
       "ew":   "sesinw",                    // sesinw | ew
       "geom": "b_rr",                      // b_rr | b_r
       "marginalize_gamma": false,          // analytic γ marginalisation (default false)

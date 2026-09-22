@@ -20,7 +20,9 @@ credible interval. The `converged`/`railed` flags exist so a caller can tell
 whether that point is trustworthy.
 
 # Fields
-- `x_map::Vector{Float64}` — MAP estimate (bounded/physical space)
+- `x_map::Vector{Float64}` — MAP estimate (bounded/physical space). A circular
+  angle (see `src/circular.jl`) lies inside the window the layout carries on
+  return, which `sample_map` may have moved off the seam.
 - `log_posterior::Float64` — log-posterior at MAP
 - `log_evidence_laplace::Float64` — Laplace approximation to log Z
 - `hessian::Matrix{Float64}` — Hessian of -log posterior at MAP (information matrix)
@@ -31,7 +33,8 @@ whether that point is trustworthy.
 - `railed::Bool` — `true` when at least one sampled parameter sits at a prior
   bound with the objective still pushing outward (the posterior wants to leave
   the box). A railed optimum is an artefact of the prior support, not a real
-  mode, so it must never be presented as a converged MAP.
+  mode, so it must never be presented as a converged MAP. Circular angles
+  never rail: their bounds are a chart seam, not an edge.
 - `railed_params::Vector{String}` — names of the parameters that railed
   (empty when `railed == false`). Useful for telling the user *which* prior to
   widen.
@@ -82,6 +85,9 @@ latter is a real MAP and must not be flagged.
 Bounds drawn from a half-open / unbounded prior (an endpoint `build_transform`
 encoded as a non-finite, mapped to 0.0) are ignored: we read the true bound
 from the prior, not the transform's clamp.
+
+Circular angles ([`is_circular`](@ref)) are never flagged: their bounds are
+where the chart of the circle was cut, not an edge of the support.
 """
 function _detect_railed(x_bounded::AbstractVector{<:Real},
                          target::NereusTarget, bound_rtol::Float64)
@@ -89,6 +95,13 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
     priors = layout.unfrozen_priors
     n = length(x_bounded)
     railed = Int[]
+    # Past one bound of a full-circle angle is just inside the other, so an
+    # "outward" gradient there only says the mode straddles the seam. These
+    # were flagged -- and api.jl turns railed into a failed fit, so a Mo mode
+    # at 0 ≡ 2π FAILED the fit. The physical-floor exemption below spared Ω
+    # charted at lo = 0 by accident but not the same mode charted at 2π; skip
+    # circular dims explicitly instead of relying on it.
+    circ = circular_indices(target.params)
 
     # Physical (Jacobian-free) negative log-posterior in bounded space.
     bounded_target = target.transform === nothing ? target :
@@ -104,6 +117,7 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
     @inbounds for i in 1:n
         ps = priors[i]
         is_fixed(ps) && continue
+        i in circ && continue
         lo, hi = bounds(ps)
         (isfinite(lo) && isfinite(hi)) || continue   # only fully-bounded params
         span = hi - lo
@@ -159,21 +173,32 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
 end
 
 """
-    _same_basin(xa, xb, target, basin_rtol) -> Bool
+    _same_basin(xa, xb, target, basin_rtol; circ = circular_indices(target.params)) -> Bool
 
 Whether two bounded-space optima sit in the same local basin, judged by the
 maximum per-parameter distance normalized by each prior's span. Unbounded /
 half-bounded params are normalized by their finite span when available and
 skipped otherwise (the bounded orbital params P/K/e dominate the basin identity
-anyway).
+anyway). Circular dims (`circ`, unfrozen positions) are compared by distance
+around the circle, so the two ends of the window are neighbours.
 """
 function _same_basin(xa::AbstractVector, xb::AbstractVector,
-                     target::NereusTarget, basin_rtol::Float64)
+                     target::NereusTarget, basin_rtol::Float64;
+                     circ::AbstractVector{Int} = circular_indices(target.params))
     priors = target.params.layout.unfrozen_priors
     @inbounds for i in eachindex(xa)
         lo, hi = bounds(priors[i])
         (isfinite(lo) && isfinite(hi) && hi > lo) || continue
-        if abs(xa[i] - xb[i]) / (hi - lo) > basin_rtol
+        d = abs(xa[i] - xb[i])
+        if i in circ
+            # Mo = 0.001 and Mo = 6.282 are the same orbit. Compared linearly
+            # they were two basins, and the "runner-up" at the far end of the
+            # window was the winner itself -- a spurious multimodal verdict.
+            # `mod` also covers two representatives from different charts.
+            d = mod(d, CIRCULAR_PERIOD)
+            d = min(d, CIRCULAR_PERIOD - d)
+        end
+        if d / (hi - lo) > basin_rtol
             return false
         end
     end
@@ -200,10 +225,11 @@ global one. The caller forces `converged=false` when `!dominant`.
 function _basin_summary(xs::Vector{Vector{Float64}}, fvals::Vector{Float64},
                         keep::Vector{Int}, best::Int, target::NereusTarget;
                         basin_rtol::Float64, dom_margin::Float64)
+    circ = circular_indices(target.params)
     # Count distinct basins among the kept starts (greedy clustering).
     reps = Int[]
     for s in keep
-        if !any(r -> _same_basin(xs[s], xs[r], target, basin_rtol), reps)
+        if !any(r -> _same_basin(xs[s], xs[r], target, basin_rtol; circ), reps)
             push!(reps, s)
         end
     end
@@ -213,7 +239,7 @@ function _basin_summary(xs::Vector{Vector{Float64}}, fvals::Vector{Float64},
     best_other = Inf
     for s in keep
         s == best && continue
-        if !_same_basin(xs[s], xs[best], target, basin_rtol)
+        if !_same_basin(xs[s], xs[best], target, basin_rtol; circ)
             best_other = min(best_other, fvals[s])
         end
     end
@@ -221,6 +247,71 @@ function _basin_summary(xs::Vector{Vector{Float64}}, fvals::Vector{Float64},
     dominance = isfinite(best_other) ? (best_other - fvals[best]) : Inf
     dominant = dominance >= dom_margin
     return n_basins, dominance, dominant
+end
+
+# A circular optimum this close to either end of its window (fraction of the
+# span) is re-charted and polished again; see `sample_map`.
+const _MAP_SEAM_FRAC = 0.05
+
+"""
+    _centre_circular_seams!(target, x) -> (moved, x_centred)
+
+Move the window of every circular parameter whose value in `x` (bounded space,
+current chart) lies within `_MAP_SEAM_FRAC` of the span of either bound, so that
+value sits at the centre of the new window. The value is first taken to its
+representative in the user's own window (`config.priors`), so the optimum stays
+readable in the user's convention. Returns the moved `(index, previous lo)`
+pairs, for undoing, and `x` with those dims relabelled into their new windows.
+The layout and `target.transform` are moved in place.
+"""
+function _centre_circular_seams!(target::NereusTarget, x::AbstractVector{<:Real})
+    params = target.params
+    L = params.layout
+    moved = Tuple{Int,Float64}[]
+    xc = Float64.(x)
+    for i in circular_indices(params)
+        lo, hi = bounds(L.unfrozen_priors[i])
+        span = hi - lo
+        xi = xc[i]
+        isfinite(xi) || continue
+        min(xi - lo, hi - xi) <= _MAP_SEAM_FRAC * span || continue
+        lo_ref = params.config.priors[L.unfrozen_names[i]].lo
+        xr = lo_ref + mod(xi - lo_ref, CIRCULAR_PERIOD)
+        push!(moved, (i, Float64(lo)))
+        set_circular_window!(params, i, xr - span / 2;
+                             transforms = (target.transform,))
+        xc[i] = xr
+    end
+    return moved, xc
+end
+
+"""
+    _circular_to_user_window!(target, x_opt, moved)
+
+After a polish in re-centred charts, shift each moved window by whole periods
+so the optimum lands in the user's window `[lo_ref, lo_ref + 2π)`: a polish
+that stepped from 6.2830 to 6.2835 reads 0.0003, as the user would write it.
+`x_opt` is the optimiser's point (unconstrained when the target has a
+transform). A whole period changes neither the prior nor the likelihood, and a
+logit `y` is chart-relative, so a transformed `x_opt` is left untouched; a
+bounded-space one carries the value itself and moves with its window.
+"""
+function _circular_to_user_window!(target::NereusTarget,
+                                   x_opt::AbstractVector{<:Real}, moved)
+    params = target.params
+    L = params.layout
+    has_transform = target.transform !== nothing
+    xb = has_transform ? transform_inverse(x_opt, target.transform) : x_opt
+    for (i, _) in moved
+        lo_ref = params.config.priors[L.unfrozen_names[i]].lo
+        k = floor((xb[i] - lo_ref) / CIRCULAR_PERIOD)
+        (isfinite(k) && k != 0) || continue
+        lo, _ = bounds(L.unfrozen_priors[i])
+        set_circular_window!(params, i, lo - k * CIRCULAR_PERIOD;
+                             transforms = (target.transform,))
+        has_transform || (x_opt[i] -= k * CIRCULAR_PERIOD)
+    end
+    return x_opt
 end
 
 """
@@ -236,6 +327,12 @@ returned `MAPResult` carries `converged` and `railed` flags so the caller can
 tell whether the optimum is trustworthy: a point pinned against a prior bound
 (the posterior wanting to escape the box) is reported with `railed=true` and
 `converged=false`, never as a clean MAP.
+
+A circular angle (`src/circular.jl`) whose optimum lands within 5% of the span
+of its window's seam is re-charted with the optimum at the window centre and
+polished once more, then read in the user's own window. This moves the window
+in `target.params.layout` and `target.transform` (never `config.priors`), and
+the move persists after return.
 
 # Keywords
 - `init::Union{Nothing, Vector{Float64}}=nothing` — initial guess (unconstrained)
@@ -450,12 +547,67 @@ function sample_map(
         argmin(fvals)   # all non-finite; report the least-bad
     end
     result = results[best]
+    x_opt = copy(Optim.minimizer(result))
+    f_opt = Optim.minimum(result)
+    opt_converged = Optim.converged(result)
 
-    x_opt = Optim.minimizer(result)
+    # Re-polish across a circular seam. The logit chart cannot cross the
+    # seam, so an optimum on or near it (Mo ≈ 0 ≡ 2π) is only approached
+    # asymptotically: y runs off toward ±∞, LBFGS stops short, and the
+    # Laplace Hessian below would be taken where dx/dy has collapsed. For a
+    # full-circle Uniform the seam is a coordinate choice (src/circular.jl),
+    # so move it: re-chart each such angle with the optimum at the centre of
+    # its window and polish once more from there. Exact -- prior and
+    # likelihood are unchanged, only what y means moves. Fail-soft: if the
+    # polish throws or comes back worse, the old windows are restored and the
+    # multistart result stands as it was.
+    #
+    # Every start has been fetched, so no thread is reading the layout while
+    # it moves. Nothing here snapshots bounds: `neg_logpost` reads
+    # `target.transform` at call time and each start builds its own
+    # OnceDifferentiable, as does the Hessian below.
+    if !isempty(keep)
+        moved, x_centred = _centre_circular_seams!(target, xs_bounded[best])
+        if !isempty(moved)
+            polished = try
+                # Only the re-charted dims get a new y; the rest keep the
+                # optimiser's own, which a bounded round trip would clamp
+                # (transform_forward holds t in [1e-10, 1 - 1e-10]).
+                y0 = copy(x_opt)
+                yc = has_transform ?
+                     transform_forward(x_centred, target.transform) : x_centred
+                for (i, _) in moved
+                    y0[i] = yc[i]
+                end
+                r = _run_one_start(y0)
+                f = Optim.minimum(r)
+                (isfinite(f) && f <= f_opt + 1e-6 * (1 + abs(f_opt))) ? r : nothing
+            catch
+                nothing
+            end
+            if polished === nothing
+                for (i, lo_old) in moved
+                    set_circular_window!(params, i, lo_old;
+                                         transforms = (target.transform,))
+                end
+            else
+                x_opt = _circular_to_user_window!(
+                    target, copy(Optim.minimizer(polished)), moved)
+                f_opt = Optim.minimum(polished)
+                opt_converged = Optim.converged(polished)
+                # The other starts stay in the old chart; `_same_basin`
+                # measures circular dims around the circle, so that is fine.
+                xs_bounded[best] = has_transform ?
+                    transform_inverse(x_opt, target.transform) : copy(x_opt)
+                fvals[best] = f_opt
+            end
+        end
+    end
+
     # Reported log-posterior is the PHYSICAL-space posterior at the MAP
     # (the optimizer objective), i.e. log_prior + log_likelihood with no
     # transform Jacobian.
-    log_post = -Optim.minimum(result)
+    log_post = -f_opt
 
     # Railing test on the reported point: a bound-pinned corner (e.g. K
     # railed to 0 with jitter soaking up the signal) has a vanishing
@@ -482,7 +634,7 @@ function sample_map(
     # A railed optimum is never "converged" (the box is binding, the point is
     # a prior-support artefact); a non-dominant optimum is never "converged"
     # (the mode is ambiguous). Either way `converged=false` is the honest call.
-    converged = Optim.converged(result) && !railed && dominant
+    converged = opt_converged && !railed && dominant
 
     # Hessian at MAP for Laplace approximation.
     #
@@ -495,7 +647,9 @@ function sample_map(
     # (the Jacobian is exactly the change-of-variables factor that keeps
     # the integral equal to the physical evidence). So the Laplace term
     # must use the unconstrained density's value and curvature at the
-    # MAP point — NOT the physical posterior used for the search.
+    # MAP point — NOT the physical posterior used for the search. After a
+    # seam re-polish `x_opt` is in the re-centred chart, where the angle is
+    # interior and dx/dy has not collapsed.
     #
     # The Hessian and the subsequent eigvals can fail (NaN/Inf entries,
     # LAPACK error) when the likelihood landscape is degenerate at the
@@ -525,8 +679,16 @@ function sample_map(
         (zeros(n_dim, n_dim), NaN)
     end
 
-    # MAP in bounded space — already computed for the railing test.
-    x_bounded = xs_bounded[best]
+    # MAP in bounded space — already computed for the railing test. A
+    # circular angle must sit inside the window the layout now carries:
+    # pt_emcee's :map_scatter scatters walkers around it, and the packed prior
+    # rejects anything outside. transform_inverse guarantees that; a
+    # bounded-space optimiser does not. A no-op (bit for bit) when inside.
+    x_bounded = copy(xs_bounded[best])
+    for i in circular_indices(params)
+        lo, hi = bounds(layout.unfrozen_priors[i])
+        x_bounded[i] = circular_relabel(x_bounded[i], lo, hi)
+    end
     railed_names = String[layout.unfrozen_names[i] for i in railed_idx]
 
     if railed

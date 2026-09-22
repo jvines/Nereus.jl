@@ -122,7 +122,7 @@ cfg = Dict(
   "model" => Dict(
      "max_kplanet"     => 1,
      "planet_modes"    => ["RV_ONLY"],
-     "parametrization" => Dict("mass" => "K_driven", "time" => "Tp",
+     "parametrization" => Dict("mass" => "K_driven", "time" => "Mo",
                                "ew" => "sesinw", "marginalize_gamma" => true),
      "stability"       => "none",
      "trend_order"     => 0),

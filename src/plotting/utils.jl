@@ -19,7 +19,7 @@ ignores `px_per_unit` anyway.
 Returns the primary `filename`.
 """
 function _save_plot(filename::AbstractString, fig;
-                     save_pdf::Bool=false, save_kwargs...)
+                     save_pdf::Bool=false, release=nothing, save_kwargs...)
     save(filename, fig; save_kwargs...)
     if save_pdf
         base, ext = splitext(filename)
@@ -27,7 +27,69 @@ function _save_plot(filename::AbstractString, fig;
             save(base * ".pdf", fig)
         end
     end
+    # Every plot function ends `_save_plot(...); return fig`, so releasing
+    # unconditionally would hand an interactive caller a blank figure. The
+    # batch producer is the only layer that knows the figure is being thrown
+    # away, so it opts in via `_RELEASE_SCENES` (see `_make_plots`).
+    (release === nothing ? _RELEASE_SCENES[] : release) && _release_scene!(fig)
     return filename
+end
+
+"""
+Whether `_save_plot` should tear a figure's scene down immediately after
+writing it. Off by default: an interactive `fig = plot_rv(...; filename=...)`
+must still get a usable figure back. `_make_plots` turns it on for the
+duration of a batch render, where the figures are written and discarded.
+"""
+const _RELEASE_SCENES = Ref(false)
+
+"""
+    _release_scene!(fig)
+
+Tear a figure's scene down on THIS task, right after it has been written.
+
+Makie puts a finalizer on every root scene that runs `free(s)` inside `@async`
+(Makie/src/scenes.jl:148-155). Every figure we save therefore leaves a teardown
+TASK behind, and two of those running at once race on the listener vector of
+any Observable they share. `Observables.off` walks the vector with `enumerate`
+and then deletes by the index it found:
+
+    for (i, (prio, f2)) in enumerate(callbacks)
+        if f === f2
+            deleteat!(callbacks, i)
+
+If the other task shrinks `callbacks` between those two lines, the index is
+stale and the delete throws
+
+    BoundsError: attempt to access 1-element Vector{Pair{Int64, Any}} at index [6]
+
+which Makie catches and logs as "Error while freeing scene". The figures on
+disk are correct -- the error happens after the write -- but cleanup stops
+partway, so the listeners leak, and a run that writes a dozen figures hits it
+routinely.
+
+Emptying the scene here, while we still hold it and before the plot loop moves
+on, leaves the finalizer's later `free` walking empty collections: no second
+mutator, no race. `reset_theme = false` because the scene is being discarded,
+not reused.
+
+Pass `release = false` to `_save_plot` when the caller still needs the figure
+afterwards (an interactive session that saves and then displays); emptying it
+would hand them a blank canvas.
+"""
+function _release_scene!(fig)
+    try
+        sc = fig isa CairoMakie.Makie.Scene ? fig :
+             hasproperty(fig, :scene)  ? getfield(fig, :scene) :
+             hasproperty(fig, :figure) ? getfield(getfield(fig, :figure), :scene) :
+             nothing
+        sc === nothing && return nothing
+        CairoMakie.Makie.empty!(sc; reset_theme = false)
+    catch
+        # Deterministic teardown is a cleanup optimisation. It must never be
+        # the reason a figure that is already on disk reports a failure.
+    end
+    return nothing
 end
 
 """

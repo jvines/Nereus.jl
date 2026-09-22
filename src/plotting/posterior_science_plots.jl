@@ -14,17 +14,39 @@ using LaTeXStrings: latexstring   # CairoMakie re-exports the type, not this fn
 const _TAB = (cyan = "#17becf", pink = "#e377c2", purple = "#9467bd", red = "#d62728")
 
 # ---- LaTeX axis labels (symbol + unit; greek words → LaTeX) -----------
-const _GREEK = ("alpha"=>"\\alpha","beta"=>"\\beta","gamma"=>"\\gamma",
-                "delta"=>"\\delta","lambda"=>"\\lambda","sigma"=>"\\sigma",
-                "omega"=>"\\omega","tau"=>"\\tau","phi"=>"\\phi","rho"=>"\\rho",
-                "mu"=>"\\mu","nu"=>"\\nu")
-_greekify(s) = (o = String(s); for (w,l) in _GREEK; o = replace(o, w => l); end; o)
+# Symbol words are matched per UNDERSCORE-SEPARATED TOKEN, never by substring:
+# a substring pass rewrote "rho_s" to "\rho_s" and then buried the command in
+# \mathrm{}, and it would mangle any name merely *containing* "mu"/"nu".
+const _MATHTOK = Dict("alpha"=>"\\alpha", "beta"=>"\\beta", "gamma"=>"\\gamma",
+                      "delta"=>"\\delta", "lambda"=>"\\lambda", "sigma"=>"\\sigma",
+                      "omega"=>"\\omega", "tau"=>"\\tau", "phi"=>"\\phi",
+                      "rho"=>"\\rho", "mu"=>"\\mu", "nu"=>"\\nu", "psi"=>"\\psi",
+                      "eta"=>"\\eta", "theta"=>"\\theta", "star"=>"\\star",
+                      "Omega"=>"\\Omega", "Lambda"=>"\\Lambda", "Phi"=>"\\Phi",
+                      "Psi"=>"\\Psi", "Theta"=>"\\Theta")
 # indicator-name abbreviations (applied before \mathrm rendering)
 const _ABBR = ("bisector_span"=>"BIS", "fwhm"=>"FWHM", "halpha"=>"Halpha",
                "log_rhk"=>"logRHK", "logrhk"=>"logRHK", "bis"=>"BIS")
 _abbr(s) = (o = String(s); for (k,v) in _ABBR; o = replace(o, k => v); end; o)
 # instrument/indicator token → math-safe \mathrm content (underscores → thin space)
 _mtxt(s) = replace(_abbr(s), "_" => "\\,")
+
+# One underscore-separated token → LaTeX: symbol words become commands, single
+# letters stay italic variables, multi-letter words are upright text.
+_textok(t) = get(_MATHTOK, t, length(t) == 1 ? String(t) : "\\mathrm{$t}")
+
+# `head_{sub,sub,…}` for an underscore-separated name, with every subscript in
+# ONE brace group. The braces are the whole point: a base carrying its own
+# underscore ("M_sec", "K_A") used to emit `M_sec_{1}` / `K_A_{1}` — a double
+# subscript that MathTeXEngine garbles (M_s·e·c_1) or refuses to parse at all.
+function _sym_sub(name, extra::AbstractString = "")
+    toks = split(_abbr(String(name)), '_'; keepempty = false)
+    isempty(toks) && return "\\mathrm{?}"
+    subs = String[_textok(t) for t in toks[2:end]]
+    isempty(extra) || push!(subs, extra)
+    isempty(subs) && return _textok(toks[1])
+    return _textok(toks[1]) * "_{" * join(subs, ",") * "}"
+end
 
 # LaTeX math symbol (no $) for a parameter name.
 function _sci_sym(name)
@@ -36,14 +58,17 @@ function _sci_sym(name)
         base == "K"      && return "K_{$k}"
         base == "sesinw" && return "\\sqrt{e}\\,\\sin\\omega_{$k}"
         base == "secosw" && return "\\sqrt{e}\\,\\cos\\omega_{$k}"
+        base == "esinw"  && return "e\\,\\sin\\omega_{$k}"
+        base == "ecosw"  && return "e\\,\\cos\\omega_{$k}"
         base == "Mo"     && return "M_{0,$k}"
         base in ("ecc","e")               && return "e_{$k}"
+        base in ("inc","inc_deg","i")     && return "i_{$k}"
         base in ("omega","omega_deg","w") && return "\\omega_{$k}"
         base == "Tp" && return "T_{\\mathrm{p},$k}"
         base == "Tc" && return "T_{\\mathrm{c},$k}"
         base == "b"  && return "b_{$k}"
         base == "rr" && return "(R_p/R_\\star)_{$k}"
-        return _greekify(base) * "_{$k}"
+        return _sym_sub(base, k)
     end
     for (pre, sym) in (("gamma","\\gamma"), ("sigma","\\sigma"), ("jitter","\\sigma"))
         startswith(s, pre*"_") &&
@@ -59,7 +84,9 @@ function _sci_sym(name)
         endswith(r,"_jit") && return "\\sigma_{\\mathrm{$(_mtxt(r[1:end-4]))}}"
         return "\\mathrm{$(_mtxt(r))}"
     end
-    return "\\mathrm{$(_mtxt(_greekify(s)))}"
+    s == "rho_s"        && return "\\rho_\\star"       # fitted stellar density
+    s == "v_sin_i_star" && return "v\\sin i_\\star"
+    return _sym_sub(s)
 end
 
 # LaTeX rendering of a unit string.
@@ -69,6 +96,7 @@ function _sci_unit_latex(u)
              "BJD"=>"\\mathrm{BJD}", "AU"=>"\\mathrm{AU}", "yr"=>"\\mathrm{yr}",
              "K"=>"\\mathrm{K}", "g/cm3"=>"\\mathrm{g\\,cm^{-3}}",
              "M_earth"=>"M_\\oplus", "M_jup"=>"M_{\\mathrm{Jup}}",
+             "M_sun"=>"M_\\odot", "mas"=>"\\mathrm{mas}",
              "R_earth"=>"R_\\oplus", "R_jup"=>"R_{\\mathrm{Jup}}",
              "S_earth"=>"S_\\oplus", "W/m2"=>"\\mathrm{W\\,m^{-2}}")
     return get(m, u, "\\mathrm{$(_mtxt(u))}")
@@ -87,10 +115,23 @@ end
 const _SUBD = Dict('0'=>'₀','1'=>'₁','2'=>'₂','3'=>'₃','4'=>'₄',
                    '5'=>'₅','6'=>'₆','7'=>'₇','8'=>'₈','9'=>'₉')
 _subn(s) = join(get(_SUBD, c, c) for c in string(s))
-const _GREEK_U = ("alpha"=>"α","beta"=>"β","gamma"=>"γ","delta"=>"δ","lambda"=>"λ",
-                  "sigma"=>"σ","omega"=>"ω","tau"=>"τ","phi"=>"φ","rho"=>"ρ",
-                  "mu"=>"μ","nu"=>"ν")
-_greeku(s) = (o = String(s); for (w,l) in _GREEK_U; o = replace(o, w => l); end; o)
+const _GREEK_U = Dict("alpha"=>"α", "beta"=>"β", "gamma"=>"γ", "delta"=>"δ",
+                      "lambda"=>"λ", "sigma"=>"σ", "omega"=>"ω", "tau"=>"τ",
+                      "phi"=>"φ", "rho"=>"ρ", "mu"=>"μ", "nu"=>"ν", "psi"=>"ψ",
+                      "eta"=>"η", "theta"=>"θ", "star"=>"⋆",
+                      "Omega"=>"Ω", "Lambda"=>"Λ", "Phi"=>"Φ", "Psi"=>"Ψ",
+                      "Theta"=>"Θ")
+# Unicode twin of `_sym_sub`: same per-token lookup, subscript tokens joined by
+# a space (the "σ HARPS" convention already used below) so no raw `_` is shown.
+function _sym_sub_u(name)
+    toks = split(_abbr(String(name)), '_'; keepempty = false)
+    isempty(toks) && return "?"
+    return join((get(_GREEK_U, t, String(t)) for t in toks), " ")
+end
+# Unicode twin of `_mtxt` for instrument/indicator text: underscores become
+# spaces (as `_mtxt` makes them thin spaces) and NO greek substitution happens,
+# so an instrument that happens to be called "PHI" is left alone.
+_utxt(s) = replace(_abbr(String(s)), "_" => " ")
 
 function _sci_sym_u(name)
     s = String(name)
@@ -101,35 +142,52 @@ function _sci_sym_u(name)
         base == "K"      && return "K" * ks
         base == "sesinw" && return "√e·sinω" * ks
         base == "secosw" && return "√e·cosω" * ks
+        base == "esinw"  && return "e·sinω" * ks
+        base == "ecosw"  && return "e·cosω" * ks
         base == "Mo"     && return "M₀," * ks
         base in ("ecc","e")               && return "e" * ks
+        base in ("inc","inc_deg","i")     && return "i" * ks
         base in ("omega","omega_deg","w") && return "ω" * ks
         base == "Tp" && return "Tₚ," * ks
         base == "Tc" && return "Tc," * ks
         base == "b"  && return "b" * ks
         base == "rr" && return "Rₚ/R⋆ " * ks
-        return _greeku(base) * ks
+        return _sym_sub_u(base) * ks
     end
     for (pre, sym) in (("gamma","γ"), ("sigma","σ"), ("jitter","σ"))
-        startswith(s, pre*"_") && return sym * " " * _abbr(s[length(pre)+2:end])
+        startswith(s, pre*"_") && return sym * " " * _utxt(s[length(pre)+2:end])
     end
-    startswith(s, "C_") && return "C(" * replace(_abbr(s[3:end]), "_" => ",") * ")"
+    startswith(s, "C_") && return "C(" * replace(_utxt(s[3:end]), " " => ",") * ")"
     if startswith(s, "ind_floor_")
         r = s[11:end]
-        r == "period"   && return "P_floor"
+        r == "period"   && return "P floor"
         r == "lambda_e" && return "λₑ"
         r == "lambda_p" && return "λₚ"
-        endswith(r,"_amp") && return "A(" * _abbr(r[1:end-4]) * ")"
-        endswith(r,"_jit") && return "σ(" * _abbr(r[1:end-4]) * ")"
-        return _greeku(_abbr(r))
+        endswith(r,"_amp") && return "A(" * _utxt(r[1:end-4]) * ")"
+        endswith(r,"_jit") && return "σ(" * _utxt(r[1:end-4]) * ")"
+        return _sym_sub_u(r)
     end
-    return _greeku(_abbr(s))
+    s == "rho_s"        && return "ρ⋆"
+    s == "i_star"       && return "i⋆"
+    s == "v_sin_i_star" && return "v sin i⋆"
+    return _sym_sub_u(s)
 end
 
 function _sci_ylabel(name, params)
     sym = _sci_sym_u(name)
     u = first(sci_param_unit(name, params))
     return u == "" ? sym : sym * "\n(" * u * ")"
+end
+
+# Chain values of `name` in the unit its axis label states. The labels above
+# append sci_param_unit's unit, which is "deg" for angles, but the values were
+# plotted straight from the chain -- radians under a degree label for Mo and ω,
+# and now for Ω and λ too. rad2deg only, never mod2pi: the draws arrive
+# contiguous (recenter_circular! ran before any plot), and a wrap would split a
+# posterior near 0 back into two lobes at 0 and 360.
+function _sci_values(chains, name, params)
+    a = Array(chains[Symbol(name)])
+    return last(sci_param_unit(name, params)) ? rad2deg.(a) : a
 end
 
 # Map each sampled name → owning planet slot (0 = shared/noise/instrument).
@@ -224,7 +282,7 @@ function plot_posteriors_raw(chains, params; credmass::Real=0.85,
     figs = Dict{String, Figure}()
     with_theme(nereus_theme()) do
         for nm in names_
-            v = vec(Array(chains[Symbol(nm)]))
+            v = vec(_sci_values(chains, nm, params))
             hpd = _hpd_indices(chains, params, nm, owner, credmass)
             allidx = collect(1:length(v))
             length(allidx) > max_points &&
@@ -274,7 +332,7 @@ function plot_posteriors_parameters(chains, params; credmass::Real=0.85,
     figs = Dict{String, Figure}()
     with_theme(nereus_theme()) do
         for nm in names_
-            v = vec(Array(chains[Symbol(nm)]))
+            v = vec(_sci_values(chains, nm, params))
             hpd = collect(_hpd_indices(chains, params, nm, owner, credmass))
             length(hpd) > max_points &&
                 (hpd = hpd[round.(Int, range(1, length(hpd); length=max_points))])
@@ -315,7 +373,7 @@ function plot_posteriors_histograms(chains, params; credmass::Real=0.85,
     figs = Dict{String, Figure}()
     with_theme(nereus_theme()) do
         for nm in names_
-            v = vec(Array(chains[Symbol(nm)]))
+            v = vec(_sci_values(chains, nm, params))
             hpd = collect(_hpd_indices(chains, params, nm, owner, credmass))
             x = v[hpd]
             length(x) < 10 && continue
@@ -350,7 +408,7 @@ end
     plot_traces_grouped(chains, params; output, …) -> Dict
 
 Trace plots GROUPED into one wide multi-panel figure per group:
-  - one per planet  (`trace_planet_P<k>` — P, K, sesinw, secosw, Mo stacked),
+  - one per planet  (`trace_planet_K<k>` — P, K, sesinw, secosw, Mo stacked),
   - instrument params (γ, jitter), noise-model params, and any other nuisance.
 Wider-than-tall panels stacked vertically. Writes to `output/traces/`.
 """
@@ -375,7 +433,7 @@ function plot_traces_grouped(chains, params; output::Union{Nothing,String}=nothi
     for n in layout.unfrozen_names
         Symbol(n) in cn || continue
         k = get(owner, n, 0)
-        g = k > 0 ? "planet_P$k" : (n in noise_set ? "noise" : _instr(n) ? "instrument" : "other")
+        g = k > 0 ? "planet_K$k" : (n in noise_set ? "noise" : _instr(n) ? "instrument" : "other")
         _push(g, n)
     end
     outdir = output === nothing ? nothing : joinpath(output, "traces")
@@ -386,7 +444,7 @@ function plot_traces_grouped(chains, params; output::Union{Nothing,String}=nothi
     # overlap grays out and you can see where the walkers converge — NOT the
     # walkers flattened into one jumpy line.
     function _walker_series(name)
-        a = Array(chains[Symbol(name)])
+        a = _sci_values(chains, name, params)   # degrees for angles, as labelled
         if ndims(a) == 2 && size(a, 2) > 1
             return [collect(view(a, :, c)) for c in 1:size(a, 2)]
         end

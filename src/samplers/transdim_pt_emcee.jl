@@ -20,6 +20,11 @@
 # toggling has its own annealed birth (`n_noise_bridge`/`n_noise_relax`),
 # its own swap move (`noise_swap`), and per-temperature accept/propose
 # accounting in `noise_td_proposed`/`noise_td_accepted`.
+#
+# Full-circle angles (Mo, Ω, λ, ω under `:ew`; src/circular.jl) are re-charted
+# halfway through and at the end of burn-in, as in `sample_pt_emcee`, except
+# that only active slots vote and same-mode planet slots share one window per
+# angle, because births re-sort planets between them (`_td_ensemble_recut!`).
 
 using Random: AbstractRNG, MersenneTwister
 using Statistics: median, quantile
@@ -125,6 +130,160 @@ end
     end
 end
 
+# ------------------------------------------------------------------
+# Circular re-cut of the trans-dim ensemble (see src/circular.jl).
+#
+# Same move as sample_pt_emcee's -- the seam of a full-circle angle is a chart,
+# so it is moved to the emptiest arc of the cold ensemble and every walker at
+# every rung is relabelled -- except that same-mode planet slots move as one
+# group (`circular_groups`, which says why they must share a window) and only
+# ACTIVE slots vote. An inactive planet's values are a MoMS off-value or
+# stretch drift, and an astrometrically uncoupled companion's Ω is a prior
+# draw (`TransDimState.as_active`); neither is a posterior draw.
+#
+# Serial, between steps, no randomness. The cached logπ / logL stay valid: the
+# prior is uniform over one period in either window and the likelihood is
+# periodic in these angles, so each walker's physical state and log-density are
+# unchanged up to rounding. The MoMS off-values move WITH the window rather than
+# being relabelled: they are the prior's median by construction (`MoMSBirth`),
+# i.e. the old window's midpoint, and a move is needed when the posterior
+# straddles the old seam -- which tends to put the new seam near that midpoint.
+# Relabelled, the off-value would then sit on the new seam and centre every
+# blind birth on the emptiest arc of the posterior. Birth and death read the
+# same off-value and the same bounds, so the kernel stays balanced; it is
+# adapted here like the Robbins-Monro scales, during burn-in only. Every other
+# birth draws from, or wraps into, the layout's bounds and so follows the window
+# by itself.
+# ------------------------------------------------------------------
+function _td_ensemble_recut!(state::Array{Float64,3},
+                             td_states::AbstractMatrix{TransDimState},
+                             params::Params, groups, strategy::MoMSBirth,
+                             transforms, moved::Dict{String,NTuple{2,Float64}})
+    L = params.layout
+    n_t, n_w = size(state, 1), size(state, 2)
+    draws  = Float64[]
+    old_lo = Float64[]
+    for grp in groups
+        empty!(draws)
+        for (d, k) in grp
+            is_node = startswith(L.unfrozen_names[d], "Omega_")
+            @inbounds for w in 1:n_w
+                tds = td_states[1, w]
+                (k > length(tds.planet_active) || tds.planet_active[k]) || continue
+                is_node && !is_as_active(tds, k) && continue
+                push!(draws, state[1, w, d])
+            end
+        end
+        isempty(draws) && continue
+        empty!(old_lo)
+        for (d, _) in grp
+            push!(old_lo, L.unfrozen_priors[d].lo)
+        end
+        win = recut_circular_group!(params, grp, draws; transforms = transforms)
+        win === nothing && continue
+        # Each member's own bounds: members share `lo`, each keeps its own span.
+        for (m, (d, k)) in enumerate(grp)
+            lo, hi = bounds(L.unfrozen_priors[d])
+            # Every walker, active or not: an inactive λ still carries its prior.
+            @inbounds for w in 1:n_w, t in 1:n_t
+                state[t, w, d] = circular_relabel(state[t, w, d], lo, hi)
+            end
+            if k <= length(strategy.slot_indices)
+                i = findfirst(==(d), strategy.slot_indices[k])
+                i === nothing || (strategy.off_values[k][i] += lo - old_lo[m])
+            end
+            moved[L.unfrozen_names[d]] = (Float64(lo), Float64(hi))
+        end
+    end
+    return nothing
+end
+
+# ------------------------------------------------------------------
+# Stranded walkers, trans-dim (burn-in only). Same argument and bound as
+# `_pt_prune_stranded!` (src/samplers/pt_emcee.jl), in the joint space of
+# (model, parameters). Here a walker can also be stranded in the WRONG MODEL: a
+# walker without the planet can only gain it by a birth that lands on the period,
+# phase and amplitude at once. Measured on an easy 12.3 d RV target with 16
+# temps and informed births: 13% of the cold rung still sat in the 0-planet
+# model, 70 nats down, at the end of the old 1000-step burn-in.
+#
+# Differences from the fixed-dim version:
+#  - A is the best walker's MODEL only, and Laplace runs over that model's
+#    active dimensions (an inactive slot has no prior density to integrate).
+#    `owner[d]` is 0 for an always-on dimension, k > 0 for planet slot k and
+#    -j for noise model j.
+#  - The bound: the spike-slab prior over (planet indicators, active
+#    parameters) is normalised, but the noise indicators carry no prior, so the
+#    joint prior integrates to at most 2^n_noise_toggle. The cut is lowered by
+#    that factor.
+#  - A walker moved onto a donor takes the donor's whole TransDimState.
+# ------------------------------------------------------------------
+function _td_prune_stranded!(state::Array{Float64,3},
+                             td_states::AbstractMatrix{TransDimState},
+                             logπ_arr::Matrix{Float64}, logL_arr::Matrix{Float64},
+                             βs::Vector{Float64},
+                             flat_shift::Vector{Union{Nothing,Float64}},
+                             owner::Vector{Int}, n_noise_toggle::Int, rng;
+                             tau::Float64 = 10.0)
+    n_t, n_w, n_dim = size(state)
+    moved = zeros(Int, n_t)
+    _active(tds, o) = o == 0 || (o > 0 ? tds.planet_active[o] : tds.noise_active[-o])
+    _same(a, b) = a.planet_active == b.planet_active &&
+                  a.noise_active == b.noise_active && a.as_active == b.as_active
+    ℓ = Vector{Float64}(undef, n_w)
+    for t in 1:n_t
+        β = βs[t]
+        # Tempered density on the flat scale, over each walker's own active dims.
+        @inbounds for w in 1:n_w
+            v = logπ_arr[t, w] + β * logL_arr[t, w]
+            for d in 1:n_dim
+                s = flat_shift[d]
+                (s === nothing || !_active(td_states[t, w], owner[d])) && continue
+                x = state[t, w, d]
+                v += x + s > 0 ? log(x + s) : -Inf
+            end
+            ℓ[w] = isfinite(v) ? v : -Inf
+        end
+        b = argmax(ℓ)
+        isfinite(ℓ[b]) || continue
+        tb = td_states[t, b]
+        dims = [d for d in 1:n_dim if _active(tb, owner[d])]
+        m = length(dims)
+        m >= 1 || continue
+        allow = quantile(Chisq(m), 1 - 1e-6) / 2
+        A = [w for w in 1:n_w if ℓ[w] >= ℓ[b] - allow && _same(td_states[t, w], tb)]
+        length(A) >= m + 2 || continue
+        Y = Matrix{Float64}(undef, length(A), m)
+        @inbounds for (i, w) in enumerate(A), (j, d) in enumerate(dims)
+            s = flat_shift[d]
+            Y[i, j] = s === nothing ? state[t, w, d] : log(state[t, w, d] + s)
+        end
+        C = cholesky(Symmetric(cov(Y; dims = 1)); check = false)
+        issuccess(C) || continue
+        cut = ℓ[b] + 0.5 * m * log(2π) + 0.5 * logdet(C) - tau -
+              n_noise_toggle * log(2)
+        inA = falses(n_w); inA[A] .= true
+        S = [w for w in 1:n_w if !inA[w] && !(β * logL_arr[t, w] >= cut)]
+        isempty(S) && continue
+        donors = A[ℓ[A] .>= median(ℓ[A])]
+        @inbounds for w in S
+            a = donors[rand(rng, 1:length(donors))]
+            for d in 1:n_dim
+                state[t, w, d] = state[t, a, d]
+            end
+            logπ_arr[t, w] = logπ_arr[t, a]
+            logL_arr[t, w] = logL_arr[t, a]
+            src, dst = td_states[t, a], td_states[t, w]
+            dst.n_planets_active = src.n_planets_active
+            copyto!(dst.planet_active, src.planet_active)
+            copyto!(dst.noise_active, src.noise_active)
+            copyto!(dst.as_active, src.as_active)
+        end
+        moved[t] = length(S)
+    end
+    return moved
+end
+
 """
     sample_transdim_pt_emcee(target, data; td, kwargs...) -> TransDimPTemceeResult
 
@@ -142,20 +301,27 @@ selection on planet count.
 - `inclusion_prior::Float64 = 0.5` — Bernoulli prior P(γ_k = 1).
 - `moms_init_scale::Float64 = 1.0` — initial scale multiplier for the
   MoMS Gaussian RW proposal in active-component dimensions.
-- `informed_birth_fraction::Float64 = 0.0` — fraction of births that use a
+- `informed_birth_fraction::Float64 = 0.5` — fraction of births that use a
   data-informed proposal (`JointInformedBirth`: BLS photometry peaks + RV
   Lomb-Scargle, with depth→radius→mass→K and BLS-t0 anchoring; auto-falls back
   to RV-only `InformedBirth` when there is no photometry) instead of the native
   MoMS Gaussian RW. Forward/reverse use the same strategy family so detailed
   balance is preserved (same pattern as `sample_moms`). Critical for finding
-  weak / arbitrary-period planets — `0.0` (the old default) gives blind RW
-  births that rarely land on a real period.
+  weak / arbitrary-period planets. It defaulted to `0.0` while this line called
+  it critical, and at 0.0 the blind births missed an easy 12.3 d, K = 12 m/s
+  planet outright: P(Nₚ = 0) = 0.84 with no draw at the period.
 
 # PT / ensemble kwargs (same as `sample_pt_emcee`)
-- `n_temps::Int = 5`
+- `n_temps::Int = 16` — was 5, for the reason `sample_pt_emcee` gives. On the
+  12.3 d target with informed births, 5 temps left 47% of the cold rung in the
+  0-planet model; 16 left 13% at the old budget and none at the new one.
 - `n_walkers::Int = 100`
-- `n_steps::Int = 2000`
-- `n_burnin::Int = 1000`
+- `n_steps::Int = 3000`
+- `n_burnin::Int = 2000` — was 2000/1000, see `sample_pt_emcee`.
+- `prune_stranded::Bool = true` — as in `sample_pt_emcee`, in the joint
+  (model, parameter) space: during burn-in a walker whose likelihood puts it
+  in a region of negligible total mass takes over a mode walker's parameters
+  AND model. See `_td_prune_stranded!`.
 - `betas::Union{Nothing,Vector{Float64}} = nothing`
 - `beta_min::Real = 1e-4` — hottest inverse-temperature. The default ladder is
   geometric across `[beta_min, 1]` (`β_i = beta_min^(i/(n_temps-1))`), so adding
@@ -173,6 +339,11 @@ selection on planet count.
   per step.
 - Tempered M-H: the MoMS acceptance uses `β · (log_L_new − log_L_old)`
   so hot chains explore more freely between models.
+- Full-circle angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`:
+  the seam moves to the emptiest arc of the cold rung's active-slot draws (see
+  src/circular.jl), which moves `target.params.layout` and `target.transform`
+  in place. Same-mode planet slots share one window per angle, unified at the
+  start when an earlier fit on the same target left them apart.
 """
 function sample_transdim_pt_emcee(
     target::NereusTarget,
@@ -180,7 +351,7 @@ function sample_transdim_pt_emcee(
     td::TransDimConfig,
     inclusion_prior::Real = 0.5,
     moms_init_scale::Real = 1.0,
-    informed_birth_fraction::Real = 0.0,
+    informed_birth_fraction::Real = 0.5,
     target_birth_accept::Real = 0.234,
     n_birth_refine::Int = 0,
     n_birth_tries::Int = 1,
@@ -189,10 +360,10 @@ function sample_transdim_pt_emcee(
     # stages, relaxing the newborn `n_noise_relax` steps at each.
     n_noise_bridge::Int = 1,
     n_noise_relax::Int = 2,
-    n_temps::Int = 5,
+    n_temps::Int = 16,
     n_walkers::Int = 100,
-    n_steps::Int = 2000,
-    n_burnin::Int = 1000,
+    n_steps::Int = 3000,
+    n_burnin::Int = 2000,
     betas::Union{Nothing,AbstractVector} = nothing,
     beta_min::Real = 1e-4,
     stretch_a::Real = 2.0,
@@ -206,6 +377,7 @@ function sample_transdim_pt_emcee(
     ladder_adapt_ν0::Real = 10.0,
     ladder_adapt_K::Real = 1.0,
     untemper_transit::Bool = false,
+    prune_stranded::Bool = true,
 )
     # JSON may deliver floats-as-Int and arrays-as-JSON3.Array; normalize.
     inclusion_prior         = Float64(inclusion_prior)
@@ -299,6 +471,32 @@ function sample_transdim_pt_emcee(
                  for _ in 1:n_thr]
     thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
     rng_master    = MersenneTwister(seed)
+
+    # Full-circle angles, re-charted during burn-in by `_td_ensemble_recut!`.
+    # Every move that copies planet blocks between slots (births and their
+    # sort, the planet↔AD swaps) is `td.planets`-gated, so that is the flag. A
+    # reused target can carry a window per column from an earlier fit, so the
+    # groups are unified before anything reads the windows -- the MoMS
+    # off-values below are prior medians and the walkers are prior draws. A
+    # no-op on a fresh target. Groups are fixed for the run; `recut_moved`
+    # collects the final windows for the single end-of-run report.
+    circ_groups = circular_groups(params; permutable = td.planets)
+    unify_circular_groups!(params, circ_groups; transforms = (target.transform,))
+    recut_moved = Dict{String,NTuple{2,Float64}}()
+    # Stretch scale per dimension (see the stretch move), pruning tally per rung,
+    # and which component owns each dimension (see `_td_prune_stranded!`).
+    flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
+                                        for ps in layout.unfrozen_priors]
+    pruned = zeros(Int, n_temps)
+    dim_owner = zeros(Int, n_dim)
+    for (k, blk) in enumerate(layout.planet_blocks), slot in planet_slot_indices(blk)
+        d = findfirst(==(slot), unfrozen_idx)
+        d === nothing || (dim_owner[d] = k)
+    end
+    for d in 1:n_dim
+        j = _noise_model_index_for_param(layout.unfrozen_names[d], params)
+        j === nothing || (dim_owner[d] = -j)
+    end
 
     # MoMS proposal strategy — shared across threads. Scales are tuned
     # during burn-in (Robbins-Monro); writes are protected by atomic
@@ -766,13 +964,42 @@ function sample_transdim_pt_emcee(
             u = rand(trng)
             z = ((stretch_a - 1) * u + 1)^2 / stretch_a
 
+            # The stretch runs on the scale each prior is flat on, y = log(x + s)
+            # for LogUniform / ModJeffreys (see sample_pt_emcee); `state` stays
+            # in x because every birth/death/refinement writes it there. The
+            # Jacobian Π(x'+s)/(x+s) enters the ratio.
+            #
+            # Only for dimensions ACTIVE in this walker. An inactive slot has no
+            # prior density, so on the log scale its only "target" is the
+            # Jacobian e^y, which drove parked periods to x → ∞; from there every
+            # proposal was NaN and the walker froze (measured: cold acceptance
+            # 0.04, 34% of the cold rung stuck without the planet). Inactive
+            # dimensions stay linear, as before. A stretch never changes the
+            # walker's model, so forward and reverse use the same scale, and a
+            # partner parked outside (-s, ∞) on an active dimension is rejected.
+            tds_w = td_states[t, w]
+            log_jac = 0.0
+            in_domain = true
             @inbounds for d in 1:n_dim
-                buf[d] = state[t, w_partner, d] +
-                         z * (state[t, w, d] - state[t, w_partner, d])
+                xp, xw = state[t, w_partner, d], state[t, w, d]
+                s = flat_shift[d]
+                o = dim_owner[d]
+                on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
+                if s === nothing || !on
+                    buf[d] = xp + z * (xw - xp)
+                elseif xp + s > 0 && xw + s > 0
+                    yp, yw = log(xp + s), log(xw + s)
+                    yn = yp + z * (yw - yp)
+                    buf[d] = exp(yn) - s
+                    log_jac += yn - yw
+                else
+                    in_domain = false
+                end
             end
 
-            lp_prop, ll_prop = eval_bounded!(buf, td_states[t, w], tid)
-            log_ratio = (n_dim - 1) * log(z) +
+            lp_prop, ll_prop = in_domain ?
+                eval_bounded!(buf, td_states[t, w], tid) : (-Inf, -Inf)
+            log_ratio = (n_dim - 1) * log(z) + log_jac +
                         β * (ll_prop - logL_arr[t, w]) +
                         (lp_prop - logπ_arr[t, w])
             Threads.atomic_add!(propose_temp[t], 1)
@@ -1509,6 +1736,27 @@ function sample_transdim_pt_emcee(
             βs .= new_betas
         end
 
+        # ---- Stranded walkers (serial; burn-in only) -----------------
+        # See `_td_prune_stranded!`. Same schedule as pt_emcee: every 50
+        # steps through 3/4 of burn-in, before the re-cut.
+        if prune_stranded && step % 50 == 0 && step <= (3 * n_burnin) ÷ 4
+            pruned .+= _td_prune_stranded!(state, td_states, logπ_arr, logL_arr,
+                                           βs, flat_shift, dim_owner,
+                                           do_noise ? length(noise_toggle_idx) : 0,
+                                           rng_master)
+        end
+
+        # ---- Circular re-cut (serial; threads idle) ------------------
+        # Halfway through burn-in, while the ensemble can still merge the two
+        # lobes a seam-centred angle burns in as; and at the end, which fixes
+        # the chart for every recorded step. Relabels `state` at every rung.
+        # thread_theta and the proposal buffers are rewritten from `state`
+        # before every evaluation, so they hold nothing to relabel.
+        if !isempty(circ_groups) && (step == n_burnin ÷ 2 || step == n_burnin)
+            _td_ensemble_recut!(state, td_states, params, circ_groups, strategy,
+                                (target.transform,), recut_moved)
+        end
+
         if step > n_burnin
             @inbounds for w in 1:n_walkers_eff
                 logL_walker = view(logL_arr, :, w)
@@ -1553,8 +1801,23 @@ function sample_transdim_pt_emcee(
         end
     end
     show_progress && finish!(pb)
+    show_progress && sum(pruned) > 0 && @info "td-pt_emcee: burn-in moved " *
+        "$(sum(pruned)) stranded walker state(s), model included, onto their " *
+        "rung's mode ($(pruned[1]) at β = 1), all from a region whose total " *
+        "posterior mass is bounded below e⁻¹⁰ of the mode's. The recorded chain " *
+        "is ordinary MCMC."
     @info "planet↔activity swap: proposed=$(pswap_prop[]) accepted=$(pswap_acc[])" *
           "  | PN(pl→AD) $(pn_acc[])/$(pn_prop[])  NP(AD→pl) $(np_acc[])/$(np_prop[])"
+    # A silent move would leave the reader of a trace plot wondering why Mo now
+    # spans [-3.05, 3.23) when they wrote U(0, 2π).
+    if show_progress && !isempty(recut_moved)
+        @info "td-pt_emcee: moved circular seams to the emptiest arc of the " *
+              "posterior (same-mode planet slots share one window); windows now " *
+              join(("$nm [$(round(w[1]; digits = 2)), $(round(w[2]; digits = 2)))"
+                    for (nm, w) in sort!(collect(recut_moved); by = first)), ", ") *
+              ". Still one full period under the same uniform prior, so this " *
+              "relabels the circle and changes neither the posterior nor the evidence."
+    end
 
     samples    = samples[1:keep_idx, :]
     lp_samples = lp_samples[1:keep_idx]
