@@ -146,23 +146,28 @@ function ofti_sample(target::NereusTarget;
     n_cal  = n_calibrate > 0 ? Int(n_calibrate) :
              max(div(Int(n_attempts), 10), 1000)
 
-    # Per-thread buffers — OFTI is embarrassingly parallel (each draw is
-    # independent), so we run the production loop with Threads.@threads
-    # over the attempt index. Need per-thread `theta`, `x_bounded`, and
-    # `rng` to avoid contention. The calibration pass is also threaded
-    # but only tracks aggregate stats.
-    nthreads = max(1, Threads.nthreads())
-    thetas       = [Theta(params)              for _ in 1:nthreads]
-    x_bounds     = [zeros(Float64, n_unf)      for _ in 1:nthreads]
+    # Per-slot buffers — OFTI is embarrassingly parallel (each draw is
+    # independent), so both passes run with Threads.@threads over chunks of
+    # the attempt index. Each chunk needs its own `theta`, `x_bounded` and
+    # `rng` to avoid contention. The calibration pass is threaded the same
+    # way but only tracks aggregate stats.
+    #
+    # Buffers are keyed by CHUNK, never by `Threads.threadid()`: the id spans
+    # every threadpool while `Threads.nthreads()` counts only the default one,
+    # so `thetas[threadid()]` overran this vector on stock Julia >= 1.12 (see
+    # src/threading.jl).
+    n_slots      = _nthread_chunks()
+    thetas       = [Theta(params)              for _ in 1:n_slots]
+    x_bounds     = [zeros(Float64, n_unf)      for _ in 1:n_slots]
 
-    # Per-thread closure. Same logic as before; takes the thread id so
-    # it can pick its own buffers. The RNG is passed IN, keyed on the
-    # attempt index rather than the thread, so the draw sequence does not
-    # depend on how many threads Julia was started with. Xoshiro (not
-    # MersenneTwister) because this constructs one per attempt.
-    @inline function _draw_and_evaluate!(tid::Int, trng)
-        theta     = thetas[tid]
-        x_bounded = x_bounds[tid]
+    # Per-slot closure. Same logic as before; takes the chunk index so it
+    # can pick its own buffers. The RNG is passed IN, keyed on the attempt
+    # index rather than the slot, so the draw sequence does not depend on
+    # how many threads Julia was started with. Xoshiro (not MersenneTwister)
+    # because this constructs one per attempt.
+    @inline function _draw_and_evaluate!(slot::Int, trng)
+        theta     = thetas[slot]
+        x_bounded = x_bounds[slot]
         for j in 1:n_unf
             ps = layout.unfrozen_priors[j]
             x_bounded[j] = prior_transform(rand(trng), ps)
@@ -189,31 +194,33 @@ function ofti_sample(target::NereusTarget;
     end
 
     # ---------- Pass 1: calibration (threaded) ----------------------
-    # Each thread tracks its own running max + counts to avoid atomics
+    # Each slot tracks its own running max + counts to avoid atomics
     # in the hot loop; we reduce after the parallel block.
-    per_t_logL_max  = fill(-Inf, nthreads)
-    per_t_finite    = zeros(Int, nthreads)
-    per_t_in_bounds = zeros(Int, nthreads)
+    per_s_logL_max  = fill(-Inf, n_slots)
+    per_s_finite    = zeros(Int, n_slots)
+    per_s_in_bounds = zeros(Int, n_slots)
     pb_cal = ProgressBar("OFTI calibration";
                           total = n_cal, enabled = show_progress)
-    # :static — Threads.@threads default :dynamic lets tasks migrate
-    # mid-iteration when GC yields fire, which means `tid =
-    # Threads.threadid()` becomes stale and per-thread buffers race.
-    # See feedback_threading_threadid.md.
-    Threads.@threads :static for attempt in 1:n_cal
-        tid = Threads.threadid()
-        ll, in_bounds = _draw_and_evaluate!(tid, Xoshiro(_walker_seed(seed, 5, attempt)))
-        if in_bounds
-            per_t_in_bounds[tid] += 1
-            if isfinite(ll)
-                per_t_finite[tid] += 1
-                ll > per_t_logL_max[tid] && (per_t_logL_max[tid] = ll)
+    # One chunk of attempts per slot, so `slot` is a plain loop counter and
+    # the buffers cannot be shared between tasks however the scheduler moves
+    # them. `:static` is kept for the 1:1 chunk-to-thread mapping, but the
+    # buffers no longer depend on it.
+    cal_chunks = _chunk_ranges(n_cal, n_slots)
+    Threads.@threads :static for slot in 1:length(cal_chunks)
+        for attempt in cal_chunks[slot]
+            ll, in_bounds = _draw_and_evaluate!(slot, Xoshiro(_walker_seed(seed, 5, attempt)))
+            if in_bounds
+                per_s_in_bounds[slot] += 1
+                if isfinite(ll)
+                    per_s_finite[slot] += 1
+                    ll > per_s_logL_max[slot] && (per_s_logL_max[slot] = ll)
+                end
             end
         end
     end
-    log_lik_max_cal = maximum(per_t_logL_max)
-    n_finite_cal    = sum(per_t_finite)
-    n_in_bounds_cal = sum(per_t_in_bounds)
+    log_lik_max_cal = maximum(per_s_logL_max)
+    n_finite_cal    = sum(per_s_finite)
+    n_in_bounds_cal = sum(per_s_in_bounds)
     update!(pb_cal; n_done = n_cal,
              fields = (:in_bounds => n_in_bounds_cal,
                        :finite => n_finite_cal,
@@ -232,46 +239,48 @@ function ofti_sample(target::NereusTarget;
     # vectors, then concatenate and re-sort into ATTEMPT order. Both the
     # draws and the ordering are therefore independent of the thread
     # count -- a run is reproducible from `seed` alone.
-    per_t_accepted   = [Vector{Vector{Float64}}() for _ in 1:nthreads]
-    per_t_loglikes   = [Float64[]                  for _ in 1:nthreads]
-    per_t_attempt    = [Int[]                      for _ in 1:nthreads]
-    per_t_finite_p   = zeros(Int, nthreads)
-    per_t_in_bnds_p  = zeros(Int, nthreads)
-    per_t_overshoot  = zeros(Int, nthreads)
+    per_s_accepted   = [Vector{Vector{Float64}}() for _ in 1:n_slots]
+    per_s_loglikes   = [Float64[]                  for _ in 1:n_slots]
+    per_s_attempt    = [Int[]                      for _ in 1:n_slots]
+    per_s_finite_p   = zeros(Int, n_slots)
+    per_s_in_bnds_p  = zeros(Int, n_slots)
+    per_s_overshoot  = zeros(Int, n_slots)
 
     pb_prod = ProgressBar("OFTI production";
                            total = n_attempts, enabled = show_progress)
-    Threads.@threads :static for attempt in 1:n_attempts
-        tid  = Threads.threadid()
-        trng = Xoshiro(_walker_seed(seed, 6, attempt))
-        ll, in_bounds = _draw_and_evaluate!(tid, trng)
-        if in_bounds
-            per_t_in_bnds_p[tid] += 1
-            if isfinite(ll)
-                per_t_finite_p[tid] += 1
-                if ll > log_lik_ref
-                    per_t_overshoot[tid] += 1
-                    push!(per_t_accepted[tid], copy(x_bounds[tid]))
-                    push!(per_t_loglikes[tid], ll)
-                    push!(per_t_attempt[tid], attempt)
-                elseif rand(trng) < exp(ll - log_lik_ref)
-                    push!(per_t_accepted[tid], copy(x_bounds[tid]))
-                    push!(per_t_loglikes[tid], ll)
-                    push!(per_t_attempt[tid], attempt)
+    prod_chunks = _chunk_ranges(n_attempts, n_slots)
+    Threads.@threads :static for slot in 1:length(prod_chunks)
+        for attempt in prod_chunks[slot]
+            trng = Xoshiro(_walker_seed(seed, 6, attempt))
+            ll, in_bounds = _draw_and_evaluate!(slot, trng)
+            if in_bounds
+                per_s_in_bnds_p[slot] += 1
+                if isfinite(ll)
+                    per_s_finite_p[slot] += 1
+                    if ll > log_lik_ref
+                        per_s_overshoot[slot] += 1
+                        push!(per_s_accepted[slot], copy(x_bounds[slot]))
+                        push!(per_s_loglikes[slot], ll)
+                        push!(per_s_attempt[slot], attempt)
+                    elseif rand(trng) < exp(ll - log_lik_ref)
+                        push!(per_s_accepted[slot], copy(x_bounds[slot]))
+                        push!(per_s_loglikes[slot], ll)
+                        push!(per_s_attempt[slot], attempt)
+                    end
                 end
             end
         end
     end
-    accepted        = reduce(vcat, per_t_accepted)
-    log_likes       = reduce(vcat, per_t_loglikes)
-    # Restore attempt order: `reduce(vcat, ...)` concatenates thread-first,
-    # which would otherwise permute the output with the thread count.
-    ord             = sortperm(reduce(vcat, per_t_attempt))
+    accepted        = reduce(vcat, per_s_accepted)
+    log_likes       = reduce(vcat, per_s_loglikes)
+    # Restore attempt order: `reduce(vcat, ...)` concatenates slot-first,
+    # which would otherwise permute the output with the chunk count.
+    ord             = sortperm(reduce(vcat, per_s_attempt))
     accepted        = accepted[ord]
     log_likes       = log_likes[ord]
-    n_finite_prod   = sum(per_t_finite_p)
-    n_in_bounds_prod= sum(per_t_in_bnds_p)
-    n_overshoot     = sum(per_t_overshoot)
+    n_finite_prod   = sum(per_s_finite_p)
+    n_in_bounds_prod= sum(per_s_in_bnds_p)
+    n_overshoot     = sum(per_s_overshoot)
     update!(pb_prod; n_done = n_attempts,
              fields = (:accepted => length(accepted),
                        :overshoot => n_overshoot,

@@ -1012,9 +1012,9 @@ function _tomo_a_Rs(theta::Theta{T}, P) where {T}
     M_s = theta.params.config.M_s; R_s = theta.params.config.R_s
     (M_s > 0 && R_s > 0) || return convert(T, NaN)
     P_s = P * T(86400.0)
-    GM  = T(1.3271244e26) * M_s
+    GM  = T(GM_SUN_CGS) * M_s
     a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-    return a_cm / (R_s * T(6.9570e10))
+    return a_cm / (R_s * T(R_SUN_CM))
 end
 
 "Quadratic limb darkening from the first PM instrument, else uniform disk."

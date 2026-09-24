@@ -199,17 +199,36 @@ end
 """
     plot_corner(chains, params;
                  output=nothing, fmt=:png,
-                 params_to_plot=nothing)
+                 params_to_plot=nothing, density=:hexbin)
 
 Corner plot using PairPlots.jl.
 `params_to_plot`: optional list of parameter name strings to include
 (default: all unfrozen params).
+
+`density` picks how the 2-D panels show the sample cloud under the contours:
+
+- `:hexbin` (default) — a binned density over EVERY draw.
+- `:scatter` — one marker per draw, as this plot used to do unconditionally.
+
+Both draw the same contours from the same full sample; only the cloud underneath
+differs. The default is `:hexbin` because `:scatter` does not scale: CairoMakie
+writes each marker as its own element in the PNG, so a 150,000-draw, 8-parameter
+corner is 4.2 million path elements and the SAVE alone measured 16.4 s against
+1.3 s to render it — 17.7 s in total, the single most expensive figure Nereus
+produces. The hexbin draws the same 150,000 draws in 3.8 s.
+
+Thinning the scatter is not the fix and was measured and rejected: at 10,000 of
+150,000 draws the cloud all but vanishes at the same alpha, and the panel limits
+move, because they follow the thinned extrema. `rasterize` is not the fix
+either — `PairPlots.Scatter` drops the keyword, and setting it on the plot
+objects after `pairplot` returns produces a byte-identical PNG.
 """
 function plot_corner(chains, params;
                       output::Union{Nothing, String}=nothing,
                       fmt::Symbol=:png,
                       save_pdf::Bool=false,
-                      params_to_plot::Union{Nothing, Vector{String}}=nothing)
+                      params_to_plot::Union{Nothing, Vector{String}}=nothing,
+                      density::Symbol=:hexbin)
     # PairPlots is loaded at the top of this file (see `using PairPlots`
     # there). The earlier pattern used `@eval using PairPlots` inside the
     # function body, which triggered Julia's world-age limitation:
@@ -233,9 +252,19 @@ function plot_corner(chains, params;
         data_nt = NamedTuple{Tuple(Symbol.(pnames))}(
             (vec(Array(chains[Symbol(name)])) for name in pnames))
 
-        fig = Base.invokelatest(pairplot,
-            data_nt => (PairPlots.Scatter(markersize=1, color=(NEREUS_COLORS.post, 0.1)),
-                        PairPlots.Contour()))
+        density in (:hexbin, :scatter) || throw(ArgumentError(
+            "plot_corner: density must be :hexbin or :scatter, got $(repr(density))"))
+        # `cool` per the house plotting convention, on a log count scale so a
+        # thousand-fold density range does not render as two flat colours — the
+        # tails of a well-sampled posterior hold single-digit counts while the
+        # core holds thousands, and on a linear scale everything outside the core
+        # saturates to one shade.
+        layers = density === :hexbin ?
+            (PairPlots.HexBin(colormap = :cool, colorscale = log10),
+             PairPlots.Contour(color = :black)) :
+            (PairPlots.Scatter(markersize = 1, color = (NEREUS_COLORS.post, 0.1)),
+             PairPlots.Contour())
+        fig = Base.invokelatest(pairplot, data_nt => layers)
 
         if output !== nothing
             mkpath(output)

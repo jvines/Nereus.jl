@@ -85,7 +85,7 @@ function _multi_iad_scenario(; with_gaia::Bool)
             "inc_k1" => SinePrior(), "Omega_k1" => UniformPrior(0.0, 2π),
             "sigma_X" => LogUniformPrior(0.1, 10.0), "M_pri" => FixedPrior(M_pri)))
     theta = Theta(params)
-    a_true = ((M_pri + M_sec) * (P_d / 365.25)^2)^(1/3)
+    a_true = ((M_pri + M_sec) * (P_d / Nereus.KEPLER_YEAR_DAYS)^2)^(1/3)
     set_param!(theta, "n_p", 1); set_param!(theta, "a_k1", a_true)
     set_param!(theta, "M_sec_k1", M_sec)
     set_param!(theta, "sesinw_k1", sqrt(e) * sin(ω))
@@ -97,17 +97,76 @@ function _multi_iad_scenario(; with_gaia::Bool)
     return data, theta, (; M_sec, i_true, Ω_true)
 end
 
+# The pinned log-likelihoods in this file are REGRESSION GOLDENS, compared to
+# 1e-13 relative -- not bit for bit. They were recorded on macOS/aarch64; on
+# Linux/x86_64, where CI runs, the same code lands an ulp away (4e-16 relative:
+# libm and FMA contraction differ between the two), so `===` against a literal
+# fails there for no reason in the code. Every change these pins exist to catch
+# is far larger: the Kepler-year fix moved them 1.9e-5 relative, the GM_sun
+# consolidation 1.1e-7. Reordered floating-point arithmetic (the reflex kernel,
+# `_markley_sc`: 1e-16 to 1e-15) passes without a re-pin, as it should, and the
+# measured cross-platform spread (4e-16) has 250x of headroom.
+const PIN_RTOL = 1e-13
+
 # Joint-path goldens. Named so the discrimination testset below and the
 # pins above cannot drift apart silently.
-const JOINT_TRUTH = -141.26944422585404
-const JOINT_3MSEC = -34009.330489890766
-const JOINT_I30   = -205.18663898287284
-const JOINT_OMEGA = -3327.5912223098817
+#
+# RE-PINNED 2026-09-23 (reflex kernel, GOST side): `gost_5param_fit` stopped
+# calling `orbitsolve` per scan transit and now evaluates the orbit from the
+# same hoisted Thiele-Innes constants `_iad_residuals!` uses
+# (`_gost_5param_accumulate`, src/astrometry/projection.jl). The joint path
+# reaches it twice — `_multi_iad_scenario` builds `Δq_true` with it, and
+# `_iad_gaia_joint_log_likelihood` calls it per evaluation — so all four
+# goldens below are exposed to the reordered multiply-adds. Three moved, by
+# 1.4e-11, 3.4e-13 and 1.8e-12 absolute (4.0e-16, 1.7e-15 and 5.4e-16
+# relative); JOINT_TRUTH rounds to the same Float64. The kernel is checked
+# against `star_reflex_offset` independently in test_reflex_kernel.jl (worst
+# relative 3.1e-14 over 10,000 orbit/epoch pairs) and `gost_5param_fit` against
+# a verbatim copy of its own previous accumulation over 60 random scan
+# geometries (worst relative 8.6e-16).
+const JOINT_TRUTH = -141.2694442258537
+const JOINT_3MSEC = -34001.345123468105
+const JOINT_I30   = -204.91035261440564
+const JOINT_OMEGA = -3328.2593093716064
 
 @testset "astrometry — multi-instrument" begin
 
     # =================================================================
     # 1. Exact reduction of the n_inst == 1 path.
+    #
+    # RE-PINNED 2026-09-23 (_markley_sc): `_reflex_offset` stopped taking a
+    # second `sincos(E)` after the Kepler solve and now uses the sine and cosine
+    # Markley already computed for its own corrector (`_markley_sc`,
+    # src/astrometry/projection.jl). E is returned BIT-IDENTICAL to
+    # PlanetOrbits' `kepler_solver` -- pinned over 20,000 random (M, e) in
+    # test_reflex_kernel.jl, 20000/20000 exact -- and only sin/cos differ, by
+    # ~7 ulp, because they come from an angle-sum over the final correction
+    # rather than a fresh libm call. On the residuals that is max |delta| =
+    # 1.4e-14 mas against a Gaia along-scan sigma of 0.049 mas. Four pins moved
+    # by 1-2 ulp: the two below and JOINT_3MSEC / JOINT_OMEGA above. Worth 12.3
+    # us of a ~57 us likelihood evaluation (1.41x on the residual loop).
+    #
+    # RE-PINNED 2026-09-22 (reflex kernel): `_iad_residuals!` stopped calling
+    # `orbitsolve` once per abscissa and now evaluates the orbit from its
+    # Thiele-Innes constants, hoisted once per likelihood call
+    # (`_reflex_kernel`, src/astrometry/projection.jl). Same Kepler solve --
+    # PlanetOrbits' own, so E is bit-identical -- and an algebraic identity
+    # after it, but the multiply-adds happen in a different order, so the low
+    # bits move. Two of the four pins below shifted, by 2.2e-13 and 5.0e-14
+    # absolute (1.1e-15 and 3.5e-16 relative); the other two round to the same
+    # Float64. Agreement with `star_reflex_offset` is pinned independently over
+    # 10,000 (orbit, epoch) pairs in test_reflex_kernel.jl, worst relative
+    # 3.1e-14. NOTE the consequence the block comment below spells out: the
+    # tracked reproduction artifacts were computed with the OLD accumulation
+    # order and need regenerating.
+    #
+    # RE-PINNED 2026-09-22: `a_from_P` moved off the Julian year onto
+    # KEPLER_YEAR_DAYS, so an orbit built from (a, M) finally has the period it
+    # was given instead of one 1.89e-5 long (src/constants.jl). At the truth
+    # parameters the value is unchanged to the last two digits — the scenario
+    # builds its abscissae through the same conversion — and the off-truth pins
+    # move by 1e-5 to 1e-4 relative, most at 3·M_sec, where the orbit is far
+    # from the data and a phase shift costs the most.
     #
     # RE-PINNED 2026-09-20 when the parallax stopped being a marginalised
     # nuisance and became the sampled `astrom_plx(theta)` (see `_iad_n_q`).
@@ -118,36 +177,37 @@ const JOINT_OMEGA = -3327.5912223098817
     # regenerating.
     #
     # These values were captured from the pre-generalisation
-    # implementation. The marginalisation is a Cholesky solve, so a
-    # reordered accumulation or a different factorisation shows up in
-    # the low bits; `===` on Float64 is the only test that catches it.
-    # The repo ships tracked reproduction artifacts computed with this
-    # likelihood — a silent last-bit drift would invalidate them.
+    # implementation and compared with `===` until 2026-09-23. That caught
+    # reordered accumulations in the low bits -- and also failed on every
+    # platform but the one the pins were recorded on (CI's Linux/x86_64 lands
+    # an ulp away), and forced five re-pins in a week for arithmetic reorders
+    # of 1e-16. They are now compared to PIN_RTOL (see its definition): a
+    # change to the model or its constants still fails, a reorder does not.
     # =================================================================
-    @testset "single instrument reduces bit-for-bit" begin
+    @testset "single instrument reproduces its pinned values" begin
         data, theta, tr = _multi_iad_scenario(with_gaia = false)
-        @test iad_log_likelihood(theta, data) === -141.44195364572727
+        @test iad_log_likelihood(theta, data) ≈ -141.44195364572727 rtol = PIN_RTOL
         set_param!(theta, "M_sec_k1", 3 * tr.M_sec)
-        @test iad_log_likelihood(theta, data) === -192.90766897419417
+        @test iad_log_likelihood(theta, data) ≈ -192.90983575750448 rtol = PIN_RTOL
         set_param!(theta, "M_sec_k1", tr.M_sec)
         set_param!(theta, "inc_k1", deg2rad(30))
-        @test iad_log_likelihood(theta, data) === -148.72597925980708
+        @test iad_log_likelihood(theta, data) ≈ -148.72611977105913 rtol = PIN_RTOL
         set_param!(theta, "inc_k1", tr.i_true)
         set_param!(theta, "Omega_k1", tr.Ω_true + 0.5)
-        @test iad_log_likelihood(theta, data) === -143.68078368353088
+        @test iad_log_likelihood(theta, data) ≈ -143.6809026397441 rtol = PIN_RTOL
     end
 
-    @testset "IAD + Gaia DR3 joint path reduces bit-for-bit" begin
+    @testset "IAD + Gaia DR3 joint path reproduces its pinned values" begin
         data, theta, tr = _multi_iad_scenario(with_gaia = true)
-        @test iad_log_likelihood(theta, data) === JOINT_TRUTH
+        @test iad_log_likelihood(theta, data) ≈ JOINT_TRUTH rtol = PIN_RTOL
         set_param!(theta, "M_sec_k1", 3 * tr.M_sec)
-        @test iad_log_likelihood(theta, data) === JOINT_3MSEC
+        @test iad_log_likelihood(theta, data) ≈ JOINT_3MSEC rtol = PIN_RTOL
         set_param!(theta, "M_sec_k1", tr.M_sec)
         set_param!(theta, "inc_k1", deg2rad(30))
-        @test iad_log_likelihood(theta, data) === JOINT_I30
+        @test iad_log_likelihood(theta, data) ≈ JOINT_I30 rtol = PIN_RTOL
         set_param!(theta, "inc_k1", tr.i_true)
         set_param!(theta, "Omega_k1", tr.Ω_true + 0.5)
-        @test iad_log_likelihood(theta, data) === JOINT_OMEGA
+        @test iad_log_likelihood(theta, data) ≈ JOINT_OMEGA rtol = PIN_RTOL
     end
 
     # =================================================================
@@ -178,7 +238,7 @@ const JOINT_OMEGA = -3327.5912223098817
         end
     end
 
-    @testset "rank-deficient fallback reduces bit-for-bit" begin
+    @testset "rank-deficient fallback reproduces its pinned value" begin
         iad = IADData(t = collect(48000.0:20.0:48200.0), abscissa = 0.3 .* sin.(1:11),
                       abscissa_err = fill(1.0, 11),
                       psi = collect(range(0, 2π, length = 11)))
@@ -194,7 +254,12 @@ const JOINT_OMEGA = -3327.5912223098817
         set_param!(theta, "Mo_k1", 0.0); set_param!(theta, "inc_k1", deg2rad(60))
         set_param!(theta, "Omega_k1", deg2rad(30)); set_param!(theta, "plx", 25.0)
         set_param!(theta, "sigma_X", 5.0)
-        @test iad_log_likelihood(theta, data) === -10.389532921270447
+        # RE-PINNED 2026-09-23: this theta is K-driven, so M_sec comes from the
+        # astrometric mass function, whose `_F_M_FACTOR` now uses the IAU GM_sun
+        # (src/constants.jl) instead of 6.6743e-11 × 1.989e30 -- 3.0e-4 in GM,
+        # 1.1e-7 in this value. With the old factor put back the previous pin
+        # (-10.389529365014097) is reproduced bit for bit, so nothing else moved.
+        @test iad_log_likelihood(theta, data) ≈ -10.38953053198153 rtol = PIN_RTOL
     end
 
     # =================================================================
@@ -494,7 +559,7 @@ const JOINT_OMEGA = -3327.5912223098817
                     "sigma_X" => LogUniformPrior(0.1, 10.0),
                     "M_pri" => FixedPrior(M_pri)))
             theta = Theta(params)
-            a_true = ((M_pri + M_sec) * (P_d / 365.25)^2)^(1/3)
+            a_true = ((M_pri + M_sec) * (P_d / Nereus.KEPLER_YEAR_DAYS)^2)^(1/3)
             set_param!(theta, "n_p", 1); set_param!(theta, "a_k1", a_true)
             set_param!(theta, "sesinw_k1", sqrt(e) * sin(ω))
             set_param!(theta, "secosw_k1", sqrt(e) * cos(ω))

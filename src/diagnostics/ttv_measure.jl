@@ -68,9 +68,9 @@ function measure_per_transit_tcs(data::Data, theta_ref::Theta, params::Params;
         # Fall back to M_s + R_s
         M_s = config.M_s; R_s = config.R_s
         P_s = P_k * 86400.0
-        GM  = 1.3271244e26 * M_s
+        GM  = GM_SUN_CGS * M_s
         a_cm = cbrt(GM * P_s^2 / (4π^2))
-        a_Rs = a_cm / (R_s * 6.9570e10)
+        a_Rs = a_cm / (R_s * R_SUN_CM)
     end
 
     # Per-instrument LD, offset, jitter
@@ -186,9 +186,16 @@ function ttvc_envelope(chains, params::Params;
 
     chain_n = size(chains)[1]
     chain_c = size(chains)[3]
-    total = chain_n * chain_c
-    n_use = min(n_draws, total)
-    inds = rand(MersenneTwister(seed), 1:total, n_use)
+    # Only draws in which BOTH planets are live: on a trans-dim chain a parked
+    # slot keeps a real orbit, and drawing it into the N-body envelope puts a
+    # perturbation in it that no model of the posterior contains. For a fixed-
+    # dimension chain the pool is every draw and the sequence is unchanged.
+    pool = intersect(_planet_present_idx(chains, params, planet_a_k),
+                     _planet_present_idx(chains, params, planet_b_k))
+    isempty(pool) && error("ttvc_envelope: no draw has planets $planet_a_k and " *
+                           "$planet_b_k both active")
+    n_use = min(n_draws, length(pool))
+    inds = pool[rand(MersenneTwister(seed), 1:length(pool), n_use)]
 
     n_tr = length(tcs_observed)
     samples = Matrix{Float64}(undef, n_use, n_tr)
@@ -229,12 +236,12 @@ function ttvc_envelope(chains, params::Params;
             a_Rs_a = rho_s_to_a_Rs(rho, P_a)
         else
             P_s = P_a * 86400.0
-            GM = 1.3271244e26 * M_s_use
-            a_Rs_a = cbrt(GM * P_s^2 / (4π^2)) / (params.config.R_s * 6.9570e10)
+            GM = GM_SUN_CGS * M_s_use
+            a_Rs_a = cbrt(GM * P_s^2 / (4π^2)) / (params.config.R_s * R_SUN_CM)
         end
         inc_a = acosd(b_a / a_Rs_a)
         mp_a  = msini(M_s_use, K_a, P_a, e_a) / sind(inc_a)
-        mr_a  = mp_a * 1.898e30 / 1.989e33 / M_s_use
+        mr_a  = mp_a * M_JUP_G / M_SUN_G / M_s_use
 
         P_b   = _get(theta_k.values, "P_k$(planet_b_k)")
         Tc_b  = _get(theta_k.values, "Tc_k$(planet_b_k)")
@@ -245,7 +252,7 @@ function ttvc_envelope(chains, params::Params;
         w_b   = atan(se_b, sc_b)
         # Use a's inclination (coplanar assumption) for non-transiting b
         mp_b  = msini(M_s_use, K_b, P_b, e_b)
-        mr_b  = mp_b * 1.898e30 / 1.989e33 / M_s_use
+        mr_b  = mp_b * M_JUP_G / M_SUN_G / M_s_use
 
         # TTVFaster has 0/0 at exactly e=0
         e_a_f = max(e_a, 1e-4)

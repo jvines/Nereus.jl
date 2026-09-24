@@ -371,9 +371,17 @@ end
 
 function _find_peaks(t::Vector{Float64}, residuals::Vector{Float64},
                      P_min::Float64, P_max::Float64;
-                     t_ref::Float64 = (minimum(t) + maximum(t)) / 2,
+                     t_ref::Float64 = isempty(t) ? 0.0 :
+                                      (minimum(t) + maximum(t)) / 2,
                      σ::Union{Vector{Float64}, Nothing} = nothing,
                      max_nfreq::Int = typemax(Int))
+    # No RVs, no periodogram. An astrometry-only fit has none at all, and
+    # `maximum(t)` over the empty vector threw "reducing over an empty
+    # collection" from inside a birth proposal — killing the whole run rather
+    # than reporting no peaks, which every caller already handles (it is what
+    # they do when the periodogram is flat, and what the BLS side does below
+    # `n_phot > 50`). Four points is the least a Lomb-Scargle can fit.
+    length(t) > 3 || return (Float64[], Float64[], Float64[], Float64[])
     f_min = 1.0 / P_max
     f_max = 1.0 / P_min
     # Adaptive frequency grid: oversample factor × baseline. `max_nfreq` caps it:
@@ -500,8 +508,12 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
                                data::Union{Data, Nothing}=nothing,
                                population::Union{AbstractVector{<:Theta}, Nothing}=nothing,
                                scratch::Union{Theta{T}, Nothing}=nothing) where {T}
-    # Need data for residuals
-    data === nothing && return propose_planet_birth(theta, rng, PriorBirth(); scratch=scratch)
+    # Need data for residuals, and RVs for the periodogram that informs the
+    # period. An astrometry-only fit has neither, so a birth there is a prior
+    # draw — `informed_birth_fraction` cannot inform anything (the joint
+    # strategy makes the same check for its LS half on a PM-only target).
+    (data === nothing || isempty(data.t_rv)) &&
+        return propose_planet_birth(theta, rng, PriorBirth(); scratch=scratch)
 
     td = theta.td
     max_k = length(td.planet_active)

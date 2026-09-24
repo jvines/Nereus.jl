@@ -76,12 +76,19 @@ Each donor cycle (its own `phase → flux` curve) is interpolated onto the
 target cycle's native phase samples `target_phase` (constant extrapolation
 where a donor does not cover a target phase). Stacking the phase-aligned
 donors as the rows of an `n_donors × n_pts` matrix `olc`, the donor weights
-solve the normal equations and the baseline is the weighted donor sum:
+are the least-squares fit of the target by the donors and the baseline is the
+weighted donor sum -- the projection of the target onto the donors' span:
 
-    A       = olc * olc'
-    b       = olc * target_flux
-    coeffs  = A \\ b               # backslash, not inv(A): same math, better conditioned
+    coeffs   = olc' \\ target_flux   # pivoted QR on the design matrix
     baseline = olc' * coeffs
+
+Not the normal equations `(olc * olc') \\ (olc * target_flux)`, which LOCoR
+writes: they square the condition number, and similar rotation cycles -- the
+case the method is built for -- make the donors nearly or exactly collinear.
+Four identical donors made `olc * olc'` exactly singular: the LU found a
+zero pivot on Linux/x86_64 and threw, and on macOS/aarch64 limped past on a
+rounding-sized one. Pivoted QR is rank-revealing, so collinear donors give
+the same baseline on every platform.
 
 Returns `baseline`, a length-`n_pts` vector aligned with `target_phase`.
 
@@ -92,9 +99,7 @@ function _rcomb_cycle(target_phase::Vector{Float64}, target_flux::Vector{Float64
                       donor_phases::Vector{Vector{Float64}},
                       donor_fluxes::Vector{Vector{Float64}})
     olc = _build_olc(target_phase, donor_phases, donor_fluxes)
-    A = olc * olc'
-    b = olc * target_flux
-    coeffs = A \ b
+    coeffs = olc' \ target_flux          # least squares, pivoted QR (see above)
     baseline = olc' * coeffs
     return baseline
 end
@@ -158,11 +163,10 @@ function _rcomb_cycle_clipped(target_phase::Vector{Float64}, target_flux::Vector
 
     # Initial fit over all points (guards the under-determined edge case for
     # the very first solve too).
+    # Least squares on the design matrix, not the normal equations: see
+    # `_rcomb_cycle` -- collinear donors make those exactly singular.
     function fit_baseline(active)
-        Aolc = olc[:, active]
-        A = Aolc * Aolc'
-        b = Aolc * target_flux[active]
-        coeffs = A \ b
+        coeffs = olc[:, active]' \ target_flux[active]
         return olc' * coeffs
     end
 

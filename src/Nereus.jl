@@ -30,6 +30,7 @@ module Nereus
 const PY_API_VERSION = 3
 
 include("constants.jl")
+include("threading.jl")   # thread-slot helpers: chunk-keyed scratch, _nthread_slots()
 include("kepler.jl")
 include("orbit.jl")
 include("transit.jl")
@@ -90,6 +91,7 @@ include("samplers/ess.jl")
 include("samplers/ofti.jl")
 include("samplers/pathfinder.jl")
 include("samplers/node_flip.jl") # astrometric (Ω, ω) → (Ω+π, ω+π) move for the PT ensembles
+include("samplers/lambda_slide.jl") # (Mo, ω) → (Mo+δ, ω−δ) slide along the mean-longitude ridge
 include("samplers/pt_emcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
 include("samplers/transdim_pt_emcee.jl") # trans-dim PT + MoMS variable selection
 include("samplers/population_annealing.jl") # sequential-MC tempered sampler (Hukushima & Iba 2003)

@@ -110,24 +110,81 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
         @test isempty(node_flips(tt.params, tt.data))
     end
 
-    @testset "the mirror has the same posterior density, and T∘T = id" begin
-        for tg in (as_target(), ew_target(), circ_target())
-            f = only(node_flips(tg.params, tg.data))
-            rng = MersenneTwister(1)
-            Δ = 0.0; inv = 0.0; n_ok = 0
-            for _ in 1:100
-                x = Nereus._draw_from_prior(tg, rng)
-                y = node_flip!(copy(x), f, tg.params)
-                a, b = logdensity_bounded(tg, x), logdensity_bounded(tg, y)
-                if isfinite(a)
-                    Δ = max(Δ, abs(a - b)); n_ok += 1
-                end
-                inv = max(inv, maximum(abs.(node_flip!(copy(y), f, tg.params) .- x)))
+    # Worst |log π(Tx) − log π(x)| and |T(Tx) − x| over prior draws. Prior
+    # draws fit the data terribly (log L ~ −2e4), which is what makes a small
+    # asymmetry visible at all.
+    function _mirror_error(tg)
+        f = only(node_flips(tg.params, tg.data))
+        rng = MersenneTwister(1)
+        Δ = 0.0; inv = 0.0; n_ok = 0
+        for _ in 1:100
+            x = Nereus._draw_from_prior(tg, rng)
+            y = node_flip!(copy(x), f, tg.params)
+            a, b = logdensity_bounded(tg, x), logdensity_bounded(tg, y)
+            if isfinite(a)
+                Δ = max(Δ, abs(a - b)); n_ok += 1
             end
+            inv = max(inv, maximum(abs.(node_flip!(copy(y), f, tg.params) .- x)))
+        end
+        return Δ, inv, n_ok
+    end
+
+    @testset "the mirror has the same posterior density, and T∘T = id" begin
+        # The e ≡ 0 target flips Mo, so it moves Tp = t_ref − Mo·P/2π by half a
+        # period: it is exact only if the orbit's period really is the sampled
+        # P. It was not — `a_from_P` used the Julian year, PlanetOrbits the
+        # G = 4π² one — and this case measured 0.2 nats off until
+        # KEPLER_YEAR_DAYS fixed it (test/astrometry/test_projection.jl pins
+        # the round trip). Prior draws fit the data terribly (log L ~ −2e4),
+        # which is what makes an asymmetry that size visible at all.
+        for tg in (as_target(), ew_target(), circ_target())
+            Δ, inv, n_ok = _mirror_error(tg)
             @test n_ok > 50
-            @test Δ < 1e-8           # measured 7e-12 on the sesinw target
+            @test Δ < 1e-8           # measured 4e-12 (sesinw), 3e-11 (:ew)
             @test inv < 1e-12
         end
+    end
+
+    @testset "windows that are not exactly one period" begin
+        # `is_circular` admits |span - 2π| within `_CIRCULAR_SPAN_RTOL`, in
+        # BOTH directions, and the two directions need opposite handling.
+        #
+        # LONGER than a period -- `Uniform(0, 6.2832)` is over by 1.5e-5 rad,
+        # and unlike Mo the builder does not cap Omega at 2π. No wrap-based map
+        # is an involution there: T∘T carries a point near `hi` to x - 2π.
+        # Measured before the gate: |T∘T(x) - x| = 6.28 at x = 6.2832. Refused.
+        @test isempty(node_flips(_target(w_obs; Omega = UniformPrior(0.0, 6.2832)).params,
+                                 _target(w_obs; Omega = UniformPrior(0.0, 6.2832)).data))
+
+        # SHORT of a period: offered, and an involution everywhere. `node_flip!`
+        # used `circular_relabel`, which PINS a value past `hi` to `hi`
+        # (src/circular.jl) -- right for relabelling a chart, wrong inside a
+        # MOVE, where it maps the whole gap onto one point: an atom, not an
+        # involution. Wrapped by the period instead, T∘T = id unconditionally
+        # (x + 2π ≡ x) and a flip into the gap is out of support and rejected.
+        tg = _target(w_obs; Omega = UniformPrior(0.0, 2π - 1e-5))
+        f  = only(node_flips(tg.params, tg.data))
+        L  = tg.params.layout
+        d  = only(f.shift)
+        lo, hi = bounds(L.unfrozen_priors[d])
+        η  = Nereus.CIRCULAR_PERIOD - (hi - lo)
+        @test 0 < η < 1e-4
+
+        x0 = Theta{Float64}(tg.params).values[L.unfrozen_idx]
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0 - 1e-12)
+            x = copy(x0); x[d] = lo + frac * (hi - lo)
+            y = node_flip!(copy(x), f, tg.params)
+            @test abs(node_flip!(copy(y), f, tg.params)[d] - x[d]) < 1e-12
+        end
+
+        # The point whose image lands INSIDE the gap. The old clamp returned
+        # exactly `hi`; the wrap must return a value strictly above it, so the
+        # prior rejects rather than an atom forming on the edge.
+        x = copy(x0); x[d] = lo + π - η / 2
+        y = node_flip!(copy(x), f, tg.params)
+        @test y[d] > hi
+        @test !isapprox(y[d], hi; atol = 1e-12)
+        @test abs(node_flip!(copy(y), f, tg.params)[d] - x[d]) < 1e-12
     end
 
     @testset "pt_emcee weights the two modes equally" begin
@@ -147,12 +204,12 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
 
     @testset "transdim_pt_emcee weights the two modes equally" begin
         tg = as_target()
-        # Blind births only: the informed birth runs an RV periodogram and has
-        # nothing to run it on in an astrometry-only fit.
+        # At the DEFAULT informed_birth_fraction: the informed birth used to
+        # take an astrometry-only fit down with "reducing over an empty
+        # collection" from the RV periodogram it had no RVs to run.
         res = sample_transdim_pt_emcee(tg, tg.data; td = TransDimConfig(max_kplanet = 1),
                                        n_temps = 8, n_walkers = 32, n_steps = 1200,
                                        n_burnin = 600, seed = 1,
-                                       informed_birth_fraction = 0.0,
                                        show_progress = false)
         np = vec(Array(res.chains[:, :n_planets, :]))
         O = vec(Array(res.chains[:, :Omega_k1, :]))[np .>= 1]

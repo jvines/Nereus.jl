@@ -18,8 +18,12 @@
 #
 # Bridge sampling never touches the prior end. It needs only samples already
 # drawn from the posterior plus a proposal we can both sample and evaluate,
-# and it costs `n_proposal` likelihood evaluations rather than the ~1.3e7 a
-# nested-sampling run spends on the same model.
+# and it costs `N1 + n_proposal` likelihood evaluations rather than the ~1.3e7 a
+# nested-sampling run spends on the same model -- where N1 is the number of
+# posterior draws handed in, NOT just `n_proposal`. The estimator re-evaluates
+# the posterior at every draw of the chain, so its cost grows with the chain:
+# 170_000 evaluations for a 100-walker × 1500-step pt_emcee run. Both evaluation
+# loops are threaded (see below), which is what keeps that affordable.
 #
 # METHOD. With p*(θ) the unnormalised posterior, q(θ) a normalised proposal,
 # {θ_i} ~ p (N1 of them) and {φ_j} ~ q (N2), the optimal bridge (Meng & Wong
@@ -129,17 +133,42 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
              μ .+ Lc * (randn(rng, d) / sqrt(sum(abs2, randn(rng, nu_i)) / ν))
 
     # --- log ratios l = log p* - log q on both sample sets --------------------
-    l1 = Float64[]
-    @inbounds for i in 1:N1
+    # `logp` is the full posterior, so this costs N1 + `n_proposal` LIKELIHOOD
+    # EVALUATIONS -- not `n_proposal`, which is what this function's docstring
+    # and pt_emcee's call site both used to claim. N1 is the ENTIRE kept chain:
+    # 150_000 draws for a 100-walker × 1500-post-burnin-step run, 525_000 for a
+    # 150-walker × 3500-step one. That made this the most expensive single thing
+    # in a fit -- 170_000 evals, 42 s measured on a Gaia DR4 IAD posterior,
+    # against 89 s for the whole 3.3M-evaluation MCMC that produced it, because
+    # the MCMC has 12 threads and this loop had one.
+    #
+    # `_logdensity_parts` builds its own Theta and touches no shared state, so
+    # the evaluations thread. The PROPOSAL DRAWS do not: they come off a single
+    # MersenneTwister, and drawing them out of order would change the numbers.
+    # So they are drawn serially up front and only the evaluations are spread
+    # out, each writing its own slot, and both arrays are filtered in index
+    # order afterwards -- so what reaches `_bridge_iterate` is bit-identical to
+    # the serial version's, at any thread count.
+    v1 = Vector{Float64}(undef, N1)
+    Threads.@threads for i in 1:N1
         y = @view Y[:, i]
-        v = logp(y) - logq(y)
-        isfinite(v) && push!(l1, v)
+        v1[i] = logp(y) - logq(y)
+    end
+    l1 = Float64[v for v in v1 if isfinite(v)]
+
+    Yp = Matrix{Float64}(undef, d, n_proposal)
+    @inbounds for i in 1:n_proposal
+        Yp[:, i] = draw()
+    end
+    v2 = Vector{Float64}(undef, n_proposal)
+    Threads.@threads for i in 1:n_proposal
+        v2[i] = logp(@view Yp[:, i])
     end
     l2 = Float64[]
     n_finite = 0
-    for _ in 1:n_proposal
-        y = draw()
-        v = logp(y)
+    @inbounds for i in 1:n_proposal
+        y = @view Yp[:, i]
+        v = v2[i]
         if isfinite(v)
             n_finite += 1
             push!(l2, v - logq(y))
@@ -154,8 +183,18 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     log_r, iters, converged = _bridge_iterate(l1, l2, max_iter, Float64(tol))
 
     # --- bootstrap standard error -------------------------------------------
+    # Only when the primary estimate CONVERGED. `se` is the sampling error OF
+    # `log_r`, and every caller discards `log_r` outright when `converged` is
+    # false (pt_emcee.jl gates on `b.converged && isfinite(b.log_z)`), so
+    # bootstrapping a non-converged estimate prices 200 extra fixed-point solves
+    # into an answer nobody reads -- and it is exactly the case where each of
+    # them runs the full `max_iter`, because a fixed point that is not there at
+    # 1000 iterations on the real data is not there on a resample of it either.
+    # Measured on the HD 114762 joint fit (525k posterior draws, no fixed point):
+    # 885 s of the 1064 s the sampler took, all of it thrown away. Convergence
+    # either happens in a handful of iterations or not at all.
     ses = Float64[]
-    if n_bootstrap > 0
+    if n_bootstrap > 0 && converged && isfinite(log_r)
         rb = MersenneTwister(seed + 1)
         for _ in 1:n_bootstrap
             b1 = l1[rand(rb, 1:length(l1), length(l1))]

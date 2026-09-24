@@ -146,7 +146,8 @@ This is version `0.2.0`.
   transit (`plot_transit_phasefold`, `plot_transit_overlay_fit` —
   per-transit QC gallery), Rossiter–McLaughlin (`plot_rm`),
   astrometry (`plot_orbit_skyplane`, `plot_iad_residuals`,
-  `plot_relastrom_timeseries`, `plot_pm_anomaly`), TTV
+  `plot_epoch_astrometry_orbit`, `plot_relastrom_timeseries`,
+  `plot_pm_anomaly`), TTV
   (`plot_ttv_oc`, `plot_ttv_diagram`), periodograms, posteriors
   (`plot_corner`, `plot_trace`, `plot_posteriors`), trans-dim
   occupancy, detection limits, and the ActivityGP latent. →

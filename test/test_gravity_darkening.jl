@@ -219,9 +219,13 @@ using Nereus: roche_flattening, roche_radius, local_gravity, gd_brightness,
         # WASP-33 b: those come from full 2-D fits with their own adopted
         # stellar parameters, and reproducing them is a separate exercise from
         # showing this conversion is internally exact.
-        let G = 6.674e-11, Msun = 1.989e30, Rsun = 6.957e8
+        # The package's own GM_sun and R_sun: a test of internal exactness has
+        # to build v_eq with the constants `omega_frac_from_veq` inverts with.
+        # (It carried its own 6.674e-11 × 1.989e30, which went 1.3e-4 off the
+        # IAU GM_sun when src/constants.jl became the single source.)
+        let GM_sun = Nereus.GM_SUN_SI, Rsun = Nereus.R_SUN_M
             for (M, Rpol) in ((1.60, 1.47), (1.98, 2.36), (0.9, 0.85))
-                Ω_crit = sqrt(G * M * Msun / (1.5 * Rpol * Rsun)^3)
+                Ω_crit = sqrt(GM_sun * M / (1.5 * Rpol * Rsun)^3)
                 for ω in (0.05, 0.2, 0.5, 0.8, 0.99)
                     R_eq = roche_radius(π / 2, ω) * Rpol * Rsun
                     v_eq = ω * Ω_crit * R_eq / 1e3            # km/s

@@ -253,9 +253,8 @@ function omega_frac_from_veq(v_eq::Real, M_s::Real, R_s::Real)
     #     v_crit = Ω_crit · (3/2) R_pol = sqrt(2GM / (3 R_pol)).
     # Using sqrt(GM/R_eq) instead (the Keplerian orbital speed at the equator)
     # understates ω by ~1.8x.
-    G = 6.674e-11; Msun = 1.989e30; Rsun = 6.957e8
-    Rpol = R_s * Rsun
-    v_crit = sqrt(2 * G * M_s * Msun / (3 * Rpol)) / 1e3      # km/s
+    Rpol = R_s * R_SUN_M
+    v_crit = sqrt(2 * GM_SUN_SI * M_s / (3 * Rpol)) / 1e3     # km/s
     vr = clamp(v_eq / v_crit, 0.0, 1.0)
     vr <= 0 && return zero(vr)
     vr >= 1 && return one(vr)

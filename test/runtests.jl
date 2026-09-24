@@ -9,6 +9,9 @@ using Test
 
 const _rng = MersenneTwister(1)
 
+include("shards.jl")   # NEREUS_TEST_SHARD=i/n runs one shard; unset runs all
+
+if _in_shard("inline: foundation + trans-dim state/config/likelihood")
 @testset "Nereus foundation" begin
 
     # -----------------------------------------------------------------
@@ -3378,7 +3381,9 @@ end
         @test ll_rv != 0.0  # should have RV contribution
     end
 end
+end  # _in_shard
 
+if _in_shard("inline: photometry detrending")
 @testset "Photometry detrending" begin
     using Random: MersenneTwister
     using Statistics: mean, std
@@ -3998,12 +4003,14 @@ end
         @test all(isfinite, grad)
     end
 end
+end  # _in_shard
 
 
 # =====================================================================
 # Polynomial Stein Discrepancy (Srinivasan+ 2024, arXiv:2412.05135)
 # =====================================================================
 
+if _in_shard("inline: polynomial Stein discrepancy")
 @testset "Polynomial Stein Discrepancy" begin
     @testset "multi-index basis enumeration" begin
         # Full basis for d=2, r=2: nonzero α with Σα ≤ 2
@@ -4129,12 +4136,14 @@ end
         @test res.basis_size == 2 * n_par
     end
 end
+end  # _in_shard
 
 
 # =====================================================================
 # sample_map — physical-space MAP (no transform Jacobian)
 # =====================================================================
 
+if _in_shard("inline: sample_map physical-space mode")
 @testset "sample_map physical-space mode" begin
     # Regression guard: sample_map must maximise the PHYSICAL-space
     # log-posterior (log_prior + log_likelihood in bounded space), NOT
@@ -4217,6 +4226,7 @@ end
     @test lp_unc ≈ res.log_posterior + lj atol=1e-4
     @test abs(lj) > 1e-3   # Jacobian is non-trivial here (would-be bias)
 end
+end  # _in_shard
 
 
 # =====================================================================
@@ -4224,6 +4234,7 @@ end
 # arXiv:2604.27791)
 # =====================================================================
 
+if _in_shard("inline: MoMS sampler")
 @testset "MoMS sampler" begin
     @testset "spike_slab_log_prior correction" begin
         # The spike-and-slab correction subtracts log π_β(off) for
@@ -4386,12 +4397,14 @@ end
         end
     end
 end
+end  # _in_shard
 
 
 # =====================================================================
 # Daedalus — trans-dim nested sampling via mutually-singular distributions
 # =====================================================================
 
+if _in_shard("inline: Daedalus sampler")
 @testset "Daedalus sampler" begin
     @testset "sample_daedalus runs end-to-end" begin
         # Tight WASP-47-style priors so random-walk proposals can mix
@@ -4559,76 +4572,19 @@ end
         @test isfinite(logZ_large)
     end
 end
+end  # _in_shard
 
 
 # =====================================================================
-# Astrometry (Phase 1: HGCA + relative astrometry)
+# Test files
 # =====================================================================
 
-include("astrometry/test_data.jl")
-include("astrometry/test_projection.jl")
-include("astrometry/test_likelihood.jl")
-include("astrometry/test_sine_prior.jl")
-include("astrometry/test_param_modes.jl")
-include("astrometry/test_m_pri.jl")
-include("astrometry/test_obs_prior.jl")
-include("astrometry/test_ofti.jl")
-include("astrometry/test_iad_gost.jl")
-include("astrometry/test_iad_multi_instrument.jl")
-include("astrometry/test_iad_multi_instrument_e2e.jl")
-include("astrometry/test_gaia_epoch_guards.jl")
-include("test_builder.jl")
-include("test_new_samplers.jl")
-include("test_runner_dispatch.jl")
-include("test_rm.jl")
-include("test_tomography.jl")
-include("test_tomography_framework.jl")
-include("test_obliquity_framework.jl")
-include("test_tomo_noise_menu.jl")
-include("test_obliquity_joint_framework.jl")
-include("test_as_coupling_mask.jl")
-include("test_as_coupling_move.jl")
-include("test_obliquity_joint.jl")
-include("test_simulate_obliquity.jl")
-include("test_gravity_darkening.jl")
-include("test_informed_noise_birth.jl")
-include("test_annealed_noise_birth.jl")
-include("test_solution_ladder.jl")
-include("test_noise_swap_samplers.jl")
-include("test_ttv.jl")
-include("test_ppc.jl")
-include("test_detection_limits.jl")
-include("test_loo.jl")
-include("test_fit_health.jl")
-include("test_pt_emcee_stranded.jl")
-include("test_circular.jl")
-include("test_node_flip.jl")
-include("test_label_switching.jl")
-include("test_pt_donor_buffer.jl")
-include("test_transdim_activity_columns.jl")
-include("test_activity_gp.jl")
-include("test_multiseries_gp.jl")
-include("test_parametric_noise.jl")
-include("test_harmonic_external.jl")
-include("test_transdim_caches.jl")
-include("test_birth_death_reversibility.jl")
-include("test_alias_jump.jl")
-include("test_transdim_death_counters.jl")
-include("test_locor.jl")
-include("test_locor_io.jl")
-include("test_lightcurve.jl")
-
-# Evidence estimators that do not temper from the prior, and the Rajpaul kernel
-# gradient check. All three carried assertions but were never included here.
-include("test_bridge_evidence.jl")
-include("test_reference_path_evidence.jl")
-include("test_phot_determinism.jl")
-include("test_sampler_determinism.jl")
-include("test_bls_informed_phot.jl")
-include("test_evidence_curved.jl")
-include("test_evidence_headline.jl")
-include("test_mode_laplace.jl")
-include("verify_rajpaul_kernel_fd.jl")
-include("test_plot_labels.jl")
-include("test_science_table_labels.jl")
-include("test_plot_patterns.jl")
+# The test files, in suite order. Which exist, how they group and what they
+# cost live in test/shards.jl -- add a new file THERE.
+for unit in TEST_UNITS
+    (isempty(unit.files) || !_in_shard(unit.name)) && continue
+    t = @elapsed foreach(include, unit.files)
+    # Sharded (CI), report each unit's cost: these are the numbers the
+    # `seconds` in test/shards.jl should track.
+    _SHARD === nothing || println("unit time: ", round(t; digits = 1), " s  ", unit.name)
+end

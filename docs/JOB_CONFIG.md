@@ -401,8 +401,8 @@ rather than a single number trusted.
       "rm_anomaly",           // in-transit RM RV anomaly (plot_rm); only for *_RM modes
       // Astrometry
       "orbit_skyplane", "relastrom_timeseries", "relastrom_residuals",
-      "hgca_pm_residuals", "g23h_residuals", "iad_residuals", "pm_anomaly",
-      "rv_astrom_phasefold",
+      "hgca_pm_residuals", "g23h_residuals", "iad_residuals",
+      "epoch_astrometry_orbit", "pm_anomaly", "rv_astrom_phasefold",
       // ActivityGP
       "activity_gp_latent", "activity_gp_decomposition",   // only when an ActivityGP is configured
       // Diagnostics
@@ -413,7 +413,7 @@ rather than a single number trusted.
       // OR a single "auto" — picks every applicable plot from the data + model present
       "auto"
     ],
-    "plot_kwargs": {                       // forwarded to each plotter (Symbol-keyed)
+    "plot_kwargs": {                       // shared; each plotter gets the keys it accepts
       "bf_cutoff": 10.0,                   // best-fit cluster filter: lp within ln(bf_cutoff) of max
       "subtract_gp": true
     },
@@ -652,7 +652,9 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
 
   // ---- Authoritative science contract (science_summary) ----
   "fitted": {                               // model-conditioned fitted parameters
-    "conditioning": { "n_planets": 1, "stellar": { /*…*/ } },
+    // planet_slots: the winning model's live slots (modal active pattern) --
+    // the slots reported below; after a trans-dim death mid-list not 1:n_planets
+    "conditioning": { "n_planets": 1, "planet_slots": [1], "active_noise_models": [] },
     "parameters": {
       // entry schema (sci_entry_dict, src/science_tables.jl:110-121):
       "P_k1": { "value": 14.31,             // best (median)
@@ -665,7 +667,7 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
     }
   },
   "derived": {                              // physical quantities; skipped if stellar params unset
-    "conditioning": { "n_planets": 1, "stellar": { /*…*/ } },
+    "conditioning": { "n_planets": 1, "planet_slots": [1], "stellar": { /*…*/ } },
     "parameters": {
       "msini_earth_k1": { /*…*/ }, "a_au_k1": { /*…*/ }, "T_eq_k1": { /*…*/ },
       "rho_p_cgs_k1": { /*…*/ }, "tsm_k1": { /*…*/ }, "esm_k1": { /*…*/ }

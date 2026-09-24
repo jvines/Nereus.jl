@@ -388,7 +388,44 @@ struct IADData
     inst::Vector{Int}
     ref_params::Vector{NTuple{5, Float64}}
     abscissa_kind::Vector{Symbol}
+    # --- derived from the columns above, computed once at construction -------
+    # These are DATA, not model: they do not depend on a single sampled
+    # parameter, yet the likelihood used to rebuild all of them on every
+    # evaluation -- `sincos(psi)` twice per abscissa (once inside
+    # `along_scan_projection` in the residual loop, again in
+    # `_iad_normal_equations!`, and a third time on the residual-abscissa
+    # branch), `1/sigma^2` per abscissa, and the constant `sum(log sigma)` from
+    # scratch over all 824 of them. Measured on a Gaia DR4 source that was
+    # 15.3 us of a 68.5 us evaluation, i.e. 22%, repeated 3.3 million times a
+    # fit. Caching them is bit-identical, not merely close: the same `sincos`
+    # values, and `log_sigma_sum` accumulated in the same left-to-right order
+    # the loop used (verified max|delta| = 0 on the residuals, rWr, A and v).
+    sinpsi::Vector{Float64}
+    cospsi::Vector{Float64}
+    weight::Vector{Float64}          # 1 / abscissa_err^2
+    log_sigma_sum::Float64           # sum(log(abscissa_err)), left to right
+    # Index of the first abscissa of `j`'s epoch group (== j when j leads one).
+    #
+    # Intermediate astrometry is not one measurement per epoch. Gaia epoch data
+    # is per-CCD: a field-of-view transit produces 8-9 abscissae ~5 s apart
+    # (measured on two real DR4 sources: 824 -> 93 groups of exactly 9 spanning
+    # 39.7 s, and 558 -> 63 of 9 spanning 38.9 s). Hipparcos is stronger still --
+    # its grouped abscissae share an epoch EXACTLY (max span 0.0 s on HIP 64426),
+    # differing only in scan angle. Across 40 s the mean anomaly of any orbit
+    # these fits reach barely moves, so one Kepler solve serves the whole group
+    # (see `_iad_residuals_kernels!`), instead of nine identical ones.
+    #
+    # A group is a CONTIGUOUS run of one instrument inside `_IAD_GROUP_TOL` days
+    # of its head, so nothing is assumed about global ordering: unsorted or
+    # unclustered input simply yields singleton groups and the old behaviour.
+    grp_head::Vector{Int}
 end
+
+"""
+Epoch-group window, in days. 0.01 d = 14.4 min, comfortably wider than a Gaia
+field-of-view transit (~40 s) and far narrower than the gap between transits.
+"""
+const _IAD_GROUP_TOL = 0.01
 
 """
     IADData(; t, abscissa, abscissa_err, psi, parallax_factor=nothing,
@@ -551,16 +588,50 @@ function IADData(;
         end
     end
 
+    # Data-only quantities the likelihood would otherwise rebuild on every
+    # evaluation (see the struct's field comments). `log_sigma_sum` accumulates
+    # left to right, exactly as `_iad_normal_equations!` used to, so the cached
+    # value is bit-identical to the one the loop produced.
+    psi_vec = Vector{Float64}(psi)
+    err_vec = Vector{Float64}(abscissa_err)
+    t_vec   = Vector{Float64}(t)
+    sin_vec = Vector{Float64}(undef, n)
+    cos_vec = Vector{Float64}(undef, n)
+    w_vec   = Vector{Float64}(undef, n)
+    log_sigma_sum = 0.0
+    @inbounds for j in 1:n
+        sin_vec[j], cos_vec[j] = sincos(psi_vec[j])
+        σ = err_vec[j]
+        w_vec[j] = 1 / (σ * σ)
+        log_sigma_sum += log(σ)
+    end
+
+    # Epoch groups (see the `grp_head` field comment).
+    grp_vec = Vector{Int}(undef, n)
+    @inbounds for j in 1:n
+        if j == 1 || inst_vec[j] != inst_vec[j - 1] ||
+           !(0 <= t_vec[j] - t_vec[grp_vec[j - 1]] <= _IAD_GROUP_TOL)
+            grp_vec[j] = j
+        else
+            grp_vec[j] = grp_vec[j - 1]
+        end
+    end
+
     return IADData(
-        Vector{Float64}(t),
+        t_vec,
         Vector{Float64}(abscissa),
-        Vector{Float64}(abscissa_err),
-        Vector{Float64}(psi),
+        err_vec,
+        psi_vec,
         plx_fac_vec,
         pm_fac_vec,
         inst_vec,
         ref_vec,
         kind_vec,
+        sin_vec,
+        cos_vec,
+        w_vec,
+        log_sigma_sum,
+        grp_vec,
     )
 end
 

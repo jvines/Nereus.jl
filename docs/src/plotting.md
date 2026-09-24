@@ -27,7 +27,7 @@ produced.
     "rm_anomaly", "ttv_oc",
     "orbit_skyplane", "relastrom_timeseries", "relastrom_residuals",
     "hgca_pm_residuals", "g23h_residuals", "iad_residuals",
-    "pm_anomaly", "rv_astrom_phasefold",
+    "epoch_astrometry_orbit", "pm_anomaly", "rv_astrom_phasefold",
     "activity_gp_latent", "activity_gp_decomposition",
     "corner", "trace", "histograms", "posteriors",
     "transdim_occupancy"
@@ -53,6 +53,7 @@ produced.
 | `relastrom_timeseries`     | `data.relastrom`                | `plot_relastrom_timeseries`     | `models/relastrom_timeseries_K*.png` |
 | `relastrom_residuals`      | `data.relastrom`                | `plot_relastrom_residuals`      | `models/relastrom_residuals_K*.png` |
 | `iad_residuals`            | `data.iad`                      | `plot_iad_residuals`            | `models/iad_residuals.png` |
+| `epoch_astrometry_orbit`   | `data.iad`                      | `plot_epoch_astrometry_orbit` (per planet)| `models/epoch_astrometry_orbit_K*.png` |
 | `hgca_pm_residuals`        | `data.hgca`                     | `plot_pm_residuals` (per planet)| `models/hgca_pm_residuals_K*.png` |
 | `g23h_residuals`           | `data.g23h`                     | `plot_g23h_residuals`           | `models/g23h_residuals.png` |
 | `pm_anomaly`               | `data.gost`                     | `plot_pm_anomaly` (per planet)  | `models/pm_anomaly_K*.png` |
@@ -77,22 +78,33 @@ produced.
 
 ### `plot_kwargs` and `save_pdf`
 
-`output.plot_kwargs` is a single dict forwarded (splatted) to *every*
-plotter, so any keyword a plotter accepts is settable there
-(`bf_cutoff`, `subtract_gp`, `n_draws`, `credmass`, `figsize`, …).
-Kwargs a given plotter doesn't accept are simply ignored by the ones
-that do — but a kwarg that *no* plotter on your list accepts will make
-that plotter throw (caught and logged as a warning, the run
-continues). Keep `plot_kwargs` to options common across the plots you
-request, or split runs.
+`output.plot_kwargs` is a single dict shared by *every* plotter, so any
+keyword a plotter accepts is settable there (`bf_cutoff`,
+`subtract_gp`, `n_draws`, `credmass`, `figsize`, `normal_point_gap`, …).
+Each plotter receives only the keys it accepts: `n_draws` reaches
+`orbit_skyplane` and is withheld from `iad_residuals`, which does not
+take it. (It used to be splatted whole, and one key a plotter lacked made
+that plotter throw and its figure vanish.) A key that no figure rendered
+in the run accepts — misspelt, or meant for a plot that was not drawn —
+is reported in one warning after plotting.
 
 `output.save_pdf` (top-level) is the single toggle for PDF companions:
 when `true`, every plot writes a `.pdf` next to its `.png`. An explicit
 `plot_kwargs.save_pdf` overrides it per-run. Default is PNG only.
 
-`ttv_oc`, `transdim_occupancy`, and the `posteriors_*`/`traces_grouped`
-plots only honour a `save_pdf` kwarg (not the full `plot_kwargs`
-splat); `ttv_oc` additionally honours an explicit `plot_kwargs.planet_b_k`.
+`transdim_occupancy` and the `posteriors_*`/`traces_grouped` plots only
+honour `save_pdf`; `ttv_oc` also honours an explicit
+`plot_kwargs.planet_b_k`.
+
+**Reference model.** Every overlay, residual and O−C figure draws the
+**maximum-log-posterior draw** of the relevant pool (the EMPEROR
+best-fit convention), never per-parameter posterior medians, which are
+not a model on the posterior ridge (circular angles, `sesinw/secosw`,
+correlated `rho_s/b/rr`). On a **trans-dim** chain each draw carries its
+own active set (`planet_active_<k>`, `noise_active_<j>`): a slot that is
+parked in a draw is neither drawn nor subtracted, per-planet figures and
+bands use only the draws in which that planet exists, and a slot that is
+never active produces no figure (and no `summary["plots"]` entry).
 
 ### `"auto"` — data-driven selection
 
@@ -110,7 +122,8 @@ The selection logic (`_dispatch_plot(..., "auto", ...)`):
   `transit_overlay`.
 - `data.relastrom` → `orbit_skyplane`, `relastrom_timeseries`,
   `relastrom_residuals`.
-- `data.iad` → `iad_residuals`; `data.hgca` → `hgca_pm_residuals`;
+- `data.iad` → `iad_residuals`, `epoch_astrometry_orbit`;
+  `data.hgca` → `hgca_pm_residuals`;
   `data.g23h` → `g23h_residuals`; `data.gost` → `pm_anomaly`.
 - RV **and** astrometry → `rv_astrom_phasefold`.
 - any `*_RM` planet mode → `rm_anomaly`.
@@ -194,7 +207,7 @@ winning model, so it's skipped with a warning.
 
 ### `plot_pm_timeseries(chains, params, data; output, fmt, save_pdf, figsize)`
 
-Transit photometry over time with the median-θ transit model and a
+Transit photometry over time with the best-fit (max-lp) transit model and a
 `data − model` residual panel (in ppm), **one figure per instrument**
 (`models/pm_timeseries_<inst>.png`). Density-aware marker alpha keeps
 the dips visible even on dense (>20 000-point) TESS baselines. Y-axes
@@ -205,8 +218,8 @@ long span of short transits).
 
 ### `plot_pm_phasefold(chains, params, data; planet, output, fmt, save_pdf, figsize, n_bins, credmass, phase_window)`
 
-Transit data phase-folded on one planet's period, median-θ transit
-model overlaid, with a residual panel. `phase_window` defaults to
+Transit data phase-folded on one planet's period, best-fit (max-lp)
+transit model overlaid, with a residual panel. `phase_window` defaults to
 `(-0.025, 0.025)` — right for short-period hot-Jupiter / sub-Neptune
 transits; widen for long-duration or grazing transits. `n_bins` (auto
 if `nothing`) controls the binned overlay; `credmass` (default `0.85`)
@@ -216,7 +229,7 @@ the band. `run_job` loops planets → `models/Transit_phasefold_K<k>_*.png`.
 
 **Per-transit light-curve gallery** (new). One panel per individual
 transit of the transiting planet, each showing that transit's
-photometry plus the posterior-median transit model, with x = hours
+photometry plus the best-fit (max-lp) transit model, with x = hours
 from `Tc`. This is per-transit QC: it catches a single bad transit
 (spot crossing, partial/grazing, systematic) that the stacked
 phase-fold averages away. `planet` defaults to the first transiting
@@ -267,9 +280,9 @@ Writes `models/rm_anomaly_K<k>.png`.
 ### `plot_orbit_skyplane(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
 Sky-plane `(ΔRA·cos δ, Δδ)` overlay of the relative-astrometry data
-with the posterior-median orbit and an optional faint fan of `n_draws`
+with the best-fit (max-lp) orbit and an optional faint fan of `n_draws`
 posterior-sampled orbits (`n_draws=0` ⇒ no fan, the default). The host
-star sits at the origin (star glyph); the periastron direction is
+star sits at the origin (star glyph); periastron (red diamond) is
 annotated; the x-axis is reversed (north up, east left). `bf_cutoff`
 default `5.0`. No-ops if `data.relastrom` is `nothing`.
 
@@ -278,7 +291,7 @@ default `5.0`. No-ops if `data.relastrom` is `nothing`.
 Two-panel **separation ρ [mas]** (top) and **PA [deg]** (bottom) vs MJD
 — the canonical companion to `plot_orbit_skyplane`'s sky map for
 visual-orbit papers. Observed epochs with errorbars from RA/Dec error
-propagation (including correlation); posterior-median orbit as a solid
+propagation (including correlation); best-fit (max-lp) orbit as a solid
 line plus `n_draws=100` faint posterior-fan draws. No-op if
 `data.relastrom` is `nothing` (or no epochs for `planet_idx`).
 
@@ -286,28 +299,58 @@ line plus `n_draws=100` faint posterior-fan draws. No-op if
 
 `(Δρ, ΔPA)` residual diagnostic — `Δρ = ρ_obs − ρ_med` [mas] (top) and
 `ΔPA = PA_obs − PA_med` [deg, wrapped to (−180, 180]] (bottom) vs MJD,
-using the posterior-median orbit. Errorbars from per-epoch RA/Dec
+using the best-fit (max-lp) orbit. Errorbars from per-epoch RA/Dec
 propagation; dashed zero reference per panel.
 
 ### `plot_iad_residuals(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff)`
 
-Two-panel along-scan residual diagnostic for Hipparcos **IAD** data.
-Per transit `j`, the residual is
-`abscissa_j − Δη_orbit_j(θ_med) − Xⱼᵀ q_opt`, where `Δη_orbit_j` is the
-orbit-induced along-scan reflex at median θ and `q_opt` is the analytic
-best-fit 5-parameter catalog correction (same Cholesky factorization as
-`iad_log_likelihood`). Per-transit σⱼ as errorbars. Top: residual vs ψ
-(scan PA, rad); bottom: residual vs MJD. No-op (empty `Figure`) if
-`data.iad` is `nothing` or has fewer than 5 transits.
+Two-panel along-scan residual diagnostic for **IAD** data (Hipparcos,
+Gaia DR4 epoch astrometry). Per transit `j`, the residual is
+`abscissa_j − Δη_orbit_j(θ) − ϖ(θ)·f_ϖ,j − Xⱼᵀ q_opt` at the best-fit
+(max-lp) draw `θ`: `Δη_orbit_j` sums every active astrometric companion's
+along-scan reflex and `q_opt` is the catalogue correction (per-instrument
+zero point, shared proper motion) the marginalisation fits — computed by
+`iad_log_likelihood`'s own helpers, so the annotated χ²/N is exactly
+`χ²_min / N`. Per-transit σⱼ as errorbars. Top: residual vs ψ (scan PA,
+rad); bottom: residual vs MJD. No-op (empty `Figure`) if `data.iad` is
+`nothing` or has no more transits than the marginalisation has
+parameters (4 for one instrument).
 
-### `plot_pm_residuals(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
+### `plot_epoch_astrometry_orbit(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff, normal_point_gap, n_track)`
 
-**HGCA** proper-motion observed-vs-modelled at the three reference
-epochs (Hipparcos / Hipparcos–Gaia / Gaia). Per panel: the observed
-`(μ_α*, μ_δ)` with its 1σ within-epoch covariance ellipse, a cloud of
-`n_draws=100` posterior-drawn reflex-PM points, and the median model PM
-(raw reflex, barycentre not re-marginalized — visual inspection only).
-A summary shows the median orbit's χ² against the three HGCA points.
+The sky-plane orbit of an **IAD / Gaia DR4 epoch-astrometry** target with
+the measurements on it — the figure `plot_orbit_skyplane` cannot draw for
+1-D data. Each abscissa is placed at the model position plus its along-scan
+O−C, `P = M(t) + (O−C)·(sin ψ, cos ψ)` (Sahlmann et al. 2011, Fig. 20;
+Holl et al. 2023, Figs. 12-16). Individual abscissae in grey; **normal
+points**, one per Gaia field-of-view transit (the 8-9 CCDs at one ψ;
+`normal_point_gap` days, default `0.01`), coloured by epoch, with a ±1σ
+bar along the scan axis and a dashed connector from the model position.
+Below: normal-point O−C vs orbital phase (0 = periastron). The host star at
+the barycentre (gold star), periastron (red diamond) and the sense of motion
+are marked.
+
+The orbit is the max-lp draw (as `plot_orbit_skyplane`), and the O−C are
+the likelihood's: every other active companion's reflex and the sampled
+parallax are subtracted and the catalogue solution marginalised by the same
+helpers `iad_log_likelihood` uses, so the annotated per-abscissa χ²/N is
+exactly `χ²_min / N`. A normal-point χ²/N well above it flags noise
+correlated within a transit. Across the scan the points sit on the model by
+construction: scatter about the ellipse is information, agreement across it
+is not. The frame follows the orbit and the normal points; individual
+abscissae outside it are counted in the annotation. Empty `Figure` when
+there is no IAD or the planet has no astrometric orbit.
+
+### `plot_pm_residuals(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
+
+**HGCA** proper-motion residuals at the three catalogue epochs
+(Hipparcos / Hipparcos–Gaia / Gaia): `Δμ = μ_obs − μ_model − μ_b` in α*
+(top) and δ (bottom) vs MJD with per-epoch 1σ, and the marginalized χ².
+`μ_model` is the likelihood's own (`_hgca_model_pm`: every active
+companion, the Hipparcos–Gaia epoch as the mean reflex velocity over the
+baseline, GOST Mode B at the Gaia epoch when scan plans are given) at the
+best-fit (max-lp) draw; `μ_b` is marginalized as in
+`hgca_log_likelihood`, so the χ² is the fit's.
 Requires `data.hgca`. Dispatched as the `hgca_pm_residuals` plot,
 written `models/hgca_pm_residuals_K<k>.png`.
 
@@ -315,25 +358,33 @@ written `models/hgca_pm_residuals_K<k>.png`.
 
 Per-epoch PM residuals for **G23H** ([Thompson+ 2026](https://ui.adsabs.harvard.edu/abs/2026arXiv260200235T/abstract)) catalog data —
 five epochs (Hip, HG long-baseline, Gaia DR2, DR3−DR2, DR3).
-`Δμ_α* = μ_α*_obs − μ_α*_model` (top) and `Δμ_δ` (bottom) vs MJD
-[mas/yr]. Model PM is the instantaneous reflex PM at each epoch
-(Mode A, no window-averaging); errorbars from the diagonal of the G23H
-10×10 within-epoch covariance. Requires `data.g23h`.
+`Δμ_α* = μ_α*_obs − μ_α*_model − μ_b` (top) and `Δμ_δ` (bottom) vs MJD
+(mas/yr). The model PM is the likelihood's own (`_g23h_model_pm`: every
+active companion, GOST Mode B at DR3 when scan plans are given) at the
+best-fit (max-lp) draw, and `μ_b` is marginalized under the full 10×10
+covariance as in `g23h_log_likelihood`; errorbars from its diagonal.
+Requires `data.g23h`.
 
 ### `plot_pm_anomaly(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
 Two-panel reflex proper-motion trajectory across the **GOST** scan
 window: `μ_α*_reflex(t)` (top) and `μ_δ_reflex(t)` (bottom) vs MJD
-[mas/yr]. Posterior-median curve in cyan, `n_draws=80` posterior fan in
-orchid, HGCA / G23H observed PMs overlaid as markers with errorbars at
-their tabulated epochs. Other companions' reflex contributions are
-summed. Requires `data.gost`.
+(mas/yr). Best-fit (max-lp) curve in cyan and the 16-84% band of
+`n_draws=80` posterior draws in orchid — both the summed reflex of every
+companion the likelihood couples to the astrometry. HGCA / G23H observed
+points overlaid at their tabulated epochs as `μ_obs − μ_b`, with `μ_b` the
+barycentric PM each likelihood marginalizes (not the catalogue's
+Hipparcos–Gaia PM, which carries the mean reflex over the baseline), next
+to open markers for the likelihood's model at the same epochs — the
+Hipparcos–Gaia epoch is a baseline-mean reflex and the Gaia epoch a
+GOST-window average, neither a point on the instantaneous curve.
+Requires `data.gost`.
 
 ### `plot_rv_astrom_phasefold(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, bf_cutoff, subtract_gp, figsize)`
 
 Joint **RV + astrometry** diagnostic for an RVAS/RVPMAS planet.
 Top: RV phase-folded on `planet_idx` (other planets and per-instrument
-γ subtracted) with the median Keplerian and an `n_draws=100` fan.
+γ subtracted) with the best-fit Keplerian and an `n_draws=100` fan.
 Bottom: sky-plane companion track over one orbital period, colour-coded
 by phase (`NEREUS_CMAP`), each RV epoch overplotted at its phase
 position, with relAST data as black errorbar points. Requires RV and
@@ -474,7 +525,7 @@ Bars coloured along `:cool`. `run_job` writes `transdim/occupancy.png`
 ### `plot_ttv_oc(chains, data, params; planet_a_k, planet_b_k, tcs_predicted, filename, half_window, ngrid, n_envelope_draws, seed, kwargs...)`
 
 End-to-end O−C diagram. Combines per-transit photometric `Tc`
-measurements (profiled at the posterior median via
+measurements (profiled at the best-fit draw via
 `measure_per_transit_tcs`) with a TTVFaster N-body envelope from
 posterior draws (`ttvc_envelope`, median line + 16/84 band) in one
 call.
@@ -484,7 +535,7 @@ call.
   skip the N-body envelope and plot the data-only O−C** (measured `Tc`
   vs the linear ephemeris).
 - `tcs_predicted` — linear-ephemeris grid; if `nothing`, built from the
-  `P_k<a>` / `Tc_k<a>` posterior medians.
+  best-fit draw's `P_k<a>` / `Tc_k<a>`.
 
 In `run_job`, `ttv_oc` defaults `planet_b_k = 2` when
 `max_kplanet ≥ 2`, else `planet_b_k = 0` — so a **single-planet** fit

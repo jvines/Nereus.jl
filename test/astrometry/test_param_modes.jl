@@ -91,8 +91,10 @@
         inc    = π/2
         Ω      = 0.0
         plx    = 10.0
-        # a from Kepler 3rd
-        a_au   = (M_pri + M_sec)^(1/3) * (P_d/365.25)^(2/3)
+        # a from Kepler 3rd, in the year that makes P² = a³/M exact
+        # (Nereus.KEPLER_YEAR_DAYS). With the Julian year here the two
+        # parametrizations are fed orbits 1.9e-5 apart and cannot round-trip.
+        a_au   = (M_pri + M_sec)^(1/3) * (P_d/Nereus.KEPLER_YEAR_DAYS)^(2/3)
 
         function _set_common(θ, name)
             set_param!(θ, "n_p", 1.0)

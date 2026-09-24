@@ -599,8 +599,9 @@ function activity_gp_predict(chains, params::Params, data::Data;
     Vc_samples = Vector{Float64}(undef, n_draws_eff)
     Vr_samples = Vector{Float64}(undef, n_draws_eff)
 
+    tdc = _td_cols(chains_flat, params)       # extracted once, not per draw
     for (d, idx) in enumerate(idx_pool)
-        theta = _theta_from_row(chains_flat, idx, params)
+        theta = _theta_from_row(chains_flat, idx, params; tdc = tdc)
 
         # Unit-variance G(t) (Rajpaul+ 2015); guarded for legacy chains.
         amp_idx = get(layout.name_to_idx, "gp_act_amp$s", 0)

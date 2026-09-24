@@ -122,8 +122,9 @@ function compute_loo(chains, params::Params, data::Data;
     # Per-point log-likelihood matrix (n_obs × n_draws).
     log_L = Matrix{Float64}(undef, n_obs_total, n_draws_eff)
 
+    tdc = _td_cols(chains_flat, params)      # each draw with its own live slots
     for (d, idx) in enumerate(idx_pool)
-        theta = _theta_from_row(chains_flat, idx, params)
+        theta = _theta_from_row(chains_flat, idx, params; tdc = tdc)
         offset = 0
         if n_rv_obs > 0
             rv_ll = agp_marg === nothing ?

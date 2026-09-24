@@ -305,9 +305,12 @@ and after the Keplerian:
 and the point is that the second row is **1.24x the median per-point error, not 1.0**.
 Something is still unmodelled at the ~0.06 mas level. Say so out loud.
 
-`plot_epoch_astrometry_orbit` bins to 24 phase bins by default. It has to: a0 is about 0.25 mas
-against 0.08 mas errors, so the unbinned cloud swamps the ellipse. If someone asks why the
-points look "too good", that is the answer.
+`plot_epoch_astrometry_orbit` puts each abscissa on the orbit along its own scan axis, and
+averages the 8-9 CCDs of each field-of-view transit into one normal point (93 for Gaia-4). It
+has to: a0 is about 0.26 mas against 0.08 mas per CCD, so the 824 raw abscissae (grey) swamp
+the ellipse, while a normal point is good to ~0.03 mas. Its error bar lies ALONG the scan, and
+across the scan the point sits on the model by construction. If someone asks why the points
+hug the ellipse, that is the answer: only the along-scan scatter is data.
 
 ## 2.6 Save
 

@@ -142,22 +142,46 @@ function sample_nested(
     #
     # PER-THREAD Theta buffers: batch/parallel NS (`sample_parallel`) calls
     # `loglike` concurrently from K constrained walks under `@threads :static`,
-    # so a single shared buffer would race. One buffer per thread, indexed by
-    # `threadid()` (stable under :static), avoids the race AND the per-eval
-    # Theta allocation (NS calls loglike ~n_live × n_iter × walks = millions).
-    theta_bufs = [Theta{Float64}(params) for _ in 1:max(1, Threads.nthreads())]
+    # so a single shared buffer would race. The scheduling is NestedSamplers',
+    # not ours, so these buffers cannot be keyed by a chunk counter the way the
+    # loops we own are — they have to stay keyed by `threadid()`. That id spans
+    # every threadpool, so the array is sized with `_nthread_slots()`
+    # (= maxthreadid()); `Threads.nthreads()` counts the default pool only and
+    # is NOT an upper bound on the id (on stock Julia ≥1.12 it is 1 while the
+    # work runs on thread 2 — the reported BoundsError). Under `:static` each
+    # thread runs one task, so one buffer per thread still removes the race and
+    # the per-eval Theta allocation (NS calls loglike ~n_live × n_iter × walks =
+    # millions).
+    #
+    # The slots are filled LAZILY: maxthreadid() counts GC and foreign threads
+    # too (32 against nthreads()=16 on `-t auto`), and a PTWorkspace is a large
+    # allocation to make eagerly for a thread that will never call the
+    # likelihood. Each thread builds its own on first use; the nothing-check is
+    # a union split on the hot path, not an allocation.
+    n_slots    = _nthread_slots()
+    theta_bufs = Vector{Union{Nothing,Theta{Float64}}}(nothing, n_slots)
     # Per-thread PTWorkspace so the ws-aware likelihood path is used: it reuses
     # preallocated planet/cadence buffers (no per-call Vector allocs → no GC
     # thrash over the millions of NS evals) AND the per-planet flux cache + the
-    # total phot-ll cache. Same proven path as PT/rjmcmc; one ws per thread,
-    # indexed by threadid() (stable under NS's :static parallel walks).
+    # total phot-ll cache. Same proven path as PT/rjmcmc.
     n_noise_ws = length(params.config.noise_models)
-    ws_bufs = [PTWorkspace(params, params.config.max_kplanet, n_noise_ws;
-                           n_obs = length(data.t_rv), n_phot = length(data.t_phot))
-               for _ in 1:max(1, Threads.nthreads())]
+    ws_bufs    = Vector{Union{Nothing,PTWorkspace}}(nothing, n_slots)
+    _new_ws()  = PTWorkspace(params, params.config.max_kplanet, n_noise_ws;
+                             n_obs = length(data.t_rv), n_phot = length(data.t_phot))
     function loglike(x)
-        tb = theta_bufs[Threads.threadid()]
-        wb = ws_bufs[Threads.threadid()]
+        tid = Threads.threadid()
+        # A thread adopted after the buffers were sized — juliacall calling in
+        # on a fresh Python thread raises maxthreadid() — carries an id past
+        # the end of the arrays. Hand it an uncached buffer instead of throwing.
+        if tid <= n_slots
+            t  = theta_bufs[tid]
+            tb = t === nothing ? (theta_bufs[tid] = Theta{Float64}(params)) : t
+            w  = ws_bufs[tid]
+            wb = w === nothing ? (ws_bufs[tid] = _new_ws()) : w
+        else
+            tb = Theta{Float64}(params)
+            wb = _new_ws()
+        end
         @inbounds for (j, idx) in enumerate(layout.unfrozen_idx)
             tb.values[idx] = x[j]
         end

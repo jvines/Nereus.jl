@@ -363,9 +363,9 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
             if !isnan(M_s) && !isnan(R_s) && R_s > 0
                 # a/R* = (G M_s P² / 4π²)^(1/3) / R_s
                 P_s = Ps[j] * T(86400.0)
-                GM = T(1.3271244e26) * M_s  # GM_sun * M_s [cm³/s²]
+                GM = T(GM_SUN_CGS) * M_s  # GM_sun * M_s [cm³/s²]
                 a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-                a_Rs[j] = a_cm / (R_s * T(6.9570e10))
+                a_Rs[j] = a_cm / (R_s * T(R_SUN_CM))
             else
                 # No stellar params available — cannot compute transit geometry
                 return zero(T)
@@ -814,9 +814,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
             R_s = theta.params.config.R_s
             if !isnan(M_s) && !isnan(R_s) && R_s > 0
                 P_s = Ps[j] * T(86400.0)
-                GM = T(1.3271244e26) * M_s
+                GM = T(GM_SUN_CGS) * M_s
                 a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-                a_Rs[j] = a_cm / (R_s * T(6.9570e10))
+                a_Rs[j] = a_cm / (R_s * T(R_SUN_CM))
             else
                 a_Rs[j] = zero(T)
             end
@@ -1093,9 +1093,9 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
             R_s = theta.params.config.R_s
             if !isnan(M_s) && !isnan(R_s) && R_s > 0
                 P_s = Ps[j] * T(86400.0)
-                GM = T(1.3271244e26) * M_s
+                GM = T(GM_SUN_CGS) * M_s
                 a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-                a_Rs[j] = a_cm / (R_s * T(6.9570e10))
+                a_Rs[j] = a_cm / (R_s * T(R_SUN_CM))
             else
                 return zero(T)
             end

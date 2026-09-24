@@ -193,7 +193,9 @@ merged in on top.
 becomes `"railed"` and `"error"` names the offending parameters. That is a
 **failed fit reported as a failure**, not a result with a caveat — a posterior
 pressed against a bound is telling you the bound is wrong, and the median it
-reports is meaningless. Do not read past it.
+reports is meaningless. Do not read past it. Two exceptions: a full-circle
+angle (its bounds are a seam, not an edge) and a jitter at its lower bound (a
+jitter can be zero; see `jitter_names`).
 
 **Saving.** Pass `output_dir` and the chains are written to `chains.nc`
 alongside the data and evidence, ready to reload for plotting without

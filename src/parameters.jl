@@ -228,9 +228,10 @@ sampled or fixed M_pri and the per-planet M_sec.
         a = theta.values[block.P]    # slot holds a, in AU
         M_pri = astrom_M_pri(theta)
         M_sec = theta.values[block.K]  # slot holds M_sec under :a_driven
-        # Kepler 3rd: P² = a³ / M_total (in solar/AU/yr units)
+        # Kepler 3rd: P² = a³ / M_total (in solar/AU/yr units), so the year is
+        # the one that makes it exact — see KEPLER_YEAR_DAYS, not the Julian year.
         P_yr = sqrt(a^3 / max(M_pri + M_sec, oftype(a, 1e-12)))
-        return P_yr * oftype(P_yr, 365.25)
+        return P_yr * oftype(P_yr, KEPLER_YEAR_DAYS)
     else
         return theta.values[block.P]
     end
@@ -251,7 +252,7 @@ derives via Kepler's third law from `planet_P` and the total mass.
         P_d   = theta.values[block.P]
         M_pri = astrom_M_pri(theta)
         M_sec = planet_M_sec(theta, k)
-        P_yr  = P_d / oftype(P_d, 365.25)
+        P_yr  = P_d / oftype(P_d, KEPLER_YEAR_DAYS)
         return cbrt((M_pri + M_sec) * P_yr * P_yr)
     end
 end
@@ -511,9 +512,9 @@ end
     end
     # Mirror the formula in transit_likelihood.jl.
     P_s = P * T(86400.0)
-    GM = T(1.3271244e26) * M_s         # GM_sun * M_s [cm³/s²]
+    GM = T(GM_SUN_CGS) * M_s         # GM_sun * M_s [cm³/s²]
     a_cm = cbrt(GM * P_s * P_s / (4 * T(π)^2))
-    return a_cm / (R_s * T(6.9570e10))
+    return a_cm / (R_s * T(R_SUN_CM))
 end
 
 @inline _planet_inc(::RVOnlyBlock, ::Theta) =

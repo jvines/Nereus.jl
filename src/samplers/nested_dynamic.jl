@@ -326,21 +326,26 @@ function _ns_inner(target::NereusTarget, data::Data;
     unfrozen_priors = layout.unfrozen_priors
     rng = MersenneTwister(seed)
 
-    # Per-thread Theta — same rationale as sample_nested_ins (parallel
-    # init pass + per-thread isolation for the inner phot threading
-    # inside transit_log_likelihood).
-    n_thr = max(Threads.nthreads(), 1)
-    thread_theta = [Theta{Float64}(params) for _ in 1:n_thr]
-    # Per-thread PTWorkspace → ws-aware likelihood (no per-call GC + caches).
+    # Per-slot Theta — same rationale as sample_nested_ins (parallel init
+    # pass + per-slot isolation for the inner phot threading inside
+    # transit_log_likelihood).
+    #
+    # Buffers are keyed by CHUNK, never by `Threads.threadid()`: the id
+    # spans every threadpool while `Threads.nthreads()` counts only the
+    # default one, so `thread_theta[threadid()]` overran this vector on
+    # stock Julia >= 1.12 (see src/threading.jl).
+    n_slots = _nthread_chunks()
+    thread_theta = [Theta{Float64}(params) for _ in 1:n_slots]
+    # Per-slot PTWorkspace → ws-aware likelihood (no per-call GC + caches).
     thread_ws = [PTWorkspace(params, params.config.max_kplanet,
                              length(params.config.noise_models);
                              n_obs = length(data.t_rv), n_phot = length(data.t_phot))
-                 for _ in 1:n_thr]
+                 for _ in 1:n_slots]
 
     @inline function eval_loglike(u::AbstractVector{<:Real},
-                                    tid::Int = 1)
-        theta = thread_theta[tid]
-        wb = thread_ws[tid]
+                                    slot::Int = 1)
+        theta = thread_theta[slot]
+        wb = thread_ws[slot]
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             theta.values[idx] = prior_transform(u[j], unfrozen_priors[j])
         end
@@ -360,9 +365,15 @@ function _ns_inner(target::NereusTarget, data::Data;
     else
         live_u = rand(rng, n_dim, n_live)
         live_logL = Vector{Float64}(undef, n_live)
-        Threads.@threads :static for i in 1:n_live
-            tid = Threads.threadid()
-            live_logL[i] = eval_loglike(@view(live_u[:, i]), tid)
+        # Buffers are keyed by CHUNK (see src/threading.jl), so `slot` is
+        # a plain loop counter, in bounds by construction regardless of
+        # thread count. `:static` is kept for the 1:1 chunk-to-thread
+        # mapping.
+        init_chunks = _chunk_ranges(n_live, n_slots)
+        Threads.@threads :static for slot in 1:length(init_chunks)
+            for i in init_chunks[slot]
+                live_logL[i] = eval_loglike(@view(live_u[:, i]), slot)
+            end
         end
     end
     n_evals = init_u === nothing ? n_live : 0

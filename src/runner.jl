@@ -290,7 +290,8 @@ const _KNOWN_BIRTH_STRATEGIES = ("PriorBirth", "InformedBirth",
 const _KNOWN_PLOTS          = ("rv_timeseries", "rv_components", "rv_phasefold",
                                 "pm_timeseries", "pm_phasefold",
                                 "rv_astrom_phasefold", "orbit_skyplane",
-                                "iad_residuals", "hgca_pm_residuals",
+                                "iad_residuals", "epoch_astrometry_orbit",
+                                "hgca_pm_residuals",
                                 "relastrom_timeseries", "relastrom_residuals",
                                 "g23h_residuals", "pm_anomaly",
                                 "ttv_oc", "transit_overlay", "rm_anomaly",
@@ -1621,7 +1622,8 @@ function _auto_plot_kinds(chains, params, data)
     # Not inside the relastrom branch, for the reason above: any
     # astrometry determines a sky-plane orbit.
     has_astrometry(data)      && push!(kinds, "orbit_skyplane")
-    data.iad      !== nothing && push!(kinds, "iad_residuals")
+    data.iad      !== nothing && append!(kinds, ["iad_residuals",
+                                                   "epoch_astrometry_orbit"])
     data.hgca     !== nothing && push!(kinds, "hgca_pm_residuals")
     data.g23h     !== nothing && push!(kinds, "g23h_residuals")
     data.gost     !== nothing && push!(kinds, "pm_anomaly")
@@ -1674,6 +1676,8 @@ function _make_plots(cfg, chains, params, data, out_dir)
     # session that calls a plot function directly is unaffected.
     _prev_release = _RELEASE_SCENES[]
     _RELEASE_SCENES[] = true
+    _PLOT_KW_SEEN[] = Set{Symbol}()       # filled by `_kw_for`
+    seen_kw = Set{Symbol}()
     try
     for (i, plot_name) in enumerate(expanded)
         update!(pb; n_done = i - 1, fields = (:now => String(plot_name),))
@@ -1699,16 +1703,99 @@ function _make_plots(cfg, chains, params, data, out_dir)
     end
     finally
         _RELEASE_SCENES[] = _prev_release
+        seen_kw = something(_PLOT_KW_SEEN[], seen_kw)
+        _PLOT_KW_SEEN[] = nothing
     end
     update!(pb; n_done = length(expanded), fields = (:now => "done",))
     finish!(pb)
+    # Each figure now takes only the `plot_kwargs` it knows (`_kw_for`), so a
+    # misspelt key no longer throws -- say so instead of dropping it silently.
+    unused = sort!([String(k) for k in keys(plot_kwargs)
+                    if k !== :save_pdf && !(k in seen_kw)])
+    isempty(unused) || @warn "plot_kwargs ignored: no figure rendered in this " *
+        "run accepts them (misspelt, or meant for a plot not drawn)" keys = unused
     return generated
 end
 
-# Keep only the kwargs the SB2 plot functions accept (they take fewer than the
-# generic RV plots — no show_keplerian/show_gp/decompose).
-_sb2_kw(kw) = (; (k => v for (k, v) in pairs(kw)
-                  if k in (:fmt, :save_pdf, :figsize, :bf_cutoff))...)
+# Keys of `plot_kwargs` some figure rendered in this `_make_plots` call named
+# explicitly -- anything left over is reported, since no figure used it.
+const _PLOT_KW_SEEN = Ref{Union{Nothing, Set{Symbol}}}(nothing)
+
+"""
+    _kw_for(f, kw; forwards_to=(), except=(:output, :filename)) -> NamedTuple
+
+The part of `plot_kwargs` that plot function `f` accepts.
+
+`plot_kwargs` is ONE dict shared by every figure in a run, and each plot
+function takes a different set of keywords. Splatted whole, a key one
+function lacks threw a MethodError: `n_draws` (orbit_skyplane) cost the
+`iad_residuals` figure, and the documented example `{bf_cutoff,
+subtract_gp}` cost `pm_timeseries` and every astrometry figure.
+
+A function that slurps `kwargs...` gets everything -- unless it only
+forwards them: name the receivers in `forwards_to` and it gets the keys
+they declare (`plot_ttv_oc` hands its slurp to `plot_ttv_diagram`, which
+throws on anything else). `except` drops keys the BRANCH sets itself, which
+would otherwise be passed twice; per-planet branches add `:planet` /
+`:planet_idx`, and nothing else withholds them.
+"""
+function _kw_for(f, kw; forwards_to = (), except = (:output, :filename))
+    named = Set{Symbol}()
+    slurps = false
+    for g in (f, forwards_to...), m in methods(g), k in Base.kwarg_decl(m)
+        endswith(String(k), "...") ? (slurps |= g === f && isempty(forwards_to)) :
+                                     push!(named, k)
+    end
+    keep = [k for k in keys(kw) if !(k in except) && (slurps || k in named)]
+    seen = _PLOT_KW_SEEN[]
+    seen === nothing || union!(seen, (k for k in keep if k in named))
+    return (; (k => kw[k] for k in keep)...)
+end
+
+"""
+    _if_written(f, name, pattern, out_dir) -> pattern or nothing
+
+Run the figure `f()` and publish `pattern` only if a file matching it was
+WRITTEN. A figure with nothing to draw -- a slot with no orbit, or one a
+trans-dim chain never activates -- writes nothing, and a pattern published
+for nothing is reported as stale by `_warn_unmatched_plot_patterns`. Judged
+from the files, not the returned figure: some functions bail out after
+building their axes. A failure is logged, not rethrown.
+"""
+function _if_written(f, name, pattern::AbstractString, out_dir)
+    before = _png_mtimes(out_dir)
+    try
+        f()
+    catch err
+        @warn "$name failed" exception = err
+    end
+    isdir(out_dir) || return nothing
+    rx = _glob_regex(replace(pattern, r"\.png$" => ""))
+    for (root, _, files) in walkdir(out_dir), fl in files
+        endswith(fl, ".png") || continue
+        full = joinpath(root, fl)
+        key = replace(splitext(relpath(full, out_dir))[1], '\\' => '/')
+        occursin(rx, key) && _is_fresh_png(full, before) && return pattern
+    end
+    return nothing
+end
+
+"""
+    _per_planet(f, name, pattern, out_dir, max_k) -> pattern or nothing
+
+`_if_written` over the per-companion figure `f(k)` for every slot; one
+slot failing does not cost the others.
+"""
+_per_planet(f, name, pattern::AbstractString, out_dir, max_k::Int) =
+    _if_written(name, pattern, out_dir) do
+        for k in 1:max_k
+            try
+                f(k)
+            catch err
+                @warn "$name K$k failed" exception = err
+            end
+        end
+    end
 
 function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothing)
     if name == "rv_timeseries"
@@ -1717,57 +1804,46 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         # primary (K_A + planet) and secondary (−K_B) model curves.
         if _is_sb2_data(data)
             plot_rv_sb2_timeseries(chains, params, data; output = out_dir,
-                                    _sb2_kw(kw)...)
+                                    _kw_for(plot_rv_sb2_timeseries, kw)...)
             return "models/rv_sb2_timeseries.png"
         end
-        plot_rv_timeseries(chains, params, data; output = out_dir, kw...)
+        plot_rv_timeseries(chains, params, data; output = out_dir, _kw_for(plot_rv_timeseries, kw)...)
         return "models/rv_timeseries.png"
     elseif name == "rv_components"
         n_rv(data) > 0 || return nothing
         # For SB2 the component-split IS the timeseries view; reuse it.
         if _is_sb2_data(data)
             plot_rv_sb2_timeseries(chains, params, data; output = out_dir,
-                                    _sb2_kw(kw)...)
+                                    _kw_for(plot_rv_sb2_timeseries, kw)...)
             return "models/rv_sb2_timeseries.png"
         end
-        plot_rv_components(chains, params, data; output = out_dir, kw...)
+        plot_rv_components(chains, params, data; output = out_dir, _kw_for(plot_rv_components, kw)...)
         return "models/rv_components.png"
     elseif name == "rv_phasefold"
         n_rv(data) > 0 || return nothing
-        for k in 1:params.config.max_kplanet
-            try
-                plot_rv_phasefold(chains, params, data;
-                                    planet = k, output = out_dir, kw...)
-            catch err
-                @warn "rv_phasefold K$k failed" exception = err
-            end
+        return _per_planet("rv_phasefold", "models/RV_phasefold_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_rv_phasefold(chains, params, data; planet = k, output = out_dir,
+                _kw_for(plot_rv_phasefold, kw; except = (:output, :filename, :planet))...)
         end
-        return "models/RV_phasefold_K*.png"
     elseif name == "pm_timeseries"
         n_phot(data) > 0 || return nothing
-        plot_pm_timeseries(chains, params, data; output = out_dir, kw...)
+        plot_pm_timeseries(chains, params, data; output = out_dir, _kw_for(plot_pm_timeseries, kw)...)
         return "models/pm_timeseries_*.png"
     elseif name == "pm_phasefold"
         n_phot(data) > 0 || return nothing
-        for k in 1:params.config.max_kplanet
-            try
-                plot_pm_phasefold(chains, params, data;
-                                    planet = k, output = out_dir, kw...)
-            catch err
-                @warn "pm_phasefold K$k failed" exception = err
-            end
+        return _per_planet("pm_phasefold", "models/Transit_phasefold_K*_*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_pm_phasefold(chains, params, data; planet = k, output = out_dir,
+                _kw_for(plot_pm_phasefold, kw; except = (:output, :filename, :planet))...)
         end
-        return "models/Transit_phasefold_K*_*.png"
     elseif name == "rv_astrom_phasefold"
         (n_rv(data) > 0 && has_astrometry(data)) || return nothing
-        for k in 1:params.config.max_kplanet
-            try
-                plot_rv_astrom_phasefold(chains, params, data;
-                                            planet_idx = k, output = out_dir, kw...)
-            catch
-            end
+        return _per_planet("rv_astrom_phasefold", "models/rv_astrom_phasefold_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_rv_astrom_phasefold(chains, params, data; planet_idx = k, output = out_dir,
+                _kw_for(plot_rv_astrom_phasefold, kw; except = (:output, :filename, :planet_idx))...)
         end
-        return "models/rv_astrom_phasefold_K*.png"
     elseif name == "orbit_skyplane"
         # The orbit is traced from the CHAINS -- _theta_from_chain_row ->
         # _planet_orbit -> _trace_orbit. `data.relastrom` is touched in exactly
@@ -1778,110 +1854,112 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         # plots=["orbit_skyplane"] looked like it worked and produced nothing.
         # The requirement is an astrometric orbit; the overlay is decoration.
         has_astrometry(data) || return nothing
-        for k in 1:params.config.max_kplanet
-            try
-                plot_orbit_skyplane(chains, params, data;
-                                      planet_idx = k, output = out_dir, kw...)
-            catch
-            end
+        return _per_planet("orbit_skyplane", "models/orbit_skyplane_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_orbit_skyplane(chains, params, data; planet_idx = k, output = out_dir,
+                _kw_for(plot_orbit_skyplane, kw; except = (:output, :filename, :planet_idx))...)
         end
-        return "models/orbit_skyplane_K*.png"
     elseif name == "relastrom_timeseries"
         data.relastrom === nothing && return nothing
-        for k in 1:params.config.max_kplanet
-            try
-                plot_relastrom_timeseries(chains, params, data;
-                                            planet_idx = k, output = out_dir, kw...)
-            catch
-            end
+        return _per_planet("relastrom_timeseries", "models/relastrom_timeseries_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_relastrom_timeseries(chains, params, data; planet_idx = k, output = out_dir,
+                _kw_for(plot_relastrom_timeseries, kw; except = (:output, :filename, :planet_idx))...)
         end
-        return "models/relastrom_timeseries_K*.png"
     elseif name == "relastrom_residuals"
         data.relastrom === nothing && return nothing
-        for k in 1:params.config.max_kplanet
-            try
-                plot_relastrom_residuals(chains, params, data;
-                                           planet_idx = k, output = out_dir, kw...)
-            catch
-            end
+        return _per_planet("relastrom_residuals", "models/relastrom_residuals_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_relastrom_residuals(chains, params, data; planet_idx = k, output = out_dir,
+                _kw_for(plot_relastrom_residuals, kw; except = (:output, :filename, :planet_idx))...)
         end
-        return "models/relastrom_residuals_K*.png"
     elseif name == "iad_residuals"
         data.iad === nothing && return nothing
-        plot_iad_residuals(chains, params, data; output = out_dir, kw...)
+        plot_iad_residuals(chains, params, data; output = out_dir, _kw_for(plot_iad_residuals, kw)...)
         return "models/iad_residuals.png"
+    elseif name == "epoch_astrometry_orbit"
+        # The sky-plane orbit WITH the data on it. IAD abscissae are 1-D, so
+        # orbit_skyplane has nothing to overlay for an IAD-only fit; this is
+        # the figure that shows the measurements against the orbit.
+        data.iad === nothing && return nothing
+        return _per_planet(name, "models/epoch_astrometry_orbit_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_epoch_astrometry_orbit(chains, params, data; planet_idx = k,
+                                        output = out_dir,
+                                        _kw_for(plot_epoch_astrometry_orbit, kw; except = (:output, :filename, :planet_idx))...)
+        end
     elseif name == "hgca_pm_residuals"
         data.hgca === nothing && return nothing
-        for k in 1:params.config.max_kplanet
-            try
-                plot_pm_residuals(chains, params, data;
-                                    planet_idx = k, output = out_dir, kw...)
-            catch
-            end
+        return _per_planet("hgca_pm_residuals", "models/hgca_pm_residuals_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_pm_residuals(chains, params, data; planet_idx = k, output = out_dir,
+                _kw_for(plot_pm_residuals, kw; except = (:output, :filename, :planet_idx))...)
         end
-        return "models/hgca_pm_residuals_K*.png"
     elseif name == "g23h_residuals"
         data.g23h === nothing && return nothing
-        plot_g23h_residuals(chains, params, data; output = out_dir, kw...)
+        plot_g23h_residuals(chains, params, data; output = out_dir, _kw_for(plot_g23h_residuals, kw)...)
         return "models/g23h_residuals.png"
     elseif name == "pm_anomaly"
         data.gost === nothing && return nothing
-        for k in 1:params.config.max_kplanet
-            try
-                plot_pm_anomaly(chains, params, data;
-                                  planet_idx = k, output = out_dir, kw...)
-            catch
-            end
+        return _per_planet("pm_anomaly", "models/pm_anomaly_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_pm_anomaly(chains, params, data; planet_idx = k, output = out_dir,
+                _kw_for(plot_pm_anomaly, kw; except = (:output, :filename, :planet_idx))...)
         end
-        return "models/pm_anomaly_K*.png"
     elseif name == "ttv_oc"
         n_phot(data) > 0 || return nothing
-        # With ≥2 planets the perturber drives the N-body O−C envelope; with a
-        # single transiting planet there is no perturber, so show the data-only
-        # O−C (measured per-transit Tc vs the linear ephemeris) by passing
-        # planet_b_k=0. An explicit plot_kwargs.planet_b_k still wins.
+        # The transiting planet: the first transiting slot that is ever live
+        # (not slot 1 by fiat -- it may be RV-only, or parked). The perturber:
+        # the first other slot live together with it, else none, which gives
+        # the data-only O−C (measured per-transit Tc vs the linear ephemeris).
+        # Explicit plot_kwargs.planet_a_k / planet_b_k still win.
         ttv_kw = copy(kw)
-        haskey(ttv_kw, :planet_b_k) ||
-            (ttv_kw[:planet_b_k] = params.config.max_kplanet >= 2 ? 2 : 0)
-        try
-            plot_ttv_oc(chains, data, params;
-                          filename = joinpath(out_dir, "models", "ttv_oc.png"),
-                          ttv_kw...)
-        catch err
-            @warn "plot_ttv_oc failed" exception = err
-            return nothing
+        modes = params.config.planet_modes
+        max_k = params.config.max_kplanet
+        present = k -> _planet_present_idx(chains, params, k)
+        if !haskey(ttv_kw, :planet_a_k)
+            a = findfirst(k -> has_pm(modes[k]) && !isempty(present(k)), 1:max_k)
+            a === nothing && return nothing
+            ttv_kw[:planet_a_k] = a
         end
-        return "models/ttv_oc.png"
+        if !haskey(ttv_kw, :planet_b_k)
+            a = ttv_kw[:planet_a_k]
+            b = findfirst(k -> k != a && !isempty(intersect(present(k), present(a))),
+                          1:max_k)
+            ttv_kw[:planet_b_k] = b === nothing ? 0 : b
+        end
+        return _if_written(name, "models/ttv_oc.png", out_dir) do
+            plot_ttv_oc(chains, data, params;
+                        filename = joinpath(out_dir, "models", "ttv_oc.png"),
+                        _kw_for(plot_ttv_oc, ttv_kw; forwards_to = (plot_ttv_diagram,))...)
+        end
     elseif name == "transit_overlay"
         n_phot(data) > 0 || return nothing
-        try
-            plot_transit_overlay_fit(chains, params, data; output = out_dir, kw...)
-        catch err
-            @warn "plot_transit_overlay_fit failed" exception = err
-            return nothing
+        # Every transiting companion, not only the first transiting slot of
+        # the layout (which on a trans-dim chain may never be live). Slots
+        # without a transit, or never live, draw and write nothing.
+        return _per_planet(name, "models/transit_overlay_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_transit_overlay_fit(chains, params, data; planet = k, output = out_dir,
+                _kw_for(plot_transit_overlay_fit, kw; except = (:output, :filename, :planet))...)
         end
-        return "models/transit_overlay_K*.png"
     elseif name == "rm_anomaly"
         # Only for RM-enabled fits (a planet with an *_RM mode).
         any(has_any_rm, params.config.planet_modes) || return nothing
-        try
-            plot_rm(chains, params, data; output = out_dir, kw...)
-        catch err
-            @warn "plot_rm failed" exception = err
-            return nothing
+        return _if_written(name, "models/rm_anomaly_K*.png", out_dir) do
+            plot_rm(chains, params, data; output = out_dir, _kw_for(plot_rm, kw)...)
         end
-        return "models/rm_anomaly_K*.png"
     elseif name == "corner"
-        plot_corner(chains, params; output = out_dir, kw...)
+        plot_corner(chains, params; output = out_dir, _kw_for(plot_corner, kw)...)
         return "corner.png"
     elseif name == "trace"
-        plot_trace(chains, params; output = out_dir, kw...)
+        plot_trace(chains, params; output = out_dir, _kw_for(plot_trace, kw)...)
         return "traces/*.png"
     elseif name == "histograms"
-        plot_histograms(chains, params; output = out_dir, kw...)
+        plot_histograms(chains, params; output = out_dir, _kw_for(plot_histograms, kw)...)
         return "histograms/*.png"
     elseif name == "posteriors"
-        plot_posteriors(chains, params; output = out_dir, kw...)
+        plot_posteriors(chains, params; output = out_dir, _kw_for(plot_posteriors, kw)...)
         return "posteriors/*.png"
     elseif name == "transdim_occupancy"
         :n_planets in Set(names(chains, :parameters)) || return nothing
@@ -1913,7 +1991,7 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         try
             plot_activity_gp_latent(chains, params, data;
                                        filename = joinpath(out_dir, "activity_gp_latent.png"),
-                                       kw...)
+                                       _kw_for(plot_activity_gp_latent, kw)...)
         catch err
             @warn "plot_activity_gp_latent failed" exception = err
             return nothing
@@ -1924,7 +2002,7 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         try
             plot_activity_gp_decomposition(chains, params, data;
                                               filename = joinpath(out_dir, "activity_gp_decomposition.png"),
-                                              kw...)
+                                              _kw_for(plot_activity_gp_decomposition, kw)...)
         catch err
             @warn "plot_activity_gp_decomposition failed" exception = err
             return nothing
@@ -2187,13 +2265,15 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
               "(their columns are parked values, not posterior draws)"
 
         # Full-circle angles are relabelled into that window before the rail
-        # check (src/circular.jl).
+        # check (src/circular.jl). A jitter can be zero: its lower bound is not
+        # a rail (`jitter_names`).
         report = assess_fit(chains; prior_bounds = prior_bounds,
                              ensemble = is_ensemble,
                              param_names = pnames,
                              circular = circular_names(params),
                              log_scale = log_scale,
-                             active = active)
+                             active = active,
+                             jitter = jitter_names(params))
 
         summary["fit_health"] = Dict{String, Any}(
             "overall"  => String(report.overall),

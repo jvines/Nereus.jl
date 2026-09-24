@@ -94,10 +94,13 @@ function detection_limits(chains, params::Params;
     P_vals = Float64.(vec(Array(chains[Symbol(P_name)])))
     K_vals = Float64.(vec(Array(chains[Symbol(K_name)])))
 
-    # Trans-dim: mask inactive draws.
-    if "n_planets" in chain_names
-        np = Int.(round.(Float64.(vec(Array(chains[:n_planets])))))
-        active = np .>= planet
+    # Trans-dim: keep the draws in which slot `planet` is live -- from
+    # `planet_active_<k>`, not `n_planets ≥ k`, which after a death mid-list
+    # keeps a parked slot's values and drops live ones.
+    tdc = _td_cols(chains, params)
+    if tdc !== nothing
+        active = planet <= length(tdc.planet) ? tdc.planet[planet] :
+                                                falses(length(P_vals))
         P_vals = P_vals[active]
         K_vals = K_vals[active]
     end

@@ -81,8 +81,11 @@ Container for a `sample_pt_emcee` run.
   what fails on the posteriors that break the tempered path.
 - `log_evidence_bridge::Float64` — bridge-sampling evidence from the same cold
   chain (Meng & Wong optimal bridge). This is the HEADLINE when it is usable:
-  it never touches the prior end, makes no Gaussianity assumption, and costs only
-  `bridge_n` likelihood evaluations. NaN if not computable.
+  it never touches the prior end and makes no Gaussianity assumption. It costs
+  `n_kept + bridge_n` likelihood evaluations, NOT `bridge_n` — it re-evaluates
+  the posterior at every kept draw, so the price scales with the chain
+  (170k evaluations at the default 100 walkers × 1500 post-burnin steps).
+  Threaded, so it is seconds rather than a minute. NaN if not computable.
 - `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ tempered stack (raw).
 - `acceptance_within::Vector{Float64}` — within-temp stretch acceptance per temp.
 - `acceptance_swap::Vector{Float64}` — swap acceptance between (k, k+1). A tiny
@@ -541,30 +544,34 @@ function sample_pt_emcee(
     length(βs) == n_temps || throw(ArgumentError(
         "Provided `betas` has length $(length(βs)), expected $n_temps"))
 
-    # --- Per-thread mutable state -------------------------------------
-    n_thr = max(Threads.nthreads(), 1)
-    thread_theta    = [Theta{Float64}(params) for _ in 1:n_thr]
-    # Per-thread PTWorkspace → ws-aware likelihood: no per-call Vector allocs
+    # --- Per-slot mutable state -----------------------------------------
+    # Keyed by CHUNK, never by `Threads.threadid()`: the id spans every
+    # threadpool while `Threads.nthreads()` counts only the default one, so
+    # `thread_theta[threadid()]` overran this vector on stock Julia >= 1.12
+    # (see src/threading.jl).
+    n_slots = _nthread_chunks()
+    thread_theta    = [Theta{Float64}(params) for _ in 1:n_slots]
+    # Per-slot PTWorkspace → ws-aware likelihood: no per-call Vector allocs
     # (the ~27.7 MB/eval GC thrash on data-rich fits) + per-planet flux cache +
     # total phot-ll cache. pt_emcee is the workhorse recoverer, so this speeds up
-    # the whole fixed-dim menu. One ws per thread, indexed by threadid().
+    # the whole fixed-dim menu. One ws per slot, indexed by the chunk index.
     thread_ws       = [PTWorkspace(params, params.config.max_kplanet,
                                    length(params.config.noise_models);
                                    n_obs = length(data.t_rv), n_phot = length(data.t_phot))
-                       for _ in 1:n_thr]
-    thread_xb       = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
-    thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
+                       for _ in 1:n_slots]
+    thread_xb       = [Vector{Float64}(undef, n_dim) for _ in 1:n_slots]
+    thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_slots]
     rng_master      = MersenneTwister(seed)
 
     # Evaluate (log_prior_bounded, log_like) at a BOUNDED-space point
-    # `x` using thread-local Theta. Returns (-Inf, -Inf) if x is
+    # `x` using the slot's own Theta. Returns (-Inf, -Inf) if x is
     # outside the prior support — caller treats this as an automatic
     # M-H reject. log_like includes external priors (eccentricity,
     # rho_s) per Nereus convention, so these get tempered too —
     # matches the in-house PT path's convention.
-    @inline function eval_bounded!(y::AbstractVector{Float64}, tid::Int)
-        theta = thread_theta[tid]
-        wb = thread_ws[tid]
+    @inline function eval_bounded!(y::AbstractVector{Float64}, slot::Int)
+        theta = thread_theta[slot]
+        wb = thread_ws[slot]
         log_jac = 0.0
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             s = flat_shift[j]
@@ -660,53 +667,58 @@ function sample_pt_emcee(
     # [-3.05, 3.23) and fail every retry below. Relabel a copy into them.
     x_init = init === nothing ? nothing : circular_relabel_point!(copy(init), params)
     init_seeds = rand(rng_master, UInt64, n_temps * n_walkers_eff)
-    Threads.@threads :static for task_idx in 1:(n_temps * n_walkers_eff)
-        tid = Threads.threadid()
-        t = (task_idx - 1) ÷ n_walkers_eff + 1
-        w = (task_idx - 1) % n_walkers_eff + 1
-        rng = MersenneTwister(init_seeds[task_idx])
-        for _ in 1:200
-            if pf_draws !== nothing
-                col = mod1(task_idx, size(pf_draws, 2))
-                if init_strategy === :pathfinder
-                    # Pathfinder draws are in unconstrained space.
-                    y_uc = Vector{Float64}(undef, n_dim)
-                    @inbounds for d in 1:n_dim
-                        y_uc[d] = pf_draws[d, col] + 1e-4 * randn(rng)
+    # Buffers are keyed by CHUNK, never by `Threads.threadid()` (see
+    # src/threading.jl); `:static` keeps the 1:1 chunk-to-thread mapping, but
+    # the buffers no longer depend on it.
+    init_chunks = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+    Threads.@threads :static for slot in 1:length(init_chunks)
+        for task_idx in init_chunks[slot]
+            t = (task_idx - 1) ÷ n_walkers_eff + 1
+            w = (task_idx - 1) % n_walkers_eff + 1
+            rng = MersenneTwister(init_seeds[task_idx])
+            for _ in 1:200
+                if pf_draws !== nothing
+                    col = mod1(task_idx, size(pf_draws, 2))
+                    if init_strategy === :pathfinder
+                        # Pathfinder draws are in unconstrained space.
+                        y_uc = Vector{Float64}(undef, n_dim)
+                        @inbounds for d in 1:n_dim
+                            y_uc[d] = pf_draws[d, col] + 1e-4 * randn(rng)
+                        end
+                        x_b = target.transform === nothing ? y_uc :
+                              transform_inverse(y_uc, target.transform)
+                        @inbounds for d in 1:n_dim
+                            state[t, w, d] = x_b[d]
+                        end
+                    else
+                        # :map_scatter — already in bounded space.
+                        @inbounds for d in 1:n_dim
+                            state[t, w, d] = pf_draws[d, col]
+                        end
                     end
-                    x_b = target.transform === nothing ? y_uc :
-                          transform_inverse(y_uc, target.transform)
+                elseif x_init !== nothing
+                    @inbounds for d in 1:n_dim
+                        state[t, w, d] = x_init[d] + 1e-3 * randn(rng)
+                    end
+                else
+                    x_b = _draw_from_prior(target, rng)
                     @inbounds for d in 1:n_dim
                         state[t, w, d] = x_b[d]
                     end
-                else
-                    # :map_scatter — already in bounded space.
-                    @inbounds for d in 1:n_dim
-                        state[t, w, d] = pf_draws[d, col]
-                    end
                 end
-            elseif x_init !== nothing
+                # Every branch above fills x; walkers move on the flat scale.
                 @inbounds for d in 1:n_dim
-                    state[t, w, d] = x_init[d] + 1e-3 * randn(rng)
+                    s = flat_shift[d]
+                    s === nothing && continue
+                    x = state[t, w, d]
+                    state[t, w, d] = x + s > 0 ? log(x + s) : -Inf
                 end
-            else
-                x_b = _draw_from_prior(target, rng)
-                @inbounds for d in 1:n_dim
-                    state[t, w, d] = x_b[d]
+                lp, ll = eval_bounded!(@view(state[t, w, :]), slot)
+                if isfinite(lp) && isfinite(ll)
+                    logπ_arr[t, w] = lp
+                    logL_arr[t, w] = ll
+                    break
                 end
-            end
-            # Every branch above fills x; walkers move on the flat scale.
-            @inbounds for d in 1:n_dim
-                s = flat_shift[d]
-                s === nothing && continue
-                x = state[t, w, d]
-                state[t, w, d] = x + s > 0 ? log(x + s) : -Inf
-            end
-            lp, ll = eval_bounded!(@view(state[t, w, :]), tid)
-            if isfinite(lp) && isfinite(ll)
-                logπ_arr[t, w] = lp
-                logL_arr[t, w] = ll
-                break
             end
         end
     end
@@ -744,6 +756,12 @@ function sample_pt_emcee(
             for w in (half + 1):n_walkers_eff; i2 += 1; tasks_h2[i2] = (t, w); end
         end
     end
+    # Chunk ranges for the half-step loops below, computed once since
+    # `tasks_h1`/`tasks_h2` are fixed for the whole run (not a per-step
+    # allocation). Keyed by CHUNK, never by `Threads.threadid()` — same
+    # reasoning as the init loop above (see src/threading.jl).
+    chunks_h1 = _chunk_ranges(length(tasks_h1), n_slots)
+    chunks_h2 = _chunk_ranges(length(tasks_h2), n_slots)
 
     # One RNG per WALKER SLOT, not per thread. Task->thread assignment
     # changes with `-t`, so drawing from a per-thread stream makes the
@@ -762,40 +780,42 @@ function sample_pt_emcee(
     flip_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
     flip_proposed  = zeros(Int, n_temps)
     flip_accepted  = zeros(Int, n_temps)
-    flip_eval(buf, t, w, tid) = eval_bounded!(buf, tid)
+    flip_eval(buf, t, w, slot) = eval_bounded!(buf, slot)
 
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
         partner_hi = active_half === :h1 ? n_walkers_eff : half
         task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
-        Threads.@threads :static for task_idx in 1:length(tasks)
-            tid = Threads.threadid()
-            t, w = tasks[task_idx]
-            β = βs[t]
-            trng = task_rngs[task_idx]
-            buf  = thread_proposal[tid]
+        chunks     = active_half === :h1 ? chunks_h1 : chunks_h2
+        Threads.@threads :static for slot in 1:length(chunks)
+            for task_idx in chunks[slot]
+                t, w = tasks[task_idx]
+                β = βs[t]
+                trng = task_rngs[task_idx]
+                buf  = thread_proposal[slot]
 
-            w_partner = rand(trng, partner_lo:partner_hi)
-            u = rand(trng)
-            z = ((stretch_a - 1) * u + 1)^2 / stretch_a
+                w_partner = rand(trng, partner_lo:partner_hi)
+                u = rand(trng)
+                z = ((stretch_a - 1) * u + 1)^2 / stretch_a
 
-            @inbounds for d in 1:n_dim
-                buf[d] = state[t, w_partner, d] +
-                         z * (state[t, w, d] - state[t, w_partner, d])
-            end
-
-            lp_prop, ll_prop = eval_bounded!(buf, tid)
-            log_ratio = (n_dim - 1) * log(z) +
-                        β * (ll_prop - logL_arr[t, w]) +
-                        (lp_prop - logπ_arr[t, w])
-            Threads.atomic_add!(propose_temp[t], 1)
-            if log(rand(trng)) < log_ratio
                 @inbounds for d in 1:n_dim
-                    state[t, w, d] = buf[d]
+                    buf[d] = state[t, w_partner, d] +
+                             z * (state[t, w, d] - state[t, w_partner, d])
                 end
-                logπ_arr[t, w] = lp_prop
-                logL_arr[t, w] = ll_prop
-                Threads.atomic_add!(accept_temp[t], 1)
+
+                lp_prop, ll_prop = eval_bounded!(buf, slot)
+                log_ratio = (n_dim - 1) * log(z) +
+                            β * (ll_prop - logL_arr[t, w]) +
+                            (lp_prop - logπ_arr[t, w])
+                Threads.atomic_add!(propose_temp[t], 1)
+                if log(rand(trng)) < log_ratio
+                    @inbounds for d in 1:n_dim
+                        state[t, w, d] = buf[d]
+                    end
+                    logπ_arr[t, w] = lp_prop
+                    logL_arr[t, w] = ll_prop
+                    Threads.atomic_add!(accept_temp[t], 1)
+                end
             end
         end
         Threads.atomic_add!(n_evals_atomic, length(tasks))
@@ -1063,11 +1083,23 @@ function sample_pt_emcee(
     laplace_check = !(untemper_transit && !isempty(data.t_phot))
     log_z_laplace = mode_laplace_evidence(target, chains)
 
-    # Bridge sampling from the cold chain we already have. Costs bridge_n
-    # likelihood evaluations (seconds), touches no hot rung, and assumes only
-    # that the fitted reference OVERLAPS the posterior -- not that the posterior
-    # is Gaussian about its mode. Requires an unconstrained target, as the
-    # proposal is Gaussian on R^n.
+    # Bridge sampling from the cold chain we already have. Touches no hot rung,
+    # and assumes only that the fitted reference OVERLAPS the posterior -- not
+    # that the posterior is Gaussian about its mode. Requires an unconstrained
+    # target, as the proposal is Gaussian on R^n.
+    #
+    # Costs `n_kept + bridge_n` likelihood evaluations, not `bridge_n`: it
+    # re-evaluates the posterior at EVERY kept draw. At the defaults that is
+    # 170k evaluations, which single-threaded was 42 s against 89 s for the
+    # entire MCMC on a Gaia DR4 IAD fit. `bridge_evidence` threads both
+    # evaluation loops now, bit-identically; mind the scaling anyway, because
+    # n_kept grows with n_walkers × (n_steps - n_burnin).
+    #
+    # NOTE: on the fit_* entry points this is computed AGAIN, post-fit, by
+    # `_augment_evidence!` (src/runner.jl) -- which exists because run_job's
+    # targets are bounded and never get here. Same estimator, same chains, so
+    # the second call is redundant on this path; it is cheap now, but it is
+    # still two passes over the posterior.
     log_z_bridge = NaN
     bridge_overlap = NaN
     if bridge_headline && target.transform !== nothing

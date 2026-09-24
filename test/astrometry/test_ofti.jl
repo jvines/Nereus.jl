@@ -1,5 +1,10 @@
 # Tests for OFTI rejection sampler.
 
+# Its own imports: under sharding (test/shards.jl) this file can run in a process
+# where no earlier file has loaded PlanetOrbits.
+using Test, Nereus
+using PlanetOrbits
+
 @testset "OFTI sampler" begin
 
     @testset "Errors out on non-:a_driven parametrization" begin

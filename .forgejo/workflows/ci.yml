@@ -1,0 +1,181 @@
+# Pre-merge gate for Nereus.jl: the full test suite on every pull request into
+# develop or main. It builds nothing that leaves the host, pushes nothing and
+# needs no secrets beyond the job's own token.
+#
+# There is no `push:` trigger. A push to develop or main is the merge of a PR
+# this job already gated; running the ~15-minute suite again buys nothing.
+# `workflow_dispatch` is there to re-run it on a branch by hand.
+#
+# ZERO `uses:` STATEMENTS. Both runners are registered host-mode (their labels
+# carry `:host`), so steps run directly on the box with no job container and no
+# node -- actions/checkout@v4 and every other JS action would fail before any of
+# this runs. The fetch below is hand-rolled for the same reason.
+#
+# Julia runs in a container (ci/Dockerfile), not on the host: the fleet rule is
+# no language runtimes on the host. It runs as the runner's own uid so that
+# every file it writes -- in the checkout and in the depot -- can be removed by
+# the cleanup step without root.
+#
+# NO MACHINE NAMES OR PATHS IN THIS FILE, AND NONE IN ANY FILE THIS REPOSITORY
+# TRACKS. The repository is mirrored publicly on every push, on every branch --
+# a push mirror cannot be limited to one ref -- so a runner label, a home
+# directory or a host name committed here is published and cannot be recalled.
+# Every such value lives in the `RUNNER_MATRIX` Actions *variable*, which is repo
+# configuration and never enters git. ci/leak-scan.sh enforces this and runs
+# ahead of the suite; tools/ci/set-runner-matrix.sh writes the variable from values
+# kept outside this repository.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+# One run per PR: a new push cancels the in-flight run for that PR.
+concurrency:
+  group: nereus-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  leak-scan:
+    # Cheap, and it gates the suite: the mirror publishes whatever is pushed,
+    # so an internal reference on ANY branch is public the moment it lands.
+    # The scan self-tests against a known-positive before trusting its own
+    # verdict -- a pattern that silently matches nothing reads exactly like a
+    # clean tree, which is how this was missed once already.
+    name: No internal references
+    runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].runner }}
+    timeout-minutes: 10
+    env:
+      FORGEJO_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      SCAN_ROOT: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].ci_root }}/scan/${{ github.run_id }}
+    steps:
+      - name: Fetch and scan
+        run: |
+          set -euo pipefail
+          rm -rf "$SCAN_ROOT"; mkdir -p "$SCAN_ROOT"; cd "$SCAN_ROOT"
+          git init -q .
+          git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
+          if [ -n "${PR_NUMBER:-}" ]; then REF="refs/pull/${PR_NUMBER}/head"; else REF="${{ github.ref }}"; fi
+          git -c credential.helper= \
+              -c credential.helper='!f() { echo "username=x-access-token"; echo "password=${FORGEJO_TOKEN}"; }; f' \
+              fetch -q --depth 1 origin "$REF"
+          git checkout -q FETCH_HEAD
+          ci/leak-scan.sh .
+      - name: Clean up
+        if: always()
+        run: rm -rf "$SCAN_ROOT"
+
+  test:
+    name: Test suite (${{ matrix.arch }})
+    needs: leak-scan
+    # Both architectures, every PR. The samplers are chaotic: the same seed on
+    # arm64 and x86_64 gives different chains, and a fixed-seed test can pass on
+    # one and fail on the other (the trans-dim default-settings fit did, seed
+    # 42). One architecture sees half of that. Each runner is also the release
+    # builder for its own architecture.
+    #
+    # arm64  runs under Docker Desktop's linux/arm64 VM; ~6 min, bound by one
+    #        mostly-serial fit.
+    # x86_64 ~15 min, the same fit taking ~11 of them.
+    #
+    # Named by a specific label, never the bare [self-hosted, Linux, X64]
+    # triple: elastic nodes advertise that, then sleep, and nothing claims them
+    # -- a job sent there queues silently forever rather than failing.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Each architecture's verdict stands on its own: a failure on one must
+      # not cancel the other.
+      fail-fast: false
+      matrix: ${{ fromJSON(vars.RUNNER_MATRIX) }}
+    # Minutes on a warm depot. The first run -- or the first after the Manifest
+    # changes -- also precompiles ~636 packages (CairoMakie, Enzyme, NCDatasets,
+    # the MCMC stack), which is most of this budget.
+    timeout-minutes: 90
+    env:
+      FORGEJO_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      CI_ROOT: ${{ matrix.ci_root }}
+      CI_WORKSPACE: ${{ matrix.ci_root }}/runs/${{ github.run_id }}
+      CI_IMAGE: nereus-ci:julia-1.11.9
+      CI_CPUS: ${{ matrix.cpus }}
+      CI_MEMORY: ${{ matrix.memory }}
+      CONTAINER: nereus-ci-${{ github.run_id }}-${{ matrix.arch }}
+
+    steps:
+      - name: Fetch the commit under test
+        run: |
+          set -euo pipefail
+          rm -rf "$CI_WORKSPACE"
+          mkdir -p "$CI_WORKSPACE" "$CI_ROOT/depot"
+          cd "$CI_WORKSPACE"
+          git init -q .
+          git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
+          # refs/pull/<n>/head is Forgejo's canonical PR tip: it still resolves
+          # after a force-push or after the branch is deleted. A manual dispatch
+          # tests the tip of the branch it was dispatched on.
+          if [ -n "${PR_NUMBER:-}" ]; then
+            REF="refs/pull/${PR_NUMBER}/head"
+          else
+            REF="${{ github.ref }}"
+          fi
+          # The EMPTY `credential.helper=` first is load-bearing: `-c` appends
+          # to the helper list, and the host's global helper shells out to
+          # `sops` -- keep this job independent of host credential config.
+          git -c credential.helper= \
+              -c credential.helper='!f() { echo "username=x-access-token"; echo "password=${FORGEJO_TOKEN}"; }; f' \
+              fetch -q --depth 1 origin "$REF"
+          git checkout -q FETCH_HEAD
+          echo "testing $(git rev-parse HEAD)"
+
+      - name: Build the CI image
+        working-directory: ${{ env.CI_WORKSPACE }}
+        run: docker build -q -t "$CI_IMAGE" ci/
+
+      - name: Instantiate and precompile
+        working-directory: ${{ env.CI_WORKSPACE }}
+        run: |
+          set -euo pipefail
+          # The depot persists in $CI_ROOT/depot between runs, which is what
+          # makes a warm run minutes instead of an hour. The lock serialises two
+          # PRs that would otherwise instantiate into it at the same moment
+          # (lockf on macOS, flock on Linux).
+          lock=$(command -v flock || command -v lockf)
+          "$lock" "$CI_ROOT/depot.lock" \
+            docker run --rm --name "$CONTAINER-pre" \
+              --label cl.jvines.owner=nereus-ci \
+              --user "$(id -u):$(id -g)" -e HOME=/tmp \
+              -e JULIA_DEPOT_PATH=/depot -v "$CI_ROOT/depot":/depot \
+              -v "$CI_WORKSPACE":/repo -w /repo \
+              --cpus "$CI_CPUS" --memory "$CI_MEMORY" \
+              "$CI_IMAGE" \
+              julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      - name: Test suite
+        working-directory: ${{ env.CI_WORKSPACE }}
+        run: |
+          set -euo pipefail
+          # Five shards in parallel (ci/run_tests.sh, split by test/shards.jl):
+          # one process ran the suite in 15-33 min. The shards are balanced on
+          # measured cost; shard 1 holds the heaviest unit alone (the trans-dim
+          # default-settings fit) and gets 6 threads, the rest 3 -- the PT /
+          # nested / OFTI tests parallelise over Threads.nthreads().
+          # --cpus/--memory are per runner (the matrix variable): each leaves
+          # room for the fleet workers that share the box.
+          docker run --rm --name "$CONTAINER" \
+            --label cl.jvines.owner=nereus-ci \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -e JULIA_DEPOT_PATH=/depot -v "$CI_ROOT/depot":/depot \
+            -v "$CI_WORKSPACE":/repo -w /repo \
+            --cpus "$CI_CPUS" --memory "$CI_MEMORY" \
+            "$CI_IMAGE" \
+            ci/run_tests.sh 5 3 6
+
+      - name: Clean up
+        if: always()
+        run: |
+          # Only this run's own containers, by name -- never a wildcard.
+          docker rm -f "$CONTAINER" "$CONTAINER-pre" >/dev/null 2>&1 || true
+          rm -rf "$CI_WORKSPACE"

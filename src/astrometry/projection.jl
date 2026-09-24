@@ -45,12 +45,13 @@ import LinearAlgebra
 # In SI, K [m/s], P [s], masses in kg → f(M) [kg]. We want Nereus-
 # native units: K [m/s], P [days], masses [M_sun] → f(M) [M_sun].
 
-const _G_SI       = 6.6743e-11      # m³/(kg·s²)
-const _M_SUN_KG   = 1.989e30        # kg
 const _SEC_PER_DAY = 86400.0
 
 # f_M [M_sun] = K[m/s]^3 · P[days] · (1-e²)^(3/2) · _F_M_FACTOR
-const _F_M_FACTOR = _SEC_PER_DAY / (2π * _G_SI * _M_SUN_KG)
+# GM_sun from src/constants.jl, not a local G × a local solar mass: this file
+# carried its own 1.989e30 kg, so the astrometric mass function ran on a
+# different GM than the RV one in src/derived.jl.
+const _F_M_FACTOR = _SEC_PER_DAY / (2π * GM_SUN_SI)
 # Numeric value ≈ 1.0364e-16. Sanity: K=12.7 m/s, P=4332 d, e=0.05 (Jupiter)
 # → f_M ≈ 9.18e-10 M_sun → M_sec sin i ≈ 9.72e-4 M_sun ≈ 1.02 M_J. ✓
 
@@ -135,9 +136,14 @@ Semi-major axis of the relative orbit in AU, given orbital period in
 days and total mass in solar masses (Kepler's third law).
 
   a³ [AU³] = M_total [M_sun] · (P [yr])²
+
+The year is `KEPLER_YEAR_DAYS`, the one that makes that exact — and the one
+PlanetOrbits uses when it turns `(a, M)` back into a period, so the orbit
+`build_orbit` hands it has the period it was given. With the Julian year it
+came out 1.89e-5 long (see the constant).
 """
 function a_from_P(P_days::Real, M_total::Real)
-    P_yr = P_days / 365.25
+    P_yr = P_days / KEPLER_YEAR_DAYS
     return cbrt(M_total * P_yr * P_yr)
 end
 
@@ -209,6 +215,188 @@ Gaia epoch astrometry).
     sol = orbitsolve(orb, t)
     return raoff(sol, M_sec), decoff(sol, M_sec)
 end
+
+# ---------------------------------------------------------------------
+# Hoisted reflex kernel — the same offset, with the orbit-constant part
+# computed once instead of once per epoch
+# ---------------------------------------------------------------------
+#
+# `star_reflex_offset` above is the REFERENCE and stays that way. It is also
+# the wrong shape for an IAD likelihood: every one of a source's abscissae
+# (824 for a Gaia DR4 source, 611 for merged Hipparcos + DR4) shares ONE orbit,
+# yet `orbitsolve` re-derives that orbit's geometry at every single epoch --
+# the true anomaly from the eccentric anomaly (`atan` + a second `sincos`),
+# `r = p/(1 + e cos ν)`, two `OrbitSolution` structs, `totalmass`, and
+# `rad2as*1e3/dist` twice. Measured over 824 abscissae that is 92 us, of which
+# ~39 us is recomputing quantities that did not change.
+#
+# Thiele-Innes collapses all of it into four constants. With
+#
+#     X = cos E - e,    Y = sqrt(1 - e^2) sin E
+#
+# the in-plane position is r cos ν = a X and r sin ν = a Y, so substituting
+# r cos(ν+ω) = a(X cos ω - Y sin ω) and r sin(ν+ω) = a(X sin ω + Y cos ω) into
+# PlanetOrbits' `posx`/`posy` (orbit-keplerian.jl:798-813)
+#
+#     posx = r cos(ν+ω) sinΩ + r sin(ν+ω) cosi cosΩ
+#     posy = r cos(ν+ω) cosΩ - r sin(ν+ω) cosi sinΩ
+#
+# gives posx = X·B + Y·G and posy = X·A + Y·F with the classical elements
+#
+#     A =  a(cos ω cosΩ - sin ω cosi sinΩ)     B = a(cos ω sinΩ + sin ω cosi cosΩ)
+#     F = -a(sin ω cosΩ + cos ω cosi sinΩ)     G = a(cos ω cosi cosΩ - sin ω sinΩ)
+#
+# Pre-multiplying those by the reflex-and-units factor -M_sec/M_tot ·
+# rad2as·1e3/dist leaves the per-epoch work at: one Kepler solve, one `sincos`,
+# and four multiply-adds.
+#
+# This is an ALGEBRAIC identity, not an approximation, and the Kepler solve is
+# still PlanetOrbits' own (`kepler_solver`, Markley for e < 1 -- the same call
+# `orbitsolve` makes), so E is bit-identical. What differs is the order of the
+# floating-point operations after it, so agreement with `star_reflex_offset` is
+# to rounding (~1e-14 relative), not bit-for-bit. `test_reflex_kernel.jl` pins
+# it to `star_reflex_offset` over the parameter ranges these fits actually
+# reach, and that test is what must catch it if PlanetOrbits ever changes the
+# internals this reads.
+
+"""
+    ReflexKernel
+
+Orbit-constant part of a stellar reflex offset, in Thiele-Innes form, with the
+reflex mass ratio and the AU→mas conversion already folded in. Build one per
+companion per likelihood call with [`_reflex_kernel`](@ref), then evaluate it at
+each epoch with [`_reflex_offset`](@ref).
+"""
+struct ReflexKernel{T}
+    n_per_day::T    # mean motion [rad/day]
+    tp::T           # epoch of periastron passage [MJD]
+    e::T
+    sqrt1me2::T     # sqrt(1 - e^2)
+    sA::T; sB::T; sF::T; sG::T   # Thiele-Innes elements, pre-scaled [mas]
+end
+
+"""
+    ReflexFallback
+
+Carries an orbit this file has no closed form for, so it is evaluated by
+`star_reflex_offset` exactly as before. Reached only if `_planet_orbit` ever
+produces something other than a `Visual{KepOrbit}`, or a hyperbolic orbit.
+"""
+struct ReflexFallback{O,T}
+    orb::O
+    M_sec::T
+end
+
+"""
+    _reflex_fast_applicable(orb) -> Bool
+
+Whether `_reflex_kernel`'s closed form covers `orb`. Callers test this over the
+WHOLE set of orbits before building any kernels, so that the vector they build
+has one concrete element type — see `_iad_residuals!`.
+
+False for any orbit that is not a `Visual{KepOrbit}`, and for a hyperbolic one:
+`sqrt(1 - e^2)` does not exist there and PlanetOrbits switches to a different
+anomaly relation. `_planet_orbit` clamps e to 0.9999 before building the orbit,
+so the hyperbolic case is unreachable from the likelihood; this keeps a caller
+that does not clamp on the reference path instead of handing it a NaN.
+"""
+_reflex_fast_applicable(orb::PlanetOrbits.VisualOrbit{<:Any,<:PlanetOrbits.KepOrbit}) =
+    orb.parent.e < 1
+_reflex_fast_applicable(orb) = false
+
+"""
+    _reflex_kernel(orb, M_sec) -> ReflexKernel
+
+Hoist everything about `(orb, M_sec)` that does not depend on epoch. Defined
+only where [`_reflex_fast_applicable`](@ref) holds, and returns exactly one
+concrete type so a vector of these stays type-stable.
+"""
+function _reflex_kernel(orb::PlanetOrbits.VisualOrbit{<:Any,<:PlanetOrbits.KepOrbit},
+                        M_sec::Real)
+    p = orb.parent
+    # -M_sec/M_tot puts the STAR opposite the companion about the barycentre
+    # (PlanetOrbits scales raoff/decoff by exactly this, PlanetOrbits.jl:958-963);
+    # rad2as*1e3/dist is its AU->mas, as in `raoff(::OrbitSolutionVisual)`.
+    scale = -M_sec / p.M * (PlanetOrbits.rad2as * oftype(orb.dist, 1e3) / orb.dist)
+    sinω, cosω = sincos(p.ω)
+    a = p.a
+    A =  a * (cosω * p.cosΩ - sinω * p.cosi * p.sinΩ)
+    B =  a * (cosω * p.sinΩ + sinω * p.cosi * p.cosΩ)
+    F = -a * (sinω * p.cosΩ + cosω * p.cosi * p.sinΩ)
+    G =  a * (cosω * p.cosi * p.cosΩ - sinω * p.sinΩ)
+    return ReflexKernel(promote(p.n / PlanetOrbits.year2day_julian, p.tp, p.e,
+                                sqrt(1 - p.e^2),
+                                scale * A, scale * B, scale * F, scale * G)...)
+end
+
+"""
+    _reflex_offset(kernel, t) -> (Δra*, Δdec)
+
+Stellar reflex offset [mas] at epoch `t` [MJD]. Equal to
+`star_reflex_offset(orb, t, M_sec)` to floating-point rounding.
+"""
+@inline function _reflex_offset(k::ReflexKernel, t::Real)
+    MA = k.n_per_day * (t - k.tp)
+    _, sE, cE = _markley_sc(MA, k.e)
+    X = cE - k.e
+    Y = k.sqrt1me2 * sE
+    return (k.sB * X + k.sG * Y, k.sA * X + k.sF * Y)
+end
+
+"""
+    _markley_sc(M, e) -> (E, sin E, cos E)
+
+Markley (1995) Kepler solver that also RETURNS the sine and cosine it already
+computed, instead of making the caller take a second `sincos`.
+
+This is PlanetOrbits' `kepler_solver(M, e, Markley())` (kepsolve-markley.jl:31)
+line for line, with one change: upstream writes `f2, f3 = e .* sincos(E1)` for
+its own corrector and then discards `sincos(E1)`, so `_reflex_offset` used to
+call `sincos(E)` all over again — measured at 18.5% of a whole likelihood
+evaluation, because it is a second libm trig call at every one of a source's 824
+abscissae, 3.3 million times a fit.
+
+`E = E1 + δ5` and `|δ5| < 1e-10` over the range these fits reach, so sin and cos
+at `E` come from the angle-sum identity with a two-term series for the tiny
+rotation — a truncation of order `δ5³/6 ~ 1e-31`, far below Float64 resolution.
+Measured against `sincos(kepler_solver(...))`: max |Δ reflex offset| = 4.9e-17
+mas, against a Gaia along-scan σ of 0.049 mas.
+
+`E` itself is returned BIT-IDENTICAL to upstream — every operation feeding it is
+the same in the same order — which is what `test_reflex_kernel.jl` pins, so an
+upstream change to the corrector fails loudly here rather than drifting.
+"""
+@inline function _markley_sc(_M::Real, e::Real)
+    M = rem2pi(_M, RoundNearest)
+    T = float(promote_type(typeof(M), typeof(e)))
+    if iszero(M) || iszero(e)
+        s, c = sincos(T(M))
+        return (T(M), s, c)
+    end
+    pi2 = abs2(T(pi))
+    α  = (3 * pi2 + 8 * (pi2 - pi * abs(M)) / (5 * (1 + e))) / (pi2 - 6)
+    d  = 3 * (1 - e) + α * e
+    q  = 2 * α * d * (1 - e) - M * M
+    r  = 3 * α * d * (d - 1 + e) * M + M * M * M
+    w  = cbrt(abs2(abs(r) + sqrt(q * q * q + r * r)))
+    E1 = (2 * r * w / @evalpoly(w, q * q, q, 1) + M) / d
+    # Upstream's `e .* sincos(E1)`, keeping the sin/cos rather than dropping them.
+    sE1, cE1 = sincos(E1)
+    f2 = e * sE1
+    f3 = e * cE1
+    f0 = E1 - f2 - M
+    f1 = 1 - f3
+    δ3 = -f0 / (f1 - f0 * f2 / (2 * f1))
+    δ4 = -f0 / @evalpoly(δ3, f1, f2 / 2, f3 / 6)
+    δ5 = -f0 / @evalpoly(δ4, f1, f2 / 2, f3 / 6, -f2 / 24)
+    d2 = δ5 * δ5
+    sd = δ5 * (1 - d2 / 6)
+    cd = 1 - d2 / 2
+    return (E1 + δ5, sE1 * cd + cE1 * sd, cE1 * cd - sE1 * sd)
+end
+
+@inline _reflex_offset(k::ReflexFallback, t::Real) =
+    star_reflex_offset(k.orb, t, k.M_sec)
 
 """
     star_reflex_pm(orbit, t, M_sec) -> (μ_ra*, μ_dec)
@@ -308,6 +496,27 @@ function gost_5param_fit(orb, gost, M_sec::Real;
 
     t_ref_gost = t_ref === nothing ? sum(gost.t) / n : Float64(t_ref)
 
+    # Same hoist as `_iad_residuals!`: ONE orbit, `n` GOST transits, so reduce
+    # the orbit to its epoch-independent constants once instead of re-deriving
+    # its geometry inside `orbitsolve` at every transit. The fast/fallback
+    # choice is made HERE, for the whole scan, and a CONCRETE kernel goes to the
+    # barrier below — deciding per transit would make the kernel a `Union` and
+    # put a dynamic dispatch back on the inner loop.
+    return _reflex_fast_applicable(orb) ?
+        _gost_5param_accumulate(_reflex_kernel(orb, M_sec), gost, M_sec, t_ref_gost, n) :
+        _gost_5param_accumulate(ReflexFallback(orb, M_sec), gost, M_sec, t_ref_gost, n)
+end
+
+"""
+    _gost_5param_accumulate(rk, gost, M_sec, t_ref_gost, n) -> Δq (5-vector)
+
+The normal-equation accumulation and solve behind [`gost_5param_fit`](@ref).
+Separate so it is a function barrier: it specialises on the concrete type of
+`rk`, which is what keeps `_reflex_offset` a static call in the transit loop.
+"""
+function _gost_5param_accumulate(rk, gost, M_sec::Real, t_ref_gost::Real, n::Int)
+    T = typeof(M_sec)
+
     A11 = zero(T); A12 = zero(T); A13 = zero(T); A14 = zero(T); A15 = zero(T)
     A22 = zero(T); A23 = zero(T); A24 = zero(T); A25 = zero(T)
     A33 = zero(T); A34 = zero(T); A35 = zero(T)
@@ -316,7 +525,7 @@ function gost_5param_fit(orb, gost, M_sec::Real;
     v1 = zero(T); v2 = zero(T); v3 = zero(T); v4 = zero(T); v5 = zero(T)
 
     @inbounds for j in 1:n
-        Δra, Δdec = star_reflex_offset(orb, gost.t[j], M_sec)
+        Δra, Δdec = _reflex_offset(rk, gost.t[j])
         s, c = sincos(gost.psi[j])
         plxf = gost.parallax_factor[j]
         dt   = (gost.t[j] - t_ref_gost) / 365.25

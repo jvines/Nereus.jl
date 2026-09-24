@@ -123,24 +123,30 @@ function sample_nested_ins(
     unfrozen_priors = layout.unfrozen_priors
     rng = MersenneTwister(seed)
 
-    # Per-thread Theta buffer. NS outer loop is sequential (one
-    # replacement per iter) but the init pass and RWalk's downstream
+    # Per-slot Theta buffer. NS outer loop is sequential (one replacement
+    # per iter, run on slot 1 by default) but the init pass threads over
+    # chunks of live points, and RWalk's downstream
     # `transit_log_likelihood` photometry threading both benefit from
-    # having a Theta per Julia thread to avoid contention.
-    n_thr = max(Threads.nthreads(), 1)
-    thread_theta = [Theta{Float64}(params) for _ in 1:n_thr]
-    # Per-thread PTWorkspace → ws-aware likelihood (preallocated buffers, no
+    # having a Theta per chunk to avoid contention.
+    #
+    # Buffers are keyed by CHUNK, never by `Threads.threadid()`: the id
+    # spans every threadpool while `Threads.nthreads()` counts only the
+    # default one, so `thread_theta[threadid()]` overran this vector on
+    # stock Julia >= 1.12 (see src/threading.jl).
+    n_slots = _nthread_chunks()
+    thread_theta = [Theta{Float64}(params) for _ in 1:n_slots]
+    # Per-slot PTWorkspace → ws-aware likelihood (preallocated buffers, no
     # per-call GC; per-planet flux cache + total phot-ll cache). See nested.jl.
     thread_ws = [PTWorkspace(params, params.config.max_kplanet,
                              length(params.config.noise_models);
                              n_obs = length(data.t_rv), n_phot = length(data.t_phot))
-                 for _ in 1:n_thr]
+                 for _ in 1:n_slots]
 
     # Likelihood at a unit-cube point u ∈ [0,1]^n_dim
     @inline function eval_loglike(u::AbstractVector{<:Real},
-                                    tid::Int = 1)
-        theta = thread_theta[tid]
-        wb = thread_ws[tid]
+                                    slot::Int = 1)
+        theta = thread_theta[slot]
+        wb = thread_ws[slot]
         # transform u → bounded x via per-coord prior quantile
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             ps = unfrozen_priors[j]
@@ -157,11 +163,16 @@ function sample_nested_ins(
              throw(ArgumentError("bounds must be :multi or :single"))
 
     # --- Initialize n_live unit-cube live points (threaded) -----------
+    # Buffers are keyed by CHUNK (see src/threading.jl), so `slot` is a
+    # plain loop counter, in bounds by construction regardless of thread
+    # count. `:static` is kept for the 1:1 chunk-to-thread mapping.
     live_u = rand(rng, n_dim, n_live)
     live_logL = Vector{Float64}(undef, n_live)
-    Threads.@threads :static for i in 1:n_live
-        tid = Threads.threadid()
-        live_logL[i] = eval_loglike(@view(live_u[:, i]), tid)
+    init_chunks = _chunk_ranges(n_live, n_slots)
+    Threads.@threads :static for slot in 1:length(init_chunks)
+        for i in init_chunks[slot]
+            live_logL[i] = eval_loglike(@view(live_u[:, i]), slot)
+        end
     end
     n_evals = n_live
 
@@ -424,7 +435,7 @@ function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
                                scratch_cur::Vector{Float64},
                                scratch_prop::Vector{Float64},
                                scratch_noise::Vector{Float64};
-                               tid::Int = 1)
+                               slot::Int = 1)
     # Start state: pick a random viable live point that's NOT the one
     # being replaced. Standard NS rule. Random offset + first-viable
     # scan avoids the `filter` allocation that the old code did per
@@ -471,7 +482,7 @@ function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
             end
             continue
         end
-        logL_prop = eval_loglike(scratch_prop, tid)
+        logL_prop = eval_loglike(scratch_prop, slot)
         push!(ins_log_L, logL_prop)
         push!(ins_log_V, log_V_cur)
         if logL_prop > logL_worst
@@ -519,7 +530,7 @@ end
 @inline function _slice_probe!(scratch_prop::Vector{Float64},
                                 scratch_cur::Vector{Float64},
                                 dir::Vector{Float64}, t::Float64,
-                                n_dim::Int, eval_loglike::Function, tid::Int,
+                                n_dim::Int, eval_loglike::Function, slot::Int,
                                 log_V_cur::Float64,
                                 ins_log_L::Vector{Float64},
                                 ins_log_V::Vector{Float64})
@@ -534,7 +545,7 @@ end
         push!(ins_log_V, log_V_cur)
         return -Inf
     end
-    ll = eval_loglike(scratch_prop, tid)
+    ll = eval_loglike(scratch_prop, slot)
     push!(ins_log_L, ll)
     push!(ins_log_V, log_V_cur)
     return ll
@@ -570,7 +581,7 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
                                scratch_cur::Vector{Float64},
                                scratch_prop::Vector{Float64},
                                scratch_noise::Vector{Float64};
-                               tid::Int = 1)
+                               slot::Int = 1)
     # Start from a random viable live point that isn't the one being
     # replaced (same NS rule as the RWalk kernel).
     rand_offset = rand(rng, 0:(n_live - 1))
@@ -616,7 +627,7 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
         ex = 0
         while ex < max_expand &&
               _slice_probe!(scratch_prop, scratch_cur, scratch_noise, lo,
-                            n_dim, eval_loglike, tid, log_V_cur,
+                            n_dim, eval_loglike, slot, log_V_cur,
                             ins_log_L, ins_log_V) > logL_worst
             lo -= w
             ex += 1
@@ -624,7 +635,7 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
         ex = 0
         while ex < max_expand &&
               _slice_probe!(scratch_prop, scratch_cur, scratch_noise, hi,
-                            n_dim, eval_loglike, tid, log_V_cur,
+                            n_dim, eval_loglike, slot, log_V_cur,
                             ins_log_L, ins_log_V) > logL_worst
             hi += w
             ex += 1
@@ -636,7 +647,7 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
         for _ in 1:max_shrink
             t  = lo + (hi - lo) * rand(rng)
             ll = _slice_probe!(scratch_prop, scratch_cur, scratch_noise, t,
-                               n_dim, eval_loglike, tid, log_V_cur,
+                               n_dim, eval_loglike, slot, log_V_cur,
                                ins_log_L, ins_log_V)
             if ll > logL_worst
                 @inbounds for d in 1:n_dim

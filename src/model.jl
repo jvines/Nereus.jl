@@ -1232,6 +1232,47 @@ struct Params
     layout::ParamsLayout
 end
 
+"""
+    jitter_names(params) -> Set{String}
+
+Every white-noise jitter term in the layout -- a variance added in quadrature to
+the reported errors, physically ≥ 0: the per-instrument RV `sigma_<inst>`,
+photometric `jitter_<label>` and relative-astrometry `sigma_as_<imager>` slots,
+and the noise models' `jit_base_*`, `gp_act_jit_*` and `IndicatorFloor`'s floor
+(`ind_floor_<ch>` under its default `:white` kernel, `ind_floor_<ch>_jit` under
+`:qp`). Not jitter despite the names: `jit_act_*` (a signed activity slope), the
+line widths `sigma_ccf` / `sigma_line_*`, and `NightlyOffset`'s `night_sigma_*`
+(the scale of grouped per-night offsets, not white noise).
+
+A jitter can be zero: the reported errors may already account for all the
+scatter. A posterior at its lower bound is then a legitimate value, never a
+pathology, so no rail check flags the LOWER bound of these -- fit_health's
+`prior_rail`, the science tables' `railed`, the MAP's `railed`. The upper bound
+still is: a jitter railing high is a prior truncating a real noise excess. Measured: every
+default fit of an easy 12.3 d RV target, 14 seeds of 14, printed "FIT HEALTH:
+FAIL -- DO NOT TRUST THIS POSTERIOR" for `sigma_HARPS` sitting at 0.
+"""
+function jitter_names(params::Params)
+    L = params.layout
+    S = L.systemic
+    out = Set{String}(L.names[i] for i in vcat(S.rv_sigma, S.pm_jitter, S.as_jitter)
+                      if i > 0)
+    for n in L.names
+        (startswith(n, "jit_base_") || startswith(n, "gp_act_jit_") ||
+         (startswith(n, "ind_floor_") && endswith(n, "_jit"))) && push!(out, n)
+    end
+    # The :white floor is a bare `ind_floor_<ch>`, which no pattern tells apart
+    # from the :qp hyperparameters (`ind_floor_period`, ...): take it from the model.
+    for m in params.config.noise_models
+        (m isa IndicatorFloor && m.kernel === :white) || continue
+        for ch in m.channels
+            n = "ind_floor_$(ch)"
+            haskey(L.name_to_idx, n) && push!(out, n)
+        end
+    end
+    return out
+end
+
 # ---------------------------------------------------------------------
 # Layout construction (pure function of the config)
 # ---------------------------------------------------------------------

@@ -166,6 +166,143 @@ _find_check(r, name) = r.checks[findfirst(c -> c.name === name, r.checks)]
         @test Nereus._railed([2000.0, 2999.0], 0.1, 3000.0, 0.0) == (true, "upper")
     end
 
+    # A jitter can be zero -- the reported errors may carry all the scatter --
+    # so a posterior piled there is never cause for alarm. Every default
+    # fit of an easy 12.3 d RV target (errors exact, no excess) printed "FIT
+    # HEALTH: FAIL -- DO NOT TRUST THIS POSTERIOR" for sigma_HARPS at 0.
+    @testset "a jitter at zero is not a rail" begin
+        rng = MersenneTwister(41)
+        arr = zeros(Float64, 2000, 1, 4)
+        for k in 1:4
+            arr[:, 1, k] .= abs.(0.7 .* randn(rng, 2000))   # half-normal at 0
+        end
+        ch = Chains(arr, [:sigma_HARPS])
+        pb = Dict(:sigma_HARPS => (0.0, 50.0))
+        @test _find_check(assess_fit(ch; prior_bounds = pb), :prior_rail).status === :fail
+        r = assess_fit(ch; prior_bounds = pb, jitter = ["sigma_HARPS"])
+        @test r.overall === :ok
+        rail = _find_check(r, :prior_rail)
+        @test rail.status === :ok
+        @test occursin("jitter at zero", rail.message)
+        @test occursin("sigma_HARPS", rail.message)
+
+        # On a log-scale prior the floor stands in for zero: the same.
+        for k in 1:4
+            arr[:, 1, k] .= 0.01 .* exp.(abs.(0.3 .* randn(rng, 2000)))
+        end
+        chl = Chains(arr, [:gp_act_jit_bis])
+        pbl = Dict(:gp_act_jit_bis => (0.01, 10.0)); lsl = Dict(:gp_act_jit_bis => 0.0)
+        @test _find_check(assess_fit(chl; prior_bounds = pbl, log_scale = lsl),
+                          :prior_rail).status === :fail
+        @test _find_check(assess_fit(chl; prior_bounds = pbl, log_scale = lsl,
+                                     jitter = [:gp_act_jit_bis]), :prior_rail).status === :ok
+
+        # The upper bound is still a rail: a noise excess the prior truncated.
+        for k in 1:4
+            arr[:, 1, k] .= 50.0 .- abs.(0.3 .* randn(rng, 2000))
+        end
+        up = _find_check(assess_fit(Chains(arr, [:sigma_HARPS]); prior_bounds = pb,
+                                    jitter = [:sigma_HARPS]), :prior_rail)
+        @test up.status === :fail
+        @test occursin("upper bound", up.message)
+
+        # Only jitters: an eccentricity at 0 next to one still fails.
+        mix = zeros(Float64, 2000, 2, 4)
+        for k in 1:4
+            mix[:, 1, k] .= abs.(0.002 .* randn(rng, 2000))
+            mix[:, 2, k] .= abs.(0.7 .* randn(rng, 2000))
+        end
+        mixed = _find_check(assess_fit(Chains(mix, [:e, :sigma_HARPS]);
+                                       prior_bounds = merge(pb, Dict(:e => (0.0, 1.0))),
+                                       jitter = [:sigma_HARPS]), :prior_rail)
+        @test mixed.status === :fail
+        @test occursin("e:", mixed.message) && !occursin("sigma_HARPS", mixed.message)
+
+        # Science tables: no "railed" flag (and no † footnote) at the floor,
+        # still one at the ceiling.
+        @test Nereus._railed([0.0, 2.1], 0.0, 50.0) == (true, "lower")
+        @test Nereus._railed([0.0, 2.1], 0.0, 50.0; floor_ok = true) == (false, "")
+        @test Nereus._railed([40.0, 50.0], 0.0, 50.0; floor_ok = true) == (true, "upper")
+        @test Nereus._railed([0.0, 50.0], 0.0, 50.0; floor_ok = true) == (true, "upper")
+    end
+
+    @testset "jitter_names: the jitter terms, and only those" begin
+        t = collect(55000.0:10.0:55300.0)
+        blk = (P = LogUniformPrior(12.0, 12.6), K = LogUniformPrior(1.0, 100.0),
+               sesinw = UniformPrior(-1.0, 1.0), secosw = UniformPrior(-1.0, 1.0),
+               Mo = UniformPrior(0.0, 2π))
+        tg = build_target(planets = (b = blk,),
+                          rv = (HARPS = (data = (t = t, rv = zeros(length(t)),
+                                                 rv_err = fill(2.0, length(t))),
+                                         sigma = LogUniformPrior(0.01, 10.0)),
+                                ESPRESSO = (data = (t = t, rv = zeros(length(t)),
+                                                    rv_err = fill(0.5, length(t))),
+                                            sigma = LogUniformPrior(0.01, 10.0))))
+        jn = Nereus.jitter_names(tg.params)
+        @test jn == Set(["sigma_HARPS", "sigma_ESPRESSO"])
+
+        # Noise-model jitters: the white-noise floors, not the slope jit_act_*
+        # nor the GP / floor amplitudes.
+        n = 25
+        d = Data(; t_rv = collect(1.0:n), rv = zeros(n), rv_err = ones(n),
+                   rv_inst = ones(Int, n),
+                   indicators = Dict("bis" => zeros(n), "log_rhk" => zeros(n)),
+                   indicator_errs = Dict("bis" => fill(0.01, n),
+                                         "log_rhk" => fill(0.01, n)))
+        p = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+                     instruments = InstrumentConfig(rv = ["SIM"]), data = d, M_s = 1.0,
+                     noise_models = NoiseModel[
+                         ActivityGP(channels = [:bis], marginalize_indicators = false),
+                         ActivityJitter(indicator = "log_rhk"),
+                         IndicatorFloor(channels = [:bis], kernel = :qp)])
+        @test Nereus.jitter_names(p) ==
+              Set(["sigma_SIM", "gp_act_jit_bis", "jit_base_log_rhk_SIM", "ind_floor_bis_jit"])
+        # IndicatorFloor's default :white kernel names its floor bare,
+        # `ind_floor_<ch>`; NightlyOffset's night_sigma is a per-night offset
+        # scale, not white noise.
+        pw = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+                      instruments = InstrumentConfig(rv = ["SIM"]), data = d, M_s = 1.0,
+                      noise_models = NoiseModel[
+                          IndicatorFloor(channels = [:bis, :log_rhk]),
+                          NightlyOffset(instruments = ["SIM"])])
+        @test any(startswith("night_sigma"), pw.layout.names)
+        @test Nereus.jitter_names(pw) == Set(["sigma_SIM", "ind_floor_bis", "ind_floor_log_rhk"])
+    end
+
+    # The MAP's own rail flag: api.jl turns a railed MAP into a failed fit. Its
+    # physical-floor exemption covered a lower bound of exactly 0 only, so a
+    # jitter on LogUniform(0.01, 10) at its floor failed the fit.
+    @testset "MAP: a jitter at its floor is not railed" begin
+        rng = MersenneTwister(43)
+        N = 60
+        t = sort(55000 .+ 200 .* rand(rng, N))
+        blk = (P = LogUniformPrior(12.0, 12.6), K = LogUniformPrior(1.0, 100.0),
+               sesinw = UniformPrior(-1.0, 1.0), secosw = UniformPrior(-1.0, 1.0),
+               Mo = UniformPrior(0.0, 2π))
+        mk(rv) = build_target(planets = (b = blk,),
+                              rv = (HARPS = (data = (t = t, rv = rv, rv_err = fill(2.0, N)),
+                                             sigma = LogUniformPrior(0.01, 10.0)),))
+        tg0 = mk(zeros(N))
+        th = Theta{Float64}(tg0.params)
+        for (nm, v) in ("P_k1" => 12.3, "K_k1" => 25.0, "sesinw_k1" => 0.3,
+                        "secosw_k1" => 0.4, "Mo_k1" => 2.0, "sigma_HARPS" => 0.01)
+            set_param!(th, nm, v)
+        end
+        model, _ = rv_predictions(th, tg0.data)
+        # 1.5 m/s of scatter under 2 m/s errors: no excess, the jitter's
+        # posterior mode is its floor.
+        tg = mk(model .+ 1.5 .* randn(rng, N))
+        names_ = tg.params.layout.unfrozen_names
+        x = [let i = findfirst(==(nm), tg0.params.layout.names)
+                 th.values[i]
+             end for nm in names_]
+        j = findfirst(==("sigma_HARPS"), names_)
+        @test x[j] == 0.01
+        # sample_map runs this on its optimum; before, sigma_HARPS was flagged
+        # ("the posterior wants to leave the box ... widen the offending prior").
+        @test !(j in Nereus._detect_railed(x, tg, 1e-3))
+    end
+
     @testset "log-posterior sanity catches corrupt :lp" begin
         rng = MersenneTwister(11)
         arr = zeros(Float64, 1000, 2, 3)

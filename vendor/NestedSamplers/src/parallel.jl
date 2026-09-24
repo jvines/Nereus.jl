@@ -47,8 +47,15 @@ function sample_parallel(rng::AbstractRNG, model::AbstractModel, sampler::Nested
     sample1, state = step(rng, model, sampler)
     samples = [sample1]
 
-    # Per-thread RNGs for race-free, reproducible parallel walks.
-    nthr = max(Threads.nthreads(), K)
+    # Per-thread RNGs for race-free, reproducible parallel walks. Sized by
+    # `maxthreadid()`, NOT `nthreads()`: the walks below index by
+    # `threadid()`, which is a global id spanning every threadpool, while
+    # `nthreads()` counts the default pool only. Julia >= 1.12 starts an
+    # interactive thread and numbers it first, so the workers run on ids
+    # 2..nthreads+1 and an `nthreads()`-long vector is short by one — the
+    # BoundsError was swallowed by Nereus's try/catch around
+    # `sample_parallel`, leaving batch NS permanently and silently serial.
+    nthr = max(Threads.maxthreadid(), K)
     rngs = [Random.MersenneTwister(rand(rng, UInt64)) for _ in 1:nthr]
     # Per-thread proposal COPIES: proposals like RWalk are mutable structs
     # whose `scale` field is adapted in place (update_scale!). Sharing one

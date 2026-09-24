@@ -31,7 +31,7 @@ function plot_ttv_diagram(transit_idx::AbstractVector{<:Integer},
                             δts_med::AbstractVector{<:Real},
                             δts_lo::Union{AbstractVector{<:Real}, Nothing} = nothing,
                             δts_hi::Union{AbstractVector{<:Real}, Nothing} = nothing;
-                            ylabel::AbstractString = "O − C [min]",
+                            ylabel::AbstractString = "O − C (min)",
                             xlabel::AbstractString = "Transit number",
                             ylim::Union{Nothing, Tuple{<:Real, <:Real}} = nothing,
                             filename::Union{Nothing, AbstractString} = nothing,
@@ -152,16 +152,30 @@ function plot_ttv_oc(chains, data::Data, params::Params;
                        n_envelope_draws::Int = 400,
                        seed::Int = 42,
                        kwargs...)
-    # 1. Posterior-median theta
-    theta_med = Theta{Float64}(params)
-    set_n_p!(theta_med, params.config.max_kplanet)
-    pname_set = Set(string.(names(chains, :parameters)))
-    for nm in keys(params.layout.name_to_idx)
-        if nm in pname_set
-            v = vec(Array(chains[:, Symbol(nm), :]))
-            theta_med.values[params.layout.name_to_idx[nm]] = median(v)
+    # 1. Reference theta: the max-lp draw among those in which the transiting
+    # planet (and the perturber, when there is one) exist, with that draw's
+    # trans-dim active set. NOT per-parameter medians: they are off the
+    # posterior ridge, and on a trans-dim chain they average in draws where
+    # a slot is parked.
+    pool = _planet_present_idx(chains, params, planet_a_k)
+    if isempty(pool)
+        @warn "plot_ttv_oc: no draw has planet $planet_a_k active; nothing to plot"
+        return Figure()
+    end
+    if planet_b_k > 0
+        pool_ab = intersect(pool, _planet_present_idx(chains, params, planet_b_k))
+        if isempty(pool_ab)
+            # No perturber to integrate -- the measured O−C against the linear
+            # ephemeris is still the figure worth having.
+            @warn "plot_ttv_oc: planet $planet_b_k is never active with planet " *
+                  "$planet_a_k; plotting the data-only O−C"
+            planet_b_k = 0
+        else
+            pool = pool_ab
         end
     end
+    theta_med = _theta_best_lp(chains, params; active_idx = pool)
+    set_n_p!(theta_med, params.config.max_kplanet)
 
     # 2. Predicted Tc grid
     P_a  = theta_med.values[params.layout.name_to_idx["P_k$(planet_a_k)"]]
@@ -320,7 +334,7 @@ end
                               output=nothing, fmt=:png, save_pdf=false) -> Figure
 
 Per-transit light-curve gallery from a fit: one panel per transit of the
-transiting planet, each showing that transit's photometry + the posterior-median
+transiting planet, each showing that transit's photometry + the best-fit (max-lp)
 transit model (x = hours from Tc). Per-transit QC — catches a single bad transit
 (spot crossing, partial/grazing, systematic) that the stacked phase-fold hides.
 Saved as `models/transit_overlay_K<k>.<fmt>`.
@@ -334,15 +348,14 @@ function plot_transit_overlay_fit(chains, params, data;
     n_phot(data) > 0 || return Figure()
     pk = planet === nothing ? findfirst(has_pm, params.config.planet_modes) : planet
     pk === nothing && return Figure()
+    has_pm(params.config.planet_modes[pk]) || return Figure()   # no transit to show
 
-    # posterior-median theta (same construction as plot_ttv_oc)
-    theta_med = Theta{Float64}(params)
+    # Reference theta: the max-lp draw among those in which planet `pk`
+    # exists, with its trans-dim active set (same construction as plot_ttv_oc).
+    present = _planet_present_idx(chains, params, pk)
+    isempty(present) && return Figure()
+    theta_med = _theta_best_lp(chains, params; active_idx = present)
     set_n_p!(theta_med, params.config.max_kplanet)
-    pname_set = Set(string.(names(chains, :parameters)))
-    for nm in keys(params.layout.name_to_idx)
-        nm in pname_set &&
-            (theta_med.values[params.layout.name_to_idx[nm]] = median(vec(Array(chains[:, Symbol(nm), :]))))
-    end
 
     model_all, _ = phot_predictions(theta_med, data)
     P = planet_P(theta_med, pk); Tc = _planet_Tc(theta_med, data, pk)

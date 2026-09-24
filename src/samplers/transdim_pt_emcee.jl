@@ -327,10 +327,62 @@ selection on planet count.
   geometric across `[beta_min, 1]` (`β_i = beta_min^(i/(n_temps-1))`), so adding
   temps DENSIFIES the cold end (closing the cold-rung swap gap) rather than
   pushing T_max ever hotter. Ignored when `betas` is supplied.
+- `adapt_ladder::Bool = true` — equalise swap acceptance across the ladder
+  during burn-in (Vousden+ 2016), holding β₁ = 1 and β_end = `beta_min` fixed
+  and stopping at `n_burnin`, so the recorded chain and the evidence both run
+  on one frozen ladder. On by default since 2026-09-23; `sample_pt_hmc` has
+  defaulted it on all along. The static geometric ladder misallocates itself
+  badly on a needle-like RV likelihood: measured on the easy 12.3 d target at
+  n_temps = 16, beta_min = 1e-4, swap acceptance was 0.138 across
+  β = 1 ↔ 0.541 and 0.69–0.88 across all fourteen hotter gaps — every rung's
+  resolution spent where the tempered posterior is already the prior, and none
+  where the cold chain needs it. That starved gap is TRANS-DIM specific:
+  planet occupancy at the cold rung falls from 77% at β = 1 to 3.7% at
+  β = 0.541, so a swap across it usually trades a one-planet state for a
+  no-planet one. `sample_pt_emcee` keeps the static ladder — on the same
+  target its worst gap accepts at 0.155, so it has nothing to equalise, and
+  flipping the default there measured as noise (mean min-ESS ratio 1.04 over
+  12 paired seeds, 12/12 passing either way).
+
+  Starving β = 1 of swaps is what left the cold ensemble unable to traverse
+  the (Mo, ω) degeneracy, which the linear stretch cannot cross on its own:
+  λ = Mo + ω is pinned to circ sd 0.056 rad while Mo and ω each span 0.66, so
+  the ridge is a helix in (Mo, sesinw, secosw) and a stretch chord leaves it.
+  In a failing run each walker froze on its own arc (between-walker circ sd
+  0.52 against within-walker 0.39) while λ mixed exactly as well as in a
+  passing one (0.039 against 0.040).
+
+  Measured over 32 runs of the trans-dim default fit — 16 seeds on arm64
+  and the same 16 on x86_64: min ESS went from a 248–7,800
+  spread with 3 of 14 seeds failing to a 12,900–31,100 band with none
+  failing, worst R-hat 1.008 against the 1.1 gate. The 25x spread in min ESS
+  -- the tell that some realisations fell into a badly mixing state for the
+  whole run -- is now 2.4x, and the new floor sits above the old ceiling.
 - `stretch_a::Float64 = 2.0`
 - `seed::Int = 1`
 - `thin::Int = 1`
 - `show_progress::Bool = true`
+- `lambda_slide::Real = 0.0` — tempered probability, per walker, planet and
+  step, of attempting the (Mo, ω) → (Mo + δ, ω − δ) slide along the
+  mean-longitude ridge (src/samplers/lambda_slide.jl). **Off by default**, and
+  the measurement is why. At low e the data pin λ = Mo + ω, not either angle:
+  on the easy 12.3 d target, circular sd 0.056 rad for λ against 0.66 for each
+  of Mo and ω. Under (:Mo, :sesinw) that ridge is a helix in the sampler's
+  coordinates, so the LINEAR stretch can only cut chords across it and walkers
+  freeze on their own arc (between-walker circular sd 0.52 against
+  within-walker 0.39 in a failing run, while λ mixed as well as in a passing
+  one). The move fixes exactly that — with it on, Mo becomes the BEST-mixing
+  parameter of the fit rather than the worst.
+  
+  It is off anyway because at the ENSEMBLE level it trades median throughput
+  for tail risk, and the tail is what this sampler's failure mode is made of.
+  Over 16 seeds of the default trans-dim fit on x86_64, against the same 16
+  without it: nine seeds improved 10–26 %, five collapsed (min ESS 1,056,
+  3,116, 3,969, 7,525, 9,432 against a floor of 13,859 without it), min ESS
+  spread went from 2.1x to 30x, and worst R-hat went from 1.008 to 1.091
+  against the 1.1 gate. Every seed still passed, but the margin is most of what
+  was spent. Turn it on for a target where the (Mo, ω) ridge is the binding
+  constraint and you are watching the diagnostics; leave it off otherwise.
 - `node_flip::Real = 0.1` — as in `sample_pt_emcee`: the tempered
   (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets, proposed only to
   walkers in which the planet is active and astrometrically coupled.
@@ -375,18 +427,26 @@ function sample_transdim_pt_emcee(
     show_progress::Bool = true,
     noise_swap::Bool = true,
     noise_swap_rate::Real = 0.5,
-    adapt_ladder::Bool = false,
+    adapt_ladder::Bool = true,
     ladder_adapt_window::Int = 50,
     ladder_adapt_ν0::Real = 10.0,
     ladder_adapt_K::Real = 1.0,
     untemper_transit::Bool = false,
     prune_stranded::Bool = true,
     node_flip::Real = 0.1,
+    lambda_slide::Real = 0.0,
+    lambda_slide_sigma::Real = 0.6,
 )
     # JSON may deliver floats-as-Int and arrays-as-JSON3.Array; normalize.
     node_flip               = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
+    lambda_slide            = Float64(lambda_slide)
+    0 <= lambda_slide <= 1 || throw(ArgumentError(
+        "lambda_slide is a probability; got $lambda_slide"))
+    lambda_slide_sigma      = Float64(lambda_slide_sigma)
+    lambda_slide_sigma > 0 || throw(ArgumentError(
+        "lambda_slide_sigma must be positive; got $lambda_slide_sigma"))
     inclusion_prior         = Float64(inclusion_prior)
     moms_init_scale         = Float64(moms_init_scale)
     informed_birth_fraction = Float64(informed_birth_fraction)
@@ -462,21 +522,26 @@ function sample_transdim_pt_emcee(
     length(βs) == n_temps || throw(ArgumentError(
         "Provided `betas` has length $(length(βs)), expected $n_temps"))
 
-    # --- Per-thread mutable state -------------------------------------
-    n_thr = max(Threads.nthreads(), 1)
+    # --- Per-slot mutable state -----------------------------------------
+    # Buffers are keyed by CHUNK, never by `Threads.threadid()`: the id spans
+    # every threadpool while `Threads.nthreads()` counts only the default one,
+    # so `thread_theta[threadid()]` overran this vector on stock Julia >= 1.12
+    # (see src/threading.jl).
+    n_slots = _nthread_chunks()
     n_noise_slots_init = length(params.config.noise_models)
     thread_theta  = [Theta{Float64}(params;
                        td = TransDimState(; max_planets = max_k,
                                             n_noise = n_noise_slots_init))
-                       for _ in 1:n_thr]
-    # Per-thread PTWorkspace → ws-aware likelihood: reuses preallocated buffers
+                       for _ in 1:n_slots]
+    # Per-slot PTWorkspace → ws-aware likelihood: reuses preallocated buffers
     # (no per-call Vector allocs → no GC thrash over the millions of ensemble-PT
     # evals) + the per-planet flux cache + total phot-ll cache. Same proven path
-    # as PT/rjmcmc/nested; one ws per thread, indexed by threadid() (:static).
+    # as PT/rjmcmc/nested; one ws per chunk slot, indexed by the chunk number
+    # (:static maps slots 1:1 onto Julia's own static chunking of the range).
     thread_ws = [PTWorkspace(params, max_k, n_noise_slots_init;
                              n_obs = length(data.t_rv), n_phot = length(data.t_phot))
-                 for _ in 1:n_thr]
-    thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
+                 for _ in 1:n_slots]
+    thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_slots]
     rng_master    = MersenneTwister(seed)
 
     # Full-circle angles, re-charted during burn-in by `_td_ensemble_recut!`.
@@ -498,6 +563,7 @@ function sample_transdim_pt_emcee(
     # Astrometry-only planets get the node flip (src/samplers/node_flip.jl).
     # Same-mode slots share Ω's window, and the flip reads it from the layout.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
+    slides = lambda_slide > 0 ? lambda_slides(params) : LambdaSlide[]
     dim_owner = zeros(Int, n_dim)
     for (k, blk) in enumerate(layout.planet_blocks), slot in planet_slot_indices(blk)
         d = findfirst(==(slot), unfrozen_idx)
@@ -595,9 +661,9 @@ function sample_transdim_pt_emcee(
     end
 
     @inline function eval_bounded!(x::AbstractVector{Float64},
-                                     tds::TransDimState, tid::Int)
-        theta = thread_theta[tid]
-        wb = thread_ws[tid]
+                                     tds::TransDimState, slot::Int)
+        theta = thread_theta[slot]
+        wb = thread_ws[slot]
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             theta.values[idx] = x[j]
         end
@@ -631,9 +697,9 @@ function sample_transdim_pt_emcee(
     # kept the transit inside the likelihood would compare a full-likelihood
     # candidate against a reference-split incumbent and silently corrupt the
     # acceptance ratio.
-    @inline function split_ref(lp0::Float64, th, tid::Int)
-        ll_rv = rv_log_likelihood(th, data, thread_ws[tid])
-        ll_tr = transit_log_likelihood(th, data, thread_ws[tid])
+    @inline function split_ref(lp0::Float64, th, slot::Int)
+        ll_rv = rv_log_likelihood(th, data, thread_ws[slot])
+        ll_tr = transit_log_likelihood(th, data, thread_ws[slot])
         return untemper_transit ? (lp0 + ll_tr, ll_rv) : (lp0, ll_rv + ll_tr)
     end
 
@@ -713,10 +779,10 @@ function sample_transdim_pt_emcee(
     # tenth of the prior's central width. Standard within-model M-H ⇒
     # detailed balance is safe wherever it runs.
     function refine_noise_birth!(t::Int, w::Int, nm_idx::Int, β::Float64,
-                                  tid::Int, trng)
+                                  slot::Int, trng)
         entries = noise_refine_slots[nm_idx]
         isempty(entries) && return
-        rbuf = thread_proposal[tid]
+        rbuf = thread_proposal[slot]
         for _ in 1:noise_refine_budget[nm_idx]
             for (jr, σ_add, ispos) in entries
                 @inbounds for j in 1:n_dim
@@ -731,7 +797,7 @@ function sample_transdim_pt_emcee(
                 else
                     rbuf[jr] = old + σ_add * randn(trng)
                 end
-                lp2, ll2 = eval_bounded!(rbuf, td_states[t, w], tid)
+                lp2, ll2 = eval_bounded!(rbuf, td_states[t, w], slot)
                 if isfinite(ll2) && log(rand(trng)) <
                             β * (ll2 - logL_arr[t, w]) + (lp2 - logπ_arr[t, w]) + hast
                     @inbounds for j in 1:n_dim
@@ -754,10 +820,10 @@ function sample_transdim_pt_emcee(
     # its only mobility until the ensemble populates. Standard within-model
     # M-H ⇒ detailed balance is safe.
     function refine_birth!(t::Int, w::Int, kb::Int, β::Float64,
-                            tid::Int, trng)
+                            bufslot::Int, trng)
         blk = params.layout.planet_blocks[kb]
         tparam = params.config.parametrization.time
-        rbuf = thread_proposal[tid]
+        rbuf = thread_proposal[bufslot]
         for _ in 1:n_birth_refine
             for slot in planet_slot_indices(blk)
                 jr = findfirst(==(slot), unfrozen_idx)
@@ -766,7 +832,7 @@ function sample_transdim_pt_emcee(
                     rbuf[j] = state[t, w, j]
                 end
                 rbuf[jr] += _refine_sigma(blk, slot, rbuf[jr], tparam) * randn(trng)
-                lp2, ll2 = eval_bounded!(rbuf, td_states[t, w], tid)
+                lp2, ll2 = eval_bounded!(rbuf, td_states[t, w], bufslot)
                 if isfinite(ll2) && log(rand(trng)) <
                             β * (ll2 - logL_arr[t, w]) + (lp2 - logπ_arr[t, w])
                     @inbounds for j in 1:n_dim
@@ -784,7 +850,7 @@ function sample_transdim_pt_emcee(
                 nv = old * exp(0.15 * randn(trng))
                 rbuf[jj] = nv
                 hast = log(nv) - log(old)
-                lp2, ll2 = eval_bounded!(rbuf, td_states[t, w], tid)
+                lp2, ll2 = eval_bounded!(rbuf, td_states[t, w], bufslot)
                 if isfinite(ll2) && log(rand(trng)) <
                             β * (ll2 - logL_arr[t, w]) + (lp2 - logπ_arr[t, w]) + hast
                     @inbounds for j in 1:n_dim
@@ -799,25 +865,27 @@ function sample_transdim_pt_emcee(
 
     # --- Initialize walkers from prior -------------------------------
     init_seeds = rand(rng_master, UInt64, n_temps * n_walkers_eff)
-    Threads.@threads :static for task_idx in 1:(n_temps * n_walkers_eff)
-        tid = Threads.threadid()
-        t = (task_idx - 1) ÷ n_walkers_eff + 1
-        w = (task_idx - 1) % n_walkers_eff + 1
-        rng = MersenneTwister(init_seeds[task_idx])
-        for _ in 1:200
-            # allow_nonfinite: the bare target scores all noise active (−Inf for
-            # eval-incompatible menu members); the real gate is eval_bounded!
-            # against this walker's toggled td_state, below.
-            x_b = _draw_from_prior(target, rng; allow_nonfinite=true)
-            @inbounds for d in 1:n_dim
-                state[t, w, d] = x_b[d]
-            end
-            lp, ll = eval_bounded!(@view(state[t, w, :]),
-                                    td_states[t, w], tid)
-            if isfinite(lp) && isfinite(ll)
-                logπ_arr[t, w] = lp
-                logL_arr[t, w] = ll
-                break
+    init_chunks = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+    Threads.@threads :static for slot in 1:length(init_chunks)
+        for task_idx in init_chunks[slot]
+            t = (task_idx - 1) ÷ n_walkers_eff + 1
+            w = (task_idx - 1) % n_walkers_eff + 1
+            rng = MersenneTwister(init_seeds[task_idx])
+            for _ in 1:200
+                # allow_nonfinite: the bare target scores all noise active (−Inf for
+                # eval-incompatible menu members); the real gate is eval_bounded!
+                # against this walker's toggled td_state, below.
+                x_b = _draw_from_prior(target, rng; allow_nonfinite=true)
+                @inbounds for d in 1:n_dim
+                    state[t, w, d] = x_b[d]
+                end
+                lp, ll = eval_bounded!(@view(state[t, w, :]),
+                                        td_states[t, w], slot)
+                if isfinite(lp) && isfinite(ll)
+                    logπ_arr[t, w] = lp
+                    logL_arr[t, w] = ll
+                    break
+                end
             end
         end
     end
@@ -855,21 +923,23 @@ function sample_transdim_pt_emcee(
         end
     end
     if !isempty(cov_seed_slots)
-        Threads.@threads :static for task_idx in 1:(n_temps * n_walkers_eff)
-            tid = Threads.threadid()
-            t = (task_idx - 1) ÷ n_walkers_eff + 1
-            w = (task_idx - 1) % n_walkers_eff + 1
-            trng_s = MersenneTwister(_walker_seed(seed, 3, task_idx))
-            @inbounds for (uf_pos, prior_ps) in cov_seed_slots
-                v = quantile(prior_ps, 0.25 + 0.5 * rand(trng_s))
-                isfinite(v) || continue
-                state[t, w, uf_pos] = v
-            end
-            lp, ll = eval_bounded!(@view(state[t, w, :]),
-                                    td_states[t, w], tid)
-            if isfinite(lp) && isfinite(ll)
-                logπ_arr[t, w] = lp
-                logL_arr[t, w] = ll
+        cov_chunks = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+        Threads.@threads :static for slot in 1:length(cov_chunks)
+            for task_idx in cov_chunks[slot]
+                t = (task_idx - 1) ÷ n_walkers_eff + 1
+                w = (task_idx - 1) % n_walkers_eff + 1
+                trng_s = MersenneTwister(_walker_seed(seed, 3, task_idx))
+                @inbounds for (uf_pos, prior_ps) in cov_seed_slots
+                    v = quantile(prior_ps, 0.25 + 0.5 * rand(trng_s))
+                    isfinite(v) || continue
+                    state[t, w, uf_pos] = v
+                end
+                lp, ll = eval_bounded!(@view(state[t, w, :]),
+                                        td_states[t, w], slot)
+                if isfinite(lp) && isfinite(ll)
+                    logπ_arr[t, w] = lp
+                    logL_arr[t, w] = ll
+                end
             end
         end
     end
@@ -969,71 +1039,124 @@ function sample_transdim_pt_emcee(
     flip_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
     flip_proposed  = zeros(Int, n_temps)
     flip_accepted  = zeros(Int, n_temps)
-    flip_eval(buf, t, w, tid) = eval_bounded!(buf, td_states[t, w], tid)
-    flip_eligible(t, w, k) = td_states[t, w].planet_active[k] &&
+    # λ slide: one stream per (rung, walker), stream id 6 (see `_walker_seed`).
+    rngs_slide = isempty(slides) ? MersenneTwister[] :
+        [MersenneTwister(_walker_seed(seed, 6, i)) for i in 1:(n_temps * n_walkers_eff)]
+    slide_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    slide_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    slide_proposed  = zeros(Int, n_temps)
+    slide_accepted  = zeros(Int, n_temps)
+    flip_eval(buf, t, w, slot) = eval_bounded!(buf, td_states[t, w], slot)
+    # `planet_active` is sized from `td.max_kplanet` while the move builders
+    # enumerate `config.max_kplanet`; the two need not agree, so bound-check
+    # before indexing. A slot the trans-dim state does not track has no
+    # activation bit, and is skipped.
+    flip_eligible(t, w, k) = k <= length(td_states[t, w].planet_active) &&
+                             td_states[t, w].planet_active[k] &&
                              is_as_active(td_states[t, w], k)
+    slide_eligible(t, w, k) = k <= length(td_states[t, w].planet_active) &&
+                              td_states[t, w].planet_active[k]
 
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
         partner_hi = active_half === :h1 ? n_walkers_eff : half
         task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
-        Threads.@threads :static for task_idx in 1:length(tasks)
-            tid = Threads.threadid()
-            t, w = tasks[task_idx]
-            β = βs[t]
-            trng = task_rngs[task_idx]
-            buf  = thread_proposal[tid]
+        half_chunks = _chunk_ranges(length(tasks), n_slots)
+        Threads.@threads :static for slot in 1:length(half_chunks)
+            for task_idx in half_chunks[slot]
+                t, w = tasks[task_idx]
+                β = βs[t]
+                trng = task_rngs[task_idx]
+                buf  = thread_proposal[slot]
 
-            w_partner = rand(trng, partner_lo:partner_hi)
-            u = rand(trng)
-            z = ((stretch_a - 1) * u + 1)^2 / stretch_a
+                w_partner = rand(trng, partner_lo:partner_hi)
+                u = rand(trng)
+                z = ((stretch_a - 1) * u + 1)^2 / stretch_a
 
-            # The stretch runs on the scale each prior is flat on, y = log(x + s)
-            # for LogUniform / ModJeffreys (see sample_pt_emcee); `state` stays
-            # in x because every birth/death/refinement writes it there. The
-            # Jacobian Π(x'+s)/(x+s) enters the ratio.
-            #
-            # Only for dimensions ACTIVE in this walker. An inactive slot has no
-            # prior density, so on the log scale its only "target" is the
-            # Jacobian e^y, which drove parked periods to x → ∞; from there every
-            # proposal was NaN and the walker froze (measured: cold acceptance
-            # 0.04, 34% of the cold rung stuck without the planet). Inactive
-            # dimensions stay linear, as before. A stretch never changes the
-            # walker's model, so forward and reverse use the same scale, and a
-            # partner parked outside (-s, ∞) on an active dimension is rejected.
-            tds_w = td_states[t, w]
-            log_jac = 0.0
-            in_domain = true
-            @inbounds for d in 1:n_dim
-                xp, xw = state[t, w_partner, d], state[t, w, d]
-                s = flat_shift[d]
-                o = dim_owner[d]
-                on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
-                if s === nothing || !on
-                    buf[d] = xp + z * (xw - xp)
-                elseif xp + s > 0 && xw + s > 0
-                    yp, yw = log(xp + s), log(xw + s)
-                    yn = yp + z * (yw - yp)
-                    buf[d] = exp(yn) - s
-                    log_jac += yn - yw
-                else
-                    in_domain = false
-                end
-            end
-
-            lp_prop, ll_prop = in_domain ?
-                eval_bounded!(buf, td_states[t, w], tid) : (-Inf, -Inf)
-            log_ratio = (n_dim - 1) * log(z) + log_jac +
-                        β * (ll_prop - logL_arr[t, w]) +
-                        (lp_prop - logπ_arr[t, w])
-            Threads.atomic_add!(propose_temp[t], 1)
-            if log(rand(trng)) < log_ratio
+                # The stretch runs on the scale each prior is flat on, y = log(x + s)
+                # for LogUniform / ModJeffreys (see sample_pt_emcee); `state` stays
+                # in x because every birth/death/refinement writes it there. The
+                # Jacobian Π(x'+s)/(x+s) enters the ratio.
+                #
+                # Only for dimensions ACTIVE in this walker. An inactive slot has no
+                # prior density, so on the log scale its only "target" is the
+                # Jacobian e^y, which drove parked periods to x → ∞; from there every
+                # proposal was NaN and the walker froze (measured: cold acceptance
+                # 0.04, 34% of the cold rung stuck without the planet). Inactive
+                # dimensions stay linear, as before. A stretch never changes the
+                # walker's model, so forward and reverse use the same scale, and a
+                # partner parked outside (-s, ∞) on an active dimension is rejected.
+                tds_w = td_states[t, w]
+                log_jac = 0.0
+                in_domain = true
+                n_on = 0
                 @inbounds for d in 1:n_dim
-                    state[t, w, d] = buf[d]
+                    xp, xw = state[t, w_partner, d], state[t, w, d]
+                    s = flat_shift[d]
+                    o = dim_owner[d]
+                    on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
+                    if !on
+                        # A PARKED dimension does not move. MoMS is a spike-slab
+                        # over (indicator, parameters): an inactive slot SITS at
+                        # `strategy.off_values[k]`, and the birth/death algebra
+                        # is only valid there. src/transdim/proposals/moms.jl:164
+                        # says it outright -- the paper's kernel N(β*; β, τ²) is
+                        # centred on the CURRENT β, and it coincides with the
+                        # off-value kernel this code implements *because* death
+                        # resets deterministically. The birth then proposes
+                        # around `offs` (moms.jl:208) while the death scores the
+                        # reverse density at whatever the slot holds (:288).
+                        #
+                        # The stretch used to move parked dimensions anyway.
+                        # They carry no prior and no likelihood, so nothing pulls
+                        # them back: x' = xp + z(x - xp) is an unconstrained
+                        # random walk with E[z] = 1.17 at stretch_a = 2, and the
+                        # spread grows geometrically. Measured on the easy RV
+                        # target, the cold rung's parked P_k2 reached sd 1e58 by
+                        # step 2000, roughly tripling every 50 steps. Long before
+                        # that ((v - off)/scale)^2 in the death density overflows,
+                        # log_q_reverse goes to -Inf, and that slot's birth/death
+                        # pair is dead for the rest of the run: the cold rung's
+                        # active-slot count decays monotonically and never
+                        # recovers.
+                        #
+                        # The earlier pass at this (see the flat-scale note below)
+                        # moved parked dimensions from the log scale to the linear
+                        # one because the log scale drove them to x -> inf. The
+                        # linear scale has the same disease, only slower.
+                        buf[d] = xw
+                    elseif s === nothing
+                        n_on += 1
+                        buf[d] = xp + z * (xw - xp)
+                    elseif xp + s > 0 && xw + s > 0
+                        n_on += 1
+                        yp, yw = log(xp + s), log(xw + s)
+                        yn = yp + z * (yw - yp)
+                        buf[d] = exp(yn) - s
+                        log_jac += yn - yw
+                    else
+                        in_domain = false
+                    end
                 end
-                logπ_arr[t, w] = lp_prop
-                logL_arr[t, w] = ll_prop
-                Threads.atomic_add!(accept_temp[t], 1)
+
+                lp_prop, ll_prop = in_domain ?
+                    eval_bounded!(buf, td_states[t, w], slot) : (-Inf, -Inf)
+                # z^(n_on - 1), not z^(n_dim - 1): with parked dimensions held
+                # fixed the stretch acts on the walker's ACTIVE subspace alone,
+                # and the Goodman-Weare Jacobian counts only the dimensions the
+                # move actually scales.
+                log_ratio = (n_on - 1) * log(z) + log_jac +
+                            β * (ll_prop - logL_arr[t, w]) +
+                            (lp_prop - logπ_arr[t, w])
+                Threads.atomic_add!(propose_temp[t], 1)
+                if log(rand(trng)) < log_ratio
+                    @inbounds for d in 1:n_dim
+                        state[t, w, d] = buf[d]
+                    end
+                    logπ_arr[t, w] = lp_prop
+                    logL_arr[t, w] = ll_prop
+                    Threads.atomic_add!(accept_temp[t], 1)
+                end
             end
         end
         Threads.atomic_add!(n_evals_atomic, length(tasks))
@@ -1046,586 +1169,588 @@ function sample_transdim_pt_emcee(
     # Tempered M-H acceptance: β·Δlog_L + Δlog_π + log_q.
     function do_transdim_step!(step::Int)
         in_burnin = step <= n_burnin
-        Threads.@threads :static for task_idx in 1:(n_temps * n_walkers_eff)
-            tid = Threads.threadid()
-            t = (task_idx - 1) ÷ n_walkers_eff + 1
-            w = (task_idx - 1) % n_walkers_eff + 1
-            trng = rngs_td[task_idx]
-            rand(trng) < td.transdim_fraction || continue
+        chunks_td = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+        Threads.@threads :static for slot in 1:length(chunks_td)
+            for task_idx in chunks_td[slot]
+                t = (task_idx - 1) ÷ n_walkers_eff + 1
+                w = (task_idx - 1) % n_walkers_eff + 1
+                trng = rngs_td[task_idx]
+                rand(trng) < td.transdim_fraction || continue
 
-            theta = thread_theta[tid]
-            @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                theta.values[idx] = state[t, w, j]
-            end
-            copyto!(theta.td.planet_active, td_states[t, w].planet_active)
-            theta.td.n_planets_active = td_states[t, w].n_planets_active
-            copyto!(theta.td.noise_active, td_states[t, w].noise_active)
-
-            # DB-correct planet↔AD swap (ALL phases): trade a redundant planet
-            # for the AD model that absorbs its signal (or vice versa) in one
-            # accept/reject with the exact swap Hastings. This is the move the
-            # standard birth/death can't make across the likelihood valley, and
-            # being DB-correct it runs post-burn-in → drives occupancy to P(M|D).
-            # Cold-side only (β>0.3) and infrequent: the swap runs a periodogram
-            # + OLS fit per call, so firing it on every temp at 0.3 dominated
-            # wall-time (the entrenchment it fixes is a cold-chain pathology, and
-            # over a long run a low rate still fires plenty to escape it).
-            if td.planets && do_noise && βs[t] > 0.3 && rand(trng) < 0.05
-                β = βs[t]
-                cand_s, lq_s = propose_planet_ad_swap(theta, trng, td.toggleable; data=data)
-                if isfinite(lq_s)
-                    is_pn = cand_s.td.n_planets_active < td_states[t, w].n_planets_active
-                    Threads.atomic_add!(pswap_prop, 1)
-                    Threads.atomic_add!(is_pn ? pn_prop : np_prop, 1)
-                    lpc = spike_slab_log_prior(cand_s, strategy, inclusion_prior)
-                    if isfinite(lpc)
-                        lpc, llc = split_ref(lpc, cand_s, tid)
-                        Threads.atomic_add!(n_evals_atomic, 1)
-                        if isfinite(llc) && log(rand(trng)) <
-                                β * (llc - logL_arr[t, w]) + (lpc - logπ_arr[t, w]) + lq_s
-                            @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                                state[t, w, j] = cand_s.values[idx]
-                            end
-                            copy_into!(td_states[t, w], cand_s.td)
-                            logπ_arr[t, w] = lpc; logL_arr[t, w] = llc
-                            Threads.atomic_add!(pswap_acc, 1)
-                            Threads.atomic_add!(is_pn ? pn_acc : np_acc, 1)
-                        end
-                    end
+                theta = thread_theta[slot]
+                @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                    theta.values[idx] = state[t, w, j]
                 end
-                continue
-            end
+                copyto!(theta.td.planet_active, td_states[t, w].planet_active)
+                theta.td.n_planets_active = td_states[t, w].n_planets_active
+                copyto!(theta.td.noise_active, td_states[t, w].noise_active)
 
-            # DB-correct WITHIN-GROUP noise swap (ALL phases): let a walker
-            # entrenched in a flexible disfavoured model (GP-Rot/AGP) ESCAPE to
-            # the high-evidence model (AD) in ONE exact-Hastings move. Birth/death
-            # can't cross the "none" valley at β≈1, so without this the
-            # disfavoured mode over-represents and occupancy ≠ P(M|D) (measured at
-            # toy scale: GP-Rot 0.3% at a 14.8-nat gap, ~4 orders above evidence;
-            # severe on deep modes). Cold-side, infrequent (periodogram+OLS per
-            # call) — same rationale as the planet↔AD swap above.
-            if noise_swap && do_noise && !isempty(td.noise_exclusion_groups) &&
-               βs[t] > 0.3 && rand(trng) < noise_swap_rate
-                β = βs[t]
-                grp = td.noise_exclusion_groups[
-                          rand(trng, 1:length(td.noise_exclusion_groups))]
-                cand_s, lq_s = propose_noise_swap(theta, trng, grp,
-                                                   td.toggleable; data=data)
-                if isfinite(lq_s)
-                    Threads.atomic_add!(propose_ntd[t], 1)
-                    lpc = spike_slab_log_prior(cand_s, strategy, inclusion_prior)
-                    if isfinite(lpc)
-                        lpc, llc = split_ref(lpc, cand_s, tid)
-                        Threads.atomic_add!(n_evals_atomic, 1)
-                        if isfinite(llc) && log(rand(trng)) <
-                                β * (llc - logL_arr[t, w]) +
-                                (lpc - logπ_arr[t, w]) + lq_s
-                            @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                                state[t, w, j] = cand_s.values[idx]
-                            end
-                            copyto!(td_states[t, w].noise_active,
-                                     cand_s.td.noise_active)
-                            logπ_arr[t, w] = lpc; logL_arr[t, w] = llc
-                            Threads.atomic_add!(accept_ntd[t], 1)
-                        end
-                    end
-                end
-                continue
-            end
-
-            # planets=false ⇒ every trans-dim move is a noise toggle; the
-            # planet branch below must never fire (the planet set is fixed).
-            attempt_noise = do_noise && (!td.planets || rand(trng) < 0.5)
-            (attempt_noise || td.planets) || continue
-
-            if attempt_noise
-                β = βs[t]
-
-                # Coordinate-M-H climb of a candidate's newborn noise
-                # params (burn-in mode-assembly; see the multi-try block).
-                # Mutates cand.values; returns the climbed (lp, ll).
-                function climb_newborn!(cand, nb::Int, lp0::Float64,
-                                         ll0::Float64)
-                    rbuf = thread_proposal[tid]
-                    @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                        rbuf[j] = cand.values[idx]
-                    end
-                    cand_ll = ll0; cand_lp = lp0
-                    for _ in 1:noise_refine_budget[nb]
-                        for (jr, σ_add, ispos) in noise_refine_slots[nb]
-                            old = rbuf[jr]
-                            hast = 0.0
-                            if ispos && old > 0
-                                nv = old * exp(0.2 * randn(trng))
-                                rbuf[jr] = nv
-                                hast = log(nv) - log(old)
-                            else
-                                rbuf[jr] = old + σ_add * randn(trng)
-                            end
-                            lp2, ll2 = eval_bounded!(rbuf, cand.td, tid)
-                            if isfinite(ll2) && log(rand(trng)) <
-                                    β * (ll2 - cand_ll) +
-                                    (lp2 - cand_lp) + hast
-                                cand_ll = ll2; cand_lp = lp2
-                            else
-                                rbuf[jr] = old
+                # DB-correct planet↔AD swap (ALL phases): trade a redundant planet
+                # for the AD model that absorbs its signal (or vice versa) in one
+                # accept/reject with the exact swap Hastings. This is the move the
+                # standard birth/death can't make across the likelihood valley, and
+                # being DB-correct it runs post-burn-in → drives occupancy to P(M|D).
+                # Cold-side only (β>0.3) and infrequent: the swap runs a periodogram
+                # + OLS fit per call, so firing it on every temp at 0.3 dominated
+                # wall-time (the entrenchment it fixes is a cold-chain pathology, and
+                # over a long run a low rate still fires plenty to escape it).
+                if td.planets && do_noise && βs[t] > 0.3 && rand(trng) < 0.05
+                    β = βs[t]
+                    cand_s, lq_s = propose_planet_ad_swap(theta, trng, td.toggleable; data=data)
+                    if isfinite(lq_s)
+                        is_pn = cand_s.td.n_planets_active < td_states[t, w].n_planets_active
+                        Threads.atomic_add!(pswap_prop, 1)
+                        Threads.atomic_add!(is_pn ? pn_prop : np_prop, 1)
+                        lpc = spike_slab_log_prior(cand_s, strategy, inclusion_prior)
+                        if isfinite(lpc)
+                            lpc, llc = split_ref(lpc, cand_s, slot)
+                            Threads.atomic_add!(n_evals_atomic, 1)
+                            if isfinite(llc) && log(rand(trng)) <
+                                    β * (llc - logL_arr[t, w]) + (lpc - logπ_arr[t, w]) + lq_s
+                                @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                                    state[t, w, j] = cand_s.values[idx]
+                                end
+                                copy_into!(td_states[t, w], cand_s.td)
+                                logπ_arr[t, w] = lpc; logL_arr[t, w] = llc
+                                Threads.atomic_add!(pswap_acc, 1)
+                                Threads.atomic_add!(is_pn ? pn_acc : np_acc, 1)
                             end
                         end
                     end
-                    @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                        cand.values[idx] = rbuf[j]
-                    end
-                    return (cand_lp, cand_ll)
+                    continue
                 end
 
-                # Within-exclusion-group SWAP (burn-in only, DB-free):
-                # kill the active group member and birth-climb another in
-                # ONE move. Without this, exclusion groups force a
-                # challenger model through the "none" valley — killing a
-                # FITTED incumbent costs hundreds of nats at β ≈ 1, so
-                # whichever member assembles first is entrenched for the
-                # whole run regardless of which model the data prefer
-                # (measured: AD-only=1.000 with AGP never evaluated
-                # head-to-head). The swap judges challenger-at-fitted-
-                # quality vs incumbent-at-fitted-quality directly.
-                if in_burnin && β > 0.3 && n_birth_tries > 1 &&
-                   rand(trng) < 0.5
-                    dead, lq_death = propose_noise_death(theta, trng,
-                                                          td.toggleable; data=data)
-                    if isfinite(lq_death)
+                # DB-correct WITHIN-GROUP noise swap (ALL phases): let a walker
+                # entrenched in a flexible disfavoured model (GP-Rot/AGP) ESCAPE to
+                # the high-evidence model (AD) in ONE exact-Hastings move. Birth/death
+                # can't cross the "none" valley at β≈1, so without this the
+                # disfavoured mode over-represents and occupancy ≠ P(M|D) (measured at
+                # toy scale: GP-Rot 0.3% at a 14.8-nat gap, ~4 orders above evidence;
+                # severe on deep modes). Cold-side, infrequent (periodogram+OLS per
+                # call) — same rationale as the planet↔AD swap above.
+                if noise_swap && do_noise && !isempty(td.noise_exclusion_groups) &&
+                   βs[t] > 0.3 && rand(trng) < noise_swap_rate
+                    β = βs[t]
+                    grp = td.noise_exclusion_groups[
+                              rand(trng, 1:length(td.noise_exclusion_groups))]
+                    cand_s, lq_s = propose_noise_swap(theta, trng, grp,
+                                                       td.toggleable; data=data)
+                    if isfinite(lq_s)
+                        Threads.atomic_add!(propose_ntd[t], 1)
+                        lpc = spike_slab_log_prior(cand_s, strategy, inclusion_prior)
+                        if isfinite(lpc)
+                            lpc, llc = split_ref(lpc, cand_s, slot)
+                            Threads.atomic_add!(n_evals_atomic, 1)
+                            if isfinite(llc) && log(rand(trng)) <
+                                    β * (llc - logL_arr[t, w]) +
+                                    (lpc - logπ_arr[t, w]) + lq_s
+                                @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                                    state[t, w, j] = cand_s.values[idx]
+                                end
+                                copyto!(td_states[t, w].noise_active,
+                                         cand_s.td.noise_active)
+                                logπ_arr[t, w] = lpc; logL_arr[t, w] = llc
+                                Threads.atomic_add!(accept_ntd[t], 1)
+                            end
+                        end
+                    end
+                    continue
+                end
+
+                # planets=false ⇒ every trans-dim move is a noise toggle; the
+                # planet branch below must never fire (the planet set is fixed).
+                attempt_noise = do_noise && (!td.planets || rand(trng) < 0.5)
+                (attempt_noise || td.planets) || continue
+
+                if attempt_noise
+                    β = βs[t]
+
+                    # Coordinate-M-H climb of a candidate's newborn noise
+                    # params (burn-in mode-assembly; see the multi-try block).
+                    # Mutates cand.values; returns the climbed (lp, ll).
+                    function climb_newborn!(cand, nb::Int, lp0::Float64,
+                                             ll0::Float64)
+                        rbuf = thread_proposal[slot]
+                        @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                            rbuf[j] = cand.values[idx]
+                        end
+                        cand_ll = ll0; cand_lp = lp0
+                        for _ in 1:noise_refine_budget[nb]
+                            for (jr, σ_add, ispos) in noise_refine_slots[nb]
+                                old = rbuf[jr]
+                                hast = 0.0
+                                if ispos && old > 0
+                                    nv = old * exp(0.2 * randn(trng))
+                                    rbuf[jr] = nv
+                                    hast = log(nv) - log(old)
+                                else
+                                    rbuf[jr] = old + σ_add * randn(trng)
+                                end
+                                lp2, ll2 = eval_bounded!(rbuf, cand.td, slot)
+                                if isfinite(ll2) && log(rand(trng)) <
+                                        β * (ll2 - cand_ll) +
+                                        (lp2 - cand_lp) + hast
+                                    cand_ll = ll2; cand_lp = lp2
+                                else
+                                    rbuf[jr] = old
+                                end
+                            end
+                        end
+                        @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                            cand.values[idx] = rbuf[j]
+                        end
+                        return (cand_lp, cand_ll)
+                    end
+
+                    # Within-exclusion-group SWAP (burn-in only, DB-free):
+                    # kill the active group member and birth-climb another in
+                    # ONE move. Without this, exclusion groups force a
+                    # challenger model through the "none" valley — killing a
+                    # FITTED incumbent costs hundreds of nats at β ≈ 1, so
+                    # whichever member assembles first is entrenched for the
+                    # whole run regardless of which model the data prefer
+                    # (measured: AD-only=1.000 with AGP never evaluated
+                    # head-to-head). The swap judges challenger-at-fitted-
+                    # quality vs incumbent-at-fitted-quality directly.
+                    if in_burnin && β > 0.3 && n_birth_tries > 1 &&
+                       rand(trng) < 0.5
+                        dead, lq_death = propose_noise_death(theta, trng,
+                                                              td.toggleable; data=data)
+                        if isfinite(lq_death)
+                            best_α = -Inf
+                            best_nt = nothing
+                            best_lp = -Inf; best_ll = -Inf
+                            for _ in 1:n_birth_tries
+                                cand, lqb = propose_noise_birth(dead, trng,
+                                                  td.toggleable; data=data,
+                                                  exclusion_groups = td.noise_exclusion_groups)
+                                isfinite(lqb) || continue
+                                lpc = spike_slab_log_prior(cand, strategy,
+                                                             inclusion_prior)
+                                isfinite(lpc) || continue
+                                lpc, llc = split_ref(lpc, cand, slot)
+                                Threads.atomic_add!(n_evals_atomic, 1)
+                                isfinite(llc) || continue
+                                αc = β * (llc - logL_arr[t, w]) +
+                                     (lpc - logπ_arr[t, w]) + lqb + lq_death
+                                if αc > best_α
+                                    best_α = αc; best_nt = cand
+                                    best_lp = lpc; best_ll = llc
+                                end
+                            end
+                            if best_nt !== nothing
+                                Threads.atomic_add!(propose_ntd[t], 1)
+                                nb = findfirst(i -> best_nt.td.noise_active[i] &&
+                                                    !td_states[t, w].noise_active[i],
+                                                1:n_noise_slots)
+                                if nb !== nothing && n_birth_refine > 0
+                                    best_lp, best_ll = climb_newborn!(best_nt, nb,
+                                                                        best_lp, best_ll)
+                                    best_α = β * (best_ll - logL_arr[t, w]) +
+                                             (best_lp - logπ_arr[t, w])
+                                end
+                                if log(rand(trng)) < best_α
+                                    @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                                        state[t, w, j] = best_nt.values[idx]
+                                    end
+                                    copyto!(td_states[t, w].noise_active,
+                                             best_nt.td.noise_active)
+                                    logπ_arr[t, w] = best_lp
+                                    logL_arr[t, w] = best_ll
+                                    Threads.atomic_add!(accept_ntd[t], 1)
+                                end
+                            end
+                            continue
+                        end
+                    end
+
+                    # Planet↔activity SWAP (burn-in only, DB-free): trade a planet
+                    # for the activity model that absorbs its signal, in ONE move.
+                    # A planet redundant with an activity model can't be killed by
+                    # the standard death — at β≈1 dropping to Np−1 with nothing to
+                    # cover the freed signal tanks logL, so the planet entrenches
+                    # and a true null fakes a planet (measured: clean-indicator toy
+                    # P(Np=0)=0 despite AD winning on evidence). Here we kill a
+                    # planet and birth a noise model whose params are FIT to the
+                    # freed residual (propose_noise_birth's OLS-informed AD sees the
+                    # planet's signal once it's deactivated). Judged at
+                    # β·ΔlogL+Δlogπ: Δlogπ removes the planet's param priors, so
+                    # Occam favors the trade ONLY when the activity model is
+                    # competitive — a REAL planet's large ΔL keeps it, a fake one
+                    # (≈AD on logL) trades to AD and the chain reaches Np=0.
+                    # `td.planets` guard: this kills a planet (Np→Np−1), so it must
+                    # NOT fire when the planet count is fixed (planets=false, e.g. a
+                    # noise-only model-selection run) — otherwise it leaks Np=0 states
+                    # despite the freeze. (The sibling swap at ~line 714 is already
+                    # td.planets-gated; this one was missed.)
+                    if td.planets && in_burnin && β > 0.3 && n_birth_tries > 1 &&
+                       theta.td.n_planets_active > 0 && rand(trng) < 0.5
+                        dead, lq_pd = propose_planet_death(theta, trng)
+                        if isfinite(lq_pd)
+                            Threads.atomic_add!(pswap_prop, 1)
+                            best_α = -Inf; best_nt = nothing
+                            best_lp = -Inf; best_ll = -Inf
+                            for _ in 1:n_birth_tries
+                                cand, lq_nb = propose_noise_birth(dead, trng,
+                                                  td.toggleable; data=data,
+                                                  exclusion_groups = td.noise_exclusion_groups)
+                                isfinite(lq_nb) || continue
+                                lpc = spike_slab_log_prior(cand, strategy, inclusion_prior)
+                                isfinite(lpc) || continue
+                                lpc, llc = split_ref(lpc, cand, slot)
+                                Threads.atomic_add!(n_evals_atomic, 1)
+                                isfinite(llc) || continue
+                                αc = β * (llc - logL_arr[t, w]) +
+                                     (lpc - logπ_arr[t, w]) + lq_nb + lq_pd
+                                if αc > best_α
+                                    best_α = αc; best_nt = cand
+                                    best_lp = lpc; best_ll = llc
+                                end
+                            end
+                            if best_nt !== nothing
+                                Threads.atomic_add!(propose_ntd[t], 1)
+                                nb = findfirst(i -> best_nt.td.noise_active[i] &&
+                                                    !td_states[t, w].noise_active[i],
+                                                1:n_noise_slots)
+                                if nb !== nothing && n_birth_refine > 0
+                                    best_lp, best_ll = climb_newborn!(best_nt, nb,
+                                                                        best_lp, best_ll)
+                                    best_α = β * (best_ll - logL_arr[t, w]) +
+                                             (best_lp - logπ_arr[t, w])
+                                end
+                                if log(rand(trng)) < best_α
+                                    @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                                        state[t, w, j] = best_nt.values[idx]
+                                    end
+                                    # full td copy — BOTH a planet death and a noise birth
+                                    copy_into!(td_states[t, w], best_nt.td)
+                                    logπ_arr[t, w] = best_lp
+                                    logL_arr[t, w] = best_ll
+                                    Threads.atomic_add!(accept_ntd[t], 1)
+                                    Threads.atomic_add!(pswap_acc, 1)
+                                end
+                            end
+                            continue
+                        end
+                    end
+
+                    do_nbirth = rand(trng) < 0.5
+
+                    # Burn-in multi-try for NOISE births (mirrors the planet
+                    # block): a single prior draw of a 12-param activity model
+                    # is never competitive, so propose `n_birth_tries`
+                    # candidates and keep the best by tempered acceptance.
+                    # DB-free since burn-in is discarded; the single-draw path
+                    # below remains the DB-correct sampling kernel.
+                    if do_nbirth && n_birth_tries > 1 && in_burnin && β > 0.3
                         best_α = -Inf
                         best_nt = nothing
-                        best_lp = -Inf; best_ll = -Inf
+                        best_lp = -Inf; best_ll = -Inf; best_lq = -Inf
                         for _ in 1:n_birth_tries
-                            cand, lqb = propose_noise_birth(dead, trng,
+                            cand, lqc = propose_noise_birth(theta, trng,
                                               td.toggleable; data=data,
                                               exclusion_groups = td.noise_exclusion_groups)
-                            isfinite(lqb) || continue
+                            isfinite(lqc) || continue
                             lpc = spike_slab_log_prior(cand, strategy,
                                                          inclusion_prior)
                             isfinite(lpc) || continue
-                            lpc, llc = split_ref(lpc, cand, tid)
+                            lpc, llc = split_ref(lpc, cand, slot)
                             Threads.atomic_add!(n_evals_atomic, 1)
                             isfinite(llc) || continue
                             αc = β * (llc - logL_arr[t, w]) +
-                                 (lpc - logπ_arr[t, w]) + lqb + lq_death
+                                 (lpc - logπ_arr[t, w]) + lqc
                             if αc > best_α
                                 best_α = αc; best_nt = cand
-                                best_lp = lpc; best_ll = llc
+                                best_lp = lpc; best_ll = llc; best_lq = lqc
                             end
                         end
-                        if best_nt !== nothing
-                            Threads.atomic_add!(propose_ntd[t], 1)
-                            nb = findfirst(i -> best_nt.td.noise_active[i] &&
-                                                !td_states[t, w].noise_active[i],
-                                            1:n_noise_slots)
-                            if nb !== nothing && n_birth_refine > 0
-                                best_lp, best_ll = climb_newborn!(best_nt, nb,
-                                                                    best_lp, best_ll)
-                                best_α = β * (best_ll - logL_arr[t, w]) +
-                                         (best_lp - logπ_arr[t, w])
+                        best_nt === nothing && continue
+                        Threads.atomic_add!(propose_ntd[t], 1)
+
+                        # Pre-accept CLIMB (burn-in only ⇒ no DB obligation).
+                        # Planet multi-try sees competitive candidates because
+                        # planet births are data-informed (BLS/LS-seeded);
+                        # noise births are BLIND prior draws, and best-of-N in
+                        # 12-D is still nowhere near the mode — judged at the
+                        # drawn config the accept bar is never reached and
+                        # post-accept refinement never runs. So climb the
+                        # selected candidate's newborn params with coordinate
+                        # M-H FIRST, then decide acceptance on the climbed
+                        # config: survival reflects the model's fitted
+                        # quality, not the luck of the draw.
+                        nb = findfirst(i -> best_nt.td.noise_active[i] &&
+                                            !td_states[t, w].noise_active[i],
+                                        1:n_noise_slots)
+                        if nb !== nothing && n_birth_refine > 0
+                            best_lp, best_ll = climb_newborn!(best_nt, nb,
+                                                                best_lp, best_ll)
+                            best_α = β * (best_ll - logL_arr[t, w]) +
+                                     (best_lp - logπ_arr[t, w]) + best_lq
+                        end
+
+                        if log(rand(trng)) < best_α
+                            @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                                state[t, w, j] = best_nt.values[idx]
                             end
-                            if log(rand(trng)) < best_α
-                                @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                                    state[t, w, j] = best_nt.values[idx]
-                                end
-                                copyto!(td_states[t, w].noise_active,
-                                         best_nt.td.noise_active)
-                                logπ_arr[t, w] = best_lp
-                                logL_arr[t, w] = best_ll
-                                Threads.atomic_add!(accept_ntd[t], 1)
-                            end
+                            copyto!(td_states[t, w].noise_active,
+                                     best_nt.td.noise_active)
+                            logπ_arr[t, w] = best_lp
+                            logL_arr[t, w] = best_ll
+                            Threads.atomic_add!(accept_ntd[t], 1)
                         end
                         continue
                     end
-                end
 
-                # Planet↔activity SWAP (burn-in only, DB-free): trade a planet
-                # for the activity model that absorbs its signal, in ONE move.
-                # A planet redundant with an activity model can't be killed by
-                # the standard death — at β≈1 dropping to Np−1 with nothing to
-                # cover the freed signal tanks logL, so the planet entrenches
-                # and a true null fakes a planet (measured: clean-indicator toy
-                # P(Np=0)=0 despite AD winning on evidence). Here we kill a
-                # planet and birth a noise model whose params are FIT to the
-                # freed residual (propose_noise_birth's OLS-informed AD sees the
-                # planet's signal once it's deactivated). Judged at
-                # β·ΔlogL+Δlogπ: Δlogπ removes the planet's param priors, so
-                # Occam favors the trade ONLY when the activity model is
-                # competitive — a REAL planet's large ΔL keeps it, a fake one
-                # (≈AD on logL) trades to AD and the chain reaches Np=0.
-                # `td.planets` guard: this kills a planet (Np→Np−1), so it must
-                # NOT fire when the planet count is fixed (planets=false, e.g. a
-                # noise-only model-selection run) — otherwise it leaks Np=0 states
-                # despite the freeze. (The sibling swap at ~line 714 is already
-                # td.planets-gated; this one was missed.)
-                if td.planets && in_burnin && β > 0.3 && n_birth_tries > 1 &&
-                   theta.td.n_planets_active > 0 && rand(trng) < 0.5
-                    dead, lq_pd = propose_planet_death(theta, trng)
-                    if isfinite(lq_pd)
-                        Threads.atomic_add!(pswap_prop, 1)
-                        best_α = -Inf; best_nt = nothing
-                        best_lp = -Inf; best_ll = -Inf
-                        for _ in 1:n_birth_tries
-                            cand, lq_nb = propose_noise_birth(dead, trng,
-                                              td.toggleable; data=data,
-                                              exclusion_groups = td.noise_exclusion_groups)
-                            isfinite(lq_nb) || continue
-                            lpc = spike_slab_log_prior(cand, strategy, inclusion_prior)
-                            isfinite(lpc) || continue
-                            lpc, llc = split_ref(lpc, cand, tid)
-                            Threads.atomic_add!(n_evals_atomic, 1)
-                            isfinite(llc) || continue
-                            αc = β * (llc - logL_arr[t, w]) +
-                                 (lpc - logπ_arr[t, w]) + lq_nb + lq_pd
-                            if αc > best_α
-                                best_α = αc; best_nt = cand
-                                best_lp = lpc; best_ll = llc
+                    # ANNEALED birth (post-burn-in too). `climb_newborn!` above
+                    # relaxes a newborn before judging it — the right idea — but is
+                    # confined to burn-in because done naively it is not reversible.
+                    # The bridged version accumulates the relaxation's work into the
+                    # acceptance ratio, so the same idea is admissible in the
+                    # sampling phase, where the occupancy is actually measured.
+                    # n_noise_bridge = 1 recovers the ordinary single-draw birth.
+                    if do_nbirth && n_noise_bridge > 1
+                        _ll(x) = last(split_ref(spike_slab_log_prior(x, strategy,
+                                                    inclusion_prior), x, slot))
+                        _lp(x) = spike_slab_log_prior(x, strategy, inclusion_prior)
+                        cand_a, acc_a, ll_a = propose_noise_birth_annealed(
+                            theta, trng, td.toggleable, _ll, _lp; data=data,
+                            exclusion_groups = td.noise_exclusion_groups,
+                            beta = β, n_bridge = n_noise_bridge,
+                            n_relax = n_noise_relax,
+                            ll_current = logL_arr[t, w],
+                            lp_current = logπ_arr[t, w])
+                        isfinite(acc_a) || continue
+                        Threads.atomic_add!(propose_ntd[t], 1)
+                        Threads.atomic_add!(n_evals_atomic, 1)
+                        if log(rand(trng)) < acc_a
+                            lp_a = _lp(cand_a)
+                            @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                                state[t, w, j] = cand_a.values[idx]
                             end
-                        end
-                        if best_nt !== nothing
-                            Threads.atomic_add!(propose_ntd[t], 1)
-                            nb = findfirst(i -> best_nt.td.noise_active[i] &&
-                                                !td_states[t, w].noise_active[i],
-                                            1:n_noise_slots)
-                            if nb !== nothing && n_birth_refine > 0
-                                best_lp, best_ll = climb_newborn!(best_nt, nb,
-                                                                    best_lp, best_ll)
-                                best_α = β * (best_ll - logL_arr[t, w]) +
-                                         (best_lp - logπ_arr[t, w])
-                            end
-                            if log(rand(trng)) < best_α
-                                @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                                    state[t, w, j] = best_nt.values[idx]
-                                end
-                                # full td copy — BOTH a planet death and a noise birth
-                                copy_into!(td_states[t, w], best_nt.td)
-                                logπ_arr[t, w] = best_lp
-                                logL_arr[t, w] = best_ll
-                                Threads.atomic_add!(accept_ntd[t], 1)
-                                Threads.atomic_add!(pswap_acc, 1)
-                            end
+                            copyto!(td_states[t, w].noise_active,
+                                     cand_a.td.noise_active)
+                            logπ_arr[t, w] = lp_a; logL_arr[t, w] = ll_a
+                            Threads.atomic_add!(accept_ntd[t], 1)
                         end
                         continue
                     end
+
+                    new_theta, log_q = do_nbirth ?
+                        propose_noise_birth(theta, trng, td.toggleable; data=data,
+                                              exclusion_groups = td.noise_exclusion_groups) :
+                        propose_noise_death(theta, trng, td.toggleable; data=data)
+                    isfinite(log_q) || continue
+                    Threads.atomic_add!(propose_ntd[t], 1)
+                    # MUST be the same prior function the rest of the sampler
+                    # stores in logπ_arr (eval_bounded!, planet moves, refinement
+                    # all use spike_slab_log_prior). The previous log_prior(...)
+                    # call here dropped the planet-indicator Bernoulli terms, so
+                    # every noise toggle carried a spurious −max_k·log(p_incl)
+                    # offset AND an accepted toggle stored the convention-less
+                    # value, biasing the NEXT within-model move too.
+                    new_log_pi = spike_slab_log_prior(new_theta, strategy,
+                                                        inclusion_prior)
+                    isfinite(new_log_pi) || continue
+                    new_log_pi, new_log_L = split_ref(new_log_pi, new_theta, slot)
+                    Threads.atomic_add!(n_evals_atomic, 1)
+                    isfinite(new_log_L) || continue
+
+                    log_α = β * (new_log_L - logL_arr[t, w]) +
+                            (new_log_pi - logπ_arr[t, w]) + log_q
+                    if log(rand(trng)) < log_α
+                        nb = do_nbirth ?
+                            findfirst(i -> new_theta.td.noise_active[i] &&
+                                           !td_states[t, w].noise_active[i],
+                                       1:n_noise_slots) : nothing
+                        @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                            state[t, w, j] = new_theta.values[idx]
+                        end
+                        copyto!(td_states[t, w].noise_active,
+                                 new_theta.td.noise_active)
+                        logπ_arr[t, w] = new_log_pi
+                        logL_arr[t, w] = new_log_L
+                        Threads.atomic_add!(accept_ntd[t], 1)
+                        # Refinement is standard within-model M-H — DB-safe
+                        # post-burn-in too (same argument as planet births).
+                        do_nbirth && n_birth_refine > 0 && β > 0.3 &&
+                            nb !== nothing &&
+                            refine_noise_birth!(t, w, nb, β, slot, trng)
+                    end
+                    continue
                 end
 
-                do_nbirth = rand(trng) < 0.5
+                n_active = theta.td.n_planets_active
+                p_birth, _ = _birth_death_probs(n_active, max_k)
+                do_birth = rand(trng) < p_birth
 
-                # Burn-in multi-try for NOISE births (mirrors the planet
-                # block): a single prior draw of a 12-param activity model
-                # is never competitive, so propose `n_birth_tries`
-                # candidates and keep the best by tempered acceptance.
-                # DB-free since burn-in is discarded; the single-draw path
-                # below remains the DB-correct sampling kernel.
-                if do_nbirth && n_birth_tries > 1 && in_burnin && β > 0.3
-                    best_α = -Inf
-                    best_nt = nothing
-                    best_lp = -Inf; best_ll = -Inf; best_lq = -Inf
+                # With probability `informed_birth_fraction`, use a DATA-INFORMED
+                # birth: JointInformedBirth (BLS photometry peaks + RV Lomb-Scargle,
+                # proposing P from the peak, K from depth→radius→mass, Tc from the
+                # BLS t0) when photometry is present, self-degrading to RV-only
+                # InformedBirth when t_phot is empty (birth_strategies.jl:748).
+                # Otherwise the native MoMS Gaussian RW around off_values. Forward
+                # and reverse use the SAME strategy family so detailed balance holds
+                # (mirrors sample_moms): MoMS births pair with the deterministic
+                # MoMS death; informed births pair with the generic uniform death
+                # (its reverse density is carried in the informed log_q). The spike-
+                # and-slab prior below always uses the MoMS `strategy` — its Bernoulli
+                # structure is strategy-independent.
+                # Informed births only on the cold side of the ladder: at β ≲ 0.3
+                # the tempered gain β·ΔlogL can't overcome the informed proposal's
+                # Hastings density penalty (~16 nats), so they are near-always
+                # rejected AND each hot junk-state would mint a fresh state-keyed
+                # BLS cache (~0.5 s build) — all cost, no benefit. Hot exploration
+                # belongs to the prior/MoMS births. The informed/MoMS mixture
+                # weight is fixed per temp and shared by the paired birth/death
+                # kernels, so detailed balance within each temp is unaffected.
+                use_informed = informed_birth_fraction > 0.0 && βs[t] > 0.3 &&
+                                rand(trng) < informed_birth_fraction
+                chosen_strategy = use_informed ? JointInformedBirth() : strategy
+                β = βs[t]
+
+                # (1)+(2) Generous multi-try exploration, BURN-IN ONLY (discarded, so
+                # no detailed-balance obligation — this just initializes the ensemble
+                # at the high-evidence modes; the post-burn-in chain samples DB-
+                # correctly from there). A single birth proposal lands the new planet
+                # at a rough config that usually misses its sharp transit mode; here
+                # we propose `n_birth_tries` candidates and keep the best by tempered
+                # acceptance, so real planets (huge ΔlogL) reliably get birthed and,
+                # across the ensemble, the Np+1 modes get populated. Refinement then
+                # climbs the winner. Self-contained: the single-try path below is
+                # left exactly as-is for deaths and for post-burn-in sampling.
+                # Multi-try only where it pays: burn-in (no DB obligation) and the
+                # cold side — at β ≲ 0.3 the tempered selection inverts (picks the
+                # candidate LEAST likely under the proposal) and burns 12× evals.
+                if do_birth && n_birth_tries > 1 && in_burnin && β > 0.3
+                    best_α = -Inf; best_nt = nothing; best_lp = -Inf
+                    best_ll = -Inf; best_k = 0
                     for _ in 1:n_birth_tries
-                        cand, lqc = propose_noise_birth(theta, trng,
-                                          td.toggleable; data=data,
-                                          exclusion_groups = td.noise_exclusion_groups)
+                        cand, lqc = propose_planet_birth(theta, trng, chosen_strategy; data=data)
                         isfinite(lqc) || continue
-                        lpc = spike_slab_log_prior(cand, strategy,
-                                                     inclusion_prior)
+                        kc = 0
+                        for k in 1:max_k
+                            if theta.td.planet_active[k] != cand.td.planet_active[k]
+                                kc = k; break
+                            end
+                        end
+                        kc == 0 && continue
+                        # the sort may have moved the newborn off the bit-flip slot
+                        kc = _newborn_slot(theta, cand, kc)
+                        lpc = spike_slab_log_prior(cand, strategy, inclusion_prior)
                         isfinite(lpc) || continue
-                        lpc, llc = split_ref(lpc, cand, tid)
+                        lpc, llc = split_ref(lpc, cand, slot)
                         Threads.atomic_add!(n_evals_atomic, 1)
                         isfinite(llc) || continue
-                        αc = β * (llc - logL_arr[t, w]) +
-                             (lpc - logπ_arr[t, w]) + lqc
+                        if td_debug
+                            _td_debug!(true, step, t, planet_P(cand, kc), 4,
+                                        llc - logL_arr[t, w])
+                            # cold-temp candidate anatomy: rr (code 5) + time
+                            # anchor (code 6), keyed by the same P for filtering
+                            blkc = theta.params.layout.planet_blocks[kc]
+                            if t <= 2 && has_geometry(blkc)
+                                _td_debug!(true, step, t, planet_P(cand, kc), 5,
+                                            Float64(cand.values[blkc.r]))
+                                _td_debug!(true, step, t, planet_P(cand, kc), 6,
+                                            Float64(cand.values[blkc.t]))
+                            end
+                        end
+                        αc = β * (llc - logL_arr[t, w]) + (lpc - logπ_arr[t, w]) + lqc
                         if αc > best_α
-                            best_α = αc; best_nt = cand
-                            best_lp = lpc; best_ll = llc; best_lq = lqc
+                            best_α = αc; best_nt = cand; best_lp = lpc
+                            best_ll = llc; best_k = kc
                         end
                     end
                     best_nt === nothing && continue
-                    Threads.atomic_add!(propose_ntd[t], 1)
-
-                    # Pre-accept CLIMB (burn-in only ⇒ no DB obligation).
-                    # Planet multi-try sees competitive candidates because
-                    # planet births are data-informed (BLS/LS-seeded);
-                    # noise births are BLIND prior draws, and best-of-N in
-                    # 12-D is still nowhere near the mode — judged at the
-                    # drawn config the accept bar is never reached and
-                    # post-accept refinement never runs. So climb the
-                    # selected candidate's newborn params with coordinate
-                    # M-H FIRST, then decide acceptance on the climbed
-                    # config: survival reflects the model's fitted
-                    # quality, not the luck of the draw.
-                    nb = findfirst(i -> best_nt.td.noise_active[i] &&
-                                        !td_states[t, w].noise_active[i],
-                                    1:n_noise_slots)
-                    if nb !== nothing && n_birth_refine > 0
-                        best_lp, best_ll = climb_newborn!(best_nt, nb,
-                                                            best_lp, best_ll)
-                        best_α = β * (best_ll - logL_arr[t, w]) +
-                                 (best_lp - logπ_arr[t, w]) + best_lq
-                    end
-
+                    Threads.atomic_add!(propose_td[best_k], 1)
+                    Threads.atomic_add!(propose_pb[t], 1)   # multi-try is birth-only
+                    td_debug && _td_debug!(true, step, t, planet_P(best_nt, best_k), 3,
+                                            best_ll - logL_arr[t, w])
                     if log(rand(trng)) < best_α
                         @inbounds for (j, idx) in enumerate(unfrozen_idx)
                             state[t, w, j] = best_nt.values[idx]
                         end
-                        copyto!(td_states[t, w].noise_active,
-                                 best_nt.td.noise_active)
-                        logπ_arr[t, w] = best_lp
-                        logL_arr[t, w] = best_ll
-                        Threads.atomic_add!(accept_ntd[t], 1)
+                        copyto!(td_states[t, w].planet_active, best_nt.td.planet_active)
+                        td_states[t, w].n_planets_active = best_nt.td.n_planets_active
+                        logπ_arr[t, w] = best_lp; logL_arr[t, w] = best_ll
+                        Threads.atomic_add!(accept_td[best_k], 1)
+                        Threads.atomic_add!(accept_pb[t], 1)
+                        td_debug && _td_debug!(true, step, t, planet_P(best_nt, best_k), 1)
+                        n_birth_refine > 0 && β > 0.3 &&
+                            refine_birth!(t, w, best_k, β, slot, trng)
                     end
                     continue
                 end
 
-                # ANNEALED birth (post-burn-in too). `climb_newborn!` above
-                # relaxes a newborn before judging it — the right idea — but is
-                # confined to burn-in because done naively it is not reversible.
-                # The bridged version accumulates the relaxation's work into the
-                # acceptance ratio, so the same idea is admissible in the
-                # sampling phase, where the occupancy is actually measured.
-                # n_noise_bridge = 1 recovers the ordinary single-draw birth.
-                if do_nbirth && n_noise_bridge > 1
-                    _ll(x) = last(split_ref(spike_slab_log_prior(x, strategy,
-                                                inclusion_prior), x, tid))
-                    _lp(x) = spike_slab_log_prior(x, strategy, inclusion_prior)
-                    cand_a, acc_a, ll_a = propose_noise_birth_annealed(
-                        theta, trng, td.toggleable, _ll, _lp; data=data,
-                        exclusion_groups = td.noise_exclusion_groups,
-                        beta = β, n_bridge = n_noise_bridge,
-                        n_relax = n_noise_relax,
-                        ll_current = logL_arr[t, w],
-                        lp_current = logπ_arr[t, w])
-                    isfinite(acc_a) || continue
-                    Threads.atomic_add!(propose_ntd[t], 1)
-                    Threads.atomic_add!(n_evals_atomic, 1)
-                    if log(rand(trng)) < acc_a
-                        lp_a = _lp(cand_a)
-                        @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                            state[t, w, j] = cand_a.values[idx]
-                        end
-                        copyto!(td_states[t, w].noise_active,
-                                 cand_a.td.noise_active)
-                        logπ_arr[t, w] = lp_a; logL_arr[t, w] = ll_a
-                        Threads.atomic_add!(accept_ntd[t], 1)
-                    end
-                    continue
+                new_theta, log_q = if do_birth
+                    propose_planet_birth(theta, trng, chosen_strategy; data=data)
+                elseif chosen_strategy isa MoMSBirth
+                    propose_planet_death(theta, trng, strategy)
+                else
+                    propose_planet_death(theta, trng)
                 end
-
-                new_theta, log_q = do_nbirth ?
-                    propose_noise_birth(theta, trng, td.toggleable; data=data,
-                                          exclusion_groups = td.noise_exclusion_groups) :
-                    propose_noise_death(theta, trng, td.toggleable; data=data)
                 isfinite(log_q) || continue
-                Threads.atomic_add!(propose_ntd[t], 1)
-                # MUST be the same prior function the rest of the sampler
-                # stores in logπ_arr (eval_bounded!, planet moves, refinement
-                # all use spike_slab_log_prior). The previous log_prior(...)
-                # call here dropped the planet-indicator Bernoulli terms, so
-                # every noise toggle carried a spurious −max_k·log(p_incl)
-                # offset AND an accepted toggle stored the convention-less
-                # value, biasing the NEXT within-model move too.
+
+                # Identify touched planet slot. For births the insertion sort may
+                # have moved the newborn's params off the bit-flip slot; deaths
+                # keep the bit-diff slot (the killed params lived there).
+                k_touched = 0
+                for k in 1:max_k
+                    if theta.td.planet_active[k] != new_theta.td.planet_active[k]
+                        k_touched = k
+                        break
+                    end
+                end
+                k_touched == 0 && continue
+                do_birth && (k_touched = _newborn_slot(theta, new_theta, k_touched))
+
                 new_log_pi = spike_slab_log_prior(new_theta, strategy,
                                                     inclusion_prior)
-                isfinite(new_log_pi) || continue
-                new_log_pi, new_log_L = split_ref(new_log_pi, new_theta, tid)
+                if !isfinite(new_log_pi)
+                    Threads.atomic_add!(propose_td[k_touched], 1)
+                    Threads.atomic_add!((do_birth ? propose_pb : propose_pd)[t], 1)
+                    continue
+                end
+
+                new_log_pi, new_log_L = split_ref(new_log_pi, new_theta, slot)
                 Threads.atomic_add!(n_evals_atomic, 1)
+                Threads.atomic_add!(propose_td[k_touched], 1)
+                Threads.atomic_add!((do_birth ? propose_pb : propose_pd)[t], 1)
                 isfinite(new_log_L) || continue
 
+                β = βs[t]
                 log_α = β * (new_log_L - logL_arr[t, w]) +
                         (new_log_pi - logπ_arr[t, w]) + log_q
                 if log(rand(trng)) < log_α
-                    nb = do_nbirth ?
-                        findfirst(i -> new_theta.td.noise_active[i] &&
-                                       !td_states[t, w].noise_active[i],
-                                   1:n_noise_slots) : nothing
+                    # Accept — copy new_theta into walker storage
                     @inbounds for (j, idx) in enumerate(unfrozen_idx)
                         state[t, w, j] = new_theta.values[idx]
                     end
-                    copyto!(td_states[t, w].noise_active,
-                             new_theta.td.noise_active)
+                    copyto!(td_states[t, w].planet_active,
+                             new_theta.td.planet_active)
+                    td_states[t, w].n_planets_active = new_theta.td.n_planets_active
                     logπ_arr[t, w] = new_log_pi
                     logL_arr[t, w] = new_log_L
-                    Threads.atomic_add!(accept_ntd[t], 1)
-                    # Refinement is standard within-model M-H — DB-safe
-                    # post-burn-in too (same argument as planet births).
-                    do_nbirth && n_birth_refine > 0 && β > 0.3 &&
-                        nb !== nothing &&
-                        refine_noise_birth!(t, w, nb, β, tid, trng)
+                    Threads.atomic_add!(accept_td[k_touched], 1)
+                    Threads.atomic_add!((do_birth ? accept_pb : accept_pd)[t], 1)
+                    td_debug && _td_debug!(true, step, t,
+                        do_birth ? planet_P(new_theta, k_touched) :
+                                   planet_P(theta, k_touched),
+                        do_birth ? 1 : 2)
+
+                    # (3) Post-birth refinement. A freshly-birthed planet sits at a
+                    # rough (BLS-seeded) config and CANNOT be refined by the stretch
+                    # move — its only valid partners would need the same planet
+                    # active, and at birth there are none. So climb it to its mode
+                    # here with a few within-model RWM sweeps on JUST the new
+                    # planet's params. Once at the mode it is self-protecting: a
+                    # later stretch/death that degrades it fails its own M-H. These
+                    # are standard within-model moves → detailed balance is safe.
+                    # Refinement gated to the cold side (β > 0.3): hot junk births
+                    # don't merit the per-slot eval cost, and hot chains explore
+                    # via the standard moves anyway.
+                    do_birth && n_birth_refine > 0 && β > 0.3 &&
+                        refine_birth!(t, w, k_touched, β, slot, trng)
                 end
-                continue
-            end
-
-            n_active = theta.td.n_planets_active
-            p_birth, _ = _birth_death_probs(n_active, max_k)
-            do_birth = rand(trng) < p_birth
-
-            # With probability `informed_birth_fraction`, use a DATA-INFORMED
-            # birth: JointInformedBirth (BLS photometry peaks + RV Lomb-Scargle,
-            # proposing P from the peak, K from depth→radius→mass, Tc from the
-            # BLS t0) when photometry is present, self-degrading to RV-only
-            # InformedBirth when t_phot is empty (birth_strategies.jl:748).
-            # Otherwise the native MoMS Gaussian RW around off_values. Forward
-            # and reverse use the SAME strategy family so detailed balance holds
-            # (mirrors sample_moms): MoMS births pair with the deterministic
-            # MoMS death; informed births pair with the generic uniform death
-            # (its reverse density is carried in the informed log_q). The spike-
-            # and-slab prior below always uses the MoMS `strategy` — its Bernoulli
-            # structure is strategy-independent.
-            # Informed births only on the cold side of the ladder: at β ≲ 0.3
-            # the tempered gain β·ΔlogL can't overcome the informed proposal's
-            # Hastings density penalty (~16 nats), so they are near-always
-            # rejected AND each hot junk-state would mint a fresh state-keyed
-            # BLS cache (~0.5 s build) — all cost, no benefit. Hot exploration
-            # belongs to the prior/MoMS births. The informed/MoMS mixture
-            # weight is fixed per temp and shared by the paired birth/death
-            # kernels, so detailed balance within each temp is unaffected.
-            use_informed = informed_birth_fraction > 0.0 && βs[t] > 0.3 &&
-                            rand(trng) < informed_birth_fraction
-            chosen_strategy = use_informed ? JointInformedBirth() : strategy
-            β = βs[t]
-
-            # (1)+(2) Generous multi-try exploration, BURN-IN ONLY (discarded, so
-            # no detailed-balance obligation — this just initializes the ensemble
-            # at the high-evidence modes; the post-burn-in chain samples DB-
-            # correctly from there). A single birth proposal lands the new planet
-            # at a rough config that usually misses its sharp transit mode; here
-            # we propose `n_birth_tries` candidates and keep the best by tempered
-            # acceptance, so real planets (huge ΔlogL) reliably get birthed and,
-            # across the ensemble, the Np+1 modes get populated. Refinement then
-            # climbs the winner. Self-contained: the single-try path below is
-            # left exactly as-is for deaths and for post-burn-in sampling.
-            # Multi-try only where it pays: burn-in (no DB obligation) and the
-            # cold side — at β ≲ 0.3 the tempered selection inverts (picks the
-            # candidate LEAST likely under the proposal) and burns 12× evals.
-            if do_birth && n_birth_tries > 1 && in_burnin && β > 0.3
-                best_α = -Inf; best_nt = nothing; best_lp = -Inf
-                best_ll = -Inf; best_k = 0
-                for _ in 1:n_birth_tries
-                    cand, lqc = propose_planet_birth(theta, trng, chosen_strategy; data=data)
-                    isfinite(lqc) || continue
-                    kc = 0
-                    for k in 1:max_k
-                        if theta.td.planet_active[k] != cand.td.planet_active[k]
-                            kc = k; break
-                        end
-                    end
-                    kc == 0 && continue
-                    # the sort may have moved the newborn off the bit-flip slot
-                    kc = _newborn_slot(theta, cand, kc)
-                    lpc = spike_slab_log_prior(cand, strategy, inclusion_prior)
-                    isfinite(lpc) || continue
-                    lpc, llc = split_ref(lpc, cand, tid)
-                    Threads.atomic_add!(n_evals_atomic, 1)
-                    isfinite(llc) || continue
-                    if td_debug
-                        _td_debug!(true, step, t, planet_P(cand, kc), 4,
-                                    llc - logL_arr[t, w])
-                        # cold-temp candidate anatomy: rr (code 5) + time
-                        # anchor (code 6), keyed by the same P for filtering
-                        blkc = theta.params.layout.planet_blocks[kc]
-                        if t <= 2 && has_geometry(blkc)
-                            _td_debug!(true, step, t, planet_P(cand, kc), 5,
-                                        Float64(cand.values[blkc.r]))
-                            _td_debug!(true, step, t, planet_P(cand, kc), 6,
-                                        Float64(cand.values[blkc.t]))
-                        end
-                    end
-                    αc = β * (llc - logL_arr[t, w]) + (lpc - logπ_arr[t, w]) + lqc
-                    if αc > best_α
-                        best_α = αc; best_nt = cand; best_lp = lpc
-                        best_ll = llc; best_k = kc
-                    end
-                end
-                best_nt === nothing && continue
-                Threads.atomic_add!(propose_td[best_k], 1)
-                Threads.atomic_add!(propose_pb[t], 1)   # multi-try is birth-only
-                td_debug && _td_debug!(true, step, t, planet_P(best_nt, best_k), 3,
-                                        best_ll - logL_arr[t, w])
-                if log(rand(trng)) < best_α
-                    @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                        state[t, w, j] = best_nt.values[idx]
-                    end
-                    copyto!(td_states[t, w].planet_active, best_nt.td.planet_active)
-                    td_states[t, w].n_planets_active = best_nt.td.n_planets_active
-                    logπ_arr[t, w] = best_lp; logL_arr[t, w] = best_ll
-                    Threads.atomic_add!(accept_td[best_k], 1)
-                    Threads.atomic_add!(accept_pb[t], 1)
-                    td_debug && _td_debug!(true, step, t, planet_P(best_nt, best_k), 1)
-                    n_birth_refine > 0 && β > 0.3 &&
-                        refine_birth!(t, w, best_k, β, tid, trng)
-                end
-                continue
-            end
-
-            new_theta, log_q = if do_birth
-                propose_planet_birth(theta, trng, chosen_strategy; data=data)
-            elseif chosen_strategy isa MoMSBirth
-                propose_planet_death(theta, trng, strategy)
-            else
-                propose_planet_death(theta, trng)
-            end
-            isfinite(log_q) || continue
-
-            # Identify touched planet slot. For births the insertion sort may
-            # have moved the newborn's params off the bit-flip slot; deaths
-            # keep the bit-diff slot (the killed params lived there).
-            k_touched = 0
-            for k in 1:max_k
-                if theta.td.planet_active[k] != new_theta.td.planet_active[k]
-                    k_touched = k
-                    break
-                end
-            end
-            k_touched == 0 && continue
-            do_birth && (k_touched = _newborn_slot(theta, new_theta, k_touched))
-
-            new_log_pi = spike_slab_log_prior(new_theta, strategy,
-                                                inclusion_prior)
-            if !isfinite(new_log_pi)
-                Threads.atomic_add!(propose_td[k_touched], 1)
-                Threads.atomic_add!((do_birth ? propose_pb : propose_pd)[t], 1)
-                continue
-            end
-
-            new_log_pi, new_log_L = split_ref(new_log_pi, new_theta, tid)
-            Threads.atomic_add!(n_evals_atomic, 1)
-            Threads.atomic_add!(propose_td[k_touched], 1)
-            Threads.atomic_add!((do_birth ? propose_pb : propose_pd)[t], 1)
-            isfinite(new_log_L) || continue
-
-            β = βs[t]
-            log_α = β * (new_log_L - logL_arr[t, w]) +
-                    (new_log_pi - logπ_arr[t, w]) + log_q
-            if log(rand(trng)) < log_α
-                # Accept — copy new_theta into walker storage
-                @inbounds for (j, idx) in enumerate(unfrozen_idx)
-                    state[t, w, j] = new_theta.values[idx]
-                end
-                copyto!(td_states[t, w].planet_active,
-                         new_theta.td.planet_active)
-                td_states[t, w].n_planets_active = new_theta.td.n_planets_active
-                logπ_arr[t, w] = new_log_pi
-                logL_arr[t, w] = new_log_L
-                Threads.atomic_add!(accept_td[k_touched], 1)
-                Threads.atomic_add!((do_birth ? accept_pb : accept_pd)[t], 1)
-                td_debug && _td_debug!(true, step, t,
-                    do_birth ? planet_P(new_theta, k_touched) :
-                               planet_P(theta, k_touched),
-                    do_birth ? 1 : 2)
-
-                # (3) Post-birth refinement. A freshly-birthed planet sits at a
-                # rough (BLS-seeded) config and CANNOT be refined by the stretch
-                # move — its only valid partners would need the same planet
-                # active, and at birth there are none. So climb it to its mode
-                # here with a few within-model RWM sweeps on JUST the new
-                # planet's params. Once at the mode it is self-protecting: a
-                # later stretch/death that degrades it fails its own M-H. These
-                # are standard within-model moves → detailed balance is safe.
-                # Refinement gated to the cold side (β > 0.3): hot junk births
-                # don't merit the per-slot eval cost, and hot chains explore
-                # via the standard moves anyway.
-                do_birth && n_birth_refine > 0 && β > 0.3 &&
-                    refine_birth!(t, w, k_touched, β, tid, trng)
             end
         end
     end
@@ -1660,6 +1785,19 @@ function sample_transdim_pt_emcee(
                 flip_accepted[t] += Threads.atomic_xchg!(flip_acc_temp[t],  0)
             end
             _np_chk("node_flip", step)
+        end
+        if !isempty(slides)
+            Threads.atomic_add!(n_evals_atomic,
+                _lambda_slide_sweep!(flip_eval, state, logπ_arr, logL_arr, βs,
+                                     slides, params, lambda_slide,
+                                     lambda_slide_sigma, rngs_slide,
+                                     thread_proposal, slide_prop_temp,
+                                     slide_acc_temp; eligible = slide_eligible))
+            @inbounds for t in 1:n_temps
+                slide_proposed[t] += Threads.atomic_xchg!(slide_prop_temp[t], 0)
+                slide_accepted[t] += Threads.atomic_xchg!(slide_acc_temp[t],  0)
+            end
+            _np_chk("lambda_slide", step)
         end
         do_transdim_step!(step); _np_chk("transdim", step)
 
@@ -1839,6 +1977,8 @@ function sample_transdim_pt_emcee(
     show_progress && finish!(pb)
     show_progress && _node_flip_info("td-pt_emcee", flips, params, flip_proposed,
                                      flip_accepted)
+    show_progress && _lambda_slide_info("td-pt_emcee", slides, params,
+                                        slide_proposed, slide_accepted)
     show_progress && sum(pruned) > 0 && @info "td-pt_emcee: burn-in moved " *
         "$(sum(pruned)) stranded walker state(s), model included, onto their " *
         "rung's mode ($(pruned[1]) at β = 1), all from a region whose total " *

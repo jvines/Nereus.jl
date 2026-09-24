@@ -36,12 +36,10 @@ function plot_pm_timeseries(chains, params, data;
             active_idx = 1:_n_flat_draws(chains)
             theta_med = Theta{Float64}(params)
         end
-        for name in params.layout.unfrozen_names
-            sym = Symbol(name)
-            sym in chain_names || continue
-            vals = vec(Array(chains[sym]))[active_idx]
-            set_param!(theta_med, name, median(vals))
-        end
+        # Max-lp draw of the winning model, with its active set -- NOT
+        # per-parameter medians, whose (rho_s, b, rr, Tc) is off the posterior
+        # ridge (see `set_theta_best_lp!` and the phase-fold below).
+        set_theta_best_lp!(theta_med, chains, params, collect(active_idx))
 
         inst_names = params.config.instruments.pm_names
 
@@ -146,17 +144,12 @@ function plot_pm_phasefold(chains, params, data;
     with_theme(nereus_theme()) do
         chain_names = Set(names(chains, :parameters))
 
-        # Active sample mask: condition on the winning N_p (modal). If
-        # `planet` exceeds modal_np the requested transit is not part of
-        # the winning model, so we skip.
+        # Active sample mask: condition on the winning model (modal N_p, its
+        # modal live slots, modal noise). If slot `planet` is not live in it,
+        # the transit is not part of the winning model and we skip (below).
         if :n_planets in chain_names
             np_all = vec(Array(chains[:n_planets]))
             modal_np = _mode_int_local(np_all)
-            if planet > modal_np
-                @warn "Planet K=$planet not in winning model " *
-                      "(modal_np=$modal_np); skipping phase-fold"
-                return nothing
-            end
             active_idx = findall(np_all .== modal_np)
             isempty(active_idx) && (active_idx = 1:_n_flat_draws(chains))
             td_state = winning_td_state(chains, params, active_idx, modal_np)
@@ -172,29 +165,22 @@ function plot_pm_phasefold(chains, params, data;
         # `credmass` of draws in (P, b, rr, sesinw, secosw, …), excluding the
         # degenerate tail that frays the band. See `_credible_region_pool`.
         cred_idx = _credible_region_pool(chains, params, planet; credmass=credmass)
-        active_idx = intersect(collect(active_idx), cred_idx)
-        isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
+        let cut = intersect(collect(active_idx), cred_idx)   # empty: keep winners
+            isempty(cut) || (active_idx = cut)
+        end
 
         # Reference theta = the MAX-LP sample among the active draws, NOT
         # per-parameter marginal medians: the θ-median's jointly-inconsistent
         # (rho_s, b, rr, Tc) lies off the posterior ridge and its transit can
         # fall entirely OUTSIDE the (correct, predictive) CI bands — measured
         # on the WASP-47 trans-dim folds. Median is the no-:lp fallback.
-        if :lp in chain_names
-            lp_all = vec(Array(chains[:lp]))
-            ibest = active_idx[argmax(@view lp_all[active_idx])]
-            for name in params.layout.unfrozen_names
-                sym = Symbol(name)
-                sym in chain_names || continue
-                set_param!(theta_med, name, vec(Array(chains[sym]))[ibest])
-            end
-        else
-            for name in params.layout.unfrozen_names
-                sym = Symbol(name)
-                sym in chain_names || continue
-                vals = vec(Array(chains[sym]))[active_idx]
-                set_param!(theta_med, name, median(vals))
-            end
+        set_theta_best_lp!(theta_med, chains, params, collect(active_idx))
+        # Is this SLOT live in the winning model? Not `planet ≤ modal_np`:
+        # after a death mid-list the live slots are not 1:modal_np.
+        if theta_med.td !== nothing && !(planet in planet_indices(theta_med))
+            @warn "Planet K=$planet is not active in the winning model; " *
+                  "skipping phase-fold"
+            return nothing
         end
 
         P  = planet_P(theta_med, planet)

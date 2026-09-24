@@ -180,8 +180,8 @@ function _plot_detrend_broken(t::Vector{Float64}, flux::Vector{Float64},
     n_seg = length(segments)
 
     t_disp = t .- time_offset
-    x_label = time_offset == 0 ? "Time [days]" :
-              "Time [BJD − $(round(Int, time_offset))]"
+    x_label = time_offset == 0 ? "Time (d)" :
+              "Time (BJD − $(round(Int, time_offset)))"
 
     # Per-segment x-axis ranges (in display time)
     seg_ranges = [extrema(t_disp[seg]) for seg in segments]

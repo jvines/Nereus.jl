@@ -331,9 +331,9 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
             a_Rs[r] = rho_s_to_a_Rs(rho_val, Ps[j])
         elseif have_ms_rs
             P_s = Ps[j] * T(86400.0)
-            GM = T(1.3271244e26) * M_s
+            GM = T(GM_SUN_CGS) * M_s
             a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-            a_Rs[r] = a_cm / (R_s * T(6.9570e10))
+            a_Rs[r] = a_cm / (R_s * T(R_SUN_CM))
         else
             return (-1, nothing)
         end

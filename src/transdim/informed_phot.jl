@@ -308,23 +308,29 @@ function _box_least_squares(
 
     if threaded
         # Threaded path is ONLY for the top-level `find_transits` pre-fit
-        # search (never called from inside a sampler's threaded region).
-        # `:static` pins task→thread so `threadid()` is a stable index into
-        # the per-thread scratch — do not relax to `:dynamic`. The serial
-        # branch below is what the trans-dim birth proposals use, so adding
-        # threading here would NOT nest illegally inside the sampler.
-        nt  = Threads.nthreads()
-        BW  = [zeros(Float64, n_phase_bins) for _ in 1:nt]
-        BWF = [zeros(Float64, n_phase_bins) for _ in 1:nt]
-        Threads.@threads :static for pi in 1:n_per
-            tid = Threads.threadid()
-            durs_pi = rho_star === nothing ? durations :
-                      _duty_grid(rho_star, periods[pi], duration_multipliers)
-            s, d, t0, du = _bls_one_period(t, w, wf, W,
-                                            periods[pi], durs_pi, n_phase_bins,
-                                            BW[tid], BWF[tid]; flank_frac=flank_frac)
-            period_score[pi] = s; period_depth[pi] = d
-            period_t0[pi]    = t0; period_dur[pi]   = du
+        # search (never called from inside a sampler's threaded region). The
+        # serial branch below is what the trans-dim birth proposals use, so
+        # adding threading here would NOT nest illegally inside the sampler.
+        #
+        # The scratch is keyed by CHUNK, never by `Threads.threadid()`: the id
+        # spans every threadpool while `Threads.nthreads()` counts only the
+        # default one, so `BW[threadid()]` overran these vectors on stock Julia
+        # >= 1.12 and took the whole pre-fit transit search down with it (see
+        # src/threading.jl).
+        n_slots = _nthread_chunks()
+        BW  = [zeros(Float64, n_phase_bins) for _ in 1:n_slots]
+        BWF = [zeros(Float64, n_phase_bins) for _ in 1:n_slots]
+        chunks = _chunk_ranges(n_per, n_slots)
+        Threads.@threads :static for slot in 1:length(chunks)
+            for pi in chunks[slot]
+                durs_pi = rho_star === nothing ? durations :
+                          _duty_grid(rho_star, periods[pi], duration_multipliers)
+                s, d, t0, du = _bls_one_period(t, w, wf, W,
+                                                periods[pi], durs_pi, n_phase_bins,
+                                                BW[slot], BWF[slot]; flank_frac=flank_frac)
+                period_score[pi] = s; period_depth[pi] = d
+                period_t0[pi]    = t0; period_dur[pi]   = du
+            end
         end
     else
         bin_w  = zeros(Float64, n_phase_bins)

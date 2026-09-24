@@ -152,6 +152,165 @@ function _mode_int_local(vals::AbstractVector)
     return best_k
 end
 
+# =====================================================================
+# Trans-dim draws: which slots are live in a draw, and in the winning model
+# =====================================================================
+#
+# A trans-dim chain stores EVERY slot's parameters on every row. A slot that
+# is inactive in a draw keeps the values it was parked at -- a real orbit with
+# a real amplitude -- so anything that rebuilds a model from a row must also
+# rebuild which slots were live in it, or parked planets enter the model.
+# Slot activity comes from the `planet_active_<k>` columns every trans-dim
+# sampler writes; `n_planets ≥ k` is only a fallback for chains without them,
+# because after a death in the middle of the slot list the live slots are NOT
+# `1:n_planets`.
+
+"""
+    _TDCols
+
+The trans-dim bookkeeping columns of a chain, extracted once: per planet
+slot, whether it is active in each flat draw; per noise model, whether it
+is (`nothing` for a model that cannot be toggled, so is always on).
+"""
+struct _TDCols
+    planet::Vector{BitVector}
+    noise::Vector{Union{Nothing, BitVector}}
+end
+
+"""
+    _td_cols(chains, params) -> _TDCols or nothing
+    _td_cols(flat::AbstractDict{Symbol}, params) -> _TDCols or nothing
+
+Extract the trans-dim columns of a chain (an `MCMCChains.Chains`, or the
+flattened `Symbol => Vector` dict the PPC/LOO code works on), or `nothing`
+for a fixed-dimension chain (no `n_planets`, no `planet_active_<k>`).
+"""
+_td_cols(chains, params) =
+    _td_cols_from(Set(names(chains, :parameters)), s -> vec(Array(chains[s])), params)
+_td_cols(flat::AbstractDict{Symbol}, params) =
+    _td_cols_from(Set(keys(flat)), s -> flat[s], params)
+
+function _td_cols_from(cn, col, params)
+    pa(k) = Symbol("planet_active_$k")
+    (:n_planets in cn || pa(1) in cn) || return nothing
+    np = :n_planets in cn ? col(:n_planets) : nothing
+    n  = np !== nothing ? length(np) : length(col(pa(1)))
+    planet = BitVector[pa(k) in cn ? col(pa(k)) .> 0.5 :
+                       np !== nothing ? np .>= k - 0.5 : falses(n)
+                       for k in 1:params.config.max_kplanet]
+    noise = Union{Nothing, BitVector}[
+        (c = Symbol("noise_active_$j"); c in cn ? col(c) .> 0.5 : nothing)
+        for j in 1:length(params.config.noise_models)]
+    return _TDCols(planet, noise)
+end
+
+_td_key(tdc::_TDCols, i::Int, noise::Bool) =
+    noise ? (Tuple(v[i] for v in tdc.planet),
+             Tuple(v === nothing ? true : v[i] for v in tdc.noise)) :
+            Tuple(v[i] for v in tdc.planet)
+
+"""
+    _modal_rows(tdc, rows; noise=true) -> Vector{Int}
+
+The draws among `rows` that share the most frequent active pattern (planet
+slots, and noise models when `noise`). Ties go to the pattern seen first.
+Used wherever one set of live slots must stand for many draws: a per-slot
+majority can assemble a pattern that no draw has.
+"""
+function _modal_rows(tdc::_TDCols, rows; noise::Bool = true)
+    counts = Dict{Any, Int}()
+    first_seen = Dict{Any, Int}()
+    for (j, i) in enumerate(rows)
+        k = _td_key(tdc, i, noise)
+        counts[k] = get(counts, k, 0) + 1
+        haskey(first_seen, k) || (first_seen[k] = j)
+    end
+    isempty(counts) && return Int[]
+    best = first(sort!(collect(keys(counts));
+                       by = k -> (-counts[k], first_seen[k])))
+    return [i for i in rows if _td_key(tdc, i, noise) == best]
+end
+
+"""
+    _row_td_state(tdc, params, rows) -> TransDimState or nothing
+
+The trans-dim state of a draw: which planet slots and toggleable noise
+models were ACTIVE in it. For several `rows`, the state of their modal
+pattern (see `_modal_rows`). `nothing` when `tdc` is `nothing`.
+
+`as_active` stays all-true: no sampler records the astrometric-coupling
+flag in the chain, and the coupling moves are not wired into any sampler.
+"""
+function _row_td_state(tdc::Union{Nothing, _TDCols}, params, rows)
+    tdc === nothing && return nothing
+    i = rows isa Integer ? rows : first(_modal_rows(tdc, rows))
+    tds = TransDimState(; max_planets = length(tdc.planet), n_noise = length(tdc.noise))
+    for (k, v) in enumerate(tdc.planet)
+        v[i] && activate_planet!(tds, k)
+    end
+    for (j, v) in enumerate(tdc.noise)
+        tds.noise_active[j] = v === nothing ? true : v[i]
+    end
+    return tds
+end
+
+"""
+    _planet_present_idx(chains, params, planet_idx; tdc=_td_cols(chains, params)) -> Vector{Int}
+
+Flat draws in which planet slot `planet_idx` exists: all of them for a
+fixed-dimension chain.
+"""
+function _planet_present_idx(chains, params, planet_idx::Int;
+                             tdc = _td_cols(chains, params))
+    tdc === nothing && return collect(1:_n_flat_draws(chains))
+    planet_idx <= length(tdc.planet) || return Int[]
+    return findall(tdc.planet[planet_idx])
+end
+
+"""
+    _winning_draw_idx(chains, params) -> Vector{Int}
+
+The draws of the WINNING model: the modal planet count, then the modal live
+slots and the winning noise configuration among those (`winning_td_state`,
+`winning_config_idx`). Every draw for a fixed-dimension chain.
+"""
+function _winning_draw_idx(chains, params)
+    all_idx = collect(1:_n_flat_draws(chains))
+    cn = Set(names(chains, :parameters))
+    :n_planets in cn || return all_idx
+    np = vec(Array(chains[:n_planets]))
+    modal = _mode_int_local(np)
+    idx = findall(x -> round(Int, x) == modal, np)
+    isempty(idx) && return all_idx
+    return winning_config_idx(chains, params, idx,
+                              winning_td_state(chains, params, idx, modal))
+end
+
+"""
+    _winning_planet_slots(chains, params) -> Vector{Int}
+
+The planet slots of the WINNING model: the modal active pattern among the
+draws with the modal planet count. All slots for a fixed-dimension chain.
+
+What the headline figures and the science tables report. Not `1:modal_np`:
+after a death mid-list that names a parked slot and drops a live one.
+"""
+function _winning_planet_slots(chains, params)
+    tdc = _td_cols(chains, params)
+    tdc === nothing && return collect(1:params.config.max_kplanet)
+    cn = Set(names(chains, :parameters))
+    rows = if :n_planets in cn
+        np = vec(Array(chains[:n_planets]))
+        m = _mode_int_local(np)
+        findall(x -> round(Int, x) == m, np)
+    else
+        collect(1:_n_flat_draws(chains))
+    end
+    isempty(rows) && return Int[]
+    i = first(_modal_rows(tdc, rows; noise = false))
+    return [k for k in eachindex(tdc.planet) if tdc.planet[k][i]]
+end
+
 """
     winning_td_state(chains, params, active_idx) -> TransDimState
 
@@ -166,8 +325,20 @@ function winning_td_state(chains, params, active_idx,
     max_kp = params.config.max_kplanet
     n_noise = length(params.config.noise_models)
     td_state = TransDimState(; max_planets=max_kp, n_noise=n_noise)
-    for k in 1:min(modal_np, max_kp)
-        activate_planet!(td_state, k)
+    # The live SLOTS of the winning model: the modal active pattern among these
+    # draws, not `1:modal_np` -- after a death mid-list the live slots are
+    # others (see `_winning_planet_slots`).
+    tdc = _td_cols(chains, params)
+    rows = collect(active_idx)
+    if tdc !== nothing && !isempty(rows)
+        i = first(_modal_rows(tdc, rows; noise = false))
+        for k in 1:max_kp
+            tdc.planet[k][i] && activate_planet!(td_state, k)
+        end
+    else
+        for k in 1:min(modal_np, max_kp)
+            activate_planet!(td_state, k)
+        end
     end
     chain_names = Set(names(chains, :parameters))
     for nm_idx in 1:n_noise
@@ -189,8 +360,8 @@ end
 """
     winning_config_idx(chains, params, active_idx, td_state) -> Vector{Int}
 
-Restrict `active_idx` to the samples whose ACTIVE noise-model configuration
-matches the winning (modal) configuration `td_state`.
+Restrict `active_idx` to the samples whose ACTIVE configuration -- live
+planet slots and noise models -- matches the winning (modal) one, `td_state`.
 
 In a trans-dim chain the global max-lp draw is *systematically* the most
 flexible model: a period-commensurate GP maximises likelihood by injecting
@@ -209,6 +380,19 @@ function winning_config_idx(chains, params, active_idx, td_state)
     n_noise = length(params.config.noise_models)
     keep = trues(length(active_idx))
     matched_any = false
+    # The same for the planet SLOTS: keep the draws whose live slots are the
+    # winning ones. Otherwise the single max-lp draw decides slot identity, and
+    # a label-switched draw (the planet in slot 3 instead of 2) moves the
+    # headline fold to a slot the rest of the posterior does not use.
+    tdc = _td_cols(chains, params)
+    if tdc !== nothing
+        matched_any = true
+        rows = collect(active_idx)
+        for k in eachindex(tdc.planet)
+            want = td_state.planet_active[k]
+            @. keep &= (tdc.planet[k][rows] == want)
+        end
+    end
     for nm_idx in 1:n_noise
         col = Symbol("noise_active_$nm_idx")
         col in chain_names || continue          # always-on model → no constraint
@@ -515,9 +699,9 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
             R_s = theta.params.config.R_s
             if !isnan(M_s) && !isnan(R_s) && R_s > 0
                 P_s = Ps[j] * 86400.0
-                GM = 1.3271244e26 * M_s
+                GM = GM_SUN_CGS * M_s
                 a_cm = cbrt(GM * P_s^2 / (4 * π^2))
-                a_Rs[j] = a_cm / (R_s * 6.9570e10)
+                a_Rs[j] = a_cm / (R_s * R_SUN_CM)
             else
                 return fill(NaN, n_grid)
             end
@@ -642,6 +826,27 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
 end
 
 """
+    _band_pool(chains, params, planet, bf_cutoff) -> Vector{Int}
+
+Draws a posterior band samples: the best-fit cluster, and for a
+single-planet band only the draws in which that planet EXISTS. On a
+trans-dim chain the rest carry the slot parked -- a real orbit the fit is
+not using -- and would widen the band with it. A low-occupancy planet that
+misses the cluster keeps the draws it is present in rather than none.
+"""
+function _band_pool(chains, params, planet, bf_cutoff)
+    pool = _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff)
+    planet === nothing && return pool
+    present = _planet_present_idx(chains, params, planet)
+    sub = intersect(pool, present)
+    return isempty(sub) ? present : sub
+end
+
+_nan_bands(n) = (nan = fill(NaN, n);
+                 (; median = nan, lo1 = nan, hi1 = nan, lo2 = nan, hi2 = nan,
+                    lo3 = nan, hi3 = nan))
+
+"""
     compute_ci_bands(chains, params, data, t_grid;
                       planet=nothing, n_draws=1000, bf_cutoff=10.0)
       -> (median, lo1, hi1, lo2, hi2, lo3, hi3)
@@ -657,9 +862,13 @@ function compute_ci_bands(chains, params, data, t_grid;
                            bf_cutoff::Real=10.0,
                            fold_phase::Union{Nothing, AbstractVector}=nothing,
                            fold_t0::Real=0.0)
-    pool = _top_lp_draw_pool(chains; bf_cutoff=bf_cutoff)
+    pool = _band_pool(chains, params, planet, bf_cutoff)
+    n_grid0 = fold_phase !== nothing && planet !== nothing ? length(fold_phase) : length(t_grid)
+    isempty(pool) && return _nan_bands(n_grid0)
     n_samples = length(pool)
     draw_idx = pool[rand(1:n_samples, min(n_draws, n_samples))]
+    tdc  = _td_cols(chains, params)
+    cols = _chain_cols(chains, params)   # ONCE, not once per draw — see _chain_cols
     # Phase-fold mode: evaluate each draw on the phase grid using THAT DRAW's
     # own period (t = t0 + φ·P_draw) so every draw is a clean single-cycle
     # curve in phase. Evaluating on a fixed reference-period time grid instead
@@ -672,15 +881,9 @@ function compute_ci_bands(chains, params, data, t_grid;
     models = Matrix{Float64}(undef, length(draw_idx), n_grid)
     valid = trues(length(draw_idx))
 
-    chain_names = Set(names(chains, :parameters))
     for (i, idx) in enumerate(draw_idx)
-        theta = Theta{Float64}(params)
-        for name in params.layout.unfrozen_names
-            sym = Symbol(name)
-            sym in chain_names || continue
-            samp_val = vec(Array(chains[sym]))[idx]
-            set_param!(theta, name, samp_val)
-        end
+        # Each draw with its own trans-dim active set: parked slots out.
+        theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
 
         if fold
             # Reference each draw to ITS OWN inferior-CONJUNCTION epoch (the
@@ -741,24 +944,21 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
                                      n_draws::Int=1000,
                                      bf_cutoff::Real=10.0,
                                      fold_phase::Union{Nothing, AbstractVector}=nothing)
-    pool = _top_lp_draw_pool(chains; bf_cutoff=bf_cutoff)
+    pool = _band_pool(chains, params, planet, bf_cutoff)
+    n_grid = fold_phase === nothing ? length(t_grid) : length(fold_phase)
+    isempty(pool) && return _nan_bands(n_grid)
     n_samples = length(pool)
     draw_idx = pool[rand(1:n_samples, min(n_draws, n_samples))]
-    n_grid = fold_phase === nothing ? length(t_grid) : length(fold_phase)
+    tdc  = _td_cols(chains, params)
+    cols = _chain_cols(chains, params)   # ONCE, not once per draw — see _chain_cols
 
     models = Matrix{Float64}(undef, length(draw_idx), n_grid)
     valid = trues(length(draw_idx))
 
     time_kind = params.config.parametrization.time
-    chain_names = Set(names(chains, :parameters))
     for (i, idx) in enumerate(draw_idx)
-        theta = Theta{Float64}(params)
-        for name in params.layout.unfrozen_names
-            sym = Symbol(name)
-            sym in chain_names || continue
-            samp_val = vec(Array(chains[sym]))[idx]
-            set_param!(theta, name, samp_val)
-        end
+        # Each draw with its own trans-dim active set: parked slots out.
+        theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
 
         # Phase-aligned bands: with `fold_phase` (and `planet`), evaluate each
         # draw at ITS OWN ephemeris t0_d + phase×P_d so the transits stack at
@@ -814,23 +1014,36 @@ are jointly inconsistent (circular angles, sesinw/secosw, correlated
 rho_s/b/rr) and produce overlay curves that fall outside the predictive
 bands and mis-subtract nuisance signals (measured: WASP-47 trans-dim folds,
 HD 159062 relastrom).
+
+On a trans-dim chain `theta.td` is replaced by the chosen draw's own active
+set (`_row_td_state`). The caller's `winning_td_state` switches on slots
+`1:modal_np`; after a death mid-list the live slots are others, and the
+draw's parameters are only a model together with its own mask -- otherwise
+a parked slot is drawn and subtracted while a live one is dropped.
 """
 function set_theta_best_lp!(theta, chains, params, active_idx)
     chain_names = Set(names(chains, :parameters))
-    if :lp in chain_names
-        lp = vec(Array(chains[:lp]))
-        ibest = active_idx[argmax(@view lp[active_idx])]
+    ibest = _best_lp_row(chains, active_idx)
+    if ibest !== nothing
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
             set_param!(theta, name, vec(Array(chains[sym]))[ibest])
         end
+        tdc = _td_cols(chains, params)
+        tdc === nothing || (theta.td = _row_td_state(tdc, params, ibest))
     else
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
             set_param!(theta, name, median(vec(Array(chains[sym]))[active_idx]))
         end
+        # No `:lp` (rjmcmc, MoMS, daedalus, trans-dim PT): the medians stand
+        # for these draws, and so must their modal live slots -- the caller's
+        # `1:modal_np` would put a parked slot in the model.
+        tdc = _td_cols(chains, params)
+        (tdc === nothing || isempty(active_idx)) ||
+            (theta.td = _row_td_state(tdc, params, collect(active_idx)))
     end
     return theta
 end

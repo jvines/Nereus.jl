@@ -101,8 +101,21 @@ function node_flips(params::Params, data::Data; flat_shift = nothing)
         j = findfirst(==(i), L.frozen_idx)
         return j === nothing ? nothing : L.frozen_values[j]
     end
+    # `is_circular` tests |span - 2π| against `_CIRCULAR_SPAN_RTOL`, which is
+    # TWO-sided, so it admits a window LONGER than a period -- `Uniform(0,
+    # 6.2832)` is over by 1.5e-5 rad, and unlike Mo the builder does not cap
+    # Omega at 2π. No wrap-based map is an involution there: the image of the
+    # shift is [lo, lo+2π), so the sliver past it is in the support but is
+    # never mapped into, and T∘T carries a point near `hi` to `x - 2π` instead
+    # of back to x (measured: |T∘T(x) - x| = 6.28 at x = 6.2832). Refuse those.
+    # A window SHORT of a period is fine: `mod` is injective on it, and a flip
+    # landing in the gap is out of support and is rejected, which is reversible.
+    _one_period(d) = let (lo, hi) = bounds(L.unfrozen_priors[d])
+        hi - lo <= CIRCULAR_PERIOD + 8 * eps(CIRCULAR_PERIOD)
+    end
     circ(d) = d !== nothing &&
-              is_circular(L.unfrozen_names[d], L.unfrozen_priors[d], cfg)
+              is_circular(L.unfrozen_names[d], L.unfrozen_priors[d], cfg) &&
+              _one_period(d)
     for (k, modes) in enumerate(cfg.planet_modes)
         astrometry_only(modes) || continue
         pc.time in (:Mo, :Tp) || continue
@@ -149,8 +162,18 @@ circular re-cut is respected. An involution up to rounding.
 @inline function node_flip!(x::AbstractVector, f::NodeFlip, params::Params)
     L = params.layout
     @inbounds for d in f.shift
-        lo, hi = bounds(L.unfrozen_priors[d])
-        x[d] = circular_relabel(x[d] + π, lo, hi)
+        lo, _ = bounds(L.unfrozen_priors[d])
+        # `mod` by the period, NOT `circular_relabel`. The latter pins a value
+        # past `hi` to `hi` (src/circular.jl), which is right when relabelling a
+        # chart but wrong inside a MOVE: on a window short of a full period --
+        # `is_circular` admits |span − 2π| within `_CIRCULAR_SPAN_RTOL`, e.g. a
+        # user typing 6.2832 -- the clamp maps the whole gap onto the single
+        # point `hi`, which is an atom, not an involution, and T∘T = id fails
+        # there. Wrapped instead, a flip into the gap is simply out of support,
+        # scores −Inf and is rejected, which IS reversible. On a window of
+        # exactly one period (the default) nothing changes: the wrap never
+        # leaves [lo, hi) and the clamp never fired.
+        x[d] = lo + mod(x[d] + π - lo, CIRCULAR_PERIOD)
     end
     @inbounds for d in f.negate
         x[d] = -x[d]
@@ -164,12 +187,19 @@ end
 
 One node-flip pass over every (rung, walker): for each flip, with probability
 `prob`, propose the walker's mirror and accept it with the tempered ratio
-β·Δlog L + Δlog π. `eval!(buf, t, w, tid)` returns the sampler's own
-`(log π, log L)` split, the one `logπ_arr` / `logL_arr` cache. `eligible(t, w,
-k)` gates planet `k` per walker (a trans-dim walker without the planet) and
-must be invariant under the flip. `rngs` holds one stream per (rung, walker),
-indexed `(t - 1) · n_walkers + w`, so the chain does not depend on the thread
-count. Returns the number of likelihood evaluations.
+β·Δlog L + Δlog π. `eval!(buf, t, w, slot)` returns the sampler's own
+`(log π, log L)` split, the one `logπ_arr` / `logL_arr` cache; `slot` is a
+chunk index, not a thread id (see src/threading.jl), so `eval!` must key its
+own scratch by `slot` too, the way `pt_emcee`'s `eval_bounded!` does.
+`eligible(t, w, k)` gates planet `k` per walker (a trans-dim walker without
+the planet) and must be invariant under the flip. `rngs` holds one stream per
+(rung, walker), indexed `(t - 1) · n_walkers + w`, so the chain does not
+depend on the thread count. `bufs` holds one scratch vector per chunk slot;
+its length is the `k` this sweep chunks against, so every caller
+(`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`) stays correct as long as it
+sizes `bufs` the same way it sizes its other per-slot buffers (see
+`_nthread_chunks`) — no coordination between callers needed. Returns the
+number of likelihood evaluations.
 """
 function _node_flip_sweep!(eval!::F, state::Array{Float64,3},
                            logπ_arr::Matrix{Float64}, logL_arr::Matrix{Float64},
@@ -182,30 +212,37 @@ function _node_flip_sweep!(eval!::F, state::Array{Float64,3},
                            eligible::G = (t, w, k) -> true) where {F,G}
     n_t, n_w, n_dim = size(state)
     n_evals = Threads.Atomic{Int}(0)
-    Threads.@threads :static for task_idx in 1:(n_t * n_w)
-        tid = Threads.threadid()
-        t = (task_idx - 1) ÷ n_w + 1
-        w = (task_idx - 1) % n_w + 1
-        rng = rngs[task_idx]
-        buf = bufs[tid]
-        for f in flips
-            rand(rng) < prob || continue
-            eligible(t, w, f.planet) || continue
-            @inbounds for d in 1:n_dim
-                buf[d] = state[t, w, d]
-            end
-            node_flip!(buf, f, params)
-            lp, ll = eval!(buf, t, w, tid)
-            Threads.atomic_add!(n_evals, 1)
-            Threads.atomic_add!(proposed[t], 1)
-            log_ratio = βs[t] * (ll - logL_arr[t, w]) + (lp - logπ_arr[t, w])
-            if log(rand(rng)) < log_ratio
+    # Chunked against `length(bufs)`, never `Threads.threadid()` (see
+    # src/threading.jl): the id spans every threadpool while
+    # `Threads.nthreads()` counts only the default one, so `bufs[threadid()]`
+    # overran this vector on stock Julia >= 1.12. `:static` keeps the 1:1
+    # chunk-to-thread mapping, but `buf` no longer depends on it.
+    chunks = _chunk_ranges(n_t * n_w, length(bufs))
+    Threads.@threads :static for slot in 1:length(chunks)
+        for task_idx in chunks[slot]
+            t = (task_idx - 1) ÷ n_w + 1
+            w = (task_idx - 1) % n_w + 1
+            rng = rngs[task_idx]
+            buf = bufs[slot]
+            for f in flips
+                rand(rng) < prob || continue
+                eligible(t, w, f.planet) || continue
                 @inbounds for d in 1:n_dim
-                    state[t, w, d] = buf[d]
+                    buf[d] = state[t, w, d]
                 end
-                logπ_arr[t, w] = lp
-                logL_arr[t, w] = ll
-                Threads.atomic_add!(accepted[t], 1)
+                node_flip!(buf, f, params)
+                lp, ll = eval!(buf, t, w, slot)
+                Threads.atomic_add!(n_evals, 1)
+                Threads.atomic_add!(proposed[t], 1)
+                log_ratio = βs[t] * (ll - logL_arr[t, w]) + (lp - logπ_arr[t, w])
+                if log(rand(rng)) < log_ratio
+                    @inbounds for d in 1:n_dim
+                        state[t, w, d] = buf[d]
+                    end
+                    logπ_arr[t, w] = lp
+                    logL_arr[t, w] = ll
+                    Threads.atomic_add!(accepted[t], 1)
+                end
             end
         end
     end

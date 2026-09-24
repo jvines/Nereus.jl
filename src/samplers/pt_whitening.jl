@@ -211,24 +211,31 @@ function sample_pt_whitening(
     length(βs) == n_temps || throw(ArgumentError(
         "Provided `betas` has length $(length(βs)), expected $n_temps"))
 
-    n_thr = max(Threads.nthreads(), 1)
-    thread_theta    = [Theta{Float64}(params) for _ in 1:n_thr]
-    # Per-thread PTWorkspace → ws-aware likelihood (no per-call GC + caches).
+    # Buffers are keyed by CHUNK, never by `Threads.threadid()`: the id spans
+    # every threadpool while `Threads.nthreads()` counts only the default one,
+    # so `thread_theta[threadid()]` overran this vector on stock Julia >= 1.12
+    # (see src/threading.jl). `n_slots` sizes every buffer a threaded loop in
+    # this function indexes — the init sweep and the stretch half-steps below,
+    # and `thread_proposal` doubles as the node-flip sweep's scratch
+    # (src/samplers/node_flip.jl), which chunks by its length.
+    n_slots         = _nthread_chunks()
+    thread_theta    = [Theta{Float64}(params) for _ in 1:n_slots]
+    # Per-slot PTWorkspace → ws-aware likelihood (no per-call GC + caches).
     thread_ws       = [PTWorkspace(params, params.config.max_kplanet,
                                    length(params.config.noise_models);
                                    n_obs = length(data.t_rv), n_phot = length(data.t_phot))
-                       for _ in 1:n_thr]
-    thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
+                       for _ in 1:n_slots]
+    thread_proposal = [Vector{Float64}(undef, n_dim) for _ in 1:n_slots]
     rng_master      = MersenneTwister(seed)
 
     # Evaluate (log_prior_bounded, log_like) at a BOUNDED-space point `x`
-    # using thread-local Theta. Returns (-Inf, -Inf) outside the prior
+    # using slot-local Theta. Returns (-Inf, -Inf) outside the prior
     # support — caller treats this as an automatic M-H reject. log_like
     # includes external priors per Nereus convention so they get
     # tempered too (matches pt_emcee / in-house PT).
-    @inline function eval_bounded!(x::AbstractVector{Float64}, tid::Int)
-        theta = thread_theta[tid]
-        wb = thread_ws[tid]
+    @inline function eval_bounded!(x::AbstractVector{Float64}, slot::Int)
+        theta = thread_theta[slot]
+        wb = thread_ws[slot]
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             theta.values[idx] = x[j]
         end
@@ -250,22 +257,28 @@ function sample_pt_whitening(
     # EMPEROR style): lots of dispersion means some walkers reliably land
     # near the high-likelihood region, and stretch + swap-down carry that
     # to the cold chain.
-    init_seeds = rand(rng_master, UInt64, n_temps * n_walkers_eff)
-    Threads.@threads :static for task_idx in 1:(n_temps * n_walkers_eff)
-        tid = Threads.threadid()
-        t = (task_idx - 1) ÷ n_walkers_eff + 1
-        w = (task_idx - 1) % n_walkers_eff + 1
-        rng = MersenneTwister(init_seeds[task_idx])
-        for _ in 1:200
-            xb = _draw_from_prior(target, rng)
-            @inbounds for d in 1:n_dim
-                state[t, w, d] = xb[d]
-            end
-            lp, ll = eval_bounded!(@view(state[t, w, :]), tid)
-            if isfinite(lp) && isfinite(ll)
-                logπ_arr[t, w] = lp
-                logL_arr[t, w] = ll
-                break
+    init_seeds  = rand(rng_master, UInt64, n_temps * n_walkers_eff)
+    # One chunk of tasks per slot, so `slot` is a plain loop counter and the
+    # buffers cannot be shared between tasks however the scheduler moves
+    # them. `:static` is kept for the 1:1 chunk-to-thread mapping, but the
+    # buffers no longer depend on it.
+    init_chunks = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+    Threads.@threads :static for slot in 1:length(init_chunks)
+        for task_idx in init_chunks[slot]
+            t = (task_idx - 1) ÷ n_walkers_eff + 1
+            w = (task_idx - 1) % n_walkers_eff + 1
+            rng = MersenneTwister(init_seeds[task_idx])
+            for _ in 1:200
+                xb = _draw_from_prior(target, rng)
+                @inbounds for d in 1:n_dim
+                    state[t, w, d] = xb[d]
+                end
+                lp, ll = eval_bounded!(@view(state[t, w, :]), slot)
+                if isfinite(lp) && isfinite(ll)
+                    logπ_arr[t, w] = lp
+                    logL_arr[t, w] = ll
+                    break
+                end
             end
         end
     end
@@ -394,40 +407,45 @@ function sample_pt_whitening(
     flip_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
     flip_proposed  = zeros(Int, n_temps)
     flip_accepted  = zeros(Int, n_temps)
-    flip_eval(buf, t, w, tid) = eval_bounded!(buf, tid)
+    flip_eval(buf, t, w, slot) = eval_bounded!(buf, slot)
 
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
         partner_hi = active_half === :h1 ? n_walkers_eff : half
         task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
-        Threads.@threads :static for task_idx in 1:length(tasks)
-            tid = Threads.threadid()
-            t, w = tasks[task_idx]
-            β = βs[t]
-            trng = task_rngs[task_idx]
-            buf  = thread_proposal[tid]
+        # Chunk-keyed like the init sweep above: `slot` indexes
+        # `thread_proposal` as a plain loop counter, independent of the
+        # thread count and immune to `:static`'s task-migration risk.
+        chunks = _chunk_ranges(length(tasks), n_slots)
+        Threads.@threads :static for slot in 1:length(chunks)
+            for task_idx in chunks[slot]
+                t, w = tasks[task_idx]
+                β = βs[t]
+                trng = task_rngs[task_idx]
+                buf  = thread_proposal[slot]
 
-            w_partner = rand(trng, partner_lo:partner_hi)
-            u = rand(trng)
-            z = ((stretch_a - 1) * u + 1)^2 / stretch_a
+                w_partner = rand(trng, partner_lo:partner_hi)
+                u = rand(trng)
+                z = ((stretch_a - 1) * u + 1)^2 / stretch_a
 
-            @inbounds for d in 1:n_dim
-                buf[d] = state[t, w_partner, d] +
-                         z * (state[t, w, d] - state[t, w_partner, d])
-            end
-
-            lp_prop, ll_prop = eval_bounded!(buf, tid)
-            log_ratio = (n_dim - 1) * log(z) +
-                        β * (ll_prop - logL_arr[t, w]) +
-                        (lp_prop - logπ_arr[t, w])
-            Threads.atomic_add!(propose_temp[t], 1)
-            if log(rand(trng)) < log_ratio
                 @inbounds for d in 1:n_dim
-                    state[t, w, d] = buf[d]
+                    buf[d] = state[t, w_partner, d] +
+                             z * (state[t, w, d] - state[t, w_partner, d])
                 end
-                logπ_arr[t, w] = lp_prop
-                logL_arr[t, w] = ll_prop
-                Threads.atomic_add!(accept_temp[t], 1)
+
+                lp_prop, ll_prop = eval_bounded!(buf, slot)
+                log_ratio = (n_dim - 1) * log(z) +
+                            β * (ll_prop - logL_arr[t, w]) +
+                            (lp_prop - logπ_arr[t, w])
+                Threads.atomic_add!(propose_temp[t], 1)
+                if log(rand(trng)) < log_ratio
+                    @inbounds for d in 1:n_dim
+                        state[t, w, d] = buf[d]
+                    end
+                    logπ_arr[t, w] = lp_prop
+                    logL_arr[t, w] = ll_prop
+                    Threads.atomic_add!(accept_temp[t], 1)
+                end
             end
         end
         Threads.atomic_add!(n_evals_atomic, length(tasks))

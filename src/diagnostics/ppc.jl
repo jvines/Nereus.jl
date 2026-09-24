@@ -35,7 +35,8 @@ failure modes:
   at a coordinate singularity); stays good whenever a good fit *exists*
   in the posterior.
 - `rv_red_chi2_median_model` — χ²/dof at the per-parameter chain
-  median model. Equals the headline for well-constrained posteriors;
+  median model (on a trans-dim chain: over the winning model's draws, with
+  its live slots). Equals the headline for well-constrained posteriors;
   can be inflated when any structural axis is degenerate at the
   median (e.g., atan2(median(sesinw), median(secosw)) when both
   marginals straddle zero).
@@ -154,7 +155,8 @@ function posterior_predictive_check(chains, params::Params, data::Data;
     idx_pool = randperm(rng, n_total)[1:n_draws_eff]
 
     # ---- Median-parameter Theta: the headline model ---------------------
-    theta_med = _theta_from_chain_summary(chains_flat, params)
+    theta_med = _theta_from_chain_summary(chains_flat, params;
+                                          rows = _winning_draw_idx(chains, params))
     preds_med_rv  = n_rv_obs > 0 ? rv_predictions(theta_med, data)[1] : Float64[]
     vars_med_rv   = n_rv_obs > 0 ? rv_predictions(theta_med, data)[2] : Float64[]
     preds_med_phot = n_pm_obs > 0 ? phot_predictions(theta_med, data)[1] : Float64[]
@@ -179,8 +181,9 @@ function posterior_predictive_check(chains, params::Params, data::Data;
     phot_resid_sq  = zeros(Float64, n_pm_obs)
     phot_chi2_per_draw = zeros(Float64, n_draws_eff)
 
+    tdc = _td_cols(chains_flat, params)
     for (draw_idx, idx) in enumerate(idx_pool)
-        theta = _theta_from_row(chains_flat, idx, params)
+        theta = _theta_from_row(chains_flat, idx, params; tdc = tdc)
 
         if n_rv_obs > 0
             preds, vars = rv_predictions(theta, data)
@@ -386,20 +389,23 @@ function _flatten_chains(chains)
 end
 
 # The "typical" parameter point used as the median model for the
-# headline χ² / outlier / residual GLS. For n_planets (trans-dim), the
-# posterior mode is used since the chain is integer-valued.
+# headline χ² / outlier / residual GLS: per-parameter medians over `rows`.
+# On a trans-dim chain `rows` must be the WINNING model's draws
+# (`_winning_draw_idx`) and the model gets their live slots: medians over
+# every planet count, with `set_n_p!(modal)` switching on slots 1:modal,
+# mixed parked slot values into the model -- 34 m/s of spurious residual on a
+# death mid-list.
 function _theta_from_chain_summary(chains_flat::Dict{Symbol, Vector{Float64}},
-                                    params::Params)
-    theta = Theta{Float64}(params)
-    if haskey(chains_flat, :n_planets)
-        np_samp = chains_flat[:n_planets]
-        n_p_set = _mode_int(np_samp)
-        set_n_p!(theta, n_p_set)
-    end
+                                    params::Params;
+                                    rows = nothing)
+    idx = rows === nothing ? Colon() : rows
+    theta = Theta{Float64}(params;
+        td = rows === nothing ? nothing :
+             _row_td_state(_td_cols(chains_flat, params), params, collect(rows)))
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         haskey(chains_flat, sym) || continue
-        set_param!(theta, name, median(chains_flat[sym]))
+        set_param!(theta, name, median(chains_flat[sym][idx]))
     end
     return theta
 end
@@ -407,13 +413,14 @@ end
 # `_mode_int` lives in reporting.jl (included first); this file used to carry
 # a byte-identical copy specialised to AbstractVector{<:Real}.
 
+# One posterior draw as a model, with ITS live slots and noise models (see
+# `_row_td_state`). `set_n_p!(n_planets)` meant slots 1:n with every noise
+# model on -- a parked slot in the model after a death mid-list, in every PPC
+# draw and every LOO pointwise likelihood. Pass `tdc` precomputed in a loop.
 function _theta_from_row(chains_flat::Dict{Symbol, Vector{Float64}},
-                          idx::Int, params::Params)
-    theta = Theta{Float64}(params)
-    if haskey(chains_flat, :n_planets)
-        np_val = chains_flat[:n_planets][idx]
-        set_n_p!(theta, Int(round(np_val)))
-    end
+                          idx::Int, params::Params;
+                          tdc = _td_cols(chains_flat, params))
+    theta = Theta{Float64}(params; td = _row_td_state(tdc, params, idx))
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         haskey(chains_flat, sym) || continue

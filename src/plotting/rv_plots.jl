@@ -59,8 +59,11 @@ function plot_rv_timeseries(chains, params, data;
         # EMPEROR best-fit cluster — keep samples within ln(bf_cutoff)
         # of max lp. Default BF=10 (Jeffreys "strong"), user-overridable.
         top_idx = _top_lp_draw_pool(chains; bf_cutoff=bf_cutoff)
-        active_idx = intersect(active_idx, top_idx)
-        isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
+        # An empty cut keeps the winning-model draws, not all draws: the
+        # latter would let a non-winning planet count back in.
+        let cut = intersect(active_idx, top_idx)
+            isempty(cut) || (active_idx = cut)
+        end
         # Max-lp reference theta (jointly consistent; see set_theta_best_lp!)
         set_theta_best_lp!(theta_med, chains, params, active_idx)
 
@@ -197,7 +200,9 @@ function plot_rv_timeseries(chains, params, data;
                 t_dense = collect(range(minimum(data.t_rv), maximum(data.t_rv);
                                         length = 4000))
                 kep_dense = zeros(length(t_dense))
-                for k in 1:params.config.max_kplanet
+                # Live slots only: `compute_rv_model_planet` evaluates any slot
+                # it is given, parked ones included.
+                for k in planet_indices(theta_med)
                     kep_dense .+= compute_rv_model_planet(theta_med, data, t_dense, k)
                 end
                 lines!(ax, t_dense .- tmin, kep_dense;
@@ -290,8 +295,9 @@ function _sb2_plot_theta(chains, params, bf_cutoff)
         active_idx = collect(1:_n_flat_draws(chains)); theta = Theta{Float64}(params)
     end
     top = _top_lp_draw_pool(chains; bf_cutoff=bf_cutoff)
-    active_idx = intersect(active_idx, top)
-    isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
+    let cut = intersect(active_idx, top)          # empty cut: keep the winners
+        isempty(cut) || (active_idx = cut)
+    end
     set_theta_best_lp!(theta, chains, params, active_idx)
     return theta
 end
@@ -472,19 +478,13 @@ function plot_rv_phasefold(chains, params, data;
         rowgap!(ga, 0)
 
         # For trans-dim chains, condition on the **winning** model: only
-        # samples with N_p == modal_np and the modal noise pattern.
-        # Plotting K_k for k > modal_np is meaningless because the
-        # winning model doesn't include that planet, so we skip and
-        # warn.
+        # samples with N_p == modal_np, its modal live slots and the modal
+        # noise pattern. A slot that is not live in it is skipped with a
+        # warning below -- by slot, not by `k > modal_np`.
         chain_names = Set(names(chains, :parameters))
         if :n_planets in chain_names
             np_all = vec(Array(chains[:n_planets]))
             modal_np = _mode_int_local(np_all)
-            if planet > modal_np
-                @warn "Planet K=$planet not in winning model " *
-                      "(modal_np=$modal_np); skipping phase-fold"
-                return fig
-            end
             active_idx = findall(np_all .== modal_np)
             if isempty(active_idx)
                 @warn "No samples with N_p == $modal_np, skipping"
@@ -507,13 +507,22 @@ function plot_rv_phasefold(chains, params, data;
         # either keeps the MAP sliver (fake-tight) or, opened up, the whole
         # degenerate tail (useless). See `_credible_region_pool`.
         top_idx = _credible_region_pool(chains, params, planet; credmass=credmass)
-        active_idx = intersect(collect(active_idx), top_idx)
-        isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
+        let cut = intersect(collect(active_idx), top_idx)   # empty: keep winners
+            isempty(cut) || (active_idx = cut)
+        end
 
         # Max-lp reference theta: the marginal-median theta is jointly
         # inconsistent and mis-subtracts the OTHER planets (b at K=141
         # leaking ±several m/s artifacts into small-planet folds).
         set_theta_best_lp!(theta_med, chains, params, active_idx)
+        # Is this SLOT live in the winning model? Not `planet ≤ modal_np`:
+        # after a death mid-list the live slots are not 1:modal_np, and that
+        # test folded a parked slot while skipping a live one.
+        if theta_med.td !== nothing && !(planet in planet_indices(theta_med))
+            @warn "Planet K=$planet is not active in the winning model; " *
+                  "skipping phase-fold"
+            return fig
+        end
 
         P = planet_P(theta_med, planet)
         # Fold around the planet's own inferior-CONJUNCTION epoch (the

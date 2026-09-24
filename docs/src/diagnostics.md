@@ -490,6 +490,10 @@ The checks (`src/diagnostics/fit_health.jl`):
    `:fail`. Without `prior_bounds` the check is skipped (`:ok`, "no
    prior_bounds given"). This is the `map` / `PA` catcher. Parameters
    named in `circular` are measured in their own window (see below).
+   Parameters named in `jitter` are never flagged at their LOWER bound: a
+   jitter can be zero (the reported errors may carry all the scatter), so a
+   posterior there is never cause for alarm. The check stays `:ok` and names
+   them ("jitter at zero"). Their upper bound is still checked.
 4. **Log-posterior sanity** — if a `:lp` / `:log_density` / `:logp`
    column exists, flags non-finite values and finite values below
    `lp_floor` (default `-1e6`) as corrupt. This is the corrupt-logZ
@@ -545,7 +549,8 @@ display(report)     # full per-check breakdown
 It is **fail-soft**: it only logs a verdict and records it in the
 summary; it never alters the chains or any other output. It builds
 `prior_bounds` from the model layout (hard bounds of every fitted
-parameter), passes `circular = circular_names(params)`, and sets
+parameter), passes `circular = circular_names(params)` and
+`jitter = jitter_names(params)`, and sets
 `ensemble = true` automatically when the sampler
 is one of `pt_emcee`, `transdim_pt_emcee`, `pt_whitening`, `pa`, `smc`,
 `ensemble`, or `ess`. The result lands in `summary.json` under

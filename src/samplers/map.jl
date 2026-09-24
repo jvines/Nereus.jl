@@ -87,7 +87,8 @@ encoded as a non-finite, mapped to 0.0) are ignored: we read the true bound
 from the prior, not the transform's clamp.
 
 Circular angles ([`is_circular`](@ref)) are never flagged: their bounds are
-where the chart of the circle was cut, not an edge of the support.
+where the chart of the circle was cut, not an edge of the support. Nor is a
+jitter ([`jitter_names`](@ref)) at its lower bound, whatever that bound is.
 """
 function _detect_railed(x_bounded::AbstractVector{<:Real},
                          target::NereusTarget, bound_rtol::Float64)
@@ -95,6 +96,7 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
     priors = layout.unfrozen_priors
     n = length(x_bounded)
     railed = Int[]
+    jit = jitter_names(target.params)
     # Past one bound of a full-circle angle is just inside the other, so an
     # "outward" gradient there only says the mode straddles the seam. These
     # were flagged -- and api.jl turns railed into a failed fit, so a Mo mode
@@ -146,8 +148,11 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
         # because a floor and a true escape look identical to it (both have
         # an inward-increasing objective). A nonzero lower bound (e.g. a
         # period bracket P ∈ [6,24], lo = 6) is a mere prior choice, NOT a
-        # physical floor, so it stays subject to the directional test.
-        if at_lo && abs(lo) <= 1e-6 * span
+        # physical floor, so it stays subject to the directional test --
+        # except a jitter's: the LogUniform floor of `gp_act_jit_*` or
+        # `ind_floor_*_jit` stands in for zero, and api.jl turns a railed MAP
+        # into a failed fit.
+        if at_lo && (abs(lo) <= 1e-6 * span || layout.unfrozen_names[i] in jit)
             continue
         end
 

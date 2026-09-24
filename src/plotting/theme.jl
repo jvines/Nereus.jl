@@ -153,5 +153,12 @@ end
 """Marker for instrument index (cycles through INST_MARKERS)."""
 inst_marker(i::Int) = INST_MARKERS[mod1(i, length(INST_MARKERS))]
 
+# On a sky-plane figure the star glyph means the host star and the diamond
+# means periastron, so neither may stand for an instrument there.
+const SKY_INST_MARKERS = filter(m -> !(m in (:star5, :diamond)), INST_MARKERS)
+
+"""Marker for instrument index on a sky-plane figure (no star glyph, no diamond)."""
+sky_inst_marker(i::Int) = SKY_INST_MARKERS[mod1(i, length(SKY_INST_MARKERS))]
+
 """Color for instrument index (cycles through INST_COLORS)."""
 inst_color(i::Int) = INST_COLORS[mod1(i, length(INST_COLORS))]

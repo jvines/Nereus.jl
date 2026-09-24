@@ -255,7 +255,7 @@ sampler permitting).
 **Known plot names** (`output.plots`): `rv_timeseries`,
 `rv_components`, `rv_phasefold`, `pm_timeseries`, `pm_phasefold`,
 `rv_astrom_phasefold`, `orbit_skyplane`, `iad_residuals`,
-`hgca_pm_residuals`, `relastrom_timeseries`, `relastrom_residuals`,
+`epoch_astrometry_orbit`, `hgca_pm_residuals`, `relastrom_timeseries`, `relastrom_residuals`,
 `g23h_residuals`, `pm_anomaly`, `ttv_oc`, `transit_overlay`,
 `rm_anomaly`, `activity_gp_latent`, `activity_gp_decomposition`,
 `corner`, `trace`, `histograms`, `posteriors`, `transdim_occupancy`,

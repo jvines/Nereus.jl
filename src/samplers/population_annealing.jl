@@ -30,8 +30,8 @@
 #   independent per replica → fully threaded (Threads.@threads :static).
 # - **Systematic resampling** — low-variance, deterministic given the
 #   weight vector. Preserves more replica diversity than multinomial.
-# - **Per-thread Theta + RNG buffers** with :static scheduling to
-#   avoid the threadid-migration bug (see feedback_threading_threadid.md).
+# - **Per-chunk Theta + RNG buffers** with :static scheduling, keyed by
+#   chunk index rather than `Threads.threadid()` (see src/threading.jl).
 
 using Random
 using MCMCChains
@@ -156,14 +156,16 @@ function sample_pa(
     unfrozen_idx = layout.unfrozen_idx
     unfrozen_priors = layout.unfrozen_priors
 
-    # Per-thread state: each task uses thread-pinned buffers (:static)
-    n_thr = max(Threads.nthreads(), 1)
-    thread_theta = [Theta{Float64}(params) for _ in 1:n_thr]
-    # Per-thread PTWorkspace → ws-aware likelihood (no per-call GC + caches).
+    # Per-chunk state: each task uses chunk-pinned buffers (:static). Sized
+    # by `_nthread_chunks()`, not `Threads.nthreads()` — buffers are keyed
+    # by chunk index below, never by `Threads.threadid()` (src/threading.jl).
+    n_slots = _nthread_chunks()
+    thread_theta = [Theta{Float64}(params) for _ in 1:n_slots]
+    # Per-chunk PTWorkspace → ws-aware likelihood (no per-call GC + caches).
     thread_ws = [PTWorkspace(params, params.config.max_kplanet,
                              length(params.config.noise_models);
                              n_obs = length(data.t_rv), n_phot = length(data.t_phot))
-                 for _ in 1:n_thr]
+                 for _ in 1:n_slots]
     rng_master   = MersenneTwister(seed)
 
     # Per-parameter MCMC step size from prior scale (1% of range for
@@ -190,10 +192,10 @@ function sample_pa(
     logL     = fill(-Inf, n_replicas)
     n_evals  = Threads.Atomic{Int}(0)
 
-    # In-place eval at point x (bounded space) using thread-local Theta
-    @inline function eval_bounded!(x::AbstractVector{Float64}, tid::Int)
-        theta = thread_theta[tid]
-        wb = thread_ws[tid]
+    # In-place eval at point x (bounded space) using chunk-local Theta
+    @inline function eval_bounded!(x::AbstractVector{Float64}, slot::Int)
+        theta = thread_theta[slot]
+        wb = thread_ws[slot]
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             theta.values[idx] = x[j]
         end
@@ -204,32 +206,35 @@ function sample_pa(
         return (lp, ll)
     end
 
-    # Pre-allocated per-thread proposal scratch — re-used across all
-    # three mutation kernels. Each Julia thread owns one (y, ξ) pair;
-    # since the per-replica @threads :static loop pins task→thread,
-    # there's no race. Saves ~60 k Vector allocations on a typical
+    # Pre-allocated per-chunk proposal scratch — re-used across all
+    # three mutation kernels. Each chunk owns one (y, ξ) pair; the
+    # @threads :static loop pins task→chunk, an ordinary loop counter,
+    # so there's no race regardless of how many threads Julia was
+    # started with. Saves ~60 k Vector allocations on a typical
     # 200-replica × 10-mcmc × 30-β run.
-    thread_y = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
-    thread_ξ = [Vector{Float64}(undef, n_dim) for _ in 1:n_thr]
+    thread_y = [Vector{Float64}(undef, n_dim) for _ in 1:n_slots]
+    thread_ξ = [Vector{Float64}(undef, n_dim) for _ in 1:n_slots]
 
     # --- Initialize replicas from the prior (β=0 target) -------------
     init_seeds = rand(rng_master, UInt64, n_replicas)
-    Threads.@threads :static for i in 1:n_replicas
-        tid = Threads.threadid()
-        rng = MersenneTwister(init_seeds[i])
-        for _ in 1:200
-            x = _draw_from_prior(target, rng)
-            @inbounds for d in 1:n_dim
-                replicas[i, d] = x[d]
-            end
-            lp, ll = eval_bounded!(@view(replicas[i, :]), tid)
-            if isfinite(lp) && isfinite(ll)
-                logπ[i] = lp
-                logL[i] = ll
+    init_chunks = _chunk_ranges(n_replicas, n_slots)
+    Threads.@threads :static for slot in 1:length(init_chunks)
+        for i in init_chunks[slot]
+            rng = MersenneTwister(init_seeds[i])
+            for _ in 1:200
+                x = _draw_from_prior(target, rng)
+                @inbounds for d in 1:n_dim
+                    replicas[i, d] = x[d]
+                end
+                lp, ll = eval_bounded!(@view(replicas[i, :]), slot)
+                if isfinite(lp) && isfinite(ll)
+                    logπ[i] = lp
+                    logL[i] = ll
+                    Threads.atomic_add!(n_evals, 1)
+                    break
+                end
                 Threads.atomic_add!(n_evals, 1)
-                break
             end
-            Threads.atomic_add!(n_evals, 1)
         end
     end
 
@@ -385,26 +390,63 @@ function sample_pa(
             for (active_lo, active_hi, partner_lo, partner_hi) in (
                     (1,        half,        half + 1, n_replicas),
                     (half + 1, n_replicas,  1,        half))
-                Threads.@threads :static for i in active_lo:active_hi
-                    tid = Threads.threadid()
-                    trng = replica_rngs[i]
-                    partner = rand(trng, partner_lo:partner_hi)
-                    u = rand(trng)
-                    z = ((stretch_a - 1) * u + 1)^2 / stretch_a
-                    y = thread_y[tid]
-                    @inbounds for d in 1:n_dim
-                        y[d] = replicas[partner, d] +
-                               z * (replicas[i, d] - replicas[partner, d])
+                active_chunks = _chunk_ranges(active_lo:active_hi, n_slots)
+                Threads.@threads :static for slot in 1:length(active_chunks)
+                    for i in active_chunks[slot]
+                        trng = replica_rngs[i]
+                        partner = rand(trng, partner_lo:partner_hi)
+                        u = rand(trng)
+                        z = ((stretch_a - 1) * u + 1)^2 / stretch_a
+                        y = thread_y[slot]
+                        @inbounds for d in 1:n_dim
+                            y[d] = replicas[partner, d] +
+                                   z * (replicas[i, d] - replicas[partner, d])
+                        end
+                        lp_y, ll_y = eval_bounded!(y, slot)
+                        Threads.atomic_add!(propose_count, 1)
+                        Threads.atomic_add!(n_evals, 1)
+                        isfinite(lp_y) || continue
+                        # Stretch-move M-H ratio includes z^(n-1) Jacobian
+                        log_α = (n_dim - 1) * log(z) +
+                                β_new * (ll_y - logL[i]) +
+                                (lp_y - logπ[i])
+                        if log(rand(trng)) < log_α
+                            @inbounds for d in 1:n_dim
+                                replicas[i, d] = y[d]
+                            end
+                            logL[i] = ll_y; logπ[i] = lp_y
+                            Threads.atomic_add!(accept_count, 1)
+                        end
                     end
-                    lp_y, ll_y = eval_bounded!(y, tid)
+                end
+            end
+        end
+
+        function adaptive_cov_sweep!()
+            chunks = _chunk_ranges(n_replicas, n_slots)
+            Threads.@threads :static for slot in 1:length(chunks)
+                for i in chunks[slot]
+                    local_rng = replica_rngs[i]
+                    x = @view replicas[i, :]
+                    ξ = thread_ξ[slot]
+                    y = thread_y[slot]
+                    @inbounds for d in 1:n_dim
+                        ξ[d] = randn(local_rng)
+                    end
+                    # y = x + cov_step · L · ξ  (multivariate Gaussian)
+                    @inbounds for d in 1:n_dim
+                        s = 0.0
+                        for k in 1:d   # L is lower-triangular
+                            s += chol_L[d, k] * ξ[k]
+                        end
+                        y[d] = x[d] + cov_step * s
+                    end
+                    lp_y, ll_y = eval_bounded!(y, slot)
                     Threads.atomic_add!(propose_count, 1)
                     Threads.atomic_add!(n_evals, 1)
                     isfinite(lp_y) || continue
-                    # Stretch-move M-H ratio includes z^(n-1) Jacobian
-                    log_α = (n_dim - 1) * log(z) +
-                            β_new * (ll_y - logL[i]) +
-                            (lp_y - logπ[i])
-                    if log(rand(trng)) < log_α
+                    log_α = β_new * (ll_y - logL[i]) + (lp_y - logπ[i])
+                    if log(rand(local_rng)) < log_α
                         @inbounds for d in 1:n_dim
                             replicas[i, d] = y[d]
                         end
@@ -415,59 +457,28 @@ function sample_pa(
             end
         end
 
-        function adaptive_cov_sweep!()
-            Threads.@threads :static for i in 1:n_replicas
-                tid = Threads.threadid()
-                local_rng = replica_rngs[i]
-                x = @view replicas[i, :]
-                ξ = thread_ξ[tid]
-                y = thread_y[tid]
-                @inbounds for d in 1:n_dim
-                    ξ[d] = randn(local_rng)
-                end
-                # y = x + cov_step · L · ξ  (multivariate Gaussian)
-                @inbounds for d in 1:n_dim
-                    s = 0.0
-                    for k in 1:d   # L is lower-triangular
-                        s += chol_L[d, k] * ξ[k]
-                    end
-                    y[d] = x[d] + cov_step * s
-                end
-                lp_y, ll_y = eval_bounded!(y, tid)
-                Threads.atomic_add!(propose_count, 1)
-                Threads.atomic_add!(n_evals, 1)
-                isfinite(lp_y) || continue
-                log_α = β_new * (ll_y - logL[i]) + (lp_y - logπ[i])
-                if log(rand(local_rng)) < log_α
-                    @inbounds for d in 1:n_dim
-                        replicas[i, d] = y[d]
-                    end
-                    logL[i] = ll_y; logπ[i] = lp_y
-                    Threads.atomic_add!(accept_count, 1)
-                end
-            end
-        end
-
         function rwm_sweep!()
-            Threads.@threads :static for i in 1:n_replicas
-                tid = Threads.threadid()
-                local_rng = replica_rngs[i]
-                x = @view replicas[i, :]
-                y = thread_y[tid]
-                @inbounds for d in 1:n_dim
-                    y[d] = x[d] + step_sigma[d] * randn(local_rng)
-                end
-                lp_y, ll_y = eval_bounded!(y, tid)
-                Threads.atomic_add!(propose_count, 1)
-                Threads.atomic_add!(n_evals, 1)
-                isfinite(lp_y) || continue
-                log_α = β_new * (ll_y - logL[i]) + (lp_y - logπ[i])
-                if log(rand(local_rng)) < log_α
+            chunks = _chunk_ranges(n_replicas, n_slots)
+            Threads.@threads :static for slot in 1:length(chunks)
+                for i in chunks[slot]
+                    local_rng = replica_rngs[i]
+                    x = @view replicas[i, :]
+                    y = thread_y[slot]
                     @inbounds for d in 1:n_dim
-                        replicas[i, d] = y[d]
+                        y[d] = x[d] + step_sigma[d] * randn(local_rng)
                     end
-                    logL[i] = ll_y; logπ[i] = lp_y
-                    Threads.atomic_add!(accept_count, 1)
+                    lp_y, ll_y = eval_bounded!(y, slot)
+                    Threads.atomic_add!(propose_count, 1)
+                    Threads.atomic_add!(n_evals, 1)
+                    isfinite(lp_y) || continue
+                    log_α = β_new * (ll_y - logL[i]) + (lp_y - logπ[i])
+                    if log(rand(local_rng)) < log_α
+                        @inbounds for d in 1:n_dim
+                            replicas[i, d] = y[d]
+                        end
+                        logL[i] = ll_y; logπ[i] = lp_y
+                        Threads.atomic_add!(accept_count, 1)
+                    end
                 end
             end
         end

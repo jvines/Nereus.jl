@@ -11,6 +11,7 @@
 
 using Test, Nereus, Random, Statistics, MCMCChains
 using Nereus: _pt_prune_stranded!, _warn_repeating_time_window
+include(joinpath(@__DIR__, "fixtures", "easy_rv_target.jl"))
 
 # One rung of `n_mode` walkers in a Gaussian mode (σ = 0.01, centred on 0.5)
 # and `n_flat` spread over the unit box `gap` nats of log-likelihood below it.
@@ -133,31 +134,7 @@ end
 
     # The reported symptom, end to end: run_job with no parametrization and no
     # sampler settings, on an easy 12.3 d planet over a 1000 d baseline.
-    rng = MersenneTwister(20260922)
-    n = 60
-    t = sort(2459000.0 .+ 1000.0 .* rand(rng, n))
-    P, K, e, ω, tp = 12.3, 12.0, 0.1, 1.0, 2459003.0
-    function _rv(ti)
-        M = mod2pi(2π * (ti - tp) / P)
-        E = M
-        for _ in 1:50
-            E -= (E - e * sin(E) - M) / (1 - e * cos(E))
-        end
-        ν = 2atan(sqrt((1 + e) / (1 - e)) * tan(E / 2))
-        return K * (cos(ν + ω) + e * cos(ω))
-    end
-    rv = _rv.(t) .+ 2.0 .* randn(rng, n) .+ 5.0
-    cfg = Dict{String,Any}(
-        "seed" => 42,
-        "output_dir" => mktempdir(),
-        "data" => Dict("rv" => Dict("values" => Dict(
-            "bjd" => t, "rv" => rv, "rv_err" => fill(2.0, n),
-            "instrument" => fill("HARPS", n)))),
-        "model" => Dict("max_kplanet" => 1, "planet_modes" => ["RV_ONLY"]),
-        "sampler" => Dict("name" => "pt_emcee",
-                          "kwargs" => Dict("show_progress" => false)),
-        "output" => Dict("plots" => String[], "ppc" => false,
-                         "detection_limits" => false, "loo" => false))
+    cfg = _easy_rv_cfg()   # test/fixtures/easy_rv_target.jl
 
     @testset "run_job defaults converge on an easy target" begin
         res = Nereus.run_job(cfg)
@@ -167,37 +144,18 @@ end
         @test checks["multimodality"]["status"] == "ok"
         # The reported false positive: P = 12.3 d on LogUniform(0.1, 3000).
         @test !occursin("P_k1", checks["prior_rail"]["message"])
+        # sigma_HARPS sits at 0 here (the errors are exact): a jitter can be
+        # zero, and fit_health must not cry FAIL over it.
+        @test checks["prior_rail"]["status"] == "ok"
+        @test s["fit_health"]["overall"] == "ok"
         ch, _ = Nereus.load_chains(joinpath(cfg["output_dir"], "chains.nc"))
         @test :Mo_k1 in names(ch)                       # the default is Mo now
         Pd = vec(Array(ch[:P_k1]))
         @test mean(abs.(Pd .- 12.3) ./ 12.3 .< 0.01) == 1.0   # no stranded draws
     end
 
-    # Trans-dim, defaults, same target, up to 2 planets. Before: 5 temps and
-    # blind births found no planet (P(Nₚ = 0) = 0.84, no draw at 12.3 d).
-    @testset "transdim_pt_emcee defaults find an easy planet" begin
-        tcfg = merge(cfg, Dict{String,Any}(
-            "output_dir" => mktempdir(),
-            "model" => Dict("max_kplanet" => 2, "planet_modes" => ["RV_ONLY", "RV_ONLY"]),
-            "transdim" => Dict("max_kplanet" => 2),
-            "sampler" => Dict("name" => "transdim_pt_emcee",
-                              "kwargs" => Dict("show_progress" => false))))
-        s = Nereus.run_job(tcfg)
-        ch, _ = Nereus.load_chains(joinpath(tcfg["output_dir"], "chains.nc"))
-        np = vec(Array(ch[:n_planets]))
-        @test mean(np .== 1) > 0.95
-        has = falses(length(np))
-        for k in 1:2
-            on = vec(Array(ch[Symbol("planet_active_$k")])) .> 0.5
-            Pk = vec(Array(ch[Symbol("P_k$k")]))
-            has .|= on .& (abs.(Pk .- 12.3) ./ 12.3 .< 0.01)
-        end
-        @test mean(has) > 0.95
-        # Both health signals: fit_health (masked to active draws) and the
-        # sampler's own report (components, not slots).
-        @test s["fit_health"]["checks"]["convergence"]["status"] == "ok"
-        @test s["run_info"]["convergence"]["pass"] == true
-    end
+    # The transdim_pt_emcee defaults test lives in
+    # test_transdim_pt_emcee_defaults.jl, so the two full fits run in parallel.
 
     @testset "draws and :lp are recorded in x, not on the move scale" begin
         data, irv, ipm, ias = Nereus._build_data(cfg["data"])

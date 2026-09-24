@@ -115,7 +115,8 @@ _asvec(x) = [x]
                ensemble::Bool=false, param_names=nothing,
                mode_ratio_max::Float64=3.0, edge_eps::Float64=0.01,
                edge_mass_frac::Float64=0.05, lp_floor::Float64=-1e6,
-               circular=nothing, log_scale=nothing, active=nothing)
+               circular=nothing, log_scale=nothing, active=nothing,
+               jitter=nothing)
         -> FitHealthReport
 
 Post-fit health screen. Runs four cheap structural checks against
@@ -146,7 +147,9 @@ checks means no red flag was raised, not that the posterior is correct.
    window, which should be the chart the ENGINE sampled in. A pile-up
    there means the engine could not carry the angle across that seam and
    the draws beyond it are missing; an engine that moved its seam off the
-   posterior shows none.
+   posterior shows none. Parameters named in `jitter` are never flagged at
+   their LOWER bound: a jitter can be zero, so a posterior there is a
+   value, not a rail. The check stays `:ok` and its message names them.
 4. **Log-posterior sanity** — if an `:lp` / `:log_density` column
    exists, flags values below `lp_floor` (default `-1e6`) as corrupt.
 
@@ -172,6 +175,9 @@ checks means no red flag was raised, not that the posterior is correct.
   column holds a parked value, not a posterior draw, and assessing it failed
   sound trans-dim runs on convergence and rails. Masked convergence is per
   parameter, the active draws in order split in half.
+- `jitter` : names of white-noise jitter terms, e.g. `jitter_names(params)`
+  (see [`jitter_names`](@ref)). Their lower bound is exempt from the rail
+  check (see check 3); their upper bound is not.
 
 See also [`FitHealthReport`](@ref), [`FitHealthCheck`](@ref).
 """
@@ -189,6 +195,7 @@ function assess_fit(
     circular = nothing,
     log_scale = nothing,
     active = nothing,
+    jitter = nothing,
 )
     # ----- which parameters to assess -------------------------------
     names_to_check = _resolve_param_names(chains, param_names)
@@ -205,7 +212,8 @@ function assess_fit(
                                     edge_eps = edge_eps,
                                     edge_mass_frac = edge_mass_frac,
                                     circular = circular,
-                                    log_scale = log_scale, active = masks))
+                                    log_scale = log_scale, active = masks,
+                                    jitter = jitter))
     push!(checks, _check_logpost(chains; lp_floor = lp_floor))
 
     overall = _worst(c.status for c in checks)
@@ -510,6 +518,12 @@ end
 # honestly flagged by this check before the seam work, and both would have
 # passed silently had circular params simply been exempted. An engine that moved
 # its seam to the emptiest arc shows no pile-up there and passes.
+#
+# A jitter (`jitter`, see `jitter_names`) piled at its LOWER bound is exempt: a
+# jitter can be zero -- the reported errors may carry all the scatter -- so that
+# is a value, never a pathology. It is named in the `:ok` message instead. Its
+# upper bound is still checked: a jitter railing high is a real noise excess
+# the prior truncated.
 
 _sym_set(::Nothing) = Set{Symbol}()
 _sym_set(xs) = Set{Symbol}(_to_sym(x) for x in xs)
@@ -517,7 +531,8 @@ _sym_set(xs) = Set{Symbol}(_to_sym(x) for x in xs)
 function _check_prior_rail(chains, names_to_check, prior_bounds;
                            edge_eps::Float64, edge_mass_frac::Float64,
                            circular = nothing, log_scale = nothing,
-                           active::Dict{Symbol, BitVector} = Dict{Symbol, BitVector}())
+                           active::Dict{Symbol, BitVector} = Dict{Symbol, BitVector}(),
+                           jitter = nothing)
     if prior_bounds === nothing
         return FitHealthCheck(:prior_rail, :ok,
             "no prior_bounds given — rail check skipped")
@@ -538,7 +553,9 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
     rail_msgs = String[]
     present = Set(names(chains, :parameters))
     circ = _sym_set(circular)
+    jit = _sym_set(jitter)
     seam_msgs = String[]
+    at_zero = String[]                    # jitters consistent with zero
 
     for p in names_to_check
         haskey(bounds_sym, p) || continue
@@ -567,6 +584,12 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
 
         med_rail_lo = (med - lo) <= margin
         med_rail_hi = (hi - med) <= margin
+
+        if p in jit && !is_circ && (med_rail_lo || frac_lo > edge_mass_frac)
+            push!(at_zero, string(p))
+            med_rail_lo = false
+            frac_lo = 0.0
+        end
 
         if is_circ && (med_rail_lo || med_rail_hi ||
                        frac_lo > edge_mass_frac || frac_hi > edge_mass_frac)
@@ -597,7 +620,9 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
 
     if isempty(offenders)
         return FitHealthCheck(:prior_rail, :ok,
-            "no parameter railed against a prior bound")
+            "no parameter railed against a prior bound" *
+            (isempty(at_zero) ? "" : "; jitter at zero (a jitter can be zero; " *
+                                     "not a rail): " * join(at_zero, ", ")))
     else
         parts = String[]
         isempty(rail_msgs) || push!(parts, "prior-edge rail: " * join(rail_msgs, "; "))

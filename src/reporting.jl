@@ -209,7 +209,9 @@ end
 
 Compute model comparison statistics from posterior chains.
 
-Evaluates the model at the median posterior sample and computes:
+Evaluates the model at the best-fit draw -- the max-lp sample of the winning
+model (modal planet count, its live slots and noise configuration; see
+`_winning_draw_idx`), with that draw's trans-dim active set -- and computes:
 - RV RMS, weighted RMS, Chi2, reduced Chi2
 - PM RMS, Chi2, reduced Chi2 (if photometry present)
 - BIC, AIC (requires `log_L_max`)
@@ -226,24 +228,11 @@ function compute_model_stats(chains, data::Data, params::Params;
     n_pm_obs = n_phot(data)
     ndat = n_rv_obs + n_pm_obs
 
-    # --- Build Theta from median posterior sample ---
-    chain_names = Set(names(chains, :parameters))
-    theta = Theta{Float64}(params)
-
-    # Set N_p from chain if available (trans-dim)
-    if :n_planets in chain_names
-        np_samp = vec(Array(chains[:n_planets]))
-        # Use the mode (most probable N_p) for stats evaluation
-        np_mode = _mode_int(np_samp)
-        set_n_p!(theta, np_mode)
-    end
-
-    for name in params.layout.unfrozen_names
-        sym = Symbol(name)
-        sym in chain_names || continue
-        samp = vec(Array(chains[sym]))
-        set_param!(theta, name, median(samp))
-    end
+    # --- The best-fit draw of the winning model ---
+    # Not per-parameter medians with `set_n_p!(modal)`: medians are not a model
+    # on the posterior ridge, and `n_p` switches on slots 1:modal -- a parked
+    # slot after a death mid-list, while the live one is left out.
+    theta = _theta_best_lp(chains, params; active_idx = _winning_draw_idx(chains, params))
 
     # --- RV diagnostics ---
     if n_rv_obs > 0
@@ -654,14 +643,18 @@ function _conditional_fitted_stats(chains, params::Params, mask::BitVector,
     stats = Vector{Pair{String, ParamStats}}()
     max_kp = params.config.max_kplanet
     chain_names = Set(names(chains, :parameters))
+    live, slot_mask = _conditional_live_slots(chains, params, mask, np_val)
 
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in chain_names || continue
 
-        # Skip planet params for inactive planets
+        # Planet params: only the slots live in this conditional's modal
+        # pattern, summarised over the draws in which that slot is live.
         planet_idx = _param_planet_index(name, max_kp)
-        if planet_idx !== nothing && planet_idx > np_val
+        if planet_idx !== nothing
+            planet_idx in live || continue
+            push!(stats, name => ParamStats(vec(Array(chains[sym]))[slot_mask(planet_idx)]))
             continue
         end
 
@@ -711,18 +704,40 @@ function _conditional_derived_stats(chains, params::Params, mask::BitVector,
                                    M_s=M_s, R_s=R_s, T_eff=T_eff,
                                    J_mag=J_mag, K_mag=K_mag, Ab=Ab)
     stats = Vector{Pair{String, ParamStats}}()
+    live, slot_mask = _conditional_live_slots(chains, params, mask, np_val)
     for dp in derived_vec
         k_str = split(dp.name, "_")[end]
         k_int = parse(Int, k_str)
-        # Only report derived params for active planets in this N_p
-        k_int > np_val && continue
+        # Only the slots live in this conditional, over their live draws
+        k_int in live || continue
+        sub = slot_mask(k_int)[mask]            # sub_chains rows are mask's rows
         for (key, samples) in dp.values
             label = "$(key)_k$(k_str)"
-            push!(stats, label => ParamStats(samples))
+            push!(stats, label => ParamStats(samples[sub]))
         end
     end
 
     return stats
+end
+
+"""
+    _conditional_live_slots(chains, params, mask, np_val) -> (live, slot_mask)
+
+The planet slots live in the N_p conditional `mask` -- its modal active
+pattern, from `planet_active_<k>` -- and, per slot, the draws of `mask` in
+which that slot is live. Not `1:np_val` over every draw of `mask`: after a
+death in the middle of the slot list the live slots are others, and a parked
+slot's values are not a posterior. Chains without the columns fall back to
+`1:np_val`.
+"""
+function _conditional_live_slots(chains, params::Params, mask::BitVector, np_val::Int)
+    tdc = _td_cols(chains, params)
+    if tdc === nothing || !any(mask)
+        return Set(1:np_val), k -> mask
+    end
+    i = first(_modal_rows(tdc, findall(mask); noise = false))
+    live = Set(k for k in eachindex(tdc.planet) if tdc.planet[k][i])
+    return live, k -> mask .& tdc.planet[k]
 end
 
 """Mode of an integer-valued sample vector (most frequent value)."""

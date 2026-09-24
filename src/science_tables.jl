@@ -160,14 +160,17 @@ end
 #
 # `shift` (see `log_scale_shift`) puts the span on the scale the prior is flat on.
 # Measured linearly, every period under 30 d on LogUniform(0.1, 3000) railed.
-function _railed(ci3, lo, hi, shift = nothing)
+#
+# `floor_ok` exempts the lower bound: a jitter can be zero, so a CI down to its
+# floor is a value, not a prior-dominated one (see `jitter_names`).
+function _railed(ci3, lo, hi, shift = nothing; floor_ok::Bool = false)
     (isfinite(lo) && isfinite(hi) && hi > lo) || return (false, "")
     if shift !== nothing && lo + shift > 0
         g(x) = log(max(x, lo) + shift)
         ci3, lo, hi = (g(ci3[1]), g(ci3[2])), g(lo), g(hi)
     end
     tol = 0.01 * (hi - lo)
-    (ci3[1] - lo) < tol && return (true, "lower")
+    !floor_ok && (ci3[1] - lo) < tol && return (true, "lower")
     (hi - ci3[2]) < tol && return (true, "upper")
     return (false, "")
 end
@@ -199,11 +202,16 @@ function science_fitted(chains, params::Params)
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
     circ = circular_names(params)
+    jit = jitter_names(params)
+    # The winning model's live SLOTS, not `1:modal_np`: after a death in the
+    # middle of the slot list the live planet sits in a later slot, and the
+    # count-based cut dropped it from the table (see `_winning_planet_slots`).
+    live = Set(_winning_planet_slots(chains, params))
     for name in params.layout.unfrozen_names
         Symbol(name) in allnames || continue
-        # skip planet params for planets beyond the winning count
+        # skip planet params for slots that are not in the winning model
         pidx = _param_planet_index(name, max_kp)
-        (pidx !== nothing && pidx > modal_np) && continue
+        (pidx !== nothing && !(pidx in live)) && continue
         e = sci_param_entry(chains, params, name)
         e === nothing && continue
         d = sci_entry_dict(e)
@@ -214,14 +222,16 @@ function science_fitted(chains, params::Params)
         # is checked against the user's prior in the degrees its CI is reported
         # in. This used to skip every angle, which was harmless while Ω and λ
         # were not registered as angles; now that they are, a narrow-arc λ prior
-        # would have silently lost its flag.
+        # would have silently lost its flag. A jitter can be zero: only its
+        # upper bound is checked.
         _, is_ang = sci_param_unit(name, params)
         if !(name in circ)
             ps = params.config.priors[name]
             lo, hi = bounds(ps)
             is_ang && ((lo, hi) = (rad2deg(lo), rad2deg(hi)))
             rail, side = _railed(d["ci3"], lo, hi,
-                                 is_ang ? nothing : log_scale_shift(ps))
+                                 is_ang ? nothing : log_scale_shift(ps);
+                                 floor_ok = name in jit)
             d["railed"] = rail
             rail && (d["railed_bound"] = side)
         end
@@ -230,6 +240,7 @@ function science_fitted(chains, params::Params)
 
     conditioning = Dict{String, Any}(
         "n_planets" => modal_np,
+        "planet_slots" => sort!(collect(live)),
         "active_noise_models" => active_noise,
         "note" => "stats conditioned on each component being active; " *
                   "occupancy field = P(component active | data)",
@@ -310,11 +321,12 @@ function science_derived(chains, params::Params;
     allnames = names(chains, :parameters)
     modal_np = :n_planets in allnames ? _mode_int(vec(Array(chains[:n_planets]))) :
                cfg.max_kplanet
+    live = Set(_winning_planet_slots(chains, params))   # not 1:modal_np
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
     for dp in derived_vec
         k = parse(Int, split(dp.name, "_")[end])     # "planet_1" → 1
-        k > modal_np && continue
+        k in live || continue
         mask = _planet_active_mask(chains, k)
         # add P in years alongside the compute_derived outputs
         vals = copy(dp.values)
@@ -330,7 +342,9 @@ function science_derived(chains, params::Params;
             push!(entries, "$(key)_k$k" => sci_entry_dict(e))
         end
     end
-    conditioning = Dict{String, Any}("n_planets" => modal_np, "stellar" => stellar,
+    conditioning = Dict{String, Any}("n_planets" => modal_np,
+                                     "planet_slots" => sort!(collect(live)),
+                                     "stellar" => stellar,
         "note" => "derived per-draw with stellar (M★/R★/T_eff) uncertainty " *
                   "propagated; conditioned on planet active")
     return entries, conditioning

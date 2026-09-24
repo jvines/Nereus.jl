@@ -97,8 +97,7 @@ function semimajor_axis_au(P::Real, M_s::Real)
     # negative semi-major axis instead of throwing.
     (!(P > 0) || !(M_s > 0)) && return NaN
     P_s = P * _DS
-    M_s_g = M_s * _MS
-    a_cm = cbrt(G_CGS * M_s_g * P_s^2 / (4π^2))
+    a_cm = cbrt(GM_SUN_CGS * M_s * P_s^2 / (4π^2))
     return a_cm / AU_CM
 end
 
@@ -604,7 +603,7 @@ function compute_derived(chains, params::Params;
                      vec(Array(chains[Symbol("M_sec_k$k")])) : zeros(length(a_au_s))
             mpri_s = :M_pri in chain_syms ? vec(Array(chains[:M_pri])) :
                      fill(isnan(config.M_s) ? 1.0 : Float64(config.M_s), length(a_au_s))
-            P = sqrt.(a_au_s .^ 3 ./ max.(mpri_s .+ msec_s, 1e-6)) .* 365.25
+            P = sqrt.(a_au_s .^ 3 ./ max.(mpri_s .+ msec_s, 1e-6)) .* KEPLER_YEAR_DAYS
         end
 
         # Draws where planet k exists. Only these vote on where the seam of a

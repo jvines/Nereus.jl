@@ -70,9 +70,26 @@ function plot_rm(chains, params, data;
         else
             active_idx = collect(1:_n_flat_draws(chains)); theta_med = Theta{Float64}(params)
         end
-        active_idx = intersect(active_idx, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
-        isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
+        let cut = intersect(active_idx, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
+            isempty(cut) || (active_idx = cut)          # empty: keep the winners
+        end
         set_theta_best_lp!(theta_med, chains, params, active_idx)
+        # The RM planet must be LIVE in the winning model: the first RM-enabled
+        # slot of the layout may be parked, and its fold would be a phantom.
+        if theta_med.td !== nothing
+            live = collect(planet_indices(theta_med))
+            if planet === nothing
+                j = findfirst(k -> has_any_rm(modes[k]), live)
+                if j === nothing
+                    @warn "plot_rm: no RM-enabled planet is active in the winning model"
+                    return Figure()
+                end
+                rm_k = live[j]
+            elseif !(rm_k in live)
+                @warn "plot_rm: planet $rm_k is not active in the winning model"
+                return Figure()
+            end
+        end
 
         # RM-free baseline: same theta with v·sin i_* = 0 → rv_predictions drops RM.
         theta0 = Theta{Float64}(params, copy(theta_med.values); td = theta_med.td)
@@ -120,8 +137,11 @@ function plot_rm(chains, params, data;
         npool = min(n_draws, length(active_idx))
         sel = active_idx[unique(round.(Int, range(1, length(active_idx); length = npool)))]
         M = Matrix{Float64}(undef, length(t_dense), length(sel))
+        tdc = _td_cols(chains, params)       # each draw with its own active set
+        cols = _chain_cols(chains, params)   # ONCE, not once per draw
         for (d, idx) in enumerate(sel)
-            M[:, d] = _rm_curve_at(_theta_from_chain_row(chains, params, idx), data, t_dense)
+            M[:, d] = _rm_curve_at(_theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols),
+                                   data, t_dense)
         end
         b = _bands123(M)
         _band_stack!(ax, hr_dense, b)

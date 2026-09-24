@@ -46,6 +46,21 @@ using PlanetOrbits
         @test a_from_P(4332.0, 1.001) ≈ 5.205 rtol=0.005
     end
 
+    @testset "the built orbit has the period it was given" begin
+        # a_from_P used the Julian year while PlanetOrbits recomputes the
+        # period from (a, M) with the year that makes G = 4π² exact, so every
+        # astrometric orbit ran 1.89e-5 long: the astrometry drifted against
+        # the RV model of the same planet, and Mo + 2π was not one full turn.
+        # Nothing about the orbit is allowed to round-trip to a different
+        # period than the one sampled.
+        for (P, M_pri, M_sec) in ((365.2568983840419, 1.0, 0.0), (4332.0, 1.0, 0.001),
+                                  (571.3, 0.644, 0.0113), (1763.5, 0.644, 0.046))
+            orb = Nereus.build_orbit(P, 0.3, 0.7, 2.1, 1.2, M_pri, M_sec, 57000.0, 13.6)
+            @test PlanetOrbits.period(orb) ≈ P rtol=1e-12
+        end
+        @test a_from_P(365.2568983840419, 1.0) ≈ 1.0 rtol=1e-12
+    end
+
     @testset "build_orbit — Jupiter face-on" begin
         orb = Nereus.build_orbit(4332.0, 0.05, 0.0, 0.0,
                                    deg2rad(1.0),  # nearly face-on

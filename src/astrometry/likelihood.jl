@@ -152,33 +152,15 @@ end
 # ---------------------------------------------------------------------
 
 """
-    hgca_log_likelihood(theta, data) -> ll
+    _hgca_model_pm(theta, hgca, data, M_pri, plx, t_ref) -> (pmra_mod, pmdec_mod)
 
-Gaussian log-likelihood of HGCA, treating the three epochs as
-independent in time and using the **2×2 within-epoch RA-Dec
-covariance** for each (Brandt 2021 Appendix Eq. 1).
-
-Per-epoch term: `(r_k − μ_b)ᵀ C_k⁻¹ (r_k − μ_b)` where
-`r_k = (pmra_obs[k] − reflex_RA[k], pmdec_obs[k] − reflex_Dec[k])` and
-`μ_b = (μ_α*,bary, μ_δ,bary)` is the system barycentric PM (a 2-vector,
-shared across the three epochs).
-
-The barycentric PM is **analytically marginalized jointly in (RA, Dec)**:
-optimal `μ_b = A⁻¹ v` where `A = Σ_k C_k⁻¹` (2×2) and
-`v = Σ_k C_k⁻¹ r_k` (2-vector). Marginalized χ² is then
-`Σ_k r_kᵀ C_k⁻¹ r_k − vᵀ A⁻¹ v` plus the Gaussian normalization.
-
-Returns 0 if `data.hgca` is `nothing`.
+The model proper motion at the three HGCA epochs: the summed stellar reflex
+of every astrometrically active companion, with the Hipparcos–Gaia epoch as
+the mean reflex velocity over the baseline and the Gaia epoch through GOST
+(Mode B) when scan plans are supplied. The part of `hgca_log_likelihood`
+that `plot_pm_residuals` must reproduce exactly, so it lives here once.
 """
-function hgca_log_likelihood(theta::Theta{T}, data) where {T<:Real}
-    hgca = data.hgca
-    hgca === nothing && return zero(T)
-
-    M_pri  = astrom_M_pri(theta)
-    plx    = astrom_plx(theta)
-    t_ref  = data.t_ref
-    log_2π = oftype(plx, log(2π))
-
+function _hgca_model_pm(theta::Theta{T}, hgca, data, M_pri, plx, t_ref) where {T<:Real}
     # Sum of stellar reflex PM at the three epochs from all astrometry-
     # bearing companions.
     #
@@ -228,6 +210,38 @@ function hgca_log_likelihood(theta::Theta{T}, data) where {T<:Real}
             pmdec_mod[ie] += μdec
         end
     end
+    return pmra_mod, pmdec_mod
+end
+
+"""
+    hgca_log_likelihood(theta, data) -> ll
+
+Gaussian log-likelihood of HGCA, treating the three epochs as
+independent in time and using the **2×2 within-epoch RA-Dec
+covariance** for each (Brandt 2021 Appendix Eq. 1).
+
+Per-epoch term: `(r_k − μ_b)ᵀ C_k⁻¹ (r_k − μ_b)` where
+`r_k = (pmra_obs[k] − reflex_RA[k], pmdec_obs[k] − reflex_Dec[k])` and
+`μ_b = (μ_α*,bary, μ_δ,bary)` is the system barycentric PM (a 2-vector,
+shared across the three epochs).
+
+The barycentric PM is **analytically marginalized jointly in (RA, Dec)**:
+optimal `μ_b = A⁻¹ v` where `A = Σ_k C_k⁻¹` (2×2) and
+`v = Σ_k C_k⁻¹ r_k` (2-vector). Marginalized χ² is then
+`Σ_k r_kᵀ C_k⁻¹ r_k − vᵀ A⁻¹ v` plus the Gaussian normalization.
+
+Returns 0 if `data.hgca` is `nothing`.
+"""
+function hgca_log_likelihood(theta::Theta{T}, data) where {T<:Real}
+    hgca = data.hgca
+    hgca === nothing && return zero(T)
+
+    M_pri  = astrom_M_pri(theta)
+    plx    = astrom_plx(theta)
+    t_ref  = data.t_ref
+    log_2π = oftype(plx, log(2π))
+
+    pmra_mod, pmdec_mod = _hgca_model_pm(theta, hgca, data, M_pri, plx, t_ref)
 
     # Build the 2-vector residuals and accumulate (A, v, Σ_k r'C⁻¹r)
     # via per-epoch 2×2 inversion.
@@ -465,6 +479,10 @@ function _iad_ref_offsets(iad)
     return offs, Bool[any(!=(0.0), o) for o in offs]
 end
 
+# The no-astrometric-planet case, hoisted to a const so that path neither
+# allocates nor hands `_iad_residuals!` an abstract element type.
+const _NO_ORBITS = PlanetOrbits.AbstractOrbit[]
+
 """
     _iad_active_orbits(theta, M_pri, plx, t_ref) -> (active_ks, orbs, M_secs)
 
@@ -476,8 +494,17 @@ Hipparcos that is 30-150 transits times a few planets, all identical.
 """
 function _iad_active_orbits(theta::Theta{T}, M_pri, plx, t_ref) where {T<:Real}
     active_ks = Int[]
-    orbs      = Any[]
     M_secs    = T[]
+    # NOT `Any[]`. `_iad_residuals!` reads `orbs[ki]` once per abscissa, so an
+    # abstract element type puts a dynamic dispatch and a boxed return on the
+    # innermost loop of the whole fit -- 824 of them per likelihood call on a
+    # Gaia DR4 source, measured at 151 ns and 214 B each: 216 us and 172 KiB per
+    # call, against 92 us and 0.2 KiB with a concrete eltype. That 182 KiB/eval
+    # also put 24% of a fit's wall time in GC. `_planet_orbit` is not inferrable
+    # (the planet-block container is abstractly typed), so take the element type
+    # from the first orbit at run time; `_iad_residuals!` and `gost_5param_fit`
+    # are function barriers and specialise on whatever concrete vector they get.
+    orbs      = nothing
     for k in planet_indices(theta)
         block = theta.params.layout.planet_blocks[k]
         has_AS(block) || continue
@@ -487,12 +514,17 @@ function _iad_active_orbits(theta::Theta{T}, M_pri, plx, t_ref) where {T<:Real}
         # Defaults true, so fixed-dim behaviour is unchanged.
         is_planet_as_active(theta, k) || continue
         orb_k, M_sec_k = _planet_orbit(theta, k, M_pri, plx, t_ref)
+        orbs === nothing && (orbs = Vector{typeof(orb_k)}())
         push!(active_ks, k)
         push!(orbs, orb_k)
         push!(M_secs, M_sec_k)
     end
-    return active_ks, orbs, M_secs
+    # Every branch of `_planet_orbit` (including the SB2 one) ends in the same
+    # `build_orbit` call, so one theta never mixes orbit types and the typed
+    # vector never has to widen.
+    return active_ks, (orbs === nothing ? _NO_ORBITS : orbs), M_secs
 end
+
 
 """
     _iad_residuals!(r, iad, orbs, M_secs, plx) -> r
@@ -509,6 +541,143 @@ by a constant in the instrument's zero-point span, which the
 marginalisation absorbs.
 """
 function _iad_residuals!(r::AbstractVector{T}, iad, orbs, M_secs, plx) where {T<:Real}
+    # Every abscissa shares these orbits, so reduce each one to its
+    # epoch-independent Thiele-Innes constants ONCE rather than re-deriving the
+    # geometry inside `orbitsolve` at all 824 of them
+    # (`_reflex_kernel`, src/astrometry/projection.jl).
+    #
+    # The fast/fallback choice is made HERE, for the whole vector, and never
+    # per element. Returning `ReflexKernel` for one orbit and `ReflexFallback`
+    # for another would make this a `Vector{Union{...}}`, and `_reflex_offset`
+    # would go back to being a dynamic dispatch on the innermost loop --
+    # measured, that costs more than the hoist saves (236 KiB/eval against
+    # 12.5). Both branches below build a CONCRETE vector and hand it to the
+    # same function barrier, which specialises on it.
+    if all(_reflex_fast_applicable, orbs)
+        ks = [_reflex_kernel(orbs[ki], M_secs[ki]) for ki in eachindex(orbs)]
+        return _iad_residuals_kernels!(r, iad, ks, plx)
+    else
+        fb = [ReflexFallback(orbs[ki], M_secs[ki]) for ki in eachindex(orbs)]
+        return _iad_residuals_kernels!(r, iad, fb, plx)
+    end
+end
+
+"""
+    _kepler_from_neighbour(e, M, E0, s0, c0) -> (E, sin E, cos E, ok)
+
+Kepler solution at mean anomaly `M`, refined from a neighbouring epoch's already
+solved `(E0, sin E0, cos E0)` instead of from scratch.
+
+The abscissae of one field-of-view transit sit within 40 s of each other
+(`grp_head`, src/astrometry/data.jl), across which the mean anomaly moves ~2e-6
+rad for a 1183 d orbit — so Newton from the group's head converges in two steps,
+and the sine and cosine come from angle-sum identities over those two tiny
+corrections rather than two more libm calls.
+
+`ok` is the point: the last thing computed is the actual Kepler residual
+`E - e sin E - M`, so the caller finds out whether the refinement really landed
+rather than assuming it. It does not for a short-period, high-eccentricity orbit
+whose group spans an appreciable fraction of a radian near periastron, and the
+caller then pays for a full solve. That makes this an optimisation with no
+accuracy regime to reason about: it is either as good as Markley or it is not
+used.
+"""
+@inline function _kepler_from_neighbour(e, δ, E0, s0, c0)
+    # Everything is expressed as an INCREMENT on the head's solution. `δ` is the
+    # mean-anomaly step across the group, formed from the time difference, and
+    # the target anomaly is never materialised. That matters: `_markley_sc`
+    # reduces its argument with `rem2pi`, so `E0` solves the head's REDUCED
+    # anomaly, and differencing a raw sibling anomaly against it would carry
+    # every 2π wrap into δ. On a prior draw with |M| ~ 1e6 that produced a
+    # mirror-asymmetry of 2e13 in the node-flip test — caught there, not here.
+    #
+    # Since the head satisfies E0 - e sin E0 = M_head exactly, Kepler's residual
+    # at the head for the sibling's anomaly is just -δ.
+    d1 = δ / (1 - e * c0)
+    s1, c1 = _rotate_by(s0, c0, d1)
+    E1 = E0 + d1
+    # f(E1) for the sibling = (E1 - e sin E1) - (E0 - e sin E0) - δ, a difference
+    # of O(1) quantities with no large anomaly anywhere in it.
+    f1 = (E1 - e * s1) - (E0 - e * s0) - δ
+    d2 = -f1 / (1 - e * c1)
+    s2, c2 = _rotate_by(s1, c1, d2)
+    E2 = E1 + d2
+    f2 = (E2 - e * s2) - (E0 - e * s0) - δ
+    return (E2, s2, c2, abs(f2) <= 1e-12)
+end
+
+# (sin(x+d), cos(x+d)) from (sin x, cos x) for a SMALL d, by angle-sum with a
+# three-term series. Error ~ d^6/720: exact to Float64 for the |d| < 1e-2 this
+# is used at, and when d is larger the caller's residual check rejects the
+# result anyway.
+@inline function _rotate_by(s, c, d)
+    d2 = d * d
+    sd = d * (1 - d2 / 6 * (1 - d2 / 20))
+    cd = 1 - d2 / 2 * (1 - d2 / 12)
+    return (s * cd + c * sd, c * cd - s * sd)
+end
+
+# Grouped path: one Markley solve per epoch group instead of one per abscissa.
+# Only for a SINGLE companion — the overwhelmingly common astrometric fit —
+# because carrying a per-kernel head state for several would need a buffer, and
+# the multi-companion case falls through to the generic loop below.
+function _iad_residuals_kernels!(r::AbstractVector{T}, iad,
+                                 kernels::AbstractVector{<:ReflexKernel},
+                                 plx) where {T<:Real}
+    length(kernels) == 1 || return _iad_residuals_generic!(r, iad, kernels, plx)
+    k = kernels[1]
+    ref_off, needs_ref = _iad_ref_offsets(iad)
+    Δplx = plx - _iad_ref_common(iad)[3]
+    head = 0
+    t_head = zero(eltype(iad.t))
+    E0 = s0 = c0 = zero(typeof(k.e))
+    @inbounds for j in eachindex(r)
+        h = iad.grp_head[j]
+        local sE, cE
+        if h != head
+            head = h
+            t_head = iad.t[j]
+            E0, s0, c0 = _markley_sc(k.n_per_day * (t_head - k.tp), k.e)
+            sE, cE = s0, c0
+        else
+            # The step across the group, straight from the time difference, so
+            # it stays ~1e-6 rad instead of inheriting the anomaly's magnitude.
+            δ = k.n_per_day * (iad.t[j] - t_head)
+            _, sE, cE, ok = _kepler_from_neighbour(k.e, δ, E0, s0, c0)
+            if !ok
+                _, sE, cE = _markley_sc(k.n_per_day * (iad.t[j] - k.tp), k.e)
+            end
+        end
+        X = cE - k.e
+        Y = k.sqrt1me2 * sE
+        Δη_mod = (k.sB * X + k.sG * Y) * iad.sinpsi[j] +
+                 (k.sA * X + k.sF * Y) * iad.cospsi[j] +
+                 Δplx * iad.parallax_factor[j]
+        m = iad.inst[j]
+        if needs_ref[m]
+            r[j] = iad.abscissa[j] +
+                   _iad_ref_offset(ref_off[m], iad.sinpsi[j], iad.cospsi[j],
+                                   iad.parallax_factor[j], iad.pm_factor[j]) - Δη_mod
+        else
+            r[j] = iad.abscissa[j] - Δη_mod
+        end
+    end
+    return r
+end
+
+_iad_residuals_kernels!(r::AbstractVector, iad, kernels, plx) =
+    _iad_residuals_generic!(r, iad, kernels, plx)
+
+"""
+    _iad_residuals_generic!(r, iad, kernels, plx) -> r
+
+The residual loop proper, one full Kepler solve per abscissa per companion.
+Separate from `_iad_residuals!` so it is a function barrier: it specialises on
+the concrete element type of `kernels`, which is what keeps `_reflex_offset` a
+static call inside the innermost loop. Used for several companions, and for any
+orbit the closed-form kernel declines (`ReflexFallback`).
+"""
+function _iad_residuals_generic!(r::AbstractVector{T}, iad, kernels, plx) where {T<:Real}
     ref_off, needs_ref = _iad_ref_offsets(iad)
     # The shared block means "correction to `ref_c`" (see `_iad_ref_common`),
     # so the parallax the model has to supply is the correction implied by the
@@ -518,18 +687,22 @@ function _iad_residuals!(r::AbstractVector{T}, iad, orbs, M_secs, plx) where {T<
     Δplx = plx - _iad_ref_common(iad)[3]
     @inbounds for j in eachindex(r)
         t_j = iad.t[j]
-        ψ_j = iad.psi[j]
+        # `iad.sinpsi`/`iad.cospsi` instead of `along_scan_projection(.., ψ_j)`
+        # and a second `sincos` on the residual branch below: ψ is data, and
+        # this loop runs 824 times per evaluation and 3.3M evaluations per fit.
+        # Same values, so the residuals are bit-identical (max|Δ| = 0 measured).
+        s = iad.sinpsi[j]
+        c = iad.cospsi[j]
         Δη_mod = zero(T)
-        for ki in eachindex(orbs)
-            Δra, Δdec = star_reflex_offset(orbs[ki], t_j, M_secs[ki])
-            Δη_mod += along_scan_projection(Δra, Δdec, ψ_j)
+        for ki in eachindex(kernels)
+            Δra, Δdec = _reflex_offset(kernels[ki], t_j)
+            Δη_mod += Δra * s + Δdec * c
         end
         # Parallax is a sampled parameter, not a marginalised nuisance, so its
         # along-scan term belongs in the model alongside the orbit reflex.
         Δη_mod += Δplx * iad.parallax_factor[j]
         m = iad.inst[j]
         if needs_ref[m]
-            s, c = sincos(ψ_j)
             w_j = iad.abscissa[j] + _iad_ref_offset(ref_off[m], s, c,
                                                     iad.parallax_factor[j],
                                                     iad.pm_factor[j])
@@ -564,19 +737,22 @@ function _iad_normal_equations!(A::AbstractMatrix{T}, v::AbstractVector{T},
                                 pm_fac::AbstractVector{<:Real},
                                 pos_col::Vector{Int}) where {T<:Real}
     rWr = zero(T)
-    log_sigma_sum = zero(T)
+    # ψ, σ and therefore Σ log σ are DATA: cached on the IADData at construction
+    # rather than rebuilt here on every one of a fit's millions of evaluations
+    # (measured 11.8 us -> 5.1 us on 824 abscissae). The cached sum accumulates
+    # in the same order this loop used, so it is the identical Float64.
+    log_sigma_sum = convert(T, iad.log_sigma_sum)
     @inbounds for j in eachindex(r)
-        s, c = sincos(iad.psi[j])
+        s    = iad.sinpsi[j]
+        c    = iad.cospsi[j]
         pmf  = pm_fac[j]
         p    = pos_col[iad.inst[j]]
         cols = (p, p + 1, 3, 4)
         xs   = (s, c, s * pmf, c * pmf)
-        σ  = iad.abscissa_err[j]
-        w  = 1 / (σ * σ)
+        w  = iad.weight[j]
         rj = r[j]
 
         rWr += w * rj * rj
-        log_sigma_sum += log(σ)
 
         for a in 1:4
             wa = w * xs[a]
@@ -587,6 +763,36 @@ function _iad_normal_equations!(A::AbstractMatrix{T}, v::AbstractVector{T},
         end
     end
     return rWr, log_sigma_sum
+end
+
+"""
+    _iad_marginalised_residuals!(out, iad, r, q_opt, pm_fac, pos_col) -> out
+
+`r` minus the fitted catalogue solution, transit by transit -- what the
+marginalisation actually leaves behind, for diagnostics that need the
+residuals themselves rather than the χ².
+
+Lives HERE, beside `_iad_normal_equations!`, because it must use that
+function's design row and nothing else: `cols = (p, p+1, 3, 4)` with
+`xs = (s, c, s·pmf, c·pmf)`. A second hand-written copy in the plotting
+code is exactly what went wrong -- it still carried the pre-removal 5-wide
+catalogue layout `(Δα₀, Δδ₀, ϖ, μα*, μδ)`, so it multiplied μα* by the
+parallax factor, shifted both proper-motion terms one column, and read
+`q_opt[5]`, which does not exist for a single instrument (`_iad_n_q(1)` is
+4). Under `@inbounds` that read past the end of the vector instead of
+throwing, and `iad_residuals.png` came out empty with χ²/N = NaN.
+"""
+function _iad_marginalised_residuals!(out::AbstractVector, iad, r::AbstractVector,
+                                      q_opt::AbstractVector, pm_fac, pos_col)
+    @inbounds for j in eachindex(r)
+        s    = iad.sinpsi[j]     # cached; see `_iad_normal_equations!`
+        c    = iad.cospsi[j]
+        pmf  = pm_fac[j]
+        p    = pos_col[iad.inst[j]]
+        out[j] = r[j] - (q_opt[p] * s + q_opt[p + 1] * c +
+                         q_opt[3] * s * pmf + q_opt[4] * c * pmf)
+    end
+    return out
 end
 
 """
@@ -1111,6 +1317,42 @@ end
 # ---------------------------------------------------------------------
 
 """
+    _g23h_model_pm(theta, g23h, data, M_pri, plx, t_ref) -> (pmra_mod, pmdec_mod)
+
+The model proper motion at the five G23H epochs: the summed stellar reflex of
+every astrometrically active companion, the DR3 epoch through GOST (Mode B)
+when scan plans are supplied. The part of `g23h_log_likelihood` that
+`plot_g23h_residuals` must reproduce exactly, so it lives here once.
+"""
+function _g23h_model_pm(theta::Theta{T}, g23h, data, M_pri, plx, t_ref) where {T<:Real}
+    # Forward-model stellar reflex PM at each of 5 G23H epochs.
+    pmra_mod  = zeros(T, 5)
+    pmdec_mod = zeros(T, 5)
+    use_gost_mode_b = data.gost !== nothing
+    for k in planet_indices(theta)
+        block = theta.params.layout.planet_blocks[k]
+        has_AS(block) || continue
+        # Per-planet astrometric coupling. A companion the RV has established
+        # can still be astrometrically undetected; when the mask says so it
+        # contributes NO reflex here, and its inc/Omega carry their priors.
+        # Defaults true, so fixed-dim behaviour is unchanged.
+        is_planet_as_active(theta, k) || continue
+        orb, M_sec = _planet_orbit(theta, k, M_pri, plx, t_ref)
+        for ie in 1:5
+            t_e = g23h.epochs[ie]
+            if ie == 5 && use_gost_mode_b
+                μra, μdec = gost_window_avg_pm(orb, data.gost, M_sec)
+            else
+                μra, μdec = star_reflex_pm(orb, t_e, M_sec)
+            end
+            pmra_mod[ie]  += μra
+            pmdec_mod[ie] += μdec
+        end
+    end
+    return pmra_mod, pmdec_mod
+end
+
+"""
     g23h_log_likelihood(theta, data) -> ll
 
 Joint log-likelihood for the Thompson+ 2026 G23H catalog
@@ -1164,30 +1406,7 @@ function g23h_log_likelihood(theta::Theta{T}, data) where {T<:Real}
     t_ref  = data.t_ref
     log_2π = oftype(plx, log(2π))
 
-    # Forward-model stellar reflex PM at each of 5 G23H epochs.
-    pmra_mod  = zeros(T, 5)
-    pmdec_mod = zeros(T, 5)
-    use_gost_mode_b = data.gost !== nothing
-    for k in planet_indices(theta)
-        block = theta.params.layout.planet_blocks[k]
-        has_AS(block) || continue
-        # Per-planet astrometric coupling. A companion the RV has established
-        # can still be astrometrically undetected; when the mask says so it
-        # contributes NO reflex here, and its inc/Omega carry their priors.
-        # Defaults true, so fixed-dim behaviour is unchanged.
-        is_planet_as_active(theta, k) || continue
-        orb, M_sec = _planet_orbit(theta, k, M_pri, plx, t_ref)
-        for ie in 1:5
-            t_e = g23h.epochs[ie]
-            if ie == 5 && use_gost_mode_b
-                μra, μdec = gost_window_avg_pm(orb, data.gost, M_sec)
-            else
-                μra, μdec = star_reflex_pm(orb, t_e, M_sec)
-            end
-            pmra_mod[ie]  += μra
-            pmdec_mod[ie] += μdec
-        end
-    end
+    pmra_mod, pmdec_mod = _g23h_model_pm(theta, g23h, data, M_pri, plx, t_ref)
 
     # Build 10-vector of residuals.
     r = Vector{T}(undef, 10)
@@ -1347,7 +1566,7 @@ function obs_based_log_prior(theta::Theta{T}, data) where {T<:Real}
         sqrt_1me2 = sqrt(1 - e_safe * e_safe)
         # Prefactor: ((G M_tot P) / (2π^4))^(1/3) in AU·yr⁻¹·M_sun
         # → simplifies in solar/AU/yr units to (M_tot P_yr / (2π²))^(1/3)
-        P_yr = P_d / oftype(P_d, 365.25)
+        P_yr = P_d / oftype(P_d, KEPLER_YEAR_DAYS)   # G ≡ 4π² year, as above
         prefactor = cbrt(M_tot * P_yr / (fourpi2 / 2))
 
         contrib = zero(T)
