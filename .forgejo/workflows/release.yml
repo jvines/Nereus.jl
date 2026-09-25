@@ -111,6 +111,13 @@ jobs:
       - name: Publish
         run: |
           set -euo pipefail
+          # A secret stored with a trailing newline puts that newline into
+          # every Authorization header, and the client refuses to send it:
+          # "invalid header field value for Authorization" -- which is how the
+          # first 0.7.0 publish died after the tag had already gone out. No
+          # token contains whitespace, so strip all of it.
+          GH_TOKEN=$(printf '%s' "$GH_TOKEN" | tr -d '[:space:]'); export GH_TOKEN
+          TWINE_PASSWORD=$(printf '%s' "$TWINE_PASSWORD" | tr -d '[:space:]'); export TWINE_PASSWORD
           cfg() { python3 -c 'import json,os,sys;print(json.loads(os.environ["RELEASE_CONFIG"])[sys.argv[1]])' "$1"; }
           cd "$(cfg nereus_jl)"
           tools/release/publish.sh "${{ inputs.nereus_version }}" "${{ inputs.astronereus_version }}" --confirm
