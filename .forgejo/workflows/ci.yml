@@ -68,9 +68,14 @@ jobs:
         id: matrix
         run: |
           set -euo pipefail
-          m='${{ vars.RUNNER_MATRIX }}'
+          # tr -d: a stored value with a trailing newline writes a SECOND,
+          # empty line into $GITHUB_OUTPUT, and the runner rejects the whole
+          # file with "invalid format ''" -- failing the job after the scan
+          # had already passed. Strip it here rather than trusting how the
+          # variable was stored.
+          m=$(printf '%s' '${{ vars.RUNNER_MATRIX }}' | tr -d '\r\n')
           [ -n "$m" ] || { echo "RUNNER_MATRIX is unset; refusing to run a suite on no runners" >&2; exit 1; }
-          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+          printf 'matrix=%s\n' "$m" >> "$GITHUB_OUTPUT"
 
       - name: Fetch and scan
         run: |
