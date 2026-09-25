@@ -51,6 +51,11 @@ jobs:
       FORGEJO_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       SCAN_ROOT: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].ci_root }}/scan/${{ github.run_id }}
+      # Passed explicitly. Without it the scan falls back to a dotfiles copy on
+      # the runner's own disk -- which exists on one runner and not the other,
+      # so the gate would pass on one architecture and fail closed on the other
+      # for reasons that have nothing to do with the commit under test.
+      LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
     steps:
       - name: Fetch and scan
         run: |
