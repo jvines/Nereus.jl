@@ -161,5 +161,12 @@ print("    manifest.json written:", len(bundles), "bundles")
 PY
 
 say "PREPARED -- nothing has been published"
+# Say this out loud. prepare.sh deliberately leaves _runtime.py rewritten so
+# the wheel matches the release, and an uncommitted change is easy to lose to a
+# checkout -- which is how a published wheel ended up with a pointer no ref had.
+if [ -n "$(git -C "$PY_ROOT" status --porcelain -- src/astronereus/_runtime.py)" ]; then
+  warn "nereus-py/_runtime.py is REWRITTEN AND UNCOMMITTED (by design)."
+  warn "publish.sh commits it. Do not discard it or check out over it."
+fi
 info "staged at $OUT"
 info "publish with: tools/release/publish.sh $JL_VER $PY_VER --confirm"

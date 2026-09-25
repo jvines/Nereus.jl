@@ -102,7 +102,36 @@ docker run --rm --name "nereus-release-upload-$$" \
   || die "twine upload failed. The GitHub release is live and correct; fix the
 upload and retry -- do NOT rebuild, the filenames are already decided."
 
-say "tagging nereus-py"
+say "committing the runtime pointer, then tagging nereus-py"
+# prepare.sh rewrites _runtime.py IN PLACE (_REL, RUNTIME_VERSION, three
+# checksums) so the wheel can be built against the new release, and nothing
+# else commits it. Without this step the wheel goes to PyPI carrying a pointer
+# that exists in no ref -- which is exactly how 0.4.26 shipped while main sat
+# on 0.3.0-era source, and how 0.4.27 shipped with a v0.7.0 pointer that main,
+# develop and the v0.4.27 tag all lacked.
+#
+# The tag is created AFTER the commit, so it names the source that was actually
+# published rather than the state before the rewrite.
+if [ -n "$(git -C "$PY_ROOT" status --porcelain -- src/astronereus/_runtime.py)" ]; then
+  # Refuse to commit something that is not what went to PyPI.
+  built=$(ls "$OUT"/dist/*.whl 2>/dev/null | head -1)
+  if [ -n "$built" ]; then
+    "$here/wheel-matches-tree.py" "$PY_ROOT/src/astronereus/_runtime.py" "$built" \
+      || die "refusing to record a runtime pointer that was not published"
+  else
+    warn "no built wheel in $OUT/dist to check the pointer against"
+  fi
+  git -C "$PY_ROOT" add src/astronereus/_runtime.py
+  git -C "$PY_ROOT" commit -q -m "astronereus $PY_VER -- Nereus v$JL_VER runtimes
+
+Bundle URLs and checksums for the v$JL_VER release. Written by
+tools/release/publish.sh so the repository matches the published wheel."
+  git -C "$PY_ROOT" push origin HEAD || warn "could not push the runtime pointer -- the repo now DISAGREES with PyPI"
+  info "runtime pointer committed and pushed"
+else
+  info "_runtime.py already committed"
+fi
+
 git -C "$PY_ROOT" tag -a "v$PY_VER" -m "astronereus $PY_VER" 2>/dev/null || true
 git -C "$PY_ROOT" push origin "v$PY_VER" || warn "could not push the astronereus tag"
 
