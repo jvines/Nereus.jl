@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  leak-scan:
+  leakscan:
     # Cheap, and it gates the suite: the mirror publishes whatever is pushed,
     # so an internal reference on ANY branch is public the moment it lands.
     # The scan self-tests against a known-positive before trusting its own
@@ -50,6 +50,11 @@ jobs:
     # error, no skipped job, it simply is not there, which reads as "CI passed".
     # So this job also re-publishes the variable as an OUTPUT, and the matrix
     # below expands `fromJSON(needs...)`, which Forgejo does support.
+    #
+    # The job id is `leakscan`, not `leak-scan`: in an Actions expression a
+    # hyphen is parsed as subtraction, so `needs.leak-scan.outputs` is a
+    # malformed expression rather than a lookup -- and the only symptom is,
+    # again, a job that silently never appears.
     runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].runner }}
     timeout-minutes: 10
     outputs:
@@ -95,7 +100,7 @@ jobs:
 
   test:
     name: Test suite (${{ matrix.arch }})
-    needs: leak-scan
+    needs: leakscan
     # Both architectures, every PR. The samplers are chaotic: the same seed on
     # arm64 and x86_64 gives different chains, and a fixed-seed test can pass on
     # one and fail on the other (the trans-dim default-settings fit did, seed
@@ -114,7 +119,7 @@ jobs:
       # Each architecture's verdict stands on its own: a failure on one must
       # not cancel the other.
       fail-fast: false
-      matrix: ${{ fromJSON(needs.leak-scan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.leakscan.outputs.matrix) }}
     # Minutes on a warm depot. The first run -- or the first after the Manifest
     # changes -- also precompiles ~636 packages (CairoMakie, Enzyme, NCDatasets,
     # the MCMC stack), which is most of this budget.
