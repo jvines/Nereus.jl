@@ -107,14 +107,20 @@ jobs:
     # 42). One architecture sees half of that. Each runner is also the release
     # builder for its own architecture.
     #
-    # arm64  runs under Docker Desktop's linux/arm64 VM; ~6 min, bound by one
-    #        mostly-serial fit.
+    # arm64  runs under Docker Desktop's linux/arm64 VM; ~6 min on the fastest
+    #        host, bound by one mostly-serial fit. It can run on a POOL
+    #        of machines (below): whichever is idle takes it, so a release
+    #        PR's prepare job no longer queues the suite behind it.
     # x86_64 ~15 min, the same fit taking ~11 of them.
     #
     # Named by a specific label, never the bare [self-hosted, Linux, X64]
     # triple: elastic nodes advertise that, then sleep, and nothing claims them
     # -- a job sent there queues silently forever rather than failing.
-    runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].runner }}
+    # `pool` (optional): a label shared by several machines of one
+    # architecture, so whichever is idle takes the suite. Only this job reads
+    # it; the leak scan and the release jobs stay on `runner`, the one host
+    # that has the release clones.
+    runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].pool || fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].runner }}
     strategy:
       # Each architecture's verdict stands on its own: a failure on one must
       # not cancel the other.
@@ -169,6 +175,26 @@ jobs:
           git checkout -q FETCH_HEAD
           echo "testing $(git rev-parse HEAD)"
 
+      - name: Fit the resource budget to this host
+        run: |
+          set -euo pipefail
+          # The matrix budget is a CEILING, not an order: a label can name a
+          # pool of machines of different sizes, and `docker run --cpus` fails
+          # outright when asked for more CPUs than the VM has. Each host gets
+          # min(budget, its Docker VM less one CPU and a quarter of the memory
+          # for whatever else shares it). Shards and threads (run_tests.sh
+          # 5 3 6) stay the same everywhere: the samplers' chains depend on the
+          # thread count, so a smaller host runs slower, never differently.
+          ncpu=$(docker info --format '{{.NCPU}}')
+          mem_g=$(( $(docker info --format '{{.MemTotal}}') * 3 / 4 / 1073741824 ))
+          cpus=$(( ncpu > 2 ? ncpu - 1 : 1 ))
+          [ "$CI_CPUS" -lt "$cpus" ] && cpus=$CI_CPUS
+          want_g=${CI_MEMORY%[gG]}
+          mem=$(( want_g < mem_g ? want_g : mem_g ))
+          echo "CI_CPUS_HOST=$cpus" >> "$GITHUB_ENV"
+          echo "CI_MEMORY_HOST=${mem}g" >> "$GITHUB_ENV"
+          echo "budget here: $cpus CPUs, ${mem}g (Docker VM: $ncpu CPUs; ceiling $CI_CPUS CPUs, $CI_MEMORY)"
+
       - name: Build the CI image
         working-directory: ${{ env.CI_WORKSPACE }}
         run: docker build -q -t "$CI_IMAGE" ci/
@@ -188,7 +214,7 @@ jobs:
               --user "$(id -u):$(id -g)" -e HOME=/tmp \
               -e JULIA_DEPOT_PATH=/depot -v "$CI_ROOT/depot":/depot \
               -v "$CI_WORKSPACE":/repo -w /repo \
-              --cpus "$CI_CPUS" --memory "$CI_MEMORY" \
+              --cpus "$CI_CPUS_HOST" --memory "$CI_MEMORY_HOST" \
               "$CI_IMAGE" \
               julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 
@@ -201,14 +227,13 @@ jobs:
           # measured cost; shard 1 holds the heaviest unit alone (the trans-dim
           # default-settings fit) and gets 6 threads, the rest 3 -- the PT /
           # nested / OFTI tests parallelise over Threads.nthreads().
-          # --cpus/--memory are per runner (the matrix variable): each leaves
-          # room for the fleet workers that share the box.
+          # --cpus/--memory: the matrix ceiling, fitted to this host above.
           docker run --rm --name "$CONTAINER" \
             --label cl.jvines.owner=nereus-ci \
             --user "$(id -u):$(id -g)" -e HOME=/tmp \
             -e JULIA_DEPOT_PATH=/depot -v "$CI_ROOT/depot":/depot \
             -v "$CI_WORKSPACE":/repo -w /repo \
-            --cpus "$CI_CPUS" --memory "$CI_MEMORY" \
+            --cpus "$CI_CPUS_HOST" --memory "$CI_MEMORY_HOST" \
             "$CI_IMAGE" \
             ci/run_tests.sh 5 3 6
 
