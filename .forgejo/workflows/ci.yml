@@ -45,8 +45,15 @@ jobs:
     # verdict -- a pattern that silently matches nothing reads exactly like a
     # clean tree, which is how this was missed once already.
     name: No internal references
+    # `vars` DOES resolve here. It does NOT resolve in `strategy.matrix`: a job
+    # whose matrix is `${{ fromJSON(vars.X) }}` is silently never created -- no
+    # error, no skipped job, it simply is not there, which reads as "CI passed".
+    # So this job also re-publishes the variable as an OUTPUT, and the matrix
+    # below expands `fromJSON(needs...)`, which Forgejo does support.
     runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].runner }}
     timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     env:
       FORGEJO_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -57,6 +64,14 @@ jobs:
       # for reasons that have nothing to do with the commit under test.
       LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
     steps:
+      - name: Publish the runner matrix for the suite job
+        id: matrix
+        run: |
+          set -euo pipefail
+          m='${{ vars.RUNNER_MATRIX }}'
+          [ -n "$m" ] || { echo "RUNNER_MATRIX is unset; refusing to run a suite on no runners" >&2; exit 1; }
+          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+
       - name: Fetch and scan
         run: |
           set -euo pipefail
@@ -94,7 +109,7 @@ jobs:
       # Each architecture's verdict stands on its own: a failure on one must
       # not cancel the other.
       fail-fast: false
-      matrix: ${{ fromJSON(vars.RUNNER_MATRIX) }}
+      matrix: ${{ fromJSON(needs.leak-scan.outputs.matrix) }}
     # Minutes on a warm depot. The first run -- or the first after the Manifest
     # changes -- also precompiles ~636 packages (CairoMakie, Enzyme, NCDatasets,
     # the MCMC stack), which is most of this budget.
