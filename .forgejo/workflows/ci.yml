@@ -191,9 +191,12 @@ jobs:
           [ "$CI_CPUS" -lt "$cpus" ] && cpus=$CI_CPUS
           want_g=${CI_MEMORY%[gG]}
           mem=$(( want_g < mem_g ? want_g : mem_g ))
+          # Shards at once: ~4 GB each. Five in an 11 GB VM were all killed.
+          par=$(( mem / 4 )); [ "$par" -lt 1 ] && par=1; [ "$par" -gt 5 ] && par=5
           echo "CI_CPUS_HOST=$cpus" >> "$GITHUB_ENV"
           echo "CI_MEMORY_HOST=${mem}g" >> "$GITHUB_ENV"
-          echo "budget here: $cpus CPUs, ${mem}g (Docker VM: $ncpu CPUs; ceiling $CI_CPUS CPUs, $CI_MEMORY)"
+          echo "CI_SHARDS_AT_ONCE=$par" >> "$GITHUB_ENV"
+          echo "budget here: $cpus CPUs, ${mem}g, $par shards at once (Docker VM: $ncpu CPUs; ceiling $CI_CPUS CPUs, $CI_MEMORY)"
 
       - name: Build the CI image
         working-directory: ${{ env.CI_WORKSPACE }}
@@ -235,7 +238,7 @@ jobs:
             -v "$CI_WORKSPACE":/repo -w /repo \
             --cpus "$CI_CPUS_HOST" --memory "$CI_MEMORY_HOST" \
             "$CI_IMAGE" \
-            ci/run_tests.sh 5 3 6
+            ci/run_tests.sh 5 3 6 "$CI_SHARDS_AT_ONCE"
 
       - name: Clean up
         if: always()
