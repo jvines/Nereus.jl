@@ -99,7 +99,7 @@ jobs:
         run: rm -rf "$SCAN_ROOT"
 
   test:
-    name: Test suite (${{ matrix.arch }})
+    name: Test suite (${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].arch }})
     needs: leakscan
     # Both architectures, every PR. The samplers are chaotic: the same seed on
     # arm64 and x86_64 gives different chains, and a fixed-seed test can pass on
@@ -114,12 +114,21 @@ jobs:
     # Named by a specific label, never the bare [self-hosted, Linux, X64]
     # triple: elastic nodes advertise that, then sleep, and nothing claims them
     # -- a job sent there queues silently forever rather than failing.
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].runner }}
     strategy:
       # Each architecture's verdict stands on its own: a failure on one must
       # not cancel the other.
       fail-fast: false
-      matrix: ${{ fromJSON(needs.leakscan.outputs.matrix) }}
+      # INDICES ONLY. A dynamic matrix does not work on this runner: neither
+      # `matrix: ${{ fromJSON(vars.X) }}` nor `${{ fromJSON(needs.j.outputs.m) }}`
+      # produces a job -- no error, no skipped entry, the job simply never
+      # appears, which in a check list reads as a pass. Both were tried against
+      # the live runner (v12.13.1) and neither ran once. `vars` DOES resolve in
+      # runs-on and env, so the matrix carries only an index and every host
+      # value is looked up by that index below.
+      # Keep this list as long as RUNNER_MATRIX has entries.
+      matrix:
+        idx: [0, 1]
     # Minutes on a warm depot. The first run -- or the first after the Manifest
     # changes -- also precompiles ~636 packages (CairoMakie, Enzyme, NCDatasets,
     # the MCMC stack), which is most of this budget.
@@ -127,12 +136,12 @@ jobs:
     env:
       FORGEJO_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
-      CI_ROOT: ${{ matrix.ci_root }}
-      CI_WORKSPACE: ${{ matrix.ci_root }}/runs/${{ github.run_id }}
+      CI_ROOT: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].ci_root }}
+      CI_WORKSPACE: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].ci_root }}/runs/${{ github.run_id }}
       CI_IMAGE: nereus-ci:julia-1.11.9
-      CI_CPUS: ${{ matrix.cpus }}
-      CI_MEMORY: ${{ matrix.memory }}
-      CONTAINER: nereus-ci-${{ github.run_id }}-${{ matrix.arch }}
+      CI_CPUS: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].cpus }}
+      CI_MEMORY: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].memory }}
+      CONTAINER: nereus-ci-${{ github.run_id }}-${{ matrix.idx }}
 
     steps:
       - name: Fetch the commit under test
