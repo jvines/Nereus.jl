@@ -32,6 +32,11 @@ print("CFG_FLEET=" + shlex.quote(c["fleet"]))
 print("CFG_NEREUS_JL=" + shlex.quote(c["nereus_jl"]))
 print("CFG_NEREUS_PY=" + shlex.quote(c["nereus_py"]))
 print("CFG_STAGE=" + shlex.quote(c["stage"]))
+# The suite reuses an existing CI depot when one is configured. A cold
+# depot precompiles ~636 packages, which is most of an hour before a
+# single test runs -- and the depot is the one input a release does not
+# need to rebuild from scratch to be trustworthy.
+print("CFG_DEPOT=" + shlex.quote(c.get("depot") or (c["stage"].rstrip("/") + "/depot")))
 print("CFG_JULIA=" + shlex.quote(c["julia_version"]))
 print("CFG_FORGEJO=" + shlex.quote(c["forgejo_base"].rstrip("/")))
 print("CFG_GH_REPO=" + shlex.quote(c["github_repo"]))
