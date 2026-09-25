@@ -38,20 +38,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  leak-scan:
+  leakscan:
     # Cheap, and it gates the suite: the mirror publishes whatever is pushed,
     # so an internal reference on ANY branch is public the moment it lands.
     # The scan self-tests against a known-positive before trusting its own
     # verdict -- a pattern that silently matches nothing reads exactly like a
     # clean tree, which is how this was missed once already.
     name: No internal references
+    # `vars` DOES resolve here. It does NOT resolve in `strategy.matrix`: a job
+    # whose matrix is `${{ fromJSON(vars.X) }}` is silently never created -- no
+    # error, no skipped job, it simply is not there, which reads as "CI passed".
+    # So this job also re-publishes the variable as an OUTPUT, and the matrix
+    # below expands `fromJSON(needs...)`, which Forgejo does support.
+    #
+    # The job id is `leakscan`, not `leak-scan`: in an Actions expression a
+    # hyphen is parsed as subtraction, so `needs.leak-scan.outputs` is a
+    # malformed expression rather than a lookup -- and the only symptom is,
+    # again, a job that silently never appears.
     runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].runner }}
     timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     env:
       FORGEJO_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       SCAN_ROOT: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].ci_root }}/scan/${{ github.run_id }}
+      # Passed explicitly. Without it the scan falls back to a dotfiles copy on
+      # the runner's own disk -- which exists on one runner and not the other,
+      # so the gate would pass on one architecture and fail closed on the other
+      # for reasons that have nothing to do with the commit under test.
+      LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
     steps:
+      - name: Publish the runner matrix for the suite job
+        id: matrix
+        run: |
+          set -euo pipefail
+          # tr -d: a stored value with a trailing newline writes a SECOND,
+          # empty line into $GITHUB_OUTPUT, and the runner rejects the whole
+          # file with "invalid format ''" -- failing the job after the scan
+          # had already passed. Strip it here rather than trusting how the
+          # variable was stored.
+          m=$(printf '%s' '${{ vars.RUNNER_MATRIX }}' | tr -d '\r\n')
+          [ -n "$m" ] || { echo "RUNNER_MATRIX is unset; refusing to run a suite on no runners" >&2; exit 1; }
+          printf 'matrix=%s\n' "$m" >> "$GITHUB_OUTPUT"
+
       - name: Fetch and scan
         run: |
           set -euo pipefail
@@ -69,8 +99,8 @@ jobs:
         run: rm -rf "$SCAN_ROOT"
 
   test:
-    name: Test suite (${{ matrix.arch }})
-    needs: leak-scan
+    name: Test suite (${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].arch }})
+    needs: leakscan
     # Both architectures, every PR. The samplers are chaotic: the same seed on
     # arm64 and x86_64 gives different chains, and a fixed-seed test can pass on
     # one and fail on the other (the trans-dim default-settings fit did, seed
@@ -84,12 +114,21 @@ jobs:
     # Named by a specific label, never the bare [self-hosted, Linux, X64]
     # triple: elastic nodes advertise that, then sleep, and nothing claims them
     # -- a job sent there queues silently forever rather than failing.
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].runner }}
     strategy:
       # Each architecture's verdict stands on its own: a failure on one must
       # not cancel the other.
       fail-fast: false
-      matrix: ${{ fromJSON(vars.RUNNER_MATRIX) }}
+      # INDICES ONLY. A dynamic matrix does not work on this runner: neither
+      # `matrix: ${{ fromJSON(vars.X) }}` nor `${{ fromJSON(needs.j.outputs.m) }}`
+      # produces a job -- no error, no skipped entry, the job simply never
+      # appears, which in a check list reads as a pass. Both were tried against
+      # the live runner (v12.13.1) and neither ran once. `vars` DOES resolve in
+      # runs-on and env, so the matrix carries only an index and every host
+      # value is looked up by that index below.
+      # Keep this list as long as RUNNER_MATRIX has entries.
+      matrix:
+        idx: [0, 1]
     # Minutes on a warm depot. The first run -- or the first after the Manifest
     # changes -- also precompiles ~636 packages (CairoMakie, Enzyme, NCDatasets,
     # the MCMC stack), which is most of this budget.
@@ -97,12 +136,12 @@ jobs:
     env:
       FORGEJO_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
-      CI_ROOT: ${{ matrix.ci_root }}
-      CI_WORKSPACE: ${{ matrix.ci_root }}/runs/${{ github.run_id }}
+      CI_ROOT: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].ci_root }}
+      CI_WORKSPACE: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].ci_root }}/runs/${{ github.run_id }}
       CI_IMAGE: nereus-ci:julia-1.11.9
-      CI_CPUS: ${{ matrix.cpus }}
-      CI_MEMORY: ${{ matrix.memory }}
-      CONTAINER: nereus-ci-${{ github.run_id }}-${{ matrix.arch }}
+      CI_CPUS: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].cpus }}
+      CI_MEMORY: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].memory }}
+      CONTAINER: nereus-ci-${{ github.run_id }}-${{ matrix.idx }}
 
     steps:
       - name: Fetch the commit under test

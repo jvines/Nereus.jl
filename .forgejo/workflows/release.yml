@@ -1,0 +1,116 @@
+# The release pipeline, in two phases.
+#
+# PREPARE runs on every pull request into main. A PR into main IS the release
+# candidate: it builds all three runtime bundles from the PR head, runs the
+# suite, builds the wheel and sdist, and comments the checksums on the PR.
+# It publishes NOTHING -- no tag, no release, no upload.
+#
+# PUBLISH is a separate, manual dispatch that takes the staged artefacts and
+# makes them public. It is deliberately not automatic: a PyPI filename can
+# never be reused, and a GitHub release that half-uploads takes the whole
+# release with it.
+#
+# NO MACHINE NAMES OR PATHS IN THIS FILE -- the repository is mirrored publicly
+# on every push, on every branch. Runner labels come from RUNNER_MATRIX and
+# everything else from the RELEASE_CONFIG secret.
+
+name: Release
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      nereus_version:
+        description: "Nereus version to publish (e.g. 0.7.0)"
+        required: true
+        type: string
+      astronereus_version:
+        description: "astronereus version to publish (e.g. 0.4.27)"
+        required: true
+        type: string
+      confirm:
+        description: "Type PUBLISH to confirm. This is irreversible."
+        required: true
+        type: string
+
+concurrency:
+  group: nereus-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false      # never interrupt a build midway
+
+jobs:
+  prepare:
+    if: github.event_name == 'pull_request'
+    name: Prepare release
+    runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].runner }}
+    timeout-minutes: 150
+    env:
+      FORGEJO_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
+      RELEASE_CONFIG: ${{ secrets.RELEASE_CONFIG }}
+      CI_WORKSPACE: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].ci_root }}/release/${{ github.run_id }}
+    steps:
+      - name: Fetch the commit under test
+        run: |
+          set -euo pipefail
+          rm -rf "$CI_WORKSPACE"; mkdir -p "$CI_WORKSPACE"; cd "$CI_WORKSPACE"
+          git init -q .
+          git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
+          git -c credential.helper= \
+              -c credential.helper='!f() { echo "username=x-access-token"; echo "password=${FORGEJO_TOKEN}"; }; f' \
+              fetch -q origin "refs/pull/${PR_NUMBER}/head"
+          git checkout -q FETCH_HEAD
+
+      - name: Prepare
+        working-directory: ${{ env.CI_WORKSPACE }}
+        run: |
+          set -euo pipefail
+          jl=$(awk -F'"' '/^version *=/{print $2; exit}' Project.toml)
+          py=$(awk -F'"' '/^version *=/{print $2; exit}' \
+               "$(python3 -c 'import json,os;print(json.loads(os.environ["RELEASE_CONFIG"])["nereus_py"])')/pyproject.toml")
+          echo "preparing Nereus $jl / astronereus $py"
+          tools/release/prepare.sh "$jl" "$py"
+
+      - name: Report on the pull request
+        if: always()
+        working-directory: ${{ env.CI_WORKSPACE }}
+        env:
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          jl=$(awk -F'"' '/^version *=/{print $2; exit}' Project.toml)
+          stage=$(python3 -c 'import json,os;print(json.loads(os.environ["RELEASE_CONFIG"])["stage"])')
+          tools/release/pr-comment.sh "$stage/v$jl/manifest.json" "$PR_NUMBER"
+
+      - name: Clean up
+        if: always()
+        run: rm -rf "$CI_WORKSPACE"
+
+  publish:
+    if: github.event_name == 'workflow_dispatch'
+    name: Publish release
+    runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].runner }}
+    timeout-minutes: 90
+    env:
+      FORGEJO_TOKEN: ${{ github.token }}
+      LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
+      RELEASE_CONFIG: ${{ secrets.RELEASE_CONFIG }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+    steps:
+      - name: Confirm
+        run: |
+          set -euo pipefail
+          # Dispatch inputs arrive as STRINGS regardless of declared type, so
+          # this is a string comparison, not a boolean.
+          [ "${{ inputs.confirm }}" = "PUBLISH" ] \
+            || { echo "confirm was not PUBLISH; refusing" >&2; exit 1; }
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          cfg() { python3 -c 'import json,os,sys;print(json.loads(os.environ["RELEASE_CONFIG"])[sys.argv[1]])' "$1"; }
+          cd "$(cfg nereus_jl)"
+          tools/release/publish.sh "${{ inputs.nereus_version }}" "${{ inputs.astronereus_version }}" --confirm
