@@ -73,7 +73,7 @@ else
   docker run --rm --name "nereus-release-suite-$$" \
     --label cl.jvines.owner=nereus-release \
     --user "$(id -u):$(id -g)" -e HOME=/tmp \
-    -e JULIA_DEPOT_PATH=/depot -v "$CFG_STAGE/depot":/depot \
+    -e JULIA_DEPOT_PATH=/depot -v "$CFG_DEPOT":/depot \
     -v "$JL_ROOT":/repo -w /repo --cpus 12 --memory 24g \
     "nereus-ci:julia-$CFG_JULIA" ci/run_tests.sh 5 3 6 \
     || die "the suite failed; nothing is built from a red tree"
