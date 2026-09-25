@@ -48,9 +48,14 @@ info "versions ok: Nereus $JL_VER, astronereus $PY_VER"
 
 check_contract "$JL_ROOT" "$PY_ROOT"
 
-if git -C "$JL_ROOT" rev-parse "v$JL_VER" >/dev/null 2>&1; then
-  die "tag v$JL_VER already exists. A released version is never rebuilt --
-its bundles are already on a GitHub release that published wheels resolve."
+# Asked of the REMOTE, not the local checkout. In CI, JL_ROOT is a --depth 1
+# fetch of one ref and carries no tags at all, so a local rev-parse would find
+# nothing and wave through a version that is already released -- exactly the
+# case this gate exists to stop.
+if git -C "$JL_ROOT" ls-remote --exit-code --tags origin "refs/tags/v$JL_VER" >/dev/null 2>&1; then
+  die "tag v$JL_VER already exists on the remote. A released version is never
+rebuilt: its bundles are already on a GitHub release that published wheels
+resolve, and those URLs and checksums cannot be changed."
 fi
 
 say "leak scan (both repositories, tree and history)"
