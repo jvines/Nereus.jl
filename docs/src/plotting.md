@@ -332,10 +332,9 @@ model, since Nereus fits the IAD of both missions directly.
 - **(a)** the orbit about the barycentre (`+`), every mission's abscissae as
   **binned lines** along their scan axes, periastron, the sense of motion,
   and a dashed box marking the frame of (b). Framed on the **orbit**: a
-  square `orbit_frame` (default `2.0`) orbit extents on a side, never wider
+  square `orbit_frame` (default `1.5`) orbit extents on a side, never wider
   than the abscissae need. Lines of a mission that does not resolve the orbit
-  — Hipparcos, usually — run off the edge, and the panel notes how many are
-  centred outside it;
+  — Hipparcos, usually — run off the edge;
 - **(b)** the same, zoomed on the mission that resolves the orbit best (the
   smallest binned errors — Gaia when present) and showing only that mission.
   Omitted when there is a single mission;
@@ -362,30 +361,31 @@ default) each panel as its own figure beside it: `..._sky.png`,
 `..._sky_<mission>.png` (the zoom) and `..._oc_<mission>.png`. Set
 `"plot_kwargs": {"panels": false}` for the combined figure alone.
 
-### `plot_epoch_astrometry_orbit(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff, normal_point_gap, n_track)`
+### `plot_epoch_astrometry_orbit(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, orbit_frame, bf_cutoff, normal_point_gap, psi_tol, n_track, mission_names)`
 
 The sky-plane orbit of an **IAD / Gaia DR4 epoch-astrometry** target with
-the measurements on it — the figure `plot_orbit_skyplane` cannot draw for
-1-D data. Each abscissa is placed at the model position plus its along-scan
-O−C, `P = M(t) + (O−C)·(sin ψ, cos ψ)` (Sahlmann et al. 2011, Fig. 20;
-Holl et al. 2023, Figs. 12-16). Individual abscissae in grey; **normal
-points**, one per Gaia field-of-view transit (the 8-9 CCDs at one ψ;
-`normal_point_gap` days, default `0.01`), coloured by epoch, with a ±1σ
-bar along the scan axis and a dashed connector from the model position.
-Below: normal-point O−C vs orbital phase (0 = periastron). The host star at
-the barycentre (gold star), periastron (red diamond) and the sense of motion
-are marked.
+every mission's abscissae on it — the figure `plot_orbit_skyplane` cannot
+draw for 1-D data — and below it the along-scan O−C against **orbital phase**
+(0 = periastron), one strip per mission.
 
-The orbit is the max-lp draw (as `plot_orbit_skyplane`), and the O−C are
-the likelihood's: every other active companion's reflex and the sampled
-parallax are subtracted and the catalogue solution marginalised by the same
-helpers `iad_log_likelihood` uses, so the annotated per-abscissa χ²/N is
-exactly `χ²_min / N`. A normal-point χ²/N well above it flags noise
-correlated within a transit. Across the scan the points sit on the model by
-construction: scatter about the ellipse is information, agreement across it
-is not. The frame follows the orbit and the normal points; individual
-abscissae outside it are counted in the annotation. Empty `Figure` when
-there is no IAD or the planet has no astrometric orbit.
+It is the same scene `plot_astrometry_model` draws, drawn by the same
+routines: its sky panel **is** that figure's panel (a). Same max-lp draw, same
+binning, same line and marker for an abscissa, same mission colours, same
+frame. Each abscissa is placed at the model position plus its along-scan O−C,
+`P = M(t) + (O−C)·(sin ψ, cos ψ)` (Sahlmann et al. 2011, Fig. 20; Holl et al.
+2023, Figs. 12-16), and drawn as a ±1σ line along the scan axis with a dashed
+connector from the model position. The two figures differ only in what the
+O−C is plotted against: epoch there, which separates the missions; orbital
+phase here, which shows whether the residuals follow the orbit.
+
+Each strip shows the mission's individual abscissae in grey, the binned ones
+with their error bars, and χ²/N over the abscissae. The O−C are the
+likelihood's: every other active companion's reflex and the sampled parallax
+are subtracted and the catalogue solution marginalised by the same helpers
+`iad_log_likelihood` uses, so that χ²/N is exactly `χ²_min / N` for the
+mission. Across the scan the lines sit on the model by construction: scatter
+about the ellipse is information, agreement across it is not. Empty `Figure`
+when there is no IAD or the planet has no astrometric orbit.
 
 ### `plot_pm_residuals(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 

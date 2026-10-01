@@ -202,6 +202,99 @@ end
         @test length(sky(fig)) == 1 && all(a -> a.xreversed[], sky(fig))
     end
 
+    @testset "the sky panel is framed on the orbit" begin
+        # Normal points far noisier than the orbit is large (Hipparcos beside
+        # Gaia) set the frame, and the orbit shrank to a speck among their
+        # error bars. The frame is capped at `orbit_frame` orbit extents.
+        @test Nereus._orbit_square([-1.0, 1.0], [-0.5, 0.5], 2.0) == (-2.0, 2.0, -2.0, 2.0)
+        # the barycentre is part of what must stay in view
+        @test Nereus._orbit_square([1.0, 2.0], [1.0, 2.0], 1.0) == (0.0, 2.0, 0.0, 2.0)
+
+        target, _, chains = _epoch_orbit_target(σ = 3.0)      # 1 mas normal points, sub-mas orbit
+        S = Nereus._astrometry_model_scene(chains, target.params, target.data, 1)
+        extent = max(maximum(S.x_t) - minimum(S.x_t), maximum(S.y_t) - minimum(S.y_t))
+        sky(fig) = only(c for c in fig.content
+                        if c isa Nereus.Axis && occursin("ΔRA", string(c.xlabel[])))
+        spans(fig) = let l = sky(fig).limits[]
+            (maximum(l[1]) - minimum(l[1]), maximum(l[2]) - minimum(l[2]))
+        end
+        inside(fig, x, y) = let l = sky(fig).limits[]
+            minimum(l[1]) <= x <= maximum(l[1]) && minimum(l[2]) <= y <= maximum(l[2])
+        end
+        tight = plot_epoch_astrometry_orbit(chains, target.params, target.data;
+                                            orbit_frame = 2.0)
+        loose = plot_epoch_astrometry_orbit(chains, target.params, target.data;
+                                            orbit_frame = 1e6)
+        @test maximum(spans(tight)) <= 2.0 * extent * (1 + 1e-6)
+        @test maximum(spans(loose)) > 2.0 * extent          # what it used to do
+        @test all(inside(tight, x, y) for (x, y) in zip(S.x_t, S.y_t))
+        @test inside(tight, 0.0, 0.0)
+        # Abscissae that already sit on the orbit are not pushed out: the
+        # frame is the tighter of the two.
+        target, _, chains = _epoch_orbit_target()
+        @test spans(plot_epoch_astrometry_orbit(chains, target.params, target.data)) ==
+              spans(plot_epoch_astrometry_orbit(chains, target.params, target.data;
+                                                orbit_frame = 1e6))
+        @test_throws ArgumentError plot_epoch_astrometry_orbit(chains, target.params,
+            target.data; orbit_frame = 0.9)
+    end
+
+    @testset "one way of drawing the abscissae, in both figures" begin
+        # This figure and `plot_astrometry_model` picture the same fit. They
+        # used to disagree on every convention: lines against points, epoch
+        # colours against mission colours, 100 normal points against 19, a
+        # star against a cross for the barycentre. Both now draw their sky
+        # panel with one routine, from one scene.
+        M = Nereus.Makie
+        target, _, chains = _epoch_orbit_target(inst2 = true)
+        sky(fig) = [c for c in fig.content
+                    if c isa Nereus.Axis && occursin("ΔRA", string(c.xlabel[]))]
+        phase(fig) = [c for c in fig.content
+                      if c isa Nereus.Axis && occursin("phase", lowercase(string(c.xlabel[])))]
+        e = plot_epoch_astrometry_orbit(chains, target.params, target.data)
+        a = plot_astrometry_model(chains, target.params, target.data)
+        ax_e, ax_a = only(sky(e)), first(sky(a))          # panel (a) comes first
+        @test ax_e.limits[] == ax_a.limits[]
+        of(T, ax) = [p for p in ax.scene.plots if p isa T]
+        # the abscissae: a dashed connector and a ±1σ line per mission ...
+        @test length(of(M.LineSegments, ax_e)) == length(of(M.LineSegments, ax_a)) == 4
+        @test [p.color[] for p in of(M.LineSegments, ax_e)] ==
+              [p.color[] for p in of(M.LineSegments, ax_a)]
+        @test [p.linewidth[] for p in of(M.LineSegments, ax_e)] ==
+              [p.linewidth[] for p in of(M.LineSegments, ax_a)]
+        # ... and a marker each, the same ones, then periastron and barycentre
+        @test [(p.marker[], p.markersize[], p.color[]) for p in of(M.Scatter, ax_e)] ==
+              [(p.marker[], p.markersize[], p.color[]) for p in of(M.Scatter, ax_a)]
+        @test length(of(M.Scatter, ax_e)) == 4
+        # the arrow: drawn after every marker, and large enough to find
+        plots = ax_e.scene.plots
+        ia = findfirst(p -> p isa M.Arrows2D, plots)
+        @test ia !== nothing
+        @test ia > maximum(findall(p -> p isa M.Scatter, plots))
+        @test plots[ia].tipwidth[] >= 20 && plots[ia].tiplength[] >= 20
+        # the orbit is drawn over the abscissa lines, not under them
+        @test findfirst(p -> p isa M.Lines, plots) >
+              maximum(findall(p -> p isa M.LineSegments, plots))
+
+        # What is this figure's own: the O−C against orbital PHASE, one strip
+        # per mission so that a mas-level mission does not flatten the other.
+        @test length(phase(e)) == 2
+        @test isempty(phase(a))
+        target1, _, chains1 = _epoch_orbit_target()
+        @test length(phase(plot_epoch_astrometry_orbit(chains1, target1.params,
+                                                       target1.data))) == 1
+
+        # Nothing is written on either figure about what its frame leaves out.
+        words(fig) = [string(p.text[]) for ax in fig.content if ax isa Nereus.Axis
+                      for p in ax.scene.plots if p isa Union{M.Text, M.TextLabel}]
+        noisy, _, nch = _epoch_orbit_target(σ = 3.0, inst2 = true)
+        for fig in (plot_epoch_astrometry_orbit(nch, noisy.params, noisy.data),
+                    plot_astrometry_model(nch, noisy.params, noisy.data))
+            @test !isempty(words(fig))
+            @test !any(w -> occursin("outside", w), words(fig))
+        end
+    end
+
     @testset "trans-dim: parked slots are neither subtracted nor drawn" begin
         # Slot 2 exists in the layout and carries a massive parked orbit, but
         # no draw has it active and the data contain only slot 1. Without the
