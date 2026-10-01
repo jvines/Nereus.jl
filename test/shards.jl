@@ -36,6 +36,7 @@ const TEST_UNITS = [
     (name = "astrometry/test_iad_marginalised_residuals.jl", seconds = 1, files = ["astrometry/test_iad_marginalised_residuals.jl"]),
     (name = "epoch astrometry orbit + trans-dim plot draws (shares a fixture)", seconds = 105, files = ["astrometry/test_epoch_astrometry_orbit.jl", "test_transdim_plot_draws.jl"]),
     (name = "astrometry/test_hgca_residual_plot.jl", seconds = 9, files = ["astrometry/test_hgca_residual_plot.jl"]),
+    (name = "astrometry/test_astrometry_model_plot.jl", seconds = 60, files = ["astrometry/test_astrometry_model_plot.jl"]),
     (name = "astrometry/test_iad_multi_instrument_e2e.jl", seconds = 5, files = ["astrometry/test_iad_multi_instrument_e2e.jl"]),
     (name = "astrometry/test_gaia_epoch_guards.jl", seconds = 2, files = ["astrometry/test_gaia_epoch_guards.jl"]),
     (name = "test_builder.jl", seconds = 2, files = ["test_builder.jl"]),

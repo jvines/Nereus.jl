@@ -291,6 +291,7 @@ const _KNOWN_PLOTS          = ("rv_timeseries", "rv_components", "rv_phasefold",
                                 "pm_timeseries", "pm_phasefold",
                                 "rv_astrom_phasefold", "orbit_skyplane",
                                 "iad_residuals", "epoch_astrometry_orbit",
+                                "astrometry_model",
                                 "hgca_pm_residuals",
                                 "relastrom_timeseries", "relastrom_residuals",
                                 "g23h_residuals", "pm_anomaly",
@@ -1627,7 +1628,8 @@ function _auto_plot_kinds(chains, params, data; result = nothing)
     # astrometry determines a sky-plane orbit.
     has_astrometry(data)      && push!(kinds, "orbit_skyplane")
     data.iad      !== nothing && append!(kinds, ["iad_residuals",
-                                                   "epoch_astrometry_orbit"])
+                                                   "epoch_astrometry_orbit",
+                                                   "astrometry_model"])
     data.hgca     !== nothing && push!(kinds, "hgca_pm_residuals")
     data.g23h     !== nothing && push!(kinds, "g23h_residuals")
     data.gost     !== nothing && push!(kinds, "pm_anomaly")
@@ -1883,6 +1885,16 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         data.iad === nothing && return nothing
         plot_iad_residuals(chains, params, data; output = out_dir, _kw_for(plot_iad_residuals, kw)...)
         return "models/iad_residuals.png"
+    elseif name == "astrometry_model"
+        # The orbit against every mission's binned abscissae, plus each panel
+        # as its own figure (`panels`); all of them match the one pattern.
+        data.iad === nothing && return nothing
+        return _per_planet(name, "models/astrometry_model_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_astrometry_model(chains, params, data; planet_idx = k,
+                                  output = out_dir,
+                                  _kw_for(plot_astrometry_model, kw; except = (:output, :filename, :planet_idx))...)
+        end
     elseif name == "epoch_astrometry_orbit"
         # The sky-plane orbit WITH the data on it. IAD abscissae are 1-D, so
         # orbit_skyplane has nothing to overlay for an IAD-only fit; this is

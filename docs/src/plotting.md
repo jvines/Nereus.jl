@@ -27,7 +27,7 @@ produced.
     "rm_anomaly", "ttv_oc",
     "orbit_skyplane", "relastrom_timeseries", "relastrom_residuals",
     "hgca_pm_residuals", "g23h_residuals", "iad_residuals",
-    "epoch_astrometry_orbit", "pm_anomaly", "rv_astrom_phasefold",
+    "epoch_astrometry_orbit", "astrometry_model", "pm_anomaly", "rv_astrom_phasefold",
     "activity_gp_latent", "activity_gp_decomposition",
     "corner", "trace", "histograms", "posteriors",
     "transdim_occupancy",
@@ -55,6 +55,7 @@ produced.
 | `relastrom_residuals`      | `data.relastrom`                | `plot_relastrom_residuals`      | `models/relastrom_residuals_K*.png` |
 | `iad_residuals`            | `data.iad`                      | `plot_iad_residuals`            | `models/iad_residuals.png` |
 | `epoch_astrometry_orbit`   | `data.iad`                      | `plot_epoch_astrometry_orbit` (per planet)| `models/epoch_astrometry_orbit_K*.png` |
+| `astrometry_model`         | `data.iad`                      | `plot_astrometry_model` (per planet)| `models/astrometry_model_K*.png` (combined + one per panel) |
 | `hgca_pm_residuals`        | `data.hgca`                     | `plot_pm_residuals` (per planet)| `models/hgca_pm_residuals_K*.png` |
 | `g23h_residuals`           | `data.g23h`                     | `plot_g23h_residuals`           | `models/g23h_residuals.png` |
 | `pm_anomaly`               | `data.gost`                     | `plot_pm_anomaly` (per planet)  | `models/pm_anomaly_K*.png` |
@@ -127,7 +128,7 @@ The selection logic (`_dispatch_plot(..., "auto", ...)`):
   `transit_overlay`.
 - `data.relastrom` → `orbit_skyplane`, `relastrom_timeseries`,
   `relastrom_residuals`.
-- `data.iad` → `iad_residuals`, `epoch_astrometry_orbit`;
+- `data.iad` → `iad_residuals`, `epoch_astrometry_orbit`, `astrometry_model`;
   `data.hgca` → `hgca_pm_residuals`;
   `data.g23h` → `g23h_residuals`; `data.gost` → `pm_anomaly`.
 - RV **and** astrometry → `rv_astrom_phasefold`.
@@ -320,6 +321,42 @@ zero point, shared proper motion) the marginalisation fits — computed by
 rad); bottom: residual vs MJD. No-op (empty `Figure`) if `data.iad` is
 `nothing` or has no more transits than the marginalisation has
 parameters (4 for one instrument).
+
+### `plot_astrometry_model(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, panels, bf_cutoff, normal_point_gap, psi_tol, n_track, mission_names)`
+
+The reflex orbit against the epoch astrometry of **every mission** in
+`data.iad` — astroEMPEROR's `astrometry_model` figure, with the intermediate
+astrometric data in place of its Gaia DR2/DR3 catalogue positions and GOST
+model, since Nereus fits the IAD of both missions directly.
+
+- **(a)** the orbit about the barycentre (`+`), every mission's abscissae as
+  **binned lines** along their scan axes, periastron, the sense of motion,
+  and a dashed box marking the frame of (b);
+- **(b)** the same, zoomed on the mission that resolves the orbit best (the
+  smallest binned errors — Gaia when present) and showing only that mission.
+  Omitted when there is a single mission;
+- one panel per mission: along-scan O−C against epoch (yr), individual
+  abscissae in grey, binned ones on top, χ²/N over the abscissae.
+
+An abscissa is one-dimensional, so it is drawn as the line it is: along
+`u = (sin ψ, cos ψ)`, ±1σ long, centred at the model position plus its O−C
+along `u`, with a dashed connector to that model position. Abscissae are
+binned first: consecutive transits of one mission within `normal_point_gap`
+days (default `0.01`) whose scan angles agree within `psi_tol` rad (default
+`0.02`). That is one line per Gaia field-of-view transit and one per
+Hipparcos satellite orbit.
+
+Missions are named from their epochs (before J2000 → Hipparcos, mid-2014 on
+→ Gaia); pass `mission_names` to override. The draw and the O−C are those
+of `plot_epoch_astrometry_orbit` below — max-lp draw, the likelihood's own
+residuals with every other active companion subtracted. On a non-detection
+the orbit is far smaller than the abscissa errors and the lines of (a) all
+pass near the barycentre.
+
+Writes `models/astrometry_model_K<k>.png`, and with `panels = true` (the
+default) each panel as its own figure beside it: `..._sky.png`,
+`..._sky_<mission>.png` (the zoom) and `..._oc_<mission>.png`. Set
+`"plot_kwargs": {"panels": false}` for the combined figure alone.
 
 ### `plot_epoch_astrometry_orbit(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff, normal_point_gap, n_track)`
 

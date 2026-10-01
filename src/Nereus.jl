@@ -125,6 +125,7 @@ include("plotting/pm_plots.jl")
 include("plotting/diagnostics.jl")
 include("plotting/detrend_plots.jl")
 include("plotting/astrom_plots.jl")
+include("plotting/astrometry_model_plot.jl")  # orbit vs every mission's binned abscissae; O−C against epoch
 include("plotting/ttv_plots.jl")
 include("plotting/ppc_plots.jl")
 include("plotting/detection_limits_plots.jl")
@@ -340,7 +341,7 @@ export
     plot_ladder_rates, plot_beta_ladder,
     plot_detrending, plot_transit_phasefold, plot_posteriors_lp,
     plot_orbit_skyplane, plot_pm_residuals, plot_rv_astrom_phasefold,
-    plot_iad_residuals, plot_epoch_astrometry_orbit,
+    plot_iad_residuals, plot_epoch_astrometry_orbit, plot_astrometry_model,
     plot_relastrom_timeseries, plot_relastrom_residuals,
     plot_g23h_residuals, plot_pm_anomaly,
     plot_ttv_diagram, plot_ttv_diagram_multipanel, plot_transit_overlay,

@@ -402,7 +402,7 @@ rather than a single number trusted.
       // Astrometry
       "orbit_skyplane", "relastrom_timeseries", "relastrom_residuals",
       "hgca_pm_residuals", "g23h_residuals", "iad_residuals",
-      "epoch_astrometry_orbit", "pm_anomaly", "rv_astrom_phasefold",
+      "epoch_astrometry_orbit", "astrometry_model", "pm_anomaly", "rv_astrom_phasefold",
       // ActivityGP
       "activity_gp_latent", "activity_gp_decomposition",   // only when an ActivityGP is configured
       // Diagnostics

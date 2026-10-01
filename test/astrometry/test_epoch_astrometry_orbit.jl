@@ -182,6 +182,26 @@ end
         @test !isfile(joinpath(out, "models", "epoch_astrometry_orbit_K3.png"))
     end
 
+    @testset "East is to the left" begin
+        # A sky-plane panel has RA increasing to the LEFT. The axis was flipped
+        # and its limits were then set low-to-high, which Makie reads as "not
+        # reversed" and silently un-flips: the orbit came out mirrored, with
+        # every other sky figure in the package the right way round.
+        let fig = Nereus.Figure(), ax = Nereus.Axis(fig[1, 1])
+            Nereus._sky_limits!(ax, -1.0, 2.0, -3.0, 4.0)
+            @test ax.xreversed[]
+            lim = ax.limits[]
+            @test extrema(lim[1]) == (-1.0, 2.0) && lim[2] == (-3.0, 4.0)
+        end
+        target, _, chains = _epoch_orbit_target()
+        sky(fig) = [c for c in fig.content
+                    if c isa Nereus.Axis && occursin("ΔRA", string(c.xlabel[]))]
+        fig = plot_epoch_astrometry_orbit(chains, target.params, target.data)
+        @test length(sky(fig)) == 1 && all(a -> a.xreversed[], sky(fig))
+        fig = plot_orbit_skyplane(chains, target.params, target.data)
+        @test length(sky(fig)) == 1 && all(a -> a.xreversed[], sky(fig))
+    end
+
     @testset "trans-dim: parked slots are neither subtracted nor drawn" begin
         # Slot 2 exists in the layout and carries a massive parked orbit, but
         # no draw has it active and the data contain only slot 1. Without the

@@ -69,6 +69,7 @@ collated error message if any is wrong — see `_validate_config` in
 - **`output.plots`**: `rv_timeseries`, `rv_components`, `rv_phasefold`,
   `pm_timeseries`, `pm_phasefold`, `rv_astrom_phasefold`,
   `orbit_skyplane`, `iad_residuals`, `epoch_astrometry_orbit`,
+  `astrometry_model`,
   `hgca_pm_residuals`,
   `relastrom_timeseries`, `relastrom_residuals`, `g23h_residuals`,
   `pm_anomaly`, `ttv_oc`, `transit_overlay`, `rm_anomaly`,

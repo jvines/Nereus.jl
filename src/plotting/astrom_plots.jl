@@ -209,6 +209,22 @@ function _flip_xaxis!(ax)
     return nothing
 end
 
+"""
+    _sky_limits!(ax, xlo, xhi, ylo, yhi)
+
+Frame a sky-plane axis and keep East to the left.
+
+`limits!(ax, xlo, xhi, ...)` is not enough after `_flip_xaxis!`: Makie reads the
+ORDER of the x limits as the direction of the axis, so low-to-high sets
+`xreversed = false` and undoes the flip without a word. The epoch-astrometry
+orbit was drawn mirrored that way. Passing them high-to-low is what Makie
+takes as "reversed".
+"""
+function _sky_limits!(ax, xlo::Real, xhi::Real, ylo::Real, yhi::Real)
+    limits!(ax, max(xlo, xhi), min(xlo, xhi), ylo, yhi)
+    return nothing
+end
+
 
 # =====================================================================
 # 1. Sky-plane orbit overlay
@@ -1735,10 +1751,11 @@ end
 # =====================================================================
 
 """
-    _iad_normal_points(iad, e, gap) -> NamedTuple
+    _iad_normal_points(iad, e, gap; psi_tol=1e-3) -> NamedTuple
 
 Group along-scan residuals `e` into normal points: consecutive transits of
-the SAME instrument, at the SAME scan angle, no more than `gap` days apart.
+the SAME instrument, at the SAME scan angle (within `psi_tol` radians of the
+previous one), no more than `gap` days apart.
 
 For Gaia that is one field-of-view transit — the 8-9 CCD abscissae read
 within ~40 s at an identical ψ; the next FoV transit is 106.5 min later, so
@@ -1750,11 +1767,17 @@ The scan-angle condition is not decoration: a weighted mean of residuals
 measured along DIFFERENT directions is not a residual along any of them, so
 a group never spans a change of ψ, whatever `gap` is.
 
+The default `psi_tol` is that of one Gaia transit. Hipparcos reductions that
+list several records per satellite orbit give them scan angles a few 1e-3 rad
+apart; `psi_tol = 0.02` (1.1°) bins those into one point per orbit, at a cost
+of `1 - cos(0.02)` = 2e-4 of the residual, and still never joins two genuinely
+different scan directions.
+
 Each normal point is the inverse-variance weighted mean residual with its
 formal error `1/√Σσ⁻²`, at the weighted mean epoch, along the weighted mean
 scan direction `u = (sin ψ, cos ψ)`.
 """
-function _iad_normal_points(iad, e::AbstractVector, gap::Real)
+function _iad_normal_points(iad, e::AbstractVector, gap::Real; psi_tol::Real = 1e-3)
     n = length(e)
     ord = sortperm(collect(zip(iad.inst, iad.t)))
     groups = Vector{Vector{Int}}()
@@ -1762,7 +1785,7 @@ function _iad_normal_points(iad, e::AbstractVector, gap::Real)
         if !isempty(groups)
             k = groups[end][end]
             if iad.inst[j] == iad.inst[k] && iad.t[j] - iad.t[k] <= gap &&
-               abs(rem2pi(iad.psi[j] - iad.psi[k], RoundNearest)) < 1e-3
+               abs(rem2pi(iad.psi[j] - iad.psi[k], RoundNearest)) < psi_tol
                 push!(groups[end], j)
                 continue
             end
@@ -2044,7 +2067,7 @@ function plot_epoch_astrometry_orbit(chains, params, data;
                  strokewidth = 1.5, strokecolor = :black, label = "Periastron")
         scatter!(ax, [0.0], [0.0]; color = :gold, marker = :star5, markersize = 22,
                  strokewidth = 1.5, strokecolor = :black, label = "Host star (barycentre)")
-        limits!(ax, xlo, xhi, ylo, yhi)
+        _sky_limits!(ax, xlo, xhi, ylo, yhi)
 
         # along-scan O−C of the normal points vs orbital phase. The individual
         # abscissae stay out: their scatter would set the scale and flatten the
