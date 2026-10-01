@@ -402,7 +402,7 @@ rather than a single number trusted.
       // Astrometry
       "orbit_skyplane", "relastrom_timeseries", "relastrom_residuals",
       "hgca_pm_residuals", "g23h_residuals", "iad_residuals",
-      "epoch_astrometry_orbit", "pm_anomaly", "rv_astrom_phasefold",
+      "epoch_astrometry_orbit", "astrometry_model", "pm_anomaly", "rv_astrom_phasefold",
       // ActivityGP
       "activity_gp_latent", "activity_gp_decomposition",   // only when an ActivityGP is configured
       // Diagnostics
@@ -410,6 +410,7 @@ rather than a single number trusted.
       "transdim_occupancy",   // only when chain has :n_planets
       "posteriors_raw", "posteriors_parameters", "posteriors_histograms",
       "traces_grouped",
+      "ladder_rates", "beta_ladder",   // only for pt_emcee / transdim_pt_emcee (T, swap rate, SMD vs step; E[log L] vs beta)
       // OR a single "auto" — picks every applicable plot from the data + model present
       "auto"
     ],
@@ -613,7 +614,9 @@ prior when that degeneracy is present.
   `rv_timeseries`+`rv_phasefold` (+`rv_components` when ≥2 planets or a GP/AGP);
   photometry → `pm_*`+`ttv_oc`+`transit_overlay`; astrometry → the astrometry
   plots; any `*_RM` mode → `rm_anomaly`; an ActivityGP → `activity_gp_latent`
-  + `activity_gp_decomposition`; a `:n_planets` chain → `transdim_occupancy`.
+  + `activity_gp_decomposition`; a `:n_planets` chain → `transdim_occupancy`;
+  an engine that records a ladder history (`pt_emcee`, `transdim_pt_emcee`) →
+  `ladder_rates` + `beta_ladder`.
 - Individual plots are fail-soft (a failing plotter logs a warning and is
   skipped, `src/runner.jl:1150-1156`).
 - `ttv_oc` renders for single-planet fits too — it shows the data-only O−C

@@ -799,7 +799,8 @@ function _finish(target, engine, stopping, output_dir; op::String,
             pcfg = cfg
             proot = joinpath(output_dir, "plots")
             before = _png_mtimes(proot)
-            _make_plots(pcfg, chains, target.params, target.data, output_dir)
+            _make_plots(pcfg, chains, target.params, target.data, output_dir;
+                        result = raw)
             # Manifest: logical name -> path, relative to plots/ without the
             # extension, exactly as run_job builds it. A bare scan also picks
             # up figures an EARLIER fit into the same output_dir left behind,

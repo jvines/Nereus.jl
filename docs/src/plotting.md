@@ -27,10 +27,11 @@ produced.
     "rm_anomaly", "ttv_oc",
     "orbit_skyplane", "relastrom_timeseries", "relastrom_residuals",
     "hgca_pm_residuals", "g23h_residuals", "iad_residuals",
-    "epoch_astrometry_orbit", "pm_anomaly", "rv_astrom_phasefold",
+    "epoch_astrometry_orbit", "astrometry_model", "pm_anomaly", "rv_astrom_phasefold",
     "activity_gp_latent", "activity_gp_decomposition",
     "corner", "trace", "histograms", "posteriors",
-    "transdim_occupancy"
+    "transdim_occupancy",
+    "ladder_rates", "beta_ladder"
   ],
   "plot_kwargs": { "bf_cutoff": 10.0, "subtract_gp": true },
   "save_pdf": false
@@ -54,6 +55,7 @@ produced.
 | `relastrom_residuals`      | `data.relastrom`                | `plot_relastrom_residuals`      | `models/relastrom_residuals_K*.png` |
 | `iad_residuals`            | `data.iad`                      | `plot_iad_residuals`            | `models/iad_residuals.png` |
 | `epoch_astrometry_orbit`   | `data.iad`                      | `plot_epoch_astrometry_orbit` (per planet)| `models/epoch_astrometry_orbit_K*.png` |
+| `astrometry_model`         | `data.iad`                      | `plot_astrometry_model` (per planet)| `models/astrometry_model_K*.png` (combined + one per panel) |
 | `hgca_pm_residuals`        | `data.hgca`                     | `plot_pm_residuals` (per planet)| `models/hgca_pm_residuals_K*.png` |
 | `g23h_residuals`           | `data.g23h`                     | `plot_g23h_residuals`           | `models/g23h_residuals.png` |
 | `pm_anomaly`               | `data.gost`                     | `plot_pm_anomaly` (per planet)  | `models/pm_anomaly_K*.png` |
@@ -69,6 +71,8 @@ produced.
 | `posteriors_histograms`    | any chain                       | `plot_posteriors_histograms`    | `posteriors/histograms/*.png` |
 | `traces_grouped`           | any chain                       | `plot_traces_grouped`           | `traces/*.png` |
 | `transdim_occupancy`       | `:n_planets` column (trans-dim) | `plot_transdim_occupancy`       | `transdim/occupancy.png` |
+| `ladder_rates`             | a ladder history (`pt_emcee`, `transdim_pt_emcee`) | `plot_ladder_rates`  | `betas/rates.png` |
+| `beta_ladder`              | a ladder history (`pt_emcee`, `transdim_pt_emcee`) | `plot_beta_ladder`   | `betas/beta_ladder.png` |
 | `auto`                     | —                               | data-driven selection (below)   | (union of the above) |
 
 !!! note "Empty `plots` makes nothing"
@@ -114,6 +118,8 @@ The selection logic (`_dispatch_plot(..., "auto", ...)`):
 
 - Always: `corner`, `posteriors_raw`, `posteriors_parameters`,
   `posteriors_histograms`, `traces_grouped`.
+- the engine returned a ladder history (`pt_emcee`, `transdim_pt_emcee`) →
+  `ladder_rates`, `beta_ladder`.
 - `:n_planets` column present → `transdim_occupancy`.
 - RV data present → `rv_timeseries`, `rv_phasefold`.
 - RV data **and** (≥ 2 planets **or** a smooth-activity noise model —
@@ -122,7 +128,7 @@ The selection logic (`_dispatch_plot(..., "auto", ...)`):
   `transit_overlay`.
 - `data.relastrom` → `orbit_skyplane`, `relastrom_timeseries`,
   `relastrom_residuals`.
-- `data.iad` → `iad_residuals`, `epoch_astrometry_orbit`;
+- `data.iad` → `iad_residuals`, `epoch_astrometry_orbit`, `astrometry_model`;
   `data.hgca` → `hgca_pm_residuals`;
   `data.g23h` → `g23h_residuals`; `data.gost` → `pm_anomaly`.
 - RV **and** astrometry → `rv_astrom_phasefold`.
@@ -316,30 +322,70 @@ rad); bottom: residual vs MJD. No-op (empty `Figure`) if `data.iad` is
 `nothing` or has no more transits than the marginalisation has
 parameters (4 for one instrument).
 
-### `plot_epoch_astrometry_orbit(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff, normal_point_gap, n_track)`
+### `plot_astrometry_model(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, panels, orbit_frame, bf_cutoff, normal_point_gap, psi_tol, n_track, mission_names)`
+
+The reflex orbit against the epoch astrometry of **every mission** in
+`data.iad` — astroEMPEROR's `astrometry_model` figure, with the intermediate
+astrometric data in place of its Gaia DR2/DR3 catalogue positions and GOST
+model, since Nereus fits the IAD of both missions directly.
+
+- **(a)** the orbit about the barycentre (`+`), every mission's abscissae as
+  **binned lines** along their scan axes, periastron, the sense of motion,
+  and a dashed box marking the frame of (b). Framed on the **orbit**: a
+  square `orbit_frame` (default `1.5`) orbit extents on a side, never wider
+  than the abscissae need. Lines of a mission that does not resolve the orbit
+  — Hipparcos, usually — run off the edge;
+- **(b)** the same, zoomed on the mission that resolves the orbit best (the
+  smallest binned errors — Gaia when present) and showing only that mission.
+  Omitted when there is a single mission;
+- one panel per mission: along-scan O−C against epoch (yr), individual
+  abscissae in grey, binned ones on top, χ²/N over the abscissae.
+
+An abscissa is one-dimensional, so it is drawn as the line it is: along
+`u = (sin ψ, cos ψ)`, ±1σ long, centred at the model position plus its O−C
+along `u`, with a dashed connector to that model position. Abscissae are
+binned first: consecutive transits of one mission within `normal_point_gap`
+days (default `0.01`) whose scan angles agree within `psi_tol` rad (default
+`0.02`). That is one line per Gaia field-of-view transit and one per
+Hipparcos satellite orbit.
+
+Missions are named from their epochs (before J2000 → Hipparcos, mid-2014 on
+→ Gaia); pass `mission_names` to override. The draw and the O−C are those
+of `plot_epoch_astrometry_orbit` below — max-lp draw, the likelihood's own
+residuals with every other active companion subtracted. On a non-detection
+the orbit is far smaller than the abscissa errors and the lines of (a) all
+pass near the barycentre.
+
+Writes `models/astrometry_model_K<k>.png`, and with `panels = true` (the
+default) each panel as its own figure beside it: `..._sky.png`,
+`..._sky_<mission>.png` (the zoom) and `..._oc_<mission>.png`. Set
+`"plot_kwargs": {"panels": false}` for the combined figure alone.
+
+### `plot_epoch_astrometry_orbit(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, orbit_frame, bf_cutoff, normal_point_gap, psi_tol, n_track, mission_names)`
 
 The sky-plane orbit of an **IAD / Gaia DR4 epoch-astrometry** target with
-the measurements on it — the figure `plot_orbit_skyplane` cannot draw for
-1-D data. Each abscissa is placed at the model position plus its along-scan
-O−C, `P = M(t) + (O−C)·(sin ψ, cos ψ)` (Sahlmann et al. 2011, Fig. 20;
-Holl et al. 2023, Figs. 12-16). Individual abscissae in grey; **normal
-points**, one per Gaia field-of-view transit (the 8-9 CCDs at one ψ;
-`normal_point_gap` days, default `0.01`), coloured by epoch, with a ±1σ
-bar along the scan axis and a dashed connector from the model position.
-Below: normal-point O−C vs orbital phase (0 = periastron). The host star at
-the barycentre (gold star), periastron (red diamond) and the sense of motion
-are marked.
+every mission's abscissae on it — the figure `plot_orbit_skyplane` cannot
+draw for 1-D data — and below it the along-scan O−C against **orbital phase**
+(0 = periastron), one strip per mission.
 
-The orbit is the max-lp draw (as `plot_orbit_skyplane`), and the O−C are
-the likelihood's: every other active companion's reflex and the sampled
-parallax are subtracted and the catalogue solution marginalised by the same
-helpers `iad_log_likelihood` uses, so the annotated per-abscissa χ²/N is
-exactly `χ²_min / N`. A normal-point χ²/N well above it flags noise
-correlated within a transit. Across the scan the points sit on the model by
-construction: scatter about the ellipse is information, agreement across it
-is not. The frame follows the orbit and the normal points; individual
-abscissae outside it are counted in the annotation. Empty `Figure` when
-there is no IAD or the planet has no astrometric orbit.
+It is the same scene `plot_astrometry_model` draws, drawn by the same
+routines: its sky panel **is** that figure's panel (a). Same max-lp draw, same
+binning, same line and marker for an abscissa, same mission colours, same
+frame. Each abscissa is placed at the model position plus its along-scan O−C,
+`P = M(t) + (O−C)·(sin ψ, cos ψ)` (Sahlmann et al. 2011, Fig. 20; Holl et al.
+2023, Figs. 12-16), and drawn as a ±1σ line along the scan axis with a dashed
+connector from the model position. The two figures differ only in what the
+O−C is plotted against: epoch there, which separates the missions; orbital
+phase here, which shows whether the residuals follow the orbit.
+
+Each strip shows the mission's individual abscissae in grey, the binned ones
+with their error bars, and χ²/N over the abscissae. The O−C are the
+likelihood's: every other active companion's reflex and the sampled parallax
+are subtracted and the catalogue solution marginalised by the same helpers
+`iad_log_likelihood` uses, so that χ²/N is exactly `χ²_min / N` for the
+mission. Across the scan the lines sit on the model by construction: scatter
+about the ellipse is information, agreement across it is not. Empty `Figure`
+when there is no IAD or the planet has no astrometric orbit.
 
 ### `plot_pm_residuals(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
@@ -499,6 +545,43 @@ write into per-group subfolders (`planet`, instrument, noise, …).
   figure per group (per planet: P/K/sesinw/secosw/Mo stacked; instrument
   γ/jitter; noise-model params; other nuisance). De-interleaves walkers
   via `n_walkers`. → `traces/*.png`.
+
+### `plot_ladder_rates(result; output, fmt, save_pdf, figsize, window)`
+
+What the temperature ladder did over the run, against step on a log
+axis — the `rates` figure astroEMPEROR draws from a reddemcee run. Unlike
+every figure above it is drawn from the **sampler result**, not the
+chains: `sample_pt_emcee` and `sample_transdim_pt_emcee` return a
+`ladder::LadderHistory` holding, for every step, the ladder, the swap
+acceptance between each pair of adjacent rungs, and the swap mean
+distance. Three panels, one line per rung, cold to hot:
+
+- `T` — the temperatures `1/β`. Flat unless the run adapted its ladder
+  (`adapt_ladder`), and then they move only during burn-in.
+- `T_swap` — fraction of swap proposals accepted per pair. A pair that
+  sinks to zero has stopped exchanging; the run-total
+  `acceptance_swap` averages that away.
+- `SMD` — swap mean distance: how far, in prior widths, a swap proposal
+  moves a walker on average, a rejected one counting as zero. A pair can
+  accept often and carry nothing, when both rungs hold the same states.
+
+`window` (default 25) is a trailing running mean; `window = 1` plots
+every step as recorded. → `betas/rates.png`.
+
+### `plot_beta_ladder(result; output, fmt, save_pdf, figsize)`
+
+The thermodynamic-integration integrand: `⟨log L⟩` per rung against `β`,
+the area to zero shaded. The annotation gives TI+ — the integral of the
+plotted curve — and, when it is a different number, the evidence the run
+actually reports (for `pt_emcee` usually bridge). A large gap between
+the two is the phase-transition signature. → `betas/beta_ladder.png`.
+
+```julia
+res = sample_pt_emcee(target, target.data; n_temps = 12, adapt_ladder = true)
+plot_ladder_rates(res; output = "out/plots")
+plot_beta_ladder(res;  output = "out/plots")
+res.ladder.swap_rate        # (n_steps, n_temps - 1), if you want the numbers
+```
 
 ### `plot_transdim_occupancy(chains, params; td, noise_labels, max_kplanet, output, fmt, save_pdf, figsize)`
 

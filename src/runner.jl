@@ -114,7 +114,7 @@ function run_job(cfg::AbstractDict)
         save_chains(joinpath(out_dir, "chains.nc"), chains, params; data = data)
 
         _plots_before = _png_mtimes(joinpath(out_dir, "plots"))
-        plot_paths = _make_plots(cfg, chains, params, data, out_dir)
+        plot_paths = _make_plots(cfg, chains, params, data, out_dir; result = result)
         summary["plots"] = plot_paths
         # figures manifest: scan the rendered plots/ tree → logical_name → path,
         # where logical_name is the path relative to plots/ without extension
@@ -291,6 +291,7 @@ const _KNOWN_PLOTS          = ("rv_timeseries", "rv_components", "rv_phasefold",
                                 "pm_timeseries", "pm_phasefold",
                                 "rv_astrom_phasefold", "orbit_skyplane",
                                 "iad_residuals", "epoch_astrometry_orbit",
+                                "astrometry_model",
                                 "hgca_pm_residuals",
                                 "relastrom_timeseries", "relastrom_residuals",
                                 "g23h_residuals", "pm_anomaly",
@@ -300,6 +301,7 @@ const _KNOWN_PLOTS          = ("rv_timeseries", "rv_components", "rv_phasefold",
                                 "transdim_occupancy", "posteriors_raw",
                                 "posteriors_parameters", "posteriors_histograms",
                                 "traces_grouped",
+                                "ladder_rates", "beta_ladder",
                                 "auto")
 
 # Collect all schema errors before throwing; gives the user a single
@@ -1590,9 +1592,11 @@ function _warn_unmatched_plot_patterns(patterns, figs)
 end
 
 """
-    _auto_plot_kinds(chains, params, data) -> Vector{String}
+    _auto_plot_kinds(chains, params, data; result=nothing) -> Vector{String}
 
-The plot set `"auto"` stands for, chosen from what is actually in `data`.
+The plot set `"auto"` stands for, chosen from what is actually in `data` --
+and, for the ladder diagnostics, from what the engine returned: they are
+drawn from `result.ladder`, which only the tempered ensemble samplers have.
 
 Extracted so `_make_plots` can EXPAND "auto" into concrete names before it
 loops. Previously the whole set was dispatched from inside `_dispatch_plot`,
@@ -1606,9 +1610,10 @@ trace beside a summary cheerfully reporting 28 figures.
 Expanding up front also means the progress bar counts real plots instead of
 sitting at 1/1 for the whole render.
 """
-function _auto_plot_kinds(chains, params, data)
+function _auto_plot_kinds(chains, params, data; result = nothing)
     kinds = String["corner", "posteriors_raw", "posteriors_parameters",
                    "posteriors_histograms", "traces_grouped"]
+    _ladder_of(result) !== nothing && append!(kinds, ["ladder_rates", "beta_ladder"])
     :n_planets in Set(names(chains, :parameters)) && push!(kinds, "transdim_occupancy")
     n_rv(data) > 0           && append!(kinds, ["rv_timeseries", "rv_phasefold"])
     # component decomposition adds over the timeseries only with multiple
@@ -1623,7 +1628,8 @@ function _auto_plot_kinds(chains, params, data)
     # astrometry determines a sky-plane orbit.
     has_astrometry(data)      && push!(kinds, "orbit_skyplane")
     data.iad      !== nothing && append!(kinds, ["iad_residuals",
-                                                   "epoch_astrometry_orbit"])
+                                                   "epoch_astrometry_orbit",
+                                                   "astrometry_model"])
     data.hgca     !== nothing && push!(kinds, "hgca_pm_residuals")
     data.g23h     !== nothing && push!(kinds, "g23h_residuals")
     data.gost     !== nothing && push!(kinds, "pm_anomaly")
@@ -1637,7 +1643,7 @@ function _auto_plot_kinds(chains, params, data)
     return unique(kinds)
 end
 
-function _make_plots(cfg, chains, params, data, out_dir)
+function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
     out_cfg = _get(cfg, :output; default = Dict())
     plot_list = _get(out_cfg, :plots; default = String[])
     plot_kwargs_raw = _get(out_cfg, :plot_kwargs; default = Dict())
@@ -1661,7 +1667,7 @@ function _make_plots(cfg, chains, params, data, out_dir)
     # anything was still happening.
     expanded = String[]
     for pn in plot_list
-        String(pn) == "auto" ? append!(expanded, _auto_plot_kinds(chains, params, data)) :
+        String(pn) == "auto" ? append!(expanded, _auto_plot_kinds(chains, params, data; result)) :
                                push!(expanded, String(pn))
     end
     expanded = unique(expanded)
@@ -1683,7 +1689,8 @@ function _make_plots(cfg, chains, params, data, out_dir)
         update!(pb; n_done = i - 1, fields = (:now => String(plot_name),))
         try
             fname = _dispatch_plot(String(plot_name), chains, params, data,
-                                     plots_dir, plot_kwargs; n_walkers = nw_eff)
+                                     plots_dir, plot_kwargs; n_walkers = nw_eff,
+                                     result = result)
             # `auto` dispatches a whole SET and returns the Vector{String} of
             # what it produced; every other kind returns one name or nothing.
             # `push!` on the vector case threw MethodError -- Vector{String}
@@ -1797,7 +1804,8 @@ _per_planet(f, name, pattern::AbstractString, out_dir, max_k::Int) =
         end
     end
 
-function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothing)
+function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothing,
+                        result=nothing)
     if name == "rv_timeseries"
         n_rv(data) > 0 || return nothing
         # SB2 double-lined fit → component-colored timeseries with both the
@@ -1877,6 +1885,16 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         data.iad === nothing && return nothing
         plot_iad_residuals(chains, params, data; output = out_dir, _kw_for(plot_iad_residuals, kw)...)
         return "models/iad_residuals.png"
+    elseif name == "astrometry_model"
+        # The orbit against every mission's binned abscissae, plus each panel
+        # as its own figure (`panels`); all of them match the one pattern.
+        data.iad === nothing && return nothing
+        return _per_planet(name, "models/astrometry_model_K*.png", out_dir,
+                           params.config.max_kplanet) do k
+            plot_astrometry_model(chains, params, data; planet_idx = k,
+                                  output = out_dir,
+                                  _kw_for(plot_astrometry_model, kw; except = (:output, :filename, :planet_idx))...)
+        end
     elseif name == "epoch_astrometry_orbit"
         # The sky-plane orbit WITH the data on it. IAD abscissae are 1-D, so
         # orbit_skyplane has nothing to overlay for an IAD-only fit; this is
@@ -2008,13 +2026,26 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
             return nothing
         end
         return "activity_gp_decomposition.png"
+    elseif name == "ladder_rates"
+        # Drawn from the engine's result, not the chains: only the tempered
+        # ensemble samplers record a ladder history.
+        _ladder_of(result) === nothing && return nothing
+        return _if_written(name, "betas/rates.png", out_dir) do
+            plot_ladder_rates(result; output = out_dir, _kw_for(plot_ladder_rates, kw)...)
+        end
+    elseif name == "beta_ladder"
+        _ladder_of(result) === nothing && return nothing
+        return _if_written(name, "betas/beta_ladder.png", out_dir) do
+            plot_beta_ladder(result; output = out_dir, _kw_for(plot_beta_ladder, kw)...)
+        end
     elseif name == "auto"
         # Kept for any caller that dispatches "auto" directly; `_make_plots`
         # expands it beforehand and never reaches here.
         produced = String[]
-        for k in _auto_plot_kinds(chains, params, data)
+        for k in _auto_plot_kinds(chains, params, data; result)
             try
-                f = _dispatch_plot(k, chains, params, data, out_dir, kw; n_walkers = n_walkers)
+                f = _dispatch_plot(k, chains, params, data, out_dir, kw; n_walkers = n_walkers,
+                                   result = result)
                 f === nothing || push!(produced, f)
             catch err
                 @warn "auto-dispatch plot `$k` failed" exception = err

@@ -209,6 +209,67 @@ function _flip_xaxis!(ax)
     return nothing
 end
 
+"""
+    _sky_limits!(ax, xlo, xhi, ylo, yhi)
+
+Frame a sky-plane axis and keep East to the left.
+
+`limits!(ax, xlo, xhi, ...)` is not enough after `_flip_xaxis!`: Makie reads the
+ORDER of the x limits as the direction of the axis, so low-to-high sets
+`xreversed = false` and undoes the flip without a word. The epoch-astrometry
+orbit was drawn mirrored that way. Passing them high-to-low is what Makie
+takes as "reversed".
+"""
+function _sky_limits!(ax, xlo::Real, xhi::Real, ylo::Real, yhi::Real)
+    limits!(ax, max(xlo, xhi), min(xlo, xhi), ylo, yhi)
+    return nothing
+end
+
+"""
+    _orbit_square(x_t, y_t, orbit_frame) -> (xlo, xhi, ylo, yhi)
+
+The square a sky panel may not grow beyond: centred on the orbit track
+`(x_t, y_t)` and the barycentre it circles, `orbit_frame` times their extent on
+a side.
+
+An abscissa far noisier than the orbit is large -- Hipparcos beside a sub-mas
+orbit -- otherwise sets the frame, and the orbit the figure exists to show
+shrinks to a speck among error bars. Capping the frame here keeps the orbit
+large and lets those measurements run off the edge.
+"""
+function _orbit_square(x_t, y_t, orbit_frame::Real)
+    xlo, xhi = min(minimum(x_t), 0.0), max(maximum(x_t), 0.0)
+    ylo, yhi = min(minimum(y_t), 0.0), max(maximum(y_t), 0.0)
+    half = orbit_frame * max(xhi - xlo, yhi - ylo, 1e-9) / 2
+    cx, cy = (xlo + xhi) / 2, (ylo + yhi) / 2
+    return (cx - half, cx + half, cy - half, cy + half)
+end
+
+"""
+    _sky_motion_arrow!(ax, p1, p2, span)
+
+The sense of motion on a sky panel: an arrow from `p1` toward `p2`, two points
+a short step apart on the orbit, sized to a panel `span` across. Call it LAST,
+so it lies over the abscissa lines and markers rather than under them, and its
+head is large enough to pick out among them.
+
+Nothing is drawn when the two points coincide -- zero reflex mass, an SB2 whose
+light ratio equals its mass ratio: no motion, so no arrow, not a NaN one.
+"""
+function _sky_motion_arrow!(ax, p1, p2, span::Real)
+    d = (p2[1] - p1[1], p2[2] - p1[2])
+    h = hypot(d...)
+    h > 0 || return nothing
+    s = 0.07 * span / h
+    return arrows2d!(ax, [Point2f(p1[1], p1[2])], [Vec2f(s * d[1], s * d[2])];
+                     color = NEREUS_COLORS.model, shaftwidth = 3.5,
+                     tipwidth = 24, tiplength = 26)
+end
+
+_check_orbit_frame(orbit_frame) = orbit_frame >= 1 || throw(ArgumentError(
+    "orbit_frame is the most a sky panel may span, in orbit extents, and must " *
+    "be at least 1 or the orbit itself is cut; got $orbit_frame"))
+
 
 # =====================================================================
 # 1. Sky-plane orbit overlay
@@ -1735,10 +1796,11 @@ end
 # =====================================================================
 
 """
-    _iad_normal_points(iad, e, gap) -> NamedTuple
+    _iad_normal_points(iad, e, gap; psi_tol=1e-3) -> NamedTuple
 
 Group along-scan residuals `e` into normal points: consecutive transits of
-the SAME instrument, at the SAME scan angle, no more than `gap` days apart.
+the SAME instrument, at the SAME scan angle (within `psi_tol` radians of the
+previous one), no more than `gap` days apart.
 
 For Gaia that is one field-of-view transit — the 8-9 CCD abscissae read
 within ~40 s at an identical ψ; the next FoV transit is 106.5 min later, so
@@ -1750,11 +1812,17 @@ The scan-angle condition is not decoration: a weighted mean of residuals
 measured along DIFFERENT directions is not a residual along any of them, so
 a group never spans a change of ψ, whatever `gap` is.
 
+The default `psi_tol` is that of one Gaia transit. Hipparcos reductions that
+list several records per satellite orbit give them scan angles a few 1e-3 rad
+apart; `psi_tol = 0.02` (1.1°) bins those into one point per orbit, at a cost
+of `1 - cos(0.02)` = 2e-4 of the residual, and still never joins two genuinely
+different scan directions.
+
 Each normal point is the inverse-variance weighted mean residual with its
 formal error `1/√Σσ⁻²`, at the weighted mean epoch, along the weighted mean
 scan direction `u = (sin ψ, cos ψ)`.
 """
-function _iad_normal_points(iad, e::AbstractVector, gap::Real)
+function _iad_normal_points(iad, e::AbstractVector, gap::Real; psi_tol::Real = 1e-3)
     n = length(e)
     ord = sortperm(collect(zip(iad.inst, iad.t)))
     groups = Vector{Vector{Int}}()
@@ -1762,7 +1830,7 @@ function _iad_normal_points(iad, e::AbstractVector, gap::Real)
         if !isempty(groups)
             k = groups[end][end]
             if iad.inst[j] == iad.inst[k] && iad.t[j] - iad.t[k] <= gap &&
-               abs(rem2pi(iad.psi[j] - iad.psi[k], RoundNearest)) < 1e-3
+               abs(rem2pi(iad.psi[j] - iad.psi[k], RoundNearest)) < psi_tol
                 push!(groups[end], j)
                 continue
             end
@@ -1801,8 +1869,8 @@ subtracts their reflex and the sampled parallax, `_iad_normal_equations!`
 sets up the catalogue marginalisation and `_iad_marginalised_residuals!`
 removes its solution. So `Σ(oc/σ)²` is `χ²_min` of `iad_log_likelihood`.
 A copy of that design in the plotting code once went stale and emptied
-`iad_residuals.png`; `plot_iad_residuals` and
-`plot_epoch_astrometry_orbit` both come through here.
+`iad_residuals.png`; `plot_iad_residuals` and both
+epoch-astrometry figures come through here.
 
 `nothing` when there is no IAD, or no more transits than the
 marginalisation has parameters (where the likelihood returns 0).
@@ -1849,236 +1917,6 @@ function _epoch_astrometry_oc(theta, data, planet_idx::Int)
     return (orb = fit.orbs[ki], M_sec = fit.M_secs[ki], oc = fit.oc, plx = fit.plx)
 end
 
-"""
-    plot_epoch_astrometry_orbit(chains, params, data; planet_idx=1,
-                                output=nothing, fmt=:png, save_pdf=false,
-                                figsize=(1000, 1000), bf_cutoff=5.0,
-                                normal_point_gap=0.01, n_track=1200)
-
-The astrometric orbit of an epoch-astrometry target (Hipparcos IAD, Gaia DR4
-along-scan) on the sky, with every abscissa placed along its own scan axis.
-
-Epoch astrometry is ONE-DIMENSIONAL: a transit measures the abscissa `w` along
-the scan direction `u = (sin ψ, cos ψ)` and nothing across it, so it pins the
-photocentre to a line, not a point. The standard picture (Sahlmann et al.
-2011, A&A 525, A95, Fig. 20; Holl et al. 2023, A&A 674, A10, Figs. 12-16, the
-Gaia DR3 NSS convention) puts each measurement at the model position plus its
-O−C along `u`:
-
-    P = M(t) + (O − C)·u
-
-and draws its error bar along `u` too. Across the scan the point sits exactly
-where the model puts it, so scatter about the ellipse is information and
-agreement across the scan is not evidence. This is a picture of the fit, not
-2-D astrometry.
-
-What is drawn:
-  - the orbit at the MAXIMUM-log-posterior draw of the best-fit cluster.
-    NOT the per-parameter median: on Gaia-4 the circular median of Ω lands
-    off the ridge and χ²/N rises from 1.38 to 1.65. On a trans-dim chain the
-    draw is taken among those where planet `planet_idx` is active, and that
-    draw's active set decides which other companions are subtracted.
-  - individual abscissae, small and grey;
-  - normal points (see `_iad_normal_points`: one per Gaia field-of-view
-    transit, `normal_point_gap` days), coloured by epoch, with a ±1σ bar
-    along the scan axis and a dashed connector from the model position —
-    the O−C itself, drawn along ψ;
-  - the host star at the barycentre (gold star) and periastron (red
-    diamond), and an arrow for the sense of motion;
-  - below, the along-scan O−C against orbital phase (0 = periastron).
-
-The O−C are the likelihood's own (`_epoch_astrometry_oc`, the path
-`plot_iad_residuals` also takes), so with several companions this panel shows
-planet `planet_idx`'s orbit with the others already removed from the data.
-
-The annotation gives χ²/N over the abscissae (what the likelihood sees) and
-over the normal points. With independent CCD errors both sit near 1, the
-normal-point one a little lower (the fitted orbit and catalogue parameters
-take a larger share of fewer points, ~0.1 at ~100 transits); a normal-point
-χ²/N well ABOVE the per-abscissa one says the excess noise is correlated
-within a transit.
-
-When a Gaia DR3 five-parameter solution is also supplied (`data.gaia_dr3`
-with `data.gost`), the fit marginalises the catalogue solution against it
-as well; this figure, like `plot_iad_residuals`, uses the IAD-only
-marginalisation.
-
-Saves `models/epoch_astrometry_orbit_K<planet_idx>.<fmt>`. Returns the
-`Figure`; an empty one (nothing saved) when there is no IAD, too few transits
-for the marginalisation, planet `planet_idx` carries no astrometric orbit, or
-a trans-dim chain never has it active.
-"""
-function plot_epoch_astrometry_orbit(chains, params, data;
-                                      planet_idx::Int = 1,
-                                      output::Union{Nothing, String} = nothing,
-                                      fmt::Symbol = :png,
-                                      save_pdf::Bool = false,
-                                      figsize = (1000, 1000),
-                                      bf_cutoff::Real = 5.0,
-                                      normal_point_gap::Real = 0.01,
-                                      n_track::Int = 1200)
-    iad = data.iad
-    iad === nothing && return Figure()
-    n = n_iad(iad)
-    n_inst = n_iad_inst(iad)
-    n_q = Nereus._iad_n_q(n_inst)
-    # The likelihood needs MORE than n_q transits (at n == n_q every orbit
-    # fits exactly); below that there is no fit to picture.
-    n > n_q || return Figure()
-
-    # The max-lp draw among those in which this companion exists, with its
-    # trans-dim active set -- so a parked slot is neither subtracted from
-    # the O−C nor drawn (see `_planet_draw`).
-    drawn = _planet_draw(chains, params, planet_idx; bf_cutoff = bf_cutoff)
-    drawn === nothing && return Figure()         # never present: nothing to draw
-    theta = first(drawn)
-
-    fit = _epoch_astrometry_oc(theta, data, planet_idx)
-    fit === nothing && return Figure()
-    (; orb, M_sec, oc, plx) = fit
-
-    np = _iad_normal_points(iad, oc, normal_point_gap)
-    m  = length(np.t)
-    has_raw = any(>(1), np.size)       # singletons: a normal point IS the abscissa
-
-    with_theme(nereus_theme()) do
-        # model positions, and each measurement along its scan axis
-        st, ct = sin.(iad.psi), cos.(iad.psi)
-        mod_raw = [star_reflex_offset(orb, iad.t[j], M_sec) for j in 1:n]
-        x_raw = [mod_raw[j][1] + oc[j] * st[j] for j in 1:n]
-        y_raw = [mod_raw[j][2] + oc[j] * ct[j] for j in 1:n]
-        mod_np = [star_reflex_offset(orb, np.t[g], M_sec) for g in 1:m]
-        xm = first.(mod_np); ym = last.(mod_np)
-        xn = xm .+ np.e .* np.ux
-        yn = ym .+ np.e .* np.uy
-
-        P_d = _orbit_period_days(theta, planet_idx)
-        t_first = minimum(iad.t)
-        tp  = PlanetOrbits.periastron(orb)
-        x_p, y_p = star_reflex_offset(orb, tp, M_sec)
-        # Traced uniformly in ECCENTRIC anomaly, not in time: at high e a time
-        # grid puts periastron between two samples and the line cuts the
-        # corner, leaving the periastron marker off the drawn orbit.
-        e_orb = PlanetOrbits.eccentricity(orb)
-        tt  = [tp + P_d / 2π * (E - e_orb * sin(E))
-               for E in range(0, 2π; length = n_track)]
-        trk = [star_reflex_offset(orb, t, M_sec) for t in tt]
-        x_t = first.(trk); y_t = last.(trk)
-        a0  = abs(PlanetOrbits.semimajoraxis(orb) * M_sec /
-                  PlanetOrbits.totalmass(orb) * plx)
-
-        # Frame the orbit and the normal points, not the individual
-        # abscissae: a handful of CCD outliers (HD 114762 has 14 beyond 5σ,
-        # one at 41σ) otherwise set the limits and shrink the orbit into a
-        # corner. The ones left outside are counted in the annotation.
-        xs = vcat(x_t, xn .- np.σ .* abs.(np.ux), xn .+ np.σ .* abs.(np.ux))
-        ys = vcat(y_t, yn .- np.σ .* abs.(np.uy), yn .+ np.σ .* abs.(np.uy))
-        pad = 0.08 * max(maximum(xs) - minimum(xs), maximum(ys) - minimum(ys))
-        xlo, xhi = minimum(xs) - pad, maximum(xs) + pad
-        ylo, yhi = minimum(ys) - pad, maximum(ys) + pad
-        n_out = has_raw ? count(j -> !(xlo <= x_raw[j] <= xhi && ylo <= y_raw[j] <= yhi), 1:n) : 0
-        xspan, yspan = xhi - xlo, yhi - ylo
-
-        # Size the figure to that frame's aspect (DataAspect), as
-        # plot_orbit_skyplane does, so the sky panel fills its box and the
-        # O−C strip below it is the same width.
-        pw = float(figsize[1]) - 190
-        ph = clamp(pw * yspan / max(xspan, eps()), 0.5pw, 1.3pw)
-        rh = 0.3pw
-        fig = Figure(; size = (round(Int, pw + 190), round(Int, ph + rh + 230)))
-        ga = fig[1, 1] = GridLayout()
-        ax = Axis(ga[1, 1];
-                  xlabel = "ΔRA·cos δ (mas)",
-                  ylabel = "Δδ (mas)",
-                  aspect = DataAspect())
-        _flip_xaxis!(ax)
-        ax_r = Axis(ga[2, 1];
-                    xlabel = "orbital phase",
-                    ylabel = "O−C (mas)")
-        rowsize!(ga, 2, rh)       # a Real is a fixed size; `Fixed` is taken by Nereus
-
-        tcol   = np.t .- t_first
-        t_span = max(maximum(tcol), 1.0)
-        mk     = [sky_inst_marker(i) for i in np.inst]
-
-        lines!(ax, x_t, y_t; color = NEREUS_COLORS.model, linewidth = 2,
-               label = "Best fit")
-        # sense of motion: a short arrow a tenth of a period past periastron
-        let t_a = tp + 0.1 * P_d, dt = P_d / 200
-            p1 = star_reflex_offset(orb, t_a, M_sec)
-            p2 = star_reflex_offset(orb, t_a + dt, M_sec)
-            d  = (p2[1] - p1[1], p2[2] - p1[2])
-            h  = hypot(d...)
-            # h == 0 when the reflex mass is zero (an SB2 whose light ratio
-            # equals its mass ratio): no motion, so no arrow, not a NaN one.
-            if h > 0
-                s = 0.06 * max(xspan, yspan) / h
-                arrows2d!(ax, [Point2f(p1...)], [Vec2f(s * d[1], s * d[2])];
-                          color = NEREUS_COLORS.model, shaftwidth = 2,
-                          tipwidth = 12, tiplength = 12)
-            end
-        end
-        if has_raw
-            scatter!(ax, x_raw, y_raw; color = (:gray, 0.35), markersize = 4,
-                     strokewidth = 0, label = "Individual abscissae")
-        end
-        # O−C connectors, model → normal point, along the scan axis
-        seg = Point2f[]
-        for g in 1:m
-            push!(seg, Point2f(xm[g], ym[g]), Point2f(xn[g], yn[g]))
-        end
-        linesegments!(ax, seg; color = (:gray30, 0.8), linewidth = 0.9,
-                      linestyle = :dash)
-        # ±1σ along the scan axis
-        bar = Point2f[]
-        for g in 1:m
-            dx, dy = np.σ[g] * np.ux[g], np.σ[g] * np.uy[g]
-            push!(bar, Point2f(xn[g] - dx, yn[g] - dy), Point2f(xn[g] + dx, yn[g] + dy))
-        end
-        linesegments!(ax, bar; color = :black, linewidth = ERRBAR_LW)
-        sc = scatter!(ax, xn, yn; color = tcol, colormap = NEREUS_CMAP,
-                      colorrange = (0, t_span), marker = mk, markersize = 11,
-                      strokewidth = 1.0, strokecolor = :black,
-                      label = has_raw ? "Normal points" : "Abscissae")
-        scatter!(ax, [x_p], [y_p]; color = :red, marker = :diamond, markersize = 18,
-                 strokewidth = 1.5, strokecolor = :black, label = "Periastron")
-        scatter!(ax, [0.0], [0.0]; color = :gold, marker = :star5, markersize = 22,
-                 strokewidth = 1.5, strokecolor = :black, label = "Host star (barycentre)")
-        limits!(ax, xlo, xhi, ylo, yhi)
-
-        # along-scan O−C of the normal points vs orbital phase. The individual
-        # abscissae stay out: their scatter would set the scale and flatten the
-        # normal points onto the zero line (plot_iad_residuals shows them).
-        ph_np = mod.((np.t .- tp) ./ P_d, 1.0)
-        errorbars!(ax_r, ph_np, np.e, np.σ; color = :black, linewidth = ERRBAR_LW)
-        scatter!(ax_r, ph_np, np.e; color = tcol, colormap = NEREUS_CMAP,
-                 colorrange = (0, t_span), marker = mk, markersize = 9,
-                 strokewidth = 0.8, strokecolor = :black)
-        hlines!(ax_r, 0; color = NEREUS_COLORS.zero_line, linestyle = :dash,
-                linewidth = 1.5)
-        xlims!(ax_r, 0, 1)
-
-        Colorbar(ga[1:2, 2], sc; label = "MJD − $(round(Int, t_first))")
-        Legend(ga[3, 1], ax; framevisible = false, labelsize = 14,
-               orientation = :horizontal, tellheight = true, tellwidth = false,
-               nbanks = 2)
-
-        χ2_raw = sum(abs2, oc ./ iad.abscissa_err) / n
-        χ2_np  = sum(abs2, np.e ./ np.σ) / m
-        txt = has_raw ?
-            @sprintf("%d abscissae in %d normal points\na₀ = %.3f mas\nχ²/N = %.2f (abscissae), %.2f (normal points)",
-                     n, m, a0, χ2_raw, χ2_np) :
-            @sprintf("%d abscissae\na₀ = %.3f mas\nχ²/N = %.2f", n, a0, χ2_raw)
-        n_out > 0 && (txt *= "\n$n_out abscissa$(n_out == 1 ? "" : "e") outside the frame")
-        text!(ax, 0.02, 0.98; text = txt, space = :relative,
-              align = (:left, :top), fontsize = 15)
-
-        if output !== nothing
-            mkpath(joinpath(output, "models"))
-            _save_plot(joinpath(output, "models",
-                                "epoch_astrometry_orbit_K$(planet_idx).$fmt"), fig;
-                       save_pdf = save_pdf, px_per_unit = 3)
-        end
-        fig
-    end
-end
+# `plot_epoch_astrometry_orbit` itself is in astrometry_model_plot.jl, beside
+# `plot_astrometry_model`: the two figures share one scene and one way of
+# drawing it.

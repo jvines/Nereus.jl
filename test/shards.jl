@@ -36,6 +36,7 @@ const TEST_UNITS = [
     (name = "astrometry/test_iad_marginalised_residuals.jl", seconds = 1, files = ["astrometry/test_iad_marginalised_residuals.jl"]),
     (name = "epoch astrometry orbit + trans-dim plot draws (shares a fixture)", seconds = 105, files = ["astrometry/test_epoch_astrometry_orbit.jl", "test_transdim_plot_draws.jl"]),
     (name = "astrometry/test_hgca_residual_plot.jl", seconds = 9, files = ["astrometry/test_hgca_residual_plot.jl"]),
+    (name = "astrometry/test_astrometry_model_plot.jl", seconds = 60, files = ["astrometry/test_astrometry_model_plot.jl"]),
     (name = "astrometry/test_iad_multi_instrument_e2e.jl", seconds = 5, files = ["astrometry/test_iad_multi_instrument_e2e.jl"]),
     (name = "astrometry/test_gaia_epoch_guards.jl", seconds = 2, files = ["astrometry/test_gaia_epoch_guards.jl"]),
     (name = "test_builder.jl", seconds = 2, files = ["test_builder.jl"]),
@@ -98,6 +99,7 @@ const TEST_UNITS = [
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 1, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 5, files = ["test_plot_patterns.jl"]),
+    (name = "test_ladder_history.jl", seconds = 40, files = ["test_ladder_history.jl"]),
     (name = "test_thread_slots.jl", seconds = 60, files = ["test_thread_slots.jl"]),
 ]
 

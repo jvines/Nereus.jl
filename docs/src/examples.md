@@ -69,12 +69,14 @@ collated error message if any is wrong — see `_validate_config` in
 - **`output.plots`**: `rv_timeseries`, `rv_components`, `rv_phasefold`,
   `pm_timeseries`, `pm_phasefold`, `rv_astrom_phasefold`,
   `orbit_skyplane`, `iad_residuals`, `epoch_astrometry_orbit`,
+  `astrometry_model`,
   `hgca_pm_residuals`,
   `relastrom_timeseries`, `relastrom_residuals`, `g23h_residuals`,
   `pm_anomaly`, `ttv_oc`, `transit_overlay`, `rm_anomaly`,
   `activity_gp_latent`, `activity_gp_decomposition`, `corner`, `trace`,
   `histograms`, `posteriors`, `transdim_occupancy`, `posteriors_raw`,
   `posteriors_parameters`, `posteriors_histograms`, `traces_grouped`,
+  `ladder_rates`, `beta_ladder`,
   and `auto` (picks the right plot set from what's in `data`).
 
 !!! warning "Symbols arrive as strings; vectors arrive as JSON arrays"

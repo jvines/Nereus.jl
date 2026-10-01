@@ -92,6 +92,7 @@ include("samplers/ofti.jl")
 include("samplers/pathfinder.jl")
 include("samplers/node_flip.jl") # astrometric (Ω, ω) → (Ω+π, ω+π) move for the PT ensembles
 include("samplers/lambda_slide.jl") # (Mo, ω) → (Mo+δ, ω−δ) slide along the mean-longitude ridge
+include("samplers/ladder_history.jl") # per-step T / swap rate / swap mean distance of a PT ensemble run
 include("samplers/pt_emcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
 include("samplers/transdim_pt_emcee.jl") # trans-dim PT + MoMS variable selection
 include("samplers/population_annealing.jl") # sequential-MC tempered sampler (Hukushima & Iba 2003)
@@ -124,12 +125,14 @@ include("plotting/pm_plots.jl")
 include("plotting/diagnostics.jl")
 include("plotting/detrend_plots.jl")
 include("plotting/astrom_plots.jl")
+include("plotting/astrometry_model_plot.jl")  # orbit vs every mission's binned abscissae; O−C against epoch
 include("plotting/ttv_plots.jl")
 include("plotting/ppc_plots.jl")
 include("plotting/detection_limits_plots.jl")
 include("plotting/posterior_plots.jl")
 include("plotting/posterior_science_plots.jl")  # raw/parameters/histograms posteriors
 include("plotting/transdim_plots.jl")
+include("plotting/ladder_plots.jl")   # T / swap rate / SMD against step; E[log L] against β
 include("plotting/activity_gp_plots.jl")
 include("preprocessing/rotation_period_plots.jl")
 include("rm.jl")                   # Rossiter-McLaughlin (Hirano+ 2011 lite)
@@ -335,9 +338,10 @@ export
     plot_rv_timeseries, plot_rv_phasefold,
     plot_pm_timeseries, plot_pm_phasefold,
     plot_trace, plot_posteriors, plot_histograms, plot_corner,
+    plot_ladder_rates, plot_beta_ladder,
     plot_detrending, plot_transit_phasefold, plot_posteriors_lp,
     plot_orbit_skyplane, plot_pm_residuals, plot_rv_astrom_phasefold,
-    plot_iad_residuals, plot_epoch_astrometry_orbit,
+    plot_iad_residuals, plot_epoch_astrometry_orbit, plot_astrometry_model,
     plot_relastrom_timeseries, plot_relastrom_residuals,
     plot_g23h_residuals, plot_pm_anomaly,
     plot_ttv_diagram, plot_ttv_diagram_multipanel, plot_transit_overlay,
