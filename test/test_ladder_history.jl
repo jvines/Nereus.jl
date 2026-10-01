@@ -131,6 +131,19 @@ using Test, Nereus, Random, Statistics
         @test all((L.swap_distance .== 0) .| (L.swap_rate .> 0))
         @test length(L.mean_logL) == 4
         @test Nereus.ti_trapezoidal(L.mean_logL, res.betas) ≈ res.evidence_report.ti[1]
+
+        # Both figures draw from this result too. Its evidence report sits
+        # under a different field name (`evidence_report`, not `evidence`) and
+        # the evidence it reports IS one of the tempered estimators.
+        rep = Nereus._evidence_report_of(res)
+        @test rep === res.evidence_report
+        @test Nereus._reported_evidence_name(res, rep) in ("H+", "TI+", "TI")
+        out = mktempdir()
+        plot_ladder_rates(res; output = out)
+        plot_beta_ladder(res; output = out)
+        @test isfile(joinpath(out, "betas", "rates.png"))
+        @test isfile(joinpath(out, "betas", "beta_ladder.png"))
+        @test "ladder_rates" in Nereus._auto_plot_kinds(res.chains, params, data; result = res)
     end
 
     @testset "figures" begin
