@@ -92,6 +92,7 @@ include("samplers/ofti.jl")
 include("samplers/pathfinder.jl")
 include("samplers/node_flip.jl") # astrometric (Ω, ω) → (Ω+π, ω+π) move for the PT ensembles
 include("samplers/lambda_slide.jl") # (Mo, ω) → (Mo+δ, ω−δ) slide along the mean-longitude ridge
+include("samplers/ladder_history.jl") # per-step T / swap rate / swap mean distance of a PT ensemble run
 include("samplers/pt_emcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
 include("samplers/transdim_pt_emcee.jl") # trans-dim PT + MoMS variable selection
 include("samplers/population_annealing.jl") # sequential-MC tempered sampler (Hukushima & Iba 2003)

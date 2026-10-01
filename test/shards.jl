@@ -98,6 +98,7 @@ const TEST_UNITS = [
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 1, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 5, files = ["test_plot_patterns.jl"]),
+    (name = "test_ladder_history.jl", seconds = 40, files = ["test_ladder_history.jl"]),
     (name = "test_thread_slots.jl", seconds = 60, files = ["test_thread_slots.jl"]),
 ]
 
