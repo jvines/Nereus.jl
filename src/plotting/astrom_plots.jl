@@ -209,6 +209,22 @@ function _flip_xaxis!(ax)
     return nothing
 end
 
+"""
+    _sky_limits!(ax, xlo, xhi, ylo, yhi)
+
+Frame a sky-plane axis and keep East to the left.
+
+`limits!(ax, xlo, xhi, ...)` is not enough after `_flip_xaxis!`: Makie reads the
+ORDER of the x limits as the direction of the axis, so low-to-high sets
+`xreversed = false` and undoes the flip without a word. The epoch-astrometry
+orbit was drawn mirrored that way. Passing them high-to-low is what Makie
+takes as "reversed".
+"""
+function _sky_limits!(ax, xlo::Real, xhi::Real, ylo::Real, yhi::Real)
+    limits!(ax, max(xlo, xhi), min(xlo, xhi), ylo, yhi)
+    return nothing
+end
+
 
 # =====================================================================
 # 1. Sky-plane orbit overlay
@@ -2044,7 +2060,7 @@ function plot_epoch_astrometry_orbit(chains, params, data;
                  strokewidth = 1.5, strokecolor = :black, label = "Periastron")
         scatter!(ax, [0.0], [0.0]; color = :gold, marker = :star5, markersize = 22,
                  strokewidth = 1.5, strokecolor = :black, label = "Host star (barycentre)")
-        limits!(ax, xlo, xhi, ylo, yhi)
+        _sky_limits!(ax, xlo, xhi, ylo, yhi)
 
         # along-scan O−C of the normal points vs orbital phase. The individual
         # abscissae stay out: their scatter would set the scale and flatten the
