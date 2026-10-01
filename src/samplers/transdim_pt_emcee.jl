@@ -63,6 +63,10 @@ struct TransDimPTemceeResult
     planet_birth_accepted::Vector{Int}        # per-temp
     planet_death_proposed::Vector{Int}        # per-temp
     planet_death_accepted::Vector{Int}        # per-temp
+    # The ladder, swap acceptance and swap mean distance at every step, and
+    # <log L> per rung -- see `LadderHistory`. The swap distance runs over the
+    # dimensions active in both walkers.
+    ladder::LadderHistory
 end
 
 # Debug event log for trans-dim moves, gated by ENV["TD_DEBUG_BIRTHS"]="1".
@@ -961,6 +965,12 @@ function sample_transdim_pt_emcee(
     propose_within = zeros(Int,     n_temps)
     accept_swap    = zeros(Float64, n_temps - 1)
     propose_swap   = zeros(Int,     n_temps - 1)
+    # Ladder history, as in sample_pt_emcee (src/samplers/ladder_history.jl).
+    β_hist    = Matrix{Float64}(undef, n_steps, n_temps)
+    swap_hist = zeros(Float64, n_steps, n_temps - 1)
+    smd_hist  = zeros(Float64, n_steps, n_temps - 1)
+    smd_scale = _swap_distance_scale(layout.unfrozen_priors, flat_shift)
+    n_done    = 0
     accept_transdim  = zeros(Int, max_k)
     propose_transdim = zeros(Int, max_k)
     # Noise-toggle moves get their OWN per-temp raw counters. They were
@@ -1848,6 +1858,11 @@ function sample_transdim_pt_emcee(
                 propose_swap[t] += 1
                 window_props[t] += 1
                 if log(rand(rng_master)) < log_ratio
+                    # Over the dimensions active in BOTH walkers, and before
+                    # the masks move with them.
+                    smd_hist[step, t] += _swap_distance(
+                        state, t, w, w2, smd_scale, flat_shift, dim_owner,
+                        td_states[t, w], td_states[t + 1, w2])
                     for d in 1:n_dim
                         tmp = state[t, w, d]
                         state[t, w, d]      = state[t + 1, w2, d]
@@ -1887,6 +1902,9 @@ function sample_transdim_pt_emcee(
                     window_accs[t] += 1
                 end
             end
+            # A rejected proposal moved nothing: it counts as zero distance.
+            swap_hist[step, t]  = window_accs[t] / window_props[t]
+            smd_hist[step, t]  /= window_props[t]
         end
         _np_chk("ptswap", step)
 
@@ -1909,6 +1927,8 @@ function sample_transdim_pt_emcee(
             new_betas[end] = βs[end]
             βs .= new_betas
         end
+        β_hist[step, :] .= βs
+        n_done = step
 
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_td_prune_stranded!`. Same schedule as pt_emcee: every 50
@@ -2047,5 +2067,6 @@ function sample_transdim_pt_emcee(
         copy(propose_noise_transdim), copy(accept_noise_transdim),
         copy(planet_birth_proposed), copy(planet_birth_accepted),
         copy(planet_death_proposed), copy(planet_death_accepted),
+        _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
     )
 end

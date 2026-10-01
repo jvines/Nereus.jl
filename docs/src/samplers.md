@@ -183,7 +183,9 @@ res = sample_pt_emcee(target, data;
 
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (best of
 TI/TI⁺/SS⁺/H⁺), `evidence::EvidenceReport`, `acceptance_within`,
-`acceptance_swap`, `n_evals`. Bump `n_temps` to 15+ when log-likelihood
+`acceptance_swap`, `n_evals`, and `ladder::LadderHistory` — the ladder, swap
+acceptance and swap mean distance at every step, plus `⟨log L⟩` per rung,
+which `plot_ladder_rates` and `plot_beta_ladder` draw. Bump `n_temps` to 15+ when log-likelihood
 spans more than ~2000 log units between prior bulk and posterior peak
 (needed for tight evidence-estimator agreement).
 

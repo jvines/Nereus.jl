@@ -93,6 +93,9 @@ Container for a `sample_pt_emcee` run.
   phase transition → the tempered evidence is untrustworthy (use the Laplace one).
 - `betas::Vector{Float64}` — β ladder used.
 - `n_evals::Int` — total likelihood evaluations.
+- `ladder::LadderHistory` — the ladder, the swap acceptance and the swap mean
+  distance at every step, and `⟨log L⟩` per rung: what [`plot_ladder_rates`](@ref)
+  and [`plot_beta_ladder`](@ref) draw. See [`LadderHistory`](@ref).
 """
 struct PTemceeResult
     chains::MCMCChains.Chains
@@ -104,6 +107,7 @@ struct PTemceeResult
     acceptance_swap::Vector{Float64}
     betas::Vector{Float64}
     n_evals::Int
+    ladder::LadderHistory
 end
 
 """
@@ -742,6 +746,14 @@ function sample_pt_emcee(
     propose_within = zeros(Int, n_temps)
     accept_swap    = zeros(Float64, n_temps - 1)
     propose_swap   = zeros(Int, n_temps - 1)
+    # Ladder history (src/samplers/ladder_history.jl): the ladder, the swap
+    # acceptance and the swap mean distance at every step, where the two
+    # counters above only keep the run totals.
+    β_hist    = Matrix{Float64}(undef, n_steps, n_temps)
+    swap_hist = zeros(Float64, n_steps, n_temps - 1)
+    smd_hist  = zeros(Float64, n_steps, n_temps - 1)
+    smd_scale = _swap_distance_scale(layout.unfrozen_priors, flat_shift)
+    n_done    = 0
     n_evals_atomic = Threads.Atomic{Int}(n_temps * n_walkers_eff)
     accept_temp    = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
     propose_temp   = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
@@ -863,6 +875,7 @@ function sample_pt_emcee(
                 propose_swap[t] += 1
                 window_props[t] += 1
                 if log(rand(rng_master)) < log_ratio
+                    smd_hist[step, t] += _swap_distance(state, t, w, w2, smd_scale)
                     for d in 1:n_dim
                         tmp = state[t, w, d]
                         state[t, w, d]      = state[t + 1, w2, d]
@@ -877,6 +890,9 @@ function sample_pt_emcee(
                     window_accs[t] += 1
                 end
             end
+            # A rejected proposal moved nothing: it counts as zero distance.
+            swap_hist[step, t]  = window_accs[t] / window_props[t]
+            smd_hist[step, t]  /= window_props[t]
         end
 
         # ---- Adaptive β-ladder (Vousden+ 2016 Algorithm 1, eq 12) ----
@@ -907,6 +923,8 @@ function sample_pt_emcee(
             new_betas[end] = βs[end]       # keep hot β fixed
             βs .= new_betas
         end
+        β_hist[step, :] .= βs
+        n_done = step
 
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_pt_prune_stranded!`. Stops at 3/4 of burn-in so the moved
@@ -1214,6 +1232,7 @@ function sample_pt_emcee(
 
     return PTemceeResult(
         chains, log_z, log_z_laplace, log_z_bridge, ev_report, acc_within, acc_swap,
-        βs, n_evals_atomic[]
+        βs, n_evals_atomic[],
+        _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin)
     )
 end
