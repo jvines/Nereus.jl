@@ -144,6 +144,47 @@ function _am_sky_frame(S, insts; bars::Bool)
 end
 
 """
+    _am_wide_frame(S, orbit_frame) -> (xlo, xhi, ylo, yhi)
+
+Frame of panel (a): the orbit, with room around it -- NOT every abscissa.
+
+Hipparcos abscissae scatter by milliarcseconds about an orbit that is often a
+fraction of one. A frame that holds all of them shows the scatter of Hipparcos
+and leaves the orbit a speck in the middle. So the frame is a square centred
+on the orbit, `orbit_frame` times its extent on a side, and the lines of a
+mission that does not resolve the orbit run off the edge (`_am_n_outside`
+counts them).
+
+Two things bound it. It never zooms OUT further than the abscissae need: when
+every binned centre already fits in less, that tighter frame is used. And it
+always contains the frame of the zoom panel, so the box (a) draws for (b) lies
+inside it even when the orbit is smaller than the zoom mission's error bars.
+"""
+function _am_wide_frame(S, orbit_frame::Real)
+    full = _am_sky_frame(S, 1:S.n_inst; bars = false)
+    xlo, xhi = extrema(vcat(S.x_t, 0.0))
+    ylo, yhi = extrema(vcat(S.y_t, 0.0))
+    half = orbit_frame * max(xhi - xlo, yhi - ylo, 1e-9) / 2
+    half >= (full[2] - full[1]) / 2 && return full
+    cx, cy = (xlo + xhi) / 2, (ylo + yhi) / 2
+    f = (cx - half, cx + half, cy - half, cy + half)
+    S.zoom == 0 && return f
+    z = _am_sky_frame(S, [S.zoom]; bars = true)
+    (f[1] <= z[1] && z[2] <= f[2] && f[3] <= z[3] && z[4] <= f[4]) && return f
+    return _square_frame((min(f[1], z[1]), max(f[2], z[2])),
+                         (min(f[3], z[3]), max(f[4], z[4])); pad = 0.0)
+end
+
+"""
+Per instrument, how many binned abscissae are CENTRED outside `frame` -- the
+lines panel (a) leaves to run off its edge.
+"""
+_am_n_outside(S, frame) =
+    [count(g -> S.np.inst[g] == m &&
+                !(frame[1] <= S.xn[g] <= frame[2] && frame[3] <= S.yn[g] <= frame[4]),
+           eachindex(S.np.t)) for m in 1:S.n_inst]
+
+"""
 Draw a sky panel into `ax`: the orbit, and for each instrument in `insts` its
 binned abscissae as lines along the scan axis.
 
@@ -158,7 +199,7 @@ The least precise mission is drawn first and the orbit over all of the lines,
 so mas-long Hipparcos lines do not bury a sub-mas orbit or Gaia's.
 """
 function _am_draw_sky!(ax, S, insts; frame, box = nothing, tag = nothing,
-                       linewidth::Real = 2.5)
+                       linewidth::Real = 2.5, count_outside::Bool = false)
     order = sort(collect(insts); by = m -> S.med_σ[m], rev = true)
     for m in order
         sel = findall(==(m), S.np.inst)
@@ -211,6 +252,17 @@ function _am_draw_sky!(ax, S, insts; frame, box = nothing, tag = nothing,
     _sky_limits!(ax, frame...)
     tag === nothing || text!(ax, 0.04, 0.97; text = tag, space = :relative,
                              align = (:left, :top), font = :bold, fontsize = 18)
+    if count_outside
+        # A frame on the orbit cuts the lines of a mission that does not
+        # resolve it. Say how many, so a cropped panel is not read as "these
+        # are all the measurements".
+        n_out = _am_n_outside(S, frame)
+        note = ["$(S.names[m]): $(n_out[m]) of $(count(==(m), S.np.inst)) lines centred outside the frame"
+                for m in insts if n_out[m] > 0]
+        isempty(note) || text!(ax, 0.04, 0.03; text = join(note, "\n"),
+                               space = :relative, align = (:left, :bottom),
+                               fontsize = 14)
+    end
     return ax
 end
 
@@ -253,8 +305,9 @@ const _AM_YLABEL = "Δδ (mas)"
 """
     plot_astrometry_model(chains, params, data; planet_idx=1, output=nothing,
                           fmt=:png, save_pdf=false, figsize=nothing,
-                          panels=true, bf_cutoff=5.0, normal_point_gap=0.01,
-                          psi_tol=0.02, n_track=1200, mission_names=nothing)
+                          panels=true, orbit_frame=2.0, bf_cutoff=5.0,
+                          normal_point_gap=0.01, psi_tol=0.02, n_track=1200,
+                          mission_names=nothing)
 
 The astrometric orbit of companion `planet_idx` against the epoch astrometry
 of every mission in `data.iad` -- astroEMPEROR's `astrometry_model` figure,
@@ -265,7 +318,10 @@ Panels:
   - **(a)** the reflex orbit of the star about the barycentre (`+`), with every
     mission's abscissae as BINNED LINES along their scan axes (see below), the
     periastron, an arrow for the sense of motion, and a dashed box marking the
-    frame of (b);
+    frame of (b). It is framed on the ORBIT: a square `orbit_frame` orbit
+    extents on a side, never wider than the abscissae need. Lines of a mission
+    that does not resolve the orbit (Hipparcos, usually) run off the edge, and
+    the panel notes how many are centred outside it;
   - **(b)** the same, zoomed on the mission that resolves the orbit best (the
     smallest binned errors; Gaia, when it is there) and showing only that
     mission. Not drawn when there is only one mission;
@@ -305,17 +361,21 @@ function plot_astrometry_model(chains, params, data;
                                save_pdf::Bool = false,
                                figsize = nothing,
                                panels::Bool = true,
+                               orbit_frame::Real = 2.0,
                                bf_cutoff::Real = 5.0,
                                normal_point_gap::Real = 0.01,
                                psi_tol::Real = 0.02,
                                n_track::Int = 1200,
                                mission_names = nothing)
+    orbit_frame >= 1 || throw(ArgumentError(
+        "orbit_frame is the side of panel (a) in orbit extents and must be " *
+        "at least 1, or the orbit itself is cut; got $orbit_frame"))
     S = _astrometry_model_scene(chains, params, data, planet_idx;
                                 bf_cutoff, normal_point_gap, psi_tol, n_track,
                                 mission_names)
     S === nothing && return Figure()
     insts = collect(1:S.n_inst)
-    frame_all  = _am_sky_frame(S, insts; bars = false)
+    frame_all  = _am_wide_frame(S, orbit_frame)
     frame_zoom = S.zoom == 0 ? nothing : _am_sky_frame(S, [S.zoom]; bars = true)
     base = output === nothing ? nothing :
            joinpath(output, "models", "astrometry_model_K$(planet_idx)")
@@ -341,7 +401,7 @@ function plot_astrometry_model(chains, params, data;
             let fig = Figure(; size = (1000, 1100))
                 ax = sky_axis(fig[1, 1])
                 _am_draw_sky!(ax, S, insts; frame = frame_all, box = frame_zoom,
-                              linewidth = wide_lw)
+                              linewidth = wide_lw, count_outside = true)
                 legend!(fig[2, 1], ax; nbanks = 2)
                 save_fig(fig, "_sky")
             end
@@ -367,7 +427,7 @@ function plot_astrometry_model(chains, params, data;
         # Row 1 is the legend, row 2 the panels.
         ax_a = sky_axis(fig[2, 1])
         _am_draw_sky!(ax_a, S, insts; frame = frame_all, box = frame_zoom,
-                      tag = tag(), linewidth = wide_lw)
+                      tag = tag(), linewidth = wide_lw, count_outside = true)
         if S.zoom == 0
             # One mission: its O−C under the orbit.
             _am_draw_oc!(oc_axis(fig[3, 1]), S, 1; tag = tag(S.names[1]))
