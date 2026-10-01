@@ -150,6 +150,26 @@ function nereus_theme()
     )
 end
 
+"""
+    cool_pastel(n; strength=0.45, reverse=false) -> Vector{RGBAf}
+
+`n` colours sampled evenly from `cool` and blended toward white: the palette
+for a handful of discrete series (temperatures of a ladder, missions on a
+sky plot). `strength` is how pastel -- 0.45 is the look for a figure, higher
+washes out. One colour is the middle of the map.
+"""
+function cool_pastel(n::Integer; strength::Real = 0.45, reverse::Bool = false)
+    g = cgrad(NEREUS_CMAP)
+    xs = n == 1 ? [0.5] : collect(range(0.0, 1.0; length = n))
+    reverse && (xs = 1 .- xs)
+    s = Float32(strength)
+    return [begin
+                c = Makie.RGBAf(g[x])
+                Makie.RGBAf(c.r + (1 - c.r) * s, c.g + (1 - c.g) * s,
+                            c.b + (1 - c.b) * s, c.alpha)
+            end for x in xs]
+end
+
 """Marker for instrument index (cycles through INST_MARKERS)."""
 inst_marker(i::Int) = INST_MARKERS[mod1(i, length(INST_MARKERS))]
 

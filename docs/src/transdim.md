@@ -263,7 +263,8 @@ present.
 
 The result `TransDimPTemceeResult` carries `chains`, `log_evidence`
 (hybrid → TI⁺ → TI fallback), `evidence_report`, within/swap/transdim
-acceptance, the β ladder, `n_evals`, plus **raw** per-planet
+acceptance, the β ladder, `n_evals`, the per-step `ladder::LadderHistory`
+(drawn by `plot_ladder_rates` / `plot_beta_ladder`), plus **raw** per-planet
 (`td_proposed`, `td_accepted`) and per-temp noise
 (`noise_td_proposed`, `noise_td_accepted`) move counts — raw counts
 because a rounded rate of `0.000` reads as "frozen" even while the

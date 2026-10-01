@@ -75,6 +75,7 @@ collated error message if any is wrong — see `_validate_config` in
   `activity_gp_latent`, `activity_gp_decomposition`, `corner`, `trace`,
   `histograms`, `posteriors`, `transdim_occupancy`, `posteriors_raw`,
   `posteriors_parameters`, `posteriors_histograms`, `traces_grouped`,
+  `ladder_rates`, `beta_ladder`,
   and `auto` (picks the right plot set from what's in `data`).
 
 !!! warning "Symbols arrive as strings; vectors arrive as JSON arrays"

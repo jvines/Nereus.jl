@@ -131,6 +131,7 @@ include("plotting/detection_limits_plots.jl")
 include("plotting/posterior_plots.jl")
 include("plotting/posterior_science_plots.jl")  # raw/parameters/histograms posteriors
 include("plotting/transdim_plots.jl")
+include("plotting/ladder_plots.jl")   # T / swap rate / SMD against step; E[log L] against β
 include("plotting/activity_gp_plots.jl")
 include("preprocessing/rotation_period_plots.jl")
 include("rm.jl")                   # Rossiter-McLaughlin (Hirano+ 2011 lite)
@@ -336,6 +337,7 @@ export
     plot_rv_timeseries, plot_rv_phasefold,
     plot_pm_timeseries, plot_pm_phasefold,
     plot_trace, plot_posteriors, plot_histograms, plot_corner,
+    plot_ladder_rates, plot_beta_ladder,
     plot_detrending, plot_transit_phasefold, plot_posteriors_lp,
     plot_orbit_skyplane, plot_pm_residuals, plot_rv_astrom_phasefold,
     plot_iad_residuals, plot_epoch_astrometry_orbit,

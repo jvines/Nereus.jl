@@ -260,7 +260,7 @@ sampler permitting).
 `rm_anomaly`, `activity_gp_latent`, `activity_gp_decomposition`,
 `corner`, `trace`, `histograms`, `posteriors`, `transdim_occupancy`,
 `posteriors_raw`, `posteriors_parameters`, `posteriors_histograms`,
-`traces_grouped`, and `auto`. Use `auto` to let `run_job` pick the
+`traces_grouped`, `ladder_rates`, `beta_ladder`, and `auto`. Use `auto` to let `run_job` pick the
 relevant set from what's in `data`; each plot still no-ops when its
 required data is absent.
 

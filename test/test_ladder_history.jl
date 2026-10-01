@@ -38,6 +38,12 @@ using Test, Nereus, Random, Statistics
         @test all(isfinite, D) && all(>(0), D)
     end
 
+    @testset "trailing running mean" begin
+        @test Nereus._running_mean([1.0, 2.0, 3.0, 4.0], 2) ≈ [1.0, 1.5, 2.5, 3.5]
+        @test Nereus._running_mean([1.0, 2.0, 3.0], 1) == [1.0, 2.0, 3.0]
+        @test Nereus._running_mean([2.0, 4.0, 6.0], 10) ≈ [2.0, 3.0, 4.0]
+    end
+
     @testset "pt_emcee, fixed ladder" begin
         target = mk_target()
         r = sample_pt_emcee(target, target.data; n_temps = n_temps, n_walkers = 20,
@@ -127,4 +133,46 @@ using Test, Nereus, Random, Statistics
         @test Nereus.ti_trapezoidal(L.mean_logL, res.betas) ≈ res.evidence_report.ti[1]
     end
 
+    @testset "figures" begin
+        target = mk_target()
+        r = sample_pt_emcee(target, target.data; n_temps = n_temps, n_walkers = 20,
+                            n_steps = n_steps, n_burnin = n_burnin, seed = 42,
+                            adapt_ladder = true, show_progress = false)
+        chains, params, data = r.chains, target.params, target.data
+
+        out = mktempdir()
+        plot_ladder_rates(r; output = out)
+        plot_beta_ladder(r; output = out)
+        @test isfile(joinpath(out, "betas", "rates.png"))
+        @test isfile(joinpath(out, "betas", "beta_ladder.png"))
+
+        # Through the runner: named kinds, and part of "auto" when -- and only
+        # when -- the engine returned a ladder history.
+        out2 = mktempdir()
+        @test Nereus._dispatch_plot("ladder_rates", chains, params, data, out2,
+                                    Dict{Symbol,Any}(); result = r) == "betas/rates.png"
+        @test Nereus._dispatch_plot("beta_ladder", chains, params, data, out2,
+                                    Dict{Symbol,Any}(); result = r) == "betas/beta_ladder.png"
+        @test isfile(joinpath(out2, "betas", "rates.png"))
+        @test isfile(joinpath(out2, "betas", "beta_ladder.png"))
+        @test Nereus._dispatch_plot("ladder_rates", chains, params, data, mktempdir(),
+                                    Dict{Symbol,Any}()) === nothing
+        @test Nereus._dispatch_plot("beta_ladder", chains, params, data, mktempdir(),
+                                    Dict{Symbol,Any}(); result = (; chains)) === nothing
+
+        auto = Nereus._auto_plot_kinds(chains, params, data; result = r)
+        @test "ladder_rates" in auto && "beta_ladder" in auto
+        bare = Nereus._auto_plot_kinds(chains, params, data)
+        @test !("ladder_rates" in bare) && !("beta_ladder" in bare)
+
+        # And end to end through `_make_plots`, which is what run_job and the
+        # fit_* API both call.
+        out3 = mktempdir()
+        cfg = Dict("output" => Dict("plots" => ["ladder_rates", "beta_ladder"],
+                                    "show_progress" => false))
+        made = Nereus._make_plots(cfg, chains, params, data, out3; result = r)
+        @test "betas/rates.png" in made && "betas/beta_ladder.png" in made
+        @test isfile(joinpath(out3, "plots", "betas", "rates.png"))
+        @test isfile(joinpath(out3, "plots", "betas", "beta_ladder.png"))
+    end
 end

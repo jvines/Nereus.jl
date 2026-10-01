@@ -30,7 +30,8 @@ produced.
     "epoch_astrometry_orbit", "pm_anomaly", "rv_astrom_phasefold",
     "activity_gp_latent", "activity_gp_decomposition",
     "corner", "trace", "histograms", "posteriors",
-    "transdim_occupancy"
+    "transdim_occupancy",
+    "ladder_rates", "beta_ladder"
   ],
   "plot_kwargs": { "bf_cutoff": 10.0, "subtract_gp": true },
   "save_pdf": false
@@ -69,6 +70,8 @@ produced.
 | `posteriors_histograms`    | any chain                       | `plot_posteriors_histograms`    | `posteriors/histograms/*.png` |
 | `traces_grouped`           | any chain                       | `plot_traces_grouped`           | `traces/*.png` |
 | `transdim_occupancy`       | `:n_planets` column (trans-dim) | `plot_transdim_occupancy`       | `transdim/occupancy.png` |
+| `ladder_rates`             | a ladder history (`pt_emcee`, `transdim_pt_emcee`) | `plot_ladder_rates`  | `betas/rates.png` |
+| `beta_ladder`              | a ladder history (`pt_emcee`, `transdim_pt_emcee`) | `plot_beta_ladder`   | `betas/beta_ladder.png` |
 | `auto`                     | —                               | data-driven selection (below)   | (union of the above) |
 
 !!! note "Empty `plots` makes nothing"
@@ -114,6 +117,8 @@ The selection logic (`_dispatch_plot(..., "auto", ...)`):
 
 - Always: `corner`, `posteriors_raw`, `posteriors_parameters`,
   `posteriors_histograms`, `traces_grouped`.
+- the engine returned a ladder history (`pt_emcee`, `transdim_pt_emcee`) →
+  `ladder_rates`, `beta_ladder`.
 - `:n_planets` column present → `transdim_occupancy`.
 - RV data present → `rv_timeseries`, `rv_phasefold`.
 - RV data **and** (≥ 2 planets **or** a smooth-activity noise model —
@@ -499,6 +504,43 @@ write into per-group subfolders (`planet`, instrument, noise, …).
   figure per group (per planet: P/K/sesinw/secosw/Mo stacked; instrument
   γ/jitter; noise-model params; other nuisance). De-interleaves walkers
   via `n_walkers`. → `traces/*.png`.
+
+### `plot_ladder_rates(result; output, fmt, save_pdf, figsize, window)`
+
+What the temperature ladder did over the run, against step on a log
+axis — the `rates` figure astroEMPEROR draws from a reddemcee run. Unlike
+every figure above it is drawn from the **sampler result**, not the
+chains: `sample_pt_emcee` and `sample_transdim_pt_emcee` return a
+`ladder::LadderHistory` holding, for every step, the ladder, the swap
+acceptance between each pair of adjacent rungs, and the swap mean
+distance. Three panels, one line per rung, cold to hot:
+
+- `T` — the temperatures `1/β`. Flat unless the run adapted its ladder
+  (`adapt_ladder`), and then they move only during burn-in.
+- `T_swap` — fraction of swap proposals accepted per pair. A pair that
+  sinks to zero has stopped exchanging; the run-total
+  `acceptance_swap` averages that away.
+- `SMD` — swap mean distance: how far, in prior widths, a swap proposal
+  moves a walker on average, a rejected one counting as zero. A pair can
+  accept often and carry nothing, when both rungs hold the same states.
+
+`window` (default 25) is a trailing running mean; `window = 1` plots
+every step as recorded. → `betas/rates.png`.
+
+### `plot_beta_ladder(result; output, fmt, save_pdf, figsize)`
+
+The thermodynamic-integration integrand: `⟨log L⟩` per rung against `β`,
+the area to zero shaded. The annotation gives TI+ — the integral of the
+plotted curve — and, when it is a different number, the evidence the run
+actually reports (for `pt_emcee` usually bridge). A large gap between
+the two is the phase-transition signature. → `betas/beta_ladder.png`.
+
+```julia
+res = sample_pt_emcee(target, target.data; n_temps = 12, adapt_ladder = true)
+plot_ladder_rates(res; output = "out/plots")
+plot_beta_ladder(res;  output = "out/plots")
+res.ladder.swap_rate        # (n_steps, n_temps - 1), if you want the numbers
+```
 
 ### `plot_transdim_occupancy(chains, params; td, noise_labels, max_kplanet, output, fmt, save_pdf, figsize)`
 
