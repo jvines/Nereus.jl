@@ -144,6 +144,56 @@ _am_files(dir) = isdir(joinpath(dir, "models")) ?
         @test S.yn[g] ≈ S.ym[g] + S.np.e[g] * S.np.uy[g]
     end
 
+    @testset "panel (a) is framed on the orbit, not on the abscissae" begin
+        # Hipparcos abscissae scatter by milliarcseconds about a sub-mas orbit.
+        # Framing every one of them left the orbit a speck in the middle of
+        # the panel that is supposed to show it. The frame follows the orbit,
+        # up to `orbit_frame` of its extent, and the lines run off the edge.
+        inside(f, x, y) = f[1] <= x <= f[2] && f[3] <= y <= f[4]
+        within(f, z) = f[1] <= z[1] && z[2] <= f[2] && f[3] <= z[3] && z[4] <= f[4]
+        extent(S) = max(maximum(S.x_t) - minimum(S.x_t), maximum(S.y_t) - minimum(S.y_t))
+
+        target, _, chains = _two_mission_target()
+        S = Nereus._astrometry_model_scene(chains, target.params, target.data, 1)
+        f = Nereus._am_wide_frame(S, 2.5)
+        @test f[2] - f[1] ≈ f[4] - f[3]                       # square
+        @test f[2] - f[1] ≈ 2.5 * extent(S)
+        @test all(inside(f, x, y) for (x, y) in zip(S.x_t, S.y_t))
+        @test inside(f, 0.0, 0.0)                             # the barycentre
+        @test within(f, Nereus._am_sky_frame(S, [S.zoom]; bars = true))
+        hip_out = count(g -> S.np.inst[g] == 1 && !inside(f, S.xn[g], S.yn[g]),
+                        eachindex(S.np.t))
+        @test hip_out > 0
+        @test Nereus._am_n_outside(S, f) == [hip_out, 0]
+
+        # It never zooms OUT further than the abscissae need, whatever the
+        # allowance: a huge one gives the frame that holds every centre.
+        @test Nereus._am_wide_frame(S, 1e6) == Nereus._am_sky_frame(S, 1:S.n_inst; bars = false)
+
+        # One mission whose abscissae sit on the orbit: all of them stay in.
+        g, _, gch = _two_mission_target(gaia_only = true)
+        Sg = Nereus._astrometry_model_scene(gch, g.params, g.data, 1)
+        fg = Nereus._am_wide_frame(Sg, 2.5)
+        @test all(inside(fg, x, y) for (x, y) in zip(Sg.xn, Sg.yn))
+        @test Nereus._am_n_outside(Sg, fg) == [0]
+
+        # A non-detection: the orbit is far smaller than the zoom mission's
+        # error bars. The wide panel must still contain the zoom's frame, or
+        # the box it draws for (b) would lie outside itself.
+        tiny = merge(S, (x_t = S.x_t .* 1e-3, y_t = S.y_t .* 1e-3))
+        ft = Nereus._am_wide_frame(tiny, 2.5)
+        @test within(ft, Nereus._am_sky_frame(tiny, [tiny.zoom]; bars = true))
+        @test ft[2] - ft[1] ≈ ft[4] - ft[3]
+
+        # The keyword reaches the figure.
+        out = mktempdir()
+        plot_astrometry_model(chains, target.params, target.data; output = out,
+                              orbit_frame = 1.5, panels = false)
+        @test _am_files(out) == ["astrometry_model_K1.png"]
+        @test_throws ArgumentError plot_astrometry_model(chains, target.params,
+            target.data; orbit_frame = 0.5)
+    end
+
     @testset "combined figure and every panel on its own" begin
         target, _, chains = _two_mission_target()
         out = mktempdir()

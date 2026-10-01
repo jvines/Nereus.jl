@@ -322,7 +322,7 @@ rad); bottom: residual vs MJD. No-op (empty `Figure`) if `data.iad` is
 `nothing` or has no more transits than the marginalisation has
 parameters (4 for one instrument).
 
-### `plot_astrometry_model(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, panels, bf_cutoff, normal_point_gap, psi_tol, n_track, mission_names)`
+### `plot_astrometry_model(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, panels, orbit_frame, bf_cutoff, normal_point_gap, psi_tol, n_track, mission_names)`
 
 The reflex orbit against the epoch astrometry of **every mission** in
 `data.iad` — astroEMPEROR's `astrometry_model` figure, with the intermediate
@@ -331,7 +331,11 @@ model, since Nereus fits the IAD of both missions directly.
 
 - **(a)** the orbit about the barycentre (`+`), every mission's abscissae as
   **binned lines** along their scan axes, periastron, the sense of motion,
-  and a dashed box marking the frame of (b);
+  and a dashed box marking the frame of (b). Framed on the **orbit**: a
+  square `orbit_frame` (default `2.0`) orbit extents on a side, never wider
+  than the abscissae need. Lines of a mission that does not resolve the orbit
+  — Hipparcos, usually — run off the edge, and the panel notes how many are
+  centred outside it;
 - **(b)** the same, zoomed on the mission that resolves the orbit best (the
   smallest binned errors — Gaia when present) and showing only that mission.
   Omitted when there is a single mission;
