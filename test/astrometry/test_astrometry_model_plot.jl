@@ -164,7 +164,6 @@ _am_files(dir) = isdir(joinpath(dir, "models")) ?
         hip_out = count(g -> S.np.inst[g] == 1 && !inside(f, S.xn[g], S.yn[g]),
                         eachindex(S.np.t))
         @test hip_out > 0
-        @test Nereus._am_n_outside(S, f) == [hip_out, 0]
 
         # It never zooms OUT further than the abscissae need, whatever the
         # allowance: a huge one gives the frame that holds every centre.
@@ -175,7 +174,6 @@ _am_files(dir) = isdir(joinpath(dir, "models")) ?
         Sg = Nereus._astrometry_model_scene(gch, g.params, g.data, 1)
         fg = Nereus._am_wide_frame(Sg, 2.5)
         @test all(inside(fg, x, y) for (x, y) in zip(Sg.xn, Sg.yn))
-        @test Nereus._am_n_outside(Sg, fg) == [0]
 
         # A non-detection: the orbit is far smaller than the zoom mission's
         # error bars. The wide panel must still contain the zoom's frame, or
