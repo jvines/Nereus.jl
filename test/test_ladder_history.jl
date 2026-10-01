@@ -65,13 +65,15 @@ using Test, Nereus, Random, Statistics
         @test vec(mean(L.swap_rate; dims = 1)) ≈ r.acceptance_swap atol = 1e-12
         @test all(0 .<= L.swap_rate .<= 1)
 
-        # reddemcee's SMD: rejected swaps count as zero distance, so it is
-        # zero exactly where nothing was accepted; and with every dimension
-        # scaled by its prior width no accepted swap can travel further than
-        # the unit hypercube's diagonal.
+        # reddemcee's SMD: rejected swaps count as zero distance, so it is zero
+        # wherever nothing was accepted; and with every dimension scaled by its
+        # prior width no accepted swap can travel further than the unit
+        # hypercube's diagonal. The converse of the first is NOT asserted: the
+        # burn-in pruning moves stranded walkers onto others, and a swap
+        # between two such twins is accepted and moves nothing.
         n_dim = length(target.params.layout.unfrozen_idx)
         @test all(L.swap_distance .>= 0)
-        @test all((L.swap_distance .== 0) .== (L.swap_rate .== 0))
+        @test all((L.swap_distance .== 0) .| (L.swap_rate .> 0))
         @test all(L.swap_distance .<= L.swap_rate .* sqrt(n_dim) .+ 1e-12)
         @test any(>(0), L.swap_distance)
 
