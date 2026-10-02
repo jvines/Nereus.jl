@@ -418,14 +418,24 @@ function default_priors(config::ParamsConfig, data::Data)
         # (100 km/s, A-star regime). User overrides with NormalPrior
         # when spectroscopic v_sin_i is measured.
         dic["v_sin_i_star"] = LogUniformPrior(500.0, 100_000.0)   # m/s
-        # Stellar inclination for gravity darkening. Uniform in [0, pi/2]: an
+        # Stellar inclination for gravity darkening. Uniform in the angle: an
         # ISOTROPIC prior would be uniform in cos(i_star), but that piles prior
         # mass at the equator-on end where the gravity-darkening signal vanishes,
         # so it biases toward a non-detection. Uniform in the angle is the honest
         # weakly-informative choice here; use cos-uniform explicitly if an
         # isotropic population prior is wanted.
+        #
+        # The RANGE depends on what else is in the fit. Darkening alone cannot
+        # tell a spin vector from its reverse -- (i_star, lambda) and
+        # (pi - i_star, lambda + pi) are one light curve -- so [0, pi/2] already
+        # holds every solution once and [0, pi] would hold each twice. RM
+        # velocities or a tomogram measure the SENSE of rotation and pin lambda,
+        # which leaves i_star > pi/2 as a different star rather than a relabelling:
+        # stopping at pi/2 then drops half of the orientations.
         if any(has_gd(m) for m in config.planet_modes)
-            dic["i_star"] = UniformPrior(0.0, pi / 2)
+            sense_known = any(has_any_rm(m) for m in config.planet_modes) ||
+                          !isempty(data.tomo)
+            dic["i_star"] = UniformPrior(0.0, sense_known ? pi : pi / 2)
         end
         # The per-band `gd_beta_<INST>` defaults are set in `_build_layout`,
         # where the photometric instrument names are known. Bolometric (0.25)

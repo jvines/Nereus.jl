@@ -18,7 +18,9 @@ using Test
 using Nereus
 using Nereus: roche_flattening, roche_radius, local_gravity, gd_brightness,
                transit_flux_gd, omega_frac_from_veq, transit_flux,
-               QuadLimbDark, _gd_disc_mean, gd_beta_band
+               QuadLimbDark, _gd_disc_mean, gd_beta_band, gd_context,
+               rm_signal, planet_sky_position
+using LinearAlgebra: norm, normalize, cross
 
 @testset "Gravity darkening" begin
 
@@ -129,16 +131,99 @@ using Nereus: roche_flattening, roche_radius, local_gravity, gd_brightness,
                   gd_brightness(0.0, 0.85, π / 2, 0.0, wf) rtol = 1e-12
         end
 
-        # λ rotates the pattern rigidly: brightness at (x,y) with λ equals
-        # brightness at the λ-rotated point with λ = 0. This is the shared
-        # convention with rm.jl -- if it broke, the tomographic λ and the
-        # gravity-darkening λ would mean different angles and could not be
-        # fitted jointly.
+        # λ rotates the pattern rigidly, in the sense the RM kernels turn their
+        # velocity field: brightness at (x, y) with λ equals brightness at the
+        # point rotated back by λ, with λ = 0.
         let wf = 0.6, i = 1.1, λ = 0.7, x = 0.4, y = -0.3
             s, c = sincos(λ)
             @test gd_brightness(x, y, i, λ, wf) ≈
-                  gd_brightness(x * c + y * s, -x * s + y * c, i, 0.0, wf) rtol = 1e-10
+                  gd_brightness(x * c - y * s, x * s + y * c, i, 0.0, wf) rtol = 1e-10
         end
+    end
+
+    # ================================================================
+    # 2b. λ and i_star mean what they mean everywhere else
+    # ================================================================
+    # The rigid-rotation check above cannot catch a mirrored axis: it compares
+    # the kernel with itself, and it passed for as long as the kernel disagreed
+    # with rm.jl. These three compare it with the things it has to agree with.
+    @testset "λ is the RM kernel's λ" begin
+        # The RM anomaly vanishes where the planet sits on the projected spin
+        # axis, and is extremal on the projected equator. Read both directions
+        # off `rm_signal`, then ask the brightness map what is there. Seen
+        # equator-on, the axis runs pole to pole and the equator is the dimmest
+        # line on the disc.
+        wf, ρ = 0.6, 0.8
+        on_pole_axis = gd_brightness(0.0, ρ, π / 2, 0.0, wf)
+        for λ in deg2rad.((-150.0, -60.0, 20.0, 40.0, 110.0))
+            φs = range(0, π; length = 36_001)
+            φ0 = φs[argmin([abs(rm_signal(sin(φ), cos(φ), 1.0, 1.0, λ)) for φ in φs])]
+            ax = (sin(φ0), cos(φ0))                  # RM: zero velocity
+            eq = (cos(φ0), -sin(φ0))                 # RM: extremal velocity
+            centre = gd_brightness(0.0, 0.0, π / 2, λ, wf)
+            for sgn in (-1, 1)
+                @test gd_brightness(sgn * ρ * ax[1], sgn * ρ * ax[2], π / 2, λ, wf) ≈
+                      on_pole_axis rtol = 1e-6
+                @test gd_brightness(sgn * ρ * eq[1], sgn * ρ * eq[2], π / 2, λ, wf) ≈
+                      centre rtol = 1e-6
+            end
+        end
+    end
+
+    @testset "i_star is measured like the orbit's inclination" begin
+        # cos ψ = cos i★ cos i + sin i★ sin i cos λ (what `compute_derived`
+        # reports) only holds if i★ and the orbital i are angles from the SAME
+        # line of sight. Then ψ = 0 -- λ = 0 and i★ = i -- puts the orbit in
+        # the stellar equatorial plane, so the direction to the planet meets the
+        # stellar surface on the equator, at every phase and every b. With the
+        # brightness map's y axis mirrored against `planet_sky_position` the
+        # same point read as latitude 2(90° − i) instead.
+        wf, β = 0.6, 0.25
+        P, e, ω, Tp, aRs = 3.0, 0.0, π / 2, 0.0, 6.0     # mid-transit at t = Tp
+        for b in (0.2, 0.5, 0.8)
+            ip = acos(b / aRs)
+            ctx = gd_context(ip, 0.0, wf, β)
+            equator = local_gravity(π / 2, ctx.ω)^ctx.p * ctx.scale
+            for t in (-0.04, -0.015, 0.0, 0.015, 0.04)
+                p = collect(planet_sky_position(Tp + t, P, e, ω, Tp, b, aRs))
+                n = p ./ norm(p)
+                @test n[3] > 0
+                @test gd_brightness(ctx, n[1], n[2]) ≈ equator rtol = 1e-9
+            end
+        end
+
+        # General obliquity. The orbit's pole is a point on the stellar sphere,
+        # and its angle from the spin axis is ψ by definition, so the brightness
+        # there is the brightness at colatitude ψ. Includes i★ > 90°.
+        for (isd, λd, b) in ((35.0, -60.0, 0.5), (70.0, 40.0, 0.3), (15.0, 160.0, 0.7),
+                             (120.0, 25.0, 0.6), (160.0, -100.0, 0.2))
+            is, λ = deg2rad(isd), deg2rad(λd)
+            ip = acos(b / aRs)
+            p1 = collect(planet_sky_position(Tp - 0.05, P, e, ω, Tp, b, aRs))
+            p2 = collect(planet_sky_position(Tp + 0.05, P, e, ω, Tp, b, aRs))
+            n = normalize(cross(p1, p2))
+            n[3] < 0 && (n = -n)                     # N/S symmetric: either pole
+            ψ = acos(clamp(cos(is) * cos(ip) + sin(is) * sin(ip) * cos(λ), -1, 1))
+            ctx = gd_context(is, λ, wf, β)
+            @test gd_brightness(ctx, n[1], n[2]) ≈
+                  local_gravity(ψ, ctx.ω)^ctx.p * ctx.scale rtol = 1e-9
+        end
+    end
+
+    @testset "spin axis and its reverse are the same star" begin
+        # Gravity darkening is blind to the SENSE of rotation, so reversing the
+        # spin vector -- (i★, λ) -> (π − i★, λ + π) -- must change nothing. That
+        # is also why i★ > 90° is a legitimate value and not an error.
+        wf = 0.6
+        for (is, λ) in ((0.4, 0.7), (1.1, -2.0), (1.5, 2.9)),
+            (x, y) in ((0.4, -0.3), (-0.6, 0.5), (0.1, 0.85))
+            @test gd_brightness(x, y, π - is, λ + π, wf) ≈
+                  gd_brightness(x, y, is, λ, wf) rtol = 1e-9
+        end
+        # ...while i★ -> π − i★ ALONE is a different star: the pole that leans
+        # toward the observer moves to the other side of the disc.
+        @test !isapprox(gd_brightness(0.4, -0.3, π - 1.1, 0.7, wf),
+                        gd_brightness(0.4, -0.3, 1.1, 0.7, wf); rtol = 1e-3)
     end
 
     # ================================================================
@@ -368,5 +453,51 @@ using Nereus: roche_flattening, roche_radius, local_gravity, gd_brightness,
         params_a, data_a = build("PM_GD"; extra = merge(copy(gd_extra),
             Dict{String, Any}("lambda_k1" => fx(0.0))))
         @test depth_asym(params_a, data_a, 25.0) < 1e-15
+
+        # (d) i_star runs over (0°, 180°). Past 90° the spin vector points away
+        #     from the observer, which is a star like any other; the likelihood
+        #     used to return -Inf there whatever the prior said, so a prior on
+        #     (0, π) was silently cut to (0, π/2).
+        function set_λ!(θ, params, λ_deg)
+            θ.values[params.layout.name_to_idx["lambda_k1"]] = deg2rad(λ_deg)
+            return θ
+        end
+        function ll_and_pred(i_star_deg, λ_deg)
+            θ = set_λ!(Nereus.Theta(params_gd), params_gd, λ_deg)
+            θ.values[params_gd.layout.systemic.i_star] = deg2rad(i_star_deg)
+            pred, _ = Nereus.phot_predictions(θ, data_gd)
+            return Nereus.transit_log_likelihood(θ, data_gd), pred
+        end
+        ll_110, pred_110 = ll_and_pred(110.0, -60.0)
+        ll_70,  pred_70  = ll_and_pred(70.0, -60.0)
+        @test isfinite(ll_110)
+        @test !isapprox(ll_110, ll_70; rtol = 1e-9)        # not a relabelling
+        #     ...and it is the SAME star as the reversed spin vector, end to end.
+        ll_rev, pred_rev = ll_and_pred(70.0, 120.0)
+        @test ll_110 ≈ ll_rev rtol = 1e-10
+        @test pred_110 ≈ pred_rev rtol = 1e-12
+        #     The ends stay closed: sin(i★) = 0 has no finite equatorial velocity.
+        @test ll_and_pred(0.0, -60.0)[1] == -Inf
+        @test ll_and_pred(180.0, -60.0)[1] == -Inf
+    end
+
+    # ================================================================
+    # 5. Default prior on i_star
+    # ================================================================
+    @testset "default i_star range follows what the data can tell" begin
+        mk(mode; kw...) = Nereus.Params(; max_kplanet = 1, planet_modes = [mode],
+            instruments = Nereus.InstrumentConfig(rv = ["HARPS"], pm = ["TESS"]),
+            M_s = 1.60, R_s = 1.47, kw...)
+        hi(p) = p.config.priors["i_star"].hi
+
+        # Gravity darkening alone cannot tell a spin vector from its reverse,
+        # so (0, π) would hold every solution twice. Half the range, no loss.
+        @test hi(mk(Nereus.RVPM_GD)) ≈ π / 2
+        # With RM velocities the sense of rotation is measured and λ is no
+        # longer free to absorb the reversal: i★ > 90° is then a distinct star,
+        # and a prior that stops at 90° excludes half of them.
+        p_rm = mk(Nereus.RVPM_RM_GD)
+        @test p_rm.config.priors["i_star"].lo == 0.0
+        @test hi(p_rm) ≈ π
     end
 end

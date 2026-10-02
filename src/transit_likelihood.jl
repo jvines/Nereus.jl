@@ -406,7 +406,11 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
     gd_state = nothing
     if any_gd && any(gd_on)
         i_star_v = system_i_star(theta)
-        (i_star_v <= 0 || i_star_v > T(π) / 2) && return convert(T, -Inf)
+        # Open at both ends because sin(i★) = 0 has no finite v_eq. NOT capped at
+        # π/2: past it the spin vector points away from the observer, which the
+        # brightness map handles, and a cap here overrode whatever range the
+        # prior on i_star gave.
+        (i_star_v <= 0 || i_star_v >= T(π)) && return convert(T, -Inf)
         M_s_gd = theta.params.config.M_s
         R_s_gd = theta.params.config.R_s
         (isnan(M_s_gd) || isnan(R_s_gd) || R_s_gd <= 0) &&
@@ -840,7 +844,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         i_star_v = system_i_star(theta)
         M_s_gd = theta.params.config.M_s
         R_s_gd = theta.params.config.R_s
-        if i_star_v > 0 && !isnan(M_s_gd) && !isnan(R_s_gd) && R_s_gd > 0
+        if 0 < i_star_v < T(π) && !isnan(M_s_gd) && !isnan(R_s_gd) && R_s_gd > 0
             v_eq_kms = system_vsini(theta) / (sin(i_star_v) * 1000)
             gd_state = (i_star = i_star_v, λs = gd_lams,
                         ω_frac = omega_frac_from_veq(v_eq_kms, M_s_gd, R_s_gd),
