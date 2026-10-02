@@ -453,5 +453,31 @@ using LinearAlgebra: norm, normalize, cross
         params_a, data_a = build("PM_GD"; extra = merge(copy(gd_extra),
             Dict{String, Any}("lambda_k1" => fx(0.0))))
         @test depth_asym(params_a, data_a, 25.0) < 1e-15
+
+        # (d) i_star runs over (0°, 180°). Past 90° the spin vector points away
+        #     from the observer, which is a star like any other; the likelihood
+        #     used to return -Inf there whatever the prior said, so a prior on
+        #     (0, π) was silently cut to (0, π/2).
+        function set_λ!(θ, params, λ_deg)
+            θ.values[params.layout.name_to_idx["lambda_k1"]] = deg2rad(λ_deg)
+            return θ
+        end
+        function ll_and_pred(i_star_deg, λ_deg)
+            θ = set_λ!(Nereus.Theta(params_gd), params_gd, λ_deg)
+            θ.values[params_gd.layout.systemic.i_star] = deg2rad(i_star_deg)
+            pred, _ = Nereus.phot_predictions(θ, data_gd)
+            return Nereus.transit_log_likelihood(θ, data_gd), pred
+        end
+        ll_110, pred_110 = ll_and_pred(110.0, -60.0)
+        ll_70,  pred_70  = ll_and_pred(70.0, -60.0)
+        @test isfinite(ll_110)
+        @test !isapprox(ll_110, ll_70; rtol = 1e-9)        # not a relabelling
+        #     ...and it is the SAME star as the reversed spin vector, end to end.
+        ll_rev, pred_rev = ll_and_pred(70.0, 120.0)
+        @test ll_110 ≈ ll_rev rtol = 1e-10
+        @test pred_110 ≈ pred_rev rtol = 1e-12
+        #     The ends stay closed: sin(i★) = 0 has no finite equatorial velocity.
+        @test ll_and_pred(0.0, -60.0)[1] == -Inf
+        @test ll_and_pred(180.0, -60.0)[1] == -Inf
     end
 end
