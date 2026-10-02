@@ -172,6 +172,20 @@ function Params(;
     # User overrides take precedence
     if priors !== nothing
         for (k, v) in priors
+            # Under γ-marginalization the offset is integrated out, not sampled,
+            # so there is nothing for a prior on it to act on. Accepting one
+            # unfroze the slot: the sampler then walked a dimension the
+            # likelihood never read, and the "posterior" on the offset was the
+            # prior handed in.
+            if parametrization.marginalize_gamma && startswith(k, "gamma_") &&
+               !is_fixed(v)
+                throw(ArgumentError(
+                    "a prior was given for `$k`, but " *
+                    "parametrization.marginalize_gamma=true integrates the RV " *
+                    "offsets analytically and does not sample them, so it " *
+                    "cannot be applied. Drop the prior, or set " *
+                    "marginalize_gamma=false to sample the offset under it."))
+            end
             defaults[k] = v
         end
     end

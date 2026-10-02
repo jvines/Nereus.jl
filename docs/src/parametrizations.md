@@ -271,6 +271,13 @@ evidence) and the RV likelihood uses the γ-marginalised path
 
 - White-noise RV only — it does **not** compose with a covariance
   (GP/celerite) RV model.
+- `γ` is integrated against a **flat, unnormalised measure**, not against the
+  `gamma_<INST>` prior. The marginal likelihood therefore carries an arbitrary
+  constant per instrument. It is the same constant for every model fitted to the
+  same instruments, so comparing those models is unaffected; comparing against
+  an evidence computed with `γ` sampled is not meaningful.
+- For the same reason a prior supplied for `gamma_<INST>` cannot be applied, and
+  is rejected at construction rather than accepted and ignored.
 - Most useful for short-arc RV + astrometry, where the Keplerian reflex
   over the RV baseline is a ~km/s offset that `γ` must absorb and
   marginalising it removes a stiff nuisance direction.

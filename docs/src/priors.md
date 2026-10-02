@@ -206,7 +206,7 @@ plots are RM-consistent. Render the in-transit anomaly with the
 
 | Parameter | Meaning | Default |
 |---|---|---|
-| `gamma_<INST>` | RV zero-point offset | `UniformPrior(μ_inst ± spread)`, `spread = max(3·std_inst, 3·rv_scatter, 100)`; widened to **≥ ±3×10⁴ m/s for joint RV+astrometry** (see note); frozen to `FixedPrior(0.0)` under `marginalize_gamma` |
+| `gamma_<INST>` | RV zero-point offset | `UniformPrior(μ_inst ± spread)`, `spread = max(3·std_inst, 3·rv_scatter, 100)`; widened to **≥ ±3×10⁴ m/s for joint RV+astrometry** (see note); frozen to `FixedPrior(0.0)` under `marginalize_gamma`, which integrates the offset against a flat measure and rejects a prior supplied for it |
 | `sigma_<INST>` | extra Gaussian RV jitter (m/s) | `NormalPrior(5.0, 5.0, 0.0, 50.0)` (Vines+ 2023 Table 7) |
 | `dvdt` | linear RV trend (if `trend_order ≥ 1`) | `UniformPrior(-1, 1)` |
 | `d2vdt2` | quadratic RV trend (if `trend_order = 2`) | `UniformPrior(-0.01, 0.01)` |

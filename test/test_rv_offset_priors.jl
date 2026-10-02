@@ -216,4 +216,20 @@ using Random, Statistics
         ps = p.config.priors["gamma_N1"]
         @test ps.lo ≈ lo && ps.hi ≈ hi
     end
+
+    # Under analytic marginalisation the offset is not a parameter, so a prior
+    # handed to it cannot be honoured. It used to be accepted, which unfroze the
+    # slot and sampled a dimension the likelihood never read.
+    @testset "marginalize_gamma refuses a prior it cannot use" begin
+        t, v, e, inst = pack(["HARPS"])
+        d = Data(t_rv = t, rv = v, rv_err = e, rv_inst = inst)
+        mk(pr) = Params(; max_kplanet = 1, planet_modes = [Nereus.RV_ONLY],
+                        instruments = InstrumentConfig(rv = ["HARPS"], pm = String[]),
+                        data = d, priors = pr,
+                        parametrization = ParametrizationConfig(marginalize_gamma = true))
+        @test_throws ArgumentError mk(Dict{String, PriorSpec}(
+            "gamma_HARPS" => UniformPrior(31_000.0, 31_500.0)))
+        p = mk(Dict{String, PriorSpec}())
+        @test !("gamma_HARPS" in p.layout.unfrozen_names)
+    end
 end
