@@ -40,6 +40,47 @@ const _RJMCMC_STOP_AT = Ref(0)
 _td_fingerprint(td::TransDimConfig) =
     (; (Symbol(:td_, f) => repr(getfield(td, f)) for f in fieldnames(TransDimConfig))...)
 
+# The model for the fingerprint, beyond what run_fingerprint covers (the
+# unfrozen names, the priors and the plain data arrays): every setting of the
+# ParamsConfig (stability, M_s, R_s, the noise models, the parametrization,
+# the sharing, the external priors, ...) and every field of the Data (t_ref,
+# the astrometry and tomography records). Each changes the posterior without
+# changing a name or a prior. Every element of every array is read, too:
+# Base.hash reads only a sample of an array of 8192 entries or more, so one
+# changed point of a long light curve can leave it unchanged.
+_rj_model_fingerprint(params::Params, data::Data) =
+    (; model_config = _rj_content_hash(params.config, zero(UInt)),
+       data_all = _rj_content_hash(data, zero(UInt)))
+
+# A hash of `x` by content, the same for a copy rebuilt in another process.
+# Base.hash of a struct that holds vectors goes by their identity, and a
+# Dict's or Set's iteration order is not part of its content.
+function _rj_content_hash(x, h::UInt)
+    x isa Union{Number, AbstractString, Char, Nothing, Missing} && return hash(x, h)
+    x isa Union{Symbol, Enum, Type, Module} && return hash(string(x), h)
+    if x isa AbstractArray
+        h = hash(size(x), h)
+        for v in x
+            h = _rj_content_hash(v, h)
+        end
+        return h
+    end
+    if x isa Union{AbstractDict, AbstractSet}
+        acc = zero(UInt)
+        for v in x
+            acc += _rj_content_hash(v, zero(UInt))
+        end
+        return hash(acc, hash(length(x), hash(string(nameof(typeof(x))), h)))
+    end
+    # Any other struct, a tuple or a pair: its type's name, then its fields.
+    h = hash(string(nameof(typeof(x))), h)
+    x isa NamedTuple && (h = hash(map(string, keys(x)), h))
+    for i in 1:nfields(x)
+        h = isdefined(x, i) ? _rj_content_hash(getfield(x, i), h) : hash(:undef, h)
+    end
+    return h
+end
+
 """
     sample_rjmcmc(target, data; td, kwargs...) -> (MCMCChains.Chains, n_evals::Int)
 
@@ -77,8 +118,10 @@ Run a standalone RJMCMC sampler for trans-dimensional inference.
   process-global informed-birth caches start cold in both (a fresh process,
   or `reset_transdim_caches!()` first), which is also what makes the
   uninterrupted run itself reproducible. Refused, with the differences listed,
-  if the checkpoint came from different data, priors, parameters, warmup,
-  seed, chain count, within-model kernel or trans-dim settings.
+  if the checkpoint came from different data (any field, any element),
+  priors, parameters, model settings (stability, stellar mass, noise models,
+  parametrization, ...), warmup, seed, chain count, within-model kernel or
+  trans-dim settings.
 
 Circular angles (`src/circular.jl`): with planet births on, same-mode planet
 slots share one window per angle, set before the first state is drawn. A single
@@ -139,7 +182,8 @@ function sample_rjmcmc(
     ck = nothing
     if ck_path !== nothing
         ck_fp = run_fingerprint(target.params, data; n_warmup, seed, n_chains,
-                                within_model, noise_swap_rate, _td_fingerprint(td)...)
+                                within_model, noise_swap_rate, _td_fingerprint(td)...,
+                                _rj_model_fingerprint(target.params, data)...)
         saved = resume ? read_checkpoint(ck_path, "rjmcmc", ck_fp).chains::Vector{Any} :
                          Any[nothing for _ in 1:n_chains]
         for st in saved

@@ -29,10 +29,10 @@ const _RJ_BIS = _RJ_ACT .+ randn(_RJ_RNG, _RJ_N)
 # A fresh target per run: the re-cut moves circular windows on the target
 # itself. And a fresh `td` with it: toggleable noise models are matched to the
 # target's by identity.
-function _rj_setup(rv; td_kw = (;))
+function _rj_setup(rv; td_kw = (;), params_kw = (;), data_kw = (;))
     data = Data(; t_rv = _RJ_T, rv = rv, rv_err = fill(1.5, _RJ_N),
                   rv_inst = ones(Int, _RJ_N), indicators = Dict("bis" => _RJ_BIS),
-                  indicator_errs = Dict("bis" => fill(1.0, _RJ_N)))
+                  indicator_errs = Dict("bis" => fill(1.0, _RJ_N)), data_kw...)
     ad = ActivityDecorrelation(indicators = ["bis"])
     params = Params(; max_kplanet = 2, planet_modes = fill(RV_ONLY, 2),
                       instruments = InstrumentConfig(rv = ["I1"]), data = data,
@@ -41,7 +41,7 @@ function _rj_setup(rv; td_kw = (;))
                           "P_k1" => LogUniformPrior(2.0, 20.0),
                           "P_k2" => LogUniformPrior(2.0, 20.0),
                           "K_k1" => LogUniformPrior(1.0, 100.0),
-                          "K_k2" => LogUniformPrior(1.0, 100.0)))
+                          "K_k2" => LogUniformPrior(1.0, 100.0)), params_kw...)
     td = TransDimConfig(; max_kplanet = 2, noise = true, toggleable = NoiseModel[ad],
                           transdim_fraction = 0.3, alias_jump_fraction = 0.2, td_kw...)
     return NereusTarget(params, data; unconstrained = false), data, td
@@ -51,8 +51,9 @@ const _RJ_KW = (n_warmup = 400, seed = 5, within_model = :rwm, show_progress = f
 
 # The informed-birth caches are process-global: every run starts them cold, as
 # a fresh process does.
-function _rj_run(n_samples; rv = _RJ_RV, td_kw = (;), kw...)
-    tg, data, td = _rj_setup(rv; td_kw)
+function _rj_run(n_samples; rv = _RJ_RV, td_kw = (;), params_kw = (;), data_kw = (;),
+                 kw...)
+    tg, data, td = _rj_setup(rv; td_kw, params_kw, data_kw)
     Nereus.reset_transdim_caches!()
     chains, n_evals = sample_rjmcmc(tg, data; td, _RJ_KW..., n_samples, kw...)
     return (; chains, n_evals, windows = Nereus.circular_windows(tg.params))
@@ -126,7 +127,12 @@ _cube(r) = r.chains.value.data
     for (kw, field) in (((n_warmup = 300,), "n_warmup"), ((seed = 6,), "seed"),
                         ((within_model = :slice,), "within_model"),
                         ((td_kw = (alias_jump_fraction = 0.1,),), "td_alias_jump_fraction"),
-                        ((rv = _RJ_RV .+ 1.0,), "data"))
+                        ((rv = _RJ_RV .+ 1.0,), "data"),
+                        # Model settings that change no name and no prior, and
+                        # a scalar of the data: each changes the posterior.
+                        ((params_kw = (stability = :none,),), "model_config"),
+                        ((params_kw = (M_s = 0.8,),), "model_config"),
+                        ((data_kw = (t_ref = 10.0,),), "data_all"))
         err = try _rj_run(800; checkpoint = path, resume = true, kw...); nothing
               catch e; e end
         @test err isa ArgumentError && occursin(field, err.msg)
@@ -152,4 +158,33 @@ end
     redo = _rj_run(400; kw..., checkpoint = path, resume = true)
     @test _cube(redo) == _cube(full)
     @test redo.n_evals == full.n_evals
+end
+
+@testset "rjmcmc fingerprint reads the whole model" begin
+    fp(tg, data) = Nereus._rj_model_fingerprint(tg.params, data)
+    # A target rebuilt from scratch, new vectors and Dicts throughout, matches.
+    @test fp(_rj_setup(_RJ_RV)[1:2]...) == fp(_rj_setup(_RJ_RV)[1:2]...)
+
+    # Base.hash reads only a sample of an array of 8192 entries or more. Find a
+    # point of a 20000-point light curve it skips: changing that point must
+    # still change the fingerprint.
+    n = 20_000
+    t = collect(range(0.0, 27.0; length = n))
+    f = 1.0 .+ 1e-4 .* sin.(t)
+    h0 = hash(f)
+    i = findfirst(1:n) do i
+        old = f[i]
+        f[i] = old + 1e-6
+        missed = hash(f) == h0
+        f[i] = old
+        missed
+    end
+    @test i !== nothing
+    g = copy(f)
+    g[i] += 1e-6
+    phot(flux) = Data(; t_rv = _RJ_T, rv = _RJ_RV, rv_err = fill(1.5, _RJ_N),
+                        t_phot = t, flux = flux, flux_err = fill(1e-4, n))
+    tg = _rj_setup(_RJ_RV)[1]
+    @test fp(tg, phot(f)).data_all != fp(tg, phot(g)).data_all
+    @test fp(tg, phot(f)).data_all == fp(tg, phot(copy(f))).data_all
 end
