@@ -10,6 +10,36 @@ using Random
 using MCMCChains
 using Statistics: median
 
+# The run's checkpoint file (src/checkpoint.jl), shared by its chains: slot c
+# holds chain c's state as of its own last checkpoint, and each write puts
+# back the whole vector under the lock.
+struct _RJCheckpoint
+    path::String
+    fingerprint::NamedTuple
+    chains::Vector{Any}
+    lock::ReentrantLock
+end
+
+function _rj_save!(ck::_RJCheckpoint, chain::Int, state::NamedTuple)
+    lock(ck.lock) do
+        ck.chains[chain] = state
+        write_checkpoint(ck.path, "rjmcmc", ck.fingerprint, (; chains = ck.chains))
+    end
+    return nothing
+end
+
+# Test seam: every chain stops after this iteration as a killed run would,
+# its checkpoint written, by throwing InterruptException. 0 = never. It is how
+# a test gets a checkpoint inside warmup, where no finished run can end
+# (`n_samples` counts only the draws after warmup).
+const _RJMCMC_STOP_AT = Ref(0)
+
+# The trans-dim settings for the fingerprint, one entry per field. As text:
+# the noise models and birth strategies hold vectors, which a deserialized
+# copy would never `isequal` by identity.
+_td_fingerprint(td::TransDimConfig) =
+    (; (Symbol(:td_, f) => repr(getfield(td, f)) for f in fieldnames(TransDimConfig))...)
+
 """
     sample_rjmcmc(target, data; td, kwargs...) -> (MCMCChains.Chains, n_evals::Int)
 
@@ -30,6 +60,25 @@ Run a standalone RJMCMC sampler for trans-dimensional inference.
 - `seed::Int=1` — base random seed; chain `c` uses `seed + 1000*(c-1)`
 - `initial_scale::Float64=0.01` — initial Gaussian proposal scale
 - `target_accept::Float64=0.234` — target acceptance rate for within-model
+- `checkpoint=nothing` — path of a state file. The sampler writes its whole
+  state there (per chain: the position and trans-dim masks, the RNG, the
+  slice widths, the RWM scales and their counters, the likelihood caches, the
+  circular warmup trace and windows, the informed-birth periodogram caches,
+  the evaluation count and the kept draws) at the end of the run and every
+  `checkpoint_interval` seconds during it, replacing the file atomically. With
+  `n_chains > 1` every chain writes its own slot of the one file. `run_job`
+  sets it to `rjmcmc_state.jls` in `output_dir` unless the job gives one.
+- `checkpoint_interval::Real=900` — seconds between checkpoints during the run.
+- `resume::Bool=false` — continue from `checkpoint` instead of initialising:
+  a run that was killed, or a finished one that needs more samples.
+  `n_samples` is the new TOTAL, counted from the start of the original run;
+  the draws already kept stay, and the new ones are appended. The continuation
+  is bit-identical to an uninterrupted run of `n_samples`, as long as the
+  process-global informed-birth caches start cold in both (a fresh process,
+  or `reset_transdim_caches!()` first), which is also what makes the
+  uninterrupted run itself reproducible. Refused, with the differences listed,
+  if the checkpoint came from different data, priors, parameters, warmup,
+  seed, chain count, within-model kernel or trans-dim settings.
 
 Circular angles (`src/circular.jl`): with planet births on, same-mode planet
 slots share one window per angle, set before the first state is drawn. A single
@@ -53,6 +102,9 @@ function sample_rjmcmc(
     noise_swap_rate::Real = 0.5,
     show_progress::Bool = true,
     progress_every::Int = max(1000, (n_samples + n_warmup) ÷ 20),
+    checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
+    checkpoint_interval::Real = 900.0,
+    resume::Bool = false,
 )
     initial_scale = Float64(initial_scale)   # JSON may deliver Ints
     target_accept = Float64(target_accept)
@@ -62,6 +114,10 @@ function sample_rjmcmc(
     noise_swap_rate = Float64(noise_swap_rate)
     0.0 <= noise_swap_rate <= 1.0 ||
         throw(ArgumentError("noise_swap_rate must be in [0, 1]"))
+    checkpoint_interval = Float64(checkpoint_interval)
+    ck_path = checkpoint === nothing ? nothing : String(checkpoint)
+    resume && ck_path === nothing && throw(ArgumentError(
+        "resume = true needs `checkpoint`, the state file to continue from"))
     # Births re-sort planets between same-mode slots, so those slots must
     # share one window per circular angle before any chain draws its first
     # state (src/circular.jl). Only births move planet blocks here: the alias
@@ -70,6 +126,33 @@ function sample_rjmcmc(
     unify_circular_groups!(target.params,
                            circular_groups(target.params; permutable = td.planets);
                            transforms = (target.transform,))
+
+    # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
+    # One file for every chain: slot c holds chain c's state as of its own
+    # last checkpoint. The chains are independent, so each continues from its
+    # own slot, and a slot still `nothing` (a run killed before that chain's
+    # first checkpoint) restarts that chain from its seed, which is exactly
+    # where it was. The fingerprint holds every setting the chains depend on
+    # except the length; `initial_scale` and `target_accept` are left out
+    # because the loop never reads them.
+    per_chain_samples = n_chains == 1 ? n_samples : max(1, cld(n_samples, n_chains))
+    ck = nothing
+    if ck_path !== nothing
+        ck_fp = run_fingerprint(target.params, data; n_warmup, seed, n_chains,
+                                within_model, noise_swap_rate, _td_fingerprint(td)...)
+        saved = resume ? read_checkpoint(ck_path, "rjmcmc", ck_fp).chains::Vector{Any} :
+                         Any[nothing for _ in 1:n_chains]
+        for st in saved
+            st === nothing && continue
+            it = st.iter::Int
+            it <= n_warmup + per_chain_samples || throw(ArgumentError(
+                "the checkpoint is at iteration $it of a chain (warmup $n_warmup); " *
+                "n_samples = $n_samples would end before it"))
+        end
+        ck = _RJCheckpoint(ck_path, ck_fp, saved, ReentrantLock())
+    end
+    stop_at = _RJMCMC_STOP_AT[]
+
     if n_chains == 1
         return _sample_rjmcmc_one(target, data; td=td, n_samples=n_samples,
                                    n_warmup=n_warmup, seed=seed,
@@ -78,7 +161,10 @@ function sample_rjmcmc(
                                    within_model=within_model,
                                    noise_swap_rate=noise_swap_rate,
                                    show_progress=show_progress,
-                                   progress_every=progress_every)
+                                   progress_every=progress_every,
+                                   ck=ck, chain=1,
+                                   checkpoint_interval=checkpoint_interval,
+                                   stop_at=stop_at)
     end
     # Multi-chain: spawn n_chains independent chains. Total samples is
     # divided across chains; each chain runs full warmup independently
@@ -90,7 +176,6 @@ function sample_rjmcmc(
     # under the others mid-sweep, and their states would be outside the new
     # support (-Inf) on the next evaluation. run_job / fit_* re-cut the
     # returned draws, which is what the summaries read.
-    per_chain_samples = max(1, cld(n_samples, n_chains))
     tasks = Vector{Task}(undef, n_chains)
     for c in 1:n_chains
         chain_seed = seed + 1000 * (c - 1)
@@ -110,6 +195,9 @@ function sample_rjmcmc(
             show_progress = chain_show_progress,
             progress_every = progress_every,
             recut_circular = false,
+            ck = ck, chain = c,
+            checkpoint_interval = checkpoint_interval,
+            stop_at = stop_at,
         )
     end
     results = [fetch(t) for t in tasks]
@@ -135,10 +223,16 @@ function _sample_rjmcmc_one(
     show_progress::Bool,
     progress_every::Int,
     recut_circular::Bool = true,   # false when other chains share `params`
+    ck::Union{Nothing,_RJCheckpoint} = nothing,   # shared checkpoint file
+    chain::Int = 1,                               # this chain's slot in it
+    checkpoint_interval::Float64 = 900.0,
+    stop_at::Int = 0,                             # _RJMCMC_STOP_AT
 )
     rng = MersenneTwister(seed)
     params = target.params
     layout = params.layout
+    saved = ck === nothing ? nothing : ck.chains[chain]
+    iter0 = saved === nothing ? 0 : saved.iter::Int
 
     # Initialize theta with trans-dim state (0 planets, no toggleable noise
     # active). The noise mask MUST be sized to the FULL noise-model list:
@@ -170,15 +264,19 @@ function _sample_rjmcmc_one(
     end
     theta = Theta{Float64}(params; td=td_state)
 
-    # Set systemics to random valid values from prior
-    _init_systemics_from_prior!(theta, rng)
-
     # Likelihood counter
     ctr = LikelihoodCounter()
 
-    # Evaluate initial state
-    log_pi = log_prior(theta)
-    log_L = _eval_ll(theta, data, ctr)
+    # Set systemics to random valid values from prior and evaluate the initial
+    # state; a resumed chain takes all of it from the checkpoint instead.
+    if saved === nothing
+        _init_systemics_from_prior!(theta, rng)
+        log_pi = log_prior(theta)
+        log_L = _eval_ll(theta, data, ctr)
+    else
+        log_pi = saved.log_pi::Float64
+        log_L = saved.log_L::Float64
+    end
 
     # Slice sampling widths (initial stepping-out size per param)
     widths = _prior_widths(layout)
@@ -223,15 +321,60 @@ function _sample_rjmcmc_one(
     # Circular angles: record iterations circ_from+1 .. n_warmup, re-cut at
     # the last of them (see the section at the bottom of this file). Groups
     # as `sample_rjmcmc` unified them.
+    # Not gated on `n_samples > 0`: what the chain does may not depend on its
+    # length, or a run extended by `resume` would differ from one that ran
+    # straight through.
     circ_from = n_warmup - n_warmup ÷ 2
     circ_groups = circular_groups(params; permutable = td.planets)
-    circ = recut_circular && n_samples > 0 && !isempty(circ_groups) ?
+    circ = recut_circular && !isempty(circ_groups) ?
            _CircularWarmupTrace(params, circ_groups, n_warmup ÷ 2) : nothing
 
     pb = ProgressBar("RJMCMC";
-                       total = n_total_iter, enabled = show_progress)
+                       total = n_total_iter, enabled = show_progress,
+                       start = iter0)
 
-    for iter in 1:n_total_iter
+    # Informed births keep their periodogram peaks in process-global caches
+    # keyed on objectid(rng), which a checkpoint cannot carry; the chain's own
+    # entries are found again through the states that minted their keys (see
+    # `_note_informed!` at the bottom of this file).
+    informed = ck !== nothing && td.planets &&
+               any(s -> s isa InformedBirth || s isa JointInformedBirth,
+                   td.birth_strategies) ? _InformedSeen() : nothing
+
+    # --- Resume: put the saved chain back exactly as it stopped ---------
+    # In place, as in pt_emcee. The slice widths come back from the checkpoint
+    # too, so they never depend on which window the layout held when they were
+    # built (`hi - lo` of a moved window can differ from the span in the last
+    # bit).
+    if saved !== nothing
+        theta.values .= saved.values
+        copy_into!(theta.td, saved.td::TransDimState)
+        copy!(rng, saved.rng::MersenneTwister)
+        ctr.count = saved.n_evals::Int
+        widths .= saved.widths
+        _ws_restore!(within_ws, saved.ws)
+        sample_idx = saved.sample_idx::Int
+        samples[1:sample_idx, :] .= saved.samples
+        if saved.circ === nothing
+            circ = nothing
+        elseif circ !== nothing
+            foreach(copy!, circ.draws, saved.circ.draws)
+            circ.tick = saved.circ.tick::Int
+        end
+        # Windows the saved state lives in (moved by the warmup re-cut). Only
+        # a chain that re-cuts moves them; with several chains the shared
+        # layout is left alone.
+        if recut_circular
+            for (nm, (lo, _)) in saved.windows
+                set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
+                                     lo; transforms = (target.transform,))
+            end
+        end
+        informed === nothing || _informed_restore!(informed, saved.informed, params, rng)
+    end
+    last_ck = time()
+
+    for iter in (iter0 + 1):n_total_iter
         if rand(rng) < td.transdim_fraction
             # --- Between-model move (birth/death) -------------------------
             if td.planets && td.alias_jump_fraction > 0.0 &&
@@ -247,6 +390,7 @@ function _sample_rjmcmc_one(
                     log_L = new_lL
                 end
             elseif td.planets && rand(rng) < 0.5
+                informed === nothing || _note_informed!(informed, theta, rng)
                 _planet_move!(theta, data, td, rng,
                               log_pi, log_L; ctr=ctr) do new_lpi, new_lL
                     log_pi = new_lpi
@@ -260,6 +404,7 @@ function _sample_rjmcmc_one(
                 end
             else
                 if td.planets
+                    informed === nothing || _note_informed!(informed, theta, rng)
                     _planet_move!(theta, data, td, rng,
                                   log_pi, log_L; ctr=ctr) do new_lpi, new_lL
                         log_pi = new_lpi
@@ -339,6 +484,23 @@ function _sample_rjmcmc_one(
                      fields = (:phase => "warmup",
                                :logL => log_L))
         end
+
+        # ---- Checkpoint: every `checkpoint_interval` s and on the last
+        # iteration (src/checkpoint.jl) ------------------------------------
+        if ck !== nothing && (iter == n_total_iter || iter == stop_at ||
+                              time() - last_ck >= checkpoint_interval)
+            _rj_save!(ck, chain, (; iter, values = copy(theta.values),
+                td = copy(theta.td), log_pi, log_L, rng = copy(rng),
+                n_evals = ctr.count, widths = copy(widths),
+                ws = _ws_snapshot(within_ws), sample_idx,
+                samples = samples[1:sample_idx, :],
+                circ = circ === nothing ? nothing :
+                       (draws = deepcopy(circ.draws), tick = circ.tick),
+                windows = circular_windows(params),
+                informed = _informed_snapshot(informed)))
+            last_ck = time()
+        end
+        iter == stop_at && throw(InterruptException())
     end
     finish!(pb)
 
@@ -1237,4 +1399,81 @@ function _recut_circular_warmup!(tr::_CircularWarmupTrace, params::Params, state
         end
     end
     return moved
+end
+
+# =====================================================================
+# Checkpoint helpers for the state that does not sit in plain locals
+# =====================================================================
+
+# The workspace: the RWM scales and their counters (adaptation state), and the
+# likelihood caches, which are restored as they were rather than rebuilt cold.
+# `scratch_theta` and `population` are proposal scratch that reference Params.
+const _WS_NOT_SAVED = (:scratch_theta, :population)
+
+function _ws_snapshot(ws::PTWorkspace)
+    fs = Tuple(f for f in fieldnames(PTWorkspace) if f ∉ _WS_NOT_SAVED)
+    return NamedTuple{fs}(map(f -> deepcopy(getfield(ws, f)), fs))
+end
+
+function _ws_restore!(ws::PTWorkspace, s::NamedTuple)
+    for f in keys(s)
+        dst, src = getfield(ws, f), getfield(s, f)
+        if dst isa Vector{Vector{Int}}
+            foreach(copy!, dst, src)
+        elseif dst isa AbstractArray
+            copyto!(dst, src)
+        else
+            setfield!(ws, f, src)
+        end
+    end
+    return ws
+end
+
+# Informed births (InformedBirth, JointInformedBirth) cache their periodogram
+# and BLS peaks in the process-global `_PEAK_CACHES` / `_BLS_CACHES`
+# (src/transdim/birth_strategies.jl), keyed by `_active_set_signature(theta,
+# objectid(rng))`, and refresh an entry only every INFORMED_CACHE_INTERVAL
+# calls, so which peaks a birth sees depends on the run's history. A resumed
+# chain has a new rng object and so new keys. The chain therefore notes, before
+# each planet move, the state behind every signature it presents; a checkpoint
+# saves the entries those signatures hold, and a resume re-keys them to its own
+# rng. Entries are counted exactly as before, so the caches' size-triggered
+# wipe also fires where it did.
+const _InformedSeen = Dict{UInt64, Tuple{Vector{Float64}, TransDimState}}
+
+function _note_informed!(seen::_InformedSeen, theta::Theta, rng::AbstractRNG)
+    sig = _active_set_signature(theta, objectid(rng))
+    haskey(seen, sig) || (seen[sig] = (copy(theta.values), copy(theta.td)))
+    return nothing
+end
+
+_informed_snapshot(::Nothing) = nothing
+function _informed_snapshot(seen::_InformedSeen)
+    out = Tuple{Vector{Float64}, TransDimState,
+                Union{Nothing, PeakCache}, Union{Nothing, BLSCache}}[]
+    for (sig, (vals, tds)) in seen
+        pk = lock(() -> get(_PEAK_CACHES, sig, nothing), _PEAK_CACHE_LOCK)
+        bl = lock(() -> get(_BLS_CACHES, sig, nothing), _BLS_CACHE_LOCK)
+        pk === nothing && bl === nothing && continue
+        push!(out, (vals, tds, deepcopy(pk), deepcopy(bl)))
+    end
+    return out
+end
+
+function _informed_restore!(seen::_InformedSeen, saved, params::Params,
+                            rng::AbstractRNG)
+    saved === nothing && return seen
+    id = objectid(rng)
+    # Copies: the chain mutates these entries, and the saved ones still belong
+    # to its checkpoint slot, which another chain's write may serialize before
+    # this chain replaces it.
+    for (vals, tds, pk, bl) in saved
+        sig = _active_set_signature(Theta{Float64}(params, vals; td = tds), id)
+        seen[sig] = (vals, tds)
+        pk === nothing ||
+            lock(() -> (_PEAK_CACHES[sig] = deepcopy(pk)), _PEAK_CACHE_LOCK)
+        bl === nothing ||
+            lock(() -> (_BLS_CACHES[sig] = deepcopy(bl)), _BLS_CACHE_LOCK)
+    end
+    return seen
 end

@@ -122,7 +122,10 @@ _dispatch_td(name, kwargs, target, data) =
              # (`toggleable: []`) — empty JSON3.Array, not the typed
              # default. Must coerce to Vector{NoiseModel}.
              :transdim  => Dict(:max_kplanet => 2, :transdim_fraction => 0.4,
-                                :toggleable => [], :noise_exclusion_groups => [])),
+                                :toggleable => [], :noise_exclusion_groups => []),
+             # run_job always has one, and a sampler that checkpoints writes
+             # its state file there by default.
+             :output_dir => mktempdir()),
         target, data, 1)
 
 @testset "runner dispatch — trans-dim samplers (td block + JSON kwargs)" begin
