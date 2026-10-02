@@ -26,9 +26,21 @@
 #
 # CONVENTIONS (shared with rm.jl so λ means the same thing in both):
 #   x_sky  along the projected orbital motion, in stellar radii
-#   y_sky  along the projected impact-parameter axis
-#   λ      sky-projected angle between the stellar spin axis and the orbit normal
-#   i★     stellar inclination; 90° = equator-on, 0° = pole-on
+#   y_sky  along the projected impact-parameter axis: +b at mid-transit, exactly
+#          as `planet_sky_position` returns it
+#   λ      sky-projected angle between the stellar spin axis and the orbit normal.
+#          The projected spin axis is the line through (sin λ, cos λ) -- where
+#          the RM kernels' sub-planet velocity x cos λ − y sin λ vanishes.
+#   i★     angle between the spin vector and the line of sight, on (0°, 180°),
+#          measured the way the orbital inclination is, so that
+#              cos ψ = cos i★ cos i + sin i★ sin i cos λ.
+#          90° = equator-on. Below 90° the visible pole sits at
+#          −sin i★ (sin λ, cos λ) on the sky: for an aligned orbit that is the
+#          far side of disc centre from the transit chord, as it must be when
+#          the orbit lies in the equatorial plane. Above 90° it is the mirror
+#          point. Darkening cannot tell a spin vector from its reverse, so
+#          (i★, λ) and (180° − i★, λ + 180°) are the same star here; it takes a
+#          measurement of the SENSE of rotation (RM, tomography) to split them.
 #   β      gravity-darkening exponent; 0.25 for a radiative envelope (von Zeipel),
 #          ~0.08 for convective (Lucy 1967). A9V here ⇒ radiative.
 
@@ -145,8 +157,13 @@ disc centre, normalised so the disc average is 1. Returns 1.0 off the disc, and
     ρ2 = x_sky^2 + y_sky^2
     ρ2 >= 1 && return one(promote_type(typeof(x_sky), typeof(ctx.scale)))
 
-    # rotate sky coords so +Y' lies along the projected stellar spin axis
-    yr = -x_sky * ctx.sλ + y_sky * ctx.cλ
+    # Component of the sky position along the projected spin axis. The axis is
+    # the line through (sin λ, cos λ) in `planet_sky_position`'s frame, and the
+    # minus sign is which end of it leans toward the observer (see CONVENTIONS).
+    # This read `-x sλ + y cλ`, correct for y_sky = −b at mid-transit; when
+    # `planet_sky_position` moved to +b the map was left behind, mirrored in y
+    # against the chord it is evaluated on -- λ entered as 180° − λ.
+    yr = -(x_sky * ctx.sλ + y_sky * ctx.cλ)
     zr = sqrt(max(1 - ρ2, zero(ρ2)))              # toward the observer
 
     # spin axis = (0, sin i★, cos i★): +y' is its sky projection, +z is toward us.
