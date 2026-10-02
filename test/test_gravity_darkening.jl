@@ -480,4 +480,24 @@ using LinearAlgebra: norm, normalize, cross
         @test ll_and_pred(0.0, -60.0)[1] == -Inf
         @test ll_and_pred(180.0, -60.0)[1] == -Inf
     end
+
+    # ================================================================
+    # 5. Default prior on i_star
+    # ================================================================
+    @testset "default i_star range follows what the data can tell" begin
+        mk(mode; kw...) = Nereus.Params(; max_kplanet = 1, planet_modes = [mode],
+            instruments = Nereus.InstrumentConfig(rv = ["HARPS"], pm = ["TESS"]),
+            M_s = 1.60, R_s = 1.47, kw...)
+        hi(p) = p.config.priors["i_star"].hi
+
+        # Gravity darkening alone cannot tell a spin vector from its reverse,
+        # so (0, π) would hold every solution twice. Half the range, no loss.
+        @test hi(mk(Nereus.RVPM_GD)) ≈ π / 2
+        # With RM velocities the sense of rotation is measured and λ is no
+        # longer free to absorb the reversal: i★ > 90° is then a distinct star,
+        # and a prior that stops at 90° excludes half of them.
+        p_rm = mk(Nereus.RVPM_RM_GD)
+        @test p_rm.config.priors["i_star"].lo == 0.0
+        @test hi(p_rm) ≈ π
+    end
 end

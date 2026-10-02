@@ -209,6 +209,22 @@ Modes: `PM_GD`, `RVPM_GD`, `RVPM_RM_GD` (`GD_SOURCE`). It reuses the RM slots �
 parameter, `i_star`, because the rotation rate is not free once `v sin i` and
 the stellar radius are known.
 
+`i_star` is the angle between the spin vector and the line of sight, on
+(0°, 180°), measured the way the orbital inclination is — so the true obliquity
+reported as `psi_deg` is
+
+```
+cos ψ = cos i★ cos i + sin i★ sin i cos λ
+```
+
+Gravity darkening cannot tell a spin vector from its reverse: `(i_star, λ)` and
+`(180° − i_star, λ + 180°)` give the same light curve, and ψ and 180° − ψ with
+them. The default prior is therefore uniform on (0°, 90°) when darkening is the
+only obliquity constraint, which holds every solution once. When RM velocities
+or a tomogram are fitted alongside (`RVPM_RM_GD`, or tomographic nights in the
+data) the sense of rotation is measured, λ can no longer absorb the reversal,
+and the default widens to (0°, 180°).
+
 It needs genuinely good photometry. The asymmetry is a subtle distortion of the
 transit shape, not a feature you will see by eye.
 
