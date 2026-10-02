@@ -130,9 +130,9 @@ _cube(r) = r.chains.value.data
                         ((rv = _RJ_RV .+ 1.0,), "data"),
                         # Model settings that change no name and no prior, and
                         # a scalar of the data: each changes the posterior.
-                        ((params_kw = (stability = :none,),), "model_config"),
-                        ((params_kw = (M_s = 0.8,),), "model_config"),
-                        ((data_kw = (t_ref = 10.0,),), "data_all"))
+                        ((params_kw = (stability = :none,),), "model"),
+                        ((params_kw = (M_s = 0.8,),), "model"),
+                        ((data_kw = (t_ref = 10.0,),), "data"))
         err = try _rj_run(800; checkpoint = path, resume = true, kw...); nothing
               catch e; e end
         @test err isa ArgumentError && occursin(field, err.msg)
@@ -161,7 +161,7 @@ end
 end
 
 @testset "rjmcmc fingerprint reads the whole model" begin
-    fp(tg, data) = Nereus._rj_model_fingerprint(tg.params, data)
+    fp(tg, data) = Nereus.run_fingerprint(tg.params, data)
     # A target rebuilt from scratch, new vectors and Dicts throughout, matches.
     @test fp(_rj_setup(_RJ_RV)[1:2]...) == fp(_rj_setup(_RJ_RV)[1:2]...)
 
@@ -185,6 +185,6 @@ end
     phot(flux) = Data(; t_rv = _RJ_T, rv = _RJ_RV, rv_err = fill(1.5, _RJ_N),
                         t_phot = t, flux = flux, flux_err = fill(1e-4, n))
     tg = _rj_setup(_RJ_RV)[1]
-    @test fp(tg, phot(f)).data_all != fp(tg, phot(g)).data_all
-    @test fp(tg, phot(f)).data_all == fp(tg, phot(copy(f))).data_all
+    @test fp(tg, phot(f)).data != fp(tg, phot(g)).data
+    @test fp(tg, phot(f)).data == fp(tg, phot(copy(f))).data
 end

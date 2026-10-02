@@ -113,40 +113,6 @@ struct WhiteningPTResult
     whitening_active_after::Int
 end
 
-# Content hash of every field of `data`, every element of every array, for the
-# checkpoint fingerprint. `run_fingerprint` hashes only the fields that are
-# numeric arrays or Dicts, so `t_ref` and the astrometry and tomography records
-# (`iad`, `hgca`, `gost`, ...) never reach it: measured, a resume onto IAD
-# abscissae shifted by 0.05 was accepted and gave another chain. Those are
-# hashed here by descending into them, because Julia's default hash of a struct
-# that holds arrays is its object identity, which differs between processes and
-# would refuse every legitimate resume. Arrays are walked element by element:
-# Base's `hash(::AbstractArray)` samples only ~log(n) entries from 8192 on.
-_ptw_content_hash(x::Union{Number,AbstractChar,AbstractString,Symbol,Nothing,Missing},
-                  h::UInt) = hash(x, h)
-function _ptw_content_hash(x::Union{AbstractArray,Tuple}, h::UInt)
-    h = hash(x isa Tuple ? length(x) : size(x), h)
-    for v in x
-        h = _ptw_content_hash(v, h)
-    end
-    return h
-end
-function _ptw_content_hash(x::AbstractDict, h::UInt)
-    h = hash(length(x), h)
-    for k in sort!(collect(keys(x)))
-        h = _ptw_content_hash(x[k], _ptw_content_hash(k, h))
-    end
-    return h
-end
-function _ptw_content_hash(x, h::UInt)   # a record: its type, then each field
-    h = hash(nameof(typeof(x)), h)
-    for f in fieldnames(typeof(x))
-        h = _ptw_content_hash(getfield(x, f), hash(f, h))
-    end
-    return h
-end
-_ptw_data_hash(data::Data) = _ptw_content_hash(data, zero(UInt))
-
 """
     sample_pt_whitening(target, data; kwargs...) -> WhiteningPTResult
 
@@ -278,13 +244,10 @@ function sample_pt_whitening(
     # just before the main loop, which then carries on from step `step0 + 1`.
     # `proposal_scale` and `init_strategy` are left out: neither is read. Nor is
     # `node_flip` when no planet can flip, so it enters as the rate in effect.
-    # `data_content` covers the data `run_fingerprint` does not hash (see
-    # `_ptw_content_hash`).
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
         n_burnin, thin, seed, stretch_a, betas = copy(βs), warmup_swaps,
         whiten_window = max(whiten_window, 1), whiten_refresh,
-        node_flip = isempty(flips) ? 0.0 : node_flip,
-        data_content = _ptw_data_hash(data))
+        node_flip = isempty(flips) ? 0.0 : node_flip)
     ck = resume ? read_checkpoint(ck_path, "pt_whitening", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(

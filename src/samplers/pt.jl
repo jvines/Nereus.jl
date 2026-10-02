@@ -823,18 +823,17 @@ function _pt_round_of(iter::Int)
     return r
 end
 
-# The trans-dim settings as plain values for the checkpoint fingerprint, which
-# compares with `isequal`: the config holds vectors of structs, which compare by
-# identity, so the noise models and birth strategies go in as their `repr`. With
-# noise births on, the module switches for their informed proposals go in too.
+# The trans-dim settings for the checkpoint fingerprint, which compares with
+# `isequal`: the config holds vectors of structs, which compare by identity, so
+# the noise models and birth strategies go in by `content_hash`. The informed-
+# birth switches are in `run_fingerprint` itself (src/checkpoint.jl).
 _pt_td_key(td::TransDimConfig) = (
     planets = td.planets, max_kplanet = td.max_kplanet, noise = td.noise,
-    toggleable = repr.(td.toggleable),
-    birth_strategies = repr.(td.birth_strategies),
+    toggleable = content_hash(td.toggleable),
+    birth_strategies = content_hash(td.birth_strategies),
     birth_weights = td.birth_weights, transdim_fraction = td.transdim_fraction,
-    noise_exclusion_groups = [repr.(g) for g in td.noise_exclusion_groups],
-    alias_jump_fraction = td.alias_jump_fraction,
-    informed_noise = td.noise ? (GP_INFORMED_BIRTH[], AD_INFORMED_BIRTH[]) : nothing)
+    noise_exclusion_groups = content_hash(td.noise_exclusion_groups),
+    alias_jump_fraction = td.alias_jump_fraction)
 
 # The warmup of the run the checkpoint at `path` holds, or `nothing` when there
 # is no pt checkpoint there (`read_checkpoint` then says what is wrong). Read

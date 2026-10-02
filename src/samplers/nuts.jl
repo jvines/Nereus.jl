@@ -400,7 +400,10 @@ function sample_nuts(
     # adaptor is saved as AdvancedHMC's own object, so the AdvancedHMC version
     # is part of the fingerprint. So is the RNG's starting state, read here
     # before anything draws from it: a different seed is a different run.
+    # And the space the chains move in: a checkpoint holds unconstrained
+    # coordinates, which a bounded target would read as bounded values.
     ck_fp = run_fingerprint(params, target.data; n_warmup, n_chains,
+        space = target.transform isa PackedTransforms ? :unconstrained : :bounded,
         target_accept, ad_backend, compile_tape, warm_start, warm_temps,
         warm_walkers, warm_steps, warm_burnin,
         init = init === nothing ? nothing : copy(init),

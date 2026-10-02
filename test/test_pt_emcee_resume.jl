@@ -9,6 +9,7 @@
 using Test
 using Nereus
 using Random
+using Serialization
 
 Random.seed!(7)
 const _RS_N = 60
@@ -16,7 +17,7 @@ const _RS_T = sort!(400 .* rand(_RS_N))
 const _RS_RV = 40.0 .* sin.(2π .* _RS_T ./ 4.23) .+ 1.5 .* randn(_RS_N)
 
 # A fresh target per run: the re-cut moves circular windows on the target itself.
-_rs_target(rv = _RS_RV) = build_target(
+_rs_target(rv = _RS_RV; kw...) = build_target(; kw...,
     planets = (b = (P = LogUniformPrior(4.0, 4.5), K = LogUniformPrior(10.0, 90.0),
                     sesinw = UniformPrior(-1.0, 1.0), secosw = UniformPrior(-1.0, 1.0),
                     Mo = UniformPrior(0.0, 2pi)),),
@@ -67,4 +68,26 @@ _cube(r) = r.chains.value.data
           catch e; e end
     @test err isa ArgumentError && occursin("data", err.msg)
     @test_throws ArgumentError _rs_run(100; checkpoint = path, resume = true)
+end
+
+# The fingerprint (src/checkpoint.jl) covers the whole model and every data
+# point, and is the same for a copy rebuilt in another process.
+@testset "checkpoint fingerprint" begin
+    tg = _rs_target()
+    rt(x) = (io = IOBuffer(); serialize(io, x); seekstart(io); deserialize(io))
+    @test Nereus.content_hash(tg.params.config) == Nereus.content_hash(rt(tg.params.config))
+    @test Nereus.content_hash(tg.data) == Nereus.content_hash(rt(tg.data))
+    a = rand(20_000); b = copy(a); b[10_001] += 1e-9    # Base.hash samples this long an array
+    @test Nereus.content_hash(a) != Nereus.content_hash(b)
+    @test Nereus.content_hash(Dict(:a => 1, :b => 2)) ==
+          Nereus.content_hash(Dict(:b => 2, :a => 1))
+
+    # A model change that touches no prior, name or data point: refused as "model".
+    path = joinpath(mktempdir(), "pt_emcee_state.jls")
+    _rs_run(30; checkpoint = path)
+    tg2 = _rs_target(; external_priors = [ExternalPrior(:ecc, BetaPrior(0.867, 3.03), true)])
+    err = try sample_pt_emcee(tg2, tg2.data; _RS_KW..., n_steps = 60, checkpoint = path,
+                              resume = true); nothing
+          catch e; e end
+    @test err isa ArgumentError && occursin("model", err.msg)
 end

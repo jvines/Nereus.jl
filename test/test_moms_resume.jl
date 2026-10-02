@@ -157,8 +157,8 @@ end
         # So is another setting of the process-wide informed noise births. The
         # AD one changes every ActivityDecorrelation birth (an OLS draw and its
         # Hastings density instead of a prior draw), so these chains part.
-        for (sw, field) in ((Nereus.AD_INFORMED_BIRTH, "ad_informed_birth"),
-                            (Nereus.GP_INFORMED_BIRTH, "gp_informed_birth"))
+        for (sw, field) in ((Nereus.AD_INFORMED_BIRTH, "informed_birth"),
+                            (Nereus.GP_INFORMED_BIRTH, "informed_birth"))
             was = sw[]
             err = try
                 sw[] = !was
@@ -228,8 +228,8 @@ end
                              "transdim_fraction"),
                             ((rv = _MR_RV .+ 1.0,), "data"),
                             # Model settings outside the names, priors and data.
-                            ((tkw = (M_s = 1.0, stability = :gladman),), "config_stability"),
-                            ((tkw = (M_s = 1.0,),), "config_M_s"))
+                            ((tkw = (M_s = 1.0, stability = :gladman),), "model"),
+                            ((tkw = (M_s = 1.0,),), "model"))
             err = try _mr_run(200; checkpoint = path, resume = true, kw...); nothing
                   catch e; e end
             @test err isa ArgumentError && occursin(field, err.msg)
@@ -242,7 +242,7 @@ end
         end
         # Data changed where Base's `hash` does not look: an element in the
         # middle of an array of 8192 or more, of which it reads a few dozen.
-        # The `data` field of `run_fingerprint` passes it; `data_content` does not.
+        # The `data` field of `run_fingerprint` reads every element, so it sees it.
         let n = 9000, t = collect(range(0.0, 300.0; length = n)),
             rv0 = 10.0 .* randn(MersenneTwister(3), n)
             bumped(i) = (r = copy(rv0); r[i] += 1.0; r)
@@ -252,7 +252,7 @@ end
                 rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(1.5, n)),
                              sigma = LogUniformPrior(0.5, 10.0)),))
             t0, t1 = mk(rv0), mk(bumped(i))
-            @test Nereus.run_fingerprint(t0.params, t0.data).data ==
+            @test Nereus.run_fingerprint(t0.params, t0.data).data !=
                   Nereus.run_fingerprint(t1.params, t1.data).data
             p3 = joinpath(mktempdir(), "moms_state.jls")
             go(tg; kw...) = sample_moms(tg, tg.data; td = TransDimConfig(max_kplanet = 1),
@@ -260,7 +260,7 @@ end
                 checkpoint = p3, kw...)
             go(t0)
             err = try go(t1; n_samples = 2, resume = true); nothing catch e; e end
-            @test err isa ArgumentError && occursin("data_content", err.msg)
+            @test err isa ArgumentError && occursin("data", err.msg)
             @test size(go(t0; n_samples = 2, resume = true)[1].value.data, 1) == 2
         end
         # Several chains look for one file each, which a one-chain run never wrote.

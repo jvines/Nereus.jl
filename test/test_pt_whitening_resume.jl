@@ -131,11 +131,11 @@ end
     msg = _ws_refusal(() -> _ws_run(200; checkpoint = path, resume = true,
                                     betas = [1.0, 0.5, 0.25, 0.125]))
     @test msg !== nothing && occursin("betas", msg)
-    # `t_ref` is a scalar, which `run_fingerprint` skips; it sets the epoch Mo
-    # is measured from, so it changes the chain.
+    # `t_ref` is a scalar of the data; it sets the epoch Mo is measured from, so
+    # it changes the chain and the fingerprint must see it.
     msg = _ws_refusal(() -> _ws_run(200; checkpoint = path, resume = true,
                                     data = d -> _ws_with(d; t_ref = d.t_ref + 1.0)))
-    @test msg !== nothing && occursin("data_content", msg)
+    @test msg !== nothing && occursin("data", msg)
 end
 
 # Base's hash of an array of 8192 or more entries samples about log(n) of them,
@@ -153,10 +153,10 @@ end
     @test i !== nothing                    # Base misses this entry ...
     rv2 = copy(rv); rv2[i] += 1e-9
     d1 = Data(t_rv = t, rv = rv2, rv_err = fill(2.0, n))
-    @test Nereus._ptw_data_hash(d1) != Nereus._ptw_data_hash(d0)    # ... this does not
+    @test Nereus.content_hash(d1) != Nereus.content_hash(d0)    # ... this does not
     # Equal content in new arrays hashes the same: the hash is of content, not
     # of object identity, so it is the same in the process that resumes.
-    @test Nereus._ptw_data_hash(deepcopy(d0)) == Nereus._ptw_data_hash(d0)
+    @test Nereus.content_hash(deepcopy(d0)) == Nereus.content_hash(d0)
 end
 
 # An astrometry-only planet, so the node flip (and its per-walker RNG streams)
@@ -192,16 +192,16 @@ _ws_iad_shift(δ) = IADData(t = _WS_IAD.t, abscissa = _WS_IAD.abscissa .+ δ,
     path = joinpath(mktempdir(), "pt_whitening_state.jls")
     _ws_as_run(20; checkpoint = path)
 
-    # Shifted abscissae change the chain, and `run_fingerprint` alone does not
-    # see them: the IAD is a record, not an array. The resume is refused.
+    # Shifted abscissae change the chain, and `run_fingerprint` sees them, though
+    # the IAD is a record, not an array. The resume is refused.
     shifted = _ws_iad_shift(0.05)
     @test _ws_cube(_ws_as_run(60; iad = shifted)) != _ws_cube(full)
     tg_a, tg_b = _ws_as_target(), _ws_as_target(shifted)
-    @test isequal(Nereus.run_fingerprint(tg_a.params, tg_a.data),
-                  Nereus.run_fingerprint(tg_b.params, tg_b.data))
+    @test !isequal(Nereus.run_fingerprint(tg_a.params, tg_a.data),
+                   Nereus.run_fingerprint(tg_b.params, tg_b.data))
     msg = _ws_refusal(() -> _ws_as_run(60; checkpoint = path, resume = true,
                                        iad = shifted))
-    @test msg !== nothing && occursin("data_content", msg)
+    @test msg !== nothing && occursin("data", msg)
     # Here a planet can flip, so a different rate is refused, and turning the
     # flip off is too.
     for nf in (0.2, 0.0)
