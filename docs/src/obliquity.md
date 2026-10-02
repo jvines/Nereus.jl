@@ -282,6 +282,11 @@ for the velocities alone — **the parameter space is identical in all three
 cases, so the three results are directly comparable.** That is the design: it
 lets you show what each channel contributes rather than asserting it.
 
+Each RM night carries its own velocity zero point, with the same prior the
+framework path gives it: uniform on the night's mean ± the largest of three
+times its standard deviation, three times the activity scatter across nights,
+and 100 m/s.
+
 ```julia
 struct RMNight
     tag::String

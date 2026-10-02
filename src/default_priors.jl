@@ -44,6 +44,35 @@ _model_activity_scatter(m, data, instruments) =
          !isempty(m.instruments)) ? m.instruments : nothing)
 
 """
+    _gamma_default_bounds(inst_rv, rv_scatter, rv_max; has_astrom = false) -> (lo, hi)
+
+Bounds of the default uniform prior on one RV zero point, from the velocities
+`inst_rv` that share it: their mean, plus or minus the largest of three times
+their own standard deviation, three times the activity scatter `rv_scatter`, and
+100 m/s. Centred per instrument so that absolute and differential velocities can
+sit in one dataset.
+
+`has_astrom` widens it to at least ±30 km/s: over a short arc of a long-period
+orbit the Keplerian reflex is itself a near-constant offset the zero point has to
+absorb, which covers stellar companions from about 1 AU out.
+
+An instrument with no velocities at all falls back to ±3 `rv_max`.
+
+This is the ONE rule for an RV offset. Anything that carries a zero point
+outside the `Params` layout takes its bounds from here rather than leaving the
+offset without a prior.
+"""
+function _gamma_default_bounds(inst_rv::AbstractVector{<:Real}, rv_scatter::Real,
+                               rv_max::Real; has_astrom::Bool = false)
+    isempty(inst_rv) && return (-3 * rv_max, 3 * rv_max)
+    mu = mean(inst_rv)
+    spread = max(3 * rv_scatter, 100.0)
+    length(inst_rv) > 1 && (spread = max(3 * std(inst_rv), spread))
+    has_astrom && (spread = max(spread, 3.0e4))
+    return (mu - spread, mu + spread)
+end
+
+"""
     default_priors(config, data) -> Dict{String, PriorSpec}
 
 Generate sensible default priors for all model parameters based on
@@ -232,19 +261,8 @@ function default_priors(config::ParamsConfig, data::Data)
             mask = data.rv_inst .== idx
             append!(inst_rv, data.rv[mask])
         end
-        if length(inst_rv) > 1
-            mu = mean(inst_rv)
-            spread = max(3 * std(inst_rv), 3 * rv_scatter, 100.0)
-            has_astrom && (spread = max(spread, 3.0e4))   # absorb orbital reflex (RVAS); ±30 km/s covers a≳1 AU stellar companions
-            dic["gamma_$label"] = UniformPrior(mu - spread, mu + spread)
-        elseif length(inst_rv) == 1
-            mu = inst_rv[1]
-            spread = max(3 * rv_scatter, 100.0)
-            has_astrom && (spread = max(spread, 3.0e4))
-            dic["gamma_$label"] = UniformPrior(mu - spread, mu + spread)
-        else
-            dic["gamma_$label"] = UniformPrior(-3 * rv_max, 3 * rv_max)
-        end
+        dic["gamma_$label"] = UniformPrior(
+            _gamma_default_bounds(inst_rv, rv_scatter, rv_max; has_astrom)...)
     end
     for (label, _) in _instrument_groups(instruments.rv_names,
                                           get(sh, :sigma, nothing))

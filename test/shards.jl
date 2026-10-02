@@ -43,6 +43,7 @@ const TEST_UNITS = [
     (name = "test_new_samplers.jl", seconds = 34, files = ["test_new_samplers.jl"]),
     (name = "test_runner_dispatch.jl", seconds = 31, files = ["test_runner_dispatch.jl"]),
     (name = "test_rm.jl", seconds = 1, files = ["test_rm.jl"]),
+    (name = "test_rv_offset_priors.jl", seconds = 5, files = ["test_rv_offset_priors.jl"]),
     (name = "test_tomography.jl", seconds = 15, files = ["test_tomography.jl"]),
     (name = "test_tomography_framework.jl", seconds = 1, files = ["test_tomography_framework.jl"]),
     (name = "test_obliquity_framework.jl", seconds = 1, files = ["test_obliquity_framework.jl"]),
