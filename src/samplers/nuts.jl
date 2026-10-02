@@ -30,6 +30,12 @@
 # (divergence count, final adapted step size, mean/max tree depth, mean
 # acceptance) in `chains.info` so non-convergence is detectable without
 # re-deriving it from the trace. See `nuts_diagnostics(chains)`.
+#
+# CHECKPOINT / RESUME: the sampling loop is `AdvancedHMC.sample`'s, run here
+# (`_nuts_loop!`) instead of inside that call, so that what it carries between
+# iterations -- the position, the RNG, the metric, the step size and the
+# StanHMCAdaptor's windowed state -- can be saved and put back. A resumed run
+# is bit-identical to one that ran straight through (src/checkpoint.jl).
 
 using AdvancedHMC
 using ForwardDiff
@@ -281,6 +287,7 @@ function nuts_diagnostics(chains::MCMCChains.Chains)
             mean_accept      = info.mean_accept)
 end
 
+
 """
     sample_nuts(target::NereusTarget; kwargs...) -> MCMCChains.Chains
 
@@ -318,8 +325,39 @@ size / tree depth are attached to `chains.info` (see
 - `init::Union{Nothing, Vector{Float64}}=nothing` : initial position in
   **bounded** space (overrides `warm_start`). Transformed to
   unconstrained internally if the target uses transforms.
-- `rng::AbstractRNG=Random.default_rng()`
+- `seed::Union{Nothing,Integer}=nothing` : run on `MersenneTwister(seed)`.
+  `run_job` passes the job's seed here. Give `seed` or `rng`, not both.
+- `rng::Union{Nothing,AbstractRNG}=nothing` : the generator to run on;
+  `nothing` (with no `seed`) is `Random.default_rng()`.
 - `progress::Bool=true`
+- `checkpoint=nothing` — path of a state file. The sampler writes its whole
+  state there (each chain's position, step size, mass matrix and Stan
+  adaptation state, every RNG stream, the circular windows the warm start
+  moved, and the kept draws with their NUTS statistics) at the end of the run
+  and every `checkpoint_interval` seconds during it, replacing the file
+  atomically. `run_job` sets it to `nuts_state.jls` in `output_dir` unless the
+  job gives one.
+- `checkpoint_interval::Real=900` — seconds between checkpoints during the
+  run. Each chain keeps its own clock; the file always holds every chain's
+  latest saved state. A chain that has not saved yet, such as one still
+  queued behind the others when there are more chains than threads, is held
+  there as its start point and RNG stream, so on a resume it starts afresh
+  exactly as it would have.
+- `resume::Bool=false` — continue from `checkpoint` instead of initialising
+  (no warm-start pre-search, no step-size search): a run that was killed, or a
+  finished one that needs more draws. `n_samples` is the new TOTAL of kept
+  draws per chain, counted from the start of the original run; the draws
+  already kept stay, and the new ones are appended. The continuation is
+  bit-identical to an uninterrupted run of `n_samples`, whether the original
+  stopped inside the warm-up or after it, and `rng` is left as that run leaves
+  it. Pass the same `seed`, or an `rng` in the state the original run started
+  from (a fresh `MersenneTwister(5)` again, not the one that run advanced).
+  Refused, with the differences listed, if the checkpoint came from
+  different data, priors, parameters, `n_warmup`, `n_chains`, `target_accept`,
+  AD settings, warm-start settings, `init`, `seed`, `rng` or AdvancedHMC
+  version. Of the RNG, the fingerprint keeps the starting state of a `seed`ed
+  or passed generator; the unseeded default stream is not part of it, so an
+  unseeded run can still be continued.
 """
 function sample_nuts(
     target::NereusTarget;
@@ -335,75 +373,137 @@ function sample_nuts(
     warm_steps::Int = 400,
     warm_burnin::Int = 200,
     init::Union{Nothing, Vector{Float64}} = nothing,
-    rng::AbstractRNG = Random.default_rng(),
+    seed::Union{Nothing,Integer} = nothing,
+    rng::Union{Nothing,AbstractRNG} = nothing,
     progress::Bool = true,
+    checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
+    checkpoint_interval::Real = 900.0,
+    resume::Bool = false,
     kwargs...
 )
+    seed !== nothing && rng !== nothing && throw(ArgumentError(
+        "sample_nuts takes `seed` or `rng`, not both"))
+    # Rebound once, here. No closure below captures `rng`, so it is not boxed.
+    rng = seed !== nothing ? MersenneTwister(seed) :
+          rng === nothing ? Random.default_rng() : rng
     target_accept = Float64(target_accept)   # JSON may deliver an Int
+    ck_path = checkpoint === nothing ? nothing : String(checkpoint)
+    resume && ck_path === nothing && throw(ArgumentError(
+        "resume = true needs `checkpoint`, the state file to continue from"))
+    params = target.params
+    n_total = n_warmup + n_samples           # iterations per chain
 
-    # Per-chain bounded-space init points. `init` (if given) pins every
-    # chain at the same point; otherwise warm-start from a short pt_emcee
-    # pre-search (the disjoint-mode fix), or fall back to independent
-    # prior draws when warm_start is off. A caller's `init` is relabelled
-    # into the layout's circular windows first (src/circular.jl): a target
-    # reused after a fit carries moved windows, and an angle written in the
-    # user's window would otherwise reach transform_forward outside its own,
-    # which clamps it onto the wall.
-    init_points = if init !== nothing
-        [circular_relabel_point!(copy(init), target.params) for _ in 1:n_chains]
-    elseif warm_start
-        _warmstart_points(target, n_chains, rng;
-                          n_temps = warm_temps, n_walkers = warm_walkers,
-                          n_steps = warm_steps, n_burnin = warm_burnin)
-    else
-        [_draw_from_prior(target, rng) for _ in 1:n_chains]
+    # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
+    # Read before the warm-start pre-search: a resumed run skips it, and the
+    # step-size search, because what they produced (the moved circular windows,
+    # each chain's position, step size and metric) is in the checkpoint. The
+    # adaptor is saved as AdvancedHMC's own object, so the AdvancedHMC version
+    # is part of the fingerprint. So is the RNG's starting state, read here
+    # before anything draws from it: a different seed is a different run.
+    ck_fp = run_fingerprint(params, target.data; n_warmup, n_chains,
+        target_accept, ad_backend, compile_tape, warm_start, warm_temps,
+        warm_walkers, warm_steps, warm_burnin,
+        init = init === nothing ? nothing : copy(init),
+        seed = seed === nothing ? nothing : Int(seed),
+        rng = _rng_fingerprint(rng),
+        advancedhmc = string(pkgversion(AdvancedHMC)))
+    ck = resume ? read_checkpoint(ck_path, "nuts", ck_fp) : nothing
+    if ck !== nothing
+        for (c, s) in enumerate(ck.chains)
+            s.step::Int <= n_total || throw(ArgumentError(
+                "chain $c of the checkpoint is at iteration $(s.step); " *
+                "n_warmup + n_samples = $n_total would end before it"))
+        end
     end
+
+    if ck === nothing
+        # Per-chain bounded-space init points. `init` (if given) pins every
+        # chain at the same point; otherwise warm-start from a short pt_emcee
+        # pre-search (the disjoint-mode fix), or fall back to independent
+        # prior draws when warm_start is off. A caller's `init` is relabelled
+        # into the layout's circular windows first (src/circular.jl): a target
+        # reused after a fit carries moved windows, and an angle written in the
+        # user's window would otherwise reach transform_forward outside its own,
+        # which clamps it onto the wall.
+        init_points = if init !== nothing
+            [circular_relabel_point!(copy(init), params) for _ in 1:n_chains]
+        elseif warm_start
+            _warmstart_points(target, n_chains, rng;
+                              n_temps = warm_temps, n_walkers = warm_walkers,
+                              n_steps = warm_steps, n_burnin = warm_burnin)
+        else
+            pts = Vector{Vector{Float64}}(undef, n_chains)
+            for c in 1:n_chains
+                pts[c] = _draw_from_prior(target, rng)
+            end
+            pts
+        end
+        # One RNG stream per chain, seeded from `rng`. A single chain runs on
+        # `rng` itself.
+        chain_rngs = Vector{AbstractRNG}(undef, n_chains)
+        if n_chains == 1
+            chain_rngs[1] = rng
+        else
+            for c in 1:n_chains
+                chain_rngs[c] = MersenneTwister(rand(rng, UInt64))
+            end
+        end
+        # Every chain's checkpoint entry exists before any chain runs: its start
+        # point and RNG stream, until it saves its own state. A chain queued
+        # behind a full thread pool has not started when the running ones save,
+        # and the tasks never yield, so it could otherwise have no entry until
+        # one of them finished; a checkpoint written in between would lack it.
+        # Without a checkpoint the stream is not copied (not every RNG can be).
+        snaps = Any[_nuts_unstarted(init_points[c],
+                                    ck_path === nothing ? nothing : copy(chain_rngs[c]))
+                    for c in 1:n_chains]
+    else
+        # The windows the saved chains live in (moved by the warm-start
+        # re-chart), and `rng` as the uninterrupted run left it once the chains
+        # had started.
+        for (nm, (lo, _)) in ck.windows
+            set_circular_window!(params, findfirst(==(nm), params.layout.unfrozen_names),
+                                 lo; transforms = (target.transform,))
+        end
+        _restore_rng!(rng, ck.rng_master)
+        # Each chain's stream as its entry holds it, saved or unstarted. A
+        # single chain's stream is `rng` itself.
+        chain_rngs = Vector{AbstractRNG}(undef, n_chains)
+        for c in 1:n_chains
+            chain_rngs[c] = n_chains == 1 ? rng : MersenneTwister(0)
+            _restore_rng!(chain_rngs[c], ck.chains[c].rng)
+        end
+        snaps = collect(Any, ck.chains)
+    end
+
+    ckw = ck_path === nothing ? nothing :
+          _NutsCheckpoint(ck_path, ck_fp, Float64(checkpoint_interval), snaps,
+                          copy(rng), circular_windows(params), ReentrantLock())
+    stops = _NUTS_STOP_AFTER[]
+    chain_kw = (; n_samples, n_warmup, target_accept, ad_backend, compile_tape)
 
     if n_chains == 1
-        return _run_single_chain(
-            target; n_samples, n_warmup, target_accept, ad_backend,
-            compile_tape, init_bounded = init_points[1], rng, progress,
-            kwargs...)
+        res = [_nuts_chain(target, 1, snaps[1], ckw, get(stops, 1, 0); chain_kw...,
+                           rng = chain_rngs[1], progress)]
     else
-        return _run_multi_chain(
-            target, n_chains; n_samples, n_warmup, target_accept,
-            ad_backend, compile_tape, init_points, rng, progress, kwargs...)
+        # Run chains in parallel. Only show progress on chain 1. Each task
+        # owns its own NereusTarget AD wrapper + RNG so there is no shared
+        # state; each chain starts from, or resumes, its entry in `snaps`.
+        tasks = Vector{Task}(undef, n_chains)
+        for c in 1:n_chains
+            chain_rng = chain_rngs[c]
+            snap = snaps[c]
+            show_progress = progress && (c == 1)
+            stop = get(stops, c, 0)
+            tasks[c] = Threads.@spawn _nuts_chain(
+                target, c, snap, ckw, stop; chain_kw...,
+                rng = chain_rng, progress = show_progress)
+        end
+        res = [fetch(t) for t in tasks]
     end
-end
-
-"""
-    _run_multi_chain(target, n_chains; kwargs...) -> MCMCChains.Chains
-
-Run `n_chains` NUTS chains in parallel using Julia threads, then merge
-into a single `Chains` object with chain IDs. Each chain starts from its
-own warm-start point (`init_points[c]`). Per-chain NUTS diagnostics are
-combined into vectors and attached to the merged `chains.info`. Requires
-Julia started with multiple threads (`julia -t N`).
-"""
-function _run_multi_chain(
-    target::NereusTarget, n_chains::Int;
-    n_samples, n_warmup, target_accept, ad_backend, compile_tape,
-    init_points, rng, progress, kwargs...
-)
-    # Generate per-chain RNG seeds from the base RNG.
-    seeds = [rand(rng, UInt64) for _ in 1:n_chains]
-
-    # Run chains in parallel. Only show progress on chain 1. `:static`
-    # so the tasks do not migrate threads mid-run (per the threadid
-    # buffer-race lesson elsewhere in this codebase); each task owns its
-    # own NereusTarget AD wrapper + RNG so there is no shared state.
-    tasks = Vector{Task}(undef, n_chains)
-    for c in 1:n_chains
-        chain_rng = MersenneTwister(seeds[c])
-        show_progress = progress && (c == 1)
-        ip = init_points[c]
-        tasks[c] = Threads.@spawn _run_single_chain(
-            target; n_samples, n_warmup, target_accept, ad_backend,
-            compile_tape, init_bounded = ip, rng = chain_rng,
-            progress = show_progress, kwargs...)
-    end
-
-    chains_list = [fetch(t) for t in tasks]
+    any(isnothing, res) && throw(_NutsStopped())
+    n_chains == 1 && return res[1]
+    chains_list = res
 
     # Tag each chain with its chain ID and merge.
     merged = MCMCChains.chainscat(chains_list...)
@@ -425,33 +525,100 @@ function _run_multi_chain(
     return merged
 end
 
-"""
-    _run_single_chain(target; kwargs...) -> MCMCChains.Chains
+# Test hook, never set by a real run: entry `c` is the iteration at which chain
+# `c` stops, checkpointed, as a killed run would (0 or no entry: it does not).
+# No `n_samples` can stop a run inside the warm-up, which the resume tests need.
+const _NUTS_STOP_AFTER = Ref(Int[])
 
-Run a single NUTS chain. Internal workhorse called by `sample_nuts`.
-Uses the canonical AdvancedHMC idiom: unit diagonal metric →
-`find_good_stepsize` → `StanHMCAdaptor` (windowed dual-averaging step
-size + Welford diagonal mass-matrix adaptation) → high-level `sample`
-with `drop_warmup=true`. The per-step `stats` carry divergence flags,
-tree depth and adapted step size, summarized into `chains.info`.
+"""Thrown by `sample_nuts` when the `_NUTS_STOP_AFTER` test hook stopped a chain."""
+struct _NutsStopped <: Exception end
+
+# What `sample_nuts` checkpoints into: each chain's latest saved state, plus
+# what is fixed once the chains have started (the caller's `rng` and the
+# circular windows). Every chain has an entry from the start (`_nuts_unstarted`
+# until it saves). Chains save on their own clocks, under `lock`.
+struct _NutsCheckpoint
+    path::String
+    fingerprint::NamedTuple
+    interval::Float64
+    snaps::Vector{Any}
+    rng_master::AbstractRNG
+    windows::Dict{String, Tuple{Float64, Float64}}
+    lock::ReentrantLock
+end
+
+# A chain's entry before it has saved a state of its own: the bounded-space
+# point it starts from and a copy of its RNG stream before the start draws from
+# it (`nothing` when the run keeps no checkpoint), which is all a fresh start
+# needs (`_nuts_chain`).
+_nuts_unstarted(init::Vector{Float64}, rng::Union{Nothing,AbstractRNG}) =
+    (; step = 0, init = copy(init), rng)
+_nuts_started(snap::NamedTuple) = haskey(snap, :z)
+
+"""Put a checkpointed RNG stream back into `rng`, in place."""
+function _restore_rng!(rng::AbstractRNG, saved::AbstractRNG)
+    applicable(copy!, rng, saved) || throw(ArgumentError(
+        "the checkpoint's RNG is a $(typeof(saved)), which cannot be put back " *
+        "into the $(typeof(rng)) passed as `rng`"))
+    copy!(rng, saved)
+    return rng
+end
+
+# What the run fingerprint keeps of the RNG a run starts on: its type and a hash
+# of its serialized state (every AbstractRNG serializes; not every one defines
+# `==`). The task-local default stream is left out, as `nothing`: it is the
+# unseeded case, and its state in a new process says nothing about the run.
+_rng_fingerprint(::Random.TaskLocalRNG) = nothing
+function _rng_fingerprint(rng::AbstractRNG)
+    io = IOBuffer()
+    serialize(io, rng)
+    return (string(typeof(rng)), hash(String(take!(io))))
+end
+
 """
-function _run_single_chain(
-    target::NereusTarget;
+    _nuts_snapshot!(ckw, c, step, z, metric, kernel, adaptor, rng, draws, stats)
+
+Save chain `c`'s state after iteration `step` as its entry in `ckw` and write
+the checkpoint file, which holds every chain's latest entry. Copies everything
+the chain goes on mutating.
+"""
+function _nuts_snapshot!(ckw::_NutsCheckpoint, c::Int, step::Int, z, metric, kernel,
+                         adaptor, rng::AbstractRNG, draws, stats)
+    # One deepcopy for all four: during warm-up the metric's M⁻¹ is the
+    # adaptor's variance array itself, and stays one array in the copy.
+    live = deepcopy((; z, metric, kernel, adaptor))
+    snap = (; step, live..., rng = copy(rng), draws = copy(draws), stats = copy(stats))
+    lock(ckw.lock) do
+        ckw.snaps[c] = snap
+        write_checkpoint(ckw.path, "nuts", ckw.fingerprint,
+                         (; chains = ckw.snaps, rng_master = ckw.rng_master,
+                            windows = ckw.windows))
+    end
+    return nothing
+end
+
+"""
+    _nuts_chain(target, c, snap, ckw, stop; kwargs...) -> Union{MCMCChains.Chains, Nothing}
+
+Run NUTS chain `c`, on `rng`, from its entry `snap`: from the start point of an
+unstarted entry (`_nuts_unstarted`), or from exactly where a saved state of
+this chain stopped. Uses the canonical AdvancedHMC idiom: unit diagonal
+metric → `find_good_stepsize` → `StanHMCAdaptor` (windowed dual-averaging step
+size + Welford diagonal mass-matrix adaptation) → the sampling loop of
+`AdvancedHMC.sample(...; drop_warmup = true)`, run here (`_nuts_loop!`) so that
+its state can be checkpointed. The per-step `stats` carry divergence flags,
+tree depth and adapted step size, summarized into `chains.info`. `ckw` is the
+run's checkpoint (`nothing`: none). Returns `nothing` when the test hook
+stopped the chain at iteration `stop`.
+"""
+function _nuts_chain(
+    target::NereusTarget, c::Int, snap::NamedTuple, ckw::Union{Nothing,_NutsCheckpoint},
+    stop::Int;
     n_samples::Int, n_warmup::Int, target_accept::Float64,
     ad_backend::Symbol, compile_tape::Bool,
-    init_bounded::Vector{Float64},
-    rng::AbstractRNG, progress::Bool, kwargs...
+    rng::AbstractRNG, progress::Bool
 )
     dim = LogDensityProblems.dimension(target)
-    length(init_bounded) == dim || throw(ArgumentError(
-        "init length $(length(init_bounded)) ≠ target dimension $dim"))
-
-    # Transform the bounded-space init to unconstrained space if needed.
-    init_y = if target.transform isa PackedTransforms
-        transform_forward(init_bounded, target.transform)
-    else
-        copy(init_bounded)
-    end
 
     # --- AD gradient wrapper ------------------------------------------
     if ad_backend === :Enzyme && target.transform isa PackedTransforms
@@ -468,40 +635,77 @@ function _run_single_chain(
         ℓ_fn = y -> LogDensityProblems.logdensity(ℓ_ad, y)
         ∂ℓ_fn = y -> LogDensityProblems.logdensity_and_gradient(ℓ_ad, y)
     end
+    kinetic = AdvancedHMC.GaussianKinetic()
 
-    # --- Metric: UNIT diagonal mass matrix ----------------------------
-    # Start from identity and let the StanHMCAdaptor's windowed Welford
-    # estimator learn the per-dimension scales from the chain itself.
-    # (The old `1/g²`-at-init metric was degenerate: at a prior-draw
-    # init the gradients are ~5000, so inv_mass ~ 1e-8 → infinite mass →
-    # frozen chain.)
-    metric = AdvancedHMC.DiagEuclideanMetric(dim)
-    hamiltonian = AdvancedHMC.Hamiltonian(metric, AdvancedHMC.GaussianKinetic(),
-                                          ℓ_fn, ∂ℓ_fn)
+    # `rng` already holds the stream of the chain's entry (`sample_nuts` put
+    # it back on a resume).
+    if !_nuts_started(snap)
+        init_bounded = snap.init::Vector{Float64}
+        length(init_bounded) == dim || throw(ArgumentError(
+            "init length $(length(init_bounded)) ≠ target dimension $dim"))
 
-    # --- Step size: heuristic initial ε, then dual-averaging ----------
-    initial_ε = AdvancedHMC.find_good_stepsize(rng, hamiltonian, init_y)
-    integrator = AdvancedHMC.Leapfrog(initial_ε)
-    kernel = AdvancedHMC.HMCKernel(AdvancedHMC.Trajectory{
-        AdvancedHMC.MultinomialTS}(integrator, AdvancedHMC.GeneralisedNoUTurn()))
+        # Transform the bounded-space init to unconstrained space if needed.
+        init_y = if target.transform isa PackedTransforms
+            transform_forward(init_bounded, target.transform)
+        else
+            copy(init_bounded)
+        end
 
-    # Windowed adaptation: dual-averaging step size + diagonal mass
-    # matrix (the canonical Stan warmup schedule).
-    adaptor = AdvancedHMC.StanHMCAdaptor(
-        AdvancedHMC.MassMatrixAdaptor(metric),
-        AdvancedHMC.StepSizeAdaptor(target_accept, integrator))
+        # --- Metric: UNIT diagonal mass matrix ------------------------
+        # Start from identity and let the StanHMCAdaptor's windowed Welford
+        # estimator learn the per-dimension scales from the chain itself.
+        # (The old `1/g²`-at-init metric was degenerate: at a prior-draw
+        # init the gradients are ~5000, so inv_mass ~ 1e-8 → infinite mass →
+        # frozen chain.)
+        metric = AdvancedHMC.DiagEuclideanMetric(dim)
+        hamiltonian = AdvancedHMC.Hamiltonian(metric, kinetic, ℓ_fn, ∂ℓ_fn)
 
-    # --- Sample (high-level API drives adaptation correctly) ----------
-    samples_y, stats = AdvancedHMC.sample(
-        rng, hamiltonian, kernel, init_y, n_warmup + n_samples,
-        adaptor, n_warmup; drop_warmup = true, progress = progress,
-        verbose = false)
+        # --- Step size: heuristic initial ε, then dual-averaging ------
+        initial_ε = AdvancedHMC.find_good_stepsize(rng, hamiltonian, init_y)
+        integrator = AdvancedHMC.Leapfrog(initial_ε)
+        kernel = AdvancedHMC.HMCKernel(AdvancedHMC.Trajectory{
+            AdvancedHMC.MultinomialTS}(integrator, AdvancedHMC.GeneralisedNoUTurn()))
+
+        # Windowed adaptation: dual-averaging step size + diagonal mass
+        # matrix (the canonical Stan warmup schedule).
+        adaptor = AdvancedHMC.StanHMCAdaptor(
+            AdvancedHMC.MassMatrixAdaptor(metric),
+            AdvancedHMC.StepSizeAdaptor(target_accept, integrator))
+
+        # The starting phase point, drawn as `AdvancedHMC.sample` draws it:
+        # its momentum is refreshed before use, but the draw advances `rng`.
+        hamiltonian, t0 = AdvancedHMC.sample_init(rng, hamiltonian, init_y)
+        z = t0.z
+        step0 = 0
+        draws = Vector{Vector{Float64}}()
+        stats = Vector{NamedTuple}()
+    else
+        # --- Resume: the saved chain, exactly as it stopped ------------
+        # Copied, not used as read: `snap` stays the chain's checkpoint entry
+        # until its next save, and the loop mutates the adaptor in place.
+        live = deepcopy((; snap.z, snap.metric, snap.kernel, snap.adaptor))
+        hamiltonian = AdvancedHMC.Hamiltonian(live.metric, kinetic, ℓ_fn, ∂ℓ_fn)
+        kernel = live.kernel
+        adaptor = live.adaptor
+        z = live.z
+        step0 = snap.step::Int
+        draws = copy(snap.draws::Vector{Vector{Float64}})
+        stats = copy(snap.stats::Vector{NamedTuple})
+    end
+
+    n_total = n_warmup + n_samples
+    sizehint!(draws, n_samples); sizehint!(stats, n_samples)
+    pb = ProgressBar("NUTS"; total = n_total, enabled = progress, start = step0)
+    done = _nuts_loop!(rng, hamiltonian, kernel, adaptor, z, draws, stats, step0,
+                       n_total, n_warmup, c, ckw, stop, pb)
+    finish!(pb)
+    done || return nothing
 
     # --- Back-transform to bounded (physical) space -------------------
     post_samples = if target.transform isa PackedTransforms
-        [transform_inverse(s, target.transform) for s in samples_y]
+        [transform_inverse(s, target.transform) for s in draws]
     else
-        samples_y
+        draws
     end
 
     param_names = Symbol.(target.params.layout.unfrozen_names)
@@ -538,4 +742,48 @@ function _run_single_chain(
         mean_accept     = isempty(accs) ? NaN : mean(filter(isfinite, accs)),
     ))
     return chains
+end
+
+"""
+    _nuts_loop!(rng, h, κ, adaptor, z, draws, stats, step0, n_total, n_warmup,
+                c, ckw, stop, pb) -> Bool
+
+Iterations `step0 + 1 : n_total` of one NUTS chain: the loop of
+`AdvancedHMC.sample(rng, h, κ, θ, n_total, adaptor, n_warmup; drop_warmup =
+true)`, step for step and draw for draw, appending the post-warmup positions
+and statistics to `draws` and `stats`. Between iterations the chain is `z`'s
+position, `rng`, the metric of `h`, the step size of `κ` and the adaptor's
+state, all of which a checkpoint saves. Returns `false` if the test hook
+stopped it at `stop`.
+"""
+function _nuts_loop!(rng::AbstractRNG, h, κ, adaptor, z,
+                     draws::Vector{Vector{Float64}}, stats::Vector{NamedTuple},
+                     step0::Int, n_total::Int, n_warmup::Int, c::Int,
+                     ckw::Union{Nothing,_NutsCheckpoint}, stop::Int, pb::ProgressBar)
+    last_ck = time()
+    for i in (step0 + 1):n_total
+        t = AdvancedHMC.transition(rng, h, κ, z)
+        tstat = AdvancedHMC.stat(t)
+        h, κ, isadapted = AdvancedHMC.Adaptation.adapt!(
+            h, κ, adaptor, i, n_warmup, t.z.θ, tstat.acceptance_rate)
+        z = t.z
+        if i > n_warmup
+            push!(draws, z.θ)
+            push!(stats, merge(tstat, (is_adapt = isadapted,)))
+        end
+        update!(pb; n_done = i,
+                fields = (:phase => isadapted ? "warmup" : "sampling",
+                          :ε => AdvancedHMC.nom_step_size(κ.τ.integrator),
+                          :accept => tstat.acceptance_rate))
+
+        # ---- Checkpoint: every `checkpoint_interval` s, on the last
+        # iteration, and before the test hook's stop (src/checkpoint.jl) ---
+        if ckw !== nothing && (i == n_total || i == stop ||
+                               time() - last_ck >= ckw.interval)
+            _nuts_snapshot!(ckw, c, i, z, h.metric, κ, adaptor, rng, draws, stats)
+            last_ck = time()
+        end
+        i == stop && return false
+    end
+    return true
 end
