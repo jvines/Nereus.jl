@@ -91,6 +91,7 @@ const TEST_UNITS = [
     (name = "test_bridge_evidence.jl", seconds = 1, files = ["test_bridge_evidence.jl"]),
     (name = "test_reference_path_evidence.jl", seconds = 6, files = ["test_reference_path_evidence.jl"]),
     (name = "test_phot_determinism.jl", seconds = 1, files = ["test_phot_determinism.jl"]),
+    (name = "test_phot_supersampling.jl", seconds = 2, files = ["test_phot_supersampling.jl"]),
     (name = "test_sampler_determinism.jl", seconds = 198, files = ["test_sampler_determinism.jl"]),
     (name = "test_bls_informed_phot.jl", seconds = 2, files = ["test_bls_informed_phot.jl"]),
     (name = "test_evidence_curved.jl", seconds = 5, files = ["test_evidence_curved.jl"]),

@@ -779,11 +779,19 @@ function _parse_photometry_blocks(lcs)
             e = Float64[Float64(x) for x in raw[:, geti(ecol)]]
         end
         inst = String(_get(lc, :instrument; default = "TESS"))
-        # exposure_time is per-LC in SECONDS (default 120 = TESS 2-min); store it
-        # per-cadence in DAYS to match t_phot, for finite-exposure supersampling.
-        exp_d = Float64(_get(lc, :exposure_time; default = 120.0)) / 86_400.0
+        # exposure_time is in SECONDS (default 120 = TESS 2-min), either one value
+        # for the whole light curve or one per cadence. A per-cadence vector is
+        # what a light curve stitched from several sectors needs: TESS has flown
+        # 1800-, 600-, 200- and 120-s cadences, and integrating every sector over
+        # the same exposure smears some transits and under-smears others.
+        # Stored per cadence in DAYS to match t_phot.
+        ex = _get(lc, :exposure_time; default = 120.0)
+        exp_s = ex isa AbstractVector ? Float64.(collect(ex)) : fill(Float64(ex), length(t))
+        length(exp_s) == length(t) || throw(ArgumentError(
+            "photometry block '$inst': exposure_time has $(length(exp_s)) entries " *
+            "for $(length(t)) cadences"))
         append!(t_all, t); append!(flux_all, f); append!(err_all, e)
-        for _ in 1:length(t); push!(inst_str_all, inst); push!(exp_times, exp_d); end
+        for k in 1:length(t); push!(inst_str_all, inst); push!(exp_times, exp_s[k] / 86_400.0); end
     end
     inst_names = sort!(unique(inst_str_all))
     inst_map = Dict(n => i for (i, n) in enumerate(inst_names))

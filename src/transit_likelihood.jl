@@ -154,9 +154,20 @@ function _phot_n_super(data::Data)
     @inbounds for e in data.exposure_times
         (isfinite(e) && e > mx) && (mx = e)
     end
-    max_texp_min = mx * 1440.0              # days → minutes
-    max_texp_min <= 2.0 && return 1
-    return clamp(ceil(Int, max_texp_min), 1, 30)
+    return _phot_n_super_point(mx)
+end
+
+# Supersampling factor for ONE cadence, from that cadence's own exposure (days).
+# Same rule as above: ≈1-min sub-cadence, none at or below 2 min, capped at 30.
+# `_phot_n_super(data)` is the dataset maximum and only says whether any cadence
+# needs integrating; the per-point count must come from here. Applying the maximum
+# to every point integrated a 2-min or 5-s cadence as finely as the longest
+# exposure in the fit (10 sub-samples whenever a 10-min band was present), which
+# costs time and changes nothing for the short cadences.
+@inline function _phot_n_super_point(texp::Real)
+    m = texp * 1440.0                       # days → minutes
+    (isfinite(m) && m > 2.0) || return 1
+    return clamp(ceil(Int, m), 1, 30)
 end
 
 # Per-cadence transit product Π_j fluxⱼ(t) with optional finite-exposure
@@ -193,6 +204,9 @@ end
         rrs, Tc_centers, T_dur_safe, r_for_j, ttv_state, n_super::Int;
         gd = nothing, gd_ctx = nothing) where {T}
     tprod = one(T)
+    # `n_super` (dataset maximum) only switches integration on; the number of
+    # sub-samples is this cadence's own, so short cadences stay instantaneous.
+    ns = n_super > 1 ? _phot_n_super_point(texp) : 1
     @inbounds for j in 1:n_transit
         transits[j] || continue
         Δt = t - Tc_centers[j]
@@ -201,10 +215,10 @@ end
         t_eff = r_for_j[j] > 0 ?
             ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tps) : t
         use_gd = gd !== nothing && gd.on[j]
-        if n_super > 1 && texp > 0
+        if ns > 1 && texp > 0
             fsum = zero(T)
-            for s in 1:n_super
-                tsub = t_eff + ((2s - n_super - 1) / (2 * n_super)) * texp
+            for s in 1:ns
+                tsub = t_eff + ((2s - ns - 1) / (2 * ns)) * texp
                 if use_gd
                     x, y, zl = planet_sky_position(tsub, Ps[j], es[j], ws[j], Tps[j],
                                                     bs[j], a_Rs[j])
@@ -214,7 +228,7 @@ end
                     fsum += transit_flux(ld, zs, rrs[j])
                 end
             end
-            tprod *= fsum / n_super
+            tprod *= fsum / ns
         elseif use_gd
             x, y, zl = planet_sky_position(t_eff, Ps[j], es[j], ws[j], Tps[j],
                                             bs[j], a_Rs[j])
