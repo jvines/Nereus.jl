@@ -316,12 +316,10 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
     # --- Decode transit planets (geometry gate) ----------------------
     # Only planets with b and r fields that pass b < 1 + rr transit.
     p_idx = planet_indices(theta)
-    n_transit = 0
-    for k in p_idx
-        block = theta.params.layout.planet_blocks[k]
-        has_geometry(block) || continue
-        n_transit += 1
-    end
+    # One assignment, not a running count: a variable assigned more than once
+    # and captured by the threaded loops below is put in a Core.Box, and every
+    # read of it in the loop body is then untyped (see `gd_s` below).
+    n_transit = count(k -> has_geometry(theta.params.layout.planet_blocks[k]), p_idx)
 
     if n_transit == 0
         return _phot_ll_no_transit(theta, data)
@@ -575,10 +573,12 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
         #
         # `:static` remains unavailable here (this runs nested inside
         # sample_pt's chain-parallel @spawn), but it is no longer needed: the
-        # correctness now comes from the indexing, not from the schedule.
+        # correctness now comes from the indexing, not from the schedule. In a
+        # task of pt_emcee's walker loop the chunks run serially (see
+        # `@_threads_unless_nested`), with the same partition and the same bits.
         nchunks  = cld(n_obs, _PHOT_REDUCE_CHUNK)
         partials = fill(zero(T), nchunks)
-        @inbounds Threads.@threads for c in 1:nchunks
+        @inbounds @_threads_unless_nested for c in 1:nchunks
             lo = (c - 1) * _PHOT_REDUCE_CHUNK + 1
             hi = min(c * _PHOT_REDUCE_CHUNK, n_obs)
             acc = zero(T)
@@ -651,7 +651,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
     # The AR/MA/GP stages below stay serial regardless (they need
     # sequential access).
     if T <: AbstractFloat
-        Threads.@threads for i in 1:n_obs
+        @_threads_unless_nested for i in 1:n_obs
             @inbounds begin
                 t       = data.t_phot[i]
                 obs_err = data.flux_err[i]
@@ -750,12 +750,10 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
 
     # Decode transit planets (geometry gate)
     p_idx = planet_indices(theta)
-    n_transit = 0
-    for k in p_idx
-        block = theta.params.layout.planet_blocks[k]
-        has_geometry(block) || continue
-        n_transit += 1
-    end
+    # One assignment, not a running count: a variable assigned more than once
+    # and captured by the threaded loops below is put in a Core.Box, and every
+    # read of it in the loop body is then untyped (see `gd_s` below).
+    n_transit = count(k -> has_geometry(theta.params.layout.planet_blocks[k]), p_idx)
 
     systemic = theta.params.layout.systemic
     n_pm     = length(theta.params.config.instruments.pm_names)
@@ -911,7 +909,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
 
     # Threaded for Float64 (no Duals = no GC thrashing), serial otherwise.
     if T <: AbstractFloat
-        Threads.@threads for i in 1:n_obs
+        @_threads_unless_nested for i in 1:n_obs
             @inbounds begin
                 t       = data.t_phot[i]
                 ins_idx = data.phot_inst[i]
@@ -1274,9 +1272,10 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
                 # 3. Compute flux at the in-transit indices. Threaded
                 # only when N is large enough to amortize spawn overhead;
                 # most planets have <500 in-transit points, single-thread
-                # is faster.
+                # is faster. Never in a task marked by `_serial_inner_loops!`,
+                # whose sampler has every thread busy already.
                 n_tx = length(old_idx)
-                if n_tx > 2000
+                if n_tx > 2000 && !_inner_loops_serial()
                     tx_chunk = cld(n_tx, nT)
                     refresh_tasks = Vector{Task}(undef, nT)
                     for c in 1:nT

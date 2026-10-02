@@ -223,3 +223,22 @@ using Nereus: _chunk_ranges, _nthread_slots, _nthread_chunks
         @test occursin("THREAD_SLOTS_CHILD_OK", txt)
     end
 end
+
+@testset "likelihood loops run serially only in a marked task" begin
+    @test !Nereus._inner_loops_serial()
+    @test fetch(Threads.@spawn Nereus._inner_loops_serial()) == false
+    @test fetch(Threads.@spawn (Nereus._serial_inner_loops!(); Nereus._inner_loops_serial()))
+    @test !Nereus._inner_loops_serial()           # the mark stays in its own task
+
+    # Every iteration runs exactly once under either schedule.
+    hits(serial) = fetch(Threads.@spawn begin
+        serial && Nereus._serial_inner_loops!()
+        seen = zeros(Int, 37)
+        Nereus.@_threads_unless_nested for i in 1:37
+            seen[i] += 1
+        end
+        seen
+    end)
+    @test hits(false) == ones(Int, 37)
+    @test hits(true) == ones(Int, 37)
+end

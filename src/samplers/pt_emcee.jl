@@ -799,7 +799,11 @@ function sample_pt_emcee(
         partner_hi = active_half === :h1 ? n_walkers_eff : half
         task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
         chunks     = active_half === :h1 ? chunks_h1 : chunks_h2
+        # Every thread has a slot of walkers: the likelihood's own threaded
+        # loops would only queue tasks behind the other slots (src/threading.jl).
+        fills_threads = length(chunks) >= Threads.nthreads()
         Threads.@threads :static for slot in 1:length(chunks)
+            fills_threads && _serial_inner_loops!()
             for task_idx in chunks[slot]
                 t, w = tasks[task_idx]
                 β = βs[t]
