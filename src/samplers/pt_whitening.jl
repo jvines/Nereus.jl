@@ -113,6 +113,40 @@ struct WhiteningPTResult
     whitening_active_after::Int
 end
 
+# Content hash of every field of `data`, every element of every array, for the
+# checkpoint fingerprint. `run_fingerprint` hashes only the fields that are
+# numeric arrays or Dicts, so `t_ref` and the astrometry and tomography records
+# (`iad`, `hgca`, `gost`, ...) never reach it: measured, a resume onto IAD
+# abscissae shifted by 0.05 was accepted and gave another chain. Those are
+# hashed here by descending into them, because Julia's default hash of a struct
+# that holds arrays is its object identity, which differs between processes and
+# would refuse every legitimate resume. Arrays are walked element by element:
+# Base's `hash(::AbstractArray)` samples only ~log(n) entries from 8192 on.
+_ptw_content_hash(x::Union{Number,AbstractChar,AbstractString,Symbol,Nothing,Missing},
+                  h::UInt) = hash(x, h)
+function _ptw_content_hash(x::Union{AbstractArray,Tuple}, h::UInt)
+    h = hash(x isa Tuple ? length(x) : size(x), h)
+    for v in x
+        h = _ptw_content_hash(v, h)
+    end
+    return h
+end
+function _ptw_content_hash(x::AbstractDict, h::UInt)
+    h = hash(length(x), h)
+    for k in sort!(collect(keys(x)))
+        h = _ptw_content_hash(x[k], _ptw_content_hash(k, h))
+    end
+    return h
+end
+function _ptw_content_hash(x, h::UInt)   # a record: its type, then each field
+    h = hash(nameof(typeof(x)), h)
+    for f in fieldnames(typeof(x))
+        h = _ptw_content_hash(getfield(x, f), hash(f, h))
+    end
+    return h
+end
+_ptw_data_hash(data::Data) = _ptw_content_hash(data, zero(UInt))
+
 """
     sample_pt_whitening(target, data; kwargs...) -> WhiteningPTResult
 
@@ -169,9 +203,11 @@ the distinguishing feature of this sampler.
   the new TOTAL, counted from the start of the original run; the draws already
   kept stay, and the new ones are appended. The continuation is bit-identical to
   an uninterrupted run of `n_steps`, at any thread count. Refused, with the
-  differences listed, if the checkpoint came from different data, priors,
-  parameters, walkers, rungs, ladder, burn-in, thinning, seed, stretch, node-flip
-  or whitening settings (`warmup_swaps`, `whiten_window`, `whiten_refresh`).
+  differences listed, if the checkpoint came from different data (any field,
+  astrometry and `t_ref` included), priors, parameters, `n_walkers`, `n_temps`,
+  `betas`, `n_burnin`, `thin`, `seed`, `stretch_a`, `node_flip` (when a planet
+  can flip) or whitening settings (`warmup_swaps`, `whiten_window`,
+  `whiten_refresh`).
 """
 function sample_pt_whitening(
     target::NereusTarget,
@@ -233,13 +269,22 @@ function sample_pt_whitening(
     length(βs) == n_temps || throw(ArgumentError(
         "Provided `betas` has length $(length(βs)), expected $n_temps"))
 
+    # Node flip for astrometry-only planets (src/samplers/node_flip.jl). Walkers
+    # here are plain bounded space, so no log-scale dimension to exclude.
+    flips = node_flip > 0 ? node_flips(params, data) : NodeFlip[]
+
     # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
     # On resume the saved state replaces initialisation below and is put back
     # just before the main loop, which then carries on from step `step0 + 1`.
-    # `proposal_scale` and `init_strategy` are left out: neither is read.
+    # `proposal_scale` and `init_strategy` are left out: neither is read. Nor is
+    # `node_flip` when no planet can flip, so it enters as the rate in effect.
+    # `data_content` covers the data `run_fingerprint` does not hash (see
+    # `_ptw_content_hash`).
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
-        n_burnin, thin, seed, stretch_a, ladder = copy(βs), warmup_swaps,
-        whiten_window = max(whiten_window, 1), whiten_refresh, node_flip)
+        n_burnin, thin, seed, stretch_a, betas = copy(βs), warmup_swaps,
+        whiten_window = max(whiten_window, 1), whiten_refresh,
+        node_flip = isempty(flips) ? 0.0 : node_flip,
+        data_content = _ptw_data_hash(data))
     ck = resume ? read_checkpoint(ck_path, "pt_whitening", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -435,9 +480,7 @@ function sample_pt_whitening(
     rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
     rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
 
-    # Node flip for astrometry-only planets (src/samplers/node_flip.jl). Walkers
-    # here are plain bounded space, so no log-scale dimension to exclude.
-    flips = node_flip > 0 ? node_flips(params, data) : NodeFlip[]
+    # Node flip (`flips` is built above, for the fingerprint).
     rngs_flip = isempty(flips) ? MersenneTwister[] :
         [MersenneTwister(_walker_seed(seed, 5, i)) for i in 1:(n_temps * n_walkers_eff)]
     flip_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]

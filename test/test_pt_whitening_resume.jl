@@ -10,10 +10,12 @@
 # the circular Mo (steps 60 and 120: the ring relabelled, the window moved), the
 # end of burn-in, and a finished run extended past its own end. A second target,
 # with an astrometry-only planet, carries the node-flip RNG streams across a
-# split.
+# split. Both check what a resume refuses: different data in any field of
+# `Data` (`t_ref` and the IAD records included, which `run_fingerprint` does not
+# hash), or a different setting, named by its keyword.
 using Test
 using Nereus
-using Nereus: IADData
+using Nereus: IADData, Data
 using Random
 
 # An eccentric planet whose mean anomaly sits 0.02 rad from the 0/2π seam, with
@@ -50,8 +52,14 @@ const _WS_KW = (n_temps = 4, n_walkers = 20, n_burnin = 120, warmup_swaps = 30,
                 show_progress = false)
 
 # A fresh target per run: the re-cut moves circular windows on the target itself.
-_ws_run(n_steps; rv = _WS_RV, kw...) = (tg = _ws_target(_WS_T, rv);
-    sample_pt_whitening(tg, tg.data; _WS_KW..., n_steps, kw...))
+# `data = f` runs on `f(tg.data)` in place of the target's own data.
+_ws_run(n_steps; rv = _WS_RV, data = identity, kw...) = (tg = _ws_target(_WS_T, rv);
+    sample_pt_whitening(tg, data(tg.data); _WS_KW..., n_steps, kw...))
+# `d` with some fields replaced.
+_ws_with(d::Data; kw...) =
+    Data((get(kw, f, getfield(d, f)) for f in fieldnames(Data))...)
+# The message of the ArgumentError `f()` throws, or nothing if it throws none.
+_ws_refusal(f) = try f(); nothing catch e; e isa ArgumentError ? e.msg : rethrow() end
 # (step, parameter, walker); `Array(chains)` would stack the walkers.
 _ws_cube(r) = r.chains.value.data
 
@@ -81,7 +89,9 @@ end
     _ws_run(25; checkpoint = path, resume = true)   # ring wrapped, identity swaps
     _ws_run(43; checkpoint = path, resume = true)   # whitened, between refreshes
     _ws_run(61; checkpoint = path, resume = true)   # just past the first re-cut
-    _ws_run(120; checkpoint = path, resume = true)  # end of burn-in, nothing kept
+    # End of burn-in, nothing kept. `node_flip` changed: nothing here can flip,
+    # so it does not touch the chain and is not refused.
+    _ws_run(120; checkpoint = path, resume = true, node_flip = 0.0)
     mid = _ws_run(160; checkpoint = path, resume = true)   # a finished run ...
     tg_ext = _ws_target(_WS_T, _WS_RV)                     # ... extended
     ext = sample_pt_whitening(tg_ext, tg_ext.data; _WS_KW..., n_steps = 190,
@@ -116,6 +126,37 @@ end
           catch e; e end
     @test err isa ArgumentError && occursin("data", err.msg)
     @test_throws ArgumentError _ws_run(150; checkpoint = path, resume = true)
+
+    # A different ladder is named by the keyword that sets it.
+    msg = _ws_refusal(() -> _ws_run(200; checkpoint = path, resume = true,
+                                    betas = [1.0, 0.5, 0.25, 0.125]))
+    @test msg !== nothing && occursin("betas", msg)
+    # `t_ref` is a scalar, which `run_fingerprint` skips; it sets the epoch Mo
+    # is measured from, so it changes the chain.
+    msg = _ws_refusal(() -> _ws_run(200; checkpoint = path, resume = true,
+                                    data = d -> _ws_with(d; t_ref = d.t_ref + 1.0)))
+    @test msg !== nothing && occursin("data_content", msg)
+end
+
+# Base's hash of an array of 8192 or more entries samples about log(n) of them,
+# so most single-entry changes in a long light curve leave it unchanged; the
+# content hash reads every entry.
+@testset "pt_whitening fingerprint reads every data entry" begin
+    n = 10_000
+    rng = MersenneTwister(5)
+    t, rv = sort(55000 .+ 200 .* rand(rng, n)), randn(rng, n)
+    d0 = Data(t_rv = t, rv = rv, rv_err = fill(2.0, n))
+    i = findfirst(1:n) do i
+        rv2 = copy(rv); rv2[i] += 1e-9
+        hash(rv2) == hash(rv)
+    end
+    @test i !== nothing                    # Base misses this entry ...
+    rv2 = copy(rv); rv2[i] += 1e-9
+    d1 = Data(t_rv = t, rv = rv2, rv_err = fill(2.0, n))
+    @test Nereus._ptw_data_hash(d1) != Nereus._ptw_data_hash(d0)    # ... this does not
+    # Equal content in new arrays hashes the same: the hash is of content, not
+    # of object identity, so it is the same in the process that resumes.
+    @test Nereus._ptw_data_hash(deepcopy(d0)) == Nereus._ptw_data_hash(d0)
 end
 
 # An astrometry-only planet, so the node flip (and its per-walker RNG streams)
@@ -127,7 +168,7 @@ const _WS_IAD = let rng = MersenneTwister(11), n = 40
             psi = psi, parallax_factor = sin.(2pi .* (t .- 57000) ./ 365.25 .- psi),
             pm_factor = (t .- sum(t) / n) ./ 365.25)
 end
-_ws_as_target() = build_target(M_pri = 0.644, iad = _WS_IAD,
+_ws_as_target(iad = _WS_IAD) = build_target(M_pri = 0.644, iad = iad,
     planets = (b = (a = LogUniformPrior(0.3, 4.0), M_sec = LogUniformPrior(0.001, 0.05),
                     sesinw = UniformPrior(-1.0, 1.0), secosw = UniformPrior(-1.0, 1.0),
                     inc = SinePrior(), Omega = UniformPrior(0.0, 2pi),
@@ -137,8 +178,12 @@ _ws_as_target() = build_target(M_pri = 0.644, iad = _WS_IAD,
 const _WS_AS_KW = (n_temps = 3, n_walkers = 16, n_burnin = 30, warmup_swaps = 10,
                    whiten_window = 10, whiten_refresh = 3, seed = 3,
                    show_progress = false)
-_ws_as_run(n_steps; kw...) = (tg = _ws_as_target();
+_ws_as_run(n_steps; iad = _WS_IAD, kw...) = (tg = _ws_as_target(iad);
     sample_pt_whitening(tg, tg.data; _WS_AS_KW..., n_steps, kw...))
+# The same IAD with every abscissa moved by `δ`.
+_ws_iad_shift(δ) = IADData(t = _WS_IAD.t, abscissa = _WS_IAD.abscissa .+ δ,
+    abscissa_err = _WS_IAD.abscissa_err, psi = _WS_IAD.psi,
+    parallax_factor = _WS_IAD.parallax_factor, pm_factor = _WS_IAD.pm_factor)
 
 @testset "pt_whitening resume carries the node-flip streams" begin
     tg = _ws_as_target()
@@ -146,5 +191,27 @@ _ws_as_run(n_steps; kw...) = (tg = _ws_as_target();
     full = _ws_as_run(60)
     path = joinpath(mktempdir(), "pt_whitening_state.jls")
     _ws_as_run(20; checkpoint = path)
-    _ws_same(_ws_as_run(60; checkpoint = path, resume = true), full)
+
+    # Shifted abscissae change the chain, and `run_fingerprint` alone does not
+    # see them: the IAD is a record, not an array. The resume is refused.
+    shifted = _ws_iad_shift(0.05)
+    @test _ws_cube(_ws_as_run(60; iad = shifted)) != _ws_cube(full)
+    tg_a, tg_b = _ws_as_target(), _ws_as_target(shifted)
+    @test isequal(Nereus.run_fingerprint(tg_a.params, tg_a.data),
+                  Nereus.run_fingerprint(tg_b.params, tg_b.data))
+    msg = _ws_refusal(() -> _ws_as_run(60; checkpoint = path, resume = true,
+                                       iad = shifted))
+    @test msg !== nothing && occursin("data_content", msg)
+    # Here a planet can flip, so a different rate is refused, and turning the
+    # flip off is too.
+    for nf in (0.2, 0.0)
+        msg = _ws_refusal(() -> _ws_as_run(60; checkpoint = path, resume = true,
+                                           node_flip = nf))
+        @test msg !== nothing && occursin("node_flip", msg)
+    end
+
+    # The same IAD in new arrays (as a resume in another process sees it) is
+    # accepted, and the continuation is the uninterrupted run.
+    _ws_same(_ws_as_run(60; checkpoint = path, resume = true,
+                        iad = deepcopy(_WS_IAD)), full)
 end
