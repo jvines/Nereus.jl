@@ -28,9 +28,10 @@ _mr_planet() = (P = UniformPrior(4.225, 4.235), K = UniformPrior(35.0, 45.0),
                 sesinw = UniformPrior(0.25, 0.35), secosw = UniformPrior(0.35, 0.45),
                 Mo = UniformPrior(0.0, 2pi))
 # A fresh target per run: the re-cut moves circular windows on the target itself.
-_mr_target(rv = zeros(_MR_N)) = build_target(planets = (b = _mr_planet(), c = _mr_planet()),
+# `tkw` are further build_target settings.
+_mr_target(rv = zeros(_MR_N); tkw...) = build_target(; planets = (b = _mr_planet(), c = _mr_planet()),
     rv = (SIM = (data = (t = _MR_T, rv = rv, rv_err = fill(1.5, _MR_N)),
-                 sigma = LogUniformPrior(0.5, 10.0)),))
+                 sigma = LogUniformPrior(0.5, 10.0)),), tkw...)
 const _MR_RV = let (e, ω) = Nereus.sesinw_to_ew(0.3, 0.4)
     Nereus.rv_keplerian.(_MR_T, 4.23, 40.0, e, ω, 0.0, _mr_target().data.t_ref) .+ _MR_ERR
 end
@@ -40,8 +41,8 @@ const _MR_TD = TransDimConfig(max_kplanet = 2, transdim_fraction = 0.3)
 const _MR_KW = (n_warmup = 120, seed = 5, init_scale = 1.5, show_progress = false)
 
 # (chains, evals, strategy, the target's circular windows afterwards)
-function _mr_run(n_samples; td = _MR_TD, rv = _MR_RV, kw...)
-    tg = _mr_target(rv)
+function _mr_run(n_samples; td = _MR_TD, rv = _MR_RV, tkw = (;), kw...)
+    tg = _mr_target(rv; tkw...)
     ch, ev, st = sample_moms(tg, tg.data; td, _MR_KW..., n_samples, kw...)
     return (chains = ch, evals = ev, strategy = st,
             windows = Nereus.circular_windows(tg.params))
@@ -153,6 +154,43 @@ end
         err = try nrun(300; checkpoint = path, resume = true, td = td2); nothing
               catch e; e end
         @test err isa ArgumentError && occursin("noise_exclusion_groups", err.msg)
+        # So is another setting of the process-wide informed noise births. The
+        # AD one changes every ActivityDecorrelation birth (an OLS draw and its
+        # Hastings density instead of a prior draw), so these chains part.
+        for (sw, field) in ((Nereus.AD_INFORMED_BIRTH, "ad_informed_birth"),
+                            (Nereus.GP_INFORMED_BIRTH, "gp_informed_birth"))
+            was = sw[]
+            err = try
+                sw[] = !was
+                nrun(300; checkpoint = path, resume = true); nothing
+            catch e; e
+            finally
+                sw[] = was
+            end
+            @test err isa ArgumentError && occursin(field, err.msg)
+        end
+        let was = Nereus.AD_INFORMED_BIRTH[]
+            off = try
+                Nereus.AD_INFORMED_BIRTH[] = false
+                nrun(200)
+            finally
+                Nereus.AD_INFORMED_BIRTH[] = was
+            end
+            @test off[1].value.data != full[1].value.data
+        end
+        # The noise models are in the fingerprint by content: a deserialized
+        # copy of the model and data, new objects throughout, matches.
+        tg = NereusTarget(Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+                instruments = InstrumentConfig(rv = ["I1"]), data = data,
+                priors = Dict{String,PriorSpec}("gamma_I1" => UniformPrior(-20.0, 20.0),
+                                                "sigma_I1" => LogUniformPrior(0.2, 12.0)),
+                noise_models = NoiseModel[ad, rot], transdim_noise = true,
+                stability = :none), data)
+        io = IOBuffer()
+        Nereus.serialize(io, (tg.params, data, td_n))
+        p2, d2, td2c = Nereus.deserialize(seekstart(io))
+        fp(p, d, t) = Nereus._moms_fingerprint(p, d, t; seed = 1)
+        @test isequal(fp(tg.params, data, td_n), fp(p2, d2, td2c))
     end
 
     @testset "run_job checkpoints by default" begin
@@ -188,10 +226,42 @@ end
                             ((td = TransDimConfig(max_kplanet = 2,
                                                   transdim_fraction = 0.4),),
                              "transdim_fraction"),
-                            ((rv = _MR_RV .+ 1.0,), "data"))
+                            ((rv = _MR_RV .+ 1.0,), "data"),
+                            # Model settings outside the names, priors and data.
+                            ((tkw = (M_s = 1.0, stability = :gladman),), "config_stability"),
+                            ((tkw = (M_s = 1.0,),), "config_M_s"))
             err = try _mr_run(200; checkpoint = path, resume = true, kw...); nothing
                   catch e; e end
             @test err isa ArgumentError && occursin(field, err.msg)
+        end
+        # Gladman stability is a different chain from no stability check, so a
+        # resume across them would match neither.
+        let tkw(s) = (M_s = 1.0, stability = s)
+            @test _draws(_mr_run(100; tkw = tkw(:none))) !=
+                  _draws(_mr_run(100; tkw = tkw(:gladman)))
+        end
+        # Data changed where Base's `hash` does not look: an element in the
+        # middle of an array of 8192 or more, of which it reads a few dozen.
+        # The `data` field of `run_fingerprint` passes it; `data_content` does not.
+        let n = 9000, t = collect(range(0.0, 300.0; length = n)),
+            rv0 = 10.0 .* randn(MersenneTwister(3), n)
+            bumped(i) = (r = copy(rv0); r[i] += 1.0; r)
+            i = findfirst(i -> hash(bumped(i)) == hash(rv0), 1:n)
+            @test i !== nothing
+            mk(rv) = build_target(planets = (b = _mr_planet(),),
+                rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(1.5, n)),
+                             sigma = LogUniformPrior(0.5, 10.0)),))
+            t0, t1 = mk(rv0), mk(bumped(i))
+            @test Nereus.run_fingerprint(t0.params, t0.data).data ==
+                  Nereus.run_fingerprint(t1.params, t1.data).data
+            p3 = joinpath(mktempdir(), "moms_state.jls")
+            go(tg; kw...) = sample_moms(tg, tg.data; td = TransDimConfig(max_kplanet = 1),
+                n_warmup = 4, n_samples = 0, seed = 1, show_progress = false,
+                checkpoint = p3, kw...)
+            go(t0)
+            err = try go(t1; n_samples = 2, resume = true); nothing catch e; e end
+            @test err isa ArgumentError && occursin("data_content", err.msg)
+            @test size(go(t0; n_samples = 2, resume = true)[1].value.data, 1) == 2
         end
         # Several chains look for one file each, which a one-chain run never wrote.
         @test_throws ArgumentError _mr_run(200; checkpoint = path, resume = true,

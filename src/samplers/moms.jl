@@ -90,11 +90,15 @@ warm-starting a follow-up run.
   the original run; the draws already kept stay, and the new ones are appended.
   The continuation is bit-identical to an uninterrupted run with that
   `n_samples`. Refused, with the differences listed, if the checkpoint came
-  from different data, priors, parameters, `td` settings, warmup, seed, chain
-  count or proposal settings. Not available with `informed_birth_fraction > 0`:
-  informed births read a process-wide periodogram cache keyed on the identity
-  of the RNG object (`src/transdim/birth_strategies.jl`), which no checkpoint
-  can carry into another process.
+  from different data, priors, parameters or model settings (`stability`,
+  `M_s`, `R_s`, trend orders, noise models, ...: every field of
+  `params.config`), `td` settings, warmup, seed, chain count, proposal
+  settings, or another setting of the process-wide informed noise births
+  (`GP_INFORMED_BIRTH`, `AD_INFORMED_BIRTH`). Not available with
+  `informed_birth_fraction > 0`: informed births read a process-wide
+  periodogram cache keyed on the identity of the RNG object
+  (`src/transdim/birth_strategies.jl`), which no checkpoint can carry into
+  another process.
 
 Circular angles (`src/circular.jl`): with planet births on, same-mode planet
 slots share one window per angle, set before the first state is drawn. A single
@@ -259,14 +263,90 @@ end
 # length, the seeds and the circular re-cut. Of `td`, the fields moms reads (it
 # ignores the birth strategies and their weights). Noise models enter by their
 # printed form, which a deserialized copy reproduces where `isequal` on the
-# structs need not. The GP-informed noise birth is a global switch.
-_moms_fingerprint(params::Params, data::Data, td::TransDimConfig; settings...) =
-    run_fingerprint(params, data; settings...,
+# structs need not.
+#
+# `run_fingerprint` covers the parameter names, the priors and the data, and
+# not all of those: the rest of the model (`stability`, `M_s`, `R_s`, the trend
+# orders, the noise models, the external priors, the sharing, the TTV settings)
+# is not in it, nor are `t_ref` and the astrometry and tomography data, which
+# are not arrays of numbers, and its data hash is Base's `hash`, which reads
+# only a few dozen elements of an array of 8192 or more: a light curve changed
+# in the middle passes it. So every `ParamsConfig` field but the priors enters
+# here as `config_<field>`, and the whole `Data` as `data_content`, each by
+# `_moms_content_hash`.
+#
+# The informed noise births are process-wide switches, `GP_INFORMED_BIRTH` and
+# `AD_INFORMED_BIRTH` (src/transdim/proposals/informed_gp.jl): the second
+# changes every ActivityDecorrelation birth and death (`propose_noise_birth`,
+# src/transdim/proposals/noise.jl), the OLS draw and its Hastings density.
+function _moms_fingerprint(params::Params, data::Data, td::TransDimConfig; settings...)
+    cfg = params.config
+    model = (; (Symbol(:config_, f) => _moms_content_hash(getfield(cfg, f))
+                for f in fieldnames(ParamsConfig) if f !== :priors)...)
+    return run_fingerprint(params, data; settings..., model...,
+        data_content = _moms_content_hash(data),
         planets = td.planets, max_kplanet = td.max_kplanet, noise = td.noise,
         toggleable = hash(repr.(td.toggleable)),
         transdim_fraction = td.transdim_fraction,
         noise_exclusion_groups = hash([repr.(g) for g in td.noise_exclusion_groups]),
-        gp_informed_birth = GP_INFORMED_BIRTH[])
+        gp_informed_birth = GP_INFORMED_BIRTH[],
+        ad_informed_birth = AD_INFORMED_BIRTH[])
+end
+
+# A hash of everything `x` holds, every element of every array included, that
+# comes out the same in another process and for a deserialized copy. Base's
+# `hash` is neither: on a struct without its own method it hashes the object's
+# identity, and on an array of 8192 or more elements it reads only a few dozen.
+# Dicts and sets go in by sorted keys, structs by type name and fields.
+_moms_content_hash(x) = _moms_content_hash(x, zero(UInt))
+function _moms_content_hash(x, h::UInt)
+    if x === nothing || x === missing
+        return hash(repr(x), h)
+    elseif x isa Union{Number, AbstractString, Char}
+        return hash(x, h)
+    elseif x isa Symbol
+        return hash(String(x), hash(":", h))
+    elseif x isa AbstractArray{<:Number}
+        h = hash(size(x), h)
+        for v in x
+            h = hash(v, h)
+        end
+        return h
+    elseif x isa AbstractArray || x isa Tuple
+        h = hash(x isa Tuple ? (length(x),) : size(x), h)
+        for v in x
+            h = _moms_content_hash(v, h)
+        end
+        return h
+    elseif x isa NamedTuple
+        for (k, v) in pairs(x)
+            h = _moms_content_hash(v, _moms_content_hash(k, h))
+        end
+        return h
+    elseif x isa AbstractDict
+        h = hash(length(x), hash("Dict", h))
+        for k in sort!(collect(keys(x)); by = repr)
+            h = _moms_content_hash(x[k], _moms_content_hash(k, h))
+        end
+        return h
+    elseif x isa AbstractSet
+        h = hash(length(x), hash("Set", h))
+        for v in sort!(collect(x); by = repr)
+            h = _moms_content_hash(v, h)
+        end
+        return h
+    elseif x isa Union{Type, Function, Module}
+        return hash(repr(x), h)
+    else
+        T = typeof(x)
+        h = hash(String(nameof(T)), h)
+        for f in fieldnames(T)
+            h = isdefined(x, f) ? _moms_content_hash(getfield(x, f), hash(String(f), h)) :
+                                  hash("#undef", h)
+        end
+        return h
+    end
+end
 
 # One MoMS chain. Split from `sample_moms` only so the multi-chain branch can
 # switch the circular re-cut off; the arguments are already normalised there,
