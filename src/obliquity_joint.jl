@@ -103,6 +103,11 @@ end
 #   then, if any RM nights are supplied, [K] and 5 per RM night:
 #       γ (m/s), log₁₀ S0, log₁₀ Q, log₁₀ ω0 (rad/day), log₁₀ jitter
 #
+# γ is uniform between the bounds `_rm_gamma_bounds` gives each night -- the
+# framework's rule for an RV zero point, so a night gets the same prior here as
+# `obliquity_params` gives it. It had none: the log-posterior was flat in γ to
+# any value, which the data hide in a chain and nothing hides in an evidence.
+#
 # The tomographic block is always present in the vector even when
 # `use_tomogram = false`, so that the three configurations a caller compares
 # share an identical parameter space and walker initialisation. With the
@@ -111,10 +116,30 @@ _joint_npar(n_tomo::Int, n_rm::Int) =
     4 + _TOMO_NPAR_NIGHT * n_tomo + (n_rm > 0 ? 1 + 5 * n_rm : 0)
 
 """
+    _rm_gamma_bounds(rm_nights) -> Vector{NTuple{2, Float64}}
+
+`(lo, hi)` of the uniform prior on each night's velocity zero point, from
+[`_gamma_default_bounds`](@ref) with the activity scatter taken across the
+nights -- what `default_priors` computes when each night is its own instrument.
+"""
+function _rm_gamma_bounds(rm_nights::Vector{RMNight})
+    isempty(rm_nights) && return NTuple{2, Float64}[]
+    multi = [_mad_scatter(n.rv) for n in rm_nights if length(n.rv) > 1]
+    scatter = isempty(multi) ?
+        max(_mad_scatter(reduce(vcat, (n.rv for n in rm_nights))), 10.0) :
+        max(maximum(multi), 10.0)
+    return [Float64.(_gamma_default_bounds(n.rv, scatter, 0.0)) for n in rm_nights]
+end
+
+"""
     joint_obliquity_logpost(θ, tomo_nights, hours, rm_nights, P; priors...)
 
 Log-posterior for the joint shadow-plus-velocity fit. See the file header for
 what is shared between the two terms and what is not.
+
+`gamma_bounds` holds one `(lo, hi)` per RM night for the uniform prior on its
+zero point. It defaults to the data-driven bounds of `_rm_gamma_bounds`; a
+caller evaluating this in a loop should compute them once and pass them in.
 """
 function joint_obliquity_logpost(θ::AbstractVector,
                                  tomo_nights::Vector{TomoNight},
@@ -128,7 +153,9 @@ function joint_obliquity_logpost(θ::AbstractVector,
                                  α_max::Real = 20.0,
                                  use_tomogram::Bool = true,
                                  use_tomo_gp::Bool = true,
-                                 use_rv_gp::Bool = true)
+                                 use_rv_gp::Bool = true,
+                                 gamma_bounds::Vector{NTuple{2, Float64}} =
+                                     _rm_gamma_bounds(rm_nights))
     λ = mod(θ[1] + π, 2π) - π
     vsini, b, a_Rs = θ[2], θ[3], θ[4]
     (vsini > 0 && a_Rs > 1 && 0 <= b < a_Rs) || return -Inf
@@ -154,6 +181,9 @@ function joint_obliquity_logpost(θ::AbstractVector,
     for (q, n) in enumerate(rm_nights)
         o = off + 1 + (q - 1) * 5
         γ, lS, lQ, lw, lj = θ[o+1], θ[o+2], θ[o+3], θ[o+4], θ[o+5]
+        γ_lo, γ_hi = gamma_bounds[q]
+        (γ_lo <= γ <= γ_hi) || return -Inf
+        lp -= log(γ_hi - γ_lo)
         (-2 <= lS <= 12) || return -Inf
         (log10(0.2) <= lQ <= 2.0) || return -Inf
         (log10(0.2) <= lw <= log10(60.0)) || return -Inf    # rad/day
@@ -208,6 +238,7 @@ function joint_obliquity_fit(tomo_nights::Vector{TomoNight},
         :joint_obliquity_fit)
     hours = [(nt.t .- nt.Tc) .* 24 for nt in tomo_nights]
     ndim  = _joint_npar(length(tomo_nights), length(rm_nights))
+    γ_bounds = _rm_gamma_bounds(rm_nights)
     lp(θ) = joint_obliquity_logpost(θ, tomo_nights, hours, rm_nights, P;
                                     vsini_mu = vsini[1], vsini_sd = vsini[2],
                                     b_mu = b[1], b_sd = b[2],
@@ -216,7 +247,8 @@ function joint_obliquity_fit(tomo_nights::Vector{TomoNight},
                                     rr = rr, u1 = u1, u2 = u2,
                                     α_max = α_max, use_tomogram = use_tomogram,
                                     use_tomo_gp = use_tomo_gp,
-                                    use_rv_gp = use_rv_gp)
+                                    use_rv_gp = use_rv_gp,
+                                    gamma_bounds = γ_bounds)
 
     rng = MersenneTwister(seed)
     x0  = Matrix{Float64}(undef, ndim, n_walkers)
