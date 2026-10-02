@@ -29,28 +29,32 @@ mutable struct ProgressBar
     use_tty::Bool
     finished::Bool
     enabled::Bool
+    n_start::Int               # iterations already done when the bar started
 end
 
 """
-    ProgressBar(label; total=0, print_every=0.5, width=24, enabled=true)
+    ProgressBar(label; total=0, print_every=0.5, width=24, enabled=true, start=0)
 
 Construct a single-line progress bar. `total=0` switches to an
 indeterminate format (just iter count + elapsed + extra fields). When
 stdout is not a TTY, output is throttled to once per `print_every`
 seconds and emitted as full lines instead of carriage-return refreshes,
 so it survives in log files. Pass `enabled=false` to make all
-`update!` / `finish!` calls no-ops.
+`update!` / `finish!` calls no-ops. `start` is the count already done before
+this bar, e.g. by the run a resumed sampler continues: the bar starts there and
+the ETA uses only the rate since.
 """
 function ProgressBar(label::AbstractString;
                        total::Integer = 0,
                        print_every::Real = 0.5,
                        width::Integer = 24,
-                       enabled::Bool = true)
+                       enabled::Bool = true,
+                       start::Integer = 0)
     use_tty = enabled && _stdout_is_tty()
     now = time()
-    return ProgressBar(String(label), Int(total), 0, now, 0.0,
+    return ProgressBar(String(label), Int(total), Int(start), now, 0.0,
                         Float64(print_every), Int(width), use_tty,
-                        false, enabled)
+                        false, enabled, Int(start))
 end
 
 # Stdout-is-TTY check that handles both terminal and pipe-to-file.
@@ -139,8 +143,8 @@ function _render(pb::ProgressBar, fields)
 
     push!(parts, @sprintf("elapsed %s", _time_fmt(elapsed)))
 
-    if pb.total > 0 && pb.n_done > 0 && pb.n_done < pb.total
-        rate = pb.n_done / max(elapsed, 1e-9)
+    if pb.total > 0 && pb.n_done > pb.n_start && pb.n_done < pb.total
+        rate = (pb.n_done - pb.n_start) / max(elapsed, 1e-9)
         eta = (pb.total - pb.n_done) / rate
         push!(parts, @sprintf("ETA %s", _time_fmt(eta)))
     end

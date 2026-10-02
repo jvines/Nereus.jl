@@ -1354,6 +1354,16 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
         _assert_supported_kwargs(_SAMPLER_FNS[name], kw; name = name)
     end
 
+    # A sampler that checkpoints (it declares `checkpoint`; src/checkpoint.jl)
+    # does so by default here, into the output directory, so every run_job run
+    # can be continued: the same job with `"resume": true` and a larger
+    # `n_steps`.
+    if haskey(_SAMPLER_FNS, name) && !haskey(kw, :checkpoint) &&
+       any(m -> :checkpoint in Base.kwarg_decl(m), methods(_SAMPLER_FNS[name]))
+        kw[:checkpoint] = joinpath(String(_get(cfg, :output_dir; required = true)),
+                                   "$(name)_state.jls")
+    end
+
     td_block = _get(cfg, :transdim; default = nothing)
     td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
 

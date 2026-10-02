@@ -67,6 +67,7 @@ const TEST_UNITS = [
     # shards. The trans-dim one is the single heaviest unit of the suite: LPT
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.
     (name = "test_pt_emcee_stranded.jl", seconds = 65, files = ["test_pt_emcee_stranded.jl"]),
+    (name = "test_pt_emcee_resume.jl", seconds = 60, files = ["test_pt_emcee_resume.jl"]),
     (name = "test_transdim_pt_emcee_defaults.jl", seconds = 375, files = ["test_transdim_pt_emcee_defaults.jl"]),
     (name = "test_circular.jl", seconds = 87, files = ["test_circular.jl"]),
     (name = "test_node_flip.jl", seconds = 86, files = ["test_node_flip.jl"]),

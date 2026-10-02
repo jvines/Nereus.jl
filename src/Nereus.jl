@@ -74,6 +74,7 @@ include("circular.jl")    # full-circle angles: the 0/2π seam is a chart, moved
 include("builder.jl")     # high-level build_target convenience over Params + Data + NereusTarget
 include("loaders_external.jl")   # TESS LC + Vizier RV CSV loaders (data prep happens in Python sidecar; Julia just ingests)
 include("progress.jl")          # ProgressBar utility used by every sampler
+include("checkpoint.jl")        # sampler checkpoints: write, read, resume (needs Params, Data, priors)
 include("juliacall_compat.jl") # _is_under_juliacall + @maybe_threaded — gate every Julia threading construct so production workers don't deadlock under the Python GIL
 include("samplers/nuts.jl")
 include("samplers/rjmcmc.jl")
