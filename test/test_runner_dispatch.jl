@@ -132,14 +132,19 @@ _dispatch_td(name, kwargs, target, data; output_dir = mktempdir()) =
     target, data = _disp_target_td()
 
     @testset "moms — String within_model + Int floats" begin
+        # moms checkpoints, and this cfg has no output_dir for run_job's
+        # default file, so it names one: a String, as JSON would send it.
+        ck = joinpath(mktempdir(), "moms_state.jls")
         res = _dispatch_td("moms",
                            Dict(:within_model => "slice", :init_scale => 1,
                                 :inclusion_prior => 0.5, :n_warmup => 150,
-                                :n_samples => 300, :show_progress => false),
+                                :n_samples => 300, :show_progress => false,
+                                :checkpoint => ck),
                            target, data)
         @test res.chains isa MCMCChains.Chains
         @test :n_planets in names(res.chains, :parameters)
         @test res.n_evals > 0
+        @test isfile(ck)
     end
 
     @testset "daedalus — Int dlogz/init_scale" begin

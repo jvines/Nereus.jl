@@ -74,6 +74,31 @@ warm-starting a follow-up run.
   used in the spike-and-slab log-prior (Bayes factors between N_p
   configurations are unbiased only when this is set deliberately by the
   user; default 0.5 corresponds to a uniform prior over models).
+- `checkpoint=nothing` — path of a state file. The sampler writes its whole
+  state there (the chain's position and model indicators, the RNG, the MoMS
+  proposal scales and off-values, the within-model RWM scales and likelihood
+  caches, the adaptation counters, the circular-angle warmup trace and windows,
+  and the kept draws) at the end of the run and every `checkpoint_interval`
+  seconds during it, replacing the file atomically. With `n_chains > 1` each
+  chain writes its own file, `<stem>_chain<c><ext>`. `run_job` sets it to
+  `moms_state.jls` in `output_dir` unless the job gives one. Nothing is written
+  when `informed_birth_fraction > 0` (see `resume`).
+- `checkpoint_interval::Real=900` — seconds between checkpoints during the run.
+- `resume::Bool=false` — continue from `checkpoint` instead of initialising:
+  a run that was killed, warmup included, or a finished one that needs more
+  draws. `n_samples` is the new TOTAL of kept draws, counted from the start of
+  the original run; the draws already kept stay, and the new ones are appended.
+  The continuation is bit-identical to an uninterrupted run with that
+  `n_samples`. Refused, with the differences listed, if the checkpoint came
+  from different data, priors, parameters or model settings (`stability`,
+  `M_s`, `R_s`, trend orders, noise models, ...: every field of
+  `params.config`), `td` settings, warmup, seed, chain count, proposal
+  settings, or another setting of the process-wide informed noise births
+  (`GP_INFORMED_BIRTH`, `AD_INFORMED_BIRTH`). Not available with
+  `informed_birth_fraction > 0`: informed births read a process-wide
+  periodogram cache keyed on the identity of the RNG object
+  (`src/transdim/birth_strategies.jl`), which no checkpoint can carry into
+  another process.
 
 Circular angles (`src/circular.jl`): with planet births on, same-mode planet
 slots share one window per angle, set before the first state is drawn. A single
@@ -98,12 +123,20 @@ function sample_moms(
     progress_every::Int = max(1000, n_samples ÷ 20),
     within_model::Symbol = :slice,
     informed_birth_fraction::Real = 0.0,
+    checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
+    checkpoint_interval::Real = 900.0,
+    resume::Bool = false,
+    # Testing hook, not an option: end the run after this iteration (warmup
+    # counted) with the checkpoint written there, as a kill right after that
+    # checkpoint would. 0 runs to the end.
+    _stop_after::Int = 0,
 )
     # JSON may deliver these floats as Int; normalize.
     init_scale              = Float64(init_scale)
     target_birth_accept     = Float64(target_birth_accept)
     inclusion_prior         = Float64(inclusion_prior)
     informed_birth_fraction = Float64(informed_birth_fraction)
+    checkpoint_interval     = Float64(checkpoint_interval)
     0.0 < inclusion_prior < 1.0 || throw(ArgumentError(
         "inclusion_prior must be in (0, 1)"))
     within_model in (:slice, :rwm) || throw(ArgumentError(
@@ -111,6 +144,23 @@ function sample_moms(
     0.0 <= informed_birth_fraction <= 1.0 || throw(ArgumentError(
         "informed_birth_fraction must be in [0, 1]"))
     n_chains >= 1 || throw(ArgumentError("n_chains must be ≥ 1"))
+    ck_path = checkpoint === nothing ? nothing : String(checkpoint)
+    resume && ck_path === nothing && throw(ArgumentError(
+        "resume = true needs `checkpoint`, the state file to continue from"))
+    # Informed births keep their periodogram peaks in a process-wide cache
+    # keyed on objectid(rng), refreshed every INFORMED_CACHE_INTERVAL births
+    # (src/transdim/birth_strategies.jl). A resumed run has a new RNG object,
+    # so it would start from an empty cache where the uninterrupted run reads
+    # stale peaks, and the two would part at the first informed birth.
+    if informed_birth_fraction > 0
+        resume && throw(ArgumentError(
+            "resume is not available with informed_birth_fraction > 0: informed " *
+            "births read a process-wide periodogram cache keyed on the RNG " *
+            "object, which a checkpoint cannot carry into another run"))
+        ck_path === nothing || @info "sample_moms: no checkpoint written, " *
+            "informed_birth_fraction > 0 cannot be resumed" checkpoint = ck_path
+    end
+    ck_file = informed_birth_fraction > 0 ? nothing : ck_path
 
     # Births re-sort planets between same-mode slots, so those slots must
     # share one window per circular angle before any chain draws its first
@@ -119,6 +169,29 @@ function sample_moms(
     unify_circular_groups!(target.params,
                            circular_groups(target.params; permutable = td.planets);
                            transforms = (target.transform,))
+
+    # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
+    # One state file per chain. Every checkpoint is read and checked here,
+    # before any chain starts, so a refusal is an ArgumentError rather than a
+    # failed task.
+    n_per_chain = n_chains > 1 ? max(1, cld(n_samples, n_chains)) : n_samples
+    cks = Vector{Any}(undef, n_chains)
+    for c in 1:n_chains
+        path = ck_file === nothing ? nothing : _moms_chain_path(ck_file, c, n_chains)
+        fp = path === nothing ? NamedTuple() :
+             _moms_fingerprint(target.params, data, td; n_warmup,
+                 seed = seed + 1000 * (c - 1), n_chains, chain = c, init_scale,
+                 target_birth_accept, inclusion_prior, within_model,
+                 informed_birth_fraction)
+        st = resume ? read_checkpoint(path, "moms", fp) : nothing
+        if st !== nothing
+            it = st.iter::Int
+            it <= n_warmup + n_per_chain || throw(ArgumentError(
+                "the checkpoint at $path is at iteration $it ($(st.sample_idx::Int) " *
+                "draws kept); n_samples = $n_samples would end before it"))
+        end
+        cks[c] = (path = path, fp = fp, state = st)
+    end
 
     if n_chains > 1
         # Multi-chain: spawn n_chains independent samplers. Each runs
@@ -134,11 +207,12 @@ function sample_moms(
         # would be outside the new support (-Inf) on the next evaluation.
         # run_job / fit_* re-cut the returned draws, which is what the
         # summaries read.
-        per_chain_samples = max(1, cld(n_samples, n_chains))
+        per_chain_samples = n_per_chain
         tasks = Vector{Task}(undef, n_chains)
         for c in 1:n_chains
             chain_seed = seed + 1000 * (c - 1)
             chain_show_progress = show_progress && (c == 1)
+            ck_c = cks[c]
             tasks[c] = Threads.@spawn _sample_moms_one(target, data;
                 td = td, n_samples = per_chain_samples,
                 n_warmup = n_warmup, seed = chain_seed,
@@ -149,6 +223,9 @@ function sample_moms(
                 within_model = within_model,
                 informed_birth_fraction = informed_birth_fraction,
                 recut_circular = false,
+                ck_path = ck_c.path, ck_fp = ck_c.fp, ck = ck_c.state,
+                checkpoint_interval = checkpoint_interval,
+                stop_after = _stop_after,
             )
         end
         results = [fetch(t) for t in tasks]
@@ -165,11 +242,115 @@ function sample_moms(
                             show_progress = show_progress,
                             within_model = within_model,
                             informed_birth_fraction = informed_birth_fraction,
-                            recut_circular = true)
+                            recut_circular = true,
+                            ck_path = cks[1].path, ck_fp = cks[1].fp,
+                            ck = cks[1].state,
+                            checkpoint_interval = checkpoint_interval,
+                            stop_after = _stop_after)
+end
+
+# Chain `c`'s state file: the path itself for one chain, `<stem>_chain<c><ext>`
+# for several.
+function _moms_chain_path(path::String, c::Int, n_chains::Int)
+    n_chains == 1 && return path
+    stem, ext = splitext(path)
+    return string(stem, "_chain", c, ext)
+end
+
+# What a moms checkpoint must match (src/checkpoint.jl): the target, and every
+# setting one chain's trajectory depends on. `n_samples` is left out, since
+# extending the run is the point; `n_chains` is in, as it sets the per-chain
+# length, the seeds and the circular re-cut. Of `td`, the fields moms reads (it
+# ignores the birth strategies and their weights). Noise models enter by their
+# printed form, which a deserialized copy reproduces where `isequal` on the
+# structs need not.
+#
+# `run_fingerprint` covers the parameter names, the priors and the data, and
+# not all of those: the rest of the model (`stability`, `M_s`, `R_s`, the trend
+# orders, the noise models, the external priors, the sharing, the TTV settings)
+# is not in it, nor are `t_ref` and the astrometry and tomography data, which
+# are not arrays of numbers, and its data hash is Base's `hash`, which reads
+# only a few dozen elements of an array of 8192 or more: a light curve changed
+# in the middle passes it. So every `ParamsConfig` field but the priors enters
+# here as `config_<field>`, and the whole `Data` as `data_content`, each by
+# `_moms_content_hash`.
+#
+# The informed noise births are process-wide switches, `GP_INFORMED_BIRTH` and
+# `AD_INFORMED_BIRTH` (src/transdim/proposals/informed_gp.jl): the second
+# changes every ActivityDecorrelation birth and death (`propose_noise_birth`,
+# src/transdim/proposals/noise.jl), the OLS draw and its Hastings density.
+function _moms_fingerprint(params::Params, data::Data, td::TransDimConfig; settings...)
+    cfg = params.config
+    model = (; (Symbol(:config_, f) => _moms_content_hash(getfield(cfg, f))
+                for f in fieldnames(ParamsConfig) if f !== :priors)...)
+    return run_fingerprint(params, data; settings..., model...,
+        data_content = _moms_content_hash(data),
+        planets = td.planets, max_kplanet = td.max_kplanet, noise = td.noise,
+        toggleable = hash(repr.(td.toggleable)),
+        transdim_fraction = td.transdim_fraction,
+        noise_exclusion_groups = hash([repr.(g) for g in td.noise_exclusion_groups]),
+        gp_informed_birth = GP_INFORMED_BIRTH[],
+        ad_informed_birth = AD_INFORMED_BIRTH[])
+end
+
+# A hash of everything `x` holds, every element of every array included, that
+# comes out the same in another process and for a deserialized copy. Base's
+# `hash` is neither: on a struct without its own method it hashes the object's
+# identity, and on an array of 8192 or more elements it reads only a few dozen.
+# Dicts and sets go in by sorted keys, structs by type name and fields.
+_moms_content_hash(x) = _moms_content_hash(x, zero(UInt))
+function _moms_content_hash(x, h::UInt)
+    if x === nothing || x === missing
+        return hash(repr(x), h)
+    elseif x isa Union{Number, AbstractString, Char}
+        return hash(x, h)
+    elseif x isa Symbol
+        return hash(String(x), hash(":", h))
+    elseif x isa AbstractArray{<:Number}
+        h = hash(size(x), h)
+        for v in x
+            h = hash(v, h)
+        end
+        return h
+    elseif x isa AbstractArray || x isa Tuple
+        h = hash(x isa Tuple ? (length(x),) : size(x), h)
+        for v in x
+            h = _moms_content_hash(v, h)
+        end
+        return h
+    elseif x isa NamedTuple
+        for (k, v) in pairs(x)
+            h = _moms_content_hash(v, _moms_content_hash(k, h))
+        end
+        return h
+    elseif x isa AbstractDict
+        h = hash(length(x), hash("Dict", h))
+        for k in sort!(collect(keys(x)); by = repr)
+            h = _moms_content_hash(x[k], _moms_content_hash(k, h))
+        end
+        return h
+    elseif x isa AbstractSet
+        h = hash(length(x), hash("Set", h))
+        for v in sort!(collect(x); by = repr)
+            h = _moms_content_hash(v, h)
+        end
+        return h
+    elseif x isa Union{Type, Function, Module}
+        return hash(repr(x), h)
+    else
+        T = typeof(x)
+        h = hash(String(nameof(T)), h)
+        for f in fieldnames(T)
+            h = isdefined(x, f) ? _moms_content_hash(getfield(x, f), hash(String(f), h)) :
+                                  hash("#undef", h)
+        end
+        return h
+    end
 end
 
 # One MoMS chain. Split from `sample_moms` only so the multi-chain branch can
-# switch the circular re-cut off; the arguments are already normalised there.
+# switch the circular re-cut off; the arguments are already normalised there,
+# and the checkpoint, if resuming, already read and checked (`ck`).
 function _sample_moms_one(
     target::NereusTarget,
     data::Data;
@@ -184,6 +365,11 @@ function _sample_moms_one(
     within_model::Symbol,
     informed_birth_fraction::Float64,
     recut_circular::Bool,
+    ck_path::Union{Nothing,String} = nothing,
+    ck_fp::NamedTuple = NamedTuple(),
+    ck::Union{Nothing,NamedTuple} = nothing,
+    checkpoint_interval::Float64 = 900.0,
+    stop_after::Int = 0,
 )
     rng    = MersenneTwister(seed)
     params = target.params
@@ -274,16 +460,73 @@ function _sample_moms_one(
 
     # Circular angles: record iterations circ_from+1 .. n_warmup, re-cut at
     # the last of them (helpers at the bottom of rjmcmc.jl). Groups as
-    # `sample_moms` unified them.
+    # `sample_moms` unified them. Done whatever `n_samples` is, so that a
+    # warmup-only run (`n_samples = 0`) is the start of a longer one.
     circ_from = n_warmup - n_warmup ÷ 2
     circ_groups = circular_groups(params; permutable = td.planets)
-    circ = recut_circular && n_samples > 0 && !isempty(circ_groups) ?
+    circ = recut_circular && !isempty(circ_groups) ?
            _CircularWarmupTrace(params, circ_groups, n_warmup ÷ 2) : nothing
 
-    pb = ProgressBar("MoMS";
-                       total = n_total_iter, enabled = show_progress)
+    # --- Resume: put the saved chain back exactly as it stopped ----------
+    # After every initialisation draw, which the restored RNG undoes. In place
+    # wherever the target, the strategy or the workspace hold the array.
+    iter0 = ck === nothing ? 0 : ck.iter::Int
+    if ck !== nothing
+        copy!(rng, ck.rng)
+        theta.values .= ck.values
+        theta.td.n_planets_active = ck.n_planets_active::Int
+        theta.td.planet_active .= ck.planet_active
+        theta.td.noise_active .= ck.noise_active
+        theta.td.as_active .= ck.as_active
+        log_pi = ck.log_pi::Float64
+        log_L  = ck.log_L::Float64
+        for k in eachindex(strategy.scales)
+            strategy.off_values[k] .= ck.off_values[k]
+            strategy.scales[k] .= ck.scales[k]
+        end
+        ctr.count = ck.n_evals::Int
+        widths .= ck.widths
+        w = ck.ws
+        rwm_ws.rwm_sigmas .= w.rwm_sigmas
+        rwm_ws.rwm_attempts .= w.rwm_attempts
+        rwm_ws.rwm_accepts .= w.rwm_accepts
+        rwm_ws.rv_vel_cache .= w.rv_vel_cache
+        rwm_ws.rv_vel_hash .= w.rv_vel_hash
+        rwm_ws.transit_flux_cache .= w.transit_flux_cache
+        rwm_ws.transit_flux_hash .= w.transit_flux_hash
+        foreach(copy!, rwm_ws.transit_in_idx, w.transit_in_idx)
+        rwm_ws.phot_ll_total_cache = w.phot_ll_total_cache::Float64
+        rwm_ws.phot_ll_total_hash = w.phot_ll_total_hash::UInt
+        n_attempts_planet .= ck.n_attempts_planet
+        n_accepts_planet .= ck.n_accepts_planet
+        adapt_iter_counter = ck.adapt_iter_counter::Int
+        sample_idx = ck.sample_idx::Int
+        samples[1:sample_idx, :] .= ck.samples
+        # The warmup trace of the circular angles, or `nothing` once re-cut.
+        if ck.circ === nothing
+            circ = nothing
+        else
+            for g in eachindex(circ.draws)
+                append!(empty!(circ.draws[g]), ck.circ.draws[g])
+            end
+            circ.tick = ck.circ.tick::Int
+        end
+        # Windows the saved state lives in (moved by the re-cut). Only a moved
+        # one is written: with several chains the layout is shared and never
+        # moves, so this writes nothing there.
+        for (nm, (lo, _)) in ck.windows
+            i = findfirst(==(nm), layout.unfrozen_names)
+            layout.unfrozen_priors[i].lo == lo ||
+                set_circular_window!(params, i, lo; transforms = (target.transform,))
+        end
+    end
+    last_ck = time()
 
-    for iter in 1:n_total_iter
+    pb = ProgressBar("MoMS";
+                       total = n_total_iter, enabled = show_progress,
+                       start = iter0)
+
+    for iter in (iter0 + 1):n_total_iter
         if rand(rng) < td.transdim_fraction
             # Between-model move: planets via MoMS proposals, noise via
             # the existing toggle infrastructure.
@@ -435,10 +678,42 @@ function _sample_moms_one(
                      fields = (:phase => "warmup",
                                :logL => log_L))
         end
+
+        # ---- Checkpoint: every `checkpoint_interval` s, on the last
+        # iteration, and where the testing hook stops (src/checkpoint.jl) ----
+        if ck_path !== nothing && (iter == n_total_iter || iter == stop_after ||
+                                   time() - last_ck >= checkpoint_interval)
+            write_checkpoint(ck_path, "moms", ck_fp, (; iter, rng,
+                values = theta.values,
+                n_planets_active = theta.td.n_planets_active,
+                planet_active = theta.td.planet_active,
+                noise_active = theta.td.noise_active,
+                as_active = theta.td.as_active,
+                log_pi, log_L,
+                off_values = strategy.off_values, scales = strategy.scales,
+                n_evals = ctr.count, widths,
+                ws = (rwm_sigmas = rwm_ws.rwm_sigmas,
+                      rwm_attempts = rwm_ws.rwm_attempts,
+                      rwm_accepts = rwm_ws.rwm_accepts,
+                      rv_vel_cache = rwm_ws.rv_vel_cache,
+                      rv_vel_hash = rwm_ws.rv_vel_hash,
+                      transit_flux_cache = rwm_ws.transit_flux_cache,
+                      transit_flux_hash = rwm_ws.transit_flux_hash,
+                      transit_in_idx = rwm_ws.transit_in_idx,
+                      phot_ll_total_cache = rwm_ws.phot_ll_total_cache,
+                      phot_ll_total_hash = rwm_ws.phot_ll_total_hash),
+                n_attempts_planet, n_accepts_planet, adapt_iter_counter,
+                circ = circ === nothing ? nothing : (draws = circ.draws, tick = circ.tick),
+                windows = circular_windows(params),
+                sample_idx, samples = samples[1:sample_idx, :]))
+            last_ck = time()
+        end
+        iter == stop_after && break
     end
     finish!(pb)
 
-    chains = MCMCChains.Chains(samples, param_names_out)
+    chains = MCMCChains.Chains(sample_idx == n_samples ? samples :
+                               samples[1:sample_idx, :], param_names_out)
     return chains, ctr.count, strategy
 end
 
