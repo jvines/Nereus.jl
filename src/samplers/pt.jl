@@ -96,6 +96,35 @@ estimate.
   initializes each replica with a fresh prior draw — fine for unimodal
   posteriors, but gets stuck in the nearest basin for multimodal
   problems (HD 159062-class). Multi-init via Pathfinder fixes this.
+- `n_warmup_rounds::Union{Nothing,Int}=nothing` : rounds of warmup. The RWM
+  step sizes adapt over them, the circular seams are re-cut at their end, and
+  the evidence accumulates only after them. `nothing` is `max(1, n_rounds ÷ 2)`,
+  or, with `resume = true`, the warmup of the run being continued, so extending
+  a run does not move its warmup.
+- `checkpoint=nothing` : path of a state file. The sampler writes its whole
+  state there (every replica's position, model state and cached log-densities,
+  every RNG stream, the RWM step sizes and their counters, the likelihood
+  counters, the cold-chain draws, the evidence accumulators, the circular
+  windows and warmup trace, and the early-stop history) at the end of the run,
+  before an early stop, and every `checkpoint_interval` seconds during it,
+  replacing the file atomically. `run_job` sets it to `pt_state.jls` in
+  `output_dir` unless the job gives one.
+- `checkpoint_interval::Real=900` : seconds between checkpoints during the run.
+- `resume::Bool=false` : continue from `checkpoint` instead of initialising (no
+  prior draws, no Pathfinder): a run that was killed, or a finished one that
+  needs more rounds. `n_rounds` is the new TOTAL, counted from the start of the
+  original run; the draws already kept stay, and the new ones are appended. The
+  continuation is bit-identical to an uninterrupted run of `n_rounds` with the
+  same warmup. A run that stopped early carries on, with
+  the early-stop check run again from the next round (`early_stop_thresh = 0`
+  turns it off). Refused, with the differences listed, if the checkpoint came
+  from different data, priors, parameters, chains, seed, warmup, within-model
+  kernel, trans-dim settings or initialisation, or if `n_rounds` would end
+  before it. Not available for a trans-dim run whose planet births use
+  `InformedBirth` or `JointInformedBirth` (the default `td` does): their
+  periodogram peaks live in process-global caches keyed on `objectid(rng)`,
+  which a checkpoint cannot hold, so such a run is not checkpointed (a warning
+  says so) and `resume` is refused.
 
 Circular angles (`src/circular.jl`): at the end of the warmup rounds each
 full-circle seam is moved to the emptiest arc of the cold replica's recent
@@ -119,6 +148,10 @@ function sample_pt(
     init_strategy::Symbol = :prior,
     n_pathfinder_runs::Int = 16,
     n_pathfinder_draws::Int = 0,
+    n_warmup_rounds::Union{Nothing,Int} = nothing,
+    checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
+    checkpoint_interval::Real = 900.0,
+    resume::Bool = false,
 )
     early_stop_thresh = Float64(early_stop_thresh)   # JSON may deliver an Int
     # PT parallelises chain updates via Threads.@threads. With nthreads()
@@ -142,21 +175,21 @@ function sample_pt(
     # MVN approximation is poor on sharp curved ridges (Pareto k >> 0.5) and
     # seeds every walker into one spurious basin, producing pristine R-hat/ESS
     # at a wrong orbit (HD 159062: a=34.5 vs true ~58).
-    if init_strategy === :pathfinder && init === nothing && n_pathfinder_runs > 0
-        init = _pathfinder_inits(target, n_chains;
-                                 n_runs  = n_pathfinder_runs,
-                                 n_draws = n_pathfinder_draws,
-                                 seed    = seed)
-    end
-
-    init_mat_for_transdim() = if init === nothing
-        nothing
-    elseif init isa NamedTuple
-        haskey(init, :draws) || throw(ArgumentError(
-            "init NamedTuple must have a :draws field (got keys $(keys(init)))"))
-        Matrix{Float64}(init.draws)
-    else
-        Matrix{Float64}(init)
+    #
+    # `init_key` is what the run started from, for the checkpoint fingerprint:
+    # the caller's matrix, the Pathfinder settings (its draws follow from them
+    # and `seed`), or prior draws. Taken before Pathfinder runs, which a resume
+    # skips: the saved replicas replace any starting point.
+    init_mat = _pt_init_matrix(init)
+    init_key = init_mat !== nothing ? hash(init_mat) :
+               init_strategy === :pathfinder && n_pathfinder_runs > 0 ?
+                   (:pathfinder, n_pathfinder_runs, n_pathfinder_draws) : :prior
+    if !resume && init_strategy === :pathfinder && init_mat === nothing &&
+       n_pathfinder_runs > 0
+        init_mat = _pathfinder_inits(target, n_chains;
+                                     n_runs  = n_pathfinder_runs,
+                                     n_draws = n_pathfinder_draws,
+                                     seed    = seed)
     end
 
     # In-house PT (default). Two cases:
@@ -181,8 +214,9 @@ function sample_pt(
         show_report=show_report,
         early_stop_thresh=early_stop_thresh,
         early_stop_min_rounds=early_stop_min_rounds,
-        init=init_mat_for_transdim(),
-        within_model=within_model)
+        init=init_mat,
+        within_model=within_model,
+        n_warmup_rounds, checkpoint, checkpoint_interval, resume, init_key)
     # Preserve historical return shapes: 2-tuple for fixed-dim
     # (matches the old Pigeons-backed path); 3-tuple for trans-dim
     # (matches the old in-house path). Test scripts depend on this.
@@ -221,6 +255,13 @@ end
 
 Trans-dimensional parallel tempering. Runs multiple RJMCMC chains
 at different temperatures with replica swaps.
+
+`n_warmup_rounds`, `checkpoint`, `checkpoint_interval` and `resume` are
+[`sample_pt`](@ref)'s. `init_key` stands for the starting point in the
+checkpoint fingerprint (`sample_pt` passes it; `nothing` derives it from
+`init`). `halt_after` is a test hook: with a `checkpoint`, the run writes it
+after iteration `halt_after` and throws `InterruptException`, as a killed run
+would.
 """
 function _sample_pt_transdim(
     target::NereusTarget,
@@ -233,9 +274,40 @@ function _sample_pt_transdim(
     early_stop_min_rounds::Int = 8,
     init::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
     within_model::Symbol = :slice,
+    n_warmup_rounds::Union{Nothing,Int} = nothing,
+    checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
+    checkpoint_interval::Real = 900.0,
+    resume::Bool = false,
+    init_key = nothing,
+    halt_after::Int = 0,
 )
     within_model in (:slice, :rwm) || throw(ArgumentError(
         "within_model must be :slice or :rwm; got :$within_model"))
+    n_warmup_rounds === nothing || n_warmup_rounds >= 1 || throw(ArgumentError(
+        "n_warmup_rounds must be ≥ 1; got $n_warmup_rounds"))
+    resume && checkpoint === nothing && throw(ArgumentError(
+        "resume = true needs `checkpoint`, the state file to continue from"))
+    # Planet births from the informed proposals (InformedBirth,
+    # JointInformedBirth) read periodogram / BLS peaks from process-global
+    # caches (src/transdim/birth_strategies.jl: _PEAK_CACHES, _BLS_CACHES),
+    # keyed on objectid(rng) and the active set and refreshed every
+    # INFORMED_CACHE_INTERVAL calls. Those peaks and counters are chain state,
+    # and the keys are address-derived hashes, so they cannot be saved and put
+    # back: such a run cannot be continued bit-identically, and is neither
+    # checkpointed nor resumed rather than continued approximately.
+    informed_births = td.planets && td.transdim_fraction > 0 &&
+        any(s -> s isa Union{InformedBirth, JointInformedBirth}, td.birth_strategies)
+    resume && informed_births && throw(ArgumentError(
+        "resume = true: this run proposes planet births with InformedBirth / " *
+        "JointInformedBirth, whose periodogram caches (process-global, keyed on " *
+        "objectid(rng)) cannot be saved, so it cannot be continued bit-identically"))
+    if informed_births && checkpoint !== nothing
+        @warn "sample_pt: not checkpointing $checkpoint: informed planet births " *
+              "(InformedBirth / JointInformedBirth) keep process-global periodogram " *
+              "caches that a checkpoint cannot hold, so this run cannot be resumed."
+    end
+    ck_path = checkpoint === nothing || informed_births ? nothing : String(checkpoint)
+    ck_every = Float64(checkpoint_interval)
     rng = MersenneTwister(seed)
     params = target.params
     data = target.data
@@ -245,6 +317,35 @@ function _sample_pt_transdim(
     # Temperature ladder (geometric spacing from 0 to 1)
     betas = [i == 1 ? 0.0 : ((i - 1) / (n_chains - 1))^2 for i in 1:n_chains]
     betas[end] = 1.0  # cold chain
+
+    # Total iterations: rounds double (like Pigeons). Round r ends at iteration
+    # n_samples_per_round * (2^r - 1).
+    n_samples_per_round = 2
+    total_samples = n_samples_per_round * (2^n_rounds - 1)
+
+    # Warmup rounds: RWM adaptation, the circular re-cut at their end, and the
+    # evidence only after them. A resume that does not name them keeps the
+    # saved run's (`max(1, n_rounds ÷ 2)` of its own n_rounds, typically), so
+    # extending a run does not move its warmup.
+    evidence_warmup_rounds = something(n_warmup_rounds,
+                                       resume ? _pt_saved_warmup(ck_path) : nothing,
+                                       max(1, n_rounds ÷ 2))
+
+    # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
+    # The fingerprint is the target plus every setting the chain depends on;
+    # n_rounds and the early-stop settings only decide how long it runs. On
+    # resume the replicas are not drawn: the saved state is put back just
+    # before the main loop, which carries on from iteration `iter0 + 1`.
+    ck_fp = run_fingerprint(params, data; n_chains, seed,
+        warmup_rounds = evidence_warmup_rounds, within_model,
+        td = _pt_td_key(td),
+        init = init_key !== nothing ? init_key :
+               init === nothing ? :prior : hash(Matrix{Float64}(init)))
+    ck = resume ? read_checkpoint(ck_path, "pt", ck_fp) : nothing
+    iter0 = ck === nothing ? 0 : ck.iter::Int
+    iter0 <= total_samples || throw(ArgumentError(
+        "the checkpoint is at iteration $iter0 (round $(_pt_round_of(iter0))); " *
+        "n_rounds = $n_rounds would end before it"))
 
     # Validate init if provided. Trans-dim chains operate in bounded
     # space (`unconstrained=false`), so init values are taken to be in
@@ -299,7 +400,12 @@ function _sample_pt_transdim(
             end
         end
         theta = Theta{Float64}(params; td=td_state)
-        if init !== nothing
+        if ck !== nothing
+            # Resume: nothing is drawn or evaluated; the saved replica is put
+            # back below, before the main loop.
+            replicas[c] = TransDimPTState(theta, NaN, NaN)
+            continue
+        elseif init !== nothing
             # Take column c of init (in bounded space) into theta.values,
             # relabelled into the current circular windows: the init is written
             # in the user's windows, or Pathfinder's, which the layout need not
@@ -328,10 +434,6 @@ function _sample_pt_transdim(
                               n_obs=n_obs_rv, n_phot=n_phot,
                               max_donors=max(1, n_chains - 1)) for _ in 1:n_chains]
     widths = _prior_widths(layout)
-
-    # Total iterations: rounds double (like Pigeons)
-    n_samples_per_round = 2
-    total_samples = n_samples_per_round * (2^n_rounds - 1)
 
     # Noise column metadata
     noise_nm_indices = Int[]  # indices into params.config.noise_models
@@ -369,13 +471,14 @@ function _sample_pt_transdim(
     # 2 + 4 + … + 2^n_rounds = 2(2^n_rounds − 1).
     pb = ProgressBar("PT trans-dim";
                        total = total_samples,
-                       enabled = show_report)
+                       enabled = show_report,
+                       start = iter0)
 
     # Reddemcee-style evidence accumulator (TI+/SS+/H+). Accumulation
     # starts after warmup_rounds — Pigeons-style, drop the early
     # doubling rounds where ⟨log L⟩_β is dominated by transient.
+    # `evidence_warmup_rounds` is set above, with the fingerprint.
     evidence_acc = EvidenceAccumulator(n_chains)
-    evidence_warmup_rounds = max(1, n_rounds ÷ 2)
     logL_buf = Vector{Float64}(undef, n_chains)
 
     # Circular angles (src/circular.jl): the cold replica's ACTIVE values over
@@ -384,17 +487,82 @@ function _sample_pt_transdim(
     # of the last warmup round, so the rounds that feed the evidence run in one
     # chart. Safe here, unlike multi-chain rjmcmc / moms: all replicas live in
     # this one loop and the re-cut runs between rounds, outside the threaded
-    # sweep.
+    # sweep. The trace is kept even when this run ends with its warmup (no
+    # re-cut then: nothing follows), so a resume that extends it re-cuts
+    # exactly where an uninterrupted run would have.
     warmup_iters = n_samples_per_round * (2^evidence_warmup_rounds - 1)
     circ_from = warmup_iters - warmup_iters ÷ 2
-    circ = evidence_warmup_rounds < n_rounds && !isempty(circ_groups) ?
-           _CircularWarmupTrace(params, circ_groups, warmup_iters ÷ 2) : nothing
+    circ = isempty(circ_groups) ? nothing :
+           _CircularWarmupTrace(params, circ_groups, warmup_iters ÷ 2)
 
-    for round in 1:n_rounds
+    # --- Resume: put the saved run back exactly as it stopped ----------
+    # In place: the threaded sweep's closure captures replicas, chain_rngs,
+    # chain_ctrs and chain_ws, and rebinding a captured variable would box it.
+    # Replicas get their saved positions, model states and cached densities
+    # (the Theta objects stay; swaps only ever permute them). The workspace
+    # likelihood caches are not saved: they are keyed on hashes of what they
+    # were computed from, so a cold cache recomputes the same values.
+    if ck !== nothing
+        for c in 1:n_chains
+            rep = replicas[c]
+            rep.theta.values .= ck.values[c]
+            _pt_copy_td_state!(rep.theta.td, ck.td_states[c])
+            rep.log_pi = ck.log_pi[c]::Float64
+            rep.log_L  = ck.log_L[c]::Float64
+            copy!(chain_rngs[c], ck.chain_rngs[c])
+            chain_ctrs[c].count = ck.n_evals[c]::Int
+            ws = chain_ws[c]
+            ws.rwm_sigmas .= ck.rwm_sigmas[c]
+            ws.rwm_attempts .= ck.rwm_attempts[c]
+            ws.rwm_accepts .= ck.rwm_accepts[c]
+        end
+        copy!(rng, ck.rng)
+        append!(cold_samples, ck.cold_samples)
+        append!(cold_n_planets, ck.cold_n_planets)
+        append!(cold_noise, ck.cold_noise)
+        append!(cold_planet_active, ck.cold_planet_active)
+        for f in fieldnames(EvidenceAccumulator)
+            setfield!(evidence_acc, f, getfield(ck.evidence, f))
+        end
+        prev_np_post = ck.prev_np_post::Vector{Float64}
+        # Windows the saved replicas live in (moved by the warmup re-cut).
+        for (nm, (lo, _)) in ck.windows
+            set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
+                                 lo; transforms = (target.transform,))
+        end
+        if circ !== nothing
+            if ck.circ_draws === nothing          # already re-cut
+                circ = nothing
+            else
+                foreach(append!, circ.draws, ck.circ_draws)
+                circ.tick = ck.circ_tick::Int
+            end
+        end
+        iter = iter0
+        # A run that ended with its warmup skipped the re-cut (nothing followed
+        # it). This one goes on, so it happens now, where it would have.
+        if circ !== nothing && iter0 == warmup_iters && evidence_warmup_rounds < n_rounds
+            _pt_recut_circular!(circ, params, replicas, cold_samples, data,
+                                chain_ctrs, chain_ws, target)
+            circ = nothing
+        end
+    end
+
+    # Where the main loop picks up: `r_done` whole rounds are behind, and `k0`
+    # iterations of the next one. A checkpoint on a round boundary is always
+    # written after that round's closing steps (early-stop check, re-cut).
+    r_done = 0
+    while n_samples_per_round * (2^(r_done + 1) - 1) <= iter0
+        r_done += 1
+    end
+    k0 = iter0 - n_samples_per_round * (2^r_done - 1)
+    last_ck = time()
+
+    for round in (r_done + 1):n_rounds
         n_iter_this_round = n_samples_per_round * 2^(round - 1)
         round_start = time()
 
-        for _ in 1:n_iter_this_round
+        for it in (round == r_done + 1 ? k0 + 1 : 1):n_iter_this_round
             iter += 1
 
             # --- Multiple MCMC steps per chain (parallel) ----------------
@@ -442,11 +610,11 @@ function _sample_pt_transdim(
                         end
                     else
                         if within_model === :rwm
-                            # Adapt only during the first half of warmup;
-                            # diminishing-adaptation theory requires the
-                            # adaptation to vanish in the limit. Round
-                            # midpoint is a reasonable cut.
-                            adapt = round <= max(1, n_rounds ÷ 2)
+                            # Adapt only during warmup (by default the first
+                            # half of the rounds); diminishing-adaptation
+                            # theory requires the adaptation to vanish in the
+                            # limit. Round midpoint is a reasonable cut.
+                            adapt = round <= evidence_warmup_rounds
                             _within_model_move_rwm!(rep.theta, data, crng,
                                                       ws, rep.log_pi,
                                                       rep.log_L;
@@ -510,6 +678,20 @@ function _sample_pt_transdim(
                      fields = (:round => @sprintf("%d/%d", round, n_rounds),
                                :Np => np_post * "%",
                                :logL => rep_cold.log_L))
+
+            # Checkpoint every `checkpoint_interval` s (src/checkpoint.jl). Not
+            # on a round's last iteration: that one is written after the
+            # round's closing steps below, so a boundary checkpoint never
+            # leaves them half done.
+            if ck_path !== nothing && it < n_iter_this_round &&
+               (time() - last_ck >= ck_every || iter == halt_after)
+                _pt_write_checkpoint(ck_path, ck_fp, iter, replicas, rng,
+                    chain_rngs, chain_ctrs, chain_ws, cold_samples,
+                    cold_n_planets, cold_noise, cold_planet_active,
+                    evidence_acc, prev_np_post, circ, params)
+                last_ck = time()
+                iter == halt_after && throw(InterruptException())
+            end
         end
 
         # Early-stop: terminate when the cold-chain N_p posterior has
@@ -524,6 +706,11 @@ function _sample_pt_transdim(
         # before any rounds with meaningful effective-sample-size have
         # run. Skip the check entirely in the fixed-dim case — fall
         # through to the normal n_rounds budget.
+        #
+        # On a stop the checkpoint is written first, with this round's N_p
+        # posterior as the one to compare against: a resume carries on and
+        # checks again from the next round.
+        stop_early = false
         if early_stop_thresh > 0 && round >= early_stop_min_rounds && td.planets
             curr_np_post = Float64[
                 count(==(Float64(k)), cold_n_planets) / max(1, length(cold_n_planets))
@@ -536,34 +723,33 @@ function _sample_pt_transdim(
                              final = @sprintf("PT early-stop at round %d/%d: N_p posterior Δmax = %.4f < %.4f",
                                               round, n_rounds, Δmax, early_stop_thresh))
                     rounds_actually_run = round
-                    break
+                    stop_early = true
                 end
             end
             prev_np_post = curr_np_post
         end
 
-        if circ !== nothing && round == evidence_warmup_rounds
-            moved = _recut_circular_warmup!(circ, params,
-                                            (r.theta for r in replicas);
-                                            transforms = (target.transform,))
-            # The warmup draws already stored go into the new chart too, so
-            # the returned chain is in one chart from its first row.
-            for m in moved, s in cold_samples
-                s[m.pos] = circular_relabel(s[m.pos], m.lo, m.hi)
-            end
-            # Same density in either chart; re-evaluated only so the cached
-            # values are those of the stored point, bit for bit. Slot c's
-            # workspace, as the sweep pairs them.
-            if !isempty(moved)
-                for c in 1:n_chains
-                    rep = replicas[c]
-                    rep.log_pi = log_prior(rep.theta)
-                    rep.log_L = _eval_ll(rep.theta, data, chain_ctrs[c],
-                                         chain_ws[c])
-                end
-            end
+        # The warmup re-cut, when rounds follow it in this run. A run that
+        # stops here early, or ends with its warmup, leaves it to a resume.
+        if !stop_early && circ !== nothing && round == evidence_warmup_rounds &&
+           evidence_warmup_rounds < n_rounds
+            _pt_recut_circular!(circ, params, replicas, cold_samples, data,
+                                chain_ctrs, chain_ws, target)
             circ = nothing
         end
+
+        # Checkpoint: every `checkpoint_interval` s, on the last round, and
+        # before an early stop (src/checkpoint.jl).
+        if ck_path !== nothing && (stop_early || round == n_rounds ||
+                                   time() - last_ck >= ck_every || iter == halt_after)
+            _pt_write_checkpoint(ck_path, ck_fp, iter, replicas, rng,
+                chain_rngs, chain_ctrs, chain_ws, cold_samples,
+                cold_n_planets, cold_noise, cold_planet_active,
+                evidence_acc, prev_np_post, circ, params)
+            last_ck = time()
+            iter == halt_after && throw(InterruptException())
+        end
+        stop_early && break
     end
     finish!(pb)
 
@@ -618,6 +804,113 @@ function _sample_pt_transdim(
 end
 
 # --- PT internal helpers -----------------------------------------------
+
+# `sample_pt`'s `init` as an n_dim × n_chains matrix, or `nothing`.
+_pt_init_matrix(::Nothing) = nothing
+_pt_init_matrix(init::AbstractMatrix{<:Real}) = Matrix{Float64}(init)
+function _pt_init_matrix(init::NamedTuple)
+    haskey(init, :draws) || throw(ArgumentError(
+        "init NamedTuple must have a :draws field (got keys $(keys(init)))"))
+    return Matrix{Float64}(init.draws)
+end
+
+# The round iteration `iter` falls in (rounds end at 2(2^r - 1)).
+function _pt_round_of(iter::Int)
+    r = 1
+    while 2 * (2^r - 1) < iter
+        r += 1
+    end
+    return r
+end
+
+# The trans-dim settings as plain values for the checkpoint fingerprint, which
+# compares with `isequal`: the config holds vectors of structs, which compare by
+# identity, so the noise models and birth strategies go in as their `repr`. With
+# noise births on, the module switches for their informed proposals go in too.
+_pt_td_key(td::TransDimConfig) = (
+    planets = td.planets, max_kplanet = td.max_kplanet, noise = td.noise,
+    toggleable = repr.(td.toggleable),
+    birth_strategies = repr.(td.birth_strategies),
+    birth_weights = td.birth_weights, transdim_fraction = td.transdim_fraction,
+    noise_exclusion_groups = [repr.(g) for g in td.noise_exclusion_groups],
+    alias_jump_fraction = td.alias_jump_fraction,
+    informed_noise = td.noise ? (GP_INFORMED_BIRTH[], AD_INFORMED_BIRTH[]) : nothing)
+
+# The warmup of the run the checkpoint at `path` holds, or `nothing` when there
+# is no pt checkpoint there (`read_checkpoint` then says what is wrong). Read
+# ahead of the fingerprint, so a resume that does not name `n_warmup_rounds`
+# keeps the saved run's.
+function _pt_saved_warmup(path::AbstractString)
+    isfile(path) || return nothing
+    ck = try
+        open(deserialize, path)
+    catch
+        return nothing
+    end
+    (ck isa NamedTuple && get(ck, :sampler, nothing) == "pt" &&
+     ck.fingerprint isa NamedTuple) || return nothing
+    w = get(ck.fingerprint, :warmup_rounds, nothing)
+    return w isa Int ? w : nothing
+end
+
+# Copy a replica's saved model state into its live one, in place (every field,
+# so a field added to TransDimState is not silently left behind).
+function _pt_copy_td_state!(dst::TransDimState, src::TransDimState)
+    for f in fieldnames(TransDimState)
+        v = getfield(src, f)
+        v isa AbstractArray ? copyto!(getfield(dst, f), v) : setfield!(dst, f, v)
+    end
+    return dst
+end
+
+# Everything `_sample_pt_transdim`'s main loop carries from one iteration to the
+# next, written atomically to `path` (src/checkpoint.jl). `circ_draws = nothing`
+# marks the warmup re-cut as done (or never needed).
+function _pt_write_checkpoint(path, fp, iter, replicas, rng, chain_rngs,
+                              chain_ctrs, chain_ws, cold_samples, cold_n_planets,
+                              cold_noise, cold_planet_active, evidence_acc,
+                              prev_np_post, circ, params)
+    write_checkpoint(path, "pt", fp, (; iter,
+        values = [r.theta.values for r in replicas],
+        td_states = [r.theta.td for r in replicas],
+        log_pi = Float64[r.log_pi for r in replicas],
+        log_L = Float64[r.log_L for r in replicas],
+        rng, chain_rngs, n_evals = Int[c.count for c in chain_ctrs],
+        rwm_sigmas = [ws.rwm_sigmas for ws in chain_ws],
+        rwm_attempts = [ws.rwm_attempts for ws in chain_ws],
+        rwm_accepts = [ws.rwm_accepts for ws in chain_ws],
+        cold_samples, cold_n_planets, cold_noise, cold_planet_active,
+        evidence = evidence_acc, prev_np_post,
+        circ_draws = circ === nothing ? nothing : circ.draws,
+        circ_tick = circ === nothing ? 0 : circ.tick,
+        windows = circular_windows(params)))
+end
+
+# The end-of-warmup circular re-cut: move the seams, relabel every replica and
+# every stored draw into the new windows, and refresh the replicas' cached
+# densities.
+function _pt_recut_circular!(circ, params, replicas, cold_samples, data,
+                             chain_ctrs, chain_ws, target)
+    moved = _recut_circular_warmup!(circ, params,
+                                    (r.theta for r in replicas);
+                                    transforms = (target.transform,))
+    # The warmup draws already stored go into the new chart too, so
+    # the returned chain is in one chart from its first row.
+    for m in moved, s in cold_samples
+        s[m.pos] = circular_relabel(s[m.pos], m.lo, m.hi)
+    end
+    # Same density in either chart; re-evaluated only so the cached
+    # values are those of the stored point, bit for bit. Slot c's
+    # workspace, as the sweep pairs them.
+    if !isempty(moved)
+        for c in eachindex(replicas)
+            rep = replicas[c]
+            rep.log_pi = log_prior(rep.theta)
+            rep.log_L = _eval_ll(rep.theta, data, chain_ctrs[c], chain_ws[c])
+        end
+    end
+    return nothing
+end
 
 function _pt_transdim_move!(rep::TransDimPTState, data::Data,
                              td::TransDimConfig, beta::Float64,
