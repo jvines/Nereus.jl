@@ -214,7 +214,12 @@ function sample_pt_hmc(
     dim = LogDensityProblems.dimension(target)
     rng = MersenneTwister(seed)
     W = max(1, n_walkers_per_temp)
-    parts = y -> _logdensity_parts(target, y)
+    # `target` is rebound above, so every closure capturing it holds a Box and
+    # reads it untyped. This one is the likelihood every NUTS step calls: give
+    # it a binding of its own.
+    parts = let target = target
+        y -> _logdensity_parts(target, y)
+    end
 
     βs = betas === nothing ?
          Float64[((i - 1) / (n_temps - 1))^2 for i in 1:n_temps] :
