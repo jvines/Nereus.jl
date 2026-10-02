@@ -115,14 +115,17 @@ function _disp_target_td(seed::Int = 2027; n_obs::Int = 40)
     return target, data
 end
 
-_dispatch_td(name, kwargs, target, data) =
+_dispatch_td(name, kwargs, target, data; output_dir = mktempdir()) =
     Nereus._dispatch_sampler(
         Dict(:sampler   => Dict(:name => name, :kwargs => kwargs),
              # Explicit empty arrays mirror what a JSON config sends
              # (`toggleable: []`) — empty JSON3.Array, not the typed
              # default. Must coerce to Vector{NoiseModel}.
              :transdim  => Dict(:max_kplanet => 2, :transdim_fraction => 0.4,
-                                :toggleable => [], :noise_exclusion_groups => [])),
+                                :toggleable => [], :noise_exclusion_groups => []),
+             # Every run_job config has one; a sampler that checkpoints writes
+             # its state there by default.
+             :output_dir => output_dir),
         target, data, 1)
 
 @testset "runner dispatch — trans-dim samplers (td block + JSON kwargs)" begin
@@ -164,13 +167,16 @@ _dispatch_td(name, kwargs, target, data) =
     end
 
     @testset "transdim_pt_emcee — Int stretch_a/inclusion_prior" begin
+        out = mktempdir()
         res = _dispatch_td("transdim_pt_emcee",
                            Dict(:stretch_a => 2, :inclusion_prior => 0.5,
                                 :n_temps => 4, :n_walkers => 20,
                                 :n_steps => 200, :n_burnin => 100,
                                 :show_progress => false),
-                           target, data)
+                           target, data; output_dir = out)
         @test res.chains isa MCMCChains.Chains
+        # run_job's default checkpoint reaches the sampler.
+        @test isfile(joinpath(out, "transdim_pt_emcee_state.jls"))
     end
 
     @testset "unsupported kwarg on a trans-dim sampler → ArgumentError" begin

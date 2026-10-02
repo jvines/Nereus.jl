@@ -784,17 +784,81 @@ end
 # walkers sharing the locked state share one entry, so cold-chain reuse
 # stays high. Rounded to 2 log-P decimals so basin-level param scatter
 # across walkers doesn't fragment the key.
-function _active_set_signature(theta::Theta, rng_id::UInt64)
+#
+# The signature is built in two parts, the walker's (`_active_set_key`) and the
+# RNG's, so a checkpoint can carry a walker's entries over to a new RNG object
+# (`_informed_cache_snapshot` below).
+_active_set_signature(theta::Theta, rng_id::UInt64) =
+    _active_set_signature(_active_set_key(theta), rng_id)
+
+function _active_set_signature(key::AbstractVector, rng_id::UInt64)
     h = rng_id
-    for k in planet_indices(theta)
-        # 1 decimal in log-P (~10% bins): coarse enough that junk-planet
-        # churn collapses onto few signatures (each new signature pays a
-        # ~0.5 s BLS rebuild — at 6 slots fine 2-decimal rounding made
-        # burn-in rebuild-bound, ~2.4 s/step), while distinct real planets
-        # (even 3:2 chain neighbours, Δlog P ≈ 0.4) still separate.
-        h = hash(round(log(planet_P(theta, k)), digits = 1), h)
+    for r in key
+        h = hash(r, h)
     end
     return h
+end
+
+# 1 decimal in log-P (~10% bins): coarse enough that junk-planet churn
+# collapses onto few signatures (each new signature pays a ~0.5 s BLS
+# rebuild — at 6 slots fine 2-decimal rounding made burn-in rebuild-bound,
+# ~2.4 s/step), while distinct real planets (even 3:2 chain neighbours,
+# Δlog P ≈ 0.4) still separate.
+_active_set_key(theta::Theta) =
+    [round(log(planet_P(theta, k)), digits = 1) for k in planet_indices(theta)]
+
+# --- Checkpoints (src/checkpoint.jl) ---------------------------------------
+# A sampler whose walkers make informed births carries their entries of
+# _PEAK_CACHES and _BLS_CACHES in its checkpoint: an entry holds the peaks found
+# at an earlier walker state and the count towards its next refresh, so a
+# continuation that started from cold caches would propose different births.
+# Entries are keyed by `objectid` of the walker's RNG, which a restored RNG does
+# not keep, so the sampler records each walker's `_active_set_key`s as it births
+# and the entries are re-keyed onto the new RNG objects on restore.
+
+"""
+    _informed_cache_snapshot(rngs, keys) -> Vector
+
+The cache entries of walker `i` (RNG `rngs[i]`) under each active-set key in
+`keys[i]`, as `(i, key, peak cache, BLS cache)`. Keys whose entries are gone (the
+oversize reset wiped them, or the birth never reached the cache) are dropped from
+`keys[i]`; a later birth there records them again.
+"""
+function _informed_cache_snapshot(rngs::AbstractVector,
+                                  keys::AbstractVector{<:AbstractSet})
+    snap = Tuple{Int, Vector, Union{Nothing, PeakCache},
+                 Union{Nothing, BLSCache}}[]
+    for (i, ks) in enumerate(keys)
+        id = objectid(rngs[i])
+        for key in collect(ks)
+            sig = _active_set_signature(key, id)
+            pc = lock(() -> get(_PEAK_CACHES, sig, nothing), _PEAK_CACHE_LOCK)
+            bc = lock(() -> get(_BLS_CACHES, sig, nothing), _BLS_CACHE_LOCK)
+            if pc === nothing && bc === nothing
+                delete!(ks, key)
+            else
+                push!(snap, (i, key, pc, bc))
+            end
+        end
+    end
+    return snap
+end
+
+"""
+    _informed_cache_restore!(snap, rngs, keys)
+
+Put the entries of a `_informed_cache_snapshot` back, keyed by the RNG objects
+`rngs` now in use, and record their keys in `keys`.
+"""
+function _informed_cache_restore!(snap, rngs::AbstractVector,
+                                  keys::AbstractVector{<:AbstractSet})
+    for (i, key, pc, bc) in snap
+        sig = _active_set_signature(key, objectid(rngs[i]))
+        pc === nothing || lock(() -> (_PEAK_CACHES[sig] = pc), _PEAK_CACHE_LOCK)
+        bc === nothing || lock(() -> (_BLS_CACHES[sig] = bc), _BLS_CACHE_LOCK)
+        push!(keys[i], key)
+    end
+    return nothing
 end
 
 """
