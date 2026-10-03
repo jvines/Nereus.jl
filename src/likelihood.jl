@@ -675,8 +675,8 @@ function rv_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
 
     # Indicator floor: zero unless an IndicatorFloor noise model is active.
     # It is active in every fixed-dim HD 18599 config, not only in trans-dim
-    # selections, so this path uses the workspace method (same bits, no
-    # allocation).
+    # selections, so this path uses the workspace method (no allocation;
+    # agrees with the generic method to ≲ 1e-12 in the kernel, see there).
     ll_ifloor = indicator_floor_log_likelihood(theta, data, ws)
     isfinite(ll_ifloor) || return convert(T, -Inf)
 
@@ -942,7 +942,8 @@ end
 # no IndicatorFloor is active. Every fixed-dim HD 18599 config carries an
 # active :qp floor, where it is a large share of each RV evaluation; the
 # PTWorkspace path uses `indicator_floor_log_likelihood(theta, data, ws)`
-# below, which returns the same bits without allocating.
+# below, which does not allocate and agrees with this one to ≲ 1e-12 in
+# the kernel.
 #
 # Quasi-periodic GP log-likelihood for ONE indicator channel (dense Cholesky,
 # mirrors ActivityGP's k_GG block — VALUE term only, no derivative coupling).
@@ -1074,6 +1075,8 @@ mutable struct RVNoiseScratch
     floor_K0::Matrix{Float64}       # kernel shape shared by every channel (upper)
     floor_Σ::Matrix{Float64}        # one channel's covariance, factored in place
     floor_α::Vector{Float64}        # Σ⁻¹ y
+    floor_s::Vector{Float64}        # sin(π(t_i − t_mid)/P), n_rv
+    floor_c::Vector{Float64}        # cos(π(t_i − t_mid)/P), n_rv
     # ActivityDecorrelation / ActivityJitter / ErrorScale slots (noise/activity.jl)
     mods::RVModifierSlots
     # CeleriteRotation coefficients, solver arrays and slots (noise/gp.jl)
@@ -1083,6 +1086,7 @@ end
 RVNoiseScratch() = RVNoiseScratch(nothing, nothing, String[], Int[], Int[], 0, 0, 0,
                                   Matrix{Float64}(undef, 0, 0),
                                   Matrix{Float64}(undef, 0, 0), Float64[],
+                                  Float64[], Float64[],
                                   RVModifierSlots(), CeleriteWork())
 
 # Resolve the floor's layout slots once; later calls only compare two keys.
@@ -1113,15 +1117,21 @@ end
     indicator_floor_log_likelihood(theta, data, ws) -> T
 
 `indicator_floor_log_likelihood(theta, data)` for the PTWorkspace path.
-For a `Float64` theta and the `:qp` kernel it returns the same bits without
-allocating: the kernel shape exp(−τ²/2λe² − sin²(πτ/P)/2λp²) depends only on
-the shared (P, λe, λp) and the RV epochs, so it is built once per call
-rather than once per channel, and each channel's Σ = amp²·K0 + diag(err² +
-jit²) is factored in place (`potrf!('U')`, then `potrs!`) in buffers held by
-`ws.rv_noise`. Every Σ entry is still `amp2 * exp(arg)` and the LAPACK calls
-are the ones `cholesky(Symmetric(Σ)) \\ y` makes, so nothing changes in the
-result. Any other case (ForwardDiff duals, the `:white` kernel) goes to the
-generic method.
+For a `Float64` theta and the `:qp` kernel it does not allocate: the
+kernel shape exp(−τ²/2λe² − sin²(πτ/P)/2λp²) depends only on the shared
+(P, λe, λp) and the RV epochs, so it is built once per call rather than
+once per channel, and each channel's Σ = amp²·K0 + diag(err² + jit²) is
+factored in place (`potrf!('U')`, then `potrs!`, the calls
+`cholesky(Symmetric(Σ)) \\ y` makes) in buffers held by `ws.rv_noise`.
+
+The kernel's sin(π(tᵢ − tⱼ)/P) come from the angle-difference identity
+(n `sincos` calls instead of n(n+1)/2 `sin` calls), so the result is not
+bit-identical to the generic method: ≲ 1e-12 in the kernel entries
+(1e-13 at P ~ 10 d), which log L inherits times the conditioning of Σ:
+≲ 1e-10 nats near the HD 18599 posterior, up to ~1e-10 relative over its
+prior, more where Σ is near singular. Everything else in Σ and the solve
+is computed as in the generic method. Any other case (ForwardDiff duals,
+the `:white` kernel) goes to the generic method.
 """
 function indicator_floor_log_likelihood(theta::Theta{Float64}, data::Data, ws)
     nm_list = theta.params.config.noise_models
@@ -1170,6 +1180,8 @@ function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloo
         sc.floor_K0 = Matrix{Float64}(undef, n, n)
         sc.floor_Σ  = Matrix{Float64}(undef, n, n)
         sc.floor_α  = Vector{Float64}(undef, n)
+        sc.floor_s  = Vector{Float64}(undef, n)
+        sc.floor_c  = Vector{Float64}(undef, n)
     end
     K0 = sc.floor_K0
     Σ  = sc.floor_Σ
@@ -1194,11 +1206,24 @@ function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloo
             inv_2λe2 = 1 / (2 * λ_e * λ_e)
             inv_2λp2 = 1 / (2 * λ_p * λ_p)
             π_P      = T(π) / P
+            # sin(π(tᵢ − tⱼ)/P) by the angle-difference identity from n
+            # sincos calls instead of n(n+1)/2 sin calls, angles measured from
+            # the middle of the RV baseline to keep them small. Not
+            # bit-identical to the generic method: ≲ 1e-12 in the kernel; in
+            # log L that is ≲ 1e-10 nats near the HD 18599 posterior and up to
+            # ~1e-10 relative over its prior, more where Σ is near singular.
+            sa = sc.floor_s
+            ca = sc.floor_c
+            tlo, thi = extrema(t)
+            t_mid = (tlo + thi) / 2
+            @inbounds for i in 1:n
+                sa[i], ca[i] = sincos(π_P * (t[i] - t_mid))
+            end
             @inbounds for j in 1:n
-                tj = t[j]
+                tj = t[j]; sj = sa[j]; cj = ca[j]
                 for i in 1:j
                     τ = t[i] - tj
-                    s = sin(π_P * τ)
+                    s = sa[i] * cj - ca[i] * sj
                     K0[i, j] = exp(-τ * τ * inv_2λe2 - s * s * inv_2λp2)
                 end
             end

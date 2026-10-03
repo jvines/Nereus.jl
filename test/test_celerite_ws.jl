@@ -98,9 +98,14 @@ _alloc_floor(th, d, ws) = @allocated indicator_floor_log_likelihood(th, d, ws)
             a = gp_log_likelihood(r, v, d.t_rv, th, nm)
             @test a === gp_log_likelihood(r, v, d.t_rv, th, nm, ws)
             isfinite(a) && (nfin += 1)
-            @test rv_log_likelihood(th, d) === rv_log_likelihood(th, d, ws)
-            @test indicator_floor_log_likelihood(th, d) ===
-                  indicator_floor_log_likelihood(th, d, ws)
+            # Everything but the floor is bit-identical; the floor's workspace
+            # kernel uses the angle-difference sine (tolerance: see
+            # test_indicator_floor_ws.jl).
+            @test Nereus._rv_log_likelihood_core(th, d) ===
+                  Nereus._rv_log_likelihood_core(th, d, ws)
+            fa = indicator_floor_log_likelihood(th, d)
+            fb = indicator_floor_log_likelihood(th, d, ws)
+            @test fa === fb || abs(fa - fb) <= 1e-6 * max(1.0, abs(fa))
         end
         @test nfin > 50
         @test _alloc_gp(r, v, d.t_rv, th, nm, ws) == 0

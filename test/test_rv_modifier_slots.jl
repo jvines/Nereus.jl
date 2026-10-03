@@ -88,9 +88,14 @@ end
                 end
             end
             @test ok
+            # The core (everything but the IndicatorFloor) is bit-identical;
+            # the floor's workspace kernel uses the angle-difference sine
+            # (tolerance: see test_indicator_floor_ws.jl).
+            @test Nereus._rv_log_likelihood_core(th, d, ws) ===
+                  Nereus._rv_log_likelihood_core(th, d)
             a = rv_log_likelihood(th, d, ws)
             b = rv_log_likelihood(th, d)
-            @test a === b
+            @test a === b || abs(a - b) <= 1e-6 * max(1.0, abs(a))
             isfinite(a) && (nfin += 1)
         end
         @test nfin > 10
