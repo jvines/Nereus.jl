@@ -107,9 +107,17 @@ Convert `(√e sin ω, √e cos ω)` → `(e, ω)`. The inverse map is
 """
 function sesinw_to_ew(sesinw::Real, secosw::Real)
     e = sesinw^2 + secosw^2
-    ω = atan(sesinw, secosw)
-    return e, ω
+    return e, _omega_of(sesinw, secosw)
 end
+
+# ω = atan(y, x), except at the origin, where ω is undefined and returned as 0.
+# Under ForwardDiff, atan(0, 0) has derivative x/(x²+y²) = 0/0 = NaN, and that
+# NaN multiplies even the ZERO partials of a FIXED circular orbit
+# (sesinw = secosw = 0, FixedPrior): the gradient of every parameter came back
+# NaN, so NUTS and pt_hmc failed on any circular fit. `==` compares values, so
+# this branch is taken exactly when the orbit is circular.
+@inline _omega_of(y::Real, x::Real) =
+    (y == 0 && x == 0) ? zero(float(y) * float(x)) : atan(y, x)
 
 """
     esinw_to_ew(esinw, ecosw) -> (e, ω)
@@ -118,9 +126,11 @@ Convert `(e sin ω, e cos ω)` → `(e, ω)`. The inverse map is
 `ew_to_esinw`. `ω` is returned in `(-π, π]`.
 """
 function esinw_to_ew(esinw::Real, ecosw::Real)
-    e = sqrt(esinw^2 + ecosw^2)
-    ω = atan(esinw, ecosw)
-    return e, ω
+    # sqrt'(0) is Inf: a fixed circular orbit would turn every partial into
+    # NaN (0 × Inf). e = 0 there, and its derivative is taken as 0.
+    s2 = esinw^2 + ecosw^2
+    e = s2 == 0 ? zero(s2) : sqrt(s2)
+    return e, _omega_of(esinw, ecosw)
 end
 
 """
