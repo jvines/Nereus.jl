@@ -142,9 +142,18 @@ function _harmonic_factor(m::HarmonicBlock, theta::Theta{T},
     ω = external ? T(0) : T(2π) / theta.values[layout.name_to_idx["harm_period$s"]]
     cov = _covered_inst_idx(m.instruments, inst_names)
     F = zeros(T, N, 2K)
+    # Amplitude slot per instrument, looked up on the instrument's first point
+    # (a name string per point cost more than the factor on a long light curve).
+    amp_idx = zeros(Int, length(inst_names))
     @inbounds for i in 1:N
-        _is_covered(cov, inst[i]) || continue
-        A = theta.values[layout.name_to_idx["harm_amp_$(inst_names[inst[i]])$s"]]
+        ci = inst[i]
+        _is_covered(cov, ci) || continue
+        j = amp_idx[ci]
+        if j == 0
+            j = layout.name_to_idx["harm_amp_$(inst_names[ci])$s"]
+            amp_idx[ci] = j
+        end
+        A = theta.values[j]
         for k in 1:K
             arg = external ? T(2π) * T(m.freqs[k]) * T(times[i]) : ω * k * T(times[i])
             F[i, 2k - 1] = A * cos(arg)
