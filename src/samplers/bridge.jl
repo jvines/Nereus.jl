@@ -107,7 +107,9 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
                               iters = 0, converged = false, overlap = NaN,
                               proposal = proposal)
 
-    logp(y) = (a = _logdensity_parts(target, y); Float64(a[1]) + Float64(a[2]))
+    # The posterior through the workspace likelihoods, one evaluator (Theta +
+    # PTWorkspace) per evaluation task. See `_bridge_logdensity!`.
+    evs = [_BridgeEvaluator(target) for _ in 1:_bridge_ntasks(max(N1, n_proposal))]
 
     μ = vec(mean(Y; dims = 2))
     Σ = cov(Y; dims = 2) + 1e-10 * I(d)
@@ -135,7 +137,7 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
              μ .+ Lc * (randn(rng, d) / sqrt(sum(abs2, randn(rng, nu_i)) / ν))
 
     # --- log ratios l = log p* - log q on both sample sets --------------------
-    # `logp` is the full posterior, so this costs N1 + `n_proposal` LIKELIHOOD
+    # Each term is the full posterior, so this costs N1 + `n_proposal` LIKELIHOOD
     # EVALUATIONS -- not `n_proposal`, which is what this function's docstring
     # and pt_emcee's call site both used to claim. N1 is the ENTIRE kept chain:
     # 150_000 draws for a 100-walker × 1500-post-burnin-step run, 525_000 for a
@@ -144,18 +146,19 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     # against 89 s for the whole 3.3M-evaluation MCMC that produced it, because
     # the MCMC has 12 threads and this loop had one.
     #
-    # `_logdensity_parts` builds its own Theta and touches no shared state, so
-    # the evaluations thread. The PROPOSAL DRAWS do not: they come off a single
-    # MersenneTwister, and drawing them out of order would change the numbers.
+    # Each task evaluates with its own Theta and workspace and touches no shared
+    # state, so the evaluations thread. The PROPOSAL DRAWS do not: they come off
+    # a single MersenneTwister, and drawing them out of order would change the
+    # numbers.
     # So they are drawn serially up front and only the evaluations are spread
     # out, each writing its own slot, and both arrays are filtered in index
     # order afterwards -- so what reaches `_bridge_iterate` is bit-identical to
     # the serial version's, at any thread count. See `_bridge_eval!` for how
     # the threads are used.
     v1 = Vector{Float64}(undef, N1)
-    _bridge_eval!(v1) do _, i
+    _bridge_eval!(v1) do c, i
         y = @view Y[:, i]
-        logp(y) - logq(y)
+        _bridge_logdensity!(evs[c], y) - logq(y)
     end
     l1 = Float64[v for v in v1 if isfinite(v)]
 
@@ -164,8 +167,8 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         Yp[:, i] = draw()
     end
     v2 = Vector{Float64}(undef, n_proposal)
-    _bridge_eval!(v2) do _, i
-        logp(@view Yp[:, i])
+    _bridge_eval!(v2) do c, i
+        _bridge_logdensity!(evs[c], @view Yp[:, i])
     end
     l2 = Float64[]
     n_finite = 0
@@ -265,6 +268,75 @@ function _bridge_eval!(f::F, out::AbstractVector{Float64}) where {F}
         end
     end
     return out
+end
+
+"""
+    _BridgeEvaluator(target)
+
+One evaluation task's scratch for `_bridge_logdensity!`: a `Theta` and a
+`PTWorkspace`, as each slot of `pt_emcee` has.
+"""
+struct _BridgeEvaluator{TT<:NereusTarget}
+    target::TT
+    theta::Theta{Float64}
+    ws::PTWorkspace
+end
+
+function _BridgeEvaluator(target::NereusTarget)
+    params, data = target.params, target.data
+    ws = PTWorkspace(params, params.config.max_kplanet, length(params.config.noise_models);
+                     n_obs = length(data.t_rv), n_phot = length(data.t_phot))
+    return _BridgeEvaluator(target, Theta{Float64}(params), ws)
+end
+
+"""
+    _bridge_logdensity!(ev, y) -> Float64
+
+The log-posterior at `y` in the target's own space, `sum(_logdensity_parts(target,
+y))` with the same guards, but through the workspace likelihoods the samplers
+draw with (`rv_log_likelihood(theta, data, ws)`, `transit_log_likelihood(theta,
+data, ws)`) and the evaluator's own `Theta`, so that a call does not allocate
+the likelihood's buffers afresh.
+
+The RV part is bit-identical to the other method's. The photometry differs by
+rounding: the workspace path computes each cadence's sky separation by an
+equivalent route (sin(ω+f) by the angle-sum identity) and sums every cadence
+in one pass, where the other sums fixed chunks and then the chunk totals.
+Measured on the HD 18599 joint fit with a 20k-point light curve: up to 5e-9
+in log L near the posterior (1e-14 relative), and at most 5e-13 relative on
+prior draws.
+"""
+function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
+    target = ev.target
+    data = target.data
+    theta = ev.theta
+    pt = target.transform
+    lj = 0.0
+    if pt === nothing
+        @inbounds for i in eachindex(y)
+            isfinite(y[i]) || return -Inf
+        end
+        set_unfrozen!(theta, y)
+    else
+        x = transform_inverse(y, pt)
+        @inbounds for i in eachindex(x)
+            isfinite(x[i]) || return -Inf
+        end
+        lj = Float64(transform_logabsdetjac_inv(y, pt))
+        isfinite(lj) || return -Inf
+        set_unfrozen!(theta, x)
+    end
+    lp = log_prior(theta)
+    isfinite(lp) || return -Inf
+    ll = rv_log_likelihood(theta, data, ev.ws)
+    isfinite(ll) || return -Inf
+    lt = transit_log_likelihood(theta, data, ev.ws)
+    ltomo = tomogram_log_likelihood(theta, data)
+    isfinite(ltomo) || return -Inf
+    isfinite(lt) || return -Inf
+    # Grouped as `_logdensity_parts` groups them: (prior + Jacobian) + likelihood.
+    pj = pt === nothing ? lp : lp + lj
+    return Float64(pj) + Float64(ll + lt + ltomo)
 end
 
 # Fixed-point iteration in log space. l1 are log(p*/q) at posterior draws,
