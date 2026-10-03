@@ -314,9 +314,11 @@ the workspace RV method without noise models and the workspace photometry
 compute cos f and sin f from E with the e they are given. Outside that interval
 the two compute different models, not the same model with different rounding.
 """
-@inline function _bridge_e_clamped(theta::Theta)
+@inline function _bridge_e_clamped(theta::Theta{T}) where {T}
     for k in planet_indices(theta)
-        e, _ = planet_e_w(theta, k)
+        # The planet blocks are abstractly typed, so `planet_e_w` is not
+        # inferred; the assertion keeps that from spreading to the test below.
+        e, _ = planet_e_w(theta, k)::Tuple{T, T}
         # `true_anomaly`'s own clamp, spelled the same way: true exactly when it
         # changes e, and for NaN.
         min(max(e, zero(e)), oftype(e, 0.9999)) == e || return true
