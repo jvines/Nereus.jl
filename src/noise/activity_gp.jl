@@ -20,6 +20,7 @@
 
 using LinearAlgebra: Cholesky, cholesky, cholesky!, ldiv!, Symmetric, Diagonal,
                      dot, logdet, diagind, I, UpperTriangular
+import ForwardDiff
 
 # =====================================================================
 # Quasi-periodic kernel + analytic derivatives
@@ -987,6 +988,22 @@ BigFloat, on the five-channel HD 18599 fit: at most 4e-12 nats near the
 posterior; on prior draws a median of 2e-9 and at most 2e-6 nats, the same
 as the Float64 dense Cholesky. test/test_activity_gp_lowrank.jl checks it.
 
+Dual numbers (ForwardDiff) take the same route, with two exceptions. R_j is
+a square root of B_j, so it is not differentiable where B_j is singular
+(every G coupling 0, every Ġ coupling 0, or all channels' (a_c, b_c)
+parallel), and its derivative loses accuracy as B_j approaches that. And
+w = R⁻ᵀ·Mᵀ D⁻¹ y divides by R, so when every coupling is tiny against the
+noise its derivatives cancel to a relative error of about eps/SNR. When a
+block's smaller eigenvalue is below 1e-10 of its larger, or the GP's
+signal-to-noise is below 1e-6 at every epoch, dual inputs are evaluated with
+the dense (C·N)² Cholesky instead, which is smooth there. A coupling that is
+a constant 0 (every Ġ coupling under `use_derivative = false`) is not a
+direction of the block and does not count. On the HD 18599 job this happens
+at couplings that are exactly 0 (the prior box centre), at none of ~250
+prior draws and 150 near-posterior points with five channels, and at 2 of
+236 prior draws with RV and logR'HK alone. `Float64` values are exact at
+singular blocks and always take the low-rank path.
+
 `y_flat`, `σ²_flat` are the channel-stacked residuals and per-point
 variances (RV block first, then each indicator), length C·N. A NaN among
 the couplings, variances or residuals gives `NaN`. `-Inf` is returned if the
@@ -1056,6 +1073,61 @@ end
     return (k, -fp * k, fp * k, -(fpp + fp * fp) * k)
 end
 
+# Zero in its value and in every partial derivative, at any nesting of
+# ForwardDiff duals (ForwardDiff 0.10's `iszero` looks at the value only).
+_agp_strictly_zero(x::Real) = iszero(x)
+_agp_strictly_zero(x::ForwardDiff.Dual) =
+    _agp_strictly_zero(ForwardDiff.value(x)) &&
+    all(_agp_strictly_zero, ForwardDiff.partials(x))
+
+# Whether derivatives taken through the factors R_j of B are accurate here.
+# Two things break them. (1) R_j is a square root of B_j: not differentiable
+# where the block is singular, inaccurate near it. Each block's smaller
+# eigenvalue must be at least 1e-10 of its larger (det B_j ≥ 1e-10·(tr B_j)²,
+# as λ_min/λ_max ≈ det/tr² when small). A direction with no coupling at all
+# (every a_c, or every b_c, a constant 0) is not part of the blocks, which are
+# then 1×1 and need only be nonzero. (2) w = R⁻ᵀv divides by R, so its
+# derivatives grow as 1/R while the GP's share of log L shrinks as R²; their
+# cancellation leaves a relative error of about eps/SNR. The largest
+# per-epoch signal-to-noise tr(R_j K_jj R_jᵀ) = k_GG(0)·bGG + k_ĠĠ(0)·bĠĠ
+# must be at least 1e-6. False for NaN.
+function _agp_blocks_smooth(bGG::AbstractVector, bGd::AbstractVector,
+                            bdd::AbstractVector, chan_a::AbstractVector,
+                            chan_b::AbstractVector, k0GG::Real, k0dd::Real)
+    noG = all(_agp_strictly_zero, chan_a)
+    noD = all(_agp_strictly_zero, chan_b)
+    noG && noD && return true
+    snr = zero(promote_type(eltype(bGG), eltype(bdd), typeof(k0GG), typeof(k0dd)))
+    @inbounds for j in eachindex(bGG)
+        g = bGG[j]; e = bdd[j]
+        if noD
+            g > 0 || return false
+        elseif noG
+            e > 0 || return false
+        else
+            (g > 0 && e > 0) || return false
+            h = bGd[j]
+            # g·q, with q = e − h²/g the Schur complement the solver factors.
+            g * (e - h * h / g) >= 1e-10 * (g + e)^2 || return false
+        end
+        snr = max(snr, k0GG * g + k0dd * e)
+    end
+    return snr >= 1e-6
+end
+
+# The dense (C·N)² Gaussian log-density of the same Σ = M·K_g·Mᵀ + D,
+# generic in the element type: the dual-number route at near-singular blocks.
+function _agp_dense_logpdf(epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
+    Σ0 = activity_gp_covariance_blocked(epochs, chan_a, chan_b, amp, P, λe, λp)
+    TS = promote_type(eltype(Σ0), eltype(y_flat), eltype(σ²_flat))
+    Σ  = eltype(Σ0) === TS ? Σ0 : convert(Matrix{TS}, Σ0)
+    @inbounds for i in eachindex(σ²_flat); Σ[i, i] += σ²_flat[i]; end
+    F = cholesky!(Symmetric(Σ, :U); check = false)
+    issuccess(F) || return convert(TS, -Inf)
+    z = F.U' \ y_flat
+    return -(dot(z, z) + logdet(F) + length(y_flat) * log(2π)) / 2
+end
+
 # The whitened low-rank solve on caller-supplied buffers: `A` is 2N×2N,
 # `bGG`…`r22` length N, `v`, `w`, `t` length 2N. Every element read is
 # written first (only the upper triangle of A is used), so nothing needs
@@ -1120,10 +1192,22 @@ function _agp_whitened_core!(A::AbstractMatrix,
     # does, rather than whatever the Cholesky of a NaN matrix returns.
     isnan(ww) && return convert(TA, NaN)
 
+    kc = _qp_consts(amp, P, λe, λp)
+
+    # Dual numbers: where derivatives through R lose their accuracy (a
+    # singular or nearly singular block of B, or a GP too faint against the
+    # noise; see _agp_blocks_smooth) the dense likelihood is smooth and is
+    # used instead. Compiled out for Float64.
+    if T <: ForwardDiff.Dual
+        k0GG, _, _, k0dd = _qp_blocks_sincos(zero(eltype(epochs)), kc)
+        _agp_blocks_smooth(bGG, bGd, bdd, chan_a, chan_b, k0GG, k0dd) ||
+            return convert(TA, _agp_dense_logpdf(epochs, chan_a, chan_b,
+                                                 amp, P, λe, λp, y_flat, σ²_flat))
+    end
+
     # Upper triangle of A = I + R·K_g·Rᵀ, straight from the kernel blocks at
     # τ = t_j − t_k (j ≤ k). Rows j and N+j of R·g are r11·G_j + r12·Ġ_j and
     # r22·Ġ_j; cov(G_j, Ġ_k) = cGd and cov(G_k, Ġ_j) = cov(Ġ_j, G_k) = cdG.
-    kc = _qp_consts(amp, P, λe, λp)
     @inbounds for k in 1:N
         r11k = r11[k]; r12k = r12[k]; r22k = r22[k]; tk = epochs[k]
         for j in 1:k

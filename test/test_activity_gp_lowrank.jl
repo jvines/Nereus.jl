@@ -364,3 +364,127 @@ end
         @test isnan(Nereus.rv_log_likelihood(th, data))
     end
 end
+
+@testset "AGP whitened solver: derivatives at and near singular blocks" begin
+    # R_j is a square root of the 2×2 block B_j, so it is not differentiable
+    # where B_j is singular: with every G coupling (or every Ġ coupling) at
+    # exactly 0 the dual-number path used to drop those couplings' derivatives
+    # (an error of 11.7 against a gradient of 24.5), and near such points, or
+    # when every coupling is tiny, the derivatives through R lost their
+    # accuracy. Dual inputs there now take the dense likelihood.
+    rng = MersenneTwister(1)
+    N, C = 20, 5
+    epochs = sort!(60 .* rand(rng, N))
+    σ² = 0.1 .+ rand(rng, C * N); y = randn(rng, C * N)
+    hyp = (1.0, 9.0, 30.0, 0.6)
+    lr(a, b, yy, s) = Nereus.activity_gp_joint_logpdf_lowrank(epochs, a, b, hyp..., yy, s)
+    dn(a, b, yy, s) = _agp_dense(epochs, a, b, hyp..., yy, s)
+    a0 = [1.0, 0.5, -0.7, 0.3, 0.8]; b0 = [0.4, -0.2, 0.3, 0.1, 0.0]
+    nz = [0.3, -0.5, 0.2, 0.9, -0.4]
+    split5(x) = (x[1:C], x[C+1:2C])
+    function grad_err(split, x, yy = y, s = σ²)
+        g1 = ForwardDiff.gradient(v -> lr(split(v)..., yy, s), x)
+        g2 = ForwardDiff.gradient(v -> dn(split(v)..., yy, s), x)
+        return maximum(abs.(g1 .- g2)) / max(maximum(abs.(g2)), floatmin()), g2
+    end
+
+    # Exactly singular blocks.
+    for (what, x) in (("every G coupling 0", vcat(zeros(C), b0)),
+                      ("every Ġ coupling 0", vcat(a0, zeros(C))),
+                      ("Ġ couplings ∝ G couplings", vcat(a0, 0.5 .* a0)),
+                      ("every coupling 0", zeros(2C)))
+        e, g = grad_err(split5, x)
+        @test e <= 1e-10
+        # The couplings that vanish do have a derivative (except at all 0).
+        what == "every coupling 0" || @test maximum(abs, g) > 1
+    end
+    # Two channels, the second without a Ġ coupling (as logR'HK): singular
+    # exactly when its G coupling is 0.
+    two(x) = ([x[1], x[2]], [x[3], zero(x[3])])
+    y2 = y[1:2N]; s2 = σ²[1:2N]
+    @test grad_err(two, [1.0, 0.0, 0.4], y2, s2)[1] <= 1e-10
+
+    # Approaching them, and every coupling tiny: no cliff in the accuracy.
+    nod(x) = (x, zero(x))       # use_derivative = false: 1×1 blocks
+    for k in (2, 4, 6, 8, 10, 12, 16, 30, 100, 200)
+        ϵ = 10.0^-k
+        @test grad_err(split5, vcat(ϵ .* a0, b0))[1] <= 1e-8
+        @test grad_err(split5, vcat(a0, ϵ .* b0))[1] <= 1e-8
+        @test grad_err(split5, vcat(a0, 0.7 .* a0 .+ ϵ .* nz))[1] <= 1e-8
+        @test grad_err(two, [1.0, ϵ, 0.4], y2, s2)[1] <= 1e-8
+        # Every coupling tiny. Below ~1e-150 the Float64 dense gradient
+        # underflows (ε² does), so the reference there is in BigFloat.
+        if k <= 100
+            @test grad_err(split5, ϵ .* vcat(a0, b0 .+ 0.1))[1] <= 1e-8
+            @test grad_err(nod, ϵ .* a0)[1] <= 1e-8
+        else
+            for (sp, x) in ((split5, ϵ .* vcat(a0, b0 .+ 0.1)), (nod, ϵ .* a0))
+                g1 = ForwardDiff.gradient(v -> lr(sp(v)..., y, σ²), x)
+                gb = setprecision(BigFloat, 256) do
+                    ForwardDiff.gradient(v -> _agp_dense(big.(epochs), sp(v)..., big.(hyp)...,
+                                                         big.(y), big.(σ²)), big.(x))
+                end
+                @test maximum(abs.(g1 .- gb)) <= 1e-8 * maximum(abs.(gb))
+            end
+        end
+    end
+
+    # Second derivatives (nested duals) at a singular block and a generic one.
+    n3 = 8; C3 = 3
+    ep3 = epochs[1:n3]; y3 = y[1:(C3 * n3)]; s3 = σ²[1:(C3 * n3)]
+    split3(x) = (x[1:C3], x[C3+1:2C3])
+    f3l(x) = Nereus.activity_gp_joint_logpdf_lowrank(ep3, split3(x)..., hyp..., y3, s3)
+    f3d(x) = _agp_dense(ep3, split3(x)..., hyp..., y3, s3)
+    for x in (vcat(a0[1:3], zeros(3)), vcat(a0[1:3], b0[1:3]))
+        H1 = ForwardDiff.hessian(f3l, x); H2 = ForwardDiff.hessian(f3d, x)
+        @test H1 ≈ H2 rtol = 1e-9
+    end
+
+    # Which inputs take the dense route. Constant zeros (no coupling at all)
+    # do not; couplings that are parameters at 0 do.
+    D(v, k, n) = ForwardDiff.Dual{:t}(v, ntuple(i -> Float64(i == k), n))
+    function smooth(a, b)
+        n = length(a) + length(b)
+        ad = [D(a[c], c, n) for c in eachindex(a)]
+        bd = [b[c] === nothing ? D(0.0, 0, n) : D(b[c], length(a) + c, n) for c in eachindex(b)]
+        Nv = 4; s = fill(0.5, length(a) * Nv)
+        gG = [sum(ad[c]^2 / s[(c - 1) * Nv + j] for c in eachindex(a)) for j in 1:Nv]
+        gd = [sum(ad[c] * bd[c] / s[(c - 1) * Nv + j] for c in eachindex(a)) for j in 1:Nv]
+        dd = [sum(bd[c]^2 / s[(c - 1) * Nv + j] for c in eachindex(a)) for j in 1:Nv]
+        return Nereus._agp_blocks_smooth(gG, gd, dd, ad, bd, 1.0, 0.1)
+    end
+    @test smooth(a0, b0)
+    @test smooth(a0, fill(nothing, C))                # use_derivative = false
+    @test !smooth(zeros(C), b0)
+    @test !smooth(a0, zeros(C))
+    @test !smooth(a0, 0.5 .* a0)
+    @test !smooth(1e-9 .* a0, fill(nothing, C))       # SNR ~ 1e-18
+    @test !smooth([NaN; a0[2:end]], b0)
+    # Float64 inputs never take it: values are exact at singular blocks.
+    for (a, b) in ((zeros(C), b0), (a0, zeros(C)), (a0, 0.5 .* a0))
+        @test lr(a, b, y, σ²) ≈ _agp_exact_dense(epochs, a, b, hyp..., y, σ²) atol = 1e-10
+    end
+
+    # Through the model: the gradient of an ActivityGP target with every G
+    # coupling, or every Ġ coupling, exactly 0 agrees with central
+    # differences.
+    data, params, _ = _agp_params(MersenneTwister(5))
+    target = NereusTarget(params, data)
+    L = params.layout
+    lp(v) = Nereus.LogDensityProblems.logdensity(target, v)
+    for zeroed in (["Vc", "Bc", "Fc", "Hc", "Lc"], ["Vr", "Br", "Fr", "Hr"])
+        th = Theta{Float64}(params)
+        _prior_theta!(th, params, MersenneTwister(6))
+        for n in zeroed; th.values[L.name_to_idx[n]] = 0.0; end
+        yv = Nereus.transform_forward([th.values[i] for i in L.unfrozen_idx],
+                                      target.transform)
+        @test isfinite(lp(yv))
+        g = ForwardDiff.gradient(lp, yv)
+        h = 1e-6
+        for (d, n) in enumerate(L.unfrozen_names)
+            e = zeros(length(yv)); e[d] = h
+            fd = (lp(yv .+ e) - lp(yv .- e)) / 2h
+            @test g[d] ≈ fd rtol = 1e-4 atol = 1e-5
+        end
+    end
+end
