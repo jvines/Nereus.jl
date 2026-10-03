@@ -149,12 +149,12 @@ end
     rng = MersenneTwister(23)
     configs = (
         (;),                                                    # 5 channels, low rank
-        (; use_derivative = false),
-        (; channels = [:bis]),                                  # C = 2, dense
-        (; channels = [:bis, :fwhm]),                           # C = 3, dense
-        (; extra = (; indicators_only = true)),
-        (; channels = [:bis, :fwhm], extra = (; marginalize_indicators = true)),
-        (; use_derivative = false, extra = (; latent_kernel = :matern32)),
+        (; use_derivative = false),                             # low rank, 1×1 blocks
+        (; channels = [:bis]),                                  # C = 2, low rank
+        (; channels = [:bis, :fwhm]),                           # C = 3, low rank
+        (; extra = (; indicators_only = true)),                 # dense, indicators
+        (; channels = [:bis, :fwhm], extra = (; marginalize_indicators = true)),  # dense
+        (; use_derivative = false, extra = (; latent_kernel = :matern32)),  # semiseparable
     )
     for kw in configs
         data, params, ws = _agp_params(rng; kw...)
@@ -501,6 +501,41 @@ end
             e = zeros(length(yv)); e[d] = h
             fd = (lp(yv .+ e) - lp(yv .- e)) / 2h
             @test g[d] ≈ fd rtol = 1e-4 atol = 1e-5
+        end
+    end
+end
+
+@testset "AGP: indicators not parallel to the RVs are refused on every path" begin
+    # _activity_gp_joint_ll had a branch for indicator vectors of another
+    # length than the RVs. Data's constructor refuses them, and _agp_index
+    # refuses them if an indicator is replaced afterwards, so the branch could
+    # not be reached; it is gone. Every route through the joint likelihood
+    # refuses them.
+    rng = MersenneTwister(61)
+    configs = ((;), (; channels = [:bis]), (; use_derivative = false),
+               (; channels = [:bis, :fwhm], extra = (; marginalize_indicators = true)),
+               (; extra = (; indicators_only = true)),
+               (; use_derivative = false, extra = (; latent_kernel = :matern32)))
+    for kw in configs
+        data, params, _ = _agp_params(rng; kw...)
+        n = length(data.t_rv)
+        theta = Theta{Float64}(params)
+        _prior_theta!(theta, params, rng)
+        @test !isnan(Nereus.rv_log_likelihood(theta, data))
+        for (nv, ne) in ((n - 1, n - 1), (n + 1, n + 1), (n, n - 1), (n - 1, n))
+            inds = copy(data.indicators); errs = copy(data.indicator_errs)
+            inds["bis"] = randn(rng, nv); errs["bis"] = fill(0.3, ne)
+            @test_throws ArgumentError Data(; t_rv = data.t_rv, rv = data.rv,
+                rv_err = data.rv_err, rv_inst = data.rv_inst,
+                indicators = inds, indicator_errs = errs)
+            # The same vectors swapped into a constructed dataset.
+            bad = Data(; t_rv = data.t_rv, rv = data.rv, rv_err = data.rv_err,
+                         rv_inst = data.rv_inst, indicators = copy(data.indicators),
+                         indicator_errs = copy(data.indicator_errs))
+            bad.indicators["bis"] = inds["bis"]; bad.indicator_errs["bis"] = errs["bis"]
+            ws = Nereus.PTWorkspace(params, 0, length(params.config.noise_models); n_obs = n)
+            @test_throws ArgumentError Nereus.rv_log_likelihood(theta, bad)
+            @test_throws ArgumentError Nereus.rv_log_likelihood(theta, bad, ws)
         end
     end
 end

@@ -1364,50 +1364,28 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
                                     α_ss, β_ss, kern)
     end
 
-    # Build covariance + diagonal measurement noise. Block-factored assembly
-    # when every channel shares the RV epochs and has per-channel-constant
-    # (a, b) — the standard Rajpaul layout (indicators 1:1 with RVs at the same
-    # epochs). Numerically identical to the dense builder; transcendentals
-    # evaluated C²× fewer times. Falls back to the dense builder if an
-    # indicator vector isn't aligned 1:1 with the RVs (unequal length).
-    if all(v -> length(v) == n_rv_obs, ix.vals)
-        # LOW-RANK joint: the C channels observe linear combos of a 2N
-        # latent (G, Ġ), so Σ = M·K_g·Mᵀ + D and the one factorization is a
-        # (2N)² Cholesky instead of the dense (C·N)² (exact up to rounding;
-        # see activity_gp_joint_logpdf_lowrank). It is faster than the dense
-        # build from C = 2 on, since it also skips the C² block assembly. Used
-        # whenever we score the joint (the marginalize/conditional path needs
-        # the explicit block partition, so it keeps the dense build).
-        if !agp.marginalize_indicators && n_total > n_rv_obs
-            ep = view(data.t_rv, 1:n_rv_obs)
-            return ws === nothing ?
-                activity_gp_joint_logpdf_lowrank(ep, chan_a, chan_b,
-                    amp, P, λe, λp, y_flat, σ²_flat) :
-                activity_gp_joint_logpdf_lowrank!(ws.agp, ep, chan_a, chan_b,
-                    amp, P, λe, λp, y_flat, σ²_flat)
-        end
-        Σ = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv_obs),
-                                            chan_a, chan_b, amp, P, λe, λp)
-    else
-        t_flat       = Vector{Float64}(undef, n_total)
-        a_flat       = Vector{T}(undef, n_total)
-        b_flat       = Vector{T}(undef, n_total)
-        channel_flat = Vector{Symbol}(undef, n_total)
-        ch_ind = [ch for ch in agp.channels if ch !== :rv]
-        off = 0
-        for k in 1:C
-            n_ch = k == 1 ? n_rv_obs : length(ix.vals[k - 1])
-            @inbounds for i in 1:n_ch
-                t_flat[off + i]       = data.t_rv[i]
-                a_flat[off + i]       = chan_a[k]
-                b_flat[off + i]       = chan_b[k]
-                channel_flat[off + i] = k == 1 ? :rv : ch_ind[k - 1]
-            end
-            off += n_ch
-        end
-        Σ = activity_gp_covariance(t_flat, channel_flat, a_flat, b_flat,
-                                     amp, P, λe, λp)
+    # LOW-RANK joint: the C channels observe linear combos of a 2N latent
+    # (G, Ġ), so Σ = M·K_g·Mᵀ + D and the one factorization is a (2N)²
+    # Cholesky instead of the dense (C·N)² (exact up to rounding; see
+    # activity_gp_joint_logpdf_lowrank). It is faster than the dense build
+    # from C = 2 on, since it also skips the C² block assembly. Used whenever
+    # we score the joint (the marginalize/conditional path needs the explicit
+    # block partition, so it keeps the dense build).
+    if !agp.marginalize_indicators && n_total > n_rv_obs
+        ep = view(data.t_rv, 1:n_rv_obs)
+        return ws === nothing ?
+            activity_gp_joint_logpdf_lowrank(ep, chan_a, chan_b,
+                amp, P, λe, λp, y_flat, σ²_flat) :
+            activity_gp_joint_logpdf_lowrank!(ws.agp, ep, chan_a, chan_b,
+                amp, P, λe, λp, y_flat, σ²_flat)
     end
+
+    # Dense covariance + diagonal measurement noise, assembled by blocks:
+    # every channel shares the RV epochs (_agp_index refuses indicators that
+    # are not parallel to the RVs) and has per-channel-constant (a, b), so
+    # the transcendentals are evaluated C²× fewer times than pair by pair.
+    Σ = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv_obs),
+                                        chan_a, chan_b, amp, P, λe, λp)
     @inbounds for i in 1:n_total
         Σ[i, i] += σ²_flat[i]
     end
