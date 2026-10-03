@@ -815,6 +815,7 @@ struct _AGPIndex
     λp::Int
     Vc::Int
     Vr::Int
+    names::Vector{String}           # the channels' keys in data.indicators
     vals::Vector{Vector{Float64}}   # indicator values, parallel to the RVs
     errs::Vector{Vector{Float64}}   # their 1σ uncertainties
     a::Vector{Int}                  # coupling to G
@@ -831,7 +832,7 @@ function _agp_index(name_to_idx::Dict{String, Int}, data::Data, agp::ActivityGP)
     Vc  = agp.indicators_only ? 0 : name_to_idx["Vc$s"]
     Vr  = (agp.use_derivative && !agp.indicators_only) ? name_to_idx["Vr$s"] : 0
     n_rv_obs = length(data.rv)
-    vals_c = Vector{Float64}[]; errs_c = Vector{Float64}[]
+    names = String[]; vals_c = Vector{Float64}[]; errs_c = Vector{Float64}[]
     a = Int[]; b = Int[]; jit = Int[]
     for ch in agp.channels
         ch === :rv && continue
@@ -857,9 +858,25 @@ function _agp_index(name_to_idx::Dict{String, Int}, data::Data, agp::ActivityGP)
         push!(b, (cd === nothing || !agp.use_derivative) ? 0 :
                  name_to_idx[string(cd, s)])
         push!(jit, get(name_to_idx, "gp_act_jit_$(ch)$s", 0))
-        push!(vals_c, vals); push!(errs_c, errs)
+        push!(names, name); push!(vals_c, vals); push!(errs_c, errs)
     end
-    return _AGPIndex(amp, P, λe, λp, Vc, Vr, vals_c, errs_c, a, b, jit)
+    return _AGPIndex(amp, P, λe, λp, Vc, Vr, names, vals_c, errs_c, a, b, jit)
+end
+
+# Whether the indicator data an `_AGPIndex` holds is still what `data` holds:
+# the same vectors under each channel's key, still parallel to the RVs. The
+# vectors are held, not copied, so a change to their values is seen anyway;
+# this catches a vector replaced inside `data.indicators` or
+# `data.indicator_errs`, or resized. Two dictionary lookups per channel.
+function _agp_index_current(ix::_AGPIndex, data::Data)
+    n = length(data.rv)
+    @inbounds for k in eachindex(ix.names)
+        vals = ix.vals[k]; errs = ix.errs[k]
+        (get(data.indicators, ix.names[k], nothing) === vals &&
+         get(data.indicator_errs, ix.names[k], nothing) === errs &&
+         length(vals) == n && length(errs) == n) || return false
+    end
+    return true
 end
 
 # What an `_AGPIndex` was resolved from, compared by identity.
@@ -909,14 +926,21 @@ function AGPWorkspace()
 end
 
 # The `_AGPIndex` of `agp` under this layout and data: resolved by name on
-# first use, then looked up by identity.
+# first use, then looked up by identity and checked against the indicator
+# vectors `data` holds now (resolved again, and validated again, if one of
+# them was replaced).
 function _agp_index!(w::AGPWorkspace, name_to_idx::Dict{String, Int}, data::Data,
                      agp::ActivityGP)
     @inbounds for k in eachindex(w.index_keys)
         key = w.index_keys[k]
-        (key[1] === agp && key[2] === name_to_idx && key[3] === data.rv &&
-         key[4] === data.indicators && key[5] === data.indicator_errs) &&
-            return w.index[k]
+        if key[1] === agp && key[2] === name_to_idx && key[3] === data.rv &&
+           key[4] === data.indicators && key[5] === data.indicator_errs
+            ix = w.index[k]
+            _agp_index_current(ix, data) && return ix
+            ix = _agp_index(name_to_idx, data, agp)
+            w.index[k] = ix
+            return ix
+        end
     end
     ix = _agp_index(name_to_idx, data, agp)
     # A workspace serves one run, so a handful of entries is the most it

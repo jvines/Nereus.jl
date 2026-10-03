@@ -1239,8 +1239,9 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
                                  variances::Vector{T},
                                  agp::ActivityGP, ws = nothing) where {T}
     # Parameter indices and indicator data, resolved by name: once per
-    # workspace on the sampler path, on every call otherwise. Validates that
-    # each indicator channel is present and parallel to the RVs.
+    # workspace on the sampler path (again if an indicator vector is replaced
+    # or resized), on every call otherwise. Validates that each indicator
+    # channel is present and parallel to the RVs.
     name_to_idx = theta.params.layout.name_to_idx
     ix = ws === nothing ? _agp_index(name_to_idx, data, agp) :
                           _agp_index!(ws.agp, name_to_idx, data, agp)

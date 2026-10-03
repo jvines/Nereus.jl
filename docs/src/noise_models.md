@@ -408,7 +408,7 @@ Notes on the couplings:
 `ActivityGP` requires both the indicator **values** and their **1σ
 errors** for every non-`:rv` channel. Errors are mandatory (the
 `activity_gp_predict`/likelihood paths throw / return `nothing` without
-`data.indicator_errs`, `src/noise/activity_gp.jl:637,841`).
+`data.indicator_errs`, `src/noise/activity_gp.jl:637,842`).
 
 - **Julia API:** `Data(; indicators = Dict("bis" => …, "fwhm" => …),
   indicator_errs = Dict("bis" => …, "fwhm" => …), …)` with string keys
@@ -527,7 +527,7 @@ The HD 18599 K-gap scenario is the canonical use case.
 
 With every indicator at the RV epochs (`N` epochs, `C` channels including
 RV, `n_total = C·N`), the joint likelihood goes through
-`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1018`): it
+`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1042`): it
 whitens each epoch's 2×2 information block and factors one `(2N)²` matrix
 instead of the dense `(C·N)²`, and is exact up to rounding. Gradients
 (ForwardDiff) take the same route, except where an information block is

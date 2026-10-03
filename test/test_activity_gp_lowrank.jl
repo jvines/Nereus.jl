@@ -540,6 +540,70 @@ end
     end
 end
 
+@testset "AGP: a warm workspace follows indicator vectors replaced in the data" begin
+    # The workspace caches each ActivityGP's resolved indices and indicator
+    # vectors, keyed by the identity of the dictionaries that hold them. A
+    # vector replaced inside data.indicators leaves those dictionaries the
+    # same objects, and a warm workspace kept scoring the old vector (on the
+    # three-channel HD 18599 model, −16435.997 against −17329.540 without a
+    # workspace) and accepted one too short. The cached vectors are now
+    # checked against the data on every call.
+    rng = MersenneTwister(71)
+    configs = ((;), (; channels = [:bis, :fwhm]), (; channels = [:bis]),
+               (; use_derivative = false),
+               (; channels = [:bis, :fwhm], extra = (; marginalize_indicators = true)),
+               (; extra = (; indicators_only = true)),
+               (; use_derivative = false, extra = (; latent_kernel = :matern32)))
+    for kw in configs
+        data, params, ws = _agp_params(rng; kw...)
+        theta = Theta{Float64}(params)
+        _prior_theta!(theta, params, rng)
+        ll() = (Nereus.rv_log_likelihood(theta, data, ws),
+                Nereus.rv_log_likelihood(theta, data))
+        v0 = ll()
+        @test v0[1] === v0[2] && isfinite(v0[1])
+        vals = data.indicators["bis"]; errs = data.indicator_errs["bis"]
+        orig_vals = copy(vals)
+
+        # Replaced by other values, then other errors: the workspace scores
+        # what the data holds.
+        data.indicators["bis"] = vals .+ 1
+        v1 = ll()
+        @test v1[1] === v1[2]
+        @test v1[1] != v0[1]
+        data.indicator_errs["bis"] = 2 .* errs
+        v2 = ll()
+        @test v2[1] === v2[2]
+        @test v2[1] != v1[1]
+        data.indicators["bis"] = vals; data.indicator_errs["bis"] = errs
+        @test ll() === v0
+
+        # Changed in place: the cache holds the vectors, not copies.
+        vals .+= 1
+        @test ll() === v1
+        copyto!(vals, orig_vals)
+        @test ll() === v0
+
+        # Not parallel to the RVs any more, replaced or resized in place, or
+        # gone: refused through the warm workspace as without one.
+        data.indicators["bis"] = vals[1:end-1]
+        @test_throws ArgumentError Nereus.rv_log_likelihood(theta, data, ws)
+        @test_throws ArgumentError Nereus.rv_log_likelihood(theta, data)
+        data.indicators["bis"] = vals
+        push!(errs, 0.3)
+        @test_throws ArgumentError Nereus.rv_log_likelihood(theta, data, ws)
+        @test_throws ArgumentError Nereus.rv_log_likelihood(theta, data)
+        pop!(errs)
+        delete!(data.indicator_errs, "bis")
+        @test_throws ArgumentError Nereus.rv_log_likelihood(theta, data, ws)
+        @test_throws ArgumentError Nereus.rv_log_likelihood(theta, data)
+        data.indicator_errs["bis"] = errs
+        @test ll() === v0
+        # Each change replaced the cached entry rather than adding one.
+        @test length(ws.agp.index) == 1
+    end
+end
+
 @testset "AGP docs: source references point at what they name" begin
     # docs/src/noise_models.md cites src/noise/activity_gp.jl by line. Each
     # citation, in order of appearance, and what its line must hold.
