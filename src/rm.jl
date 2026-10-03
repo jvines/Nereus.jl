@@ -198,11 +198,27 @@ we use the true anomaly and the standard sky-projection formulae
 """
 function planet_sky_position(t::Real, P::Real, e::Real, ω::Real,
                               Tp::Real, b::Real, a_Rs::Real)
+    cosf, cosfw, sinfw = _sky_phase(t, P, e, ω, Tp)
+    return _sky_from_phase(cosf, cosfw, sinfw, e, ω, b, a_Rs)
+end
+
+# `planet_sky_position` in two parts. The orbital phase -- Kepler's equation,
+# the true anomaly f and the trigonometry of f and f + ω -- depends on the
+# time and the orbit only, so with P, the transit time, e and ω fixed it is
+# the same at every evaluation and can be kept (see `RVOrbitWork`); the
+# projection depends on b and a/R★ as well.
+@inline function _sky_phase(t::Real, P::Real, e::Real, ω::Real, Tp::Real)
     M = 2π * (t - Tp) / P
     E = kepler_solve(M, e)
     f = true_anomaly(E, e)
+    fw = f + ω
+    return cos(f), cos(fw), sin(fw)
+end
+
+@inline function _sky_from_phase(cosf, cosfw, sinfw, e::Real, ω::Real, b::Real,
+                                 a_Rs::Real)
     # Distance from star (in stellar radii), accounting for eccentricity.
-    r = a_Rs * (1 - e * e) / (1 + e * cos(f))
+    r = a_Rs * (1 - e * e) / (1 + e * cosf)
     # Sky-plane components (Winn 2010 Eq. 53–55).
     # Use the impact parameter to recover sin(i): b = (a_Rs)(1-e²)/(1+e sin ω) · cos(i)
     # We approximate cos(i) ≈ b / a_Rs · (1+e sin ω)/(1-e²) ; in practice we just
@@ -211,8 +227,7 @@ function planet_sky_position(t::Real, P::Real, e::Real, ω::Real,
     cosi = b * (1 + e * sin(ω)) / max(a_Rs * one_minus_e2, eps())
     cosi = clamp(cosi, -1.0, 1.0)
     sini = sqrt(max(1 - cosi * cosi, zero(cosi)))
-    fw = f + ω
-    x_sky = r * (-cos(fw))           # along orbital motion
+    x_sky = r * (-cosfw)             # along orbital motion
     # SIGN: +b at mid-transit, matching this function's own docstring and
     # `shadow_track` in tomography.jl. It returned -b until 2026-08-10, which
     # silently mirrored the lambda axis of every RV-RM fit relative to every
@@ -222,8 +237,8 @@ function planet_sky_position(t::Real, P::Real, e::Real, ω::Real,
     # under (y, lambda) -> (-y, -lambda), so gravity-darkened fits were affected
     # in substance: ~55 ppm peak at a hot-Jupiter-on-A-star geometry, growing
     # with rotation.
-    y_sky = r * (sin(fw) * cosi)     # impact-parameter axis
-    z_los = r * (sin(fw) * sini)     # line of sight: > 0 ⇒ planet in front
+    y_sky = r * (sinfw * cosi)       # impact-parameter axis
+    z_los = r * (sinfw * sini)       # line of sight: > 0 ⇒ planet in front
     return (x_sky, y_sky, z_los)
 end
 
@@ -493,43 +508,76 @@ Sums the in-transit RM anomalies from all RM-enabled planets at time
         (state.σ0s[ins_idx], state.βps[ins_idx]) : (state.σ0, state.βp)
     @inbounds for r in 1:n_rm
         j = state.j_active[r]
-        x_sky, y_sky, z_los = if state.rel
-            # Phase measured from the transit of the model ephemeris nearest
-            # t, Tc_n = Tc0 + E·P, as a small time difference: an absolute
-            # periastron time in BJD carries ~2e-10 d of rounding, which moved
-            # the anomaly by 1e-6 m/s. Same orbit, same positions.
-            E   = round((_val(t) - _val(state.Tc0s[r])) / _val(Ps[j]))
-            Tcn = state.Tc0s[r] + E * Ps[j]
-            planet_sky_position(t - Tcn, Ps[j], es[j], ws[j],
-                                -Ps[j] * state.Mtrs[r] / (2 * oftype(Ps[j], π)),
-                                state.bs[r], state.a_Rs[r])
-        else
-            planet_sky_position(t, Ps[j], es[j], ws[j], Tps[j],
-                                state.bs[r], state.a_Rs[r])
-        end
-        # Reject superior conjunction: the sky-separation test below is satisfied
-        # at BOTH conjunctions, so without this the occultation would produce a
-        # mirrored RM anomaly of equal magnitude.
-        z_los > 0 || continue
-        Δflux = if state.point
-            point_occulted_flux(x_sky, y_sky, state.rrs[r], state.u1, state.u2)
-        else
-            z2 = x_sky * x_sky + y_sky * y_sky
-            limit = 1 + state.rrs[r]
-            z2 > limit * limit && continue
-            1 - _rm_disc_flux(state.ld_uniform, state.ld, sqrt(z2), state.rrs[r])
-        end
-        Δflux > 0 || continue
-        Δ += if state.is_arome[r]
-            rm_signal_arome(x_sky, y_sky, Δflux, state.v_sini, state.λs[r],
-                             σ0, βp)
-        elseif state.is_reloaded[r]
-            rm_reloaded_signal(x_sky, y_sky, state.rrs[r],
-                                state.u1, state.u2,
-                                state.v_sini, state.λs[r], Δflux)
-        else
-            rm_signal(x_sky, y_sky, Δflux, state.v_sini, state.λs[r])
-        end
+        cosf, cosfw, sinfw = _rm_phase(t, r, j, state, Ps, es, ws, Tps)
+        x_sky, y_sky, z_los = _sky_from_phase(cosf, cosfw, sinfw, es[j], ws[j],
+                                              state.bs[r], state.a_Rs[r])
+        Δ = _rm_add(Δ, x_sky, y_sky, z_los, r, state, σ0, βp)
+    end
+    return Δ
+end
+
+# The orbital phase of RM planet r at time t, as `rm_contribution` places it.
+@inline function _rm_phase(t, r, j, state, Ps, es, ws, Tps)
+    if state.rel
+        # Phase measured from the transit of the model ephemeris nearest
+        # t, Tc_n = Tc0 + E·P, as a small time difference: an absolute
+        # periastron time in BJD carries ~2e-10 d of rounding, which moved
+        # the anomaly by 1e-6 m/s. Same orbit, same positions.
+        E   = round((_val(t) - _val(state.Tc0s[r])) / _val(Ps[j]))
+        Tcn = state.Tc0s[r] + E * Ps[j]
+        return _sky_phase(t - Tcn, Ps[j], es[j], ws[j],
+                          -Ps[j] * state.Mtrs[r] / (2 * oftype(Ps[j], π)))
+    else
+        return _sky_phase(t, Ps[j], es[j], ws[j], Tps[j])
+    end
+end
+
+# Δ plus the anomaly of RM planet r at sky position (x, y, z).
+@inline function _rm_add(Δ, x_sky, y_sky, z_los, r, state, σ0, βp)
+    # Reject superior conjunction: the sky-separation test below is satisfied
+    # at BOTH conjunctions, so without this the occultation would produce a
+    # mirrored RM anomaly of equal magnitude.
+    z_los > 0 || return Δ
+    @inbounds Δflux = if state.point
+        point_occulted_flux(x_sky, y_sky, state.rrs[r], state.u1, state.u2)
+    else
+        z2 = x_sky * x_sky + y_sky * y_sky
+        limit = 1 + state.rrs[r]
+        z2 > limit * limit && return Δ
+        1 - _rm_disc_flux(state.ld_uniform, state.ld, sqrt(z2), state.rrs[r])
+    end
+    Δflux > 0 || return Δ
+    @inbounds return Δ + if state.is_arome[r]
+        rm_signal_arome(x_sky, y_sky, Δflux, state.v_sini, state.λs[r],
+                         σ0, βp)
+    elseif state.is_reloaded[r]
+        rm_reloaded_signal(x_sky, y_sky, state.rrs[r],
+                            state.u1, state.u2,
+                            state.v_sini, state.λs[r], Δflux)
+    else
+        rm_signal(x_sky, y_sky, Δflux, state.v_sini, state.λs[r])
+    end
+end
+
+"""
+    _rm_contribution_cached(ow, i, n_rm, state, es, ws, ins_idx) -> ΔRV
+
+`rm_contribution` at the RV epoch `i`, with each RM planet's orbital phase
+read from `ow` (filled by `_refresh_orbits!`). Same arithmetic, same bits.
+"""
+@inline function _rm_contribution_cached(ow::RVOrbitWork, i::Int, n_rm::Int, state,
+                                         es::AbstractVector{Float64},
+                                         ws::AbstractVector{Float64}, ins_idx::Int)
+    n_rm == 0 && return 0.0
+    Δ = 0.0
+    σ0, βp = (state.per_inst && ins_idx > 0) ?
+        (state.σ0s[ins_idx], state.βps[ins_idx]) : (state.σ0, state.βp)
+    @inbounds for r in 1:n_rm
+        j = state.j_active[r]
+        x_sky, y_sky, z_los = _sky_from_phase(ow.rm_cosf[r, i], ow.rm_cosfw[r, i],
+                                              ow.rm_sinfw[r, i], es[j], ws[j],
+                                              state.bs[r], state.a_Rs[r])
+        Δ = _rm_add(Δ, x_sky, y_sky, z_los, r, state, σ0, βp)
     end
     return Δ
 end

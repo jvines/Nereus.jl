@@ -640,6 +640,8 @@ mutable struct PTWorkspace
     # --- RV-channel scratch (instrument-restricted GPs) ---
     # Built on first use by `_eval_channel_likelihood(..., ws)` (noise/gp.jl).
     rv_channel::Union{Nothing,ChannelWork}
+    # --- Orbital phases of the RV epochs (likelihood.jl, RVOrbitWork) ---
+    rv_orbit::Union{Nothing,RVOrbitWork}
 end
 
 # `max_donors` sizes the donor-birth scratch buffer. It must be ≥ the number
@@ -718,7 +720,17 @@ function PTWorkspace(params::Params, max_kplanet::Int, n_noise::Int=0;
         nothing,
         # RV-channel scratch, built on first use.
         nothing,
+        # RV orbital phases, built on first use.
+        nothing,
     )
+end
+
+function _rv_orbit_work!(ws::PTWorkspace, data::Data)
+    ow = ws.rv_orbit
+    if ow === nothing || ow.t !== data.t_rv || ow.comp !== data.rv_comp
+        ow = ws.rv_orbit = RVOrbitWork(data.t_rv, data.rv_comp, length(ws.planet_Ps))
+    end
+    return ow
 end
 
 function _channel_work!(ws::PTWorkspace, params, times, inst, channel)

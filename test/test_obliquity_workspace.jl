@@ -16,6 +16,7 @@ using Nereus: Theta, PTWorkspace, TomoWorkspace, SymEigenWork, tomogram_log_like
               planet_indices
 using LinearAlgebra: Symmetric, eigen
 using Random
+using Random: randperm
 import ForwardDiff
 
 include(joinpath(@__DIR__, "fixtures", "obliquity_synthetic.jl"))
@@ -206,6 +207,59 @@ include(joinpath(@__DIR__, "fixtures", "obliquity_synthetic.jl"))
         ws = new_ws(p)
         rv_log_likelihood(th, d, ws)
         @test (@allocated rv_log_likelihood(th, d, ws)) < 3000
+    end
+
+    @testset "sky position in two parts is the one-piece formula" begin
+        # planet_sky_position as it was written before it was split into
+        # _sky_phase and _sky_from_phase.
+        function sky_ref(t, P, e, ω, Tp, b, a_Rs)
+            M = 2π * (t - Tp) / P
+            E = Nereus.kepler_solve(M, e)
+            f = Nereus.true_anomaly(E, e)
+            r = a_Rs * (1 - e * e) / (1 + e * cos(f))
+            one_minus_e2 = 1 - e * e
+            cosi = b * (1 + e * sin(ω)) / max(a_Rs * one_minus_e2, eps())
+            cosi = clamp(cosi, -1.0, 1.0)
+            sini = sqrt(max(1 - cosi * cosi, zero(cosi)))
+            fw = f + ω
+            return (r * (-cos(fw)), r * (sin(fw) * cosi), r * (sin(fw) * sini))
+        end
+        rng = MersenneTwister(31)
+        for _ in 1:2000
+            P = 0.5 + 10rand(rng); e = rand(rng, (0.0, 0.3 * rand(rng), 0.9 * rand(rng)))
+            ω = 2π * rand(rng) - π; Tp = 2459000 + 5randn(rng); t = Tp + 20randn(rng)
+            b = 1.2rand(rng); a = 1.5 + 20rand(rng)
+            @test all(Nereus.planet_sky_position(t, P, e, ω, Tp, b, a) .=== sky_ref(t, P, e, ω, Tp, b, a))
+        end
+    end
+
+    # With noise models the workspace RV path and the allocating one are the
+    # same arithmetic, so the allocating path is the reference. Without them
+    # the workspace path has always computed the Keplerian differently (the
+    # half-angle form of its velocity cache), so there the reference is the
+    # workspace path with no history: a fresh workspace per call.
+    @testset "RV orbital phases kept across calls ($label)" for (label, kw, ref) in (
+            ("fixed ephemeris, oscillators", (P = OS_P, Tc = OS_TC0), :alloc),
+            ("free P, Tc, e and ω", (P = (OS_P, 1e-4), Tc = (OS_TC0, 1e-3), ecc = :free), :alloc),
+            ("point occultation", (occultation = :point, ecc = :free), :alloc),
+            ("no noise models", (tomo_noise = :white, rv_noise = :white), :fresh),
+            ("no noise models, free ephemeris",
+             (tomo_noise = :white, rv_noise = :white, P = (OS_P, 1e-4), ecc = :free), :fresh))
+        p = build(; kw...)
+        ws = new_ws(p)
+        th = Theta{Float64}(p)
+        pts = points(p, 40)
+        rng = MersenneTwister(5)
+        nsame = 0; n = 0
+        # Each point twice in a row, then in random order: the cache is both
+        # hit and refreshed.
+        for x in vcat(repeat(pts; inner = 2), pts[randperm(rng, length(pts))])
+            seat!(th, p, x)
+            a = rv_log_likelihood(th, d, ws)
+            b = ref === :alloc ? rv_log_likelihood(th, d) : rv_log_likelihood(th, d, new_ws(p))
+            nsame += a === b; n += 1
+        end
+        @test nsame == n
     end
 
     @testset "kernel factors from distance groups" begin
