@@ -1258,11 +1258,14 @@ function _agp_blocks_smooth(bGG::AbstractVector, bGd::AbstractVector,
     return snr >= 1e-6
 end
 
-# Whether any of these numbers, or any element of these vectors, is NaN.
+# Whether the low-rank route gives NaN for these inputs: yᵀD⁻¹y or log det D
+# is NaN, or an element of B or v is NaN or infinite. An infinity there (a
+# coupling or residual beyond ~1e154, a zero variance) reaches w through R as
+# Inf/Inf or Inf − Inf.
 function _agp_nan_seen(yDy, logdetD, vs::AbstractVector...)
     (isnan(yDy) || isnan(logdetD)) && return true
     for x in vs, i in eachindex(x)
-        isnan(x[i]) && return true
+        isfinite(x[i]) || return true
     end
     return false
 end
@@ -1325,8 +1328,10 @@ function _agp_sequential_logpdf!(K::AbstractMatrix, m::AbstractVector,
         P11 = 1 + (g * k11 + h * k12); P12 = g * k12 + h * k22
         P21 = h * k11 + e * k12;       P22 = 1 + (h * k12 + e * k22)
         dP = P11 * P22 - P12 * P21
-        # det P ≥ 1 in exact arithmetic; a NaN or infinite input breaks it.
-        dP > 0 || return convert(TA, isnan(dP) ? NaN : -Inf)
+        # det P ≥ 1 in exact arithmetic. NaN and infinite inputs were turned
+        # away before this route; what is left is overflow, a failure as for
+        # a Cholesky.
+        dP > 0 || return convert(TA, -Inf)
         m1 = m[2p-1]; m2 = m[2p]
         vG = v[p]; vd = v[N+p]
         r1 = vG - (g * m1 + h * m2); r2 = vd - (h * m1 + e * m2)
@@ -1413,7 +1418,7 @@ function _agp_whitened_core!(A::AbstractMatrix,
     if !(T <: AbstractFloat)
         k0GG, _, _, k0dd = _qp_blocks_sincos(zero(eltype(epochs)), kc)
         if !_agp_blocks_smooth(bGG, bGd, bdd, chan_a, chan_b, k0GG, k0dd)
-            # A NaN input gives NaN, as on the low-rank route below.
+            # Inputs for which the low-rank route gives NaN give NaN here too.
             _agp_nan_seen(yDy, logdetD, bGG, bGd, bdd, v) && return convert(TA, NaN)
             C >= 4 && return _agp_sequential_logpdf!(A, t, epochs, bGG, bGd, bdd, v,
                                                      yDy, logdetD, C, kc)

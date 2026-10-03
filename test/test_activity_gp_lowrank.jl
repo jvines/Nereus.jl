@@ -387,6 +387,24 @@ end
         end
     end
 
+    # Numbers that carry derivatives at singular blocks take the fallback,
+    # which used to return -Inf where the low-rank route gives NaN: a coupling
+    # or residual that is infinite or overflows when squared puts an infinity
+    # into B or v, which R turns into NaN (Inf/Inf, Inf − Inf) and the dense
+    # Cholesky into a failed factorization. Both routes now give NaN.
+    D1(x) = ForwardDiff.Dual{:t}(x, 1.0)
+    for (N, C) in ((12, 5), (10, 3), (9, 2))
+        epochs, a0, b0, amp, P, λe, λp, y, σ² = _agp_inputs(rng, N, C)
+        for (a, b, r) in ((zeros(C), [1e200; b0[2:end]], y), (zeros(C), [Inf; b0[2:end]], y),
+                          ([1e155; a0[2:end]], zeros(C), y), ([-Inf; a0[2:end]], zeros(C), y),
+                          ([1e160; a0[2:end]], 0.5 .* [1e160; a0[2:end]], y),
+                          (a0, zeros(C), [Inf; y[2:end]]))
+            @test isnan(Nereus.activity_gp_joint_logpdf_lowrank(epochs, a, b, amp, P, λe, λp, r, σ²))
+            @test isnan(Nereus.activity_gp_joint_logpdf_lowrank(epochs, D1.(a), D1.(b),
+                                                               amp, P, λe, λp, r, σ²))
+        end
+    end
+
     # Through the likelihood, with and without a workspace: NaN in any one
     # coupling or channel jitter of the five-channel model.
     data, params, ws = _agp_params(MersenneTwister(43))
