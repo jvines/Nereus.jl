@@ -1238,15 +1238,20 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
                                  predictions::Vector{T},
                                  variances::Vector{T},
                                  agp::ActivityGP, ws = nothing) where {T}
-    layout = theta.params.layout
-    s = _gp_suffix(agp)
+    # Parameter indices and indicator data, resolved by name: once per
+    # workspace on the sampler path, on every call otherwise. Validates that
+    # each indicator channel is present and parallel to the RVs.
+    name_to_idx = theta.params.layout.name_to_idx
+    ix = ws === nothing ? _agp_index(name_to_idx, data, agp) :
+                          _agp_index!(ws.agp, name_to_idx, data, agp)
+    # Buffers come from the workspace on the (Float64) sampler path.
+    use_ws = ws !== nothing && T === Float64
 
     # Unit-variance G(t) (Rajpaul+ 2015); guarded lookup for legacy chains.
-    amp_idx = get(layout.name_to_idx, "gp_act_amp$s", 0)
-    amp = amp_idx == 0 ? one(T) : theta.values[amp_idx]
-    P   = theta.values[layout.name_to_idx["gp_act_period$s"]]
-    λe  = theta.values[layout.name_to_idx["gp_act_lambda_e$s"]]
-    λp  = theta.values[layout.name_to_idx["gp_act_lambda_p$s"]]
+    amp = ix.amp == 0 ? one(T) : theta.values[ix.amp]
+    P   = theta.values[ix.P]
+    λe  = theta.values[ix.λe]
+    λp  = theta.values[ix.λp]
     (amp > 0 && P > 0 && λe > 0 && λp > 0) || return convert(T, -Inf)
 
     # Derivative couplings sampled as amplitudes (see the scoped twin):
@@ -1254,43 +1259,24 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
     inv_sdG = 1 / sqrt(1 / (λe * λe) + π * π / (P * P * λp * λp))
 
     # indicators_only mode scores no RV channel — couplings absent.
-    Vc = agp.indicators_only ? zero(T) :
-         theta.values[layout.name_to_idx["Vc$s"]]
-    Vr = (agp.use_derivative && !agp.indicators_only) ?
-         theta.values[layout.name_to_idx["Vr$s"]] * inv_sdG : zero(T)
+    Vc = ix.Vc == 0 ? zero(T) : theta.values[ix.Vc]
+    Vr = ix.Vr == 0 ? zero(T) : theta.values[ix.Vr] * inv_sdG
 
     n_rv_obs = length(data.rv)
 
-    # Indicator channels — verify data is present.
-    ind_meta = Tuple{Symbol, Vector{Float64}, Vector{Float64}, T, T, T}[]
+    # Per-channel couplings (RV first, then the indicators in agp.channels
+    # order) and indicator jitter².
+    n_ind = length(ix.a)
+    C = n_ind + 1
+    chan_a, chan_b, jit2 = use_ws ? _agp_coef_buffers!(ws.agp, C) :
+                           (Vector{T}(undef, C), Vector{T}(undef, C), Vector{T}(undef, C))
+    chan_a[1] = Vc; chan_b[1] = Vr; jit2[1] = zero(T)
     n_total = n_rv_obs
-    for ch in agp.channels
-        ch === :rv && continue
-        name = String(ch)
-        haskey(data.indicators, name) || throw(ArgumentError(
-            "ActivityGP requires data.indicators[\"$name\"] for channel :$ch"))
-        haskey(data.indicator_errs, name) || throw(ArgumentError(
-            "ActivityGP requires data.indicator_errs[\"$name\"] for channel :$ch"))
-        vals = data.indicators[name]
-        errs = data.indicator_errs[name]
-        # Data-model invariant: indicators are parallel to the RV data (one
-        # value per RV epoch). The joint path places indicator k at epoch
-        # data.t_rv[k]; only valid when lengths match. Fail clearly rather
-        # than OOB (n_ind > n_rv) or silently-wrong epochs (n_ind < n_rv).
-        length(vals) == n_rv_obs && length(errs) == n_rv_obs ||
-            throw(ArgumentError(
-                "ActivityGP indicator :$ch has $(length(vals)) values (errs " *
-                "$(length(errs))) but there are $n_rv_obs RV observations — " *
-                "indicators must be parallel to the RV data (one value per " *
-                "RV epoch)."))
-        cg, cd = _ACTIVITY_GP_COEFFS[ch]
-        a_coef = theta.values[layout.name_to_idx[string(cg, s)]]
-        b_coef = (cd === nothing || !agp.use_derivative) ? zero(T) :
-                  theta.values[layout.name_to_idx[string(cd, s)]] * inv_sdG
-        jit_idx = get(layout.name_to_idx, "gp_act_jit_$(ch)$s", 0)
-        jit² = jit_idx == 0 ? zero(T) : theta.values[jit_idx]^2
-        push!(ind_meta, (ch, vals, errs, a_coef, b_coef, jit²))
-        n_total += length(vals)
+    @inbounds for k in 1:n_ind
+        chan_a[k + 1] = theta.values[ix.a[k]]
+        chan_b[k + 1] = ix.b[k] == 0 ? zero(T) : theta.values[ix.b[k]] * inv_sdG
+        jit2[k + 1]   = ix.jit[k] == 0 ? zero(T) : theta.values[ix.jit[k]]^2
+        n_total += length(ix.vals[k])
     end
 
     if agp.indicators_only
@@ -1306,15 +1292,16 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         y_I  = Vector{T}(undef, n_ind_total)
         σ²_I = Vector{T}(undef, n_ind_total)
         off = 0
-        for (ch, vals, errs, a_coef, b_coef, jit²) in ind_meta
+        for k in 1:n_ind
+            vals = ix.vals[k]; errs = ix.errs[k]; jit² = jit2[k + 1]
             @inbounds for i in 1:length(vals)
                 y_I[off + i]  = convert(T, vals[i])
                 σ²_I[off + i] = convert(T, errs[i]^2) + jit²
             end
             off += length(vals)
         end
-        chan_aI = T[m[4] for m in ind_meta]
-        chan_bI = T[m[5] for m in ind_meta]
+        chan_aI = chan_a[2:C]
+        chan_bI = chan_b[2:C]
         Σ_I = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv_obs),
                                               chan_aI, chan_bI,
                                               amp, P, λe, λp)
@@ -1328,31 +1315,20 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
                                    n_ind_total * log(2π)))
     end
 
-    t_flat       = Vector{Float64}(undef, n_total)
-    y_flat       = Vector{T}(undef, n_total)
-    σ²_flat      = Vector{T}(undef, n_total)
-    a_flat       = Vector{T}(undef, n_total)
-    b_flat       = Vector{T}(undef, n_total)
-    channel_flat = Vector{Symbol}(undef, n_total)
-
+    # Channel-stacked residuals and variances: RV block, then each indicator.
+    y_flat, σ²_flat = use_ws ? _agp_flat_buffers!(ws.agp, n_total) :
+                      (Vector{T}(undef, n_total), Vector{T}(undef, n_total))
     @inbounds for i in 1:n_rv_obs
-        t_flat[i]       = data.t_rv[i]
-        y_flat[i]       = data.rv[i] - predictions[i]
-        σ²_flat[i]      = variances[i]
-        a_flat[i]       = Vc
-        b_flat[i]       = Vr
-        channel_flat[i] = :rv
+        y_flat[i]  = data.rv[i] - predictions[i]
+        σ²_flat[i] = variances[i]
     end
     offset = n_rv_obs
-    for (ch, vals, errs, a_coef, b_coef, jit²) in ind_meta
+    for k in 1:n_ind
+        vals = ix.vals[k]; errs = ix.errs[k]; jit² = jit2[k + 1]
         n_ch = length(vals)
         @inbounds for i in 1:n_ch
-            t_flat[offset + i]       = data.t_rv[i]
-            y_flat[offset + i]       = convert(T, vals[i])
-            σ²_flat[offset + i]      = convert(T, errs[i]^2) + jit²
-            a_flat[offset + i]       = a_coef
-            b_flat[offset + i]       = b_coef
-            channel_flat[offset + i] = ch
+            y_flat[offset + i]  = convert(T, vals[i])
+            σ²_flat[offset + i] = convert(T, errs[i]^2) + jit²
         end
         offset += n_ch
     end
@@ -1366,20 +1342,23 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
     # marginalize/conditional diagnostic keeps the explicit dense partition.
     if agp.latent_kernel !== :qp_dense && !agp.marginalize_indicators
         kern = _ss_latent_kernel(agp.latent_kernel, amp, P, λe, λp)
+        t_flat    = Vector{Float64}(undef, n_total)
         series_id = Vector{Int}(undef, n_total)
         @inbounds for i in 1:n_rv_obs
+            t_flat[i]    = data.t_rv[i]
             series_id[i] = 1
         end
         soff = n_rv_obs
-        for (s, m) in enumerate(ind_meta)
-            n_ch = length(m[2])
+        for k in 1:n_ind
+            n_ch = length(ix.vals[k])
             @inbounds for i in 1:n_ch
-                series_id[soff + i] = s + 1
+                t_flat[soff + i]    = data.t_rv[i]
+                series_id[soff + i] = k + 1
             end
             soff += n_ch
         end
-        α_ss = T[Vc, (m[4] for m in ind_meta)...]
-        β_ss = T[Vr, (m[5] for m in ind_meta)...]
+        α_ss = chan_a[1:C]
+        β_ss = chan_b[1:C]
         # σ²_flat already carries the per-channel measurement variance + jitter.
         return multiseries_loglike(t_flat, y_flat, σ²_flat, series_id,
                                     α_ss, β_ss, kern)
@@ -1391,9 +1370,7 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
     # epochs). Numerically identical to the dense builder; transcendentals
     # evaluated C²× fewer times. Falls back to the dense builder if an
     # indicator vector isn't aligned 1:1 with the RVs (unequal length).
-    if all(m -> length(m[2]) == n_rv_obs, ind_meta)
-        chan_a = T[Vc, (m[4] for m in ind_meta)...]
-        chan_b = T[Vr, (m[5] for m in ind_meta)...]
+    if all(v -> length(v) == n_rv_obs, ix.vals)
         # LOW-RANK joint: the C channels observe linear combos of a 2N
         # latent (G, Ġ), so Σ = M·K_g·Mᵀ + D and the dominant factorization
         # drops from (C·N)² to (2N)² — ~4× faster at C=5 (machine-precision
@@ -1412,6 +1389,22 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         Σ = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv_obs),
                                             chan_a, chan_b, amp, P, λe, λp)
     else
+        t_flat       = Vector{Float64}(undef, n_total)
+        a_flat       = Vector{T}(undef, n_total)
+        b_flat       = Vector{T}(undef, n_total)
+        channel_flat = Vector{Symbol}(undef, n_total)
+        ch_ind = [ch for ch in agp.channels if ch !== :rv]
+        off = 0
+        for k in 1:C
+            n_ch = k == 1 ? n_rv_obs : length(ix.vals[k - 1])
+            @inbounds for i in 1:n_ch
+                t_flat[off + i]       = data.t_rv[i]
+                a_flat[off + i]       = chan_a[k]
+                b_flat[off + i]       = chan_b[k]
+                channel_flat[off + i] = k == 1 ? :rv : ch_ind[k - 1]
+            end
+            off += n_ch
+        end
         Σ = activity_gp_covariance(t_flat, channel_flat, a_flat, b_flat,
                                      amp, P, λe, λp)
     end

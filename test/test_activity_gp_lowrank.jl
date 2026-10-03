@@ -144,3 +144,56 @@ end
     # Solver scratch is not part of a sampler checkpoint.
     @test :agp ∉ keys(Nereus._ws_snapshot(ws))
 end
+
+@testset "AGP likelihood setup: cached indices and buffers" begin
+    rng = MersenneTwister(23)
+    configs = (
+        (;),                                                    # 5 channels, low rank
+        (; use_derivative = false),
+        (; channels = [:bis]),                                  # C = 2, dense
+        (; channels = [:bis, :fwhm]),                           # C = 3, dense
+        (; extra = (; indicators_only = true)),
+        (; channels = [:bis, :fwhm], extra = (; marginalize_indicators = true)),
+        (; use_derivative = false, extra = (; latent_kernel = :matern32)),
+    )
+    for kw in configs
+        data, params, ws = _agp_params(rng; kw...)
+        # A second dataset with the same layout, evaluated through the same
+        # workspace: the cached indices must follow the data they came from.
+        data2, _, _ = _agp_params(MersenneTwister(99); kw...)
+        theta = Theta{Float64}(params)
+        n_finite = 0
+        for _ in 1:25
+            _prior_theta!(theta, params, rng)
+            for d in (data, data2)
+                a = Nereus.rv_log_likelihood(theta, d, ws)
+                @test isequal(a, Nereus.rv_log_likelihood(theta, d))
+                n_finite += isfinite(a)
+            end
+        end
+        @test n_finite > 25
+        @test length(ws.agp.index) == 2
+    end
+
+    # The five-channel setup no longer builds strings or per-call vectors:
+    # what is left of the call is a few small objects outside the AGP code.
+    data, params, ws = _agp_params(rng)
+    theta = Theta{Float64}(params)
+    _prior_theta!(theta, params, rng)
+    Nereus.rv_log_likelihood(theta, data, ws)
+    @test (@allocated Nereus.rv_log_likelihood(theta, data, ws)) < 2048
+
+    # The same validation as before, on first use of a workspace: a dataset
+    # without one of the channels is refused, not scored.
+    _, params_b, _ = _agp_params(rng)
+    t = sort!(60 .* rand(rng, 30))
+    no_logrhk = Data(; t_rv = t, rv = randn(rng, 30), rv_err = ones(30),
+                   rv_inst = ones(Int, 30),
+                   indicators = Dict(c => randn(rng, 30) for c in ("bis", "fwhm", "halpha")),
+                   indicator_errs = Dict(c => fill(0.3, 30) for c in ("bis", "fwhm", "halpha")))
+    ws_b = Nereus.PTWorkspace(params_b, 0, 1; n_obs = 30)
+    theta_b = Theta{Float64}(params_b)
+    _prior_theta!(theta_b, params_b, rng)
+    @test_throws ArgumentError Nereus.rv_log_likelihood(theta_b, no_logrhk, ws_b)
+    @test_throws ArgumentError Nereus.rv_log_likelihood(theta_b, no_logrhk)
+end

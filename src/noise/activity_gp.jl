@@ -802,6 +802,70 @@ function activity_gp_decompose_rv(chains, params::Params, data::Data;
               rv_corrected, rv_corrected_err)
 end
 
+# Where an ActivityGP's inputs live: parameter indices in the layout, 0 where
+# there is no parameter (no amplitude in legacy layouts, no RV coupling in
+# indicators_only mode, no derivative coupling, no per-channel jitter), and the
+# data of each non-RV channel in `agp.channels` order. Resolving the names
+# builds strings, so the sampler path caches this in its AGPWorkspace.
+struct _AGPIndex
+    amp::Int
+    P::Int
+    λe::Int
+    λp::Int
+    Vc::Int
+    Vr::Int
+    vals::Vector{Vector{Float64}}   # indicator values, parallel to the RVs
+    errs::Vector{Vector{Float64}}   # their 1σ uncertainties
+    a::Vector{Int}                  # coupling to G
+    b::Vector{Int}                  # coupling to Ġ (0: none)
+    jit::Vector{Int}                # per-channel jitter (0: none)
+end
+
+function _agp_index(name_to_idx::Dict{String, Int}, data::Data, agp::ActivityGP)
+    s = _gp_suffix(agp)
+    amp = get(name_to_idx, "gp_act_amp$s", 0)
+    P   = name_to_idx["gp_act_period$s"]
+    λe  = name_to_idx["gp_act_lambda_e$s"]
+    λp  = name_to_idx["gp_act_lambda_p$s"]
+    Vc  = agp.indicators_only ? 0 : name_to_idx["Vc$s"]
+    Vr  = (agp.use_derivative && !agp.indicators_only) ? name_to_idx["Vr$s"] : 0
+    n_rv_obs = length(data.rv)
+    vals_c = Vector{Float64}[]; errs_c = Vector{Float64}[]
+    a = Int[]; b = Int[]; jit = Int[]
+    for ch in agp.channels
+        ch === :rv && continue
+        name = String(ch)
+        haskey(data.indicators, name) || throw(ArgumentError(
+            "ActivityGP requires data.indicators[\"$name\"] for channel :$ch"))
+        haskey(data.indicator_errs, name) || throw(ArgumentError(
+            "ActivityGP requires data.indicator_errs[\"$name\"] for channel :$ch"))
+        vals = data.indicators[name]
+        errs = data.indicator_errs[name]
+        # Data-model invariant: indicators are parallel to the RV data (one
+        # value per RV epoch). The joint path places indicator k at epoch
+        # data.t_rv[k]; only valid when lengths match. Fail clearly rather
+        # than OOB (n_ind > n_rv) or silently-wrong epochs (n_ind < n_rv).
+        length(vals) == n_rv_obs && length(errs) == n_rv_obs ||
+            throw(ArgumentError(
+                "ActivityGP indicator :$ch has $(length(vals)) values (errs " *
+                "$(length(errs))) but there are $n_rv_obs RV observations — " *
+                "indicators must be parallel to the RV data (one value per " *
+                "RV epoch)."))
+        cg, cd = _ACTIVITY_GP_COEFFS[ch]
+        push!(a, name_to_idx[string(cg, s)])
+        push!(b, (cd === nothing || !agp.use_derivative) ? 0 :
+                 name_to_idx[string(cd, s)])
+        push!(jit, get(name_to_idx, "gp_act_jit_$(ch)$s", 0))
+        push!(vals_c, vals); push!(errs_c, errs)
+    end
+    return _AGPIndex(amp, P, λe, λp, Vc, Vr, vals_c, errs_c, a, b, jit)
+end
+
+# What an `_AGPIndex` was resolved from, compared by identity.
+const _AGPIndexKey = Tuple{ActivityGP, Dict{String, Int}, Vector{Float64},
+                           Dict{String, Vector{Float64}},
+                           Dict{String, Vector{Float64}}}
+
 """
     AGPWorkspace()
 
@@ -809,8 +873,20 @@ Reusable buffers for the ActivityGP joint likelihood, held by each
 `PTWorkspace` (one per sampler slot) so the per-call matrices of
 [`activity_gp_joint_logpdf_lowrank!`](@ref) are allocated once. Empty until an
 ActivityGP is evaluated, and resized when the number of epochs `N` changes.
+Also caches the resolved parameter indices of each ActivityGP it has seen.
 """
 mutable struct AGPWorkspace
+    # Parameter indices per (ActivityGP, layout, data), see `_agp_index!`.
+    index_keys::Vector{_AGPIndexKey}
+    index::Vector{_AGPIndex}
+    # Channel coefficients and jitter² (length C), channel-stacked
+    # residuals and variances (length C·N).
+    chan_a::Vector{Float64}
+    chan_b::Vector{Float64}
+    jit2::Vector{Float64}
+    y_flat::Vector{Float64}
+    σ²_flat::Vector{Float64}
+    # Low-rank solver buffers for N epochs.
     N::Int
     Kg::Matrix{Float64}      # 2N×2N latent covariance, factored in place
     L::Matrix{Float64}       # 2N×2N lower factor of Kg
@@ -827,7 +903,40 @@ end
 function AGPWorkspace()
     m() = Matrix{Float64}(undef, 0, 0)
     z() = Float64[]
-    return AGPWorkspace(0, m(), m(), m(), m(), z(), z(), z(), z(), z(), z())
+    return AGPWorkspace(_AGPIndexKey[], _AGPIndex[], z(), z(), z(), z(), z(),
+                        0, m(), m(), m(), m(), z(), z(), z(), z(), z(), z())
+end
+
+# The `_AGPIndex` of `agp` under this layout and data: resolved by name on
+# first use, then looked up by identity.
+function _agp_index!(w::AGPWorkspace, name_to_idx::Dict{String, Int}, data::Data,
+                     agp::ActivityGP)
+    @inbounds for k in eachindex(w.index_keys)
+        key = w.index_keys[k]
+        (key[1] === agp && key[2] === name_to_idx && key[3] === data.rv &&
+         key[4] === data.indicators && key[5] === data.indicator_errs) &&
+            return w.index[k]
+    end
+    ix = _agp_index(name_to_idx, data, agp)
+    # A workspace serves one run, so a handful of entries is the most it
+    # needs; start over rather than grow if it is handed many datasets.
+    if length(w.index_keys) >= 8
+        empty!(w.index_keys); empty!(w.index)
+    end
+    push!(w.index_keys, (agp, name_to_idx, data.rv, data.indicators,
+                         data.indicator_errs))
+    push!(w.index, ix)
+    return ix
+end
+
+# Coefficient buffers (length C) and channel-stacked buffers (length n).
+function _agp_coef_buffers!(w::AGPWorkspace, C::Int)
+    resize!(w.chan_a, C); resize!(w.chan_b, C); resize!(w.jit2, C)
+    return w.chan_a, w.chan_b, w.jit2
+end
+function _agp_flat_buffers!(w::AGPWorkspace, n::Int)
+    resize!(w.y_flat, n); resize!(w.σ²_flat, n)
+    return w.y_flat, w.σ²_flat
 end
 
 function _agp_resize!(w::AGPWorkspace, N::Int)
