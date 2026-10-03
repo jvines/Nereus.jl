@@ -108,6 +108,8 @@ const TEST_UNITS = [
     (name = "test_evidence_headline.jl", seconds = 6, files = ["test_evidence_headline.jl"]),
     (name = "test_mode_laplace.jl", seconds = 6, files = ["test_mode_laplace.jl"]),
     (name = "verify_rajpaul_kernel_fd.jl", seconds = 1, files = ["verify_rajpaul_kernel_fd.jl"]),
+    (name = "test_plot_corner_thinning.jl", seconds = 20, files = ["test_plot_corner_thinning.jl"]),
+    (name = "test_plot_trace_thinning.jl", seconds = 20, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 1, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 5, files = ["test_plot_patterns.jl"]),
