@@ -313,17 +313,29 @@ draw with (`rv_log_likelihood(theta, data, ws)`, `transit_log_likelihood(theta,
 data, ws)`) and the evaluator's own `Theta`, so that a call does not allocate
 the likelihood's buffers afresh.
 
-The RV part is bit-identical to the other method's. The photometry differs by
-rounding: the workspace path computes each cadence's sky separation by an
-equivalent route (sin(ω+f) by the angle-sum identity) and sums every cadence
-in one pass, where the other sums fixed chunks and then the chunk totals.
-Measured on the HD 18599 joint fit with a 20k-point light curve: up to 5e-9
-in log L near the posterior (1e-14 relative), and at most 5e-13 relative on
-prior draws.
+It is the same function as `_logdensity_parts` up to rounding, not to the bit:
 
-A fit with a gravity-darkened planet evaluates the photometry by the
-allocating method, as `_logdensity_parts` does, because the workspace method
-has no gravity darkening (see `_bridge_phot_ws`).
+- RV without noise models: the workspace method (`_rv_ll_no_noise(theta, data,
+  ws)`) caches each planet's velocity curve and computes cos(f+ω) by the
+  angle-sum identity, so its log L differs in the last bits at most points.
+  Measured up to 2.4e-9 nats on the HD 18599 white-noise fit without the
+  floor, and 2.4e-7 nats on prior draws of an RV + astrometry fit. With noise
+  models it evaluates each cadence as the other method does, and gave the same
+  bits on every fit measured (GP rotation, activity GP, activity
+  decorrelation, error scale, white noise with the floor, the
+  trans-dimensional job, RM with tomography).
+- Photometry: the workspace method computes each cadence's sky separation by
+  the same angle-sum route and sums every cadence in one pass, where the other
+  sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
+  a 20k-point light curve the whole log density differs by at most 5.4e-9 nats
+  near the reference point, and on prior draws by at most 1e-11 relative
+  (3.1e-13 with the GP rotation, 9.7e-12 with activity decorrelation).
+- Gravity darkening: the workspace method has none, so a fit with a :GD planet
+  takes the allocating photometry, as `_logdensity_parts` does
+  (`_bridge_phot_ws`). So do TTV fits, exposures longer than 2 min and
+  photometric noise models, which the workspace method hands over itself. In
+  those cases the photometry gives the same bits as in `_logdensity_parts`, as
+  the tomogram always does.
 """
 function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
     target = ev.target

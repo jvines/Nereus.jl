@@ -2,13 +2,14 @@
 # (src/samplers/bridge.jl, `_bridge_logdensity!`), the ones pt_emcee and the
 # other samplers draw with, instead of the allocating `_logdensity_parts`.
 #
-# The two are the same function up to rounding. The RV part is bit-identical;
-# the photometry is not: the workspace path computes each cadence's sky
-# separation by a different but equivalent route (sin(ω+f) by the angle-sum
-# identity) and sums every cadence in one pass, where `_logdensity_parts` sums
-# fixed 4096-point chunks and then the chunk totals. Near the posterior of a
-# 20k-point light curve they differ by ~1e-9 in log L, ~1e-14 relative.
-# Anything larger is a bug in one of the two, not rounding.
+# The two are the same function up to rounding, not to the bit. Without noise
+# models the workspace RV method caches each planet's velocity curve and
+# computes cos(f+ω) by the angle-sum identity; the workspace photometry
+# computes each cadence's sky separation by the same route and sums every
+# cadence in one pass, where `_logdensity_parts` sums fixed 4096-point chunks
+# and then the chunk totals. Near the posterior of a 20k-point light curve
+# they differ by ~1e-9 in log L, ~1e-14 relative. Anything larger is a bug in
+# one of the two, not rounding.
 using Test, Nereus, Random, MCMCChains
 using Nereus: _BridgeEvaluator, _bridge_logdensity!, _logdensity_parts
 
@@ -196,5 +197,46 @@ end
         l_true = at(20.0, -60.0)
         @test l_true - at(85.0, -60.0) > 100
         @test l_true - at(20.0, 30.0) > 100
+    end
+end
+
+# RV-only fits, where the RV is the whole likelihood. Without noise models the
+# workspace RV method is not bit-identical to the other one (see the header);
+# with them it evaluates each cadence the same way. Either way the evaluator
+# must agree with `_logdensity_parts` to rounding, over the prior and near
+# the best point, with eccentricities up to 0.9.
+@testset "bridge evaluator on RV-only fits, with and without noise models" begin
+    rng = MersenneTwister(41)
+    t = sort!(500 .* rand(rng, 80))
+    rv = 25 .* sin.(2π .* (t .- 1.0) ./ 7.3) .+ 8 .* sin.(2π .* (t .- 3.0) ./ 41.0) .+
+         3 .* randn(rng, 80)
+    pl = (b = (P = UniformPrior(7.0, 7.6), Tc = UniformPrior(0.5, 1.5), K = UniformPrior(1.0, 60.0),
+               sesinw = UniformPrior(-0.95, 0.95), secosw = UniformPrior(-0.95, 0.95)),
+          c = (P = UniformPrior(38.0, 44.0), Tc = UniformPrior(1.0, 5.0), K = UniformPrior(1.0, 30.0),
+               sesinw = UniformPrior(-0.95, 0.95), secosw = UniformPrior(-0.95, 0.95)))
+    rvd = (SIM = (data = (t = t, rv = rv, rv_err = fill(3.0, 80)),
+                  sigma = LogUniformPrior(0.1, 20.0)),)
+    for nm in (nothing, [MaternGP()])
+        tg = build_target(planets = pl, rv = rvd, noise_models = nm)
+        @test isempty(tg.data.t_phot)
+        @test isempty(tg.params.config.noise_models) == (nm === nothing)
+        r2 = MersenneTwister(5)
+        xs = [Nereus._draw_from_prior(tg, r2) for _ in 1:150]
+        ys = [Nereus.transform_forward(x, tg.transform) for x in xs]
+        best = xs[argmax([_ref(tg, y) for y in ys])]
+        pri = tg.params.layout.unfrozen_priors
+        for _ in 1:150
+            x = [clamp(v + 1e-3 * (p.hi - p.lo) * randn(r2), p.lo + 1e-9, p.hi - 1e-9)
+                 for (v, p) in zip(best, pri)]
+            push!(ys, Nereus.transform_forward(x, tg.transform))
+        end
+        ev = _BridgeEvaluator(tg)
+        ref = [_ref(tg, y) for y in ys]
+        got = [_bridge_logdensity!(ev, y) for y in ys]
+        fin = isfinite.(ref)
+        @test isfinite.(got) == fin
+        @test count(fin) >= 250
+        @test maximum(abs.(got[fin] .- ref[fin]) ./ max.(1.0, abs.(ref[fin]))) < 1e-12
+        @test maximum(abs(got[i] - ref[i]) for i in 151:300 if fin[i]) < 1e-8
     end
 end
