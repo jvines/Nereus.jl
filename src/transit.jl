@@ -172,6 +172,14 @@ We compute the exact formula using the full orbital position.
 """
 function sky_separation(t::Real, P::Real, e::Real, ω::Real,
                          Tp::Real, b::Real, a_Rs::Real)
+    return _sky_separation_signed(t, P, e, ω, Tp, b, a_Rs)[1]
+end
+
+# `sky_separation`'s z together with sin(ω+f), which is > 0 when the planet is
+# in front of the star (transit side) and <= 0 behind it (occultation side). z
+# alone cannot tell the two apart: it depends on sin²(ω+f) only.
+@inline function _sky_separation_signed(t::Real, P::Real, e::Real, ω::Real,
+                                        Tp::Real, b::Real, a_Rs::Real)
     two_pi = oftype(t, 2π)
     M = two_pi * (t - Tp) / P
     E = kepler_solve(M, e)
@@ -189,7 +197,7 @@ function sky_separation(t::Real, P::Real, e::Real, ω::Real,
     # Sky-projected separation
     sin_wf, cos_wf = sincos(ω + f)
     z = a_Rs * r_over_a * sqrt(max(1 - sin_i_sq * sin_wf^2, zero(t)))
-    return z
+    return z, sin_wf
 end
 
 """

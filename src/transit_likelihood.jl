@@ -55,7 +55,8 @@ const _PHOT_REDUCE_CHUNK = 4096
         z = a_Rs * r_over_a *
             sqrt(max(1 - sin_i_sq * sin_wf * sin_wf, 0.0))
         ld_i = lds[data.phot_inst[i]]
-        flux_cache[j, i] = transit_flux(ld_i, z, rr)
+        # Behind the star (sin(ω+f) <= 0) it is an occultation: no dip.
+        flux_cache[j, i] = sin_wf > 0 ? transit_flux(ld_i, z, rr) : 1.0
     end
     return nothing
 end
@@ -103,7 +104,8 @@ end
         z = a_Rs * r_over_a *
             sqrt(max(1 - sin_i_sq * sin_wf * sin_wf, 0.0))
         ld_i = lds[data.phot_inst[i]]
-        flux_cache[j, i] = transit_flux(ld_i, z, rr)
+        # Behind the star (sin(ω+f) <= 0) it is an occultation: no dip.
+        flux_cache[j, i] = sin_wf > 0 ? transit_flux(ld_i, z, rr) : 1.0
     end
     return nothing
 end
@@ -155,6 +157,191 @@ function _phot_n_super(data::Data)
         (isfinite(e) && e > mx) && (mx = e)
     end
     return _phot_n_super_point(mx)
+end
+
+# Quantities that depend on the photometry alone, cached per workspace and filled
+# on first use. A workspace is already bound to one dataset (its transit flux
+# cache is indexed by cadence), so nothing here needs a data key. Not part of a
+# checkpoint (`_WS_NOT_SAVED`): it is rebuilt from the data on the first call
+# after a resume, and the data itself is in the run fingerprint.
+mutable struct PhotDataCache
+    n_super::Int        # _phot_n_super(data); 0 = not computed yet (it is >= 1)
+    # Time order of the cadences, for `_phot_window_indices!`. `t_phot` is not
+    # sorted across instruments. Built on first use (`order_built`).
+    order_built::Bool
+    sortable::Bool              # every t_phot finite
+    perm::Vector{Int}           # t_phot[perm] == t_sorted
+    t_sorted::Vector{Float64}
+end
+PhotDataCache() = PhotDataCache(0, false, false, Int[], Float64[])
+
+function _phot_time_order!(data::Data, cache::PhotDataCache)
+    if !cache.order_built
+        t = data.t_phot
+        cache.sortable = all(isfinite, t)
+        if cache.sortable
+            cache.perm = sortperm(t)
+            cache.t_sorted = t[cache.perm]
+        end
+        cache.order_built = true
+    end
+    return cache
+end
+
+# Append to `idx` every cadence i with |Δt| <= hw, where Δt = t_i - Tc folded
+# by P: the same set, from the same expression, as testing all n_obs cadences,
+# but only the cadences within hw + δ of a transit centre are tested, found by
+# binary search in the time order. δ is far above the rounding of the folded Δt
+# and of Tc + mP, so no cadence the test accepts is missed. Indices come in time
+# order, not index order; each one's flux is computed on its own, so the order
+# changes nothing. Falls back to the full scan when the window is not narrow
+# (hw >= P/4, NaN), or an input or a cadence time is not finite.
+function _phot_window_indices!(idx::Vector{Int}, data::Data, cache::PhotDataCache,
+                               Tc::Float64, P::Float64, hw::Float64)
+    t_phot = data.t_phot
+    n = length(t_phot)
+    n == 0 && return idx
+    _phot_time_order!(data, cache)
+    ts = cache.t_sorted
+    δ = cache.sortable ? 1e-6 + 1e-12 * (abs(ts[1]) + abs(ts[end]) + abs(Tc) + abs(P)) : 0.0
+    w = max(hw, 0.0) + δ
+    if !(cache.sortable && isfinite(Tc) && P > 0 && isfinite(P) && w < P / 4)
+        @inbounds for i in 1:n
+            Δt = t_phot[i] - Tc
+            Δt -= P * round(Δt / P)
+            abs(Δt) <= hw && push!(idx, i)
+        end
+        return idx
+    end
+    perm = cache.perm
+    fwd = Base.Order.Forward
+    r = 1
+    @inbounds while r <= n
+        c = Tc + round((ts[r] - Tc) / P) * P     # nearest transit centre
+        if ts[r] < c - w                          # before its window: jump in
+            r = searchsortedfirst(ts, c - w, r, n, fwd)
+        elseif ts[r] > c + w                      # after it: jump to the next
+            r = searchsortedfirst(ts, c + P - w, r, n, fwd)
+        else
+            hi = c + w
+            while r <= n && ts[r] <= hi
+                i = perm[r]
+                Δt = t_phot[i] - Tc
+                Δt -= P * round(Δt / P)
+                abs(Δt) <= hw && push!(idx, i)
+                r += 1
+            end
+        end
+    end
+    return idx
+end
+
+# `_phot_n_super(data)` reads every exposure time, about 20 us on 20k cadences,
+# and the workspace likelihood asked for it on every call.
+@inline function _phot_n_super(data::Data, cache::PhotDataCache)
+    n = cache.n_super
+    if n == 0
+        n = _phot_n_super(data)
+        cache.n_super = n
+    end
+    return n
+end
+
+# Longest finite positive exposure in the data (days); 0 when there is none.
+function _phot_max_exposure(data::Data)
+    mx = 0.0
+    @inbounds for e in data.exposure_times
+        (isfinite(e) && e > mx) && (mx = e)
+    end
+    return mx
+end
+
+# =====================================================================
+# Transit window: which cadences get a flux evaluation
+# =====================================================================
+#
+# A cadence's flux is computed only when it lies within ±T_dur_safe of the
+# transit centre Tc, folded by P; everywhere else it is taken as exactly 1.
+# Transits.compute returns exactly one(T) when z >= 1 + k, and a cadence with
+# the planet behind the star has flux 1, so a window that holds every cadence
+# with the planet in front and z < 1 + k changes no bits.
+#
+# The half-width used to be 2P(1+k)/(π a_R), about four circular
+# half-durations. That is not an upper bound: at high e it cut real transits
+# short (P = 4.137 d, k = 0.031, a_R = 12.7, b = 0.3, ω = -π/2 lost 4.4 % of
+# the in-transit cadences at e = 0.90 and 21 % at e = 0.93; at a_R = 3 the
+# loss starts near e = 0.8). The window is now `_transit_window_halfwidth`, a
+# bound from the orbit itself:
+#
+#     z = (r/R*) sqrt(1 - sin²i sin²(ω+f)) >= (r/R*)|cos(ω+f)| >= a_R (1-e)|cos(ω+f)|
+#
+# so z < 1 + k needs |cos(ω+f)| < s = (1+k)/(a_R(1-e)), i.e. f within asin(s)
+# of a conjunction. Around the transit conjunction f_c = π/2 - ω the half-width
+# is the longer of the two mean-anomaly spans f_c -> f_c ± asin(s), through
+# Kepler's equation, in time. Both formulas for z (`sky_separation`, the
+# refresh in `_phot_sparse_refresh`, and `planet_sky_position` for gravity
+# darkening) satisfy the inequality.
+#
+# Margins: ×(1 + 1e-9) and +1e-8 rad of mean anomaly, which covers the Kepler
+# solver's 1e-10 tolerance and the rounding of M = 2π(t - Tp)/P for |t - Tp| up
+# to ~10⁶ periods; plus 8 ulp of the epoch for the rounding of Tc itself.
+#
+# Inf (no bound: every cadence is evaluated) when s >= 1 (periastron within
+# 1 + k stellar radii), when e is outside [0, 0.9999) (above that
+# `true_anomaly` clamps e, so sky_separation's f is not the f of this map), or
+# when an input is not a finite positive number.
+
+# Plain Float64 of a likelihood input (strips ForwardDiff duals). A type it
+# cannot strip gives NaN, and with it no bound: every cadence is evaluated.
+@inline _gate_float(x::Float64) = x
+@inline _gate_float(x::ForwardDiff.Dual) = _gate_float(ForwardDiff.value(x))
+@inline _gate_float(x::Real) = x isa AbstractFloat ? Float64(x) : NaN
+
+@inline function _mean_anomaly_from_true(f::Float64, e::Float64, q::Float64)
+    E = 2 * atan(tan(f / 2) * q)          # q = sqrt((1-e)/(1+e))
+    return E - e * sin(E)
+end
+
+function _transit_window_halfwidth(P::Float64, e::Float64, ω::Float64, k::Float64,
+                                   aR::Float64, tscale::Float64)
+    (0.0 <= e < 0.9999) || return Inf
+    (P > 0 && aR > 0 && k >= 0 && isfinite(P) && isfinite(aR) && isfinite(k) &&
+     isfinite(ω) && isfinite(tscale)) || return Inf
+    s = (1 + k) / (aR * (1 - e))
+    s < 1 || return Inf
+    Δf = asin(s)
+    q  = sqrt((1 - e) / (1 + e))
+    fc = π / 2 - ω
+    Mc = _mean_anomaly_from_true(fc, e, q)
+    d1 = abs(rem2pi(_mean_anomaly_from_true(fc + Δf, e, q) - Mc, RoundNearest))
+    d2 = abs(rem2pi(Mc - _mean_anomaly_from_true(fc - Δf, e, q), RoundNearest))
+    hw_M = max(d1, d2) * (1 + 1e-9) + 1e-8
+    return hw_M * P / (2π) + 8 * eps(tscale)
+end
+
+# Every transiting planet's window (non-workspace paths): the bound plus `pad`,
+# the furthest a supersampling sub-sample lies from its cadence (half the
+# longest exposure; 0 without supersampling), plus, for a TTV planet, the
+# largest |δt| of its transits, since its flux is evaluated at t - δt. A NaN
+# anywhere gives a NaN window, which skips no cadence.
+function _set_transit_windows!(T_dur_safe, n_transit::Int, transits, r_for_j, ttv_state,
+                               Ps, es, ws, rrs, a_Rs, Tc_centers, Tps, pad::Float64)
+    @inbounds for j in 1:n_transit
+        transits[j] || continue
+        tscale = max(abs(_gate_float(Tc_centers[j])), abs(_gate_float(Tps[j])))
+        hw = _transit_window_halfwidth(_gate_float(Ps[j]), _gate_float(es[j]),
+                                       _gate_float(ws[j]), _gate_float(rrs[j]),
+                                       _gate_float(a_Rs[j]), tscale) + pad
+        if r_for_j[j] > 0
+            shift = 0.0
+            for δ in ttv_state.δts[r_for_j[j]]
+                shift = max(shift, abs(_gate_float(δ)))
+            end
+            hw += shift
+        end
+        T_dur_safe[j] = hw
+    end
+    return T_dur_safe
 end
 
 # Supersampling factor for ONE cadence, from that cadence's own exposure (days).
@@ -241,8 +428,10 @@ end
                                                     bs[j], a_Rs[j])
                     fsum += transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
                 else
-                    zs = sky_separation(tsub, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
-                    fsum += transit_flux(ld, zs, rrs[j])
+                    zs, sw = _sky_separation_signed(tsub, Ps[j], es[j], ws[j], Tps[j],
+                                                    bs[j], a_Rs[j])
+                    # Behind the star (sin(ω+f) <= 0): an occultation, no dip.
+                    fsum += sw > 0 ? transit_flux(ld, zs, rrs[j]) : one(T)
                 end
             end
             tprod *= fsum / ns
@@ -251,8 +440,8 @@ end
                                             bs[j], a_Rs[j])
             tprod *= transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
         else
-            z = sky_separation(t_eff, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
-            tprod *= transit_flux(ld, z, rrs[j])
+            z, sw = _sky_separation_signed(t_eff, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
+            tprod *= sw > 0 ? transit_flux(ld, z, rrs[j]) : one(T)
         end
     end
     return tprod
@@ -305,7 +494,13 @@ Gaussian log-likelihood of photometric (transit) observations.
 Only planets with transit geometry (PMOnlyBlock or RVPMBlock) and
 passing the geometry gate (b < 1 + Rp/Rs) contribute.
 """
-function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
+transit_log_likelihood(theta::Theta, data::Data) =
+    _transit_ll_direct(theta, data, _phot_n_super(data))
+
+# The body of `transit_log_likelihood(theta, data)`, with the dataset's
+# supersampling factor passed in so the workspace method, which caches it, can
+# fall back here without scanning every exposure time again.
+function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) where {T}
     n_obs = length(data.t_phot)
     n_obs > 0 || return zero(T)
 
@@ -409,20 +604,16 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
             gd_lams[j] = planet_lambda(theta, k)
         end
 
-        # Phase-distance early-out cache — circular-orbit Tc (good
-        # enough for the "clearly out of window" check; if e is
-        # nontrivial we just fall through to the exact sky_separation
-        # for borderline points). T_dur upper bound: 2 × P/π · (1+rr)/(a/R*)
-        # gives ~3-4× the actual full-transit half-duration even for
-        # high e; safe in the sense that only points truly far from
-        # the window get short-circuited.
+        # Phase-distance early-out cache: the window half-width T_dur_safe
+        # is set after the TTV decode (`_set_transit_windows!`), from a bound
+        # that holds every cadence with the planet in front and z < 1 + rr.
         # Tc_centers must be the *true* transit center (mid-conjunction).
         # `Tps + P/4` is the CIRCULAR-orbit approximation — wrong by up
         # to ~e·P for ω near ±π/2, large enough that the T_dur_safe
         # phase gate folds the wrong window and skips the actual transit
         # entirely. tp_to_tc recovers Tc exactly via the Kepler inverse.
         Tc_centers[j] = tp_to_tc(Tps[j], Ps[j], es[j], ws[j])
-        T_dur_safe[j] = 2 * Ps[j] / T(π) * (1 + rrs[j]) / a_Rs[j]
+        T_dur_safe[j] = T(Inf)        # set by _set_transit_windows!
     end
 
     any(transits) || return _phot_ll_no_transit(theta, data)
@@ -481,6 +672,9 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
                             Ps, es, ws, Tps, bs, a_Rs, t_max)
         end
     end
+    _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
+                          rrs, a_Rs, Tc_centers, Tps,
+                          n_super_data > 1 ? _phot_max_exposure(data) / 2 : 0.0)
 
     # --- Limb darkening per instrument (via precomputed indices) ------
     systemic = theta.params.layout.systemic
@@ -542,7 +736,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
             jitters[ix] = pm_jitter(theta, ix)
             dilutions[ix] = pm_dilution(theta, ix)
         end
-        n_super = _phot_n_super(data)
+        n_super = n_super_data
         has_exp = !isempty(data.exposure_times)
         trends_c = _phot_trend_cache(theta, n_pm)
         inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
@@ -636,7 +830,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
         jitters_s[ix] = pm_jitter(theta, ix)
         dilutions_s[ix] = pm_dilution(theta, ix)
     end
-    n_super_s = _phot_n_super(data)
+    n_super_s = n_super_data
     has_exp_s = !isempty(data.exposure_times)
     trends_cs = _phot_trend_cache(theta, n_pm_s)
     inv_th_s = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
@@ -870,7 +1064,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         # phase gate folds the wrong window and skips the actual transit
         # entirely. tp_to_tc recovers Tc exactly via the Kepler inverse.
         Tc_centers[j] = tp_to_tc(Tps[j], Ps[j], es[j], ws[j])
-        T_dur_safe[j] = 2 * Ps[j] / T(π) * (1 + rrs[j]) / a_Rs[j]
+        T_dur_safe[j] = T(Inf)        # set by _set_transit_windows!
     end
 
     gd_state = nothing
@@ -906,6 +1100,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
                             Ps, es, ws, Tps, bs, a_Rs, t_max)
         end
     end
+    _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
+                          rrs, a_Rs, Tc_centers, Tps,
+                          n_super_p > 1 ? _phot_max_exposure(data) / 2 : 0.0)
 
     # Threaded for Float64 (no Duals = no GC thrashing), serial otherwise.
     if T <: AbstractFloat
@@ -1109,16 +1306,17 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     # (no δts), so it cannot detect cache invalidation when TTV offsets
     # change. For TTV fits, route through the non-cached variant which
     # recomputes per-point sky_separation every call.
+    n_super_data = _phot_n_super(data, ws.phot_data)
     if _has_active_ttv(theta, p_idx)
-        return transit_log_likelihood(theta, data)
+        return _transit_ll_direct(theta, data, n_super_data)
     end
 
     # Finite-exposure bypass: the analytic flux-cache evaluates the transit at
     # cadence MIDPOINTS only. When long-cadence supersampling is required
     # (Kipping 2010), route through the non-cached variant which integrates the
     # model over each exposure. Short/absent exposures (n_super==1) keep the cache.
-    if _phot_n_super(data) > 1
-        return transit_log_likelihood(theta, data)
+    if n_super_data > 1
+        return _transit_ll_direct(theta, data, n_super_data)
     end
 
     Ps   = ws.transit_Ps
@@ -1342,14 +1540,12 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
                 # the phase gate fold the wrong window → high-e/grazing transits
                 # silently vanish). Mirrors the non-ws path (tp_to_tc).
                 Tc_center = tp_to_tc(Tpj, Pj, ej, wj)
-                T_dur_safe = 2 * Pj / π * (1 + rrj) / aj
-                @inbounds for i in 1:n_obs
-                    Δt = data.t_phot[i] - Tc_center
-                    Δt -= Pj * round(Δt / Pj)
-                    if abs(Δt) <= T_dur_safe
-                        push!(old_idx, i)
-                    end
-                end
+                # Every cadence with the planet in front and z < 1 + rr (Inf,
+                # i.e. all cadences, where the orbit gives no bound).
+                T_dur_safe = _transit_window_halfwidth(Pj, ej, wj, rrj, aj,
+                                                       max(abs(Tc_center), abs(Tpj)))
+                _phot_window_indices!(old_idx, data, ws.phot_data, Tc_center, Pj,
+                                      T_dur_safe)
 
                 # 3. Compute flux at the in-transit indices. Threaded
                 # only when N is large enough to amortize spawn overhead;
@@ -1409,5 +1605,5 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     # Serial path (phot ARMA / GP) — fall back to the allocating
     # variant. The per-cadence n_obs buffers there have a different
     # lifetime than `ws.transit_*` and aren't worth threading through.
-    return transit_log_likelihood(theta, data)
+    return _transit_ll_direct(theta, data, n_super_data)
 end

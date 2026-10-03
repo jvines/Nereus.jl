@@ -632,6 +632,11 @@ mutable struct PTWorkspace
     # the white-noise path (no active phot AR/MA/GP). hash==0 ⇒ invalid.
     phot_ll_total_cache::Float64
     phot_ll_total_hash::UInt
+    # --- Transit track (perf/transit-gate): photometry-derived data ---
+    # Filled lazily from the data on first use (`PhotDataCache`, defined in
+    # transit_likelihood.jl). Listed in `_WS_NOT_SAVED`.
+    phot_data::PhotDataCache
+    # --- end transit track ---
 end
 
 # `max_donors` sizes the donor-birth scratch buffer. It must be ≥ the number
@@ -706,6 +711,8 @@ function PTWorkspace(params::Params, max_kplanet::Int, n_noise::Int=0;
         # Total phot-ll cache (Fix B): value + hash, seeded invalid (0).
         0.0,
         zero(UInt),
+        # Transit track: photometry-derived data, empty until first use.
+        PhotDataCache(),
     )
 end
 
@@ -1411,7 +1418,8 @@ end
 # The workspace: the RWM scales and their counters (adaptation state), and the
 # likelihood caches, which are restored as they were rather than rebuilt cold.
 # `scratch_theta` and `population` are proposal scratch that reference Params.
-const _WS_NOT_SAVED = (:scratch_theta, :population)
+# `phot_data` is derived from the data alone and is rebuilt on first use.
+const _WS_NOT_SAVED = (:scratch_theta, :population, :phot_data)
 
 function _ws_snapshot(ws::PTWorkspace)
     fs = Tuple(f for f in fieldnames(PTWorkspace) if f ∉ _WS_NOT_SAVED)
