@@ -93,13 +93,15 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     cols = [vec(Array(chains[:, Symbol(nm), :])) for nm in names]
     N = length(cols[1])
     pt = target.transform
-    Y = Matrix{Float64}(undef, d, N)
+    Y_all = Matrix{Float64}(undef, d, N)
     @inbounds for i in 1:N
         xi = Float64[cols[j][i] for j in 1:d]
-        Y[:, i] = pt === nothing ? xi : transform_forward(xi, pt)
+        Y_all[:, i] = pt === nothing ? xi : transform_forward(xi, pt)
     end
-    keep = vec(all(isfinite, Y; dims = 1))
-    Y = Y[:, keep]
+    keep = vec(all(isfinite, Y_all; dims = 1))
+    # Bound once: the threaded evaluation below captures `Y`, and a captured
+    # variable that is assigned twice is boxed.
+    Y = Y_all[:, keep]
     N1 = size(Y, 2)
     N1 >= 2d + 2 || return (; log_z = NaN, se = NaN, n_post = N1, n_prop = 0,
                               iters = 0, converged = false, overlap = NaN,
@@ -148,11 +150,12 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     # So they are drawn serially up front and only the evaluations are spread
     # out, each writing its own slot, and both arrays are filtered in index
     # order afterwards -- so what reaches `_bridge_iterate` is bit-identical to
-    # the serial version's, at any thread count.
+    # the serial version's, at any thread count. See `_bridge_eval!` for how
+    # the threads are used.
     v1 = Vector{Float64}(undef, N1)
-    Threads.@threads for i in 1:N1
+    _bridge_eval!(v1) do _, i
         y = @view Y[:, i]
-        v1[i] = logp(y) - logq(y)
+        logp(y) - logq(y)
     end
     l1 = Float64[v for v in v1 if isfinite(v)]
 
@@ -161,8 +164,8 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         Yp[:, i] = draw()
     end
     v2 = Vector{Float64}(undef, n_proposal)
-    Threads.@threads for i in 1:n_proposal
-        v2[i] = logp(@view Yp[:, i])
+    _bridge_eval!(v2) do _, i
+        logp(@view Yp[:, i])
     end
     l2 = Float64[]
     n_finite = 0
@@ -208,6 +211,60 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     return (; log_z = log_r, se = se, n_post = length(l1), n_prop = length(l2),
               iters = iters, converged = converged, overlap = overlap,
               proposal = proposal)
+end
+
+# Block of indices a thread takes from the shared counter in `_bridge_eval!`.
+# Small enough that the last blocks even out the finish across threads (a
+# joint-fit evaluation is ~1 ms), large enough that the counter is never
+# contended.
+const _BRIDGE_EVAL_BLOCK = 16
+
+"""
+    _bridge_ntasks(n) -> Int
+
+Number of tasks `_bridge_eval!` runs for `n` evaluations: one per thread, but
+never more than there are blocks of work.
+"""
+_bridge_ntasks(n::Integer) = n <= 0 ? 0 : min(_nthread_chunks(), cld(n, _BRIDGE_EVAL_BLOCK))
+
+"""
+    _bridge_eval!(f, out) -> out
+
+`out[i] = f(c, i)` for every index of `out`, on all threads, where `c` in
+`1:_bridge_ntasks(length(out))` numbers the task making the call, so that `f`
+can keep scratch per task.
+
+One task per thread, each taking blocks of `_BRIDGE_EVAL_BLOCK` indices from a
+shared counter until none are left, so a thread on a slow core or one that
+draws cheap points (a proposal outside the support returns at the prior) does
+not hold up the rest. Every `out[i]` is computed by one call and written once,
+so the result does not depend on which thread computed it or on the thread
+count.
+
+When there is a task for every thread, each one is marked with
+`_serial_inner_loops!`: every thread already has evaluations of its own, and
+the photometry's threaded reduction (`transit_likelihood.jl`) would otherwise
+spawn one task per thread on every call, which only queue behind the other
+threads' evaluations and allocate. That reduction sums fixed chunks combined
+in order, so running it serially gives the same bits.
+"""
+function _bridge_eval!(f::F, out::AbstractVector{Float64}) where {F}
+    n = length(out)
+    n_tasks = _bridge_ntasks(n)
+    n_tasks == 0 && return out
+    fills_threads = n_tasks >= Threads.nthreads()
+    next = Threads.Atomic{Int}(1)
+    Threads.@threads for c in 1:n_tasks
+        fills_threads && _serial_inner_loops!()
+        while true
+            lo = Threads.atomic_add!(next, _BRIDGE_EVAL_BLOCK)
+            lo > n && break
+            for i in lo:min(lo + _BRIDGE_EVAL_BLOCK - 1, n)
+                @inbounds out[i] = f(c, i)
+            end
+        end
+    end
+    return out
 end
 
 # Fixed-point iteration in log space. l1 are log(p*/q) at posterior draws,
