@@ -1155,6 +1155,9 @@ const _VALID_EXTERNAL_QUANTITIES = (:ecc, :rho_s)
 # ObliquityConfig — options of the RM / Doppler-tomography model
 # =====================================================================
 
+# Default floor (m/s) on the derived ARoME β_p; see `ObliquityConfig`.
+const DEFAULT_BETA_P_FLOOR = 2000.0
+
 """
     ObliquityConfig(; sigma0, beta_p_floor, occultation, spec_ld, shared_alpha)
 
@@ -1175,9 +1178,11 @@ configuration (see `docs/src/obliquity.md`).
   the ARoME prefactor rescale the anomaly -- a free RM amplitude. Must cover
   every RV instrument when non-empty.
 - `beta_p_floor::Float64` -- lower limit (m/s) on the derived `β_p`:
-  `β_p = sqrt(max(σ₀² − (0.5503 v sin i)², floor²))`. `0` (default) is the
-  formula as written; a positive value keeps β_p physical when v sin i
-  approaches σ₀/0.5503.
+  `β_p = sqrt(max(σ₀² − (0.5503 v sin i)², floor²))`. Default
+  `DEFAULT_BETA_P_FLOOR` = 2 km/s: β_p is the width of the local line,
+  instrumental plus thermal broadening, which no spectrograph and no A-F star
+  brings below about 2 km/s, so the floor keeps β_p physical where v sin i
+  approaches σ₀/0.5503 instead of letting it reach 0. Only used with `sigma0`.
 - `occultation::Symbol` -- the occulted flux fraction `f` of the RM anomaly.
   `:disc` (default): the exact overlap of the planet's disc with the
   limb-darkened star, nonzero from first to fourth contact. `:point`: the
@@ -1210,7 +1215,7 @@ struct ObliquityConfig
     end
 end
 
-ObliquityConfig(; sigma0 = Dict{String,Float64}(), beta_p_floor::Real = 0.0,
+ObliquityConfig(; sigma0 = Dict{String,Float64}(), beta_p_floor::Real = DEFAULT_BETA_P_FLOOR,
                   occultation::Symbol = :disc, spec_ld::Bool = false,
                   shared_alpha::Bool = false) =
     ObliquityConfig(Dict{String,Float64}(String(k) => Float64(v) for (k, v) in sigma0),
@@ -1218,7 +1223,7 @@ ObliquityConfig(; sigma0 = Dict{String,Float64}(), beta_p_floor::Real = 0.0,
 
 "`true` when `o` is the default `ObliquityConfig()` (the pre-option model)."
 is_default_obliquity(o::ObliquityConfig) =
-    isempty(o.sigma0) && o.beta_p_floor == 0 && o.occultation === :disc &&
+    isempty(o.sigma0) && o.beta_p_floor == DEFAULT_BETA_P_FLOOR && o.occultation === :disc &&
     !o.spec_ld && !o.shared_alpha
 
 # =====================================================================

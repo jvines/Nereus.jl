@@ -27,7 +27,7 @@ the MEASURED dispersion of the night's out-of-transit CCF, and the sub-planet
 width follows from it at every evaluation,
 
 ```
-β_p² = σ0_n² − (0.5503 v sin i)²        (floored at `beta_p_floor`, default 0)
+β_p² = σ0_n² − (0.5503 v sin i)²        (floored at `beta_p_floor`, default 2000 m/s: the local line cannot be narrower)
 ```
 
 so the amplitude is fixed by v sin i, R_p/R★ and the limb darkening, with
@@ -152,7 +152,7 @@ Any of them can be overridden by name through the job's `priors` block (or the
       "limb_darkening": [0.32, 0.30],    // quadratic u1, u2 of the spectroscopic band;
                                          // required without transit_photometry
       "occultation": "disc",             // "disc" (default) | "point"
-      "beta_p_floor": 0.0,               // m/s
+      "beta_p_floor": 2000.0,            // m/s, the default
       "shared_alpha": false,
       "ecc": 0,                          // 0 (circular, default) | "free"
       "lambda": "wrapped",               // "wrapped" (default) | "bounded"

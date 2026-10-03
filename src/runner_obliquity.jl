@@ -349,7 +349,7 @@ function _build_obliquity_model(cfg, data::Data, inst_names_rv, inst_names_pm)
         :ecc => (ecc isa AbstractString && ecc == "free") ? :free : 0.0,
         :lambda_prior => Symbol(_get(ocfg, :lambda; default = "wrapped")),
         :sigma0 => (isempty(sigma0) ? nothing : sigma0),
-        :beta_p_floor => Float64(_get(ocfg, :beta_p_floor; default = 0.0)),
+        :beta_p_floor => Float64(_get(ocfg, :beta_p_floor; default = DEFAULT_BETA_P_FLOOR)),
         :occultation => Symbol(_get(ocfg, :occultation; default = "disc")),
         :ld => ld === nothing ? nothing : (Float64(ld[1]), Float64(ld[2])),
         :shared_alpha => Bool(_get(ocfg, :shared_alpha; default = false)),

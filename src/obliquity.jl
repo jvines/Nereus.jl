@@ -186,7 +186,8 @@ framework default.
   v sin i, R_p/R★ and the limb darkening with nothing free to rescale it.
   Without it, `arome = true` gives ARoME with one free (σ_ccf, β_p) pair, and
   the default is the flux-weighted kernel (`RVPM_RM`).
-- `beta_p_floor` (m/s, default 0): lower limit on the derived β_p.
+- `beta_p_floor` (m/s, default 2000): lower limit on the derived β_p, the width
+  of the local line (see `ObliquityConfig`).
 - `occultation` (`:disc` default, or `:point`): the occulted flux fraction --
   the exact disc overlap, or a point planet at its centre (see
   `ObliquityConfig`).
@@ -221,7 +222,7 @@ function obliquity_params(data::Data, inst_names::Vector{String};
                           ecc = 0.0,
                           lambda_prior::Symbol = :wrapped,
                           sigma0 = nothing,
-                          beta_p_floor::Real = 0.0,
+                          beta_p_floor::Real = DEFAULT_BETA_P_FLOOR,
                           occultation::Symbol = :disc,
                           ld = nothing,
                           shared_alpha::Bool = false,
