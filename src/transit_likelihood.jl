@@ -157,6 +157,27 @@ function _phot_n_super(data::Data)
     return _phot_n_super_point(mx)
 end
 
+# Quantities that depend on the photometry alone, cached per workspace and filled
+# on first use. A workspace is already bound to one dataset (its transit flux
+# cache is indexed by cadence), so nothing here needs a data key. Not part of a
+# checkpoint (`_WS_NOT_SAVED`): it is rebuilt from the data on the first call
+# after a resume, and the data itself is in the run fingerprint.
+mutable struct PhotDataCache
+    n_super::Int        # _phot_n_super(data); 0 = not computed yet (it is >= 1)
+end
+PhotDataCache() = PhotDataCache(0)
+
+# `_phot_n_super(data)` reads every exposure time, about 20 us on 20k cadences,
+# and the workspace likelihood asked for it on every call.
+@inline function _phot_n_super(data::Data, cache::PhotDataCache)
+    n = cache.n_super
+    if n == 0
+        n = _phot_n_super(data)
+        cache.n_super = n
+    end
+    return n
+end
+
 # Supersampling factor for ONE cadence, from that cadence's own exposure (days).
 # Same rule as above: ≈1-min sub-cadence, none at or below 2 min, capped at 30.
 # `_phot_n_super(data)` is the dataset maximum and only says whether any cadence
@@ -305,7 +326,13 @@ Gaussian log-likelihood of photometric (transit) observations.
 Only planets with transit geometry (PMOnlyBlock or RVPMBlock) and
 passing the geometry gate (b < 1 + Rp/Rs) contribute.
 """
-function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
+transit_log_likelihood(theta::Theta, data::Data) =
+    _transit_ll_direct(theta, data, _phot_n_super(data))
+
+# The body of `transit_log_likelihood(theta, data)`, with the dataset's
+# supersampling factor passed in so the workspace method, which caches it, can
+# fall back here without scanning every exposure time again.
+function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) where {T}
     n_obs = length(data.t_phot)
     n_obs > 0 || return zero(T)
 
@@ -542,7 +569,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
             jitters[ix] = pm_jitter(theta, ix)
             dilutions[ix] = pm_dilution(theta, ix)
         end
-        n_super = _phot_n_super(data)
+        n_super = n_super_data
         has_exp = !isempty(data.exposure_times)
         trends_c = _phot_trend_cache(theta, n_pm)
         inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
@@ -636,7 +663,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
         jitters_s[ix] = pm_jitter(theta, ix)
         dilutions_s[ix] = pm_dilution(theta, ix)
     end
-    n_super_s = _phot_n_super(data)
+    n_super_s = n_super_data
     has_exp_s = !isempty(data.exposure_times)
     trends_cs = _phot_trend_cache(theta, n_pm_s)
     inv_th_s = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
@@ -1076,16 +1103,17 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     # (no δts), so it cannot detect cache invalidation when TTV offsets
     # change. For TTV fits, route through the non-cached variant which
     # recomputes per-point sky_separation every call.
+    n_super_data = _phot_n_super(data, ws.phot_data)
     if _has_active_ttv(theta, p_idx)
-        return transit_log_likelihood(theta, data)
+        return _transit_ll_direct(theta, data, n_super_data)
     end
 
     # Finite-exposure bypass: the analytic flux-cache evaluates the transit at
     # cadence MIDPOINTS only. When long-cadence supersampling is required
     # (Kipping 2010), route through the non-cached variant which integrates the
     # model over each exposure. Short/absent exposures (n_super==1) keep the cache.
-    if _phot_n_super(data) > 1
-        return transit_log_likelihood(theta, data)
+    if n_super_data > 1
+        return _transit_ll_direct(theta, data, n_super_data)
     end
 
     Ps   = ws.transit_Ps
@@ -1327,5 +1355,5 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     # Serial path (phot ARMA / GP) — fall back to the allocating
     # variant. The per-cadence n_obs buffers there have a different
     # lifetime than `ws.transit_*` and aren't worth threading through.
-    return transit_log_likelihood(theta, data)
+    return _transit_ll_direct(theta, data, n_super_data)
 end
