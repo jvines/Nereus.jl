@@ -19,7 +19,8 @@
 #   modelling stellar activity signals in radial velocity data."
 
 using LinearAlgebra: Cholesky, cholesky, cholesky!, ldiv!, Symmetric, Diagonal,
-                     dot, logdet, diagind, I
+                     dot, logdet, diagind, I, UpperTriangular
+import ForwardDiff
 
 # =====================================================================
 # Quasi-periodic kernel + analytic derivatives
@@ -52,7 +53,6 @@ Rajpaul quasi-periodic kernel with overall amplitude `amp`, rotation
                                          λ_e::Real, λ_p::Real)
     # f(τ) and derivatives
     s = sin(π * τ / period)
-    c = cos(π * τ / period)
     s2 = sin(2π * τ / period)
     c2 = cos(2π * τ / period)
 
@@ -373,7 +373,6 @@ function activity_gp_covariance(t::AbstractVector{<:Real},
             #       = -τ/λe² - π/(2P λp²) sin(2πτ/P)
             # f''(τ) = -1/λe² - π²/(P² λp²) cos(2πτ/P)
             s     = sin(π_P * τ)
-            c     = cos(π_P * τ)
             s2    = sin(two_π_P * τ)
             c2    = cos(two_π_P * τ)
             f_val = -τ * τ * (0.5 * inv_λe2) - s * s * inv_2λp2
@@ -804,60 +803,605 @@ function activity_gp_decompose_rv(chains, params::Params, data::Data;
               rv_corrected, rv_corrected_err)
 end
 
+# Where an ActivityGP's inputs live: parameter indices in the layout, 0 where
+# there is no parameter (no amplitude in legacy layouts, no RV coupling in
+# indicators_only mode, no derivative coupling, no per-channel jitter), and the
+# data of each non-RV channel in `agp.channels` order. Resolving the names
+# builds strings, so the sampler path caches this in its AGPWorkspace.
+struct _AGPIndex
+    amp::Int
+    P::Int
+    λe::Int
+    λp::Int
+    Vc::Int
+    Vr::Int
+    names::Vector{String}           # the channels' keys in data.indicators
+    vals::Vector{Vector{Float64}}   # indicator values, parallel to the RVs
+    errs::Vector{Vector{Float64}}   # their 1σ uncertainties
+    a::Vector{Int}                  # coupling to G
+    b::Vector{Int}                  # coupling to Ġ (0: none)
+    jit::Vector{Int}                # per-channel jitter (0: none)
+end
+
+function _agp_index(name_to_idx::Dict{String, Int}, data::Data, agp::ActivityGP)
+    s = _gp_suffix(agp)
+    amp = get(name_to_idx, "gp_act_amp$s", 0)
+    P   = name_to_idx["gp_act_period$s"]
+    λe  = name_to_idx["gp_act_lambda_e$s"]
+    λp  = name_to_idx["gp_act_lambda_p$s"]
+    Vc  = agp.indicators_only ? 0 : name_to_idx["Vc$s"]
+    Vr  = (agp.use_derivative && !agp.indicators_only) ? name_to_idx["Vr$s"] : 0
+    n_rv_obs = length(data.rv)
+    names = String[]; vals_c = Vector{Float64}[]; errs_c = Vector{Float64}[]
+    a = Int[]; b = Int[]; jit = Int[]
+    for ch in agp.channels
+        ch === :rv && continue
+        name = String(ch)
+        haskey(data.indicators, name) || throw(ArgumentError(
+            "ActivityGP requires data.indicators[\"$name\"] for channel :$ch"))
+        haskey(data.indicator_errs, name) || throw(ArgumentError(
+            "ActivityGP requires data.indicator_errs[\"$name\"] for channel :$ch"))
+        vals = data.indicators[name]
+        errs = data.indicator_errs[name]
+        # Data-model invariant: indicators are parallel to the RV data (one
+        # value per RV epoch). The joint path places indicator k at epoch
+        # data.t_rv[k]; only valid when lengths match. Fail clearly rather
+        # than OOB (n_ind > n_rv) or silently-wrong epochs (n_ind < n_rv).
+        length(vals) == n_rv_obs && length(errs) == n_rv_obs ||
+            throw(ArgumentError(
+                "ActivityGP indicator :$ch has $(length(vals)) values (errs " *
+                "$(length(errs))) but there are $n_rv_obs RV observations — " *
+                "indicators must be parallel to the RV data (one value per " *
+                "RV epoch)."))
+        cg, cd = _ACTIVITY_GP_COEFFS[ch]
+        push!(a, name_to_idx[string(cg, s)])
+        push!(b, (cd === nothing || !agp.use_derivative) ? 0 :
+                 name_to_idx[string(cd, s)])
+        push!(jit, get(name_to_idx, "gp_act_jit_$(ch)$s", 0))
+        push!(names, name); push!(vals_c, vals); push!(errs_c, errs)
+    end
+    return _AGPIndex(amp, P, λe, λp, Vc, Vr, names, vals_c, errs_c, a, b, jit)
+end
+
+# Whether the indicator data an `_AGPIndex` holds is still what `data` holds:
+# the same vectors under each channel's key, still parallel to the RVs. The
+# vectors are held, not copied, so a change to their values is seen anyway;
+# this catches a vector replaced inside `data.indicators` or
+# `data.indicator_errs`, or resized. Two dictionary lookups per channel.
+function _agp_index_current(ix::_AGPIndex, data::Data)
+    n = length(data.rv)
+    @inbounds for k in eachindex(ix.names)
+        vals = ix.vals[k]; errs = ix.errs[k]
+        (get(data.indicators, ix.names[k], nothing) === vals &&
+         get(data.indicator_errs, ix.names[k], nothing) === errs &&
+         length(vals) == n && length(errs) == n) || return false
+    end
+    return true
+end
+
+# What an `_AGPIndex` was resolved from, compared by identity.
+const _AGPIndexKey = Tuple{ActivityGP, Dict{String, Int}, Vector{Float64},
+                           Dict{String, Vector{Float64}},
+                           Dict{String, Vector{Float64}}}
+
+"""
+    AGPWorkspace()
+
+Reusable buffers for the ActivityGP joint likelihood, held by each
+`PTWorkspace` (one per sampler slot) so the per-call matrices of
+[`activity_gp_joint_logpdf_lowrank!`](@ref) are allocated once. Empty until an
+ActivityGP is evaluated, and resized when the number of epochs `N` changes.
+Also caches the resolved parameter indices of each ActivityGP it has seen.
+"""
+mutable struct AGPWorkspace
+    # Parameter indices per (ActivityGP, layout, data), see `_agp_index!`.
+    index_keys::Vector{_AGPIndexKey}
+    index::Vector{_AGPIndex}
+    # Channel coefficients and jitter² (length C), channel-stacked
+    # residuals and variances (length C·N).
+    chan_a::Vector{Float64}
+    chan_b::Vector{Float64}
+    jit2::Vector{Float64}
+    y_flat::Vector{Float64}
+    σ²_flat::Vector{Float64}
+    # Low-rank solver buffers for N epochs.
+    N::Int
+    A::Matrix{Float64}       # 2N×2N I + R·K_g·Rᵀ, factored in place
+    bGG::Vector{Float64}     # N: the 2×2 blocks of B = Mᵀ D⁻¹ M
+    bGd::Vector{Float64}
+    bdd::Vector{Float64}
+    r11::Vector{Float64}     # N: their factors B_j = R_jᵀ R_j
+    r12::Vector{Float64}
+    r22::Vector{Float64}
+    v::Vector{Float64}       # 2N: Mᵀ D⁻¹ y
+    w::Vector{Float64}       # 2N: R⁻ᵀ v
+    t::Vector{Float64}       # 2N: U⁻ᵀ w, with A = UᵀU
+end
+
+function AGPWorkspace()
+    m() = Matrix{Float64}(undef, 0, 0)
+    z() = Float64[]
+    return AGPWorkspace(_AGPIndexKey[], _AGPIndex[], z(), z(), z(), z(), z(),
+                        0, m(), z(), z(), z(), z(), z(), z(), z(), z(), z())
+end
+
+# The `_AGPIndex` of `agp` under this layout and data: resolved by name on
+# first use, then looked up by identity and checked against the indicator
+# vectors `data` holds now (resolved again, and validated again, if one of
+# them was replaced).
+function _agp_index!(w::AGPWorkspace, name_to_idx::Dict{String, Int}, data::Data,
+                     agp::ActivityGP)
+    @inbounds for k in eachindex(w.index_keys)
+        key = w.index_keys[k]
+        if key[1] === agp && key[2] === name_to_idx && key[3] === data.rv &&
+           key[4] === data.indicators && key[5] === data.indicator_errs
+            ix = w.index[k]
+            _agp_index_current(ix, data) && return ix
+            ix = _agp_index(name_to_idx, data, agp)
+            w.index[k] = ix
+            return ix
+        end
+    end
+    ix = _agp_index(name_to_idx, data, agp)
+    # A workspace serves one run, so a handful of entries is the most it
+    # needs; start over rather than grow if it is handed many datasets.
+    if length(w.index_keys) >= 8
+        empty!(w.index_keys); empty!(w.index)
+    end
+    push!(w.index_keys, (agp, name_to_idx, data.rv, data.indicators,
+                         data.indicator_errs))
+    push!(w.index, ix)
+    return ix
+end
+
+# Coefficient buffers (length C) and channel-stacked buffers (length n).
+function _agp_coef_buffers!(w::AGPWorkspace, C::Int)
+    resize!(w.chan_a, C); resize!(w.chan_b, C); resize!(w.jit2, C)
+    return w.chan_a, w.chan_b, w.jit2
+end
+function _agp_flat_buffers!(w::AGPWorkspace, n::Int)
+    resize!(w.y_flat, n); resize!(w.σ²_flat, n)
+    return w.y_flat, w.σ²_flat
+end
+
+function _agp_resize!(w::AGPWorkspace, N::Int)
+    w.N == N && return w
+    n2 = 2N
+    w.A = Matrix{Float64}(undef, n2, n2)
+    for f in (:bGG, :bGd, :bdd, :r11, :r12, :r22)
+        setfield!(w, f, Vector{Float64}(undef, N))
+    end
+    for f in (:v, :w, :t)
+        setfield!(w, f, Vector{Float64}(undef, n2))
+    end
+    w.N = N
+    return w
+end
+
 """
     activity_gp_joint_logpdf_lowrank(epochs, chan_a, chan_b, amp, P, λe, λp,
                                       y_flat, σ²_flat) -> logpdf
 
-Marginal log-likelihood of the JOINT Rajpaul model exploiting the
-latent-variable LOW-RANK structure. The C channels all observe linear
-combinations `a_c·G(t) + b_c·Ġ(t)` of the SAME 2N-dimensional latent
+Marginal log-likelihood of the JOINT Rajpaul model through its latent
+low-rank structure. The C channels all observe linear combinations
+`a_c·G(t) + b_c·Ġ(t)` of the SAME 2N-dimensional latent
 `g = [G(t₁..N); Ġ(t₁..N)]`, so
 
     Σ = M·K_g·Mᵀ + D ,   M ∈ ℝ^{CN×2N},  K_g ∈ ℝ^{2N×2N},  D diagonal.
 
-Woodbury + the matrix-determinant lemma reduce the dominant factorization
-from the dense (C·N)² to (2N)² — for the 5-channel HD 18599 AGP that is
-228² vs 570², ~15× fewer flops. `Mᵀ D⁻¹ M` and `Mᵀ D⁻¹ y` are 2×2-block
-diagonals (built in O(CN)) because M is `a_c·δ`/`b_c·δ` structured.
+`B = Mᵀ D⁻¹ M` is block diagonal, one 2×2 block per epoch, and each block is
+factored exactly as `B_j = R_jᵀ R_j` (R_j upper triangular). With
+`A = I + R·K_g·Rᵀ` and `w = R⁻ᵀ·Mᵀ D⁻¹ y`, Woodbury and the
+matrix-determinant lemma give
+
+    log det Σ = log det D + log det A
+    yᵀ Σ⁻¹ y  = yᵀ D⁻¹ y − wᵀw + wᵀ A⁻¹ w
+
+A is built directly from the kernel and is the only matrix factored: one
+(2N)² Cholesky instead of the dense (C·N)² (228² against 570² for the
+five-channel HD 18599 fit). K_g itself is never factored, so it needs no
+jitter and may be singular. A rank-deficient block (no Ġ coupling, as with
+`use_derivative = false`, or no G coupling at an epoch) gets a zero row in R,
+and the identities above still hold exactly.
+
+The result is therefore the exact Gaussian log-density of Σ up to
+floating-point rounding. That rounding error grows with the conditioning of A
+(the signal-to-noise ratio and coherence length of the GP) as it does for a
+Float64 Cholesky of the dense Σ: it is the rounding of the kernel entries,
+amplified by that conditioning, in both. Measured against a BigFloat
+reference on the HD 18599 job, at 85 to 151 points per model (prior draws,
+prior-box corners, extreme hyperparameters, near-posterior and
+coupling-edge points, and the 12 points where the previous solver was
+furthest off), the largest errors seen were, with the Float64 dense
+Cholesky's at the same points in brackets: 3.6e-11 nats (1.5e-11) near the
+posterior with five channels; 6.5e-6 (6.6e-6) over all five-channel
+points; 1.5e-5 (1.6e-5) with RV + BIS and 1.8e-5 (1.8e-5) with
+RV + BIS + FWHM, at extreme draws where |log L| ~ 1e4. The medians were
+2e-10 to 3e-9. These are the largest errors in those samples, not bounds,
+and point by point either method's error can be the larger. With two or
+three channels A is as large as Σ (C = 2) or not much smaller, so there is
+no accuracy to gain over the dense Cholesky. test/test_activity_gp_lowrank.jl
+checks its own sample to 1e-10 nats.
+
+The whitening adds a second source of rounding error that the dense Cholesky
+does not have. Where the channels' couplings are nearly parallel, B_j is
+nearly rank 1, r22 = √(bĠĠ − bGĠ²/bGG) is computed from a difference that
+cancels, and w divides by it. (Exactly parallel couplings give r22 = 0 and
+are exact.) With five channels, 40 epochs and the Ġ couplings parallel to
+the G couplings to within 1e-7 to 1e-10, the error was up to 1.3e-7 nats,
+against at most 7e-13 for the dense Cholesky. On the HD 18599 job with
+RV + BIS, Br = 0 and Bc scaled by 1e-5, 1e-7 and 1e-9 at six prior draws, it
+was up to 2.8e-5 nats at |log L| ≈ 7e3, against 2.8e-6 for the dense
+Cholesky. That is above the 1.5e-5 quoted for RV + BIS in the sample above.
+
+Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked
+reals, any type that is not a plain float) take the same route, with two
+exceptions. R_j is a square root of B_j, so it is not differentiable where
+B_j is singular (every G coupling 0, every Ġ coupling 0, or all channels'
+(a_c, b_c) parallel), and its derivative loses accuracy as B_j approaches
+that. And w = R⁻ᵀ·Mᵀ D⁻¹ y divides by R, so when every coupling is tiny
+against the noise its derivatives cancel to a relative error of about
+eps/SNR. Such inputs take a route that is smooth there. That happens when a
+block's smaller eigenvalue is below 1e-10 of its larger, or when the GP's
+signal-to-noise is below 1e-6 at every epoch.
+
+With four or more channels the latent is conditioned on one epoch at a time
+(`_agp_sequential_logpdf!`). That route reads B rather than a square root
+of it and never inverts K_g. It uses A's (2N)² buffer and does about the
+work of A's Cholesky, so a derivative there costs what it costs anywhere
+else. On the five-channel HD 18599 job, a ReverseDiff gradient
+(`ADgradient(:ReverseDiff)`, tape not compiled) cost the following.
+
+- Every Ġ coupling 0: 1.7 s, 0.9 GB allocated, 3.9 GB peak memory. The
+  dense fallback this replaces took 34 s, 16 GB and 19 GB. The solver before
+  this branch took 4.9 s, 4.0 GB and 7.0 GB.
+- The prior-box centre: 1.7 s, 0.9 GB and 4.0 GB. The dense fallback took
+  50 s, 16 GB and 19 GB; the solver before this branch 7.6 s, 4.0 GB and
+  6.5 GB.
+- Building the tape that `sample_nuts(ad_backend = :ReverseDiff)` compiles
+  by default (at zeros(dim), where every coupling is 0): 43 s, 7.1 GB and
+  5.5 GB. The dense fallback took 110 s, 44 GB and 39 GB; the solver before
+  this branch 72 s, 14 GB and 13 GB.
+
+That tape records this route, which has no branch on the values, so the
+AGP part of it gives the right value and gradient wherever it is replayed.
+
+With two or three channels the fallback is the dense (C·N)² Cholesky. Its
+side C·N is at most 1.5 times A's 2N (about 3.4 times the work at C = 3,
+the same at C = 2), and it is what the likelihood used for every evaluation
+before this branch.
+
+A coupling that is a constant 0 (every Ġ coupling under
+`use_derivative = false`) is not a direction of the block and does not
+count. Only a plain number, or a ForwardDiff dual whose partials are all 0,
+is known to be one, so the likelihood passes the missing Ġ couplings of a
+tracked number type as `Float64` zeros.
+
+The eigenvalue test reads B_j in the solver's own units, in which Ġ carries
+one over time, so where it falls depends on the time unit and on the
+kernel. With the epochs in hours rather than days, a block's ratio moves by
+up to 24² either way while log L is unchanged. `_agp_blocks_smooth` says
+why the test is not made unit-free. On the HD 18599 job the fallback is
+taken at couplings that are exactly 0 (the prior-box centre and points
+derived from it). It is taken at none of 248 prior draws and 150
+near-posterior points with five channels, and at 2 of 236 prior draws with
+RV and logR'HK alone. `Float64` values are exact at singular blocks and
+always take the low-rank path.
+
+Below the thresholds the derivatives are those of the fallback. On
+synthetic singular blocks with two to five channels (every G coupling 0,
+every Ġ coupling 0, parallel couplings, every coupling 0, one channel
+uncoupled; one seed per configuration), gradients and Hessians agreed with
+the dense likelihood differentiated in BigFloat to 2e-14 or better on both
+fallbacks. The sequential route's rounding grows faster with the
+signal-to-noise than the whitened solve's or the dense Cholesky's, because
+its updates of K cancel once the latent is well determined. The earlier
+sample of HD 18599 points
+was made singular three ways (every Ġ coupling 0, every G coupling 0, and Ġ
+couplings proportional to G couplings; 585 points over the five-channel,
+use_derivative = false and four-channel models). Against BigFloat, the
+sequential route's largest value errors were 1.0e-5, 3.7e-6 and 1.7e-4 nats
+in those three cases, against 1.0e-5, 3.7e-6 and 6.8e-6 for the dense
+Cholesky. Its largest relative errors in a directional derivative were
+1.2e-7, 1.5e-8 and 2.0e-6, against 1.2e-7, 1.4e-8 and 5.7e-7. On the
+five-channel model with Ġ couplings the medians were 3e-10 to 1.3e-9 nats
+and 2e-13 to 2e-12, and near the posterior the value errors were at most
+4e-11 nats for both routes.
+
+Just above the thresholds the derivatives through R lose accuracy as eps/λ,
+where λ is the signal-to-noise of the fainter latent direction at its
+faintest epoch (the smaller eigenvalue of K0^½ B_j K0^½, with
+K0 = diag(k_GG(0), k_ĠĠ(0))). The thresholds do not bound λ from below, so
+these errors have no bound. They were probed in 3,476 points that keep the
+low-rank route: three to five channels, 8 to 18 epochs, four kernels from
+P = 3 d, λp = 0.3 to P = 60 d, λp = 4 with epochs in days, and sixteen
+seeds. The sweeps approached a faint G direction, a faint Ġ direction and
+parallel couplings. Against the sequential route in 256-bit BigFloat, the
+relative errors stayed below 7·eps/λ for gradients and 126·eps/λ for
+Hessians, with respect to the couplings passed here, while λ went as low
+as 4e-14. The largest were 5.6e-8 for gradients and 2.5e-5 for Hessians;
+an independent sample of 880 such points gave at most 3.6e-9 and 2.5e-5.
+Gradients are not affected in any practical sense; a MAP Hessian at such a
+point can be.
 
 `y_flat`, `σ²_flat` are the channel-stacked residuals and per-point
-variances (RV block first, then each indicator), length C·N. Numerically
-identical to the dense builder to machine precision (validated). Returns
-`-Inf` if either Cholesky fails.
+variances (RV block first, then each indicator), length C·N. A NaN among
+the couplings, variances or residuals gives `NaN`. `-Inf` is returned if the
+Cholesky of A fails, which A ⪰ I rules out for finite inputs.
 """
 function activity_gp_joint_logpdf_lowrank(epochs::AbstractVector{<:Real},
-        chan_a::AbstractVector{T}, chan_b::AbstractVector{T},
+        chan_a::AbstractVector{<:Real}, chan_b::AbstractVector{<:Real},
         amp::Real, P::Real, λe::Real, λp::Real,
-        y_flat::AbstractVector{T}, σ²_flat::AbstractVector{T}) where {T<:Real}
+        y_flat::AbstractVector{<:Real}, σ²_flat::AbstractVector{<:Real})
+    N = length(epochs); twoN = 2N
+    T  = promote_type(eltype(chan_a), eltype(chan_b), eltype(y_flat), eltype(σ²_flat))
+    TA = promote_type(T, typeof(amp), typeof(P), typeof(λe), typeof(λp))
+    vN() = Vector{T}(undef, N)
+    return _agp_whitened_core!(Matrix{TA}(undef, twoN, twoN),
+                               vN(), vN(), vN(), vN(), vN(), vN(),
+                               Vector{T}(undef, twoN), Vector{T}(undef, twoN),
+                               Vector{TA}(undef, twoN),
+                               epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
+end
+
+"""
+    activity_gp_joint_logpdf_lowrank!(w::AGPWorkspace, epochs, chan_a, chan_b,
+                                       amp, P, λe, λp, y_flat, σ²_flat) -> logpdf
+
+[`activity_gp_joint_logpdf_lowrank`](@ref) with its matrix and vectors taken
+from `w` instead of allocated, for the per-slot workspace of the samplers. Same
+operations, same result bit for bit. Inputs that are not `Float64` (dual
+numbers) take the allocating method.
+"""
+function activity_gp_joint_logpdf_lowrank!(w::AGPWorkspace, epochs::AbstractVector{<:Real},
+        chan_a::AbstractVector{Float64}, chan_b::AbstractVector{Float64},
+        amp::Float64, P::Float64, λe::Float64, λp::Float64,
+        y_flat::AbstractVector{Float64}, σ²_flat::AbstractVector{Float64})
+    _agp_resize!(w, length(epochs))
+    return _agp_whitened_core!(w.A, w.bGG, w.bGd, w.bdd, w.r11, w.r12, w.r22,
+                               w.v, w.w, w.t,
+                               epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
+end
+activity_gp_joint_logpdf_lowrank!(::AGPWorkspace, epochs, chan_a, chan_b,
+                                   amp, P, λe, λp, y_flat, σ²_flat) =
+    activity_gp_joint_logpdf_lowrank(epochs, chan_a, chan_b, amp, P, λe, λp,
+                                     y_flat, σ²_flat)
+
+# Constants of the quasi-periodic kernel blocks, hoisted out of the pair loop.
+@inline function _qp_consts(amp, P, λe, λp)
+    amp2     = amp * amp
+    inv_λe2  = 1 / (λe * λe)
+    inv_2λp2 = 1 / (2 * λp * λp)
+    π_P      = π / P
+    c_fp     = π_P * inv_2λp2              # π/(2Pλp²)
+    c_fpp    = π_P * π_P * 2 * inv_2λp2    # π²/(P²λp²)
+    return (amp2, 0.5 * inv_λe2, inv_λe2, inv_2λp2, π_P, c_fp, c_fpp)
+end
+
+# The four blocks of `activity_kernel_blocks` from one sincos(πτ/P), using
+# sin(2x) = 2 sin x cos x and cos(2x) = 1 − 2 sin²x. Same closed forms,
+# different rounding.
+@inline function _qp_blocks_sincos(τ, c)
+    amp2, half_inv_λe2, inv_λe2, inv_2λp2, π_P, c_fp, c_fpp = c
+    s, co = sincos(π_P * τ)
+    s2  = 2 * s * co
+    c2  = 1 - 2 * s * s
+    f   = -τ * τ * half_inv_λe2 - s * s * inv_2λp2
+    fp  = -τ * inv_λe2 - c_fp * s2
+    fpp = -inv_λe2 - c_fpp * c2
+    k   = amp2 * exp(f)
+    return (k, -fp * k, fp * k, -(fpp + fp * fp) * k)
+end
+
+# Zero in its value and in every derivative it carries. Plain numbers carry
+# none. ForwardDiff duals are checked at any nesting (ForwardDiff 0.10's
+# `iszero` looks at the value only). Any other number type (ReverseDiff's
+# tracked reals, for one) may carry derivatives that cannot be read here, so
+# its zeros are never taken for a missing coupling.
+_agp_strictly_zero(x::Union{AbstractFloat, Integer}) = iszero(x)
+_agp_strictly_zero(x::ForwardDiff.Dual) =
+    _agp_strictly_zero(ForwardDiff.value(x)) &&
+    all(_agp_strictly_zero, ForwardDiff.partials(x))
+_agp_strictly_zero(::Real) = false
+# Whether `zero(T)` reads as a constant to `_agp_strictly_zero`.
+_agp_zero_is_constant(::Type{<:Union{AbstractFloat, Integer}}) = true
+_agp_zero_is_constant(::Type{<:ForwardDiff.Dual{Tg, V}}) where {Tg, V} =
+    _agp_zero_is_constant(V)
+_agp_zero_is_constant(::Type) = false
+# Every element strictly zero. Indexed one by one: ReverseDiff's `all` on a
+# tracked array tests the values, not the tracked elements.
+function _agp_all_strictly_zero(v::AbstractVector)
+    @inbounds for i in eachindex(v)
+        _agp_strictly_zero(v[i]) || return false
+    end
+    return true
+end
+
+# Whether derivatives taken through the factors R_j of B are accurate here.
+# Two things break them. (1) R_j is a square root of B_j: not differentiable
+# where the block is singular, inaccurate near it. Each block's smaller
+# eigenvalue must be at least 1e-10 of its larger (det B_j ≥ 1e-10·(tr B_j)²,
+# as λ_min/λ_max ≈ det/tr² when small). A direction with no coupling at all
+# (every a_c, or every b_c, a constant 0) is not part of the blocks, which are
+# then 1×1 and need only be nonzero. (2) w = R⁻ᵀv divides by R, so its
+# derivatives grow as 1/R while the GP's share of log L shrinks as R²; their
+# cancellation leaves a relative error of about eps/SNR. The largest
+# per-epoch signal-to-noise tr(R_j K_jj R_jᵀ) = k_GG(0)·bGG + k_ĠĠ(0)·bĠĠ
+# must be at least 1e-6. False for NaN.
+#
+# The eigenvalue ratio in (1) is taken on B_j in the solver's units, where
+# Ġ carries one over time, so it depends on the time unit and on the kernel
+# (through k_ĠĠ(0)/k_GG(0) = 1/λe² + π²/(P²λp²)): with the epochs in hours a
+# block's ratio moves by up to 24² either way, and log L does not change.
+# Which points keep the low-rank route then changes: the faint-Ġ point of
+# test/test_activity_gp_lowrank.jl takes the fallback in days (Hessian
+# error 1.7e-15) and the low-rank route in hours (4.7e-6). The test is kept
+# because the unit-free version measured was no better: the ratio of
+# B̃_j = K0^½ B_j K0^½, K0 = diag(k_GG(0), k_ĠĠ(0)), kept points whose
+# Hessians were off by up to 5e-3 (P = 60 d, λp = 4, faint G), against
+# 1.4e-6 for this test on the same five-channel probes. What limits the
+# derivatives is the absolute signal-to-noise λ of the fainter latent
+# direction (errors of about eps/λ, see the docstring), which no ratio
+# measures. A test on λ itself would be unit-free, and in the probes the
+# errors stayed within a fixed multiple of eps/λ, but at 1e-6 (on λ at the
+# best epoch) it would also send near-posterior HD 18599 points to the
+# fallback (5 of 150 with RV + logR'HK, 1 of 150 with RV + BIS), where this
+# test sends none.
+function _agp_blocks_smooth(bGG::AbstractVector, bGd::AbstractVector,
+                            bdd::AbstractVector, chan_a::AbstractVector,
+                            chan_b::AbstractVector, k0GG::Real, k0dd::Real)
+    noG = _agp_all_strictly_zero(chan_a)
+    noD = _agp_all_strictly_zero(chan_b)
+    noG && noD && return true
+    snr = zero(promote_type(eltype(bGG), eltype(bdd), typeof(k0GG), typeof(k0dd)))
+    @inbounds for j in eachindex(bGG)
+        g = bGG[j]; e = bdd[j]
+        if noD
+            g > 0 || return false
+        elseif noG
+            e > 0 || return false
+        else
+            (g > 0 && e > 0) || return false
+            h = bGd[j]
+            # det B_j = g·e − h², without a division: under reverse-mode AD
+            # this arithmetic is recorded too, and h²/g at a tiny g would put
+            # an infinite derivative on the tape.
+            g * e - h * h >= 1e-10 * (g + e)^2 || return false
+        end
+        snr = max(snr, k0GG * g + k0dd * e)
+    end
+    return snr >= 1e-6
+end
+
+# Whether the low-rank route gives NaN for these inputs: yᵀD⁻¹y or log det D
+# is NaN, or an element of B or v is NaN or infinite. An infinity there (a
+# coupling or residual beyond ~1e154, a zero variance) reaches w through R as
+# Inf/Inf or Inf − Inf.
+function _agp_nan_seen(yDy, logdetD, vs::AbstractVector...)
+    (isnan(yDy) || isnan(logdetD)) && return true
+    for x in vs, i in eachindex(x)
+        isfinite(x[i]) || return true
+    end
+    return false
+end
+
+# The dense (C·N)² Gaussian log-density of the same Σ = M·K_g·Mᵀ + D,
+# generic in the element type: the fallback for numbers that carry
+# derivatives at near-singular blocks with two or three channels. The solve
+# is `F.U' \ y`, not `F \ y`: the latter goes through LinearAlgebra's ldiv!,
+# which asks `istriu` of the transposed factor, and ForwardDiff's `iszero`
+# reads only a dual's value, so where the factor is diagonal in value (every
+# coupling 0) its off-diagonal partials would be dropped and Hessians come out
+# wrong (test/test_activity_gp_lowrank.jl checks this point).
+function _agp_dense_logpdf(epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
+    Σ0 = activity_gp_covariance_blocked(epochs, chan_a, chan_b, amp, P, λe, λp)
+    TS = promote_type(eltype(Σ0), eltype(y_flat), eltype(σ²_flat))
+    Σ  = eltype(Σ0) === TS ? Σ0 : convert(Matrix{TS}, Σ0)
+    @inbounds for i in eachindex(σ²_flat); Σ[i, i] += σ²_flat[i]; end
+    F = cholesky!(Symmetric(Σ, :U); check = false)
+    issuccess(F) || return convert(TS, -Inf)
+    z = F.U' \ y_flat
+    return -(dot(z, z) + logdet(F) + length(y_flat) * log(2π)) / 2
+end
+
+# The same Gaussian log-density, for numbers that carry derivatives where R is
+# not smooth, with four or more channels: the latent g = (G, Ġ) is
+# conditioned on the observations of one epoch at a time. With m and K the
+# mean and covariance of g given the epochs before p (m = 0 and K = K_g at
+# first), B_p and v_p epoch p's blocks of B = Mᵀ D⁻¹ M and v = Mᵀ D⁻¹ y,
+# P = I + B_p·K_pp (2×2, det P ≥ 1) and r = v_p − B_p·m_p,
+#
+#   log ∫ N(g; 0, K_g)·exp(vᵀg − ½ gᵀBg) dg
+#       = Σ_p [ v_pᵀm_p − ½ m_pᵀB_p m_p + ½ rᵀK_pp P⁻¹ r − ½ log det P ],
+#
+# after which the later epochs' mean and covariance are updated by
+# m_q += K_qp P⁻¹ r and K_qq' −= K_qp P⁻¹ B_p K_pq'. It reads B itself, never a
+# square root of it, and never inverts K_g, so it is smooth in every input,
+# singular blocks included. K (2×2 blocks per epoch pair, upper blocks only)
+# overwrites `K`, the 2N×2N buffer of A, and the mean overwrites `m`
+# (length 2N); the work is about that of A's Cholesky. Its rounding error is
+# larger than the whitened solve's at high signal-to-noise (the updates of K
+# cancel; see the docstring), which is why it is not used everywhere.
+function _agp_sequential_logpdf!(K::AbstractMatrix, m::AbstractVector,
+        epochs::AbstractVector{<:Real}, bGG::AbstractVector, bGd::AbstractVector,
+        bdd::AbstractVector, v::AbstractVector, yDy, logdetD, C::Int, kc)
+    N = length(epochs)
+    TA = eltype(K)
+    @inbounds for j in 1:N
+        tj = epochs[j]
+        for i in 1:j
+            cGG, cGd, cdG, cdd = _qp_blocks_sincos(epochs[i] - tj, kc)
+            K[2i-1, 2j-1] = cGG; K[2i-1, 2j] = cGd
+            K[2i,   2j-1] = cdG; K[2i,   2j] = cdd
+        end
+    end
+    fill!(m, zero(TA))
+    Z = zero(TA)
+    @inbounds for p in 1:N
+        k11 = K[2p-1, 2p-1]; k12 = K[2p-1, 2p]; k22 = K[2p, 2p]
+        g = bGG[p]; h = bGd[p]; e = bdd[p]
+        P11 = 1 + (g * k11 + h * k12); P12 = g * k12 + h * k22
+        P21 = h * k11 + e * k12;       P22 = 1 + (h * k12 + e * k22)
+        dP = P11 * P22 - P12 * P21
+        # det P ≥ 1 in exact arithmetic. NaN and infinite inputs were turned
+        # away before this route; what is left is overflow, a failure as for
+        # a Cholesky.
+        dP > 0 || return convert(TA, -Inf)
+        m1 = m[2p-1]; m2 = m[2p]
+        vG = v[p]; vd = v[N+p]
+        r1 = vG - (g * m1 + h * m2); r2 = vd - (h * m1 + e * m2)
+        s1 = (P22 * r1 - P12 * r2) / dP; s2 = (P11 * r2 - P21 * r1) / dP
+        Z += vG * m1 + vd * m2 - (g * m1 * m1 + 2 * h * m1 * m2 + e * m2 * m2) / 2 +
+             (r1 * (k11 * s1 + k12 * s2) + r2 * (k12 * s1 + k22 * s2)) / 2 - log(dP) / 2
+        # W = P⁻¹ B_p, symmetric.
+        W11 = (P22 * g - P12 * h) / dP
+        W12 = (P22 * h - P12 * e) / dP
+        W22 = (P11 * e - P21 * h) / dP
+        for q in (p + 1):N
+            # Block (p, q) holds K_pq; K_qp = K_pqᵀ.
+            a11 = K[2p-1, 2q-1]; a12 = K[2p-1, 2q]
+            a21 = K[2p,   2q-1]; a22 = K[2p,   2q]
+            m[2q-1] += a11 * s1 + a21 * s2
+            m[2q]   += a12 * s1 + a22 * s2
+        end
+        for q2 in (p + 1):N
+            b11 = K[2p-1, 2q2-1]; b12 = K[2p-1, 2q2]
+            b21 = K[2p,   2q2-1]; b22 = K[2p,   2q2]
+            y11 = W11 * b11 + W12 * b21; y12 = W11 * b12 + W12 * b22
+            y21 = W12 * b11 + W22 * b21; y22 = W12 * b12 + W22 * b22
+            for q in (p + 1):q2
+                c11 = K[2p-1, 2q-1]; c12 = K[2p-1, 2q]
+                c21 = K[2p,   2q-1]; c22 = K[2p,   2q]
+                K[2q-1, 2q2-1] -= c11 * y11 + c21 * y21
+                K[2q-1, 2q2]   -= c11 * y12 + c21 * y22
+                K[2q,   2q2-1] -= c12 * y11 + c22 * y21
+                K[2q,   2q2]   -= c12 * y12 + c22 * y22
+            end
+        end
+    end
+    return -(yDy + logdetD + (C * N) * log(2π)) / 2 + Z
+end
+
+# The whitened low-rank solve on caller-supplied buffers: `A` is 2N×2N,
+# `bGG`…`r22` length N, `v`, `w`, `t` length 2N. Every element read is
+# written first (only the upper triangle of A is used), so nothing needs
+# clearing.
+function _agp_whitened_core!(A::AbstractMatrix,
+        bGG::AbstractVector{T}, bGd::AbstractVector{T}, bdd::AbstractVector{T},
+        r11::AbstractVector{T}, r12::AbstractVector{T}, r22::AbstractVector{T},
+        v::AbstractVector{T}, w::AbstractVector{T}, t::AbstractVector,
+        epochs::AbstractVector{<:Real},
+        chan_a::AbstractVector{<:Real}, chan_b::AbstractVector{<:Real},
+        amp::Real, P::Real, λe::Real, λp::Real,
+        y_flat::AbstractVector{<:Real}, σ²_flat::AbstractVector{<:Real}) where {T<:Real}
     N = length(epochs)
     C = length(chan_a)
     twoN = 2N
+    TA = eltype(A)
 
-    # --- K_g: 2N×2N joint [G; Ġ] covariance from the 4 kernel blocks ---
-    Kg = Matrix{T}(undef, twoN, twoN)
-    @inbounds for j in 1:N, i in 1:j
-        τ = epochs[i] - epochs[j]
-        kGG, kGdG, kdGG, kdGdG = activity_kernel_blocks(τ, amp, P, λe, λp)
-        Kg[i, j]         = kGG;   Kg[j, i]         = kGG
-        Kg[i, N+j]       = kGdG;  Kg[N+j, i]       = kGdG    # cov(G_i, Ġ_j)
-        Kg[N+i, j]       = kdGG;  Kg[j, N+i]       = kdGG    # cov(Ġ_i, G_j)
-        Kg[N+i, N+j]     = kdGdG; Kg[N+j, N+i]     = kdGdG
-    end
-    # symmetric jitter for conditioning of the latent covariance
-    jit = T(1e-10) * (one(T) + maximum(abs, @view Kg[1:N, 1:N]))
-    @inbounds for d in 1:twoN; Kg[d, d] += jit; end
-
-    L_g = cholesky!(Symmetric(Kg); check = false)
-    issuccess(L_g) || return convert(T, -Inf)
-    Lg = L_g.L                                          # lower factor (2N×2N)
-
-    # --- B = Mᵀ D⁻¹ M is 2×2-block diagonal: per epoch j only the three
-    # coefficients (bGG, bGĠ, bĠĠ). v = Mᵀ D⁻¹ y. ---------------------
-    # WHITENED Woodbury avoids forming K_g⁻¹:
-    #   logdetΣ = logdetD + logdet(I + Lgᵀ B Lg)
-    #   quad    = yᵀD⁻¹y − uᵀ(I + Lgᵀ B Lg)⁻¹u,   u = Lgᵀ v
-    bGG = zeros(T, N); bGdG = zeros(T, N); bdGdG = zeros(T, N)
-    v = zeros(T, twoN)
+    # B = Mᵀ D⁻¹ M per epoch (bGG, bGĠ, bĠĠ) and v = Mᵀ D⁻¹ y.
+    fill!(bGG, zero(T)); fill!(bGd, zero(T)); fill!(bdd, zero(T))
+    fill!(v, zero(T))
     yDy = zero(T); logdetD = zero(T)
     @inbounds for c in 1:C
         ac = chan_a[c]; bc = chan_b[c]; off = (c - 1) * N
@@ -866,32 +1410,93 @@ function activity_gp_joint_logpdf_lowrank(epochs::AbstractVector{<:Real},
             yj = y_flat[off + j]; wj = yj * inv_d
             yDy += yj * wj; logdetD += log(d)
             v[j] += ac * wj; v[N+j] += bc * wj
-            bGG[j]   += ac * ac * inv_d
-            bGdG[j]  += ac * bc * inv_d
-            bdGdG[j] += bc * bc * inv_d
+            bGG[j] += ac * ac * inv_d
+            bGd[j] += ac * bc * inv_d
+            bdd[j] += bc * bc * inv_d
         end
     end
 
-    # BLg = B·Lg directly from the block structure (4N² vs a 2N³ gemm on a
-    # 99%-zero B): rows j and N+j are linear combos of Lg rows j, N+j.
-    Lgf = Lg                      # LowerTriangular wrapper over the factor
-    BLg = Matrix{T}(undef, twoN, twoN)
-    @inbounds for k in 1:twoN
-        for j in 1:N
-            gjk = Lgf[j, k]; djk = Lgf[N+j, k]
-            BLg[j,   k] = bGG[j]  * gjk + bGdG[j]  * djk
-            BLg[N+j, k] = bGdG[j] * gjk + bdGdG[j] * djk
+    kc = _qp_consts(amp, P, λe, λp)
+
+    # Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked
+    # reals, any type that is not a plain float): where derivatives through
+    # R lose their accuracy (a singular or nearly singular block of B, or a
+    # GP too faint against the noise; see _agp_blocks_smooth) a route that is
+    # smooth there is used instead: with four or more channels the latent is
+    # conditioned one epoch at a time (_agp_sequential_logpdf!, on A's
+    # buffer, about the work of the low-rank solve), with two or three the
+    # dense Cholesky of Σ, whose side is at most 1.5 times A's. Decided before R
+    # is formed: a reverse-mode tape keeps every operation, and R's
+    # derivatives at a vanishing block are infinite even where R goes unused
+    # (0·Inf = NaN). Compiled out for Float64, whose values are exact at
+    # singular blocks.
+    if !(T <: AbstractFloat)
+        k0GG, _, _, k0dd = _qp_blocks_sincos(zero(eltype(epochs)), kc)
+        if !_agp_blocks_smooth(bGG, bGd, bdd, chan_a, chan_b, k0GG, k0dd)
+            # Inputs for which the low-rank route gives NaN give NaN here too.
+            _agp_nan_seen(yDy, logdetD, bGG, bGd, bdd, v) && return convert(TA, NaN)
+            C >= 4 && return _agp_sequential_logpdf!(A, t, epochs, bGG, bGd, bdd, v,
+                                                     yDy, logdetD, C, kc)
+            return convert(TA, _agp_dense_logpdf(epochs, chan_a, chan_b,
+                                                 amp, P, λe, λp, y_flat, σ²_flat))
         end
     end
-    # W = Lgᵀ·BLg — triangular×dense (trmm), not a full gemm.
-    W = transpose(Lgf) * BLg
-    @inbounds for d in 1:twoN; W[d, d] += one(T); end
-    F_C = cholesky!(Symmetric(W); check = false)
-    issuccess(F_C) || return convert(T, -Inf)
-    logdet_C = 2 * sum(log, @view F_C.factors[diagind(F_C.factors)])
 
-    u = transpose(Lgf) * v
-    quad = yDy - dot(u, F_C \ u)
-    logdetΣ = logdetD + logdet_C
-    return convert(T, -0.5 * (quad + logdetΣ + (C * N) * log(2π)))
+    # B_j = R_jᵀ R_j with R_j = [r11 r12; 0 r22], and w = R⁻ᵀ v. A block with
+    # no G information (bGG = 0, hence bGĠ = 0) factors as diag(0, √bĠĠ); a
+    # rank-1 block (no Ġ information independent of G) gets r22 = 0. A zero
+    # row of R leaves that row and column of A at the identity and w at 0
+    # there, so both cases are exact rather than approximated. Only a value
+    # that is zero (or rounded below it) means "no information": a NaN takes
+    # the square root and reaches w, so it is not mistaken for one.
+    ww = zero(T)
+    @inbounds for j in 1:N
+        g = bGG[j]
+        if g <= 0
+            x11 = zero(T); x12 = zero(T); q = bdd[j]; wG = zero(T)
+        else
+            x11 = sqrt(g); x12 = bGd[j] / x11
+            q   = bdd[j] - x12 * x12
+            wG  = v[j] / x11
+        end
+        if q <= 0
+            x22 = zero(T); wd = zero(T)
+        else
+            x22 = sqrt(q); wd = (v[N+j] - x12 * wG) / x22
+        end
+        r11[j] = x11; r12[j] = x12; r22[j] = x22
+        w[j] = wG; w[N+j] = wd
+        ww += wG * wG + wd * wd
+    end
+    # A NaN coupling, variance or residual gives NaN, as the dense likelihood
+    # does, rather than whatever the Cholesky of a NaN matrix returns.
+    isnan(ww) && return convert(TA, NaN)
+
+    # Upper triangle of A = I + R·K_g·Rᵀ, straight from the kernel blocks at
+    # τ = t_j − t_k (j ≤ k). Rows j and N+j of R·g are r11·G_j + r12·Ġ_j and
+    # r22·Ġ_j; cov(G_j, Ġ_k) = cGd and cov(G_k, Ġ_j) = cov(Ġ_j, G_k) = cdG.
+    @inbounds for k in 1:N
+        r11k = r11[k]; r12k = r12[k]; r22k = r22[k]; tk = epochs[k]
+        for j in 1:k
+            cGG, cGd, cdG, cdd = _qp_blocks_sincos(epochs[j] - tk, kc)
+            r11j = r11[j]; r12j = r12[j]; r22j = r22[j]
+            A[j, k]         = r11j * (r11k * cGG + r12k * cGd) +
+                              r12j * (r11k * cdG + r12k * cdd)
+            A[j, N + k]     = r22k * (r11j * cGd + r12j * cdd)
+            A[N + j, N + k] = r22j * r22k * cdd
+            j == k || (A[k, N + j] = r22j * (r11k * cdG + r12k * cdd))
+        end
+    end
+    @inbounds for d in 1:twoN; A[d, d] += one(TA); end
+
+    # A ⪰ I, so the factorization succeeds for any finite input.
+    F = cholesky!(Symmetric(A, :U); check = false)
+    issuccess(F) || return convert(TA, -Inf)
+    logdetA = zero(TA)
+    @inbounds for d in 1:twoN; logdetA += log(A[d, d]); end
+    logdetA *= 2
+    copyto!(t, w)
+    ldiv!(transpose(UpperTriangular(A)), t)       # t = U⁻ᵀ w, so wᵀA⁻¹w = tᵀt
+    quad = yDy - ww + dot(t, t)
+    return -(quad + logdetD + logdetA + (C * N) * log(2π)) / 2
 end

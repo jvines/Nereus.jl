@@ -640,6 +640,10 @@ mutable struct PTWorkspace
     # transit_likelihood.jl). Listed in `_WS_NOT_SAVED`.
     phot_data::PhotDataCache
     # --- end transit track ---
+    # --- ActivityGP joint likelihood (agp) ---
+    # Buffers for the AGP low-rank solver, sized on first use; empty in runs
+    # without an ActivityGP. Scratch only, so not saved in checkpoints.
+    agp::AGPWorkspace
 end
 
 # `max_donors` sizes the donor-birth scratch buffer. It must be ≥ the number
@@ -718,6 +722,8 @@ function PTWorkspace(params::Params, max_kplanet::Int, n_noise::Int=0;
         zero(UInt),
         # Transit track: photometry-derived data, empty until first use.
         PhotDataCache(),
+        # ActivityGP buffers (agp), sized on first use.
+        AGPWorkspace(),
     )
 end
 
@@ -1425,7 +1431,8 @@ end
 # `scratch_theta` and `population` are proposal scratch that reference Params;
 # `rv_noise` is likelihood scratch (buffers and resolved layout slots).
 # `phot_data` is derived from the data alone and is rebuilt on first use.
-const _WS_NOT_SAVED = (:scratch_theta, :population, :rv_noise, :phot_data)
+# `agp` holds ActivityGP solver buffers, rebuilt on first use after a resume.
+const _WS_NOT_SAVED = (:scratch_theta, :population, :rv_noise, :phot_data, :agp)
 
 function _ws_snapshot(ws::PTWorkspace)
     fs = Tuple(f for f in fieldnames(PTWorkspace) if f ∉ _WS_NOT_SAVED)
