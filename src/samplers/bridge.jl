@@ -274,20 +274,35 @@ end
     _BridgeEvaluator(target)
 
 One evaluation task's scratch for `_bridge_logdensity!`: a `Theta` and a
-`PTWorkspace`, as each slot of `pt_emcee` has.
+`PTWorkspace`, as each slot of `pt_emcee` has, and whether the photometry can
+go through the workspace method (`_bridge_phot_ws`).
 """
 struct _BridgeEvaluator{TT<:NereusTarget}
     target::TT
     theta::Theta{Float64}
     ws::PTWorkspace
+    phot_ws::Bool
 end
 
 function _BridgeEvaluator(target::NereusTarget)
     params, data = target.params, target.data
     ws = PTWorkspace(params, params.config.max_kplanet, length(params.config.noise_models);
                      n_obs = length(data.t_rv), n_phot = length(data.t_phot))
-    return _BridgeEvaluator(target, Theta{Float64}(params), ws)
+    return _BridgeEvaluator(target, Theta{Float64}(params), ws, _bridge_phot_ws(params))
 end
+
+"""
+    _bridge_phot_ws(params) -> Bool
+
+Whether `transit_log_likelihood(theta, data, ws)` computes the same model as
+`transit_log_likelihood(theta, data)` for this fit. It does not when a planet
+has gravity darkening (`:GD`): the workspace method has no gravity-darkened
+transit, and it hands over to the other method only for TTVs, exposures
+longer than 2 min and photometric noise models. A gravity-darkened fit with
+2-min or shorter cadences therefore took the plain transit there, and its log
+density did not depend on i_star or lambda.
+"""
+_bridge_phot_ws(params) = !any(has_gd, params.config.planet_modes)
 
 """
     _bridge_logdensity!(ev, y) -> Float64
@@ -305,6 +320,10 @@ in one pass, where the other sums fixed chunks and then the chunk totals.
 Measured on the HD 18599 joint fit with a 20k-point light curve: up to 5e-9
 in log L near the posterior (1e-14 relative), and at most 5e-13 relative on
 prior draws.
+
+A fit with a gravity-darkened planet evaluates the photometry by the
+allocating method, as `_logdensity_parts` does, because the workspace method
+has no gravity darkening (see `_bridge_phot_ws`).
 """
 function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
     target = ev.target
@@ -330,7 +349,8 @@ function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
     isfinite(lp) || return -Inf
     ll = rv_log_likelihood(theta, data, ev.ws)
     isfinite(ll) || return -Inf
-    lt = transit_log_likelihood(theta, data, ev.ws)
+    lt = ev.phot_ws ? transit_log_likelihood(theta, data, ev.ws) :
+                      transit_log_likelihood(theta, data)
     ltomo = tomogram_log_likelihood(theta, data)
     isfinite(ltomo) || return -Inf
     isfinite(lt) || return -Inf
