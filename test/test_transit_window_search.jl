@@ -8,7 +8,7 @@
 using Test
 using Nereus
 using Random
-using Nereus: _phot_window_indices!, PhotDataCache, _tight_gate_halfwidth, tp_to_tc
+using Nereus: _phot_window_indices!, PhotDataCache, _transit_window_halfwidth, tp_to_tc
 
 include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
 
@@ -79,8 +79,7 @@ tws_data(t) = Data(; t_phot = t, flux = ones(length(t)), flux_err = fill(1e-3, l
             rr, aR, b = ws.transit_rrs[1], ws.transit_a_Rs[1], ws.transit_bs[1]
             b < 1 + rr || continue
             Tc = tp_to_tc(Tp, P, e, ω)
-            hw = 2 * P / π * (1 + rr) / aR
-            hw = min(hw, _tight_gate_halfwidth(P, e, ω, rr, aR, max(abs(Tc), abs(Tp)), hw, 0.0))
+            hw = _transit_window_halfwidth(P, e, ω, rr, aR, max(abs(Tc), abs(Tp)))
             @test sort(ws.transit_in_idx[1]) == tws_scan(data.t_phot, Tc, P, hw)
             n_cmp += 1
         end

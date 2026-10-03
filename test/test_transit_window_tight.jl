@@ -1,19 +1,22 @@
-# The transit window (the cadences whose flux is computed) is narrowed from
+# The transit window (the cadences whose flux is computed) was narrowed from
 # 2P(1+k)/(π a_R), about four circular half-durations, to a bound from the
-# orbit (`_transit_window_halfwidth`), wherever the narrower window provably
-# skips only cadences whose flux is exactly 1. Everything else is unchanged, so
-# the likelihood is bit-identical.
+# orbit (`_transit_window_halfwidth`) wherever that provably skipped only
+# cadences whose flux is exactly 1, which kept the likelihood bit-identical.
+# Since the old window was found to cut real transits short at high e
+# (test_transit_window_superset.jl), the window is the bound alone. What this
+# file checks holds for it:
 #
 #   1. data-free: for random orbits (e up to 0.9999), no cadence outside the
 #      bound has the planet in front of the star with z < 1 + k, and every
-#      cadence the narrower window drops from the old one has flux exactly 1;
-#   2. workspace likelihood: === the old window's value on random prior draws;
+#      cadence the bound drops from the old window has flux exactly 1;
+#   2. workspace likelihood: === the old window's value on random prior draws,
+#      wherever the old window held the whole transit;
 #   3. non-workspace paths (supersampled exposures, TTV): the per-cadence
-#      transit product is === with the old and the narrowed window.
+#      transit product is === with the window and with no window at all.
 using Test
 using Nereus
 using Random
-using Nereus: _transit_window_halfwidth, _tight_gate_halfwidth, _tighten_transit_windows!,
+using Nereus: _transit_window_halfwidth, _set_transit_windows!,
               _phot_sparse_refresh, _phot_chunk_loglik, _phot_transit_product,
               _phot_trend_cache, QuadLimbDark, transit_flux, tp_to_tc, tc_to_tp,
               kepler_solve, kipping_q_to_u
@@ -58,7 +61,7 @@ end
             ts = max(abs(o.Tc), abs(o.Tp))
             hw = _transit_window_halfwidth(o.P, e, o.ω, o.k, o.aR, ts)
             old = tw_old(o.P, o.k, o.aR)
-            g = min(old, _tight_gate_halfwidth(o.P, e, o.ω, o.k, o.aR, ts, old, 0.0))
+            g = min(old, hw)
             isfinite(hw) && (n_bound += 1)
             g < old && (n_tight += 1)
             for j in 1:60
@@ -76,14 +79,14 @@ end
                 end
                 if g < Δf <= old
                     n_band += 1
-                    transit_flux(ld, z, o.k) === 1.0 || (bad_band += 1)
+                    (swf <= 0 || transit_flux(ld, z, o.k) === 1.0) || (bad_band += 1)
                 end
             end
         end
         @info "window superset" n_bound n_tight n_out n_band
         @test n_bound > 5_000 && n_tight > 5_000 && n_band > 100_000
         @test bad_bound == 0     # nothing in front of the star outside the bound
-        @test bad_band == 0      # every dropped cadence has flux exactly 1
+        @test bad_band == 0      # every dropped cadence has flux exactly 1 (or is behind)
     end
 
     @testset "no bound where none exists" begin
@@ -114,6 +117,9 @@ end
             (isfinite(val) && 0 <= e < 1 && b < 1 + rr) || continue
             Tc = tp_to_tc(Tp, P, e, ω); old = tw_old(P, rr, aR)
             idx = [i for i in 1:n if abs(tw_fold(data.t_phot[i], Tc, P)) <= old]
+            # skip draws where the old window cut the transit short
+            any(i -> !(i in idx) && (zs = tw_zsep(data.t_phot[i], P, e, ω, Tp, b, aR);
+                                     zs[1] < 1 + rr && zs[2] > 0), 1:n) && continue
             length(ws.transit_in_idx[1]) < length(idx) && (n_narrow += 1)
             lds = [QuadLimbDark(collect(kipping_q_to_u(th.values[sys.ld_q1[ix]],
                                                        th.values[sys.ld_q2[ix]]))) for ix in 1:n_pm]
@@ -153,9 +159,8 @@ end
                 _, ttv_state = Nereus._decode_ttv_state(th, Nereus.planet_indices(th))
                 r_for_j = [ttv ? 1 : 0]
                 old = [tw_old(P, rr, aR)]
-                tight = _tighten_transit_windows!(copy(old), 1, [true], r_for_j, [P], [e], [ω],
-                                                  [rr], [aR], [Tc], [Tp], pad)
-                ttv && @test tight == old        # TTV planets keep the old window
+                tight = _set_transit_windows!([Inf], 1, [true], r_for_j, ttv_state, [P], [e], [ω],
+                                              [rr], [aR], [Tc], [Tp], pad)
                 tight[1] < old[1] && (n_narrow += 1)
                 lds = [QuadLimbDark(collect(kipping_q_to_u(th.values[sys.ld_q1[ix]],
                                                            th.values[sys.ld_q2[ix]]))) for ix in 1:2]
@@ -166,14 +171,14 @@ end
                     pr(w) = _phot_transit_product(data.t_phot[i], texp, ld, 1, [true], [P], [e],
                                                   [ω], [Tp], [b], [aR], [rr], [Tc], w, r_for_j,
                                                   ttv_state, n_super)
-                    same &= pr(old) === pr(tight)
+                    same &= pr(tight) === pr([Inf])
                 end
                 @test same
                 n_cmp += 1
             end
             @info "per-cadence product" exposure ttv n_cmp n_narrow
             @test n_cmp > 20
-            ttv || @test n_narrow > 5
+            @test n_narrow > 5
         end
     end
 end
