@@ -342,7 +342,7 @@ combinations of `G(t)` and its time derivative `dG/dt`
 The joint data covariance is assembled from four analytic kernel blocks
 `k_GG`, `k_GdotG`, `k_dotGG`, `k_dotGdotG` (closed-form derivatives of
 the quasi-periodic kernel `k(τ) = σ² exp(−τ²/2λ_e² − sin²(πτ/P)/2λ_p²)`,
-`activity_kernel_blocks`, `src/noise/activity_gp.jl:50`) weighted by the
+`activity_kernel_blocks`, `src/noise/activity_gp.jl:51`) weighted by the
 per-observation channel coefficients. This is the principled framework
 for activity decorrelation on noisy K-dwarfs — it captures
 rotation-phase-shifted activity-RV coupling that single-channel BIS
@@ -408,7 +408,7 @@ Notes on the couplings:
 `ActivityGP` requires both the indicator **values** and their **1σ
 errors** for every non-`:rv` channel. Errors are mandatory (the
 `activity_gp_predict`/likelihood paths throw / return `nothing` without
-`data.indicator_errs`, `src/noise/activity_gp.jl:614,637`).
+`data.indicator_errs`, `src/noise/activity_gp.jl:637,841`).
 
 - **Julia API:** `Data(; indicators = Dict("bis" => …, "fwhm" => …),
   indicator_errs = Dict("bis" => …, "fwhm" => …), …)` with string keys
@@ -480,7 +480,7 @@ falls through the standard white/celerite machinery untouched. In
 #### Latent-G recovery + RV decomposition
 
 - [`activity_gp_predict(chains, params, data)`](@ref)
-  (`src/noise/activity_gp.jl:517`) returns the posterior over the
+  (`src/noise/activity_gp.jl:516`) returns the posterior over the
   inferred activity process `G(t)` **and** its derivative `dG/dt` at a
   dense prediction grid (default 200 points spanning the RV baseline),
   conditioning the joint covariance per posterior draw. Returns
@@ -527,17 +527,22 @@ The HD 18599 K-gap scenario is the canonical use case.
 
 With every indicator at the RV epochs (`N` epochs, `C` channels including
 RV, `n_total = C·N`), the joint likelihood goes through
-`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:994`): it
+`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1018`): it
 whitens each epoch's 2×2 information block and factors one `(2N)²` matrix
-instead of the dense `(C·N)²`, and is exact up to rounding. The
+instead of the dense `(C·N)²`, and is exact up to rounding. Gradients
+(ForwardDiff) take the same route, except where an information block is
+singular or nearly so (couplings at exactly 0, or parallel across
+channels) or the GP's signal-to-noise is below 1e-6 at every epoch: there
+the whitening is not differentiable or loses its derivative accuracy, and
+they come from the dense likelihood instead. The
 `marginalize_indicators` diagnostic and `indicators_only` scoring build the
 dense covariance with the block-factored builder
-(`activity_gp_covariance_blocked`, `src/noise/activity_gp.jl:423`), an
+(`activity_gp_covariance_blocked`, `src/noise/activity_gp.jl:424`), an
 `O(n_total³)` Cholesky per likelihood call, tractable up to ~500 total
 observations. The celerite-block O(n) route is a dead-end for the QP joint
 covariance (its kernel is not a finite sum of damped exponentials, and the
 FM17 celerite form carries a `|τ|` kink that makes `Var(dG/dt)` formally
-infinite — see the warning at `src/noise/activity_gp.jl:74`).
+infinite — see the warning at `src/noise/activity_gp.jl:75`).
 
 ### `IndicatorFloor`
 

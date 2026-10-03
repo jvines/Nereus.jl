@@ -539,3 +539,26 @@ end
         end
     end
 end
+
+@testset "AGP docs: source references point at what they name" begin
+    # docs/src/noise_models.md cites src/noise/activity_gp.jl by line. Each
+    # citation, in order of appearance, and what its line must hold.
+    docs = read(joinpath(@__DIR__, "..", "docs", "src", "noise_models.md"), String)
+    src = readlines(joinpath(@__DIR__, "..", "src", "noise", "activity_gp.jl"))
+    refs = [parse.(Int, split(m[1], ","))
+            for m in eachmatch(r"src/noise/activity_gp\.jl:([0-9,]+)", docs)]
+    expected = [[r"function activity_kernel_blocks\("],
+                [r"haskey\(data\.indicator_errs", r"haskey\(data\.indicator_errs"],
+                [r"^function activity_gp_predict\("],
+                [r"^function activity_gp_decompose_rv\("],
+                [r"^function activity_gp_joint_logpdf_lowrank\("],
+                [r"^function activity_gp_covariance_blocked\("],
+                [r"WARNING — do NOT use these blocks in a Rajpaul joint"]]
+    @test length(refs) == length(expected)
+    for (lines, pats) in zip(refs, expected)
+        @test length(lines) == length(pats)
+        for (l, pat) in zip(lines, pats)
+            @test occursin(pat, src[l])
+        end
+    end
+end
