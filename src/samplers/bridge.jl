@@ -380,7 +380,12 @@ every point, but not to the bit:
   sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
   a 20k-point light curve the whole log density differs by at most 5.4e-9 nats
   near the reference point, and on prior draws by at most 1e-11 relative
-  (3.1e-13 with the GP rotation, 9.7e-12 with activity decorrelation).
+  (1.6e-12 with the GP rotation, 9.7e-12 with activity decorrelation).
+
+Relative figures are |difference| / max(1, |log p|). The largest measured on any
+fit, over 15078 points on 28 fits, is 1.03e-11: 1.9e-10 nats at a point where
+log p = -18.2, near the best point of a two-planet RV + transit fit (10k-point
+light curve, ρ⋆ and the mean anomaly as parameters, the Gladman stability check).
 
 The same bits as `_logdensity_parts` come out for the tomogram, for the
 photometry wherever it takes the allocating method, for the RV of a fit with

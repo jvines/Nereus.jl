@@ -2,14 +2,15 @@
 # (src/samplers/bridge.jl, `_bridge_logdensity!`), the ones pt_emcee and the
 # other samplers draw with, instead of the allocating `_logdensity_parts`.
 #
-# The two are the same function up to rounding, not to the bit. Without noise
-# models the workspace RV method caches each planet's velocity curve and
-# computes cos(f+ω) by the angle-sum identity; the workspace photometry
-# computes each cadence's sky separation by the same route and sums every
-# cadence in one pass, where `_logdensity_parts` sums fixed 4096-point chunks
-# and then the chunk totals. Near the posterior of a 20k-point light curve
-# they differ by ~1e-9 in log L, ~1e-14 relative. Anything larger is a bug in
-# one of the two, not rounding.
+# The two are the same function up to rounding, not to the bit. On a fit with
+# no noise models at all (on any channel) the workspace RV method caches each
+# planet's velocity curve and computes cos(f+ω) by the angle-sum identity; the
+# workspace photometry computes each cadence's sky separation by the same route
+# and sums every cadence in one pass, where `_logdensity_parts` sums fixed
+# 4096-point chunks and then the chunk totals. Near the posterior of a 20k-point
+# light curve they differ by a few 1e-9 nats. Relative to max(1, |log p|) the
+# largest difference measured on any fit is 1.03e-11. Anything much larger is
+# a bug in one of the two, not rounding.
 #
 # That holds because the evaluator steps around the places where the workspace
 # methods compute another model: a planet with gravity darkening, and any
@@ -277,10 +278,81 @@ end
     end
 end
 
+# A two-planet RV + transit fit with ρ⋆ and the mean anomaly as parameters and
+# the Gladman stability check, no noise models, two RV and two photometric
+# instruments. The largest difference relative to max(1, |log p|) measured on
+# any fit, 1.03e-11, was on this kind of fit (with e up to 0.98 and b up to
+# 1.3), at a point where log p = -18.2: 1.9e-10 nats, still rounding. Here e
+# and b are narrower so that prior draws give finite densities. The relative
+# bound allows for points where |log p| is that small.
+@testset "bridge evaluator on a two-planet fit with rho_s, Mo and stability" begin
+    un(a, b) = Dict{String, Any}("type" => "UniformPrior", "args" => [a, b])
+    rng = MersenneTwister(11)
+    trv = sort!(400 .* rand(rng, 60))
+    rv = 30 .* sin.(2π .* (trv .- 1.2) ./ 3.11) .+ 12 .* sin.(2π .* (trv .- 2.0) ./ 8.0) .+
+         3 .* randn(rng, 60)
+    t1 = collect(range(0.0, 40.0; length = 10_000))
+    t2 = collect(range(10.33, 10.73; length = 600))
+    lc(t, d1, d2) = (f = 1.0 .+ 3e-4 .* randn(rng, length(t));
+                     f[abs.(mod.(t .- 1.2 .+ 1.555, 3.11) .- 1.555) .< 0.05] .-= d1;
+                     f[abs.(mod.(t .- 2.0 .+ 4.0, 8.0) .- 4.0) .< 0.07] .-= d2; f)
+    pri = Dict{String, Any}(
+        "P_k1" => un(3.05, 3.17), "P_k2" => un(7.8, 8.2), "K_k1" => un(1.0, 60.0),
+        "K_k2" => un(1.0, 40.0), "b_k1" => un(0.0, 1.0), "b_k2" => un(0.0, 1.0),
+        "rr_k1" => un(0.01, 0.2), "rr_k2" => un(0.01, 0.2), "rho_s" => un(0.3, 3.0),
+        "sesinw_k1" => un(-0.6, 0.6), "secosw_k1" => un(-0.6, 0.6),
+        "sesinw_k2" => un(-0.6, 0.6), "secosw_k2" => un(-0.6, 0.6),
+        "dilution_NGTS" => un(0.0, 0.5),
+        "gamma_HARPS" => un(-20.0, 20.0), "gamma_FEROS" => un(-20.0, 20.0),
+        "sigma_HARPS" => un(0.0, 20.0), "sigma_FEROS" => un(0.0, 20.0))
+    cfg = Dict{String, Any}(
+        "star" => Dict("M_s" => 1.0, "R_s" => 1.0), "priors" => pri,
+        "model" => Dict{String, Any}(
+            "max_kplanet" => 2, "planet_modes" => ["RVPM", "RVPM"], "stability" => "gladman",
+            "phot_trend_order" => 1,
+            "parametrization" => Dict("mass" => "K_driven", "time" => "Mo", "ew" => "sesinw",
+                                      "geom" => "b_rr", "use_rho_s" => true)),
+        "noise_models" => Any[],
+        "data" => Dict{String, Any}(
+            "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv, "rv_err" => fill(3.0, 60),
+                                          "instrument" => [isodd(i) ? "HARPS" : "FEROS" for i in 1:60])),
+            "transit_photometry" => Any[
+                Dict("instrument" => "TESS", "exposure_time" => 120.0,
+                     "values" => Dict("bjd" => t1, "flux" => lc(t1, 0.006, 0.003),
+                                      "flux_err" => fill(3e-4, length(t1)))),
+                Dict("instrument" => "NGTS", "exposure_time" => 60.0,
+                     "values" => Dict("bjd" => t2, "flux" => lc(t2, 0.004, 0.002),
+                                      "flux_err" => fill(5e-4, length(t2))))]))
+    d, irv, ipm = Nereus._build_data(cfg["data"])
+    params, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+    tg = Nereus.NereusTarget(params, d; unconstrained = true)
+    names = params.layout.unfrozen_names
+    @test "rho_s" in names && "Mo_k1" in names && "Mo_k2" in names
+    @test params.config.stability === :gladman && isempty(params.config.noise_models)
+    r2 = MersenneTwister(7)
+    xs = [Nereus._draw_from_prior(tg, r2) for _ in 1:250]
+    ys = [Nereus.transform_forward(x, tg.transform) for x in xs]
+    best = xs[argmax([_ref(tg, y) for y in ys])]
+    ys = ys[1:60]
+    for _ in 1:100
+        x = [clamp(v + 3e-4 * (p.hi - p.lo) * randn(r2), p.lo + 1e-9, p.hi - 1e-9)
+             for (v, p) in zip(best, params.layout.unfrozen_priors)]
+        push!(ys, Nereus.transform_forward(x, tg.transform))
+    end
+    ev = _BridgeEvaluator(tg)
+    ref = [_ref(tg, y) for y in ys]
+    got = [_bridge_logdensity!(ev, y) for y in ys]
+    fin = isfinite.(ref)
+    @test isfinite.(got) == fin
+    @test count(fin) >= 120
+    @test maximum(abs.(got[fin] .- ref[fin]) ./ max.(1.0, abs.(ref[fin]))) < 1e-10
+    @test maximum(abs(got[i] - ref[i]) for i in 61:160 if fin[i]) < 1e-8
+end
+
 # Eccentricities that `true_anomaly` clamps. The allocating RV and transit
 # methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
-# the workspace RV method without noise models and the workspace photometry use
-# the e they are given. Above 0.9999 those are two models, nats apart, not one
+# the workspace photometry, and the workspace RV of a fit with no noise models,
+# use the e they are given. Above 0.9999 those are two models, nats apart, not one
 # model rounded two ways. The evaluator takes the allocating methods wherever a
 # planet's e is clamped, so there it must give the same bits as
 # `_logdensity_parts`; just below the clamp it keeps the workspace methods and
