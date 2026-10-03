@@ -305,6 +305,26 @@ density did not depend on i_star or lambda.
 _bridge_phot_ws(params) = !any(has_gd, params.config.planet_modes)
 
 """
+    _bridge_e_clamped(theta) -> Bool
+
+Whether `true_anomaly` (orbit.jl) clamps the eccentricity of any active planet,
+that is whether some planet's e lies outside [0, 0.9999] (or is NaN). The
+allocating RV and transit methods take the true anomaly from `true_anomaly`;
+the workspace RV method without noise models and the workspace photometry
+compute cos f and sin f from E with the e they are given. Outside that interval
+the two compute different models, not the same model with different rounding.
+"""
+@inline function _bridge_e_clamped(theta::Theta)
+    for k in planet_indices(theta)
+        e, _ = planet_e_w(theta, k)
+        # `true_anomaly`'s own clamp, spelled the same way: true exactly when it
+        # changes e, and for NaN.
+        min(max(e, zero(e)), oftype(e, 0.9999)) == e || return true
+    end
+    return false
+end
+
+"""
     _bridge_logdensity!(ev, y) -> Float64
 
 The log-posterior at `y` in the target's own space, `sum(_logdensity_parts(target,
@@ -313,7 +333,26 @@ draw with (`rv_log_likelihood(theta, data, ws)`, `transit_log_likelihood(theta,
 data, ws)`) and the evaluator's own `Theta`, so that a call does not allocate
 the likelihood's buffers afresh.
 
-It is the same function as `_logdensity_parts` up to rounding, not to the bit:
+Where the workspace methods compute a different model from the allocating
+ones, it takes the allocating methods:
+
+- Gravity darkening: the workspace transit has none, so a fit with a :GD planet
+  takes the allocating photometry (`_bridge_phot_ws`). TTV fits, exposures
+  longer than 2 min and photometric noise models are handed over by the
+  workspace method itself.
+- Eccentricity outside [0, 0.9999] (`_bridge_e_clamped`): the allocating
+  methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
+  the workspace RV without noise models and the workspace photometry use the
+  given e. Above 0.9999 the two differ by much more than rounding: on an RV +
+  transit fit with a 20k-point light curve, up to 8.6 nats in the RV and
+  8.1e4 nats in the photometry; in the RV, 5.8 nats on an SB2 fit and 2.5 on
+  the HD 18599 white-noise fit without the floor. At those points both the RV
+  and the photometry take the allocating methods. This follows
+  `_logdensity_parts`, as the bridge did before it used the workspace;
+  pt_emcee's own likelihood (`eval_bounded!`) keeps the given e there.
+
+With that it is the same function as `_logdensity_parts` up to rounding at
+every point, but not to the bit:
 
 - RV without noise models: the workspace method (`_rv_ll_no_noise(theta, data,
   ws)`) caches each planet's velocity curve and computes cos(f+ω) by the
@@ -330,12 +369,10 @@ It is the same function as `_logdensity_parts` up to rounding, not to the bit:
   a 20k-point light curve the whole log density differs by at most 5.4e-9 nats
   near the reference point, and on prior draws by at most 1e-11 relative
   (3.1e-13 with the GP rotation, 9.7e-12 with activity decorrelation).
-- Gravity darkening: the workspace method has none, so a fit with a :GD planet
-  takes the allocating photometry, as `_logdensity_parts` does
-  (`_bridge_phot_ws`). So do TTV fits, exposures longer than 2 min and
-  photometric noise models, which the workspace method hands over itself. In
-  those cases the photometry gives the same bits as in `_logdensity_parts`, as
-  the tomogram always does.
+
+The photometry gives the same bits as in `_logdensity_parts` wherever it takes
+the allocating method, as the tomogram always does, and so does the whole
+density at a clamped e.
 """
 function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
     target = ev.target
@@ -359,10 +396,13 @@ function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
     end
     lp = log_prior(theta)
     isfinite(lp) || return -Inf
-    ll = rv_log_likelihood(theta, data, ev.ws)
+    # Where `true_anomaly` clamps an eccentricity the workspace methods compute
+    # another model, so both likelihoods take the allocating methods there.
+    ws_ok = !_bridge_e_clamped(theta)
+    ll = ws_ok ? rv_log_likelihood(theta, data, ev.ws) : rv_log_likelihood(theta, data)
     isfinite(ll) || return -Inf
-    lt = ev.phot_ws ? transit_log_likelihood(theta, data, ev.ws) :
-                      transit_log_likelihood(theta, data)
+    lt = ws_ok && ev.phot_ws ? transit_log_likelihood(theta, data, ev.ws) :
+                               transit_log_likelihood(theta, data)
     ltomo = tomogram_log_likelihood(theta, data)
     isfinite(ltomo) || return -Inf
     isfinite(lt) || return -Inf

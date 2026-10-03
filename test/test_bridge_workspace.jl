@@ -10,6 +10,11 @@
 # and then the chunk totals. Near the posterior of a 20k-point light curve
 # they differ by ~1e-9 in log L, ~1e-14 relative. Anything larger is a bug in
 # one of the two, not rounding.
+#
+# That holds because the evaluator steps around the places where the workspace
+# methods compute another model: a planet with gravity darkening, and any
+# planet whose e `true_anomaly` clamps (outside [0, 0.9999]). There it takes
+# the allocating methods and gives the same bits as `_logdensity_parts`.
 using Test, Nereus, Random, MCMCChains
 using Nereus: _BridgeEvaluator, _bridge_logdensity!, _logdensity_parts
 
@@ -23,12 +28,12 @@ const _BW_FLUX = let ph = @. abs(mod(_BW_TPH - 1.2 + 3.11 / 2, 3.11) - 3.11 / 2)
     f = 1.0 .+ 3e-4 .* randn(_BW_NPH); f[ph .< 0.05] .-= 0.006; f
 end
 
-_bw_target(; unconstrained = true) = begin
+_bw_target(; unconstrained = true, se = 0.5) = begin
     tg = build_target(
         planets = (b = (P = UniformPrior(3.06, 3.16), Tc = UniformPrior(1.15, 1.25),
                         K = UniformPrior(5.0, 60.0), b = UniformPrior(0.0, 0.9),
-                        rr = UniformPrior(0.02, 0.15), sesinw = UniformPrior(-0.5, 0.5),
-                        secosw = UniformPrior(-0.5, 0.5)),),
+                        rr = UniformPrior(0.02, 0.15), sesinw = UniformPrior(-se, se),
+                        secosw = UniformPrior(-se, se)),),
         rv = (SIM = (data = (t = _BW_TRV, rv = _BW_RV, rv_err = fill(2.0, _BW_NRV)),
                      sigma = LogUniformPrior(0.5, 10.0)),),
         phot = (TESS = (data = (t = _BW_TPH, flux = _BW_FLUX, flux_err = fill(3e-4, _BW_NPH)),),),
@@ -238,5 +243,53 @@ end
         @test count(fin) >= 250
         @test maximum(abs.(got[fin] .- ref[fin]) ./ max.(1.0, abs.(ref[fin]))) < 1e-12
         @test maximum(abs(got[i] - ref[i]) for i in 151:300 if fin[i]) < 1e-8
+    end
+end
+
+# Eccentricities that `true_anomaly` clamps. The allocating RV and transit
+# methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
+# the workspace RV method without noise models and the workspace photometry use
+# the e they are given. Above 0.9999 those are two models, nats apart, not one
+# model rounded two ways. The evaluator takes the allocating methods wherever a
+# planet's e is clamped, so there it must give the same bits as
+# `_logdensity_parts`; just below the clamp it keeps the workspace methods and
+# agrees to rounding.
+@testset "bridge evaluator where true_anomaly clamps e" begin
+    rng = MersenneTwister(43)
+    t = sort!(500 .* rand(rng, 80))
+    rv = 25 .* sin.(2π .* (t .- 1.0) ./ 7.3) .+ 3 .* randn(rng, 80)
+    rvonly = build_target(
+        planets = (b = (P = UniformPrior(7.0, 7.6), Tc = UniformPrior(0.5, 1.5),
+                        K = UniformPrior(1.0, 60.0), sesinw = UniformPrior(-1.0, 1.0),
+                        secosw = UniformPrior(-1.0, 1.0)),),
+        rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(3.0, 80)),
+                     sigma = LogUniformPrior(0.1, 20.0)),))
+    for tg in (rvonly, _bw_target(; se = 1.0))
+        names = tg.params.layout.unfrozen_names
+        js, jc = findfirst(==("sesinw_k1"), names), findfirst(==("secosw_k1"), names)
+        r2 = MersenneTwister(6)
+        xs0 = [Nereus._draw_from_prior(tg, r2) for _ in 1:100]
+        best = xs0[argmax([_ref(tg, Nereus.transform_forward(x, tg.transform)) for x in xs0])]
+        at(e, ω) = (x = copy(best); x[js] = sqrt(e) * sin(ω); x[jc] = sqrt(e) * cos(ω);
+                    Nereus.transform_forward(x, tg.transform))
+        ωs = range(-π, π; length = 9)[1:8]
+        hi = [at(e, ω) for e in (0.99990001, 0.99995, 0.99999, 0.9999999) for ω in ωs]
+        lo = [at(e, ω) for e in (0.9998, 0.99989) for ω in ωs]
+        th = Nereus.Theta{Float64}(tg.params)
+        clamped(y) = (Nereus.set_unfrozen!(th, Nereus.transform_inverse(y, tg.transform));
+                      Nereus._bridge_e_clamped(th))
+        @test all(clamped, hi)
+        @test !any(clamped, lo)
+        ev = _BridgeEvaluator(tg)
+        ref_hi = [_ref(tg, y) for y in hi]
+        got_hi = [_bridge_logdensity!(ev, y) for y in hi]
+        @test count(isfinite, ref_hi) >= 24
+        @test all(got_hi .=== ref_hi)
+        ref_lo = [_ref(tg, y) for y in lo]
+        got_lo = [_bridge_logdensity!(ev, y) for y in lo]
+        fin = isfinite.(ref_lo)
+        @test isfinite.(got_lo) == fin
+        @test count(fin) >= 12
+        @test maximum(abs.(got_lo[fin] .- ref_lo[fin]) ./ max.(1.0, abs.(ref_lo[fin]))) < 1e-12
     end
 end
