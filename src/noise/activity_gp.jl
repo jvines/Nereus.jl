@@ -988,8 +988,9 @@ posterior; on prior draws a median of 2e-9 and at most 2e-6 nats, the same
 as the Float64 dense Cholesky. test/test_activity_gp_lowrank.jl checks it.
 
 `y_flat`, `σ²_flat` are the channel-stacked residuals and per-point
-variances (RV block first, then each indicator), length C·N. Returns `-Inf`
-if the Cholesky of A fails, which takes non-finite inputs.
+variances (RV block first, then each indicator), length C·N. A NaN among
+the couplings, variances or residuals gives `NaN`. `-Inf` is returned if the
+Cholesky of A fails, which A ⪰ I rules out for finite inputs.
 """
 function activity_gp_joint_logpdf_lowrank(epochs::AbstractVector{<:Real},
         chan_a::AbstractVector{<:Real}, chan_b::AbstractVector{<:Real},
@@ -1093,23 +1094,31 @@ function _agp_whitened_core!(A::AbstractMatrix,
     # no G information (bGG = 0, hence bGĠ = 0) factors as diag(0, √bĠĠ); a
     # rank-1 block (no Ġ information independent of G) gets r22 = 0. A zero
     # row of R leaves that row and column of A at the identity and w at 0
-    # there, so both cases are exact rather than approximated.
+    # there, so both cases are exact rather than approximated. Only a value
+    # that is zero (or rounded below it) means "no information": a NaN takes
+    # the square root and reaches w, so it is not mistaken for one.
     ww = zero(T)
     @inbounds for j in 1:N
         g = bGG[j]
-        if g > 0
+        if g <= 0
+            x11 = zero(T); x12 = zero(T); q = bdd[j]; wG = zero(T)
+        else
             x11 = sqrt(g); x12 = bGd[j] / x11
             q   = bdd[j] - x12 * x12
             wG  = v[j] / x11
-        else
-            x11 = zero(T); x12 = zero(T); q = bdd[j]; wG = zero(T)
         end
-        x22 = q > 0 ? sqrt(q) : zero(T)
-        wd  = x22 > 0 ? (v[N+j] - x12 * wG) / x22 : zero(T)
+        if q <= 0
+            x22 = zero(T); wd = zero(T)
+        else
+            x22 = sqrt(q); wd = (v[N+j] - x12 * wG) / x22
+        end
         r11[j] = x11; r12[j] = x12; r22[j] = x22
         w[j] = wG; w[N+j] = wd
         ww += wG * wG + wd * wd
     end
+    # A NaN coupling, variance or residual gives NaN, as the dense likelihood
+    # does, rather than whatever the Cholesky of a NaN matrix returns.
+    isnan(ww) && return convert(TA, NaN)
 
     # Upper triangle of A = I + R·K_g·Rᵀ, straight from the kernel blocks at
     # τ = t_j − t_k (j ≤ k). Rows j and N+j of R·g are r11·G_j + r12·Ġ_j and

@@ -314,3 +314,53 @@ end
         @test g[d] ≈ fd rtol = 1e-4 atol = 1e-5
     end
 end
+
+@testset "AGP whitened solver: NaN inputs give NaN" begin
+    # A NaN coupling used to be read as "no information" by the zero tests of
+    # the 2×2 factor (NaN > 0 is false), and the solver returned a finite
+    # log-likelihood. The dense likelihood returns NaN; so does the solver.
+    rng = MersenneTwister(41)
+    w = Nereus.AGPWorkspace()
+    for (N, C) in ((12, 5), (9, 2), (10, 3))
+        epochs, ca, cb, amp, P, λe, λp, y, σ² = _agp_inputs(rng, N, C)
+        solve(ca, cb, y, σ²) = (Nereus.activity_gp_joint_logpdf_lowrank(epochs, ca, cb,
+                                    amp, P, λe, λp, y, σ²),
+                                Nereus.activity_gp_joint_logpdf_lowrank!(w, epochs, ca, cb,
+                                    amp, P, λe, λp, y, σ²))
+        @test all(isfinite, solve(ca, cb, y, σ²))
+        for c in 1:C
+            a = copy(ca); a[c] = NaN
+            @test all(isnan, solve(a, cb, y, σ²))
+            b = copy(cb); b[c] = NaN
+            @test all(isnan, solve(ca, b, y, σ²))
+        end
+        @test all(isnan, solve(fill(NaN, C), cb, y, σ²))
+        @test all(isnan, solve(ca, fill(NaN, C), y, σ²))
+        # With no G coupling at all, a NaN Ġ coupling still propagates.
+        b = copy(cb); b[1] = NaN
+        @test all(isnan, solve(zeros(C), b, y, σ²))
+        for k in (1, N + 2, C * N)
+            s = copy(σ²); s[k] = NaN
+            @test all(isnan, solve(ca, cb, y, s))
+            r = copy(y); r[k] = NaN
+            @test all(isnan, solve(ca, cb, r, σ²))
+        end
+    end
+
+    # Through the likelihood, with and without a workspace: NaN in any one
+    # coupling or channel jitter of the five-channel model.
+    data, params, ws = _agp_params(MersenneTwister(43))
+    theta = Theta{Float64}(params)
+    L = params.layout
+    _prior_theta!(theta, params, MersenneTwister(44))
+    @test isfinite(Nereus.rv_log_likelihood(theta, data, ws))
+    nan_names = filter(n -> occursin(r"^(Vc|Vr|Bc|Br|Fc|Fr|Hc|Hr|Lc)$", n) ||
+                            startswith(n, "gp_act_jit_"), L.unfrozen_names)
+    @test length(nan_names) == 13
+    for n in nan_names
+        th = deepcopy(theta)
+        th.values[L.name_to_idx[n]] = NaN
+        @test isnan(Nereus.rv_log_likelihood(th, data, ws))
+        @test isnan(Nereus.rv_log_likelihood(th, data))
+    end
+end
