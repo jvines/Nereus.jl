@@ -49,6 +49,10 @@ const TEST_UNITS = [
     (name = "test_obliquity_framework.jl", seconds = 1, files = ["test_obliquity_framework.jl"]),
     (name = "test_tomo_noise_menu.jl", seconds = 1, files = ["test_tomo_noise_menu.jl"]),
     (name = "test_obliquity_joint_framework.jl", seconds = 1, files = ["test_obliquity_joint_framework.jl"]),
+    (name = "test_obliquity_target.jl", seconds = 45, files = ["test_obliquity_target.jl"]),
+    (name = "test_obliquity_parity.jl", seconds = 15, files = ["test_obliquity_parity.jl"]),
+    # Every sampler through run_job on an obliquity target; pt_hmc dominates.
+    (name = "test_obliquity_runjob.jl", seconds = 400, files = ["test_obliquity_runjob.jl"]),
     (name = "test_as_coupling_mask.jl", seconds = 1, files = ["test_as_coupling_mask.jl"]),
     (name = "test_as_coupling_move.jl", seconds = 1, files = ["test_as_coupling_move.jl"]),
     (name = "test_obliquity_joint.jl", seconds = 94, files = ["test_obliquity_joint.jl"]),
