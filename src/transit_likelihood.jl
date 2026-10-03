@@ -55,7 +55,8 @@ const _PHOT_REDUCE_CHUNK = 4096
         z = a_Rs * r_over_a *
             sqrt(max(1 - sin_i_sq * sin_wf * sin_wf, 0.0))
         ld_i = lds[data.phot_inst[i]]
-        flux_cache[j, i] = transit_flux(ld_i, z, rr)
+        # Behind the star (sin(ω+f) <= 0) it is an occultation: no dip.
+        flux_cache[j, i] = sin_wf > 0 ? transit_flux(ld_i, z, rr) : 1.0
     end
     return nothing
 end
@@ -103,7 +104,8 @@ end
         z = a_Rs * r_over_a *
             sqrt(max(1 - sin_i_sq * sin_wf * sin_wf, 0.0))
         ld_i = lds[data.phot_inst[i]]
-        flux_cache[j, i] = transit_flux(ld_i, z, rr)
+        # Behind the star (sin(ω+f) <= 0) it is an occultation: no dip.
+        flux_cache[j, i] = sin_wf > 0 ? transit_flux(ld_i, z, rr) : 1.0
     end
     return nothing
 end
@@ -446,8 +448,10 @@ end
                                                     bs[j], a_Rs[j])
                     fsum += transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
                 else
-                    zs = sky_separation(tsub, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
-                    fsum += transit_flux(ld, zs, rrs[j])
+                    zs, sw = _sky_separation_signed(tsub, Ps[j], es[j], ws[j], Tps[j],
+                                                    bs[j], a_Rs[j])
+                    # Behind the star (sin(ω+f) <= 0): an occultation, no dip.
+                    fsum += sw > 0 ? transit_flux(ld, zs, rrs[j]) : one(T)
                 end
             end
             tprod *= fsum / ns
@@ -456,8 +460,8 @@ end
                                             bs[j], a_Rs[j])
             tprod *= transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
         else
-            z = sky_separation(t_eff, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
-            tprod *= transit_flux(ld, z, rrs[j])
+            z, sw = _sky_separation_signed(t_eff, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
+            tprod *= sw > 0 ? transit_flux(ld, z, rrs[j]) : one(T)
         end
     end
     return tprod
