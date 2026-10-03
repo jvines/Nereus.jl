@@ -115,28 +115,36 @@ function _disp_target_td(seed::Int = 2027; n_obs::Int = 40)
     return target, data
 end
 
-_dispatch_td(name, kwargs, target, data) =
+_dispatch_td(name, kwargs, target, data; output_dir = mktempdir()) =
     Nereus._dispatch_sampler(
         Dict(:sampler   => Dict(:name => name, :kwargs => kwargs),
              # Explicit empty arrays mirror what a JSON config sends
              # (`toggleable: []`) — empty JSON3.Array, not the typed
              # default. Must coerce to Vector{NoiseModel}.
              :transdim  => Dict(:max_kplanet => 2, :transdim_fraction => 0.4,
-                                :toggleable => [], :noise_exclusion_groups => [])),
+                                :toggleable => [], :noise_exclusion_groups => []),
+             # Every run_job config has one; a sampler that checkpoints writes
+             # its state there by default.
+             :output_dir => output_dir),
         target, data, 1)
 
 @testset "runner dispatch — trans-dim samplers (td block + JSON kwargs)" begin
     target, data = _disp_target_td()
 
     @testset "moms — String within_model + Int floats" begin
+        # moms checkpoints, and this cfg has no output_dir for run_job's
+        # default file, so it names one: a String, as JSON would send it.
+        ck = joinpath(mktempdir(), "moms_state.jls")
         res = _dispatch_td("moms",
                            Dict(:within_model => "slice", :init_scale => 1,
                                 :inclusion_prior => 0.5, :n_warmup => 150,
-                                :n_samples => 300, :show_progress => false),
+                                :n_samples => 300, :show_progress => false,
+                                :checkpoint => ck),
                            target, data)
         @test res.chains isa MCMCChains.Chains
         @test :n_planets in names(res.chains, :parameters)
         @test res.n_evals > 0
+        @test isfile(ck)
     end
 
     @testset "daedalus — Int dlogz/init_scale" begin
@@ -164,13 +172,16 @@ _dispatch_td(name, kwargs, target, data) =
     end
 
     @testset "transdim_pt_emcee — Int stretch_a/inclusion_prior" begin
+        out = mktempdir()
         res = _dispatch_td("transdim_pt_emcee",
                            Dict(:stretch_a => 2, :inclusion_prior => 0.5,
                                 :n_temps => 4, :n_walkers => 20,
                                 :n_steps => 200, :n_burnin => 100,
                                 :show_progress => false),
-                           target, data)
+                           target, data; output_dir = out)
         @test res.chains isa MCMCChains.Chains
+        # run_job's default checkpoint reaches the sampler.
+        @test isfile(joinpath(out, "transdim_pt_emcee_state.jls"))
     end
 
     @testset "unsupported kwarg on a trans-dim sampler → ArgumentError" begin

@@ -390,6 +390,21 @@ selection on planet count.
 - `node_flip::Real = 0.1` — as in `sample_pt_emcee`: the tempered
   (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets, proposed only to
   walkers in which the planet is active and astrometrically coupled.
+- `checkpoint=nothing` — path of a state file. The sampler writes its whole
+  state there (every rung's walkers and their models, the ladder, every RNG
+  stream, the MoMS proposal scales and off-values, the counters, the ladder
+  history, the evidence accumulators, the informed-birth caches and the kept
+  draws) at the end of the run and every `checkpoint_interval` seconds during
+  it, replacing the file atomically. `run_job` sets it to
+  `transdim_pt_emcee_state.jls` in `output_dir` unless the job gives one.
+- `checkpoint_interval::Real=900` — seconds between checkpoints during the run.
+- `resume::Bool=false` — continue from `checkpoint` instead of initialising:
+  a run that was killed, or a finished one that needs more steps. `n_steps` is
+  the new TOTAL, counted from the start of the original run; the draws already
+  kept stay, and the new ones are appended. The continuation is bit-identical to
+  an uninterrupted run of `n_steps`. Refused, with the differences listed, if
+  the checkpoint came from different data, priors, parameters, walkers, rungs,
+  burn-in, thinning, seed, trans-dim configuration or move settings.
 
 # Notes
 - Within-step ordering: stretch on continuous params → MoMS planet
@@ -440,7 +455,13 @@ function sample_transdim_pt_emcee(
     node_flip::Real = 0.1,
     lambda_slide::Real = 0.0,
     lambda_slide_sigma::Real = 0.6,
+    checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
+    checkpoint_interval::Real = 900.0,
+    resume::Bool = false,
 )
+    ck_path = checkpoint === nothing ? nothing : String(checkpoint)
+    resume && ck_path === nothing && throw(ArgumentError(
+        "resume = true needs `checkpoint`, the state file to continue from"))
     # JSON may deliver floats-as-Int and arrays-as-JSON3.Array; normalize.
     node_flip               = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
@@ -525,6 +546,30 @@ function sample_transdim_pt_emcee(
     end
     length(βs) == n_temps || throw(ArgumentError(
         "Provided `betas` has length $(length(βs)), expected $n_temps"))
+
+    # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
+    # As in sample_pt_emcee: the fingerprint takes the ladder as built, before
+    # any adaptation, and the trans-dim configuration by the positions of its
+    # noise models in the target's menu. On resume the saved state replaces
+    # initialisation below and is put back just before the main loop, which
+    # then carries on from step `step0 + 1`.
+    menu_pos(nm) = something(findfirst(==(nm), params.config.noise_models), 0)
+    ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
+        n_burnin, thin, seed, stretch_a, ladder = copy(βs), adapt_ladder,
+        ladder_adapt_window, ladder_adapt_ν0, ladder_adapt_K, untemper_transit,
+        prune_stranded, node_flip, lambda_slide, lambda_slide_sigma,
+        td = (planets = td.planets, noise = td.noise, max_kplanet = td.max_kplanet,
+              toggleable = Int[menu_pos(nm) for nm in td.toggleable],
+              exclusion = [Int[menu_pos(nm) for nm in g]
+                           for g in td.noise_exclusion_groups],
+              transdim_fraction = td.transdim_fraction),
+        inclusion_prior, moms_init_scale, informed_birth_fraction,
+        target_birth_accept, n_birth_refine, n_birth_tries, n_noise_bridge,
+        n_noise_relax, noise_swap, noise_swap_rate = Float64(noise_swap_rate))
+    ck = resume ? read_checkpoint(ck_path, "transdim_pt_emcee", ck_fp) : nothing
+    step0 = ck === nothing ? 0 : ck.step::Int
+    step0 <= n_steps || throw(ArgumentError(
+        "the checkpoint is at step $step0; n_steps = $n_steps would end before it"))
 
     # --- Per-slot mutable state -----------------------------------------
     # Buffers are keyed by CHUNK, never by `Threads.threadid()`: the id spans
@@ -741,8 +786,11 @@ function sample_transdim_pt_emcee(
     # toggleable model's eval cost once and scale its climb budget
     # inversely, floored at `min_refine` so even the expensive models get
     # a real climb. Cheap models keep the full budget.
+    #
+    # The budget comes from a clock, so it is part of the run's state: a resumed
+    # run takes the one its original measured (restored before the main loop).
     noise_refine_budget = fill(n_birth_refine, n_noise_slots)
-    if n_birth_refine > 1 && do_noise
+    if ck === nothing && n_birth_refine > 1 && do_noise
         min_refine = max(3, n_birth_refine ÷ 6)
         x_med = Float64[clamp(quantile(layout.unfrozen_priors[j], 0.5),
                               bounds(layout.unfrozen_priors[j])...)
@@ -868,8 +916,13 @@ function sample_transdim_pt_emcee(
     end
 
     # --- Initialize walkers from prior -------------------------------
+    # On resume no walker is drawn or re-seeded (here or in the CovarianceNoise
+    # pass below): those loops get no chunks, and the saved walkers, models and
+    # rng_master (whose draws above and here the restore undoes) are put back
+    # before the main loop.
+    n_init = ck === nothing ? n_temps * n_walkers_eff : 0
     init_seeds = rand(rng_master, UInt64, n_temps * n_walkers_eff)
-    init_chunks = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+    init_chunks = _chunk_ranges(n_init, n_slots)
     Threads.@threads :static for slot in 1:length(init_chunks)
         for task_idx in init_chunks[slot]
             t = (task_idx - 1) ÷ n_walkers_eff + 1
@@ -927,7 +980,7 @@ function sample_transdim_pt_emcee(
         end
     end
     if !isempty(cov_seed_slots)
-        cov_chunks = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+        cov_chunks = _chunk_ranges(n_init, n_slots)
         Threads.@threads :static for slot in 1:length(cov_chunks)
             for task_idx in cov_chunks[slot]
                 t = (task_idx - 1) ÷ n_walkers_eff + 1
@@ -1038,6 +1091,11 @@ function sample_transdim_pt_emcee(
     rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
     rngs_td = [MersenneTwister(_walker_seed(seed, 4, i))
                for i in 1:(n_temps * n_walkers_eff)]
+    # Informed births read and write process-global caches keyed by the walker's
+    # RNG and active set (src/transdim/birth_strategies.jl). A checkpoint has to
+    # carry them, so while checkpointing each walker records its keys here.
+    track_informed = ck_path !== nothing && td.planets && informed_birth_fraction > 0
+    informed_keys = [Set{Vector{Float64}}() for _ in 1:(n_temps * n_walkers_eff)]
     # Node flip, one stream per (rung, walker); built only when a planet has
     # the move. Offered to a walker only while the planet is active AND coupled
     # to the astrometry: an inactive slot sits at its MoMS off-value and an
@@ -1616,6 +1674,8 @@ function sample_transdim_pt_emcee(
                 use_informed = informed_birth_fraction > 0.0 && βs[t] > 0.3 &&
                                 rand(trng) < informed_birth_fraction
                 chosen_strategy = use_informed ? JointInformedBirth() : strategy
+                track_informed && use_informed && do_birth &&
+                    push!(informed_keys[task_idx], _active_set_key(theta))
                 β = βs[t]
 
                 # (1)+(2) Generous multi-try exploration, BURN-IN ONLY (discarded, so
@@ -1779,9 +1839,61 @@ function sample_transdim_pt_emcee(
     _np_trace && println("[NP_TRACE] td.planets=$(td.planets) max_k=$max_k " *
                           "post-init Np<max=$(_np0())/$(length(td_states))")
 
-    pb = ProgressBar("td-pt_emcee"; total = n_steps, enabled = show_progress)
+    pb = ProgressBar("td-pt_emcee"; total = n_steps, enabled = show_progress,
+                     start = step0)
 
-    for step in 1:n_steps
+    # --- Resume: put the saved run back exactly as it stopped ----------
+    # In place throughout: the closures above captured these arrays (and the
+    # TransDimStates, and the MoMS strategy), and rebinding a captured variable
+    # would box it. The per-step atomic tallies are zero between steps, so they
+    # carry nothing; the swap diagnostics are cumulative and do.
+    if ck !== nothing
+        state .= ck.state; logπ_arr .= ck.logπ; logL_arr .= ck.logL; βs .= ck.betas
+        foreach(copy_into!, td_states, ck.td_states)
+        copy!(rng_master, ck.rng_master)
+        foreach(copy!, rngs_h1, ck.rngs_h1); foreach(copy!, rngs_h2, ck.rngs_h2)
+        foreach(copy!, rngs_td, ck.rngs_td); foreach(copy!, rngs_flip, ck.rngs_flip)
+        foreach(copy!, rngs_slide, ck.rngs_slide)
+        foreach((a, b) -> a .= b, strategy.off_values, ck.moms_off_values)
+        foreach((a, b) -> a .= b, strategy.scales, ck.moms_scales)
+        adapt_n_attempts .= ck.adapt_n_attempts; adapt_n_accepts .= ck.adapt_n_accepts
+        noise_refine_budget .= ck.noise_refine_budget
+        accept_within .= ck.accept_within; propose_within .= ck.propose_within
+        accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
+        accept_transdim .= ck.accept_transdim; propose_transdim .= ck.propose_transdim
+        accept_noise_transdim .= ck.accept_noise_transdim
+        propose_noise_transdim .= ck.propose_noise_transdim
+        planet_birth_proposed .= ck.planet_birth_proposed
+        planet_birth_accepted .= ck.planet_birth_accepted
+        planet_death_proposed .= ck.planet_death_proposed
+        planet_death_accepted .= ck.planet_death_accepted
+        flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
+        slide_proposed .= ck.slide_proposed; slide_accepted .= ck.slide_accepted
+        pruned .= ck.pruned
+        n_evals_atomic[] = ck.n_evals::Int
+        for (a, v) in zip((pswap_prop, pswap_acc, pn_prop, pn_acc, np_prop, np_acc),
+                          ck.swap_diag)
+            a[] = v::Int
+        end
+        β_hist[1:step0, :] .= ck.β_hist; swap_hist[1:step0, :] .= ck.swap_hist
+        smd_hist[1:step0, :] .= ck.smd_hist
+        keep_idx = ck.keep_idx::Int
+        samples[1:keep_idx, :] .= ck.samples; lp_samples[1:keep_idx] .= ck.lp_samples
+        for f in fieldnames(EvidenceAccumulator)
+            setfield!(evidence_acc, f, getfield(ck.evidence, f))
+        end
+        # Windows the saved walkers live in (moved by the burn-in re-cut).
+        for (nm, (lo, _)) in ck.windows
+            set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
+                                 lo; transforms = (target.transform,))
+        end
+        merge!(recut_moved, ck.recut_moved)
+        _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
+        n_done = step0
+    end
+    last_ck = time()
+
+    for step in (step0 + 1):n_steps
         do_half_step!(tasks_h1, :h1); _np_chk("h1", step)
         do_half_step!(tasks_h2, :h2); _np_chk("h2", step)
         if !isempty(flips)
@@ -1992,6 +2104,32 @@ function sample_transdim_pt_emcee(
                               :td_n => td_acc,
                               :ntd_n => sum(accept_noise_transdim),
                               :nevals => n_evals_atomic[]))
+        end
+
+        # ---- Checkpoint: every `checkpoint_interval` s and on the last step
+        # (src/checkpoint.jl); this sampler has no early stop -------------
+        if ck_path !== nothing &&
+           (step == n_steps || time() - last_ck >= checkpoint_interval)
+            write_checkpoint(ck_path, "transdim_pt_emcee", ck_fp, (; step,
+                state, logπ = logπ_arr, logL = logL_arr, td_states, betas = βs,
+                rng_master, rngs_h1, rngs_h2, rngs_td, rngs_flip, rngs_slide,
+                moms_off_values = strategy.off_values, moms_scales = strategy.scales,
+                adapt_n_attempts, adapt_n_accepts, noise_refine_budget,
+                accept_within, propose_within, accept_swap, propose_swap,
+                accept_transdim, propose_transdim, accept_noise_transdim,
+                propose_noise_transdim, planet_birth_proposed, planet_birth_accepted,
+                planet_death_proposed, planet_death_accepted, flip_proposed,
+                flip_accepted, slide_proposed, slide_accepted, pruned,
+                n_evals = n_evals_atomic[],
+                swap_diag = Int[a[] for a in (pswap_prop, pswap_acc, pn_prop, pn_acc,
+                                               np_prop, np_acc)],
+                β_hist = β_hist[1:step, :], swap_hist = swap_hist[1:step, :],
+                smd_hist = smd_hist[1:step, :], keep_idx,
+                samples = samples[1:keep_idx, :], lp_samples = lp_samples[1:keep_idx],
+                evidence = evidence_acc, windows = circular_windows(params),
+                recut_moved,
+                informed = _informed_cache_snapshot(rngs_td, informed_keys)))
+            last_ck = time()
         end
     end
     show_progress && finish!(pb)

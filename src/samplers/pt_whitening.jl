@@ -156,6 +156,24 @@ the distinguishing feature of this sampler.
 - `node_flip::Real=0.1` — as in `sample_pt_emcee`: the tempered
   (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets
   (src/samplers/node_flip.jl). `0` disables it.
+- `checkpoint=nothing` — path of a state file. The sampler writes its whole
+  state there (every rung's walkers, every RNG stream, the whitening ring
+  buffer and its (μ, σ), the step whitening started, the counters, the evidence
+  accumulators, the circular windows and the kept draws) at the end of the run
+  and every `checkpoint_interval` seconds during it, replacing the file
+  atomically. `run_job` sets it to `pt_whitening_state.jls` in `output_dir`
+  unless the job gives one.
+- `checkpoint_interval::Real=900` — seconds between checkpoints during the run.
+- `resume::Bool=false` — continue from `checkpoint` instead of initialising:
+  a run that was killed, or a finished one that needs more steps. `n_steps` is
+  the new TOTAL, counted from the start of the original run; the draws already
+  kept stay, and the new ones are appended. The continuation is bit-identical to
+  an uninterrupted run of `n_steps`, at any thread count. Refused, with the
+  differences listed, if the checkpoint came from different data (any field,
+  astrometry and `t_ref` included), priors, parameters, `n_walkers`, `n_temps`,
+  `betas`, `n_burnin`, `thin`, `seed`, `stretch_a`, `node_flip` (when a planet
+  can flip) or whitening settings (`warmup_swaps`, `whiten_window`,
+  `whiten_refresh`).
 """
 function sample_pt_whitening(
     target::NereusTarget,
@@ -175,6 +193,9 @@ function sample_pt_whitening(
     thin::Int = 1,
     show_progress::Bool = true,
     node_flip::Real = 0.1,
+    checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
+    checkpoint_interval::Real = 900.0,
+    resume::Bool = false,
 )
     # JSON config delivers floats-as-Int and arrays-as-JSON3.Array;
     # normalize both.
@@ -182,6 +203,9 @@ function sample_pt_whitening(
     node_flip      = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
+    ck_path = checkpoint === nothing ? nothing : String(checkpoint)
+    resume && ck_path === nothing && throw(ArgumentError(
+        "resume = true needs `checkpoint`, the state file to continue from"))
     proposal_scale = Float64(proposal_scale)   # accepted, unused (ensemble move)
     betas = betas === nothing ? nothing : collect(Float64, betas)
     params = target.params
@@ -210,6 +234,24 @@ function sample_pt_whitening(
     @assert issorted(βs; rev = true)
     length(βs) == n_temps || throw(ArgumentError(
         "Provided `betas` has length $(length(βs)), expected $n_temps"))
+
+    # Node flip for astrometry-only planets (src/samplers/node_flip.jl). Walkers
+    # here are plain bounded space, so no log-scale dimension to exclude.
+    flips = node_flip > 0 ? node_flips(params, data) : NodeFlip[]
+
+    # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
+    # On resume the saved state replaces initialisation below and is put back
+    # just before the main loop, which then carries on from step `step0 + 1`.
+    # `proposal_scale` and `init_strategy` are left out: neither is read. Nor is
+    # `node_flip` when no planet can flip, so it enters as the rate in effect.
+    ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
+        n_burnin, thin, seed, stretch_a, betas = copy(βs), warmup_swaps,
+        whiten_window = max(whiten_window, 1), whiten_refresh,
+        node_flip = isempty(flips) ? 0.0 : node_flip)
+    ck = resume ? read_checkpoint(ck_path, "pt_whitening", ck_fp) : nothing
+    step0 = ck === nothing ? 0 : ck.step::Int
+    step0 <= n_steps || throw(ArgumentError(
+        "the checkpoint is at step $step0; n_steps = $n_steps would end before it"))
 
     # Buffers are keyed by CHUNK, never by `Threads.threadid()`: the id spans
     # every threadpool while `Threads.nthreads()` counts only the default one,
@@ -262,7 +304,10 @@ function sample_pt_whitening(
     # buffers cannot be shared between tasks however the scheduler moves
     # them. `:static` is kept for the 1:1 chunk-to-thread mapping, but the
     # buffers no longer depend on it.
-    init_chunks = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+    # On resume no walker is drawn: the loop gets no chunks, and the saved
+    # walkers and rng_master (whose draw of `init_seeds` above is undone by the
+    # restore) are put back before the main loop.
+    init_chunks = _chunk_ranges(ck === nothing ? n_temps * n_walkers_eff : 0, n_slots)
     Threads.@threads :static for slot in 1:length(init_chunks)
         for task_idx in init_chunks[slot]
             t = (task_idx - 1) ÷ n_walkers_eff + 1
@@ -398,9 +443,7 @@ function sample_pt_whitening(
     rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
     rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
 
-    # Node flip for astrometry-only planets (src/samplers/node_flip.jl). Walkers
-    # here are plain bounded space, so no log-scale dimension to exclude.
-    flips = node_flip > 0 ? node_flips(params, data) : NodeFlip[]
+    # Node flip (`flips` is built above, for the fingerprint).
     rngs_flip = isempty(flips) ? MersenneTwister[] :
         [MersenneTwister(_walker_seed(seed, 5, i)) for i in 1:(n_temps * n_walkers_eff)]
     flip_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
@@ -453,9 +496,52 @@ function sample_pt_whitening(
 
     whitening_active_after = -1
 
-    pb = ProgressBar("pt_whitening"; total = n_steps, enabled = show_progress)
+    # --- Resume: put the saved run back exactly as it stopped ----------
+    # In place throughout: the closures above captured these arrays, and
+    # rebinding a captured variable would box it. (μ, σ) are saved, not
+    # recomputed: they are refreshed only every `whiten_refresh` steps, so
+    # between refreshes they lag the ring.
+    if ck !== nothing
+        state .= ck.state; logπ_arr .= ck.logπ; logL_arr .= ck.logL
+        copy!(rng_master, ck.rng_master)
+        foreach(copy!, rngs_h1, ck.rngs_h1); foreach(copy!, rngs_h2, ck.rngs_h2)
+        foreach(copy!, rngs_flip, ck.rngs_flip)
+        ring[:, 1:size(ck.ring, 2), :, :] .= ck.ring
+        ring_count .= ck.ring_count; ring_head .= ck.ring_head
+        μ_w .= ck.μ_w; σ_w .= ck.σ_w
+        whitening_active_after = ck.whitening_active_after::Int
+        accept_within .= ck.accept_within; propose_within .= ck.propose_within
+        accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
+        flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
+        n_evals_atomic[] = ck.n_evals::Int
+        keep_idx = ck.keep_idx::Int
+        samples[1:keep_idx, :] .= ck.samples; lp_samples[1:keep_idx] .= ck.lp_samples
+        for f in fieldnames(EvidenceAccumulator)
+            setfield!(evidence_acc, f, getfield(ck.evidence, f))
+        end
+        # Windows the saved walkers live in (moved by the burn-in re-cut), with
+        # the bounds exactly as saved. `set_circular_window!` sets hi = lo +
+        # span, and once a window has moved twice that sum can round an ulp off
+        # the hi the run used, changing the Uniform density -log(hi - lo) in its
+        # last bit; the saved hi is written over it in the places it sets.
+        for (nm, (lo, hi)) in ck.windows
+            d = findfirst(==(nm), layout.unfrozen_names)::Int
+            set_circular_window!(params, d, lo; transforms = (target.transform,))
+            if layout.unfrozen_priors[d].hi != hi
+                layout.unfrozen_priors[d] = UniformPrior(lo, hi)
+                layout.packed_priors.uppers[d] = hi
+                target.transform isa PackedTransforms &&
+                    (target.transform.uppers[d] = hi)
+            end
+        end
+        merge!(recut_moved, ck.recut_moved)
+    end
+    last_ck = time()
 
-    for step in 1:n_steps
+    pb = ProgressBar("pt_whitening"; total = n_steps, enabled = show_progress,
+                     start = step0)
+
+    for step in (step0 + 1):n_steps
         # ---- Within-temp ensemble stretch (two half-steps) ----------
         do_half_step!(tasks_h1, :h1)
         do_half_step!(tasks_h2, :h2)
@@ -611,6 +697,24 @@ function sample_pt_whitening(
                 fields = (:acc  => round(acc_rate, digits = 3),
                           :swap => round(sum(accept_swap) / max(sum(propose_swap), 1), digits = 3),
                           :flow => use_whitening ? "on" : "off"))
+        end
+
+        # ---- Checkpoint: every `checkpoint_interval` s and on the last step
+        # (src/checkpoint.jl); this sampler has no early stop ---------------
+        # The ring is saved up to its filled depth (every rung holds the same
+        # count); the slots past it are never read.
+        if ck_path !== nothing && (step == n_steps ||
+                                   time() - last_ck >= checkpoint_interval)
+            write_checkpoint(ck_path, "pt_whitening", ck_fp, (; step,
+                state, logπ = logπ_arr, logL = logL_arr, rng_master, rngs_h1,
+                rngs_h2, rngs_flip, ring = ring[:, 1:maximum(ring_count), :, :],
+                ring_count, ring_head, μ_w, σ_w, whitening_active_after,
+                accept_within, propose_within, accept_swap, propose_swap,
+                flip_proposed, flip_accepted, n_evals = n_evals_atomic[],
+                keep_idx, samples = samples[1:keep_idx, :],
+                lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
+                windows = circular_windows(params), recut_moved))
+            last_ck = time()
         end
     end
     show_progress && finish!(pb)
