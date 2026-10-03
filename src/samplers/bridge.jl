@@ -350,8 +350,8 @@ ones, it takes the allocating methods:
   workspace method itself.
 - Eccentricity outside [0, 0.9999] (`_bridge_e_clamped`): the allocating
   methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
-  the workspace RV without noise models and the workspace photometry use the
-  given e. Above 0.9999 the two differ by much more than rounding: on an RV +
+  the workspace photometry, and the workspace RV of a fit with no noise models,
+  use the given e. Above 0.9999 the two differ by much more than rounding: on an RV +
   transit fit with a 20k-point light curve, up to 8.6 nats in the RV and
   8.1e4 nats in the photometry; in the RV, 5.8 nats on an SB2 fit and 2.5 on
   the HD 18599 white-noise fit without the floor. At those points both the RV
@@ -362,15 +362,19 @@ ones, it takes the allocating methods:
 With that it is the same function as `_logdensity_parts` up to rounding at
 every point, but not to the bit:
 
-- RV without noise models: the workspace method (`_rv_ll_no_noise(theta, data,
-  ws)`) caches each planet's velocity curve and computes cos(f+ω) by the
-  angle-sum identity, so its log L differs in the last bits at most points.
-  Measured up to 2.4e-9 nats on the HD 18599 white-noise fit without the
-  floor, and 2.4e-7 nats (3e-15 relative) on prior draws of an RV +
-  astrometry fit. With noise models it evaluates each cadence as the other
-  method does, in the same order, and gave the same bits on every fit measured
-  (GP rotation, activity GP, activity decorrelation, error scale, white noise
-  with the floor, the trans-dimensional job, RM with tomography).
+- RV of a fit with no noise models at all: both RV methods choose their branch
+  on `config.noise_models` as a whole, whatever channel each model is on. With
+  none, the workspace method (`_rv_ll_no_noise(theta, data, ws)`) caches each
+  planet's velocity curve and computes cos(f+ω) by the angle-sum identity, so
+  its log L differs in the last bits at most points. Measured up to 2.4e-9
+  nats on the HD 18599 white-noise fit without the floor, and 2.4e-7 nats
+  (3e-15 relative) on prior draws of an RV + astrometry fit. With any noise
+  model, on the RV or only on the photometry, the RV goes through
+  `_rv_ll_with_noise`, which evaluates each cadence as the other method does,
+  in the same order, and gave the same bits on every fit measured (GP
+  rotation, activity GP, activity decorrelation, error scale, white noise with
+  the floor, the trans-dimensional job, RM with tomography, and a CeleriteSHO
+  on the photometry only, with and without gravity darkening).
 - Photometry: the workspace method computes each cadence's sky separation by
   the same angle-sum route and sums every cadence in one pass, where the other
   sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
@@ -379,14 +383,16 @@ every point, but not to the bit:
   (3.1e-13 with the GP rotation, 9.7e-12 with activity decorrelation).
 
 The same bits as `_logdensity_parts` come out for the tomogram, for the
-photometry wherever it takes the allocating method, for the RV with noise
-models, and for the whole density at a clamped e. A gravity-darkened fit is
-therefore bit-identical only without RV data or with an RV noise model. With
-RV data and no RV noise model its RV carries the workspace rounding like any
-other fit's: on a one-planet RVPM_GD fit the RV log L matched at 72 of 420
-points (up to 5.1e-11 nats apart); on a two-band, two-planet one the whole
-density matched at 410 of 500 (up to 4.7e-10 nats, 1.4e-15 relative), and
-one bridge_evidence of five moved log Z by 4.5e-13.
+photometry wherever it takes the allocating method, for the RV of a fit with
+any noise model, and for the whole density at a clamped e. A gravity-darkened
+fit, whose photometry always takes the allocating method, is therefore
+bit-identical whenever it has no RV data or has any noise model, on either
+channel. Only a gravity-darkened fit with RV data and no noise model at all
+carries the workspace RV rounding, like any other fit without noise models: on
+a one-planet RVPM_GD fit the RV log L matched at 72 of 420 points (up to
+5.1e-11 nats apart); on a two-band, two-planet one the whole density matched
+at 410 of 500 (up to 4.7e-10 nats, 1.4e-15 relative), and one bridge_evidence
+of five moved log Z by 4.5e-13.
 """
 function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
     target = ev.target

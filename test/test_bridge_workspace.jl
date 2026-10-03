@@ -119,7 +119,9 @@ const _BW_GD_P, _BW_GD_ARS = 2.827969, 6.815
 const _BW_GD_T = collect(range(-0.09, 0.09; length = 301))
 const _BW_GD_TRV = collect(range(0.0, 20.0; length = 30))
 
-function _bw_gd_build(mode, flux; rv_noise = false)
+# `noise`: nothing, "rv" (a MaternGP on the RV) or "phot" (a CeleriteSHO on the
+# photometry only).
+function _bw_gd_build(mode, flux; noise = nothing)
     fx(v) = Dict{String, Any}("type" => "FixedPrior", "args" => [v])
     un(a, b) = Dict{String, Any}("type" => "UniformPrior", "args" => [a, b])
     priors = Dict{String, Any}(
@@ -146,7 +148,9 @@ function _bw_gd_build(mode, flux; rv_noise = false)
         "star" => Dict("M_s" => 1.60, "R_s" => 1.47), "priors" => priors,
         "model" => Dict("max_kplanet" => 1, "planet_modes" => [mode],
                         "parametrization" => Dict("time" => "Tc", "use_rho_s" => true)),
-        "noise_models" => rv_noise ? Any[Dict("kind" => "MaternGP", "channel" => "rv")] : Any[],
+        "noise_models" => noise === nothing ? Any[] :
+                          noise == "rv" ? Any[Dict("kind" => "MaternGP", "channel" => "rv")] :
+                          Any[Dict("kind" => "CeleriteSHO", "channel" => "phot")],
         "data" => data)
     d, irv, ipm = Nereus._build_data(cfg["data"])
     params, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
@@ -155,8 +159,8 @@ end
 
 # The light curve of a gravity-darkened transit at i_star = 20 deg and
 # lambda = -60 deg, with white noise.
-function _bw_gd_target(mode; rv_noise = false)
-    params, d = _bw_gd_build(mode, ones(length(_BW_GD_T)); rv_noise)
+function _bw_gd_target(mode; noise = nothing)
+    params, d = _bw_gd_build(mode, ones(length(_BW_GD_T)); noise)
     th = Nereus.Theta{Float64}(params)
     L = params.layout
     truth = Dict("Tc_k1" => 0.0, "b_k1" => 0.75, "rr_k1" => 0.116,
@@ -165,14 +169,17 @@ function _bw_gd_target(mode; rv_noise = false)
     Nereus.set_unfrozen!(th, x)
     pred, _ = Nereus.phot_predictions(th, d)
     params, d = _bw_gd_build(mode, pred .+ 2.4e-5 .* randn(MersenneTwister(1), length(pred));
-                             rv_noise)
+                             noise)
     return Nereus.NereusTarget(params, d; unconstrained = true), x
 end
 
 @testset "bridge evaluator on a gravity-darkened fit" begin
-    for (mode, rv_noise) in (("PM_GD", false), ("RVPM_GD", false), ("RVPM_GD", true))
-        tg, x_true = _bw_gd_target(mode; rv_noise)
-        @test isempty(tg.params.config.noise_models) == !rv_noise
+    for (mode, noise) in (("PM_GD", nothing), ("RVPM_GD", nothing), ("RVPM_GD", "rv"),
+                          ("RVPM_GD", "phot"))
+        tg, x_true = _bw_gd_target(mode; noise)
+        nms = tg.params.config.noise_models
+        @test isempty(nms) == (noise === nothing)
+        @test all(m -> Nereus.noise_channel(m) === Symbol(something(noise, "")), nms)
         names = tg.params.layout.unfrozen_names
         # The case the workspace method does not hand over by itself.
         @test Nereus._phot_n_super(tg.data) == 1
@@ -190,25 +197,42 @@ end
         @test isfinite.(got) == isfinite.(ref)
         @test count(isfinite, ref) >= 100
         # The photometry goes through the allocating method in both, so it
-        # gives the same bits. The RV gives the same bits only with a noise
-        # model; without one it takes the workspace no-noise method and its
-        # rounding, as on any other fit. So a gravity-darkened fit with RV data
-        # and no RV noise model is equal to rounding only, not to the bit.
-        if mode == "PM_GD" || rv_noise
+        # gives the same bits. Both RV methods choose their branch on
+        # `config.noise_models` as a whole, not on the RV channel: with any
+        # noise model, on the RV or only on the photometry, the RV gives the
+        # same bits. With none at all it takes the workspace no-noise method
+        # and its rounding, as on any other fit, and a gravity-darkened fit
+        # with RV data is then equal to rounding only, not to the bit.
+        if mode == "PM_GD" || noise !== nothing
             @test all(got .=== ref)
         else
             fin = isfinite.(ref)
             @test maximum(abs.(got[fin] .- ref[fin]) ./ max.(1.0, abs.(ref[fin]))) < 1e-12
         end
+        # The RV on its own, since a large photometric term can absorb its last
+        # bits in the sum.
+        if mode == "RVPM_GD" && noise !== nothing
+            ev2 = _BridgeEvaluator(tg)
+            th2 = ev2.theta
+            same = 0
+            for x in xs
+                Nereus.set_unfrozen!(th2, x)
+                same += Nereus.rv_log_likelihood(th2, tg.data, ev2.ws) ===
+                        Nereus.rv_log_likelihood(th2, tg.data)
+            end
+            @test same == length(xs)
+        end
 
-        # The evaluator sees i_star and lambda.
+        # The evaluator sees i_star and lambda. A GP on the photometry absorbs
+        # part of the change in the light curve.
         j_is = findfirst(==("i_star"), names)
         j_la = findfirst(==("lambda_k1"), names)
         at(is, la) = (x = copy(x_true); x[j_is] = deg2rad(is); x[j_la] = deg2rad(la);
                       _bridge_logdensity!(ev, Nereus.transform_forward(x, tg.transform)))
         l_true = at(20.0, -60.0)
-        @test l_true - at(85.0, -60.0) > 100
-        @test l_true - at(20.0, 30.0) > 100
+        dmin = noise == "phot" ? 10 : 100
+        @test l_true - at(85.0, -60.0) > dmin
+        @test l_true - at(20.0, 30.0) > dmin
     end
 end
 
