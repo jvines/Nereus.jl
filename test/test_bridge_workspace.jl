@@ -261,6 +261,9 @@ end
 # planet's e is clamped, so there it must give the same bits as
 # `_logdensity_parts`; just below the clamp it keeps the workspace methods and
 # agrees to rounding.
+_bw_alloc_ec(th) = @allocated Nereus._bridge_e_clamped(th)
+_bw_alloc_ew(th) = sum(k -> @allocated(Nereus.planet_e_w(th, k)), Nereus.planet_indices(th))
+
 @testset "bridge evaluator where true_anomaly clamps e" begin
     rng = MersenneTwister(43)
     t = sort!(500 .* rand(rng, 80))
@@ -287,6 +290,9 @@ end
                       Nereus._bridge_e_clamped(th))
         @test all(clamped, hi)
         @test !any(clamped, lo)
+        # The check costs no more than the `planet_e_w` calls it makes.
+        _bw_alloc_ec(th); _bw_alloc_ew(th)
+        @test _bw_alloc_ec(th) <= _bw_alloc_ew(th)
         ev = _BridgeEvaluator(tg)
         ref_hi = [_ref(tg, y) for y in hi]
         got_hi = [_bridge_logdensity!(ev, y) for y in hi]
