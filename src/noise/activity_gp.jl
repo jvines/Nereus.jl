@@ -52,7 +52,6 @@ Rajpaul quasi-periodic kernel with overall amplitude `amp`, rotation
                                          λ_e::Real, λ_p::Real)
     # f(τ) and derivatives
     s = sin(π * τ / period)
-    c = cos(π * τ / period)
     s2 = sin(2π * τ / period)
     c2 = cos(2π * τ / period)
 
@@ -373,7 +372,6 @@ function activity_gp_covariance(t::AbstractVector{<:Real},
             #       = -τ/λe² - π/(2P λp²) sin(2πτ/P)
             # f''(τ) = -1/λe² - π²/(P² λp²) cos(2πτ/P)
             s     = sin(π_P * τ)
-            c     = cos(π_P * τ)
             s2    = sin(two_π_P * τ)
             c2    = cos(two_π_P * τ)
             f_val = -τ * τ * (0.5 * inv_λe2) - s * s * inv_2λp2
