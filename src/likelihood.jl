@@ -499,6 +499,8 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
 
     predictions = ws.predictions
     variances = ws.variances
+    # ActivityDecorrelation / ActivityJitter / ErrorScale slots, resolved once.
+    sl = _modifier_slots!(ws.rv_noise.mods, theta, data, noise_models)
 
     @inbounds for i in 1:n_obs
         t = data.t_rv[i]; obs_err = data.rv_err[i]; ins_idx = data.rv_inst[i]
@@ -509,7 +511,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityDecorrelation
-                pred = apply_activity_decorrelation(pred, theta, data, nm, ins_idx, i)
+                pred = _ad_term(pred, theta, data, nm, sl, nm_idx, ins_idx, i)
             end
         end
 
@@ -533,12 +535,11 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityJitter
-                var_i = apply_activity_jitter(obs_err * obs_err, theta, data, nm, ins_idx, i)
-            elseif nm isa ErrorScale && _errorscale_covers(theta, nm, ins_idx)
+                var_i = _aj_variance(obs_err * obs_err, theta, data, nm, sl, nm_idx, ins_idx, i)
+            elseif nm isa ErrorScale && sl.es_cov[nm_idx][ins_idx]
                 # Multiplicative error-scale REPLACES additive jitter: f²·σ_formal²
                 # (whenever it covers this instrument — independent of the drawn f).
-                f2 = error_scale_factor(theta, nm, ins_idx)
-                var_i = f2 * obs_err * obs_err
+                var_i = _es_variance(obs_err, theta, nm, sl, nm_idx, ins_idx)
             end
         end
         variances[i] = var_i
@@ -752,6 +753,8 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
 
     predictions = Vector{T}(undef, n_obs)
     variances = Vector{T}(undef, n_obs)
+    # ActivityDecorrelation / ActivityJitter / ErrorScale slots, once per call.
+    sl = _modifier_slots!(RVModifierSlots(), theta, data, noise_models)
 
     @inbounds for i in 1:n_obs
         t = data.t_rv[i]; obs_err = data.rv_err[i]; ins_idx = data.rv_inst[i]
@@ -762,7 +765,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityDecorrelation
-                pred = apply_activity_decorrelation(pred, theta, data, nm, ins_idx, i)
+                pred = _ad_term(pred, theta, data, nm, sl, nm_idx, ins_idx, i)
             end
         end
 
@@ -785,12 +788,11 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityJitter
-                var_i = apply_activity_jitter(obs_err * obs_err, theta, data, nm, ins_idx, i)
-            elseif nm isa ErrorScale && _errorscale_covers(theta, nm, ins_idx)
+                var_i = _aj_variance(obs_err * obs_err, theta, data, nm, sl, nm_idx, ins_idx, i)
+            elseif nm isa ErrorScale && sl.es_cov[nm_idx][ins_idx]
                 # Multiplicative error-scale REPLACES additive jitter: f²·σ_formal²
                 # (whenever it covers this instrument — independent of the drawn f).
-                f2 = error_scale_factor(theta, nm, ins_idx)
-                var_i = f2 * obs_err * obs_err
+                var_i = _es_variance(obs_err, theta, nm, sl, nm_idx, ins_idx)
             end
         end
         variances[i] = var_i
@@ -1069,11 +1071,14 @@ mutable struct RVNoiseScratch
     floor_K0::Matrix{Float64}       # kernel shape shared by every channel (upper)
     floor_Σ::Matrix{Float64}        # one channel's covariance, factored in place
     floor_α::Vector{Float64}        # Σ⁻¹ y
+    # ActivityDecorrelation / ActivityJitter / ErrorScale slots (noise/activity.jl)
+    mods::RVModifierSlots
 end
 
 RVNoiseScratch() = RVNoiseScratch(nothing, nothing, String[], Int[], Int[], 0, 0, 0,
                                   Matrix{Float64}(undef, 0, 0),
-                                  Matrix{Float64}(undef, 0, 0), Float64[])
+                                  Matrix{Float64}(undef, 0, 0), Float64[],
+                                  RVModifierSlots())
 
 # Resolve the floor's layout slots once; later calls only compare two keys.
 function _floor_slots!(sc::RVNoiseScratch, layout, floor::IndicatorFloor)
@@ -1703,6 +1708,8 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
     # Build predictions + variances
     predictions = Vector{T}(undef, n_obs)
     variances   = Vector{T}(undef, n_obs)
+    # ActivityDecorrelation / ActivityJitter / ErrorScale slots, once per call.
+    sl = _modifier_slots!(RVModifierSlots(), theta, data, noise_models)
 
     @inbounds for i in 1:n_obs
         t       = data.t_rv[i]
@@ -1716,7 +1723,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityDecorrelation
-                pred = apply_activity_decorrelation(pred, theta, data, nm, ins_idx, i)
+                pred = _ad_term(pred, theta, data, nm, sl, nm_idx, ins_idx, i)
             end
         end
 
@@ -1739,12 +1746,11 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityJitter
-                var_i = apply_activity_jitter(obs_err * obs_err, theta, data, nm, ins_idx, i)
-            elseif nm isa ErrorScale && _errorscale_covers(theta, nm, ins_idx)
+                var_i = _aj_variance(obs_err * obs_err, theta, data, nm, sl, nm_idx, ins_idx, i)
+            elseif nm isa ErrorScale && sl.es_cov[nm_idx][ins_idx]
                 # Multiplicative error-scale REPLACES additive jitter: f²·σ_formal²
                 # (whenever it covers this instrument — independent of the drawn f).
-                f2 = error_scale_factor(theta, nm, ins_idx)
-                var_i = f2 * obs_err * obs_err
+                var_i = _es_variance(obs_err, theta, nm, sl, nm_idx, ins_idx)
             end
         end
         variances[i] = var_i

@@ -76,7 +76,7 @@ end
 # regardless of the drawn f.
 @inline function error_scale_factor(theta::Theta{T}, m::ErrorScale, ins_idx::Int) where {T}
     _errorscale_covers(theta, m, ins_idx) || return one(T)
-    f = theta.values[theta.params.layout.name_to_idx["errscale_$(theta.params.config.instruments.rv_names[ins_idx])"]]
+    f = theta.values[theta.params.layout.name_to_idx[_errscale_name(theta.params.config.instruments.rv_names[ins_idx])]]
     return f * f
 end
 
