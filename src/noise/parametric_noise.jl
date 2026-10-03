@@ -109,21 +109,50 @@ end
 
 # Low-rank factor of a NightlyOffset: one column per night-group, entries
 # σ_night(instrument) on that night's points. FFᵀ = Σ_g σ² 1_g 1_gᵀ.
-function _nightly_factor(m::NightlyOffset, theta::Theta{T},
+#
+# Every row has at most one non-zero (nights are disjoint), so the factor is
+# kept as (night id per row, σ per night) — `_NightlyFactor`, an AbstractMatrix
+# that reads as the dense factor — and the white-base likelihood uses the
+# block-diagonal closed form below. `Matrix(F)` is the dense factor.
+struct _NightlyFactor{T} <: AbstractMatrix{T}
+    ids::Vector{Int}       # night-group id of each row, 0 = not covered
+    σ::Vector{T}           # σ of each night-group
+end
+Base.size(F::_NightlyFactor) = (length(F.ids), length(F.σ))
+function Base.getindex(F::_NightlyFactor{T}, i::Int, g::Int) where {T}
+    @boundscheck checkbounds(F, i, g)
+    @inbounds return F.ids[i] == g ? F.σ[g] : zero(T)
+end
+function Base.Matrix(F::_NightlyFactor{T}) where {T}
+    M = zeros(T, size(F))
+    @inbounds for i in eachindex(F.ids)
+        g = F.ids[i]
+        g == 0 || (M[i, g] = F.σ[g])
+    end
+    return M
+end
+
+function _nightly_blocks(m::NightlyOffset, theta::Theta{T},
                          times, inst, inst_names) where {T}
     ids, grp_inst = _night_group_ids(m, times, inst, inst_names)
-    ng = length(grp_inst)
-    N = length(times)
     s = _channel_suffix(m.channel)
-    σ = T[theta.values[theta.params.layout.name_to_idx["night_sigma_$(inst_names[ci])$s"]]
-          for ci in grp_inst]
-    F = zeros(T, N, ng)
-    @inbounds for i in 1:N
-        g = ids[i]
-        g == 0 || (F[i, g] = σ[g])
+    layout = theta.params.layout
+    # σ slot per instrument, looked up on its first night (not once per night)
+    slot = zeros(Int, length(inst_names))
+    σ = Vector{T}(undef, length(grp_inst))
+    for (g, ci) in enumerate(grp_inst)
+        j = slot[ci]
+        if j == 0
+            j = layout.name_to_idx["night_sigma_$(inst_names[ci])$s"]
+            slot[ci] = j
+        end
+        σ[g] = theta.values[j]
     end
-    return F
+    return _NightlyFactor{T}(ids, σ)
 end
+
+_nightly_factor(m::NightlyOffset, theta::Theta, times, inst, inst_names) =
+    Matrix(_nightly_blocks(m, theta, times, inst, inst_names))
 
 # ── harmonic block ───────────────────────────────────────────────────────────
 # Low-rank factor of a HarmonicBlock: 2·nharm columns [cos,sin] per harmonic,
@@ -164,8 +193,11 @@ function _harmonic_factor(m::HarmonicBlock, theta::Theta{T},
 end
 
 # Combined low-rank factor of all active additive-covariance models.
+# A lone NightlyOffset keeps its block structure (see `_NightlyFactor`).
 function _additive_factor(add_models, theta::Theta{T},
                           times, inst, inst_names) where {T}
+    length(add_models) == 1 && add_models[1] isa NightlyOffset &&
+        return _nightly_blocks(add_models[1], theta, times, inst, inst_names)
     blocks = Matrix{T}[]
     for m in add_models
         if m isa NightlyOffset
@@ -207,6 +239,51 @@ function _woodbury_white_ll(y, variances, F, two_pi::T) where {T}
     return _woodbury_core(y, F, Biy, BiF, logdetB, length(y), two_pi)
 end
 
+# Base = white diagonal, one NightlyOffset. Σ = diag(v) + Σ_g σ_g² 1_g 1_gᵀ is
+# block diagonal with one block per night, each a rank-1 update of a diagonal.
+# With a_g = Σ 1/vᵢ and the weighted mean ȳ_g = (Σ yᵢ/vᵢ)/a_g over night g
+# (determinant lemma and Sherman–Morrison per block):
+#   logdet Σ = Σ log vᵢ + Σ_g log(1 + σ_g² a_g)
+#   yᵀΣ⁻¹y  = Σ (yᵢ − ȳ_{g(i)})²/vᵢ + Σ_g a_g ȳ_g² / (1 + σ_g² a_g)
+# (ȳ = 0 for points on no night). O(N), against O(N·k²) for the dense Woodbury
+# over k nights. Every term of the quadratic form is ≥ 0: the textbook
+# Σ y²/v − σ²b²/(1+σ²a) cancels badly when σ² a ≫ 1 (a long, well-measured
+# night), and the dense path carries the same cancellation. This form is at
+# least as accurate as the dense one (checked against a 256-bit reference) and
+# differs from it in the last digits only.
+function _woodbury_white_ll(y, variances, F::_NightlyFactor, two_pi::T) where {T}
+    R = promote_type(eltype(y), eltype(variances), eltype(F), T)
+    ids = F.ids; ng = size(F, 2)
+    idx = eachindex(y, variances, ids)
+    logv = convert(R, sum(log, variances))    # as the dense path: DomainError if v < 0
+    # Per-night Σ 1/v and Σ y/v. Column 1 collects the points on no night; four
+    # interleaved partial sums keep one long night from being one serial chain.
+    a = zeros(R, 4, ng + 1); b = zeros(R, 4, ng + 1)
+    @inbounds for i in idx
+        g = ids[i] + 1; l = (i - first(idx)) & 3 + 1
+        w = inv(variances[i])
+        a[l, g] += w
+        b[l, g] += y[i] * w
+    end
+    ȳ = zeros(R, ng + 1)                      # night means; 0 for no night
+    qn = zero(R); ld = zero(R)                # per-night terms
+    @inbounds for g in 2:(ng + 1)
+        ag = (a[1, g] + a[2, g]) + (a[3, g] + a[4, g])
+        bg = (b[1, g] + b[2, g]) + (b[3, g] + b[4, g])
+        s2a = F.σ[g - 1]^2 * ag
+        one(R) + s2a > zero(R) || return R(-Inf)  # NaN: where the dense Cholesky fails
+        ȳ[g] = ag > zero(R) ? bg / ag : zero(R)
+        qn += ag * ȳ[g]^2 / (one(R) + s2a)
+        ld += log1p(s2a)
+    end
+    qs = zero(R)                              # scatter about the night means
+    @inbounds @simd for i in idx
+        r = y[i] - ȳ[ids[i] + 1]
+        qs += r * r / variances[i]
+    end
+    return -R(0.5) * ((qn + qs) + (ld + logv) + length(y) * log(two_pi))
+end
+
 # Base = one celerite GP. celerite_solve/loglike are T-generic, so we recover
 # B⁻¹y, B⁻¹F column-by-column and logdet(B) from the base log-likelihood.
 function _woodbury_celerite_ll(y, variances, times, theta::Theta{T}, nm, F,
@@ -226,6 +303,11 @@ function _woodbury_celerite_ll(y, variances, times, theta::Theta{T}, nm, F,
     logdetB = -2 * llB - qB - N * log(two_pi)     # invert the base loglike
     return _woodbury_core(y, F, Biy, BiF, logdetB, N, two_pi)
 end
+
+# A GP base has no block structure to exploit: it takes the dense factor.
+_woodbury_celerite_ll(y, variances, times, theta::Theta{T}, nm, F::_NightlyFactor,
+                      two_pi::T) where {T} =
+    _woodbury_celerite_ll(y, variances, times, theta, nm, Matrix(F), two_pi)
 
 # celerite coefficients for a base GP (mirror of the gp_log_likelihood methods;
 # kept separate so the validated scoring path is untouched).
@@ -290,6 +372,10 @@ function _woodbury_matern_ll(y, variances, times, theta::Theta{T}, nm::MaternGP,
     return _woodbury_core(ys, Fs, Biy, BiF, logdetB, length(ys), two_pi)
 end
 
+_woodbury_matern_ll(y, variances, times, theta::Theta{T}, nm::MaternGP, F::_NightlyFactor,
+                    two_pi::T) where {T} =
+    _woodbury_matern_ll(y, variances, times, theta, nm, Matrix(F), two_pi)
+
 # ── dense oracle (testing only) ──────────────────────────────────────────────
 # Explicit Σ = base + FFᵀ Cholesky log-likelihood, for parity gates.
 function dense_additive_ll(y, variances, times, inst, inst_names,
@@ -316,7 +402,7 @@ function dense_additive_ll(y, variances, times, inst, inst_names,
             Σ[i, i] += variances[i]
         end
     end
-    F = _additive_factor(add_models, theta, times, inst, inst_names)
+    F = Matrix(_additive_factor(add_models, theta, times, inst, inst_names))
     Σ .+= F * F'
     C = cholesky(Symmetric(Σ); check = false)
     issuccess(C) || return T(-Inf)
