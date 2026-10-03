@@ -93,19 +93,23 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     cols = [vec(Array(chains[:, Symbol(nm), :])) for nm in names]
     N = length(cols[1])
     pt = target.transform
-    Y = Matrix{Float64}(undef, d, N)
+    Y_all = Matrix{Float64}(undef, d, N)
     @inbounds for i in 1:N
         xi = Float64[cols[j][i] for j in 1:d]
-        Y[:, i] = pt === nothing ? xi : transform_forward(xi, pt)
+        Y_all[:, i] = pt === nothing ? xi : transform_forward(xi, pt)
     end
-    keep = vec(all(isfinite, Y; dims = 1))
-    Y = Y[:, keep]
+    keep = vec(all(isfinite, Y_all; dims = 1))
+    # Bound once: the threaded evaluation below captures `Y`, and a captured
+    # variable that is assigned twice is boxed.
+    Y = Y_all[:, keep]
     N1 = size(Y, 2)
     N1 >= 2d + 2 || return (; log_z = NaN, se = NaN, n_post = N1, n_prop = 0,
                               iters = 0, converged = false, overlap = NaN,
                               proposal = proposal)
 
-    logp(y) = (a = _logdensity_parts(target, y); Float64(a[1]) + Float64(a[2]))
+    # The posterior through the workspace likelihoods, one evaluator (Theta +
+    # PTWorkspace) per evaluation task. See `_bridge_logdensity!`.
+    evs = [_BridgeEvaluator(target) for _ in 1:_bridge_ntasks(max(N1, n_proposal))]
 
     μ = vec(mean(Y; dims = 2))
     Σ = cov(Y; dims = 2) + 1e-10 * I(d)
@@ -133,7 +137,7 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
              μ .+ Lc * (randn(rng, d) / sqrt(sum(abs2, randn(rng, nu_i)) / ν))
 
     # --- log ratios l = log p* - log q on both sample sets --------------------
-    # `logp` is the full posterior, so this costs N1 + `n_proposal` LIKELIHOOD
+    # Each term is the full posterior, so this costs N1 + `n_proposal` LIKELIHOOD
     # EVALUATIONS -- not `n_proposal`, which is what this function's docstring
     # and pt_emcee's call site both used to claim. N1 is the ENTIRE kept chain:
     # 150_000 draws for a 100-walker × 1500-post-burnin-step run, 525_000 for a
@@ -142,17 +146,19 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     # against 89 s for the whole 3.3M-evaluation MCMC that produced it, because
     # the MCMC has 12 threads and this loop had one.
     #
-    # `_logdensity_parts` builds its own Theta and touches no shared state, so
-    # the evaluations thread. The PROPOSAL DRAWS do not: they come off a single
-    # MersenneTwister, and drawing them out of order would change the numbers.
+    # Each task evaluates with its own Theta and workspace and touches no shared
+    # state, so the evaluations thread. The PROPOSAL DRAWS do not: they come off
+    # a single MersenneTwister, and drawing them out of order would change the
+    # numbers.
     # So they are drawn serially up front and only the evaluations are spread
     # out, each writing its own slot, and both arrays are filtered in index
     # order afterwards -- so what reaches `_bridge_iterate` is bit-identical to
-    # the serial version's, at any thread count.
+    # the serial version's, at any thread count. See `_bridge_eval!` for how
+    # the threads are used.
     v1 = Vector{Float64}(undef, N1)
-    Threads.@threads for i in 1:N1
+    _bridge_eval!(v1) do c, i
         y = @view Y[:, i]
-        v1[i] = logp(y) - logq(y)
+        _bridge_logdensity!(evs[c], y) - logq(y)
     end
     l1 = Float64[v for v in v1 if isfinite(v)]
 
@@ -161,8 +167,8 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         Yp[:, i] = draw()
     end
     v2 = Vector{Float64}(undef, n_proposal)
-    Threads.@threads for i in 1:n_proposal
-        v2[i] = logp(@view Yp[:, i])
+    _bridge_eval!(v2) do c, i
+        _bridge_logdensity!(evs[c], @view Yp[:, i])
     end
     l2 = Float64[]
     n_finite = 0
@@ -208,6 +214,226 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     return (; log_z = log_r, se = se, n_post = length(l1), n_prop = length(l2),
               iters = iters, converged = converged, overlap = overlap,
               proposal = proposal)
+end
+
+# Block of indices a thread takes from the shared counter in `_bridge_eval!`.
+# Small enough that the last blocks even out the finish across threads (a
+# joint-fit evaluation is ~1 ms), large enough that the counter is never
+# contended.
+const _BRIDGE_EVAL_BLOCK = 16
+
+"""
+    _bridge_ntasks(n) -> Int
+
+Number of tasks `_bridge_eval!` runs for `n` evaluations: one per thread, but
+never more than there are blocks of work.
+"""
+_bridge_ntasks(n::Integer) = n <= 0 ? 0 : min(_nthread_chunks(), cld(n, _BRIDGE_EVAL_BLOCK))
+
+"""
+    _bridge_eval!(f, out) -> out
+
+`out[i] = f(c, i)` for every index of `out`, on all threads, where `c` in
+`1:_bridge_ntasks(length(out))` numbers the task making the call, so that `f`
+can keep scratch per task.
+
+One task per thread, each taking blocks of `_BRIDGE_EVAL_BLOCK` indices from a
+shared counter until none are left, so a thread on a slow core or one that
+draws cheap points (a proposal outside the support returns at the prior) does
+not hold up the rest. Every `out[i]` is computed by one call and written once,
+so the result does not depend on which thread computed it or on the thread
+count.
+
+When there is a task for every thread, each one is marked with
+`_serial_inner_loops!`: every thread already has evaluations of its own, and
+the photometry's threaded reduction (`transit_likelihood.jl`) would otherwise
+spawn one task per thread on every call, which only queue behind the other
+threads' evaluations and allocate. That reduction sums fixed chunks combined
+in order, so running it serially gives the same bits.
+"""
+function _bridge_eval!(f::F, out::AbstractVector{Float64}) where {F}
+    n = length(out)
+    n_tasks = _bridge_ntasks(n)
+    n_tasks == 0 && return out
+    fills_threads = n_tasks >= Threads.nthreads()
+    next = Threads.Atomic{Int}(1)
+    Threads.@threads for c in 1:n_tasks
+        fills_threads && _serial_inner_loops!()
+        while true
+            lo = Threads.atomic_add!(next, _BRIDGE_EVAL_BLOCK)
+            lo > n && break
+            for i in lo:min(lo + _BRIDGE_EVAL_BLOCK - 1, n)
+                @inbounds out[i] = f(c, i)
+            end
+        end
+    end
+    return out
+end
+
+"""
+    _BridgeEvaluator(target)
+
+One evaluation task's scratch for `_bridge_logdensity!`: a `Theta` and a
+`PTWorkspace`, as each slot of `pt_emcee` has, and whether the photometry can
+go through the workspace method (`_bridge_phot_ws`).
+"""
+struct _BridgeEvaluator{TT<:NereusTarget}
+    target::TT
+    theta::Theta{Float64}
+    ws::PTWorkspace
+    phot_ws::Bool
+end
+
+function _BridgeEvaluator(target::NereusTarget)
+    params, data = target.params, target.data
+    ws = PTWorkspace(params, params.config.max_kplanet, length(params.config.noise_models);
+                     n_obs = length(data.t_rv), n_phot = length(data.t_phot))
+    return _BridgeEvaluator(target, Theta{Float64}(params), ws, _bridge_phot_ws(params))
+end
+
+"""
+    _bridge_phot_ws(params) -> Bool
+
+Whether `transit_log_likelihood(theta, data, ws)` computes the same model as
+`transit_log_likelihood(theta, data)` for this fit. It does not when a planet
+has gravity darkening (`:GD`): the workspace method has no gravity-darkened
+transit, and it hands over to the other method only for TTVs, exposures
+longer than 2 min and photometric noise models. A gravity-darkened fit with
+2-min or shorter cadences therefore took the plain transit there, and its log
+density did not depend on i_star or lambda.
+"""
+_bridge_phot_ws(params) = !any(has_gd, params.config.planet_modes)
+
+"""
+    _bridge_e_clamped(theta) -> Bool
+
+Whether `true_anomaly` (orbit.jl) clamps the eccentricity of any active planet,
+that is whether some planet's e lies outside [0, 0.9999] (or is NaN). The
+allocating RV and transit methods take the true anomaly from `true_anomaly`;
+the workspace photometry, and the workspace RV of a fit with no noise models,
+compute cos f and sin f from E with the e they are given. Outside that interval
+the two compute different models, not the same model with different rounding.
+
+The planet blocks are abstractly typed, so `planet_e_w` is not inferred and its
+result is boxed. A call allocates what `planet_e_w(theta, k)::Tuple{T, T}` does
+for each planet, and nothing for the comparison: 64 bytes per planet. With
+:sesinw that is all `planet_e_w` costs; with :ew `planet_e_w` costs 32 bytes
+and the assertion boxes the tuple for the other 32.
+"""
+@inline function _bridge_e_clamped(theta::Theta{T}) where {T}
+    for k in planet_indices(theta)
+        # The planet blocks are abstractly typed, so `planet_e_w` is not
+        # inferred; the assertion keeps that from spreading to the test below.
+        e, _ = planet_e_w(theta, k)::Tuple{T, T}
+        # `true_anomaly`'s own clamp, spelled the same way: true exactly when it
+        # changes e, and for NaN.
+        min(max(e, zero(e)), oftype(e, 0.9999)) == e || return true
+    end
+    return false
+end
+
+"""
+    _bridge_logdensity!(ev, y) -> Float64
+
+The log-posterior at `y` in the target's own space, `sum(_logdensity_parts(target,
+y))` with the same guards, but through the workspace likelihoods the samplers
+draw with (`rv_log_likelihood(theta, data, ws)`, `transit_log_likelihood(theta,
+data, ws)`) and the evaluator's own `Theta`, so that a call does not allocate
+the likelihood's buffers afresh.
+
+Where the workspace methods compute a different model from the allocating
+ones, it takes the allocating methods:
+
+- Gravity darkening: the workspace transit has none, so a fit with a :GD planet
+  takes the allocating photometry (`_bridge_phot_ws`). TTV fits, exposures
+  longer than 2 min and photometric noise models are handed over by the
+  workspace method itself.
+- Eccentricity outside [0, 0.9999] (`_bridge_e_clamped`): the allocating
+  methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
+  the workspace photometry, and the workspace RV of a fit with no noise models,
+  use the given e. Above 0.9999 the two differ by much more than rounding: on an RV +
+  transit fit with a 20k-point light curve, up to 8.6 nats in the RV and
+  8.1e4 nats in the photometry; in the RV, 5.8 nats on an SB2 fit and 2.5 on
+  the HD 18599 white-noise fit without the floor. At those points both the RV
+  and the photometry take the allocating methods. This follows
+  `_logdensity_parts`, as the bridge did before it used the workspace;
+  pt_emcee's own likelihood (`eval_bounded!`) keeps the given e there.
+
+With that it is the same function as `_logdensity_parts` up to rounding at
+every point, but not to the bit:
+
+- RV of a fit with no noise models at all: both RV methods choose their branch
+  on `config.noise_models` as a whole, whatever channel each model is on. With
+  none, the workspace method (`_rv_ll_no_noise(theta, data, ws)`) caches each
+  planet's velocity curve and computes cos(f+ω) by the angle-sum identity, so
+  its log L differs in the last bits at most points. Measured up to 2.4e-9
+  nats on the HD 18599 white-noise fit without the floor, and 2.4e-7 nats
+  (3e-15 relative) on prior draws of an RV + astrometry fit. With any noise
+  model, on the RV or only on the photometry, the RV goes through
+  `_rv_ll_with_noise`, which evaluates each cadence as the other method does,
+  in the same order, and gave the same bits on every fit measured (GP
+  rotation, activity GP, activity decorrelation, error scale, white noise with
+  the floor, the trans-dimensional job, RM with tomography, and a CeleriteSHO
+  on the photometry only, with and without gravity darkening).
+- Photometry: the workspace method computes each cadence's sky separation by
+  the same angle-sum route and sums every cadence in one pass, where the other
+  sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
+  a 20k-point light curve the whole log density differs by at most 5.4e-9 nats
+  near the reference point, and on prior draws by at most 1e-11 relative
+  (1.6e-12 with the GP rotation, 9.7e-12 with activity decorrelation).
+
+Relative figures are |difference| / max(1, |log p|). The largest measured on any
+fit, over 15078 points on 28 fits, is 1.03e-11: 1.9e-10 nats at a point where
+log p = -18.2, near the best point of a two-planet RV + transit fit (10k-point
+light curve, ρ⋆ and the mean anomaly as parameters, the Gladman stability check).
+
+The same bits as `_logdensity_parts` come out for the tomogram, for the
+photometry wherever it takes the allocating method, for the RV of a fit with
+any noise model, and for the whole density at a clamped e. A gravity-darkened
+fit, whose photometry always takes the allocating method, is therefore
+bit-identical whenever it has no RV data or has any noise model, on either
+channel. Only a gravity-darkened fit with RV data and no noise model at all
+carries the workspace RV rounding, like any other fit without noise models: on
+a one-planet RVPM_GD fit the RV log L matched at 72 of 420 points (up to
+5.1e-11 nats apart); on a two-band, two-planet one the whole density matched
+at 410 of 500 (up to 4.7e-10 nats, 1.4e-15 relative), and one bridge_evidence
+of five moved log Z by 4.5e-13.
+"""
+function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
+    target = ev.target
+    data = target.data
+    theta = ev.theta
+    pt = target.transform
+    lj = 0.0
+    if pt === nothing
+        @inbounds for i in eachindex(y)
+            isfinite(y[i]) || return -Inf
+        end
+        set_unfrozen!(theta, y)
+    else
+        x = transform_inverse(y, pt)
+        @inbounds for i in eachindex(x)
+            isfinite(x[i]) || return -Inf
+        end
+        lj = Float64(transform_logabsdetjac_inv(y, pt))
+        isfinite(lj) || return -Inf
+        set_unfrozen!(theta, x)
+    end
+    lp = log_prior(theta)
+    isfinite(lp) || return -Inf
+    # Where `true_anomaly` clamps an eccentricity the workspace methods compute
+    # another model, so both likelihoods take the allocating methods there.
+    ws_ok = !_bridge_e_clamped(theta)
+    ll = ws_ok ? rv_log_likelihood(theta, data, ev.ws) : rv_log_likelihood(theta, data)
+    isfinite(ll) || return -Inf
+    lt = ws_ok && ev.phot_ws ? transit_log_likelihood(theta, data, ev.ws) :
+                               transit_log_likelihood(theta, data)
+    ltomo = tomogram_log_likelihood(theta, data)
+    isfinite(ltomo) || return -Inf
+    isfinite(lt) || return -Inf
+    # Grouped as `_logdensity_parts` groups them: (prior + Jacobian) + likelihood.
+    pj = pt === nothing ? lp : lp + lj
+    return Float64(pj) + Float64(ll + lt + ltomo)
 end
 
 # Fixed-point iteration in log space. l1 are log(p*/q) at posterior draws,
