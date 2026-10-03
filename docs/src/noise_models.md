@@ -527,7 +527,7 @@ The HD 18599 K-gap scenario is the canonical use case.
 
 With every indicator at the RV epochs (`N` epochs, `C` channels including
 RV, `n_total = C·N`), the joint likelihood goes through
-`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1118`): it
+`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1120`): it
 whitens each epoch's 2×2 information block and factors one `(2N)²` matrix
 instead of the dense `(C·N)²`, and is exact up to rounding. Gradients
 (ForwardDiff, or ReverseDiff under `sample_nuts(ad_backend = :ReverseDiff)`)

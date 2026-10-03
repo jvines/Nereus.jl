@@ -1096,19 +1096,21 @@ five-channel model with Ġ couplings the medians were 3e-10 to 1.3e-9 nats
 and 2e-13 to 2e-12, and near the posterior the value errors were at most
 4e-11 nats for both routes.
 
-Just above the thresholds the derivatives through R are not: they
-lose accuracy as eps over the signal-to-noise of the fainter latent
-direction. In probes approaching each threshold (a faint G direction, a
-faint Ġ direction, near-parallel couplings; three and five channels, 8 and
-18 epochs, four kernels from P = 3 d, λp = 0.3 to P = 60 d, λp = 4, epochs
-in days), the largest relative errors seen at points that keep the low-rank
-route, against the dense likelihood differentiated in BigFloat, were 2e-9
-for gradients and 4e-6 for Hessians with respect to the couplings passed
-here. With respect to couplings in units of the prior standard deviations of
-G and Ġ (the amplitudes the samplers move) they were 2e-10 and 1.4e-4, the
-latter at the longest, smoothest kernel. These are the largest errors in
-those samples, not bounds. Gradients are not affected in any practical
-sense; a MAP Hessian at such a point can be.
+Just above the thresholds the derivatives through R lose accuracy as eps/λ,
+where λ is the signal-to-noise of the fainter latent direction at its
+faintest epoch (the smaller eigenvalue of K0^½ B_j K0^½, with
+K0 = diag(k_GG(0), k_ĠĠ(0))). The thresholds do not bound λ from below, so
+these errors have no bound. They were probed in 3,476 points that keep the
+low-rank route: three to five channels, 8 to 18 epochs, four kernels from
+P = 3 d, λp = 0.3 to P = 60 d, λp = 4 with epochs in days, and sixteen
+seeds. The sweeps approached a faint G direction, a faint Ġ direction and
+parallel couplings. Against the sequential route in 256-bit BigFloat, the
+relative errors stayed below 7·eps/λ for gradients and 126·eps/λ for
+Hessians, with respect to the couplings passed here, while λ went as low
+as 4e-14. The largest were 5.6e-8 for gradients and 2.5e-5 for Hessians;
+an independent sample of 880 such points gave at most 3.6e-9 and 2.5e-5.
+Gradients are not affected in any practical sense; a MAP Hessian at such a
+point can be.
 
 `y_flat`, `σ²_flat` are the channel-stacked residuals and per-point
 variances (RV block first, then each indicator), length C·N. A NaN among
@@ -1220,18 +1222,19 @@ end
 # (through k_ĠĠ(0)/k_GG(0) = 1/λe² + π²/(P²λp²)): with the epochs in hours a
 # block's ratio moves by up to 24² either way, and log L does not change.
 # Which points keep the low-rank route then changes: the faint-Ġ point of
-# test/test_activity_gp_lowrank.jl takes the dense route in days (Hessian
+# test/test_activity_gp_lowrank.jl takes the fallback in days (Hessian
 # error 1.7e-15) and the low-rank route in hours (4.7e-6). The test is kept
 # because the unit-free version measured was no better: the ratio of
 # B̃_j = K0^½ B_j K0^½, K0 = diag(k_GG(0), k_ĠĠ(0)), kept points whose
 # Hessians were off by up to 5e-3 (P = 60 d, λp = 4, faint G), against
 # 1.4e-6 for this test on the same five-channel probes. What limits the
-# derivatives is the absolute signal-to-noise of the fainter latent
-# direction (Hessian errors of about eps over it), which no ratio measures.
-# A test on that quantity, the smaller eigenvalue of B̃_j at the best epoch,
-# would be unit-free and would bound the error, but at 1e-6 it would also
-# send near-posterior HD 18599 points to the dense route (5 of 150 with
-# RV + logR'HK, 1 of 150 with RV + BIS), where this test sends none.
+# derivatives is the absolute signal-to-noise λ of the fainter latent
+# direction (errors of about eps/λ, see the docstring), which no ratio
+# measures. A test on λ itself would be unit-free, and in the probes the
+# errors stayed within a fixed multiple of eps/λ, but at 1e-6 (on λ at the
+# best epoch) it would also send near-posterior HD 18599 points to the
+# fallback (5 of 150 with RV + logR'HK, 1 of 150 with RV + BIS), where this
+# test sends none.
 function _agp_blocks_smooth(bGG::AbstractVector, bGd::AbstractVector,
                             bdd::AbstractVector, chan_a::AbstractVector,
                             chan_b::AbstractVector, k0GG::Real, k0dd::Real)

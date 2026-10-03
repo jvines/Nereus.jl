@@ -570,67 +570,87 @@ end
     end
 end
 
-@testset "AGP whitened solver: derivative accuracy on either side of the dense-route thresholds" begin
+@testset "AGP whitened solver: derivative accuracy on either side of the fallback thresholds" begin
     # The docstring of activity_gp_joint_logpdf_lowrank states what the
-    # derivatives are worth near the thresholds: about 1e-15 below them (the
-    # dense route) and, just above them, errors growing as eps over the
-    # fainter latent direction's signal-to-noise, of which it quotes the
-    # largest seen. This sample (three channels, eight epochs, three kernels)
-    # gave at most 1.9e-9 for gradients and 3.9e-6 for Hessians on the
-    # low-rank route, and 1.5e-14 on the dense one.
-    rng = MersenneTwister(7)
-    N, C = 8, 3
-    epochs = sort!(60 .* rand(rng, N))
-    σ² = 0.1 .+ rand(rng, C * N); y = randn(rng, C * N)
-    a0 = [1.0, 0.5, -0.7]; b0 = [0.4, -0.2, 0.3]; nz = [0.3, -0.5, 0.9]
-    D(v, k) = ForwardDiff.Dual{:t}(v, ntuple(i -> Float64(i == k), 2C))
-    function lowrank_route(a, b, hyp)
-        ad = [D(a[c], c) for c in 1:C]; bd = [D(b[c], C + c) for c in 1:C]
-        w(j, c) = σ²[(c - 1) * N + j]
-        gG = [sum(ad[c]^2 / w(j, c) for c in 1:C) for j in 1:N]
-        gd = [sum(ad[c] * bd[c] / w(j, c) for c in 1:C) for j in 1:N]
-        dd = [sum(bd[c]^2 / w(j, c) for c in 1:C) for j in 1:N]
-        k0GG, _, _, k0dd = Nereus._qp_blocks_sincos(0.0, Nereus._qp_consts(hyp...))
-        return Nereus._agp_blocks_smooth(gG, gd, dd, ad, bd, k0GG, k0dd)
-    end
-    n_lr = 0; n_dn = 0
-    for hyp in ((1.3, 11.0, 25.0, 0.5), (1.0, 60.0, 100.0, 4.0), (1.0, 3.0, 10.0, 0.3))
-        fl(v) = Nereus.activity_gp_joint_logpdf_lowrank(epochs, v[1:C], v[C+1:2C],
-                                                        hyp..., y, σ²)
-        fb(v) = _agp_dense(big.(epochs), v[1:C], v[C+1:2C], big.(hyp)..., big.(y), big.(σ²))
-        for mk in (s -> (s .* a0, b0), s -> (a0, s .* nz), s -> (a0, 0.7 .* a0 .+ s .* nz))
-            for k in 3:0.5:6.5
-                a, b = mk(10.0^-k); x = vcat(a, b)
-                g = ForwardDiff.gradient(fl, x); H = ForwardDiff.hessian(fl, x)
-                gb, Hb = setprecision(BigFloat, 128) do
-                    ForwardDiff.gradient(fb, big.(x)), ForwardDiff.hessian(fb, big.(x))
-                end
-                eg = Float64(maximum(abs.(g .- gb)) / maximum(abs, gb))
-                eh = Float64(maximum(abs.(H .- Hb)) / maximum(abs, Hb))
-                if lowrank_route(a, b, hyp)
-                    n_lr += 1
-                    @test eg <= 5e-9
-                    @test eh <= 1e-5
-                else
-                    n_dn += 1
-                    @test eg <= 1e-13
-                    @test eh <= 1e-13
+    # derivatives are worth near the thresholds. Below them the fallback
+    # (the dense likelihood with three channels, the sequential route with
+    # five) is accurate to about 1e-14. Just above them the derivatives go
+    # through R and lose accuracy as eps over λ, the signal-to-noise of the
+    # fainter latent direction at its faintest epoch (the smaller eigenvalue
+    # of K0^½ B_j K0^½, K0 = diag(k_GG(0), k_ĠĠ(0))). The thresholds do not
+    # bound λ from below, so no fixed tolerance holds there for every seed:
+    # in 3,476 such points (C = 3, 4, 5; N = 8, 12, 18; the four kernels
+    # below; sixteen seeds) the relative error stayed below 7·eps/λ for
+    # gradients and 126·eps/λ for Hessians, and those are checked here with
+    # a margin of about ten.
+    for (C, seed) in ((3, 7), (5, 8))
+        rng = MersenneTwister(seed)
+        N = 8
+        epochs = sort!(60 .* rand(rng, N))
+        σ² = 0.1 .+ rand(rng, C * N); y = randn(rng, C * N)
+        a0 = randn(rng, C); b0 = 0.5 .* randn(rng, C); nz = randn(rng, C)
+        D(v, k) = ForwardDiff.Dual{:t}(v, ntuple(i -> Float64(i == k), 2C))
+        function blocks(a, b)
+            w(j, c) = σ²[(c - 1) * N + j]
+            gG = [sum(a[c]^2 / w(j, c) for c in 1:C) for j in 1:N]
+            gd = [sum(a[c] * b[c] / w(j, c) for c in 1:C) for j in 1:N]
+            dd = [sum(b[c]^2 / w(j, c) for c in 1:C) for j in 1:N]
+            return gG, gd, dd
+        end
+        function lowrank_route(a, b, hyp)
+            ad = [D(a[c], c) for c in 1:C]; bd = [D(b[c], C + c) for c in 1:C]
+            k0GG, _, _, k0dd = Nereus._qp_blocks_sincos(0.0, Nereus._qp_consts(hyp...))
+            return Nereus._agp_blocks_smooth(blocks(ad, bd)..., ad, bd, k0GG, k0dd)
+        end
+        function faintest(a, b, hyp)
+            k0GG, _, _, k0dd = Nereus._qp_blocks_sincos(0.0, Nereus._qp_consts(hyp...))
+            gG, gd, dd = blocks(a, b); r = sqrt(k0GG * k0dd)
+            return minimum(eigmin(Symmetric([k0GG * gG[j] r * gd[j]; r * gd[j] k0dd * dd[j]]))
+                           for j in 1:N)
+        end
+        n_lr = 0; n_fb = 0
+        for hyp in ((1.3, 11.0, 25.0, 0.5), (1.0, 60.0, 100.0, 4.0), (1.0, 3.0, 10.0, 0.3),
+                    (1.0, 9.0, 300.0, 1.0))
+            fl(v) = Nereus.activity_gp_joint_logpdf_lowrank(epochs, v[1:C], v[C+1:2C],
+                                                            hyp..., y, σ²)
+            fb(v) = _agp_dense(big.(epochs), v[1:C], v[C+1:2C], big.(hyp)..., big.(y), big.(σ²))
+            for mk in (s -> (s .* a0, b0), s -> (a0, s .* nz), s -> (a0, 0.7 .* a0 .+ s .* nz))
+                for k in 3:0.5:6.5
+                    a, b = mk(10.0^-k); x = vcat(a, b)
+                    g = ForwardDiff.gradient(fl, x); H = ForwardDiff.hessian(fl, x)
+                    gb, Hb = setprecision(BigFloat, 128) do
+                        ForwardDiff.gradient(fb, big.(x)), ForwardDiff.hessian(fb, big.(x))
+                    end
+                    eg = Float64(maximum(abs.(g .- gb)) / maximum(abs, gb))
+                    eh = Float64(maximum(abs.(H .- Hb)) / maximum(abs, Hb))
+                    if lowrank_route(a, b, hyp)
+                        n_lr += 1
+                        λ = faintest(a, b, hyp)
+                        @test eg <= 70 * eps() / λ
+                        @test eh <= 1300 * eps() / λ
+                    else
+                        n_fb += 1
+                        @test eg <= 1e-13
+                        @test eh <= 1e-13
+                    end
                 end
             end
         end
+        # Both routes are exercised (the sweeps cross every threshold).
+        @test n_lr >= 30 && n_fb >= 25
     end
-    # Both routes are exercised (the sweeps cross every threshold).
-    @test n_lr >= 30 && n_dn >= 25
 end
 
-@testset "AGP whitened solver: the dense-route test depends on the time unit, the result does not" begin
+@testset "AGP whitened solver: the fallback test depends on the time unit, the result does not" begin
     # The eigenvalue test reads B_j in the solver's units, where Ġ carries one
     # over time, so a change of time unit moves it (documented in
     # _agp_blocks_smooth, where the unit-free alternatives are compared). The
     # same model with the epochs, P and λe in hours and the Ġ couplings ×24
-    # has the same log L; at this faint-Ġ point it takes the dense route in
-    # days and the low-rank route in hours, and both derivatives agree with
-    # the dense likelihood in BigFloat to what the docstring states.
+    # has the same log L; at this faint-Ġ point it takes the fallback (the
+    # dense likelihood, with three channels) in days and the low-rank route in
+    # hours, and both derivatives agree with the dense likelihood in BigFloat
+    # to what the docstring states (on the low-rank route, the eps/λ bounds of
+    # the testset above; λ does not depend on the unit).
     rng = MersenneTwister(7)
     N, C = 8, 3
     epochs = sort!(60 .* rand(rng, N))
@@ -665,8 +685,15 @@ end
     rel(g, r) = Float64(maximum(abs.(g .- r)) / maximum(abs, r))
     @test rel(ForwardDiff.gradient(f_days, x), gb) <= 1e-13
     @test rel(ForwardDiff.hessian(f_days, x), Hb) <= 1e-13
-    @test rel(ForwardDiff.gradient(f_hours, x), gb) <= 5e-9
-    @test rel(ForwardDiff.hessian(f_hours, x), Hb) <= 1e-5
+    k0GG, _, _, k0dd = Nereus._qp_blocks_sincos(0.0, Nereus._qp_consts(hyp...))
+    λ = minimum(1:N) do j
+        w(c) = σ²[(c - 1) * N + j]
+        g = sum(a[c]^2 / w(c) for c in 1:C); e = sum(b[c]^2 / w(c) for c in 1:C)
+        h = sum(a[c] * b[c] / w(c) for c in 1:C); r = sqrt(k0GG * k0dd)
+        eigmin(Symmetric([k0GG * g r * h; r * h k0dd * e]))
+    end
+    @test rel(ForwardDiff.gradient(f_hours, x), gb) <= 70 * eps() / λ
+    @test rel(ForwardDiff.hessian(f_hours, x), Hb) <= 1300 * eps() / λ
 end
 
 @testset "AGP whitened solver: ReverseDiff gradients at singular blocks" begin
