@@ -216,13 +216,36 @@ function _agp_exact_dense(epochs, ca, cb, amp, P, λe, λp, y, σ²)
     end
 end
 
-# The same density through a Float64 dense Cholesky (generic in the eltype,
-# so it also carries dual numbers).
+# The same density through a dense Cholesky, generic in the eltype so it also
+# carries dual numbers, and in BigFloat it is the derivative reference. The
+# factorization and the solve are written out: `F \ y` goes through
+# LinearAlgebra's ldiv!, which asks `istriu` of the transposed factor, and
+# ForwardDiff's `iszero` reads only the value of a dual number. Where the
+# factor is diagonal in value but not in its partials (every coupling 0, for
+# one) the off-diagonal entries were dropped and the Hessian came out wrong.
 function _agp_dense(epochs, ca, cb, amp, P, λe, λp, y, σ²)
     Σ = Nereus.activity_gp_covariance_blocked(epochs, ca, cb, amp, P, λe, λp)
-    for i in eachindex(σ²); Σ[i, i] += σ²[i]; end
-    F = cholesky!(Symmetric(Σ))
-    return -(dot(y, F \ y) + logdet(F) + length(y) * log(2π)) / 2
+    T = promote_type(eltype(Σ), eltype(y), eltype(σ²))
+    U = Matrix{T}(Σ); n = size(U, 1)
+    for i in 1:n; U[i, i] += σ²[i]; end
+    for k in 1:n                       # upper Cholesky, Σ = UᵀU
+        s = U[k, k]
+        for i in 1:k-1; s -= U[i, k] * U[i, k]; end
+        U[k, k] = sqrt(s)
+        for j in k+1:n
+            t = U[k, j]
+            for i in 1:k-1; t -= U[i, k] * U[i, j]; end
+            U[k, j] = t / U[k, k]
+        end
+    end
+    zz = zero(T); ld = zero(T); z = Vector{T}(undef, n)
+    for j in 1:n                       # z = U⁻ᵀ y
+        t = convert(T, y[j])
+        for i in 1:j-1; t -= U[i, j] * z[i]; end
+        z[j] = t / U[j, j]
+        zz += z[j] * z[j]; ld += log(U[j, j])
+    end
+    return -(zz + 2ld + n * log(2 * convert(T, π))) / 2
 end
 
 @testset "AGP whitened solver: exact against the dense likelihood" begin
@@ -388,7 +411,9 @@ end
     # exactly 0 the dual-number path used to drop those couplings' derivatives
     # (an error of 11.7 against a gradient of 24.5), and near such points, or
     # when every coupling is tiny, the derivatives through R lost their
-    # accuracy. Dual inputs there now take the dense likelihood.
+    # accuracy. Dual inputs there take a route that is smooth there: the
+    # latent conditioned one epoch at a time with four or more channels (the
+    # five-channel cases here), the dense likelihood with two or three.
     rng = MersenneTwister(1)
     N, C = 20, 5
     epochs = sort!(60 .* rand(rng, N))
@@ -456,8 +481,29 @@ end
         H1 = ForwardDiff.hessian(f3l, x); H2 = ForwardDiff.hessian(f3d, x)
         @test H1 ≈ H2 rtol = 1e-9
     end
+    # Every coupling exactly 0 (the prior-box centre): B = 0, its first
+    # derivatives vanish and its second do not. Against the dense likelihood
+    # in BigFloat, on the dense fallback (two and three channels) and the
+    # sequential one (five). For two channels and one epoch the cross term is
+    # k_GG(0)·(y₁/σ₁²)(y₂/σ₂²), which a dense solve through LinearAlgebra's
+    # ldiv! halves (see _agp_dense).
+    for Cz in (2, 3, 5)
+        Nz = Cz == 2 ? 1 : 8
+        epz = epochs[1:Nz]; yz = y[1:(Cz * Nz)]; sz = σ²[1:(Cz * Nz)]
+        fz(x) = Nereus.activity_gp_joint_logpdf_lowrank(epz, x[1:Cz], x[Cz+1:2Cz], hyp..., yz, sz)
+        Hb = setprecision(BigFloat, 128) do
+            ForwardDiff.hessian(x -> _agp_dense(big.(epz), x[1:Cz], x[Cz+1:2Cz], big.(hyp)...,
+                                                big.(yz), big.(sz)), big.(zeros(2Cz)))
+        end
+        H = ForwardDiff.hessian(fz, zeros(2Cz))
+        @test maximum(abs.(H .- Hb)) <= 1e-13 * maximum(abs, Hb)
+        if Cz == 2
+            k0 = hyp[1]^2
+            @test H[1, 2] ≈ k0 * (yz[1] / sz[1]) * (yz[2] / sz[2]) rtol = 1e-13
+        end
+    end
 
-    # Which inputs take the dense route. Constant zeros (no coupling at all)
+    # Which inputs take the fallback. Constant zeros (no coupling at all)
     # do not; couplings that are parameters at 0 do.
     D(v, k, n) = ForwardDiff.Dual{:t}(v, ntuple(i -> Float64(i == k), n))
     function smooth(a, b)
@@ -606,7 +652,7 @@ end
 end
 
 @testset "AGP whitened solver: ReverseDiff gradients at singular blocks" begin
-    # The dense route for derivatives was taken for ForwardDiff duals only, so
+    # The smooth route for derivatives was taken for ForwardDiff duals only, so
     # ReverseDiff's tracked reals (sample_nuts with ad_backend = :ReverseDiff)
     # still went through R at singular blocks: on the three-channel HD 18599
     # model with every G coupling 0 those couplings' derivatives came out 0
@@ -649,7 +695,7 @@ end
     end
     # No Ġ coupling at all. Float64 zeros are constants, so the blocks are
     # 1×1 and the low-rank route is kept; tracked zeros cannot be told from
-    # parameters at 0 and take the dense route. Both are exact.
+    # parameters at 0 and take the fallback. Both are exact.
     @test rd_err(x -> (x, zeros(C)), a0)[1] <= 1e-12
     @test rd_err(x -> (x, zero(x)), a0)[1] <= 1e-12
     @test Nereus._agp_zero_is_constant(Float64)
@@ -659,12 +705,43 @@ end
     @test !Nereus._agp_all_strictly_zero(ReverseDiff.track(zeros(3)))
     @test Nereus._agp_all_strictly_zero(zeros(3))
 
+    # What the fallback costs. With five channels it was the dense (5N)²
+    # Cholesky, which on the five-channel HD 18599 job took a ReverseDiff
+    # gradient at every Ġ coupling 0 from 4.9 s and 4.0 GB (the solver before
+    # this branch) to 34 s and 16 GB, and the tape sample_nuts compiles at
+    # zeros(dim) to 44 GB. The sequential route records about as many
+    # instructions as the low-rank solve; the dense one records about nine
+    # times as many here (N = 20).
+    fx(x) = Nereus.activity_gp_joint_logpdf_lowrank(epochs, x[1:C], x[C+1:2C],
+                x[2C+1], x[2C+2], x[2C+3], x[2C+4], y, σ²)
+    xg = vcat(a0, b0, hyp...)                  # low-rank route
+    xs = vcat(a0, zeros(C), hyp...)            # every Ġ coupling 0
+    x0 = vcat(zeros(2C), hyp...)               # every coupling 0
+    n_generic = length(ReverseDiff.GradientTape(fx, xg).tape)
+    for x in (xs, x0)
+        @test length(ReverseDiff.GradientTape(fx, x).tape) <= 1.2 * n_generic
+    end
+    # It has no branch on the values, so a compiled tape recorded where every
+    # coupling is 0 (as sample_nuts records its default compiled tape, at
+    # zeros(dim)) is the sequential route, exact at any point.
+    ct = ReverseDiff.compile(ReverseDiff.GradientTape(fx, x0))
+    for x in (xg, xs, vcat(a0, 0.5 .* a0, hyp...))
+        gb = setprecision(BigFloat, 128) do
+            ForwardDiff.gradient(v -> _agp_dense(big.(epochs), v[1:C], v[C+1:2C],
+                                                 v[2C+1], v[2C+2], v[2C+3], v[2C+4],
+                                                 big.(y), big.(σ²)), big.(x))
+        end
+        g = ReverseDiff.gradient!(similar(x), ct, x)
+        @test maximum(abs.(g .- gb)) <= 1e-12 * maximum(abs, gb)
+    end
+
     # Through the model, with the gradient object sample_nuts builds for
     # ad_backend = :ReverseDiff, compile_tape = false: five channels with
     # every G or every Ġ coupling at 0, three channels with every G coupling
     # at 0, and use_derivative = false with every G coupling at 0. The
-    # reference is ForwardDiff on BigFloat, which takes the dense likelihood
-    # at these points.
+    # reference is ForwardDiff on BigFloat, which takes the same fallback at
+    # these points in BigFloat (the fallbacks themselves are checked against
+    # the dense likelihood above).
     for (kw, zeroed) in (((;), ["Vc", "Bc", "Fc", "Hc", "Lc"]),
                          ((;), ["Vr", "Br", "Fr", "Hr"]),
                          ((; channels = [:bis, :fwhm]), ["Vc", "Bc", "Fc"]),
@@ -680,8 +757,8 @@ end
                                       target.transform)
         ℓ = LogDensityProblemsAD.ADgradient(:ReverseDiff, target)
         v, g = Nereus.LogDensityProblems.logdensity_and_gradient(ℓ, yv)
-        # The value comes from the dense likelihood here, so it differs from
-        # the Float64 log-density in the last digits.
+        # The value comes from the fallback here, so it differs from the
+        # Float64 log-density in the last digits.
         @test v ≈ Nereus.LogDensityProblems.logdensity(target, yv) rtol = 1e-12
         gb = setprecision(BigFloat, 128) do
             lpb(z) = Nereus.LogDensityProblems.logdensity(target, z)

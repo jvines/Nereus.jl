@@ -1030,26 +1030,73 @@ B_j is singular (every G coupling 0, every Ġ coupling 0, or all channels'
 (a_c, b_c) parallel), and its derivative loses accuracy as B_j approaches
 that. And w = R⁻ᵀ·Mᵀ D⁻¹ y divides by R, so when every coupling is tiny
 against the noise its derivatives cancel to a relative error of about
-eps/SNR. When a block's smaller eigenvalue is below 1e-10 of its larger, or
-the GP's signal-to-noise is below 1e-6 at every epoch, such inputs are
-evaluated with the dense (C·N)² Cholesky instead, which is smooth there. A
-coupling that is a constant 0 (every Ġ coupling under
-`use_derivative = false`) is not a direction of the block and does not
-count; only a plain number, or a ForwardDiff dual whose partials are all 0,
-is known to be one, so the likelihood passes the missing Ġ couplings of a
-tracked number type as `Float64` zeros. The eigenvalue test reads B_j in the solver's own units, in
-which Ġ carries one over time, so where it falls depends on the time unit
-and on the kernel: with the epochs in hours rather than days a block's ratio
-moves by up to 24² either way while log L is unchanged, so the accuracy
-figures below hold for epochs in days (see `_agp_blocks_smooth` for why the
-test is not made unit-free). On the HD 18599 job the dense route is taken at
-couplings that are exactly 0 (the prior box centre and points derived from
-it), at none of 248 prior draws and 150 near-posterior points with five
-channels, and at 2 of 236 prior draws with RV and logR'HK alone. `Float64`
-values are exact at singular blocks and always take the low-rank path.
+eps/SNR. Such inputs take a route that is smooth there. That happens when a
+block's smaller eigenvalue is below 1e-10 of its larger, or when the GP's
+signal-to-noise is below 1e-6 at every epoch.
 
-Below those thresholds the dense route's derivatives are accurate to about
-1e-15 (relative). Just above them the derivatives through R are not: they
+With four or more channels the latent is conditioned on one epoch at a time
+(`_agp_sequential_logpdf!`). That route reads B rather than a square root
+of it and never inverts K_g. It uses A's (2N)² buffer and does about the
+work of A's Cholesky, so a derivative there costs what it costs anywhere
+else. On the five-channel HD 18599 job, a ReverseDiff gradient
+(`ADgradient(:ReverseDiff)`, tape not compiled) cost the following.
+
+- Every Ġ coupling 0: 1.7 s, 0.9 GB allocated, 3.9 GB peak memory. The
+  dense fallback this replaces took 34 s, 16 GB and 19 GB. The solver before
+  this branch took 4.9 s, 4.0 GB and 7.0 GB.
+- The prior-box centre: 1.7 s, 0.9 GB and 4.0 GB. The dense fallback took
+  50 s, 16 GB and 19 GB; the solver before this branch 7.6 s, 4.0 GB and
+  6.5 GB.
+- Building the tape that `sample_nuts(ad_backend = :ReverseDiff)` compiles
+  by default (at zeros(dim), where every coupling is 0): 43 s, 7.1 GB and
+  5.5 GB. The dense fallback took 110 s, 44 GB and 39 GB; the solver before
+  this branch 72 s, 14 GB and 13 GB.
+
+That tape records this route, which has no branch on the values, so the
+AGP part of it gives the right value and gradient wherever it is replayed.
+
+With two or three channels the fallback is the dense (C·N)² Cholesky. That
+matrix is at most 1.5 times as large as A, and it is what the likelihood
+used for every evaluation before this branch.
+
+A coupling that is a constant 0 (every Ġ coupling under
+`use_derivative = false`) is not a direction of the block and does not
+count. Only a plain number, or a ForwardDiff dual whose partials are all 0,
+is known to be one, so the likelihood passes the missing Ġ couplings of a
+tracked number type as `Float64` zeros.
+
+The eigenvalue test reads B_j in the solver's own units, in which Ġ carries
+one over time, so where it falls depends on the time unit and on the
+kernel. With the epochs in hours rather than days, a block's ratio moves by
+up to 24² either way while log L is unchanged. `_agp_blocks_smooth` says
+why the test is not made unit-free. On the HD 18599 job the fallback is
+taken at couplings that are exactly 0 (the prior-box centre and points
+derived from it). It is taken at none of 248 prior draws and 150
+near-posterior points with five channels, and at 2 of 236 prior draws with
+RV and logR'HK alone. `Float64` values are exact at singular blocks and
+always take the low-rank path.
+
+Below the thresholds the derivatives are those of the fallback. On
+synthetic singular blocks with two to five channels (every G coupling 0,
+every Ġ coupling 0, parallel couplings, every coupling 0, one channel
+uncoupled; one seed per configuration), gradients and Hessians agreed with
+the dense likelihood differentiated in BigFloat to 2e-14 or better on both
+fallbacks. The sequential route's rounding grows faster with the
+signal-to-noise than the whitened solve's or the dense Cholesky's, because
+its updates of K cancel once the latent is well determined. The earlier
+sample of HD 18599 points
+was made singular three ways (every Ġ coupling 0, every G coupling 0, and Ġ
+couplings proportional to G couplings; 585 points over the five-channel,
+use_derivative = false and four-channel models). Against BigFloat, the
+sequential route's largest value errors were 1.0e-5, 3.7e-6 and 1.7e-4 nats
+in those three cases, against 1.0e-5, 3.7e-6 and 6.8e-6 for the dense
+Cholesky. Its largest relative errors in a directional derivative were
+1.2e-7, 1.5e-8 and 2.0e-6, against 1.2e-7, 1.4e-8 and 5.7e-7. On the
+five-channel model with Ġ couplings the medians were 3e-10 to 1.3e-9 nats
+and 2e-13 to 2e-12, and near the posterior the value errors were at most
+4e-11 nats for both routes.
+
+Just above the thresholds the derivatives through R are not: they
 lose accuracy as eps over the signal-to-noise of the fainter latent
 direction. In probes approaching each threshold (a faint G direction, a
 faint Ġ direction, near-parallel couplings; three and five channels, 8 and
@@ -1221,7 +1268,13 @@ function _agp_nan_seen(yDy, logdetD, vs::AbstractVector...)
 end
 
 # The dense (C·N)² Gaussian log-density of the same Σ = M·K_g·Mᵀ + D,
-# generic in the element type: the dual-number route at near-singular blocks.
+# generic in the element type: the fallback for numbers that carry
+# derivatives at near-singular blocks with two or three channels. The solve
+# is `F.U' \ y`, not `F \ y`: the latter goes through LinearAlgebra's ldiv!,
+# which asks `istriu` of the transposed factor, and ForwardDiff's `iszero`
+# reads only a dual's value, so where the factor is diagonal in value (every
+# coupling 0) its off-diagonal partials would be dropped and Hessians come out
+# wrong (test/test_activity_gp_lowrank.jl checks this point).
 function _agp_dense_logpdf(epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
     Σ0 = activity_gp_covariance_blocked(epochs, chan_a, chan_b, amp, P, λe, λp)
     TS = promote_type(eltype(Σ0), eltype(y_flat), eltype(σ²_flat))
@@ -1231,6 +1284,82 @@ function _agp_dense_logpdf(epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ�
     issuccess(F) || return convert(TS, -Inf)
     z = F.U' \ y_flat
     return -(dot(z, z) + logdet(F) + length(y_flat) * log(2π)) / 2
+end
+
+# The same Gaussian log-density, for numbers that carry derivatives where R is
+# not smooth, with four or more channels: the latent g = (G, Ġ) is
+# conditioned on the observations of one epoch at a time. With m and K the
+# mean and covariance of g given the epochs before p (m = 0 and K = K_g at
+# first), B_p and v_p epoch p's blocks of B = Mᵀ D⁻¹ M and v = Mᵀ D⁻¹ y,
+# P = I + B_p·K_pp (2×2, det P ≥ 1) and r = v_p − B_p·m_p,
+#
+#   log ∫ N(g; 0, K_g)·exp(vᵀg − ½ gᵀBg) dg
+#       = Σ_p [ v_pᵀm_p − ½ m_pᵀB_p m_p + ½ rᵀK_pp P⁻¹ r − ½ log det P ],
+#
+# after which the later epochs' mean and covariance are updated by
+# m_q += K_qp P⁻¹ r and K_qq' −= K_qp P⁻¹ B_p K_pq'. It reads B itself, never a
+# square root of it, and never inverts K_g, so it is smooth in every input,
+# singular blocks included. K (2×2 blocks per epoch pair, upper blocks only)
+# overwrites `K`, the 2N×2N buffer of A, and the mean overwrites `m`
+# (length 2N); the work is about that of A's Cholesky. Its rounding error is
+# larger than the whitened solve's at high signal-to-noise (the updates of K
+# cancel; see the docstring), which is why it is not used everywhere.
+function _agp_sequential_logpdf!(K::AbstractMatrix, m::AbstractVector,
+        epochs::AbstractVector{<:Real}, bGG::AbstractVector, bGd::AbstractVector,
+        bdd::AbstractVector, v::AbstractVector, yDy, logdetD, C::Int, kc)
+    N = length(epochs)
+    TA = eltype(K)
+    @inbounds for j in 1:N
+        tj = epochs[j]
+        for i in 1:j
+            cGG, cGd, cdG, cdd = _qp_blocks_sincos(epochs[i] - tj, kc)
+            K[2i-1, 2j-1] = cGG; K[2i-1, 2j] = cGd
+            K[2i,   2j-1] = cdG; K[2i,   2j] = cdd
+        end
+    end
+    fill!(m, zero(TA))
+    Z = zero(TA)
+    @inbounds for p in 1:N
+        k11 = K[2p-1, 2p-1]; k12 = K[2p-1, 2p]; k22 = K[2p, 2p]
+        g = bGG[p]; h = bGd[p]; e = bdd[p]
+        P11 = 1 + (g * k11 + h * k12); P12 = g * k12 + h * k22
+        P21 = h * k11 + e * k12;       P22 = 1 + (h * k12 + e * k22)
+        dP = P11 * P22 - P12 * P21
+        # det P ≥ 1 in exact arithmetic; a NaN or infinite input breaks it.
+        dP > 0 || return convert(TA, isnan(dP) ? NaN : -Inf)
+        m1 = m[2p-1]; m2 = m[2p]
+        vG = v[p]; vd = v[N+p]
+        r1 = vG - (g * m1 + h * m2); r2 = vd - (h * m1 + e * m2)
+        s1 = (P22 * r1 - P12 * r2) / dP; s2 = (P11 * r2 - P21 * r1) / dP
+        Z += vG * m1 + vd * m2 - (g * m1 * m1 + 2 * h * m1 * m2 + e * m2 * m2) / 2 +
+             (r1 * (k11 * s1 + k12 * s2) + r2 * (k12 * s1 + k22 * s2)) / 2 - log(dP) / 2
+        # W = P⁻¹ B_p, symmetric.
+        W11 = (P22 * g - P12 * h) / dP
+        W12 = (P22 * h - P12 * e) / dP
+        W22 = (P11 * e - P21 * h) / dP
+        for q in (p + 1):N
+            # Block (p, q) holds K_pq; K_qp = K_pqᵀ.
+            a11 = K[2p-1, 2q-1]; a12 = K[2p-1, 2q]
+            a21 = K[2p,   2q-1]; a22 = K[2p,   2q]
+            m[2q-1] += a11 * s1 + a21 * s2
+            m[2q]   += a12 * s1 + a22 * s2
+        end
+        for q2 in (p + 1):N
+            b11 = K[2p-1, 2q2-1]; b12 = K[2p-1, 2q2]
+            b21 = K[2p,   2q2-1]; b22 = K[2p,   2q2]
+            y11 = W11 * b11 + W12 * b21; y12 = W11 * b12 + W12 * b22
+            y21 = W12 * b11 + W22 * b21; y22 = W12 * b12 + W22 * b22
+            for q in (p + 1):q2
+                c11 = K[2p-1, 2q-1]; c12 = K[2p-1, 2q]
+                c21 = K[2p,   2q-1]; c22 = K[2p,   2q]
+                K[2q-1, 2q2-1] -= c11 * y11 + c21 * y21
+                K[2q-1, 2q2]   -= c11 * y12 + c21 * y22
+                K[2q,   2q2-1] -= c12 * y11 + c22 * y21
+                K[2q,   2q2]   -= c12 * y12 + c22 * y22
+            end
+        end
+    end
+    return -(yDy + logdetD + (C * N) * log(2π)) / 2 + Z
 end
 
 # The whitened low-rank solve on caller-supplied buffers: `A` is 2N×2N,
@@ -1272,16 +1401,22 @@ function _agp_whitened_core!(A::AbstractMatrix,
     # Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked
     # reals, any type that is not a plain float): where derivatives through
     # R lose their accuracy (a singular or nearly singular block of B, or a
-    # GP too faint against the noise; see _agp_blocks_smooth) the dense
-    # likelihood is smooth and is used instead. Decided before R is formed:
-    # a reverse-mode tape keeps every operation, and R's derivatives at a
-    # vanishing block are infinite even where R goes unused (0·Inf = NaN).
-    # Compiled out for Float64, whose values are exact at singular blocks.
+    # GP too faint against the noise; see _agp_blocks_smooth) a route that is
+    # smooth there is used instead: with four or more channels the latent is
+    # conditioned one epoch at a time (_agp_sequential_logpdf!, on A's
+    # buffer, about the work of the low-rank solve), with two or three the
+    # dense Cholesky of Σ, at most 1.5 times as large as A. Decided before R
+    # is formed: a reverse-mode tape keeps every operation, and R's
+    # derivatives at a vanishing block are infinite even where R goes unused
+    # (0·Inf = NaN). Compiled out for Float64, whose values are exact at
+    # singular blocks.
     if !(T <: AbstractFloat)
         k0GG, _, _, k0dd = _qp_blocks_sincos(zero(eltype(epochs)), kc)
         if !_agp_blocks_smooth(bGG, bGd, bdd, chan_a, chan_b, k0GG, k0dd)
             # A NaN input gives NaN, as on the low-rank route below.
             _agp_nan_seen(yDy, logdetD, bGG, bGd, bdd, v) && return convert(TA, NaN)
+            C >= 4 && return _agp_sequential_logpdf!(A, t, epochs, bGG, bGd, bdd, v,
+                                                     yDy, logdetD, C, kc)
             return convert(TA, _agp_dense_logpdf(epochs, chan_a, chan_b,
                                                  amp, P, λe, λp, y_flat, σ²_flat))
         end
