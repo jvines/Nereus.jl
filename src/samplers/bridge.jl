@@ -358,11 +358,11 @@ every point, but not to the bit:
   ws)`) caches each planet's velocity curve and computes cos(f+ω) by the
   angle-sum identity, so its log L differs in the last bits at most points.
   Measured up to 2.4e-9 nats on the HD 18599 white-noise fit without the
-  floor, and 2.4e-7 nats on prior draws of an RV + astrometry fit. With noise
-  models it evaluates each cadence as the other method does, and gave the same
-  bits on every fit measured (GP rotation, activity GP, activity
-  decorrelation, error scale, white noise with the floor, the
-  trans-dimensional job, RM with tomography).
+  floor, and 2.4e-7 nats (3e-15 relative) on prior draws of an RV +
+  astrometry fit. With noise models it evaluates each cadence as the other
+  method does, in the same order, and gave the same bits on every fit measured
+  (GP rotation, activity GP, activity decorrelation, error scale, white noise
+  with the floor, the trans-dimensional job, RM with tomography).
 - Photometry: the workspace method computes each cadence's sky separation by
   the same angle-sum route and sums every cadence in one pass, where the other
   sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
@@ -370,9 +370,15 @@ every point, but not to the bit:
   near the reference point, and on prior draws by at most 1e-11 relative
   (3.1e-13 with the GP rotation, 9.7e-12 with activity decorrelation).
 
-The photometry gives the same bits as in `_logdensity_parts` wherever it takes
-the allocating method, as the tomogram always does, and so does the whole
-density at a clamped e.
+The same bits as `_logdensity_parts` come out for the tomogram, for the
+photometry wherever it takes the allocating method, for the RV with noise
+models, and for the whole density at a clamped e. A gravity-darkened fit is
+therefore bit-identical only without RV data or with an RV noise model. With
+RV data and no RV noise model its RV carries the workspace rounding like any
+other fit's: on a one-planet RVPM_GD fit the RV log L matched at 72 of 420
+points (up to 5.1e-11 nats apart); on a two-band, two-planet one the whole
+density matched at 410 of 500 (up to 4.7e-10 nats, 1.4e-15 relative), and
+one bridge_evidence of five moved log Z by 4.5e-13.
 """
 function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
     target = ev.target
