@@ -195,6 +195,8 @@ export
     RVPM_RM_A, RVPMAS_RM_A,
     SB_SOURCE, BINARY, BINARY_RV, has_sb,
     has_ttv_nb, has_rm_r, has_rm_a, has_any_rm,
+    DT_SOURCE, PM_DT, has_dt, has_obliquity, ObliquityConfig,
+    planet_a_Rs, arome_beta_p, spectroscopic_ld,
     rm_reloaded_signal,
     ParametrizationConfig, InstrumentConfig, SystemicIndices,
     PlanetBlock, RVOnlyBlock, PMOnlyBlock, RVPMBlock,

@@ -267,7 +267,8 @@ Returns `n_rm = -1` (sentinel) if a required quantity is missing
 failure and returns -Inf log-likelihood.
 """
 function _decode_rm_state(theta::Theta{T}, p_idx,
-                           Ps::AbstractVector{T}) where {T}
+                           Ps::AbstractVector{T};
+                           t_ref::Union{Nothing,Real} = nothing) where {T}
     config  = theta.params.config
     layout  = theta.params.layout
     modes   = config.planet_modes
@@ -290,6 +291,11 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
     a_Rs        = Vector{T}(undef, n_rm)
     is_reloaded = Vector{Bool}(undef, n_rm)
     is_arome    = Vector{Bool}(undef, n_rm)
+    # Transit-relative phase: the reference transit time Tc0 and the mean
+    # anomaly at transit M_tr of each RM planet (see `rm_contribution`).
+    Tc0s        = Vector{T}(undef, n_rm)
+    Mtrs        = Vector{T}(undef, n_rm)
+    tm_kind     = config.parametrization.time
 
     use_rho = config.parametrization.use_rho_s
     rho_val = use_rho ? theta.values[layout.systemic.rho_s] : zero(T)
@@ -312,6 +318,17 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
         # λ from explicit layout slot
         λs[r] = planet_lambda(theta, k)
 
+        if t_ref !== nothing
+            e_k, ω_k = planet_e_w(theta, k)
+            ta = planet_time_anchor(theta, k)
+            Tc0s[r] = tm_kind === :Tc ? ta :
+                      tp_to_tc(tm_kind === :Mo ? t_ref - ta * Ps[j] / T(2π) : ta,
+                               Ps[j], e_k, ω_k)
+            ec = clamp(e_k, zero(e_k), oftype(e_k, 1) - eps(oftype(e_k, 1)))
+            E_tr = 2 * atan(tan((T(π) / 2 - ω_k) / 2) * sqrt((1 - ec) / (1 + ec)))
+            Mtrs[r] = E_tr - ec * sin(E_tr)
+        end
+
         # b, rr from transit geometry (planet must have PM mode — RM
         # requires PM by construction; we keep the gate cheap and just
         # decode b_rr).
@@ -326,8 +343,10 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
             bs[r], rrs[r] = b_raw, rr_raw
         end
 
-        # a_Rs: rho_s path (preferred) or M_s+R_s fallback
-        if use_rho
+        # a_Rs: sampled a/R★ slot, else rho_s, else M_s+R_s
+        if (ai = a_Rs_slot(theta, k)) > 0
+            a_Rs[r] = theta.values[ai]
+        elseif use_rho
             a_Rs[r] = rho_s_to_a_Rs(rho_val, Ps[j])
         elseif have_ms_rs
             P_s = Ps[j] * T(86400.0)
@@ -341,25 +360,104 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
 
     v_sini = system_vsini(theta)
 
-    # LD from first PM instrument's (q1, q2). Defaults to uniform disk
-    # when no PM instrument is configured.
-    u1, u2 = zero(T), zero(T)
-    n_pm_inst = length(layout.systemic.ld_q1)
-    if n_pm_inst > 0 && layout.systemic.ld_q1[1] > 0
-        q1 = theta.values[layout.systemic.ld_q1[1]]
-        q2 = theta.values[layout.systemic.ld_q2[1]]
-        u1, u2 = kipping_q_to_u(q1, q2)
-    end
+    # Limb darkening: the spectroscopic pair when allocated, else the first PM
+    # instrument's (q1, q2), else a uniform disc.
+    u1, u2 = spectroscopic_ld(theta)
+    isfinite(u1) || return (-1, nothing)
 
-    # ARoME line widths (zero unless some planet uses :RM_A).
+    # ARoME line widths (zero unless some planet uses :RM_A). With measured
+    # per-night σ0 (`ObliquityConfig.sigma0`) each RV instrument gets its own
+    # (σ0, β_p), β_p derived from v sin i; otherwise one free pair for all.
+    obl = config.obliquity
     σ0 = zero(T); βp = zero(T)
-    if layout.systemic.rm_sigma_ccf > 0
+    per_inst = !isempty(obl.sigma0)
+    n_inst = length(config.instruments.rv_names)
+    σ0s = per_inst ? Vector{T}(undef, n_inst) : T[]
+    βps = per_inst ? Vector{T}(undef, n_inst) : T[]
+    if per_inst
+        for (i, nm) in enumerate(config.instruments.rv_names)
+            σ0s[i] = T(obl.sigma0[nm])
+            βps[i] = arome_beta_p(σ0s[i], v_sini, obl.beta_p_floor)
+        end
+        σ0, βp = σ0s[1], βps[1]
+    elseif layout.systemic.rm_sigma_ccf > 0
         σ0 = theta.values[layout.systemic.rm_sigma_ccf]
         βp = theta.values[layout.systemic.rm_beta_p]
     end
+    point = obl.occultation === :point
 
+    rel = t_ref !== nothing
     return (n_rm, (; j_active, λs, bs, rrs, a_Rs, v_sini, u1, u2,
-                     is_reloaded, is_arome, σ0, βp))
+                     is_reloaded, is_arome, σ0, βp, per_inst, σ0s, βps, point,
+                     rel, Tc0s, Mtrs))
+end
+
+"""
+    AROME_ROT_SIGMA = 0.5503
+
+Dispersion, in units of v sin i, of the Gaussian that best fits a rotationally
+broadened line profile: the factor in `β_p² = σ₀² − (0.5503 v sin i)²`, which
+recovers the sub-planet line width from the measured out-of-transit CCF width.
+"""
+const AROME_ROT_SIGMA = 0.5503
+
+"""
+    arome_beta_p(σ0, v_sini, floor = 0) -> β_p
+
+Sub-planet line width (m/s) implied by the measured out-of-transit CCF
+dispersion `σ0` and the projected rotation `v_sini` (both m/s):
+`β_p = sqrt(max(σ0² − (0.5503 v sin i)², floor²))`. A rotationally broadened
+profile fitted by a Gaussian has σ ≈ 0.5503 v sin i convolved with the local
+line, which is what this inverts. `floor` (m/s) keeps β_p physical when
+v sin i approaches σ0/0.5503; with `floor = 0` the width there is 0.
+"""
+@inline function arome_beta_p(σ0, v_sini, floor::Real = 0.0)
+    d  = σ0 * σ0 - (AROME_ROT_SIGMA * v_sini)^2
+    f2 = floor * floor
+    # Branches rather than sqrt(max(d, f2)): the same value, but sqrt at an exact
+    # 0 has an infinite derivative, and ForwardDiff would turn the floor's zero
+    # partials into NaN. `floor` is a constant, so the floored branch has none.
+    d > f2 && return sqrt(d)
+    return f2 > 0 ? oftype(d, floor) : zero(d)
+end
+
+"""
+    spectroscopic_ld(theta) -> (u1, u2)
+
+Quadratic limb darkening read by the RM anomaly and the Doppler shadow: the
+spectroscopic pair `u1_spec`/`u2_spec` when `ObliquityConfig.spec_ld`
+allocated it, else the first photometric instrument's Kipping (q1, q2), else
+a uniform disc (0, 0). `(NaN, NaN)` for an unphysical spectroscopic pair
+(intensity negative somewhere on the disc, or u1 < 0).
+"""
+function spectroscopic_ld(theta::Theta{T}) where {T}
+    S = theta.params.layout.systemic
+    if S.ld_u1_spec > 0
+        u1 = theta.values[S.ld_u1_spec]; u2 = theta.values[S.ld_u2_spec]
+        # I(μ) = 1 − u1(1−μ) − u2(1−μ)² ≥ 0 on [0, 1] and decreasing to the limb.
+        (u1 >= 0 && u1 + u2 <= 1 && u1 + 2u2 >= 0) ||
+            return (convert(T, NaN), convert(T, NaN))
+        return (u1, u2)
+    end
+    if length(S.ld_q1) > 0 && S.ld_q1[1] > 0
+        return kipping_q_to_u(theta.values[S.ld_q1[1]], theta.values[S.ld_q2[1]])
+    end
+    return (zero(T), zero(T))
+end
+
+"""
+    point_occulted_flux(x, y, rr, u1, u2) -> f
+
+Occulted flux fraction of a POINT planet at sky position `(x, y)` (stellar
+radii): `rr² I(μ)/⟨I⟩` with quadratic limb darkening, zero unless the planet's
+centre is on the disc. The approximation the tomographic shadow model uses;
+see `ObliquityConfig.occultation`.
+"""
+@inline function point_occulted_flux(x, y, rr, u1, u2)
+    (hypot(x, y) < 1) || return zero(promote_type(typeof(x), typeof(rr), typeof(u1)))
+    μ = sqrt(max(1 - x^2 - y^2, zero(x)))
+    norm = 1 - u1 / 3 - u2 / 6
+    return rr^2 * (1 - u1 * (1 - μ) - u2 * (1 - μ)^2) / norm
 end
 
 """
@@ -373,26 +471,47 @@ Sums the in-transit RM anomalies from all RM-enabled planets at time
                                    Ps::AbstractVector{T},
                                    es::AbstractVector{T},
                                    ws::AbstractVector{T},
-                                   Tps::AbstractVector{T}) where {T}
+                                   Tps::AbstractVector{T},
+                                   ins_idx::Int = 0) where {T}
     n_rm == 0 && return zero(T)
     Δ = zero(T)
+    # The ARoME widths of THIS observation's night when they are per
+    # instrument; `ins_idx = 0` (a model curve with no instrument) takes the
+    # first instrument's.
+    σ0, βp = (state.per_inst && ins_idx > 0) ?
+        (state.σ0s[ins_idx], state.βps[ins_idx]) : (state.σ0, state.βp)
     @inbounds for r in 1:n_rm
         j = state.j_active[r]
-        x_sky, y_sky, z_los = planet_sky_position(t, Ps[j], es[j], ws[j], Tps[j],
-                                                   state.bs[r], state.a_Rs[r])
+        x_sky, y_sky, z_los = if state.rel
+            # Phase measured from the transit of the model ephemeris nearest
+            # t, Tc_n = Tc0 + E·P, as a small time difference: an absolute
+            # periastron time in BJD carries ~2e-10 d of rounding, which moved
+            # the anomaly by 1e-6 m/s. Same orbit, same positions.
+            E   = round((_val(t) - _val(state.Tc0s[r])) / _val(Ps[j]))
+            Tcn = state.Tc0s[r] + E * Ps[j]
+            planet_sky_position(t - Tcn, Ps[j], es[j], ws[j],
+                                -Ps[j] * state.Mtrs[r] / (2 * oftype(Ps[j], π)),
+                                state.bs[r], state.a_Rs[r])
+        else
+            planet_sky_position(t, Ps[j], es[j], ws[j], Tps[j],
+                                state.bs[r], state.a_Rs[r])
+        end
         # Reject superior conjunction: the sky-separation test below is satisfied
         # at BOTH conjunctions, so without this the occultation would produce a
         # mirrored RM anomaly of equal magnitude.
         z_los > 0 || continue
-        z2 = x_sky * x_sky + y_sky * y_sky
-        limit = 1 + state.rrs[r]
-        z2 > limit * limit && continue
-        z = sqrt(z2)
-        Δflux = 1 - transit_flux(z, state.rrs[r], state.u1, state.u2)
+        Δflux = if state.point
+            point_occulted_flux(x_sky, y_sky, state.rrs[r], state.u1, state.u2)
+        else
+            z2 = x_sky * x_sky + y_sky * y_sky
+            limit = 1 + state.rrs[r]
+            z2 > limit * limit && continue
+            1 - transit_flux(sqrt(z2), state.rrs[r], state.u1, state.u2)
+        end
         Δflux > 0 || continue
         Δ += if state.is_arome[r]
             rm_signal_arome(x_sky, y_sky, Δflux, state.v_sini, state.λs[r],
-                             state.σ0, state.βp)
+                             σ0, βp)
         elseif state.is_reloaded[r]
             rm_reloaded_signal(x_sky, y_sky, state.rrs[r],
                                 state.u1, state.u2,
@@ -403,6 +522,9 @@ Sums the in-transit RM anomalies from all RM-enabled planets at time
     end
     return Δ
 end
+
+_val(x::Real) = x
+_val(x::ForwardDiff.Dual) = _val(ForwardDiff.value(x))
 
 """
     rm_reloaded_signal(x_p, y_p, rr, u1, u2, v_sini, λ, Δflux;

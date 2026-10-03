@@ -46,6 +46,8 @@ const RM_SOURCE     = :RM    # Rossiter-McLaughlin in-transit RV anomaly (Hirano
 const RM_R_SOURCE   = :RM_R  # Reloaded Rossiter-McLaughlin (Cegla+ 2016)
 const RM_A_SOURCE   = :RM_A  # ARoME CCF-Gaussian-fit RM (Boué+ 2013, Eq. 15)
 const GD_SOURCE     = :GD    # gravity-darkened transit (von Zeipel; Barnes 2009)
+const DT_SOURCE     = :DT    # Doppler tomography: λ and v sin i from the planet's
+                             # shadow in the line profiles, with no RV anomaly
 const TTV_SOURCE    = :TTV   # per-transit free time offsets (TTV-A)
 const TTV_NB_SOURCE = :TTV_NB # N-body-predicted TTVs (TTV-C, TTVFaster)
 """
@@ -310,6 +312,25 @@ Pass through `planet_modes=` to state which observables constrain a
 given planet; the set decides which parameter block is built for it.
 """
 const PM_GD      = PlanetDataSources(PM_SOURCE, GD_SOURCE)
+"""
+    PM_DT :: PlanetDataSources
+
+Planet model driven by:
+
+  - the transit geometry (impact parameter, radius ratio, a/R★), and
+  - Doppler tomography: the planet's shadow in the stellar line profiles.
+
+The mode of a Doppler-shadow fit WITHOUT velocities: it carries `lambda_k`
+and `v_sin_i_star` (which the tomographic likelihood reads) but no `K`, no
+RM-anomaly line widths and no RV instruments. The transit term is zero when
+there is no photometry, so the geometry is set by its priors. With RM
+velocities as well, use `RVPM_RM_A` (or another `*_RM*` mode) instead: the
+tomogram reads the same λ slot either way.
+
+Pass through `planet_modes=` to state which observables constrain a
+given planet; the set decides which parameter block is built for it.
+"""
+const PM_DT      = PlanetDataSources(PM_SOURCE, DT_SOURCE)
 # TTV variants — per-transit free time offsets. Requires PM (need
 # transit observations to fit transit-time offsets against).
 """
@@ -507,6 +528,21 @@ Use this rather than testing the three separately when the question is
     has_rm(modes) || has_rm_r(modes) || has_rm_a(modes)
 @inline has_gd(modes::PlanetDataSources) = GD_SOURCE in modes
 """
+    has_dt(modes::PlanetDataSources) -> Bool
+
+Whether this planet's data-source set includes Doppler tomography (`:DT`).
+"""
+@inline has_dt(modes::PlanetDataSources) = DT_SOURCE in modes
+"""
+    has_obliquity(modes::PlanetDataSources) -> Bool
+
+Whether the planet carries a sky-projected obliquity `lambda_k` -- through an
+RM anomaly, Doppler tomography or gravity darkening. These all read the SAME
+λ slot and the same `v_sin_i_star`, which is what makes a joint fit joint.
+"""
+@inline has_obliquity(modes::PlanetDataSources) =
+    has_any_rm(modes) || has_gd(modes) || has_dt(modes)
+"""
     has_ttv(modes::PlanetDataSources) -> Bool
 
 Whether this planet's data-source set includes per-transit free timing offsets (TTV-A).
@@ -550,6 +586,14 @@ Choices for how orbital parameters are parametrized in the sampler.
 - `geom::Symbol`      : one of `:b_rr`, `:r1r2`
 - `use_rho_s::Bool`   : if `true`, a shared stellar density parameter
                          replaces per-planet `a_kN`
+- `sample_a_Rs::Bool` : if `true`, every planet with transit geometry gets
+                         its own sampled scaled semi-major axis `a_Rs_k<k>`
+                         (a/R★), and a/R★ is read from it rather than derived
+                         from `rho_s` or `M_s, R_s`. The parametrization of an
+                         obliquity fit with a published a/R★: its Gaussian prior
+                         goes on the quantity it was measured as, with no
+                         stellar-density proxy. Mutually exclusive with
+                         `use_rho_s`.
 - `mass::Symbol`      : one of `:K_driven` (default — sample RV semi-
                          amplitude K, derive M_sec via mass function),
                          `:M_sec_driven` (sample M_sec directly, derive
@@ -585,13 +629,17 @@ struct ParametrizationConfig
     # likelihood uses the γ-marginalized path. White-noise only — see
     # `_rv_ll_gamma_marginalized`.
     marginalize_gamma::Bool
+    # Sample a/R★ per transiting planet (`a_Rs_k<k>`) instead of deriving it
+    # from rho_s or (M_s, R_s). See the docstring.
+    sample_a_Rs::Bool
 end
 
 function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
                                 geom::Symbol=:b_rr, use_rho_s::Bool=false,
                                 mass::Symbol=:K_driven,
                                 obs_prior::Bool=false,
-                                marginalize_gamma::Bool=false)
+                                marginalize_gamma::Bool=false,
+                                sample_a_Rs::Bool=false)
     ew in (:sesinw, :esinw, :ew) ||
         throw(ArgumentError("ew must be :sesinw, :esinw, or :ew; got :$ew"))
     time in (:Mo, :Tp, :Tc) ||
@@ -600,8 +648,11 @@ function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
         throw(ArgumentError("geom must be :b_rr or :r1r2; got :$geom"))
     mass in (:K_driven, :M_sec_driven, :a_driven) ||
         throw(ArgumentError("mass must be :K_driven, :M_sec_driven, or :a_driven; got :$mass"))
+    (use_rho_s && sample_a_Rs) && throw(ArgumentError(
+        "use_rho_s and sample_a_Rs are mutually exclusive: a/R★ is either derived " *
+        "from the stellar density or sampled directly, not both"))
     return ParametrizationConfig(ew, time, geom, use_rho_s, mass, obs_prior,
-                                 marginalize_gamma)
+                                 marginalize_gamma, sample_a_Rs)
 end
 
 # =====================================================================
@@ -1053,6 +1104,14 @@ struct SystemicIndices
     f_light::Int       # 0 unless an SB2 binary has astrometry; secondary
                        # light fraction L_B/(L_A+L_B) in the ASTROMETRIC band,
                        # for the luminous-companion photocenter correction.
+    # --- obliquity options (see `ObliquityConfig`) ---------------------
+    a_Rs::Vector{Int}  # one per planet; the `a_Rs_k<k>` slot under
+                       # `parametrization.sample_a_Rs`, else 0
+    tomo_jit::Vector{Int}  # one per residual map: the white-noise σ_n of
+                       # Σ_n = K_t ⊗ K_v + σ_n² I, in units of the map
+    ld_u1_spec::Int    # 0 unless `ObliquityConfig.spec_ld`: quadratic
+    ld_u2_spec::Int    # limb darkening of the SPECTROSCOPIC band, read by
+                       # the RM anomaly and the Doppler shadow
 end
 
 # =====================================================================
@@ -1091,6 +1150,76 @@ struct ExternalPrior
 end
 
 const _VALID_EXTERNAL_QUANTITIES = (:ecc, :rho_s)
+
+# =====================================================================
+# ObliquityConfig — options of the RM / Doppler-tomography model
+# =====================================================================
+
+"""
+    ObliquityConfig(; sigma0, beta_p_floor, occultation, spec_ld, shared_alpha)
+
+Model options for the obliquity observables -- the RM anomaly in the
+velocities and the Doppler shadow in the line profiles. The defaults
+reproduce the model as it was before these options existed, so a `Params`
+built without one is unchanged; `obliquity_params` sets the standard
+configuration (see `docs/src/obliquity.md`).
+
+# Fields
+- `sigma0::Dict{String,Float64}` -- the MEASURED dispersion σ₀ (m/s) of a
+  Gaussian fitted to each RV instrument's out-of-transit CCF, keyed by RV
+  instrument name (one RM night is one instrument). When given, the ARoME
+  kernel uses each night's own σ₀ and DERIVES the sub-planet width,
+  `β_p² = σ₀² − (0.5503 v sin i)²`, at every evaluation; `sigma_ccf` and
+  `beta_p` are then not parameters. Without it (empty, the old behaviour) the
+  two widths are single free parameters shared by every night, which lets
+  the ARoME prefactor rescale the anomaly -- a free RM amplitude. Must cover
+  every RV instrument when non-empty.
+- `beta_p_floor::Float64` -- lower limit (m/s) on the derived `β_p`:
+  `β_p = sqrt(max(σ₀² − (0.5503 v sin i)², floor²))`. `0` (default) is the
+  formula as written; a positive value keeps β_p physical when v sin i
+  approaches σ₀/0.5503.
+- `occultation::Symbol` -- the occulted flux fraction `f` of the RM anomaly.
+  `:disc` (default): the exact overlap of the planet's disc with the
+  limb-darkened star, nonzero from first to fourth contact. `:point`: the
+  planet as a point, `f = (R_p/R★)² I(μ)/⟨I⟩` at its centre, zero unless the
+  centre is on the disc (the approximation the tomographic shadow uses).
+- `spec_ld::Bool` -- allocate the quadratic limb-darkening pair of the
+  spectroscopic band, `u1_spec` and `u2_spec`, read by the RM anomaly and the
+  shadow. Without it (default) both read the first photometric instrument's
+  pair, or a uniform disc when there is none.
+- `shared_alpha::Bool` -- one shadow amplitude `tomo_alpha` for every residual
+  map instead of `tomo_alpha_<tag>` per night.
+"""
+struct ObliquityConfig
+    sigma0::Dict{String,Float64}
+    beta_p_floor::Float64
+    occultation::Symbol
+    spec_ld::Bool
+    shared_alpha::Bool
+    function ObliquityConfig(sigma0, beta_p_floor, occultation, spec_ld, shared_alpha)
+        occultation in (:disc, :point) || throw(ArgumentError(
+            "ObliquityConfig.occultation must be :disc or :point; got :$occultation"))
+        beta_p_floor >= 0 || throw(ArgumentError(
+            "ObliquityConfig.beta_p_floor must be >= 0; got $beta_p_floor"))
+        for (k, v) in sigma0
+            (isfinite(v) && v > 0) || throw(ArgumentError(
+                "ObliquityConfig.sigma0[\"$k\"] must be a positive width in m/s; got $v"))
+        end
+        return new(Dict{String,Float64}(sigma0), Float64(beta_p_floor), occultation,
+                   spec_ld, shared_alpha)
+    end
+end
+
+ObliquityConfig(; sigma0 = Dict{String,Float64}(), beta_p_floor::Real = 0.0,
+                  occultation::Symbol = :disc, spec_ld::Bool = false,
+                  shared_alpha::Bool = false) =
+    ObliquityConfig(Dict{String,Float64}(String(k) => Float64(v) for (k, v) in sigma0),
+                    beta_p_floor, occultation, spec_ld, shared_alpha)
+
+"`true` when `o` is the default `ObliquityConfig()` (the pre-option model)."
+is_default_obliquity(o::ObliquityConfig) =
+    isempty(o.sigma0) && o.beta_p_floor == 0 && o.occultation === :disc &&
+    !o.spec_ld && !o.shared_alpha
 
 # =====================================================================
 # ParamsConfig — immutable user-facing inputs
@@ -1153,6 +1282,9 @@ struct ParamsConfig
     # active. Use `:nbody` for high-mass / high-e / strongly-resonant
     # systems where TTVFaster breaks down.
     ttv_backend::Symbol
+    # RM / Doppler-tomography model options. `ObliquityConfig()` is the
+    # pre-option model; see its docstring.
+    obliquity::ObliquityConfig
 end
 
 const _VALID_SHARING_CATEGORIES = (
@@ -1361,7 +1493,7 @@ function _planet_param_names(pc::ParametrizationConfig,
     # darkening, which measures the same angle from the light-curve asymmetry --
     # so a :GD planet must get the slot even with no RM data, or the two could
     # not be fitted against a shared λ.
-    if has_any_rm(modes) || has_gd(modes)
+    if has_obliquity(modes)
         push!(names, "lambda" * suffix)
     end
 
@@ -1664,6 +1796,17 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         rho_s_idx = length(names)
     end
 
+    # Per-planet a/R★ when it is sampled directly (`sample_a_Rs`). Only for
+    # planets with transit geometry -- the others have no a/R★ to read.
+    a_Rs_idx = zeros(Int, config.max_kplanet)
+    if config.parametrization.sample_a_Rs
+        for k in 1:config.max_kplanet
+            has_pm(config.planet_modes[k]) || continue
+            push!(names, "a_Rs_k$k")
+            a_Rs_idx[k] = length(names)
+        end
+    end
+
     dvdt_idx = 0
     d2vdt2_idx = 0
     if config.trend_order >= 1
@@ -1688,7 +1831,7 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
     # Rossiter-McLaughlin: system-level V·sin(i_*), shared across any
     # planet with RM enabled. Added once.
     v_sin_i_star_idx = 0
-    if any(has_any_rm(m) || has_gd(m) for m in config.planet_modes)
+    if any(has_obliquity(m) for m in config.planet_modes)
         push!(names, "v_sin_i_star")
         v_sin_i_star_idx = length(names)
     end
@@ -1714,7 +1857,26 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
     # Only allocated when some planet asks for :RM_A.
     rm_sigma_ccf_idx = 0
     rm_beta_p_idx = 0
-    if any(has_rm_a(m) for m in config.planet_modes)
+    obl = config.obliquity
+    any_arome = any(m -> has_rm_a(m) && has_rv(m), config.planet_modes)
+    if !isempty(obl.sigma0)
+        any_arome || throw(ArgumentError(
+            "ObliquityConfig.sigma0 is given, but no planet uses the ARoME RM " *
+            "kernel (an RV mode with :RM_A, e.g. RVPM_RM_A), so nothing would read it"))
+        missing_s0 = setdiff(config.instruments.rv_names, keys(obl.sigma0))
+        isempty(missing_s0) || throw(ArgumentError(
+            "ObliquityConfig.sigma0 must give the measured CCF width of EVERY RV " *
+            "instrument once it is used; missing: $(join(missing_s0, ", ")). The " *
+            "ARoME anomaly of an in-transit point needs its night's σ0."))
+        extra_s0 = setdiff(keys(obl.sigma0), config.instruments.rv_names)
+        isempty(extra_s0) || throw(ArgumentError(
+            "ObliquityConfig.sigma0 names instruments that are not RV instruments: " *
+            "$(join(sort!(collect(extra_s0)), ", ")) (RV instruments: " *
+            "$(join(config.instruments.rv_names, ", ")))"))
+    end
+    # The two shared ARoME widths are parameters only when the per-night σ0
+    # are not given: with them, β_p is derived and σ0 is data.
+    if any_arome && isempty(obl.sigma0)
         push!(names, "sigma_ccf")
         rm_sigma_ccf_idx = length(names)
         push!(names, "beta_p")
@@ -1728,11 +1890,36 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
     tomo_alpha_idx = zeros(Int, n_tomo)
     tomo_sigma_line_idx = zeros(Int, n_tomo)
     tomo_ell_v_idx = zeros(Int, n_tomo)
+    tomo_jit_idx = zeros(Int, n_tomo)
+    if n_tomo > 0
+        tags = [nt.tag for nt in data.tomo]
+        length(unique(tags)) == n_tomo || throw(ArgumentError(
+            "residual-map tags must be unique; got $(tags). They name the per-night " *
+            "parameters, which would otherwise collide"))
+    end
+    # SHARED amplitude: one `tomo_alpha` read by every map. It makes "no
+    # shadow" the single point alpha = 0, which is what a Savage-Dickey
+    # detection statistic needs (see `shadow_bayes_factor`).
+    if obl.shared_alpha && n_tomo > 0
+        push!(names, "tomo_alpha")
+        fill!(tomo_alpha_idx, length(names))
+    end
     for j in 1:n_tomo
         tag = data.tomo[j].tag
-        push!(names, "tomo_alpha_$(tag)");      tomo_alpha_idx[j] = length(names)
+        if !obl.shared_alpha
+            push!(names, "tomo_alpha_$(tag)");  tomo_alpha_idx[j] = length(names)
+        end
         push!(names, "tomo_sigma_line_$(tag)"); tomo_sigma_line_idx[j] = length(names)
         push!(names, "tomo_ell_v_$(tag)");      tomo_ell_v_idx[j] = length(names)
+        push!(names, "tomo_jit_$(tag)");        tomo_jit_idx[j] = length(names)
+    end
+
+    # Limb darkening of the spectroscopic band (RM anomaly + shadow).
+    ld_u1_spec_idx = 0
+    ld_u2_spec_idx = 0
+    if obl.spec_ld
+        push!(names, "u1_spec"); ld_u1_spec_idx = length(names)
+        push!(names, "u2_spec"); ld_u2_spec_idx = length(names)
     end
 
     # Luminous-companion photocenter: system-level secondary light
@@ -1752,12 +1939,27 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
                                plx_idx, m_pri_idx, v_sin_i_star_idx, i_star_idx,
                                gd_beta_idx,
                                tomo_alpha_idx, tomo_sigma_line_idx, tomo_ell_v_idx,
-                               rm_sigma_ccf_idx, rm_beta_p_idx, f_light_idx)
+                               rm_sigma_ccf_idx, rm_beta_p_idx, f_light_idx,
+                               a_Rs_idx, tomo_jit_idx, ld_u1_spec_idx, ld_u2_spec_idx)
 
     # --- Noise model parameters ---------------------------------------
     for nm in config.noise_models
         nm_names = noise_param_names(nm, config.instruments; data=data)
         append!(names, nm_names)
+    end
+    # A :tomo-channel model scoped with `instruments` covers the residual maps
+    # NAMED there. A name that is not a map's tag would leave its kernel read by
+    # no map at all -- the map silently white -- so it is an error.
+    if data !== nothing
+        tomo_tags = Set(nt.tag for nt in data.tomo)
+        for nm in config.noise_models
+            (nm isa CovarianceNoise && noise_channel(nm) === :tomo) || continue
+            bad = setdiff(noise_instruments(nm), tomo_tags)
+            isempty(bad) || throw(ArgumentError(
+                "$(nameof(typeof(nm)))(channel = :tomo) names residual maps " *
+                "$(collect(bad)) that are not in the data (maps: " *
+                "$(join(sort!(collect(tomo_tags)), ", ")))"))
+        end
     end
 
     # Layout names must be globally unique. A duplicate silently collapses in

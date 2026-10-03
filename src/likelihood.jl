@@ -204,7 +204,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- Decode Rossiter-McLaughlin state (once) ---------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)   # RM enabled but M_s/R_s missing
 
     # --- Stage 1: Build predictions + variances -----------------------
@@ -240,7 +240,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
         # Rossiter-McLaughlin during in-transit windows — component A only
         # (the RM anomaly lives in the primary's deblended lines)
         (n_rm > 0 && comp == 1) && (pred += rm_contribution(t, n_rm, rm_state,
-                                                Ps, es, ws, Tps))
+                                                Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -386,7 +386,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- Decode RM state (once) --------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
 
     # --- Stage 1: Build predictions + variances (reuse buffers) ------
@@ -414,7 +414,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
         (n_rm > 0 && data.rv_comp[i] == 1) &&
             (pred += rm_contribution(t, n_rm, rm_state,
                                      Ps, es, view(ws_buf, 1:n_rv_planets),
-                                     Tps))
+                                     Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -494,7 +494,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- RM state (once) ---------------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
 
     predictions = ws.predictions
@@ -524,7 +524,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
 
         (n_rm > 0 && comp == 1) &&
             (pred += rm_contribution(t, n_rm, rm_state, Ps, es,
-                                     view(ws_buf, 1:n_rv_planets), Tps))
+                                     view(ws_buf, 1:n_rv_planets), Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -745,7 +745,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- RM state (once) ---------------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
 
     predictions = Vector{T}(undef, n_obs)
@@ -774,7 +774,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         end
 
         (n_rm > 0 && comp == 1) && (pred += rm_contribution(t, n_rm, rm_state,
-                                                Ps, es, ws, Tps))
+                                                Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -1523,7 +1523,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
     # RV — used by PPC, residuals, fit-health and all RV plots — includes the
     # in-transit RM anomaly. No-op for non-RM fits (n_rm == 0); a missing M_s/R_s
     # (n_rm == -1) simply skips RM here rather than poisoning predictions.
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && (n_rm = 0)
 
     # Build predictions + variances
@@ -1556,7 +1556,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
         end
 
         (n_rm > 0 && comp == 1) &&
-            (pred += rm_contribution(t, n_rm, rm_state, Ps, es, ws, Tps))
+            (pred += rm_contribution(t, n_rm, rm_state, Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred

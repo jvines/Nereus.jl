@@ -145,8 +145,11 @@ function Data(;
     has_astrom = relastrom !== nothing || hgca !== nothing ||
                  iad !== nothing || gost !== nothing ||
                  g23h !== nothing || gaia_dr3 !== nothing
-    (n_rv > 0 || n_phot > 0 || has_astrom) || throw(ArgumentError(
-        "Data requires at least one RV, photometric, or astrometric observation"))
+    # Residual maps are data in their own right: a Doppler-shadow fit has no
+    # velocities, and giving it a dummy RV point to get past this check left a
+    # constant offset in the likelihood and three prior-only parameters.
+    (n_rv > 0 || n_phot > 0 || has_astrom || !isempty(tomo)) || throw(ArgumentError(
+        "Data requires at least one RV, photometric, astrometric or tomographic observation"))
 
     # --- RV validation ---
     if n_rv > 0
@@ -204,6 +207,8 @@ function Data(;
         t_ref_val = Float64(g23h.epochs[3])  # DR2 epoch (~mid)
     elseif gaia_dr3 !== nothing
         t_ref_val = Float64(gaia_dr3.t_ref)
+    elseif !isempty(tomo)
+        t_ref_val = Float64(median(reduce(vcat, (nt.t for nt in tomo))))
     else
         throw(ArgumentError("no observations to derive t_ref from"))
     end

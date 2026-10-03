@@ -237,6 +237,15 @@ function default_priors(config::ParamsConfig, data::Data)
     if parametrization.use_rho_s
         dic["rho_s"] = LogUniformPrior(0.001, 100.0)
     end
+    # --- a/R★ per transiting planet, when sampled directly ---
+    # Broad: from a grazing contact binary to a temperate orbit. An obliquity
+    # fit replaces it with the published solution (`obliquity_params`).
+    if parametrization.sample_a_Rs
+        for k in 1:config.max_kplanet
+            PM_SOURCE in config.planet_modes[k] || continue
+            dic["a_Rs_k$k"] = LogUniformPrior(1.2, 500.0)
+        end
+    end
 
     # --- RV instrumental (sharing-aware, per-instrument bounds) ---
     # Use per-instrument mean + scatter for gamma bounds (handles mixed
@@ -399,11 +408,27 @@ function default_priors(config::ParamsConfig, data::Data)
     # sigma_line is the LOCAL line width (intrinsic ⊗ instrumental), not
     # v·sin i. Deriving it from v·sin i is the same mistake as deriving
     # sigma_ccf that way above.
-    for nt in (data === nothing ? TomoNight[] : data.tomo)
-        dic["tomo_alpha_$(nt.tag)"]      = UniformPrior(0.0, 20.0)
+    #
+    # tomo_jit is the white term σ_n of Σ_n = K_t ⊗ K_v + σ_n² I, in the map's
+    # own units (unit line depth for `tomogram_residuals`' default
+    # normalisation). Log-uniform from 1e-6 to 1 -- or to ten times the map's
+    # scatter for a map that is not in line-depth units (scatter ≥ 1).
+    obl = config.obliquity
+    tomo_nights = data === nothing ? TomoNight[] : data.tomo
+    obl.shared_alpha && !isempty(tomo_nights) &&
+        (dic["tomo_alpha"] = UniformPrior(0.0, 20.0))
+    for nt in tomo_nights
+        obl.shared_alpha || (dic["tomo_alpha_$(nt.tag)"] = UniformPrior(0.0, 20.0))
         dic["tomo_sigma_line_$(nt.tag)"] = UniformPrior(2.0, 25.0)   # km/s
         # Velocity correlation length: at least a CCF bin, at most the line.
         dic["tomo_ell_v_$(nt.tag)"]      = LogUniformPrior(0.5, 60.0)  # km/s
+        dic["tomo_jit_$(nt.tag)"]        = LogUniformPrior(1e-6, _tomo_scale_hi(nt))
+    end
+    # Spectroscopic limb darkening (quadratic u1, u2), when allocated. Broad;
+    # physically valid pairs are enforced where they are read.
+    if obl.spec_ld
+        dic["u1_spec"] = UniformPrior(0.0, 1.0)
+        dic["u2_spec"] = UniformPrior(-1.0, 1.0)
     end
 
     # --- Obliquity: RM / tomography (:RM*) and gravity darkening (:GD) ---
@@ -412,7 +437,7 @@ function default_priors(config::ParamsConfig, data::Data)
     # and no priors -- which fails loudly at build time, but only because
     # `_build_layout` checks; it is the same mismatch that would silently
     # mis-gate anything not checked.
-    if any(has_any_rm(m) || has_gd(m) for m in config.planet_modes)
+    if any(has_obliquity(m) for m in config.planet_modes)
         # Stellar V·sin(i_*): LogUniform spanning slow rotators (0.5
         # km/s, typical M dwarf v_sin_i floor) to very fast rotators
         # (100 km/s, A-star regime). User overrides with NormalPrior
@@ -447,13 +472,14 @@ function default_priors(config::ParamsConfig, data::Data)
         # co-added out-of-transit CCF, β_p the local line width (intrinsic ⊗
         # instrumental). Deriving σ₀ from v·sin i instead of measuring it is what
         # produces Boué+2013's quoted v·sin i ≲ 20 km/s validity ceiling.
-        if any(has_rm_a(m) for m in config.planet_modes)
+        if any(m -> has_rm_a(m) && RV_SOURCE in m, config.planet_modes) &&
+           isempty(config.obliquity.sigma0)
             dic["sigma_ccf"] = LogUniformPrior(500.0, 100_000.0)  # m/s
             dic["beta_p"]    = LogUniformPrior(200.0,  50_000.0)  # m/s
         end
 
         for k in 1:config.max_kplanet
-            if has_any_rm(config.planet_modes[k]) || has_gd(config.planet_modes[k])
+            if has_obliquity(config.planet_modes[k])
                 # Sky-projected obliquity uniform on [-π, π]. User
                 # tightens to NormalPrior(0, π/8) for aligned systems.
                 dic["lambda_k$k"] = UniformPrior(-π, π)
@@ -479,6 +505,17 @@ function default_priors(config::ParamsConfig, data::Data)
 
     return dic
 end
+
+# Upper end of a residual-map amplitude prior: 1 for a map in units of the line
+# depth (`tomogram_residuals`' default normalisation, scatter below 1), or ten
+# times the map's scatter for a map in other units.
+_tomo_scale_hi(nt::TomoNight) = (s = std(nt.R); s < 1 ? 1.0 : 10s)
+_tomo_scale_hi(nts::AbstractVector) =
+    isempty(nts) ? 1.0 : maximum(_tomo_scale_hi(nt) for nt in nts)
+# The residual maps a :tomo-channel model covers: those it names, or all.
+_tomo_nights_of(m, data) = data === nothing ? TomoNight[] :
+    (isempty(m.instruments) ? data.tomo :
+     filter(nt -> nt.tag in m.instruments, data.tomo))
 
 # ActivityDecorrelation coefficient priors — SCALE-ADAPTIVE (automatic).
 #
@@ -672,6 +709,18 @@ end
 function _default_noise_priors!(dic, m::CeleriteSHO,
                                  instruments, data, rv_max, min_cadence)
     s = _gp_suffix(m)
+    if m.channel === :tomo
+        # Temporal kernel of a residual map, in DAYS and natural log like every
+        # SHO. Oscillation periods from ~2.5 h to a month (ω0 in [0.2, 60]
+        # rad/d), quality 0.2-100, and power such that the variance
+        # k(0) = S0·ω0·Q spans (1e-6)² to (the map's scale)².
+        hi = _tomo_scale_hi(_tomo_nights_of(m, data))
+        dic["gp_log_omega0$s"] = UniformPrior(log(0.2), log(60.0))
+        dic["gp_log_Q$s"]      = UniformPrior(log(0.2), log(100.0))
+        dic["gp_log_S0$s"]     = UniformPrior(log(1e-12 / (60.0 * 100.0)),
+                                              log(hi^2 / (0.2 * 0.2)))
+        return
+    end
     if m.channel === :phot
         # Photometry: fractional-flux scale; keep broad but period-floored so it
         # can't interpolate cadence-to-cadence.
@@ -701,6 +750,17 @@ end
 function _default_noise_priors!(dic, m::MaternGP,
                                  instruments, data, rv_max, min_cadence)
     s = _gp_suffix(m)
+    if m.channel === :tomo
+        # Temporal Matérn of a residual map. The amplitude is in the map's units
+        # (unit line depth by default) -- NOT the RV scatter, which is in m/s and
+        # would put the ceiling thousands of times too high. The length scale is
+        # in DAYS: 0.05 h to 12 h, the range over which pulsations are a drift
+        # within one transit night. The RV defaults (ρ of 1-100 d) do not even
+        # overlap it.
+        dic["matern_sigma$s"] = LogUniformPrior(1e-6, _tomo_scale_hi(_tomo_nights_of(m, data)))
+        dic["matern_rho$s"]   = LogUniformPrior(0.05 / 24, 12.0 / 24)
+        return
+    end
     σ_max = m.channel === :phot ? 1.0 : 3 * _model_activity_scatter(m, data, instruments)
     dic["matern_sigma$s"] = LogUniformPrior(1e-4, σ_max)
     # ρ floored at 1 d: a sub-day length scale lets the Matérn interpolate
