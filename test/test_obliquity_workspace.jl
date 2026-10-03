@@ -10,7 +10,9 @@ using Test
 using Nereus
 using Nereus: Theta, PTWorkspace, TomoWorkspace, SymEigenWork, tomogram_log_likelihood,
               set_param!, _sym_eigen!, _kern, obliquity_noise_menu, KernelDistances,
-              _matern_upper!, _celerite_upper!, celerite_kernel_dense, sho_coefficients
+              _matern_upper!, _celerite_upper!, celerite_kernel_dense, sho_coefficients,
+              _eval_channel_likelihood, ChannelWork, rv_log_likelihood, CeleriteSHO,
+              MaternGP, NoiseModel
 using LinearAlgebra: Symmetric, eigen
 using Random
 import ForwardDiff
@@ -122,6 +124,68 @@ include(joinpath(@__DIR__, "fixtures", "obliquity_synthetic.jl"))
             @test tomogram_log_likelihood(th, d, ws) === tomogram_log_likelihood(th, d)
             @test tomogram_log_likelihood(th, d2, ws) === tomogram_log_likelihood(th, d2)
         end
+    end
+
+    @testset "RV channel ($label)" for (label, kw) in (
+            ("one oscillator per night", (;)),
+            ("one Matern per night", (rv_noise = :matern,)),
+            ("white", (rv_noise = :white,)),
+            ("one global oscillator", (noise_models = NoiseModel[CeleriteSHO(channel = :rv)],)),
+            ("oscillators on two of three nights",
+             (noise_models = NoiseModel[CeleriteSHO(channel = :rv, instruments = ["A"]),
+                                        CeleriteSHO(channel = :rv, instruments = ["C"])],)))
+        p = build(; kw...)
+        ws = new_ws(p)
+        cw = ChannelWork(p, d.t_rv, d.rv_inst, :rv)
+        th = Theta{Float64}(p)
+        rng = MersenneTwister(21)
+        n = length(d.t_rv)
+        nsame = 0; ntot = 0
+        for x in points(p, 40)
+            seat!(th, p, x)
+            # Both oscillator branches: Q below and above 1/2.
+            for (k, idx) in p.layout.name_to_idx
+                startswith(k, "gp_log_Q") && (th.values[idx] = log(rand(rng, (0.3, 0.45, 0.7, 5.0))))
+            end
+            r = 50 .* randn(rng, n); v = 10 .+ 100 .* rand(rng, n)
+            a = _eval_channel_likelihood(th, r, v, d.t_rv, d.rv_inst, :rv, 2π)
+            b = _eval_channel_likelihood(th, r, v, d.t_rv, d.rv_inst, :rv, 2π, ws)
+            c = _eval_channel_likelihood(th, r, v, d.t_rv, d.rv_inst, :rv, 2π, cw)
+            nsame += (a === b && a === c); ntot += 1
+            @test rv_log_likelihood(th, d, ws) === rv_log_likelihood(th, d)
+        end
+        @test nsame == ntot
+    end
+
+    @testset "RV channel: trans-dim masks, allocation" begin
+        menu = obliquity_noise_menu(names, [nt.tag for nt in tomo])
+        p = build(; noise_models = menu.noise_models, transdim_noise = true)
+        nm = length(p.config.noise_models)
+        n = length(d.t_rv)
+        for pattern in 1:8
+            td = Nereus.TransDimState(max_planets = 1, n_noise = nm)
+            Nereus.activate_planet!(td, 1)
+            rng = MersenneTwister(100 + pattern)
+            for i in 1:nm
+                td.noise_active[i] = rand(rng, Bool)
+            end
+            th = Theta{Float64}(p; td = td)
+            ws = new_ws(p)
+            for x in points(p, 10)
+                seat!(th, p, x)
+                r = 50 .* randn(rng, n); v = 10 .+ 100 .* rand(rng, n)
+                @test _eval_channel_likelihood(th, r, v, d.t_rv, d.rv_inst, :rv, 2π) ===
+                      _eval_channel_likelihood(th, r, v, d.t_rv, d.rv_inst, :rv, 2π, ws)
+            end
+        end
+        p = build()
+        ws = new_ws(p)
+        th = seat!(Theta{Float64}(p), p, points(p, 5)[1])
+        r = 50 .* randn(n); v = 10 .+ 100 .* rand(n)
+        f(ws) = _eval_channel_likelihood(th, r, v, d.t_rv, d.rv_inst, :rv, 2π, ws)
+        f(ws)
+        @test (@allocated f(ws)) <= 512
+        @test (@allocated _eval_channel_likelihood(th, r, v, d.t_rv, d.rv_inst, :rv, 2π)) > 4096
     end
 
     @testset "kernel factors from distance groups" begin

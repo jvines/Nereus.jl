@@ -637,6 +637,9 @@ mutable struct PTWorkspace
     # Built on the first `tomogram_log_likelihood(theta, data, ws)` call;
     # `nothing` for a fit without maps. See TomoWorkspace (tomography_data.jl).
     tomo::Union{Nothing,TomoWorkspace}
+    # --- RV-channel scratch (instrument-restricted GPs) ---
+    # Built on first use by `_eval_channel_likelihood(..., ws)` (noise/gp.jl).
+    rv_channel::Union{Nothing,ChannelWork}
 end
 
 # `max_donors` sizes the donor-birth scratch buffer. It must be ≥ the number
@@ -713,7 +716,17 @@ function PTWorkspace(params::Params, max_kplanet::Int, n_noise::Int=0;
         zero(UInt),
         # Residual-map scratch, built on first use.
         nothing,
+        # RV-channel scratch, built on first use.
+        nothing,
     )
+end
+
+function _channel_work!(ws::PTWorkspace, params, times, inst, channel)
+    cw = ws.rv_channel
+    cw === nothing && (cw = ws.rv_channel = ChannelWork(params, times, inst, channel))
+    cw2 = _channel_work!(cw, params, times, inst, channel)
+    cw2 === cw || (ws.rv_channel = cw2)
+    return cw2
 end
 
 """Workspace-aware _eval_ll: threads pre-allocated buffers through."""

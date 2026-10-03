@@ -551,7 +551,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     end
 
     return _apply_noise_and_eval(theta, data, predictions, residuals,
-                                  variances, noise_models, two_pi)
+                                  variances, noise_models, two_pi, ws)
 end
 
 """
@@ -819,7 +819,7 @@ end
 # MA / single-channel GP do not (composition rule documented in
 # `validate_noise_models`).
 function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
-                                variances, noise_models, two_pi) where {T}
+                                variances, noise_models, two_pi, ws = nothing) where {T}
     for (nm_idx, nm) in enumerate(noise_models)
         is_noise_model_active(theta, nm_idx) || continue
         if nm isa ARModel && noise_channel(nm) === :rv
@@ -839,7 +839,10 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
     #     disjoint `instruments` lists → per-instrument-group joint LL,
     #     summed. RV instruments NOT covered by any AGP fall back to
     #     the standard white-noise / celerite path.
-    agp_list = _active_activity_gps(theta, noise_models)
+    # (No active ActivityGP -- every fit without one -- reads a shared empty
+    # list instead of allocating one; neither list is ever mutated.)
+    agp_list = _active_activity_gp(theta, noise_models) === nothing ? _NO_ACTIVITY_GPS :
+               _active_activity_gps(theta, noise_models)
     # indicators_only AGPs score ONLY the indicator block log p(y_I|θ);
     # the RV path continues below (white noise / celerite) as if no GP
     # were registered, and the indicator term is ADDED to whichever
@@ -902,10 +905,17 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
         end
     end
 
-    return ind_only_ll +
-           _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
-                                     data.rv_inst, :rv, two_pi)
+    # With a sampler workspace the per-instrument GPs are scored in its
+    # scratch (see `_eval_channel_likelihood(..., ws)`); same arithmetic.
+    ch_ll = ws === nothing ?
+        _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
+                                 data.rv_inst, :rv, two_pi) :
+        _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
+                                 data.rv_inst, :rv, two_pi, ws)
+    return ind_only_ll + ch_ll
 end
+
+const _NO_ACTIVITY_GPS = ActivityGP[]
 
 # Return the first active `ActivityGP` in `noise_models`, or `nothing`.
 @inline function _active_activity_gp(theta::Theta, noise_models)

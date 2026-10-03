@@ -23,19 +23,27 @@ Overdamped (Q < 0.5): two real terms. Underdamped (Q ≥ 0.5): one complex term.
 """
 function sho_coefficients(S0, Q, ω0)
     T = promote_type(typeof(S0), typeof(Q), typeof(ω0))
+    over, p1, p2, p3, p4 = _sho_terms(S0, Q, ω0)
+    return over ? (T[p1, p2], T[p3, p4], T[], T[], T[], T[]) :
+                  (T[], T[], T[p1], T[p2], T[p3], T[p4])
+end
+
+# The four numbers of `sho_coefficients`: (true, ar1, ar2, cr1, cr2) for an
+# overdamped oscillator, (false, ac, bc, cc, dc) otherwise.
+function _sho_terms(S0, Q, ω0)
+    T = promote_type(typeof(S0), typeof(Q), typeof(ω0))
     eps = T(1e-5)
     half = T(0.5)
     if Q < half
         f = sqrt(max(1 - 4Q^2, eps))
         a = half * S0 * ω0 * Q
         c = half * ω0 / Q
-        return (T[a * (1 + 1/f), a * (1 - 1/f)], T[c * (1 - f), c * (1 + f)],
-                T[], T[], T[], T[])
+        return (true, T(a * (1 + 1/f)), T(a * (1 - 1/f)), T(c * (1 - f)), T(c * (1 + f)))
     else
         f = sqrt(max(4Q^2 - 1, eps))
         a = S0 * ω0 * Q
         c = half * ω0 / Q
-        return (T[], T[], T[a], T[a/f], T[c], T[c * f])
+        return (false, T(a), T(a/f), T(c), T(c * f))
     end
 end
 
@@ -108,26 +116,45 @@ function celerite_loglike(times::Vector{Float64},
                            ac::Vector{T}, bc::Vector{T},
                            cc::Vector{T}, dc::Vector{T}) where {T}
     N = length(times)
+    J = length(ar) + 2 * length(ac)
+    return _celerite_loglike!(Vector{T}(undef, N), Vector{T}(undef, N),
+                              Matrix{T}(undef, J, N), Matrix{T}(undef, J, N),
+                              Matrix{T}(undef, J, N - 1), Matrix{T}(undef, J, J),
+                              Vector{T}(undef, length(ac)), Vector{T}(undef, length(ac)),
+                              Vector{T}(undef, N), Vector{T}(undef, J),
+                              times, residuals, variances, ar, cr, ac, bc, cc, dc)
+end
+
+"""
+    _celerite_loglike!(A, D, U, W, phi, S, cosdt, sindt, z, f, times, residuals,
+                       variances, ar, cr, ac, bc, cc, dc) -> logL
+
+`celerite_loglike` in caller-supplied scratch: `A`, `D`, `z` of length N,
+`U`, `W` of J x N, `phi` J x (N-1), `S` J x J, `f` of length J and `cosdt`,
+`sindt` of length (at least) the number of complex terms. Their contents on
+entry do not matter. `celerite_loglike` is this with fresh arrays.
+"""
+function _celerite_loglike!(A, D, U, W, phi, S, cosdt, sindt, z, f,
+                            times::Vector{Float64},
+                            residuals::AbstractVector{T},
+                            variances::AbstractVector{T},
+                            ar::Vector{T}, cr::Vector{T},
+                            ac::Vector{T}, bc::Vector{T},
+                            cc::Vector{T}, dc::Vector{T}) where {T}
+    N = length(times)
     Jr = length(ar)
     Jc = length(ac)
     J = Jr + 2Jc
 
     # --- Factorize (O(n) Cholesky of semi-separable matrix) ----------
-    A = variances .+ sum(ar; init=zero(T)) .+ sum(ac; init=zero(T))
-
-    D = Vector{T}(undef, N)
-    U = Matrix{T}(undef, J, N)
-    W = Matrix{T}(undef, J, N)
-    phi = Matrix{T}(undef, J, N - 1)
-    S = zeros(T, J, J)
+    A .= variances .+ sum(ar; init=zero(T)) .+ sum(ac; init=zero(T))
+    fill!(S, zero(T))
 
     # First element
     D[1] = A[1]
     inv_d1 = 1 / D[1]
 
-    # Initialize cos/sin accumulators for complex terms
-    cosdt = Vector{T}(undef, Jc)
-    sindt = Vector{T}(undef, Jc)
+    # cos/sin accumulators for complex terms: cosdt, sindt
 
     for j in 1:Jr
         U[j, 1] = ar[j]
@@ -206,8 +233,7 @@ function celerite_loglike(times::Vector{Float64},
     end
 
     # --- Solve (O(n) forward-backward substitution) ------------------
-    z = Vector{T}(undef, N)
-    f = zeros(T, J)
+    fill!(f, zero(T))
     z[1] = residuals[1]
 
     @inbounds for n in 2:N
@@ -821,6 +847,194 @@ function _eval_channel_likelihood(theta::Theta{T},
         total += -(log(two_pi * variances[i]) + residuals[i]^2 / variances[i]) / 2
     end
     return total
+end
+
+# ---------------------------------------------------------------------
+# The per-instrument GP channel in a sampler's scratch
+# ---------------------------------------------------------------------
+#
+# An obliquity fit scores each RM night with its own oscillator: one
+# instrument-restricted CeleriteSHO per night on :rv. For every call the
+# path above rebuilds each night's selection (`inst_idxs`, `sel`,
+# `covered`), copies the night's times, builds the hyperparameter names to
+# look them up, allocates the coefficient vectors and every celerite array:
+# ~16 KB per call on NGTS-33. Here the selections and times are built once
+# per (Params, times, instruments) and the arrays live in the workspace; the
+# arithmetic, and so every bit, is that path's. Anything else on the channel
+# -- a global GP, an additive covariance, Student-t, an instrument name that
+# does not resolve -- takes that path unchanged.
+
+"""Scratch for one instrument-restricted GP: its points, times and celerite arrays."""
+struct ChannelGPWork
+    sel::Vector{Int}            # the observations it covers, in order
+    t::Vector{Float64}          # their times, as `_as_t_vec(view(times, sel))` builds them
+    sho::NTuple{3,Int}          # (log S0, log Q, log omega0) slots; zeros unless CeleriteSHO
+    A::Vector{Float64}
+    D::Vector{Float64}
+    z::Vector{Float64}
+    U::Matrix{Float64}
+    W::Matrix{Float64}
+    phi::Matrix{Float64}
+    S::Matrix{Float64}
+    f::Vector{Float64}
+    cosdt::Vector{Float64}
+    sindt::Vector{Float64}
+end
+
+"""Per-channel scratch held by a sampler workspace; see `_eval_channel_likelihood(..., ws)`."""
+mutable struct ChannelWork
+    params::Any
+    times::Vector{Float64}
+    inst::Vector{Int}
+    channel::Symbol
+    gps::Vector{Union{Nothing,ChannelGPWork}}   # per noise model; nothing = not resolvable here
+    covered::BitVector
+    active::Vector{Int}
+    ar2::Vector{Float64}        # oscillator coefficients, overdamped (two real terms)
+    cr2::Vector{Float64}
+    ac1::Vector{Float64}        # underdamped (one complex term)
+    bc1::Vector{Float64}
+    cc1::Vector{Float64}
+    dc1::Vector{Float64}
+    none::Vector{Float64}
+end
+
+function ChannelWork(params, times::Vector{Float64}, inst::Vector{Int}, channel::Symbol)
+    config = params.config
+    names = channel === :rv ? config.instruments.rv_names : config.instruments.pm_names
+    L = params.layout
+    nms = config.noise_models
+    gps = Vector{Union{Nothing,ChannelGPWork}}(nothing, length(nms))
+    for (i, nm) in enumerate(nms)
+        (nm isa CovarianceNoise && !(nm isa ActivityGP) && noise_channel(nm) === channel) ||
+            continue
+        insts = noise_instruments(nm)
+        isempty(insts) && continue
+        idxs = Int[]
+        for name in insts
+            k = findfirst(==(name), names)
+            k === nothing && (idxs = nothing; break)
+            push!(idxs, k)
+        end
+        idxs === nothing && continue          # the general path reports it
+        sel = Int[q for q in eachindex(inst) if inst[q] in idxs]
+        N = length(sel)
+        sho = (0, 0, 0)
+        if nm isa CeleriteSHO
+            sfx = _gp_suffix(nm)
+            sho = (get(L.name_to_idx, "gp_log_S0$sfx", 0), get(L.name_to_idx, "gp_log_Q$sfx", 0),
+                   get(L.name_to_idx, "gp_log_omega0$sfx", 0))
+            any(==(0), sho) && (sho = (0, 0, 0))
+        end
+        J = 2                                  # an oscillator: two real or one complex term
+        gps[i] = ChannelGPWork(sel, Vector{Float64}(view(times, sel)), sho,
+                               zeros(N), zeros(N), zeros(N), zeros(J, N), zeros(J, N),
+                               zeros(J, max(N - 1, 0)), zeros(J, J), zeros(J), zeros(1),
+                               zeros(1))
+    end
+    return ChannelWork(params, times, inst, channel, gps, falses(length(inst)),
+                       zeros(Int, length(nms)), zeros(2), zeros(2), zeros(1), zeros(1),
+                       zeros(1), zeros(1), Float64[])
+end
+
+"""
+    _eval_channel_likelihood(theta, residuals, variances, times, inst, channel,
+                             two_pi, ws) -> Float64
+
+`_eval_channel_likelihood` scored in the scratch of a sampler workspace `ws`
+(a `PTWorkspace`, or a `ChannelWork`): the same terms in the same order, bit
+for bit, without rebuilding the per-instrument selections or allocating the
+celerite arrays of the instrument-restricted oscillators.
+"""
+function _eval_channel_likelihood(theta::Theta{Float64}, residuals::Vector{Float64},
+                                  variances::Vector{Float64}, times::Vector{Float64},
+                                  inst::Vector{Int}, channel::Symbol, two_pi::Float64, ws)
+    cw = _channel_work!(ws, theta.params, times, inst, channel)
+    _channel_fast_ok(cw, theta, channel) ||
+        return _eval_channel_likelihood(theta, residuals, variances, times, inst,
+                                        channel, two_pi)
+    noise_models = theta.params.config.noise_models
+    n_active = 0
+    for (i, nm) in enumerate(noise_models)
+        nm isa CovarianceNoise || continue
+        nm isa ActivityGP && continue
+        noise_channel(nm) === channel || continue
+        is_noise_model_active(theta, i) || continue
+        n_active += 1
+        cw.active[n_active] = i
+    end
+    n_active == 0 && return _diag_gaussian_ll(residuals, variances, two_pi)
+
+    n_obs = length(residuals)
+    covered = cw.covered
+    fill!(covered, false)
+    total = 0.0
+    for a in 1:n_active
+        i = cw.active[a]
+        g = cw.gps[i]::ChannelGPWork
+        @inbounds for k in g.sel
+            covered[k] = true
+        end
+        isempty(g.sel) && continue
+        total += g.sho[1] > 0 ?
+            _sho_loglike!(g, cw, view(residuals, g.sel), view(variances, g.sel), theta) :
+            _restricted_gp_ll(residuals, variances, times, g.sel, theta, noise_models[i])::Float64
+    end
+    @inbounds for i in 1:n_obs
+        covered[i] && continue
+        total += -(log(two_pi * variances[i]) + residuals[i]^2 / variances[i]) / 2
+    end
+    return total
+end
+
+@noinline _restricted_gp_ll(residuals, variances, times, sel, theta, nm) =
+    gp_log_likelihood(view(residuals, sel), view(variances, sel), view(times, sel), theta, nm)
+
+# Whether the active models on `channel` are all instruments-restricted
+# covariance models this workspace resolved -- nothing additive, no global
+# GP, no Student-t. Otherwise the general path decides.
+function _channel_fast_ok(cw::ChannelWork, theta::Theta, channel::Symbol)
+    noise_models = theta.params.config.noise_models
+    for (i, nm) in enumerate(noise_models)
+        if nm isa AdditiveCovariance
+            (noise_channel(nm) === channel && is_noise_model_active(theta, i)) && return false
+        end
+        nm isa CovarianceNoise || continue
+        nm isa ActivityGP && continue
+        noise_channel(nm) === channel || continue
+        is_noise_model_active(theta, i) || continue
+        (isempty(noise_instruments(nm)) || cw.gps[i] === nothing) && return false
+    end
+    return _active_studentt(theta, noise_models, channel) === nothing
+end
+
+# Any other element type (ForwardDiff): the general path.
+_eval_channel_likelihood(theta::Theta, residuals, variances, times, inst, channel::Symbol,
+                         two_pi, ws) =
+    _eval_channel_likelihood(theta, residuals, variances, times, inst, channel, two_pi)
+
+function _channel_work!(cw::ChannelWork, params, times, inst, channel)
+    (cw.params === params && cw.times === times && cw.inst === inst &&
+     cw.channel === channel) && return cw
+    return ChannelWork(params, times, inst, channel)
+end
+
+# `gp_log_likelihood(r, v, view(times, sel), theta, ::CeleriteSHO)` in the
+# GP's scratch.
+function _sho_loglike!(g::ChannelGPWork, cw::ChannelWork, r, v, theta::Theta{Float64})
+    S0 = exp(theta.values[g.sho[1]])
+    Q  = exp(theta.values[g.sho[2]])
+    ω0 = exp(theta.values[g.sho[3]])
+    over, p1, p2, p3, p4 = _sho_terms(S0, Q, ω0)
+    if over
+        cw.ar2[1] = p1; cw.ar2[2] = p2; cw.cr2[1] = p3; cw.cr2[2] = p4
+        ar, cr, ac, bc, cc, dc = cw.ar2, cw.cr2, cw.none, cw.none, cw.none, cw.none
+    else
+        cw.ac1[1] = p1; cw.bc1[1] = p2; cw.cc1[1] = p3; cw.dc1[1] = p4
+        ar, cr, ac, bc, cc, dc = cw.none, cw.none, cw.ac1, cw.bc1, cw.cc1, cw.dc1
+    end
+    return _celerite_loglike!(g.A, g.D, g.U, g.W, g.phi, g.S, g.cosdt, g.sindt, g.z, g.f,
+                              g.t, r, v, ar, cr, ac, bc, cc, dc)
 end
 
 @inline function _diag_gaussian_ll(residuals::AbstractVector{T},
