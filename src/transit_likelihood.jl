@@ -1034,6 +1034,39 @@ end
     return result
 end
 
+# `_phot_sparse_refresh` for the workspace flux cache with one more argument:
+# `nothing` for an ordinary row, which is the method above unchanged, or the
+# `_gd_contexts` matrix for a row whose planet uses :GD. A :GD row's flux at
+# each cadence comes from the same `planet_sky_position` and `transit_flux_gd`
+# calls, on the same arguments, as the instantaneous gravity-darkened branch of
+# `_phot_transit_product`, so it is bit-identical to the non-workspace one.
+@inline _phot_sparse_refresh(a::Int, b::Int, j::Int, data::Data,
+                             idx::AbstractVector{Int}, P::Float64, e::Float64,
+                             ω::Float64, Tp::Float64, b_imp::Float64, a_Rs::Float64,
+                             rr::Float64, lds::AbstractVector,
+                             flux_cache::AbstractMatrix{Float64}, ::Nothing) =
+    _phot_sparse_refresh(a, b, j, data, idx, P, e, ω, Tp, b_imp, a_Rs, rr, lds,
+                         flux_cache)
+
+@inline function _phot_sparse_refresh(a::Int, b::Int, j::Int, data::Data,
+                                       idx::AbstractVector{Int},
+                                       P::Float64, e::Float64, ω::Float64,
+                                       Tp::Float64, b_imp::Float64,
+                                       a_Rs::Float64, rr::Float64,
+                                       lds::AbstractVector,
+                                       flux_cache::AbstractMatrix{Float64},
+                                       gd_ctxs::AbstractMatrix)
+    a > b && return nothing
+    @inbounds for k in a:b
+        i = idx[k]
+        ins_idx = data.phot_inst[i]
+        x, y, zl = planet_sky_position(data.t_phot[i], P, e, ω, Tp, b_imp, a_Rs)
+        flux_cache[j, i] = transit_flux_gd(lds[ins_idx], gd_ctxs[j, ins_idx],
+                                           x, y, zl, rr)
+    end
+    return nothing
+end
+
 # =====================================================================
 # Workspace-aware variant (used by `_eval_ll(theta, data, ctr, ws)`
 # in trans-dim PT). Reuses pre-allocated planet-decode buffers from
@@ -1096,6 +1129,11 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     bs   = ws.transit_bs
     a_Rs = ws.transit_a_Rs
     transits = ws.transit_active
+    # Gravity darkening: which rows use it, and each row's λ, filled in the
+    # j-loop below as in the non-workspace method. `nothing` without a :GD
+    # planet, so an ordinary fit allocates nothing more.
+    gd_rows = any(has_gd(m) for m in theta.params.config.planet_modes) ?
+        (on = fill(false, n_transit), λs = zeros(T, n_transit)) : nothing
 
     use_rho = parametrization.use_rho_s
     rho_val = use_rho ? rho_s(theta) : zero(T)
@@ -1145,6 +1183,11 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
         end
 
         transits[j] = bs[j] < 1 + rrs[j]
+
+        if gd_rows !== nothing && has_gd(theta.params.config.planet_modes[k])
+            gd_rows.on[j] = true
+            gd_rows.λs[j] = planet_lambda(theta, k)
+        end
     end
 
     any_transit = false
@@ -1199,13 +1242,45 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
         trends_c = _phot_trend_cache(theta, n_pm)
         inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
 
+        # Gravity-darkening state, built as the non-workspace method builds it
+        # (see there for the physics), with the same -Inf at the ends of i★ and
+        # the same error without M_s / R_s. `gd_h` keys a :GD row's cached flux
+        # on what the brightness map reads besides the orbit and LD: i★, ω
+        # (from v sin i★ and i★) and every band's β. The row's own λ is added
+        # per row below.
+        gd_state = nothing
+        gd_h = zero(UInt)
+        if gd_rows !== nothing && any(gd_rows.on)
+            i_star_v = system_i_star(theta)
+            (i_star_v <= 0 || i_star_v >= T(π)) && return convert(T, -Inf)
+            M_s_gd = theta.params.config.M_s
+            R_s_gd = theta.params.config.R_s
+            (isnan(M_s_gd) || isnan(R_s_gd) || R_s_gd <= 0) &&
+                throw(ArgumentError("a planet uses :GD but M_s / R_s are not set; " *
+                                    "gravity darkening needs both to convert " *
+                                    "v_sin_i_star into a fraction of break-up"))
+            v_eq_kms = system_vsini(theta) / (sin(i_star_v) * 1000)
+            gd_state = (i_star = i_star_v,
+                        λs     = gd_rows.λs,
+                        ω_frac = omega_frac_from_veq(v_eq_kms, M_s_gd, R_s_gd),
+                        on     = gd_rows.on)
+            gd_h = hash(gd_state.i_star, hash(gd_state.ω_frac, hash(0x4744)))  # "GD"
+            for ix in 1:n_pm
+                gd_h = hash(system_gd_beta(theta, ix), gd_h)
+            end
+        end
+        # Brightness contexts: built on the first :GD row that needs a refresh.
+        gd_ctxs = nothing
+
         # ============================================================
         # Per-planet transit-flux cache. Each cached row holds the
         # full Mandel-Agol flux contribution per phot point for one
         # planet. The cache key combines the planet's orbit
         # (P,e,ω,Tp,b,a/R*), its rr, and ALL instrument LDs (because
         # phot points across instruments share a row, and a change to
-        # any instrument's q1/q2 invalidates the whole row).
+        # any instrument's q1/q2 invalidates the whole row). A :GD
+        # planet's key adds `gd_h` and its λ, so its cached flux is never
+        # reused across a different i★, v sin i★, λ or β.
         # ============================================================
         flux_cache = ws.transit_flux_cache
         flux_hash  = ws.transit_flux_hash
@@ -1243,8 +1318,15 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
             full_h = hash(Ps[j], hash(es[j], hash(ws_[j],
                   hash(Tps[j], hash(bs[j], hash(a_Rs[j],
                   hash(rrs[j], ld_h)))))))
+            is_gd = gd_state !== nothing && gd_state.on[j]
+            is_gd && (full_h = hash(gd_state.λs[j], hash(gd_h, full_h)))
             total_h = hash(full_h, total_h)
             if flux_hash[j] != full_h
+                # Brightness contexts for a :GD row (`nothing` for the others),
+                # built once per call, and only when such a row is refreshed.
+                row_gd = !is_gd ? nothing : gd_ctxs !== nothing ? gd_ctxs :
+                    (gd_ctxs = _gd_contexts(theta, gd_state, n_transit, n_pm))
+
                 # 1. Reset previous in-transit positions to 1.0
                 old_idx = in_idx_list[j]
                 @inbounds for i in old_idx
@@ -1283,14 +1365,14 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
                         b = min(c * tx_chunk, n_tx)
                         refresh_tasks[c] = Threads.@spawn _phot_sparse_refresh(
                             a, b, j, data, old_idx, Pj, ej, wj, Tpj,
-                            bj, aj, rrj, lds, flux_cache)
+                            bj, aj, rrj, lds, flux_cache, row_gd)
                     end
                     for c in 1:nT
                         wait(refresh_tasks[c])
                     end
                 else
                     _phot_sparse_refresh(1, n_tx, j, data, old_idx,
-                        Pj, ej, wj, Tpj, bj, aj, rrj, lds, flux_cache)
+                        Pj, ej, wj, Tpj, bj, aj, rrj, lds, flux_cache, row_gd)
                 end
                 flux_hash[j] = full_h
             end
