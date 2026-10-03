@@ -45,8 +45,10 @@ end
 
 abstract type SemiseparableKernel end
 
-# A term as a NamedTuple. `_terms(k)` returns the ordered list for kernel k.
+# A term as a NamedTuple. `_terms(k)` returns the ordered list for kernel k
+# (a Tuple when its length is fixed by the kernel type, else a Vector{_Term}).
 # Types are preserved (promote) so ForwardDiff.Dual hyperparameters flow through.
+const _Term{T} = NamedTuple{(:kind, :a, :b, :λ, :ν), Tuple{Symbol, T, T, T, T}}
 function _qp(a, b, λ, ν)
     aa, bb, ll, nn = promote(a, b, λ, ν)
     (kind = :qp, a = aa, b = bb, λ = ll, ν = nn)
@@ -348,10 +350,17 @@ function multiseries_loglike(t_all::AbstractVector{<:Real}, y_all::AbstractVecto
     dt = N > 1 ? diff(t) : Float64[]
 
     U0, V0, dU0, dV0, φ0 = _generators(kernel, t, dt)
-    r = size(U0, 2)
     kk0  = T(k0(kernel))
     mk20 = T(mk2_0(kernel))
+    return _ms_fill_solve(t, y, v, sid, α, β, jitter, kk0, mk20, U0, V0, dU0, dV0, φ0)
+end
 
+# Function barrier: per-row (α,β) mix of the N×r generators into the r×N
+# solver layout, then the LDLᵀ solve. Compiled against the generators' concrete
+# element types even when the caller could not infer them.
+function _ms_fill_solve(t::Vector{Float64}, y::Vector{T}, v, sid, α, β, jitter,
+                        kk0::T, mk20::T, U0, V0, dU0, dV0, φ0) where {T}
+    N = length(t); r = size(U0, 2)
     U = Matrix{T}(undef, r, N)
     V = Matrix{T}(undef, r, N)
     A = Vector{T}(undef, N)
@@ -434,10 +443,14 @@ function _terms(k::SSSHO)
     ω0 = 2π / k.P₀
     S0 = k.σ^2 / (ω0 * k.Q)                        # S0 chosen so k(0)=σ²
     ar, cr, ac, bc, cc, dc = sho_coefficients(S0, k.Q, ω0)
-    ts = Any[]
+    # One complex term or two real ones, decided by Q at run time, so the list
+    # is a concretely typed Vector rather than a Tuple of unknown length: a
+    # Vector{Any} → Tuple here left every generator fill downstream to dynamic
+    # dispatch (≈10× the cost of the solve itself).
+    ts = _Term{promote_type(eltype(ar), eltype(ac), Float64)}[]
     for i in eachindex(ar); push!(ts, _qp(ar[i], 0.0, cr[i], 0.0)); end
     for i in eachindex(ac); push!(ts, _qp(ac[i], bc[i], cc[i], dc[i])); end
-    return Tuple(ts)
+    return ts
 end
 
 """Matérn-3/2 exponential-periodic (MEP), rank 6 — approximates the
@@ -485,11 +498,13 @@ function _esp_periodic_terms(P, η, nharm::Int)
     a[1] /= 2                                        # halve the n=0 (constant) weight
     a ./= sum(a)                                     # normalize so k_periodic(0)=1
     ν = 2π / P
-    ts = Any[_qp(a[1], 0.0, 0.0, 0.0)]              # n=0 constant (λ=0, ν=0)
+    # nharm is a run-time Int, so a concretely typed Vector (see _terms(::SSSHO)).
+    ts = _Term{promote_type(eltype(a), typeof(ν), Float64)}[]
+    push!(ts, _qp(a[1], 0.0, 0.0, 0.0))             # n=0 constant (λ=0, ν=0)
     for n in 1:nharm
         push!(ts, _qp(a[n + 1], 0.0, 0.0, n * ν))  # cos(nντ) harmonic (λ=0)
     end
-    return Tuple(ts)
+    return ts
 end
 
 """Exponential-sine periodic (ESP), rank 3·(1+2·nharm) — twice-differentiable
