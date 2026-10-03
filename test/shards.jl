@@ -54,6 +54,7 @@ const TEST_UNITS = [
     (name = "test_obliquity_joint.jl", seconds = 94, files = ["test_obliquity_joint.jl"]),
     (name = "test_simulate_obliquity.jl", seconds = 19, files = ["test_simulate_obliquity.jl"]),
     (name = "test_gravity_darkening.jl", seconds = 3, files = ["test_gravity_darkening.jl"]),
+    (name = "test_gd_workspace_likelihood.jl", seconds = 12, files = ["test_gd_workspace_likelihood.jl"]),
     (name = "test_informed_noise_birth.jl", seconds = 1, files = ["test_informed_noise_birth.jl"]),
     (name = "test_annealed_noise_birth.jl", seconds = 2, files = ["test_annealed_noise_birth.jl"]),
     (name = "test_solution_ladder.jl", seconds = 1, files = ["test_solution_ladder.jl"]),
