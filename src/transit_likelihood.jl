@@ -178,8 +178,17 @@ end
 # Returns the PURE transit signal (OOT = 1); the caller applies dilution + offset.
 # `gd` is `nothing` for the standard model (every existing call path), or a
 # NamedTuple (i_star, λs, ω_frac, on) enabling the gravity-darkened
-# transit for the planets flagged in `on`. Keeping it a keyword with a `nothing`
-# default means the ordinary model is bit-for-bit unchanged.
+# transit for the planets flagged in `on`; `gd_ctxs` is then the per-call context
+# matrix from `_gd_contexts` and `ins_idx` the cadence's instrument column.
+#
+# All three are POSITIONAL, defaulting to `nothing`, so the ordinary model is
+# bit-for-bit unchanged. They used to be keywords, with the caller passing
+# `view(gd_ctxs, :, ins_idx)`: per cadence that built a SubArray and a keyword
+# NamedTuple and left this function unspecialised, so the limb-darkening struct
+# and the returned flux were boxed too. About 400 bytes per cadence, 7.5 MB per
+# likelihood call on a 18 000-cadence fit, and the garbage collector, which stops
+# every thread, then took 29 per cent of wall time at 8 threads and most of it at
+# 90. Indexing the matrix in place allocates nothing.
 
 # One brightness context per (transit planet, photometric instrument), built once
 # per likelihood evaluation. `β` is per band, so the context is too. Returns
@@ -191,9 +200,17 @@ function _gd_contexts(theta, gd, n_transit::Int, n_pm::Int)
     out = Matrix{typeof(ctx1)}(undef, n_transit, n_pm)
     @inbounds for ix in 1:n_pm
         β = system_gd_beta(theta, ix)
+        # Bands that share β (several cadences of one survey, say) share the
+        # context: building one is a 96 x 96 disc integral, so do it once per β.
+        prev = 0
+        for jx in 1:(ix - 1)
+            system_gd_beta(theta, jx) == β && (prev = jx; break)
+        end
         for j in 1:n_transit
-            out[j, ix] = gd.on[j] ?
-                gd_context(gd.i_star, gd.λs[j], gd.ω_frac, β) : ctx1
+            out[j, ix] = !gd.on[j] ? ctx1 :
+                prev > 0 ? out[j, prev] :
+                (j == 1 && ix == 1) ? ctx1 :
+                gd_context(gd.i_star, gd.λs[j], gd.ω_frac, β)
         end
     end
     return out
@@ -201,8 +218,8 @@ end
 
 @inline function _phot_transit_product(t::Float64, texp::Float64, ld,
         n_transit::Int, transits, Ps::AbstractVector{T}, es, ws, Tps, bs, a_Rs,
-        rrs, Tc_centers, T_dur_safe, r_for_j, ttv_state, n_super::Int;
-        gd = nothing, gd_ctx = nothing) where {T}
+        rrs, Tc_centers, T_dur_safe, r_for_j, ttv_state, n_super::Int,
+        gd = nothing, gd_ctxs = nothing, ins_idx::Int = 0) where {T}
     tprod = one(T)
     # `n_super` (dataset maximum) only switches integration on; the number of
     # sub-samples is this cadence's own, so short cadences stay instantaneous.
@@ -222,7 +239,7 @@ end
                 if use_gd
                     x, y, zl = planet_sky_position(tsub, Ps[j], es[j], ws[j], Tps[j],
                                                     bs[j], a_Rs[j])
-                    fsum += transit_flux_gd(ld, gd_ctx[j], x, y, zl, rrs[j])
+                    fsum += transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
                 else
                     zs = sky_separation(tsub, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
                     fsum += transit_flux(ld, zs, rrs[j])
@@ -232,7 +249,7 @@ end
         elseif use_gd
             x, y, zl = planet_sky_position(t_eff, Ps[j], es[j], ws[j], Tps[j],
                                             bs[j], a_Rs[j])
-            tprod *= transit_flux_gd(ld, gd_ctx[j], x, y, zl, rrs[j])
+            tprod *= transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
         else
             z = sky_separation(t_eff, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
             tprod *= transit_flux(ld, z, rrs[j])
@@ -299,12 +316,10 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
     # --- Decode transit planets (geometry gate) ----------------------
     # Only planets with b and r fields that pass b < 1 + rr transit.
     p_idx = planet_indices(theta)
-    n_transit = 0
-    for k in p_idx
-        block = theta.params.layout.planet_blocks[k]
-        has_geometry(block) || continue
-        n_transit += 1
-    end
+    # One assignment, not a running count: a variable assigned more than once
+    # and captured by the threaded loops below is put in a Core.Box, and every
+    # read of it in the loop body is then untyped (see `gd_s` below).
+    n_transit = count(k -> has_geometry(theta.params.layout.planet_blocks[k]), p_idx)
 
     if n_transit == 0
         return _phot_ll_no_transit(theta, data)
@@ -439,6 +454,11 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
     end
     gd_ctxs = _gd_contexts(theta, gd_state, n_transit,
                            length(theta.params.config.instruments.pm_names))
+    # Single-assignment copies for the threaded loops below. `gd_state` is assigned
+    # twice above, and a variable assigned more than once and captured by a
+    # `Threads.@threads` closure is put in a Core.Box: every use inside the loop is
+    # then untyped, and the per-cadence call boxed its arguments and its result.
+    gd_s, gd_c = gd_state, gd_ctxs
 
     # --- TTV decode ---------------------------------------------------
     # Per-planet timing offsets (TTV-A). `r_for_j[j]` is the row in
@@ -553,10 +573,12 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
         #
         # `:static` remains unavailable here (this runs nested inside
         # sample_pt's chain-parallel @spawn), but it is no longer needed: the
-        # correctness now comes from the indexing, not from the schedule.
+        # correctness now comes from the indexing, not from the schedule. In a
+        # task of pt_emcee's walker loop the chunks run serially (see
+        # `@_threads_unless_nested`), with the same partition and the same bits.
         nchunks  = cld(n_obs, _PHOT_REDUCE_CHUNK)
         partials = fill(zero(T), nchunks)
-        @inbounds Threads.@threads for c in 1:nchunks
+        @inbounds @_threads_unless_nested for c in 1:nchunks
             lo = (c - 1) * _PHOT_REDUCE_CHUNK + 1
             hi = min(c * _PHOT_REDUCE_CHUNK, n_obs)
             acc = zero(T)
@@ -573,8 +595,8 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
             texp = has_exp ? data.exposure_times[i] : 0.0
             tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers, T_dur_safe,
-                        r_for_j, ttv_state, n_super; gd = gd_state,
-                        gd_ctx = gd_ctxs === nothing ? nothing : view(gd_ctxs, :, ins_idx))
+                        r_for_j, ttv_state, n_super,
+                        gd_s, gd_c, ins_idx)
             model_flux = _phot_continuum(t, t_ref, inv_th, offset, trends_c[ins_idx]) *
                          _apply_dilution(tprod, dilutions[ins_idx])
 
@@ -629,7 +651,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
     # The AR/MA/GP stages below stay serial regardless (they need
     # sequential access).
     if T <: AbstractFloat
-        Threads.@threads for i in 1:n_obs
+        @_threads_unless_nested for i in 1:n_obs
             @inbounds begin
                 t       = data.t_phot[i]
                 obs_err = data.flux_err[i]
@@ -642,8 +664,8 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
                 texp = has_exp_s ? data.exposure_times[i] : 0.0
                 tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                             Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
-                            T_dur_safe, r_for_j, ttv_state, n_super_s; gd = gd_state,
-                            gd_ctx = gd_ctxs === nothing ? nothing : view(gd_ctxs, :, ins_idx))
+                            T_dur_safe, r_for_j, ttv_state, n_super_s,
+                        gd_s, gd_c, ins_idx)
                 predictions[i] = _phot_continuum(t, t_ref, inv_th_s, offset,
                                      trends_cs[ins_idx]) *
                                  _apply_dilution(tprod, dilutions_s[ins_idx])
@@ -663,8 +685,8 @@ function transit_log_likelihood(theta::Theta{T}, data::Data) where {T}
             texp = has_exp_s ? data.exposure_times[i] : 0.0
             tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
-                        T_dur_safe, r_for_j, ttv_state, n_super_s; gd = gd_state,
-                            gd_ctx = gd_ctxs === nothing ? nothing : view(gd_ctxs, :, ins_idx))
+                        T_dur_safe, r_for_j, ttv_state, n_super_s,
+                        gd_s, gd_c, ins_idx)
             predictions[i] = _phot_continuum(t, t_ref, inv_th_s, offset,
                                  trends_cs[ins_idx]) *
                              _apply_dilution(tprod, dilutions_s[ins_idx])
@@ -728,12 +750,10 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
 
     # Decode transit planets (geometry gate)
     p_idx = planet_indices(theta)
-    n_transit = 0
-    for k in p_idx
-        block = theta.params.layout.planet_blocks[k]
-        has_geometry(block) || continue
-        n_transit += 1
-    end
+    # One assignment, not a running count: a variable assigned more than once
+    # and captured by the threaded loops below is put in a Core.Box, and every
+    # read of it in the loop body is then untyped (see `gd_s` below).
+    n_transit = count(k -> has_geometry(theta.params.layout.planet_blocks[k]), p_idx)
 
     systemic = theta.params.layout.systemic
     n_pm     = length(theta.params.config.instruments.pm_names)
@@ -867,6 +887,11 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     end
     gd_ctxs = _gd_contexts(theta, gd_state, n_transit,
                            length(theta.params.config.instruments.pm_names))
+    # Single-assignment copies for the threaded loops below. `gd_state` is assigned
+    # twice above, and a variable assigned more than once and captured by a
+    # `Threads.@threads` closure is put in a Core.Box: every use inside the loop is
+    # then untyped, and the per-cadence call boxed its arguments and its result.
+    gd_s, gd_c = gd_state, gd_ctxs
 
     # TTV decode (TTV-A + TTV-C) — see transit_log_likelihood for rationale.
     n_ttv, ttv_state = _decode_ttv_state(theta, p_idx)
@@ -884,7 +909,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
 
     # Threaded for Float64 (no Duals = no GC thrashing), serial otherwise.
     if T <: AbstractFloat
-        Threads.@threads for i in 1:n_obs
+        @_threads_unless_nested for i in 1:n_obs
             @inbounds begin
                 t       = data.t_phot[i]
                 ins_idx = data.phot_inst[i]
@@ -894,8 +919,8 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
                 texp = has_exp_p ? data.exposure_times[i] : 0.0
                 tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                             Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
-                            T_dur_safe, r_for_j, ttv_state, n_super_p; gd = gd_state,
-                            gd_ctx = gd_ctxs === nothing ? nothing : view(gd_ctxs, :, ins_idx))
+                            T_dur_safe, r_for_j, ttv_state, n_super_p,
+                        gd_s, gd_c, ins_idx)
                 predictions[i] = _phot_continuum(t, t_ref_p, inv_th_p, offset,
                                      trends_cp[ins_idx]) *
                                  _apply_dilution(tprod, dilutions[ins_idx])
@@ -912,8 +937,8 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
             texp = has_exp_p ? data.exposure_times[i] : 0.0
             tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
-                        T_dur_safe, r_for_j, ttv_state, n_super_p; gd = gd_state,
-                            gd_ctx = gd_ctxs === nothing ? nothing : view(gd_ctxs, :, ins_idx))
+                        T_dur_safe, r_for_j, ttv_state, n_super_p,
+                        gd_s, gd_c, ins_idx)
             predictions[i] = _phot_continuum(t, t_ref_p, inv_th_p, offset,
                                  trends_cp[ins_idx]) *
                              _apply_dilution(tprod, dilutions[ins_idx])
@@ -1247,9 +1272,10 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
                 # 3. Compute flux at the in-transit indices. Threaded
                 # only when N is large enough to amortize spawn overhead;
                 # most planets have <500 in-transit points, single-thread
-                # is faster.
+                # is faster. Never in a task marked by `_serial_inner_loops!`,
+                # whose sampler has every thread busy already.
                 n_tx = length(old_idx)
-                if n_tx > 2000
+                if n_tx > 2000 && !_inner_loops_serial()
                     tx_chunk = cld(n_tx, nT)
                     refresh_tasks = Vector{Task}(undef, nT)
                     for c in 1:nT

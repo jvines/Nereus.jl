@@ -774,6 +774,9 @@ function sample_pt_emcee(
     # reasoning as the init loop above (see src/threading.jl).
     chunks_h1 = _chunk_ranges(length(tasks_h1), n_slots)
     chunks_h2 = _chunk_ranges(length(tasks_h2), n_slots)
+    # The half-step uses the chunk count only, for its number of slots; the
+    # walkers themselves are handed out through this counter.
+    next_task = Threads.Atomic{Int}(1)
 
     # One RNG per WALKER SLOT, not per thread. Task->thread assignment
     # changes with `-t`, so drawing from a per-thread stream makes the
@@ -799,8 +802,22 @@ function sample_pt_emcee(
         partner_hi = active_half === :h1 ? n_walkers_eff : half
         task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
         chunks     = active_half === :h1 ? chunks_h1 : chunks_h2
+        # Every thread has a slot of walkers: the likelihood's own threaded
+        # loops would only queue tasks behind the other slots (src/threading.jl).
+        fills_threads = length(chunks) >= Threads.nthreads()
+        n_tasks = length(tasks)
+        next_task[] = 1
         Threads.@threads :static for slot in 1:length(chunks)
-            for task_idx in chunks[slot]
+            fills_threads && _serial_inner_loops!()
+            # Each slot takes the next walker as it frees up, not a fixed block:
+            # `tasks` runs cold to hot and a walker's cost differs between rungs,
+            # so fixed blocks left threads idle at the end of every half-step
+            # (NGTS-33, 90 threads: threads 1-12 0.9 busy, the last 50 0.45). The
+            # chain stays bit-identical: a walker's draws come from its own RNG,
+            # and it reads only the other half, which no task writes this pass.
+            while true
+                task_idx = Threads.atomic_add!(next_task, 1)
+                task_idx > n_tasks && break
                 t, w = tasks[task_idx]
                 β = βs[t]
                 trng = task_rngs[task_idx]
