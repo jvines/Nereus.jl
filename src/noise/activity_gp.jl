@@ -19,7 +19,7 @@
 #   modelling stellar activity signals in radial velocity data."
 
 using LinearAlgebra: Cholesky, cholesky, cholesky!, ldiv!, Symmetric, Diagonal,
-                     dot, logdet, diagind, I, LowerTriangular, mul!, transpose!
+                     dot, logdet, diagind, I, UpperTriangular
 
 # =====================================================================
 # Quasi-periodic kernel + analytic derivatives
@@ -888,23 +888,23 @@ mutable struct AGPWorkspace
     σ²_flat::Vector{Float64}
     # Low-rank solver buffers for N epochs.
     N::Int
-    Kg::Matrix{Float64}      # 2N×2N latent covariance, factored in place
-    L::Matrix{Float64}       # 2N×2N lower factor of Kg
-    BLg::Matrix{Float64}     # 2N×2N B·L
-    W::Matrix{Float64}       # 2N×2N I + Lᵀ·B·L, factored in place
+    A::Matrix{Float64}       # 2N×2N I + R·K_g·Rᵀ, factored in place
     bGG::Vector{Float64}     # N: the 2×2 blocks of B = Mᵀ D⁻¹ M
-    bGdG::Vector{Float64}
-    bdGdG::Vector{Float64}
+    bGd::Vector{Float64}
+    bdd::Vector{Float64}
+    r11::Vector{Float64}     # N: their factors B_j = R_jᵀ R_j
+    r12::Vector{Float64}
+    r22::Vector{Float64}
     v::Vector{Float64}       # 2N: Mᵀ D⁻¹ y
-    u::Vector{Float64}       # 2N: Lᵀ v
-    s::Vector{Float64}       # 2N: W⁻¹ u
+    w::Vector{Float64}       # 2N: R⁻ᵀ v
+    t::Vector{Float64}       # 2N: U⁻ᵀ w, with A = UᵀU
 end
 
 function AGPWorkspace()
     m() = Matrix{Float64}(undef, 0, 0)
     z() = Float64[]
     return AGPWorkspace(_AGPIndexKey[], _AGPIndex[], z(), z(), z(), z(), z(),
-                        0, m(), m(), m(), m(), z(), z(), z(), z(), z(), z())
+                        0, m(), z(), z(), z(), z(), z(), z(), z(), z(), z())
 end
 
 # The `_AGPIndex` of `agp` under this layout and data: resolved by name on
@@ -942,12 +942,13 @@ end
 function _agp_resize!(w::AGPWorkspace, N::Int)
     w.N == N && return w
     n2 = 2N
-    w.Kg = Matrix{Float64}(undef, n2, n2); w.L = Matrix{Float64}(undef, n2, n2)
-    w.BLg = Matrix{Float64}(undef, n2, n2); w.W = Matrix{Float64}(undef, n2, n2)
-    w.bGG = Vector{Float64}(undef, N); w.bGdG = Vector{Float64}(undef, N)
-    w.bdGdG = Vector{Float64}(undef, N)
-    w.v = Vector{Float64}(undef, n2); w.u = Vector{Float64}(undef, n2)
-    w.s = Vector{Float64}(undef, n2)
+    w.A = Matrix{Float64}(undef, n2, n2)
+    for f in (:bGG, :bGd, :bdd, :r11, :r12, :r22)
+        setfield!(w, f, Vector{Float64}(undef, N))
+    end
+    for f in (:v, :w, :t)
+        setfield!(w, f, Vector{Float64}(undef, n2))
+    end
     w.N = N
     return w
 end
@@ -956,99 +957,123 @@ end
     activity_gp_joint_logpdf_lowrank(epochs, chan_a, chan_b, amp, P, λe, λp,
                                       y_flat, σ²_flat) -> logpdf
 
-Marginal log-likelihood of the JOINT Rajpaul model exploiting the
-latent-variable LOW-RANK structure. The C channels all observe linear
-combinations `a_c·G(t) + b_c·Ġ(t)` of the SAME 2N-dimensional latent
+Marginal log-likelihood of the JOINT Rajpaul model through its latent
+low-rank structure. The C channels all observe linear combinations
+`a_c·G(t) + b_c·Ġ(t)` of the SAME 2N-dimensional latent
 `g = [G(t₁..N); Ġ(t₁..N)]`, so
 
     Σ = M·K_g·Mᵀ + D ,   M ∈ ℝ^{CN×2N},  K_g ∈ ℝ^{2N×2N},  D diagonal.
 
-Woodbury + the matrix-determinant lemma reduce the dominant factorization
-from the dense (C·N)² to (2N)² — for the 5-channel HD 18599 AGP that is
-228² vs 570², ~15× fewer flops. `Mᵀ D⁻¹ M` and `Mᵀ D⁻¹ y` are 2×2-block
-diagonals (built in O(CN)) because M is `a_c·δ`/`b_c·δ` structured.
+`B = Mᵀ D⁻¹ M` is block diagonal, one 2×2 block per epoch, and each block is
+factored exactly as `B_j = R_jᵀ R_j` (R_j upper triangular). With
+`A = I + R·K_g·Rᵀ` and `w = R⁻ᵀ·Mᵀ D⁻¹ y`, Woodbury and the
+matrix-determinant lemma give
+
+    log det Σ = log det D + log det A
+    yᵀ Σ⁻¹ y  = yᵀ D⁻¹ y − wᵀw + wᵀ A⁻¹ w
+
+A is built directly from the kernel and is the only matrix factored: one
+(2N)² Cholesky instead of the dense (C·N)² (228² against 570² for the
+five-channel HD 18599 fit). K_g itself is never factored, so it needs no
+jitter and may be singular. A rank-deficient block (no Ġ coupling, as with
+`use_derivative = false`, or no G coupling at an epoch) gets a zero row in R,
+and the identities above still hold exactly.
+
+The result is therefore the exact Gaussian log-density of Σ up to
+floating-point rounding. That rounding error grows with the conditioning of A
+(the signal-to-noise ratio and coherence length of the GP) as it does for a
+Float64 Cholesky of the dense Σ. Against the dense likelihood evaluated in
+BigFloat, on the five-channel HD 18599 fit: at most 4e-12 nats near the
+posterior; on prior draws a median of 2e-9 and at most 2e-6 nats, the same
+as the Float64 dense Cholesky. test/test_activity_gp_lowrank.jl checks it.
 
 `y_flat`, `σ²_flat` are the channel-stacked residuals and per-point
-variances (RV block first, then each indicator), length C·N. Numerically
-identical to the dense builder to machine precision (validated). Returns
-`-Inf` if either Cholesky fails.
+variances (RV block first, then each indicator), length C·N. Returns `-Inf`
+if the Cholesky of A fails, which takes non-finite inputs.
 """
 function activity_gp_joint_logpdf_lowrank(epochs::AbstractVector{<:Real},
-        chan_a::AbstractVector{T}, chan_b::AbstractVector{T},
+        chan_a::AbstractVector{<:Real}, chan_b::AbstractVector{<:Real},
         amp::Real, P::Real, λe::Real, λp::Real,
-        y_flat::AbstractVector{T}, σ²_flat::AbstractVector{T}) where {T<:Real}
+        y_flat::AbstractVector{<:Real}, σ²_flat::AbstractVector{<:Real})
     N = length(epochs); twoN = 2N
-    return _agp_lowrank_core!(Matrix{T}(undef, twoN, twoN), Matrix{T}(undef, twoN, twoN),
-                              Matrix{T}(undef, twoN, twoN), Matrix{T}(undef, twoN, twoN),
-                              Vector{T}(undef, N), Vector{T}(undef, N), Vector{T}(undef, N),
-                              Vector{T}(undef, twoN), Vector{T}(undef, twoN),
-                              Vector{T}(undef, twoN),
-                              epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
+    T  = promote_type(eltype(chan_a), eltype(chan_b), eltype(y_flat), eltype(σ²_flat))
+    TA = promote_type(T, typeof(amp), typeof(P), typeof(λe), typeof(λp))
+    vN() = Vector{T}(undef, N)
+    return _agp_whitened_core!(Matrix{TA}(undef, twoN, twoN),
+                               vN(), vN(), vN(), vN(), vN(), vN(),
+                               Vector{T}(undef, twoN), Vector{T}(undef, twoN),
+                               Vector{TA}(undef, twoN),
+                               epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
 end
 
 """
     activity_gp_joint_logpdf_lowrank!(w::AGPWorkspace, epochs, chan_a, chan_b,
                                        amp, P, λe, λp, y_flat, σ²_flat) -> logpdf
 
-[`activity_gp_joint_logpdf_lowrank`](@ref) with its matrices and vectors taken
+[`activity_gp_joint_logpdf_lowrank`](@ref) with its matrix and vectors taken
 from `w` instead of allocated, for the per-slot workspace of the samplers. Same
 operations, same result bit for bit. Inputs that are not `Float64` (dual
 numbers) take the allocating method.
 """
 function activity_gp_joint_logpdf_lowrank!(w::AGPWorkspace, epochs::AbstractVector{<:Real},
         chan_a::AbstractVector{Float64}, chan_b::AbstractVector{Float64},
-        amp::Real, P::Real, λe::Real, λp::Real,
+        amp::Float64, P::Float64, λe::Float64, λp::Float64,
         y_flat::AbstractVector{Float64}, σ²_flat::AbstractVector{Float64})
     _agp_resize!(w, length(epochs))
-    return _agp_lowrank_core!(w.Kg, w.L, w.BLg, w.W, w.bGG, w.bGdG, w.bdGdG,
-                              w.v, w.u, w.s,
-                              epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
+    return _agp_whitened_core!(w.A, w.bGG, w.bGd, w.bdd, w.r11, w.r12, w.r22,
+                               w.v, w.w, w.t,
+                               epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
 end
 activity_gp_joint_logpdf_lowrank!(::AGPWorkspace, epochs, chan_a, chan_b,
                                    amp, P, λe, λp, y_flat, σ²_flat) =
     activity_gp_joint_logpdf_lowrank(epochs, chan_a, chan_b, amp, P, λe, λp,
                                      y_flat, σ²_flat)
 
-# The low-rank solver on caller-supplied buffers: `Kg`, `Lb`, `BLg`, `W` are
-# 2N×2N, `bGG`, `bGdG`, `bdGdG` length N, `v`, `u`, `s` length 2N. Every
-# element read is written first, so the buffers need no clearing.
-function _agp_lowrank_core!(Kg::AbstractMatrix{T}, Lb::AbstractMatrix{T},
-        BLg::AbstractMatrix{T}, W::AbstractMatrix{T},
-        bGG::AbstractVector{T}, bGdG::AbstractVector{T}, bdGdG::AbstractVector{T},
-        v::AbstractVector{T}, u::AbstractVector{T}, s::AbstractVector{T},
+# Constants of the quasi-periodic kernel blocks, hoisted out of the pair loop.
+@inline function _qp_consts(amp, P, λe, λp)
+    amp2     = amp * amp
+    inv_λe2  = 1 / (λe * λe)
+    inv_2λp2 = 1 / (2 * λp * λp)
+    π_P      = π / P
+    c_fp     = π_P * inv_2λp2              # π/(2Pλp²)
+    c_fpp    = π_P * π_P * 2 * inv_2λp2    # π²/(P²λp²)
+    return (amp2, 0.5 * inv_λe2, inv_λe2, inv_2λp2, π_P, c_fp, c_fpp)
+end
+
+# The four blocks of `activity_kernel_blocks` from one sincos(πτ/P), using
+# sin(2x) = 2 sin x cos x and cos(2x) = 1 − 2 sin²x. Same closed forms,
+# different rounding.
+@inline function _qp_blocks_sincos(τ, c)
+    amp2, half_inv_λe2, inv_λe2, inv_2λp2, π_P, c_fp, c_fpp = c
+    s, co = sincos(π_P * τ)
+    s2  = 2 * s * co
+    c2  = 1 - 2 * s * s
+    f   = -τ * τ * half_inv_λe2 - s * s * inv_2λp2
+    fp  = -τ * inv_λe2 - c_fp * s2
+    fpp = -inv_λe2 - c_fpp * c2
+    k   = amp2 * exp(f)
+    return (k, -fp * k, fp * k, -(fpp + fp * fp) * k)
+end
+
+# The whitened low-rank solve on caller-supplied buffers: `A` is 2N×2N,
+# `bGG`…`r22` length N, `v`, `w`, `t` length 2N. Every element read is
+# written first (only the upper triangle of A is used), so nothing needs
+# clearing.
+function _agp_whitened_core!(A::AbstractMatrix,
+        bGG::AbstractVector{T}, bGd::AbstractVector{T}, bdd::AbstractVector{T},
+        r11::AbstractVector{T}, r12::AbstractVector{T}, r22::AbstractVector{T},
+        v::AbstractVector{T}, w::AbstractVector{T}, t::AbstractVector,
         epochs::AbstractVector{<:Real},
-        chan_a::AbstractVector{T}, chan_b::AbstractVector{T},
+        chan_a::AbstractVector{<:Real}, chan_b::AbstractVector{<:Real},
         amp::Real, P::Real, λe::Real, λp::Real,
-        y_flat::AbstractVector{T}, σ²_flat::AbstractVector{T}) where {T<:Real}
+        y_flat::AbstractVector{<:Real}, σ²_flat::AbstractVector{<:Real}) where {T<:Real}
     N = length(epochs)
     C = length(chan_a)
     twoN = 2N
+    TA = eltype(A)
 
-    # --- K_g: 2N×2N joint [G; Ġ] covariance from the 4 kernel blocks ---
-    @inbounds for j in 1:N, i in 1:j
-        τ = epochs[i] - epochs[j]
-        kGG, kGdG, kdGG, kdGdG = activity_kernel_blocks(τ, amp, P, λe, λp)
-        Kg[i, j]         = kGG;   Kg[j, i]         = kGG
-        Kg[i, N+j]       = kGdG;  Kg[N+j, i]       = kGdG    # cov(G_i, Ġ_j)
-        Kg[N+i, j]       = kdGG;  Kg[j, N+i]       = kdGG    # cov(Ġ_i, G_j)
-        Kg[N+i, N+j]     = kdGdG; Kg[N+j, N+i]     = kdGdG
-    end
-    # symmetric jitter for conditioning of the latent covariance
-    jit = T(1e-10) * (one(T) + maximum(abs, @view Kg[1:N, 1:N]))
-    @inbounds for d in 1:twoN; Kg[d, d] += jit; end
-
-    L_g = cholesky!(Symmetric(Kg); check = false)
-    issuccess(L_g) || return convert(T, -Inf)
-    # Lower factor (2N×2N): the transpose of the upper factor `cholesky!` left
-    # in Kg — what `L_g.L` returns, written into Lb instead of a new matrix.
-    Lg = LowerTriangular(transpose!(Lb, Kg))
-
-    # --- B = Mᵀ D⁻¹ M is 2×2-block diagonal: per epoch j only the three
-    # coefficients (bGG, bGĠ, bĠĠ). v = Mᵀ D⁻¹ y. ---------------------
-    # WHITENED Woodbury avoids forming K_g⁻¹:
-    #   logdetΣ = logdetD + logdet(I + Lgᵀ B Lg)
-    #   quad    = yᵀD⁻¹y − uᵀ(I + Lgᵀ B Lg)⁻¹u,   u = Lgᵀ v
-    fill!(bGG, zero(T)); fill!(bGdG, zero(T)); fill!(bdGdG, zero(T))
+    # B = Mᵀ D⁻¹ M per epoch (bGG, bGĠ, bĠĠ) and v = Mᵀ D⁻¹ y.
+    fill!(bGG, zero(T)); fill!(bGd, zero(T)); fill!(bdd, zero(T))
     fill!(v, zero(T))
     yDy = zero(T); logdetD = zero(T)
     @inbounds for c in 1:C
@@ -1058,31 +1083,60 @@ function _agp_lowrank_core!(Kg::AbstractMatrix{T}, Lb::AbstractMatrix{T},
             yj = y_flat[off + j]; wj = yj * inv_d
             yDy += yj * wj; logdetD += log(d)
             v[j] += ac * wj; v[N+j] += bc * wj
-            bGG[j]   += ac * ac * inv_d
-            bGdG[j]  += ac * bc * inv_d
-            bdGdG[j] += bc * bc * inv_d
+            bGG[j] += ac * ac * inv_d
+            bGd[j] += ac * bc * inv_d
+            bdd[j] += bc * bc * inv_d
         end
     end
 
-    # BLg = B·Lg directly from the block structure (4N² vs a 2N³ gemm on a
-    # 99%-zero B): rows j and N+j are linear combos of Lg rows j, N+j.
-    Lgf = Lg                      # LowerTriangular wrapper over the factor
-    @inbounds for k in 1:twoN
-        for j in 1:N
-            gjk = Lgf[j, k]; djk = Lgf[N+j, k]
-            BLg[j,   k] = bGG[j]  * gjk + bGdG[j]  * djk
-            BLg[N+j, k] = bGdG[j] * gjk + bdGdG[j] * djk
+    # B_j = R_jᵀ R_j with R_j = [r11 r12; 0 r22], and w = R⁻ᵀ v. A block with
+    # no G information (bGG = 0, hence bGĠ = 0) factors as diag(0, √bĠĠ); a
+    # rank-1 block (no Ġ information independent of G) gets r22 = 0. A zero
+    # row of R leaves that row and column of A at the identity and w at 0
+    # there, so both cases are exact rather than approximated.
+    ww = zero(T)
+    @inbounds for j in 1:N
+        g = bGG[j]
+        if g > 0
+            x11 = sqrt(g); x12 = bGd[j] / x11
+            q   = bdd[j] - x12 * x12
+            wG  = v[j] / x11
+        else
+            x11 = zero(T); x12 = zero(T); q = bdd[j]; wG = zero(T)
+        end
+        x22 = q > 0 ? sqrt(q) : zero(T)
+        wd  = x22 > 0 ? (v[N+j] - x12 * wG) / x22 : zero(T)
+        r11[j] = x11; r12[j] = x12; r22[j] = x22
+        w[j] = wG; w[N+j] = wd
+        ww += wG * wG + wd * wd
+    end
+
+    # Upper triangle of A = I + R·K_g·Rᵀ, straight from the kernel blocks at
+    # τ = t_j − t_k (j ≤ k). Rows j and N+j of R·g are r11·G_j + r12·Ġ_j and
+    # r22·Ġ_j; cov(G_j, Ġ_k) = cGd and cov(G_k, Ġ_j) = cov(Ġ_j, G_k) = cdG.
+    kc = _qp_consts(amp, P, λe, λp)
+    @inbounds for k in 1:N
+        r11k = r11[k]; r12k = r12[k]; r22k = r22[k]; tk = epochs[k]
+        for j in 1:k
+            cGG, cGd, cdG, cdd = _qp_blocks_sincos(epochs[j] - tk, kc)
+            r11j = r11[j]; r12j = r12[j]; r22j = r22[j]
+            A[j, k]         = r11j * (r11k * cGG + r12k * cGd) +
+                              r12j * (r11k * cdG + r12k * cdd)
+            A[j, N + k]     = r22k * (r11j * cGd + r12j * cdd)
+            A[N + j, N + k] = r22j * r22k * cdd
+            j == k || (A[k, N + j] = r22j * (r11k * cdG + r12k * cdd))
         end
     end
-    # W = Lgᵀ·BLg — triangular×dense (trmm), not a full gemm.
-    mul!(W, transpose(Lgf), BLg)
-    @inbounds for d in 1:twoN; W[d, d] += one(T); end
-    F_C = cholesky!(Symmetric(W); check = false)
-    issuccess(F_C) || return convert(T, -Inf)
-    logdet_C = 2 * sum(log, @view F_C.factors[diagind(F_C.factors)])
+    @inbounds for d in 1:twoN; A[d, d] += one(TA); end
 
-    mul!(u, transpose(Lgf), v)
-    quad = yDy - dot(u, ldiv!(F_C, copyto!(s, u)))
-    logdetΣ = logdetD + logdet_C
-    return convert(T, -0.5 * (quad + logdetΣ + (C * N) * log(2π)))
+    # A ⪰ I, so the factorization succeeds for any finite input.
+    F = cholesky!(Symmetric(A, :U); check = false)
+    issuccess(F) || return convert(TA, -Inf)
+    logdetA = zero(TA)
+    @inbounds for d in 1:twoN; logdetA += log(A[d, d]); end
+    logdetA *= 2
+    copyto!(t, w)
+    ldiv!(transpose(UpperTriangular(A)), t)       # t = U⁻ᵀ w, so wᵀA⁻¹w = tᵀt
+    quad = yDy - ww + dot(t, t)
+    return -(quad + logdetD + logdetA + (C * N) * log(2π)) / 2
 end

@@ -1,7 +1,7 @@
 # ActivityGP joint-likelihood solver: the quasi-periodic kernel blocks and
 # the covariance builders that feed it.
 
-using Nereus, LinearAlgebra, Random, Test
+using Nereus, LinearAlgebra, Random, Test, ForwardDiff
 using Random: MersenneTwister
 
 # Transcription of the closed forms in the header of src/noise/activity_gp.jl:
@@ -196,4 +196,121 @@ end
     _prior_theta!(theta_b, params_b, rng)
     @test_throws ArgumentError Nereus.rv_log_likelihood(theta_b, no_logrhk, ws_b)
     @test_throws ArgumentError Nereus.rv_log_likelihood(theta_b, no_logrhk)
+end
+
+# ---------------------------------------------------------------------
+# The whitened low-rank solver against the exact dense likelihood
+# ---------------------------------------------------------------------
+
+# The dense (C·N)² Gaussian log-density with the kernel, the covariance and
+# its Cholesky evaluated in BigFloat from the same Float64 inputs.
+function _agp_exact_dense(epochs, ca, cb, amp, P, λe, λp, y, σ²)
+    setprecision(BigFloat, 128) do
+        Σ = Nereus.activity_gp_covariance_blocked(epochs, big.(ca), big.(cb),
+                big(amp), big(P), big(λe), big(λp))
+        for i in eachindex(σ²); Σ[i, i] += big(σ²[i]); end
+        F = cholesky!(Symmetric(Σ))
+        yb = big.(y)
+        -(dot(yb, F \ yb) + logdet(F) + length(y) * log(2 * big(π))) / 2
+    end
+end
+
+# The same density through a Float64 dense Cholesky (generic in the eltype,
+# so it also carries dual numbers).
+function _agp_dense(epochs, ca, cb, amp, P, λe, λp, y, σ²)
+    Σ = Nereus.activity_gp_covariance_blocked(epochs, ca, cb, amp, P, λe, λp)
+    for i in eachindex(σ²); Σ[i, i] += σ²[i]; end
+    F = cholesky!(Symmetric(Σ))
+    return -(dot(y, F \ y) + logdet(F) + length(y) * log(2π)) / 2
+end
+
+@testset "AGP whitened solver: exact against the dense likelihood" begin
+    rng = MersenneTwister(3)
+    N, C = 24, 5
+    epochs = sort!(80 .* rand(rng, N))
+    σ = [1.0, 0.3, 0.5, 0.2, 0.4]
+    σ² = repeat(σ .^ 2, inner = N)
+    # Data drawn from the model itself; the fifth channel has no Ġ coupling,
+    # as logR'HK in the HD 18599 fit.
+    ca0 = [3.0, 0.8, -1.2, 0.6, 0.9]; cb0 = [0.8, -0.3, 0.5, 0.2, 0.0]
+    Σ0 = Nereus.activity_gp_covariance_blocked(epochs, ca0, cb0, 1.0, 9.0, 30.0, 0.6)
+    y = cholesky(Symmetric(Σ0 + Diagonal(σ²))).L * randn(rng, C * N)
+    solve(a) = Nereus.activity_gp_joint_logpdf_lowrank(a...)
+    err(a) = Float64(abs(solve(a) - _agp_exact_dense(a...)))
+
+    # Near the truth (the posterior).
+    for _ in 1:20
+        a = (epochs, ca0 .* (1 .+ 0.01 .* randn(rng, C)), cb0 .* (1 .+ 0.01 .* randn(rng, C)),
+             1.0, 9.0 + 0.05randn(rng), 30 * (1 + 0.02randn(rng)), 0.6 * (1 + 0.02randn(rng)),
+             y, σ²)
+        @test err(a) <= 1e-10
+    end
+    # Across a broad prior: couplings from 0.1 to 30 times the noise of their
+    # channel, coherence 5-500 d, λp 0.2-5, P 3-30 d, extra jitter. Long λe
+    # with large λp is where the previous solver's 1e-10·max|K| jitter on K_g
+    # moved log L by up to several nats.
+    worst = 0.0
+    for _ in 1:30
+        ca = randn(rng, C) .* σ .* 10 .^ (3rand(rng, C) .- 1)
+        cb = randn(rng, C) .* σ .* 10 .^ (3rand(rng, C) .- 1); cb[5] = 0
+        a = (epochs, ca, cb, 1.0, 3 + 27rand(rng), 5 * 100^rand(rng), 0.2 * 25^rand(rng),
+             y, σ² .* (1 .+ rand(rng, C * N)))
+        e = err(a)
+        worst = max(worst, e)
+        @test e <= 1e-10
+    end
+    @info "AGP whitened solver: worst |Δ| against BigFloat dense on prior draws" worst
+
+    # Rank-deficient 2×2 blocks are exact, not approximated: no Ġ coupling
+    # anywhere (use_derivative = false), Ġ couplings proportional to the G
+    # couplings, and no G coupling at all (bGG = 0 at every epoch).
+    for (ca, cb) in ((ca0, zeros(C)), (ca0, 0.7 .* ca0), (zeros(C), cb0 .+ 0.1))
+        a = (epochs, ca, cb, 1.0, 9.0, 30.0, 0.6, y, σ²)
+        @test isfinite(solve(a))
+        @test err(a) <= 1e-10
+    end
+
+    # Two and three channels (now also on the low-rank path).
+    for Cs in (2, 3)
+        ys = y[1:(Cs * N)]; s2 = σ²[1:(Cs * N)]
+        a = (epochs, ca0[1:Cs], cb0[1:Cs], 1.0, 9.0, 30.0, 0.6, ys, s2)
+        @test err(a) <= 1e-10
+    end
+
+    # Workspace and allocating methods agree bit for bit; the workspace call
+    # allocates nothing that scales with N.
+    w = Nereus.AGPWorkspace()
+    a = (epochs, ca0, cb0, 1.0, 9.0, 30.0, 0.6, y, σ²)
+    @test Nereus.activity_gp_joint_logpdf_lowrank!(w, a...) === solve(a)
+    @test (@allocated Nereus.activity_gp_joint_logpdf_lowrank!(w, a...)) < 512
+
+    # Dual numbers take the generic path: the gradient matches the gradient
+    # of the dense likelihood.
+    f_lr(x) = Nereus.activity_gp_joint_logpdf_lowrank(epochs, x[1:5], x[6:10],
+                  x[11], x[12], x[13], x[14], y, σ²)
+    f_dn(x) = _agp_dense(epochs, x[1:5], x[6:10], x[11], x[12], x[13], x[14], y, σ²)
+    x0 = vcat(ca0, cb0, 1.0, 9.0, 30.0, 0.6)
+    g_lr = ForwardDiff.gradient(f_lr, x0)
+    g_dn = ForwardDiff.gradient(f_dn, x0)
+    @test all(isfinite, g_lr)
+    @test g_lr ≈ g_dn rtol = 1e-8
+    @test f_lr(x0) ≈ f_dn(x0) atol = 1e-10
+
+    # And through the model: a gradient of the log-density of an ActivityGP
+    # target agrees with central differences.
+    data, params, _ = _agp_params(MersenneTwister(5))
+    target = NereusTarget(params, data)
+    th = Theta{Float64}(params)
+    _prior_theta!(th, params, MersenneTwister(6))
+    yv = Nereus.transform_forward([th.values[i] for i in params.layout.unfrozen_idx],
+                                  target.transform)
+    lp(v) = Nereus.LogDensityProblems.logdensity(target, v)
+    @test isfinite(lp(yv))
+    g = ForwardDiff.gradient(lp, yv)
+    h = 1e-6
+    for d in 1:length(yv)
+        e = zeros(length(yv)); e[d] = h
+        fd = (lp(yv .+ e) - lp(yv .- e)) / 2h
+        @test g[d] ≈ fd rtol = 1e-4 atol = 1e-5
+    end
 end

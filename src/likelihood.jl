@@ -1372,13 +1372,13 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
     # indicator vector isn't aligned 1:1 with the RVs (unequal length).
     if all(v -> length(v) == n_rv_obs, ix.vals)
         # LOW-RANK joint: the C channels observe linear combos of a 2N
-        # latent (G, Ġ), so Σ = M·K_g·Mᵀ + D and the dominant factorization
-        # drops from (C·N)² to (2N)² — ~4× faster at C=5 (machine-precision
-        # identical; validated). Only when it pays (C ≥ 4 ⇒ 2N < C·N) and
-        # we score the joint (the marginalize/conditional path needs the
-        # explicit block partition, so it keeps the dense build).
-        if !agp.marginalize_indicators && n_total > n_rv_obs &&
-           length(chan_a) >= 4
+        # latent (G, Ġ), so Σ = M·K_g·Mᵀ + D and the one factorization is a
+        # (2N)² Cholesky instead of the dense (C·N)² (exact up to rounding;
+        # see activity_gp_joint_logpdf_lowrank). It is faster than the dense
+        # build from C = 2 on, since it also skips the C² block assembly. Used
+        # whenever we score the joint (the marginalize/conditional path needs
+        # the explicit block partition, so it keeps the dense build).
+        if !agp.marginalize_indicators && n_total > n_rv_obs
             ep = view(data.t_rv, 1:n_rv_obs)
             return ws === nothing ?
                 activity_gp_joint_logpdf_lowrank(ep, chan_a, chan_b,

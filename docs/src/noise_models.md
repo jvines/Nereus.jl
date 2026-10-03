@@ -525,17 +525,19 @@ The HD 18599 K-gap scenario is the canonical use case.
 
 #### Cost
 
-The joint covariance is built dense — `O(n_total³)` Cholesky per
-likelihood call, where `n_total = n_rv + Σᵢ n_indᵢ`. Tractable up to
-~500 total observations. A Woodbury / low-rank route
-(`activity_gp_joint_logpdf_lowrank`, `src/noise/activity_gp.jl:827`) and
-a block-factored builder (`activity_gp_covariance_blocked`,
-`src/noise/activity_gp.jl:425`) reduce the dominant factorisation from
-`(C·N)²` to `(2N)²` for the common same-epoch case. The celerite-block
-O(n) route is a dead-end for the QP joint covariance (its kernel is not
-a finite sum of damped exponentials, and the FM17 celerite form carries
-a `|τ|` kink that makes `Var(dG/dt)` formally infinite — see the
-warning at `src/noise/activity_gp.jl:75`).
+With every indicator at the RV epochs (`N` epochs, `C` channels including
+RV, `n_total = C·N`), the joint likelihood goes through
+`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:994`): it
+whitens each epoch's 2×2 information block and factors one `(2N)²` matrix
+instead of the dense `(C·N)²`, and is exact up to rounding. The
+`marginalize_indicators` diagnostic and `indicators_only` scoring build the
+dense covariance with the block-factored builder
+(`activity_gp_covariance_blocked`, `src/noise/activity_gp.jl:423`), an
+`O(n_total³)` Cholesky per likelihood call, tractable up to ~500 total
+observations. The celerite-block O(n) route is a dead-end for the QP joint
+covariance (its kernel is not a finite sum of damped exponentials, and the
+FM17 celerite form carries a `|τ|` kink that makes `Var(dG/dt)` formally
+infinite — see the warning at `src/noise/activity_gp.jl:74`).
 
 ### `IndicatorFloor`
 
