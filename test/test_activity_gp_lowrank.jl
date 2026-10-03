@@ -559,6 +559,52 @@ end
     @test n_lr >= 30 && n_dn >= 25
 end
 
+@testset "AGP whitened solver: the dense-route test depends on the time unit, the result does not" begin
+    # The eigenvalue test reads B_j in the solver's units, where Ġ carries one
+    # over time, so a change of time unit moves it (documented in
+    # _agp_blocks_smooth, where the unit-free alternatives are compared). The
+    # same model with the epochs, P and λe in hours and the Ġ couplings ×24
+    # has the same log L; at this faint-Ġ point it takes the dense route in
+    # days and the low-rank route in hours, and both derivatives agree with
+    # the dense likelihood in BigFloat to what the docstring states.
+    rng = MersenneTwister(7)
+    N, C = 8, 3
+    epochs = sort!(60 .* rand(rng, N))
+    σ² = 0.1 .+ rand(rng, C * N); y = randn(rng, C * N)
+    a = [1.0, 0.5, -0.7]; b = 1e-5 .* [0.3, -0.5, 0.9]
+    hyp = (1.3, 11.0, 25.0, 0.5); u = 24.0
+    hyp_h = (hyp[1], u * hyp[2], u * hyp[3], hyp[4])
+    D(v, k) = ForwardDiff.Dual{:t}(v, ntuple(i -> Float64(i == k), 2C))
+    function lowrank_route(a, b, hyp)
+        ad = [D(a[c], c) for c in 1:C]; bd = [D(b[c], C + c) for c in 1:C]
+        w(j, c) = σ²[(c - 1) * N + j]
+        gG = [sum(ad[c]^2 / w(j, c) for c in 1:C) for j in 1:N]
+        gd = [sum(ad[c] * bd[c] / w(j, c) for c in 1:C) for j in 1:N]
+        dd = [sum(bd[c]^2 / w(j, c) for c in 1:C) for j in 1:N]
+        k0GG, _, _, k0dd = Nereus._qp_blocks_sincos(0.0, Nereus._qp_consts(hyp...))
+        return Nereus._agp_blocks_smooth(gG, gd, dd, ad, bd, k0GG, k0dd)
+    end
+    @test !lowrank_route(a, b, hyp)
+    @test lowrank_route(a, u .* b, hyp_h)
+
+    # x holds the couplings in day units throughout.
+    f_days(x)  = Nereus.activity_gp_joint_logpdf_lowrank(epochs, x[1:C], x[C+1:2C],
+                                                         hyp..., y, σ²)
+    f_hours(x) = Nereus.activity_gp_joint_logpdf_lowrank(u .* epochs, x[1:C],
+                                                         u .* x[C+1:2C], hyp_h..., y, σ²)
+    fb(x) = _agp_dense(big.(epochs), x[1:C], x[C+1:2C], big.(hyp)..., big.(y), big.(σ²))
+    x = vcat(a, b)
+    @test f_hours(x) ≈ f_days(x) rtol = 1e-13
+    gb, Hb = setprecision(BigFloat, 128) do
+        ForwardDiff.gradient(fb, big.(x)), ForwardDiff.hessian(fb, big.(x))
+    end
+    rel(g, r) = Float64(maximum(abs.(g .- r)) / maximum(abs, r))
+    @test rel(ForwardDiff.gradient(f_days, x), gb) <= 1e-13
+    @test rel(ForwardDiff.hessian(f_days, x), Hb) <= 1e-13
+    @test rel(ForwardDiff.gradient(f_hours, x), gb) <= 5e-9
+    @test rel(ForwardDiff.hessian(f_hours, x), Hb) <= 1e-5
+end
+
 @testset "AGP whitened solver: ReverseDiff gradients at singular blocks" begin
     # The dense route for derivatives was taken for ForwardDiff duals only, so
     # ReverseDiff's tracked reals (sample_nuts with ad_backend = :ReverseDiff)

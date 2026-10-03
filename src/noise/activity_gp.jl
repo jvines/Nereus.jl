@@ -1023,41 +1023,45 @@ three channels A is as large as Σ (C = 2) or not much smaller, so there is
 no accuracy to gain over the dense Cholesky. test/test_activity_gp_lowrank.jl
 checks its own sample to 1e-10 nats.
 
-Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked reals,
-any type that is not a plain float) take the same route, with two
+Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked
+reals, any type that is not a plain float) take the same route, with two
 exceptions. R_j is a square root of B_j, so it is not differentiable where
 B_j is singular (every G coupling 0, every Ġ coupling 0, or all channels'
 (a_c, b_c) parallel), and its derivative loses accuracy as B_j approaches
-that. And
-w = R⁻ᵀ·Mᵀ D⁻¹ y divides by R, so when every coupling is tiny against the
-noise its derivatives cancel to a relative error of about eps/SNR. When a
-block's smaller eigenvalue is below 1e-10 of its larger, or the GP's
-signal-to-noise is below 1e-6 at every epoch, such inputs are evaluated with
-the dense (C·N)² Cholesky instead, which is smooth there. A coupling that is
-a constant 0 (every Ġ coupling under `use_derivative = false`) is not a
-direction of the block and does not count; only a plain number, or a
-ForwardDiff dual whose partials are all 0, is known to be one, so the
-likelihood passes the missing Ġ couplings of a tracked number type as
-`Float64` zeros. On the HD 18599 job this happens at couplings that are
-exactly 0 (the prior box centre and points derived from it), at none of 248
-prior draws and 150 near-posterior points with five channels, and at 2 of
-236 prior draws with RV and logR'HK alone. `Float64` values are exact at
-singular blocks and always take the low-rank path.
+that. And w = R⁻ᵀ·Mᵀ D⁻¹ y divides by R, so when every coupling is tiny
+against the noise its derivatives cancel to a relative error of about
+eps/SNR. When a block's smaller eigenvalue is below 1e-10 of its larger, or
+the GP's signal-to-noise is below 1e-6 at every epoch, such inputs are
+evaluated with the dense (C·N)² Cholesky instead, which is smooth there. A
+coupling that is a constant 0 (every Ġ coupling under
+`use_derivative = false`) is not a direction of the block and does not
+count; only a plain number, or a ForwardDiff dual whose partials are all 0,
+is known to be one, so the likelihood passes the missing Ġ couplings of a
+tracked number type as `Float64` zeros. The eigenvalue test reads B_j in the solver's own units, in
+which Ġ carries one over time, so where it falls depends on the time unit
+and on the kernel: with the epochs in hours rather than days a block's ratio
+moves by up to 24² either way while log L is unchanged, so the accuracy
+figures below hold for epochs in days (see `_agp_blocks_smooth` for why the
+test is not made unit-free). On the HD 18599 job the dense route is taken at
+couplings that are exactly 0 (the prior box centre and points derived from
+it), at none of 248 prior draws and 150 near-posterior points with five
+channels, and at 2 of 236 prior draws with RV and logR'HK alone. `Float64`
+values are exact at singular blocks and always take the low-rank path.
 
 Below those thresholds the dense route's derivatives are accurate to about
 1e-15 (relative). Just above them the derivatives through R are not: they
 lose accuracy as eps over the signal-to-noise of the fainter latent
 direction. In probes approaching each threshold (a faint G direction, a
 faint Ġ direction, near-parallel couplings; three and five channels, 8 and
-18 epochs, four kernels from P = 3 d, λp = 0.3 to P = 60 d, λp = 4), the
-largest relative errors seen at points that keep the low-rank route, against
-the dense likelihood differentiated in BigFloat, were 2e-9 for gradients and
-4e-6 for Hessians with respect to the couplings passed here. With respect
-to couplings in units of the prior standard deviations of G and Ġ (the
-amplitudes the samplers move) they were 2e-10 and 1.4e-4, the latter at the
-longest, smoothest kernel. These are the largest errors in those samples,
-not bounds. Gradients are not affected in any practical sense; a MAP Hessian
-at such a point can be.
+18 epochs, four kernels from P = 3 d, λp = 0.3 to P = 60 d, λp = 4, epochs
+in days), the largest relative errors seen at points that keep the low-rank
+route, against the dense likelihood differentiated in BigFloat, were 2e-9
+for gradients and 4e-6 for Hessians with respect to the couplings passed
+here. With respect to couplings in units of the prior standard deviations of
+G and Ġ (the amplitudes the samplers move) they were 2e-10 and 1.4e-4, the
+latter at the longest, smoothest kernel. These are the largest errors in
+those samples, not bounds. Gradients are not affected in any practical
+sense; a MAP Hessian at such a point can be.
 
 `y_flat`, `σ²_flat` are the channel-stacked residuals and per-point
 variances (RV block first, then each indicator), length C·N. A NaN among
@@ -1163,6 +1167,24 @@ end
 # cancellation leaves a relative error of about eps/SNR. The largest
 # per-epoch signal-to-noise tr(R_j K_jj R_jᵀ) = k_GG(0)·bGG + k_ĠĠ(0)·bĠĠ
 # must be at least 1e-6. False for NaN.
+#
+# The eigenvalue ratio in (1) is taken on B_j in the solver's units, where
+# Ġ carries one over time, so it depends on the time unit and on the kernel
+# (through k_ĠĠ(0)/k_GG(0) = 1/λe² + π²/(P²λp²)): with the epochs in hours a
+# block's ratio moves by up to 24² either way, and log L does not change.
+# Which points keep the low-rank route then changes: the faint-Ġ point of
+# test/test_activity_gp_lowrank.jl takes the dense route in days (Hessian
+# error 1.7e-15) and the low-rank route in hours (4.7e-6). The test is kept
+# because the unit-free version measured was no better: the ratio of
+# B̃_j = K0^½ B_j K0^½, K0 = diag(k_GG(0), k_ĠĠ(0)), kept points whose
+# Hessians were off by up to 5e-3 (P = 60 d, λp = 4, faint G), against
+# 1.4e-6 for this test on the same five-channel probes. What limits the
+# derivatives is the absolute signal-to-noise of the fainter latent
+# direction (Hessian errors of about eps over it), which no ratio measures.
+# A test on that quantity, the smaller eigenvalue of B̃_j at the best epoch,
+# would be unit-free and would bound the error, but at 1e-6 it would also
+# send near-posterior HD 18599 points to the dense route (5 of 150 with
+# RV + logR'HK, 1 of 150 with RV + BIS), where this test sends none.
 function _agp_blocks_smooth(bGG::AbstractVector, bGd::AbstractVector,
                             bdd::AbstractVector, chan_a::AbstractVector,
                             chan_b::AbstractVector, k0GG::Real, k0dd::Real)
