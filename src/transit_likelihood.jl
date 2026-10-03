@@ -178,6 +178,123 @@ PhotDataCache() = PhotDataCache(0)
     return n
 end
 
+# Longest finite positive exposure in the data (days); 0 when there is none.
+function _phot_max_exposure(data::Data)
+    mx = 0.0
+    @inbounds for e in data.exposure_times
+        (isfinite(e) && e > mx) && (mx = e)
+    end
+    return mx
+end
+
+# =====================================================================
+# Transit window: which cadences get a flux evaluation
+# =====================================================================
+#
+# A cadence's flux is computed only when it lies within ±T_dur_safe of the
+# transit centre Tc, folded by P; everywhere else it is taken as exactly 1.
+# Transits.compute returns exactly one(T) when z >= 1 + k, so a window that
+# holds every cadence with z < 1 + k changes no bits.
+#
+# The half-width used so far is 2P(1+k)/(π a_R), about four circular
+# half-durations. `_transit_window_halfwidth` is a bound from the orbit itself:
+#
+#     z = (r/R*) sqrt(1 - sin²i sin²(ω+f)) >= (r/R*)|cos(ω+f)| >= a_R (1-e)|cos(ω+f)|
+#
+# so z < 1 + k needs |cos(ω+f)| < s = (1+k)/(a_R(1-e)), i.e. f within asin(s)
+# of a conjunction. Around the transit conjunction f_c = π/2 - ω the half-width
+# is the longer of the two mean-anomaly spans f_c -> f_c ± asin(s), through
+# Kepler's equation, in time. Both formulas for z (`sky_separation`, the
+# refresh in `_phot_sparse_refresh`, and `planet_sky_position` for gravity
+# darkening) satisfy the inequality.
+#
+# Margins: ×(1 + 1e-9) and +1e-8 rad of mean anomaly, which covers the Kepler
+# solver's 1e-10 tolerance and the rounding of M = 2π(t - Tp)/P for |t - Tp| up
+# to ~10⁶ periods; plus 8 ulp of the epoch for the rounding of Tc itself.
+#
+# Inf (no bound) when s >= 1 (periastron within 1 + k stellar radii), when e is
+# outside [0, 0.9999) (above that `true_anomaly` clamps e, so sky_separation's f
+# is not the f of this map), or when an input is not a finite positive number.
+
+# Plain Float64 of a likelihood input (strips ForwardDiff duals). A type it
+# cannot strip gives NaN, which every caller turns into "no tighter bound".
+@inline _gate_float(x::Float64) = x
+@inline _gate_float(x::ForwardDiff.Dual) = _gate_float(ForwardDiff.value(x))
+@inline _gate_float(x::Real) = x isa AbstractFloat ? Float64(x) : NaN
+
+@inline function _mean_anomaly_from_true(f::Float64, e::Float64, q::Float64)
+    E = 2 * atan(tan(f / 2) * q)          # q = sqrt((1-e)/(1+e))
+    return E - e * sin(E)
+end
+
+function _transit_window_halfwidth(P::Float64, e::Float64, ω::Float64, k::Float64,
+                                   aR::Float64, tscale::Float64)
+    (0.0 <= e < 0.9999) || return Inf
+    (P > 0 && aR > 0 && k >= 0 && isfinite(P) && isfinite(aR) && isfinite(k) &&
+     isfinite(ω) && isfinite(tscale)) || return Inf
+    s = (1 + k) / (aR * (1 - e))
+    s < 1 || return Inf
+    Δf = asin(s)
+    q  = sqrt((1 - e) / (1 + e))
+    fc = π / 2 - ω
+    Mc = _mean_anomaly_from_true(fc, e, q)
+    d1 = abs(rem2pi(_mean_anomaly_from_true(fc + Δf, e, q) - Mc, RoundNearest))
+    d2 = abs(rem2pi(Mc - _mean_anomaly_from_true(fc - Δf, e, q), RoundNearest))
+    hw_M = max(d1, d2) * (1 + 1e-9) + 1e-8
+    return hw_M * P / (2π) + 8 * eps(tscale)
+end
+
+# Whether the OTHER conjunction (f = -π/2 - ω, planet behind the star), where
+# z < 1 + k is just as possible, comes within `g_time` of Tc. The code has
+# always modelled that as a transit when it fell inside the window.
+function _occultation_near_window(P::Float64, e::Float64, ω::Float64, k::Float64,
+                                  aR::Float64, g_time::Float64)
+    s  = (1 + k) / (aR * (1 - e))
+    Δf = asin(s)
+    q  = sqrt((1 - e) / (1 + e))
+    Mc = _mean_anomaly_from_true(π / 2 - ω, e, q)
+    f2 = -π / 2 - ω
+    M_lo = _mean_anomaly_from_true(f2 - Δf, e, q)
+    a  = rem2pi(M_lo - Mc, RoundNearest)                       # start, rel. to Tc
+    L  = mod(_mean_anomaly_from_true(f2 + Δf, e, q) - M_lo, 2π) # length
+    b  = a + L
+    g  = g_time / P * 2π * (1 + 1e-6) + 1e-8                    # window in M units
+    return (a <= 0 <= b) || (a <= 2π <= b) || abs(a) <= g ||
+           abs(rem2pi(b, RoundNearest)) <= g
+end
+
+# The window half-width actually used: min(old, this). Tighter only where that
+# provably changes no flux: e < 0.95, s < 0.5, and the occultation window clear
+# of the old window widened by `pad`. `pad` is the furthest a sub-sample of a
+# supersampled cadence lies from the cadence time (texp/2), 0 otherwise.
+function _tight_gate_halfwidth(P::Real, e::Real, ω::Real, k::Real, aR::Real,
+                               tscale::Real, old_hw::Real, pad::Float64)
+    Pf, ef, ωf, kf, aRf = _gate_float(P), _gate_float(e), _gate_float(ω),
+                          _gate_float(k), _gate_float(aR)
+    old = _gate_float(old_hw)
+    (0.0 <= ef < 0.95 && isfinite(old)) || return Inf
+    s = (1 + kf) / (aRf * (1 - ef))
+    s < 0.5 || return Inf
+    hw = _transit_window_halfwidth(Pf, ef, ωf, kf, aRf, _gate_float(tscale))
+    isfinite(hw) || return Inf
+    _occultation_near_window(Pf, ef, ωf, kf, aRf, old + pad) && return Inf
+    return hw + pad
+end
+
+# Tighten each planet's window in place (non-workspace paths). A TTV planet
+# keeps the old window: its flux is evaluated at a shifted time.
+function _tighten_transit_windows!(T_dur_safe, n_transit::Int, transits, r_for_j,
+                                   Ps, es, ws, rrs, a_Rs, Tc_centers, Tps, pad::Float64)
+    @inbounds for j in 1:n_transit
+        (transits[j] && r_for_j[j] == 0) || continue
+        tscale = max(abs(_gate_float(Tc_centers[j])), abs(_gate_float(Tps[j])))
+        tight = _tight_gate_halfwidth(Ps[j], es[j], ws[j], rrs[j], a_Rs[j], tscale,
+                                      T_dur_safe[j], pad)
+        tight < T_dur_safe[j] && (T_dur_safe[j] = tight)
+    end
+    return T_dur_safe
+end
+
 # Supersampling factor for ONE cadence, from that cadence's own exposure (days).
 # Same rule as above: ≈1-min sub-cadence, none at or below 2 min, capped at 30.
 # `_phot_n_super(data)` is the dataset maximum and only says whether any cadence
@@ -442,7 +559,8 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         # for borderline points). T_dur upper bound: 2 × P/π · (1+rr)/(a/R*)
         # gives ~3-4× the actual full-transit half-duration even for
         # high e; safe in the sense that only points truly far from
-        # the window get short-circuited.
+        # the window get short-circuited. Narrowed after the TTV decode
+        # where the orbit allows it (`_tighten_transit_windows!`).
         # Tc_centers must be the *true* transit center (mid-conjunction).
         # `Tps + P/4` is the CIRCULAR-orbit approximation — wrong by up
         # to ~e·P for ω near ±π/2, large enough that the T_dur_safe
@@ -508,6 +626,9 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
                             Ps, es, ws, Tps, bs, a_Rs, t_max)
         end
     end
+    _tighten_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, Ps, es, ws,
+                              rrs, a_Rs, Tc_centers, Tps,
+                              n_super_data > 1 ? _phot_max_exposure(data) / 2 : 0.0)
 
     # --- Limb darkening per instrument (via precomputed indices) ------
     systemic = theta.params.layout.systemic
@@ -933,6 +1054,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
                             Ps, es, ws, Tps, bs, a_Rs, t_max)
         end
     end
+    _tighten_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, Ps, es, ws,
+                              rrs, a_Rs, Tc_centers, Tps,
+                              n_super_p > 1 ? _phot_max_exposure(data) / 2 : 0.0)
 
     # Threaded for Float64 (no Duals = no GC thrashing), serial otherwise.
     if T <: AbstractFloat
@@ -1289,6 +1413,9 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
                 # silently vanish). Mirrors the non-ws path (tp_to_tc).
                 Tc_center = tp_to_tc(Tpj, Pj, ej, wj)
                 T_dur_safe = 2 * Pj / π * (1 + rrj) / aj
+                tight = _tight_gate_halfwidth(Pj, ej, wj, rrj, aj,
+                                              max(abs(Tc_center), abs(Tpj)), T_dur_safe, 0.0)
+                tight < T_dur_safe && (T_dur_safe = tight)
                 @inbounds for i in 1:n_obs
                     Δt = data.t_phot[i] - Tc_center
                     Δt -= Pj * round(Δt / Pj)
