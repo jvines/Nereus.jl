@@ -1099,8 +1099,11 @@ function sample_pt_emcee(
                               # minimum(acceptance_swap) since the sampler was
                               # written; the counters were right here and the
                               # readout never showed them.
-                              :min_swap => round(minimum(accept_swap ./ max.(propose_swap, 1)),
-                                                 digits = 3),
+                              # One rung (n_temps = 1) has no swaps: NaN, not
+                              # `minimum` of an empty vector, which threw.
+                              :min_swap => isempty(accept_swap) ? NaN :
+                                  round(minimum(accept_swap ./ max.(propose_swap, 1)),
+                                        digits = 3),
                               :Rhat => rhat_str,    # mean/worst over science params
                               :ESS => ess_str,      # mean(bulk)/worst(tail)
                               :nevals => n_evals_atomic[]))
