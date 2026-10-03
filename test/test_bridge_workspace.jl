@@ -261,8 +261,36 @@ end
 # planet's e is clamped, so there it must give the same bits as
 # `_logdensity_parts`; just below the clamp it keeps the workspace methods and
 # agrees to rounding.
+#
+# The planet blocks are abstractly typed, so `planet_e_w`'s result is boxed.
+# `_bridge_e_clamped` asserts its type, and must then allocate no more than
+# that typed decode: 64 bytes per planet with :sesinw, where `planet_e_w` alone
+# costs the same, and with :ew, where `planet_e_w` alone costs 32 and the
+# assertion boxes the tuple for the other 32. Without the assertion the
+# comparison after it was boxed as well (112 bytes per planet with :sesinw).
 _bw_alloc_ec(th) = @allocated Nereus._bridge_e_clamped(th)
-_bw_alloc_ew(th) = sum(k -> @allocated(Nereus.planet_e_w(th, k)), Nereus.planet_indices(th))
+_bw_alloc_ew(th) = sum(k -> @allocated(Nereus.planet_e_w(th, k)::Tuple{Float64, Float64}),
+                       Nereus.planet_indices(th))
+
+# An RV-only fit with e and ω as parameters (:ew).
+function _bw_ew_target(t, rv)
+    un(a, b) = Dict{String, Any}("type" => "UniformPrior", "args" => [a, b])
+    n = length(t)
+    cfg = Dict{String, Any}(
+        "star" => Dict("M_s" => 1.0, "R_s" => 1.0),
+        "priors" => Dict{String, Any}(
+            "P_k1" => un(7.0, 7.6), "Tc_k1" => un(0.5, 1.5), "K_k1" => un(1.0, 60.0),
+            "ecc_k1" => un(0.0, 1.0), "w_k1" => un(-π, π),
+            "gamma_SIM" => un(-50.0, 50.0), "sigma_SIM" => un(0.1, 20.0)),
+        "model" => Dict{String, Any}("max_kplanet" => 1, "planet_modes" => ["RV_ONLY"],
+                                     "parametrization" => Dict("time" => "Tc", "ew" => "ew")),
+        "noise_models" => Any[],
+        "data" => Dict{String, Any}("rv" => Dict("values" => Dict(
+            "bjd" => t, "rv" => rv, "rv_err" => fill(3.0, n), "instrument" => fill("SIM", n)))))
+    d, irv, ipm = Nereus._build_data(cfg["data"])
+    params, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+    return Nereus.NereusTarget(params, d; unconstrained = true)
+end
 
 @testset "bridge evaluator where true_anomaly clamps e" begin
     rng = MersenneTwister(43)
@@ -274,15 +302,21 @@ _bw_alloc_ew(th) = sum(k -> @allocated(Nereus.planet_e_w(th, k)), Nereus.planet_
                         secosw = UniformPrior(-1.0, 1.0)),),
         rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(3.0, 80)),
                      sigma = LogUniformPrior(0.1, 20.0)),))
-    for tg in (rvonly, _bw_target(; se = 1.0))
+    for tg in (rvonly, _bw_target(; se = 1.0), _bw_ew_target(t, rv))
         names = tg.params.layout.unfrozen_names
-        js, jc = findfirst(==("sesinw_k1"), names), findfirst(==("secosw_k1"), names)
+        ew = tg.params.config.parametrization.ew
+        @test ew in (:sesinw, :ew)
+        j1 = findfirst(==(ew === :ew ? "ecc_k1" : "sesinw_k1"), names)
+        j2 = findfirst(==(ew === :ew ? "w_k1" : "secosw_k1"), names)
         r2 = MersenneTwister(6)
         xs0 = [Nereus._draw_from_prior(tg, r2) for _ in 1:100]
         best = xs0[argmax([_ref(tg, Nereus.transform_forward(x, tg.transform)) for x in xs0])]
-        at(e, ω) = (x = copy(best); x[js] = sqrt(e) * sin(ω); x[jc] = sqrt(e) * cos(ω);
+        at(e, ω) = (x = copy(best);
+                    ew === :ew ? (x[j1] = e; x[j2] = ω) :
+                                 (x[j1] = sqrt(e) * sin(ω); x[j2] = sqrt(e) * cos(ω));
                     Nereus.transform_forward(x, tg.transform))
-        ωs = range(-π, π; length = 9)[1:8]
+        # With :ew, ω is a parameter bounded by [-π, π]; keep off the bound.
+        ωs = range(-π, π; length = 9)[1:8] .+ (ew === :ew ? 0.05 : 0.0)
         hi = [at(e, ω) for e in (0.99990001, 0.99995, 0.99999, 0.9999999) for ω in ωs]
         lo = [at(e, ω) for e in (0.9998, 0.99989) for ω in ωs]
         th = Nereus.Theta{Float64}(tg.params)
@@ -290,7 +324,8 @@ _bw_alloc_ew(th) = sum(k -> @allocated(Nereus.planet_e_w(th, k)), Nereus.planet_
                       Nereus._bridge_e_clamped(th))
         @test all(clamped, hi)
         @test !any(clamped, lo)
-        # The check costs no more than the `planet_e_w` calls it makes.
+        # The check costs no more than decoding e with the type asserted: the
+        # comparison after it allocates nothing.
         _bw_alloc_ec(th); _bw_alloc_ew(th)
         @test _bw_alloc_ec(th) <= _bw_alloc_ew(th)
         ev = _BridgeEvaluator(tg)

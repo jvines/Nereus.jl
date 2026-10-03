@@ -310,9 +310,15 @@ _bridge_phot_ws(params) = !any(has_gd, params.config.planet_modes)
 Whether `true_anomaly` (orbit.jl) clamps the eccentricity of any active planet,
 that is whether some planet's e lies outside [0, 0.9999] (or is NaN). The
 allocating RV and transit methods take the true anomaly from `true_anomaly`;
-the workspace RV method without noise models and the workspace photometry
+the workspace photometry, and the workspace RV of a fit with no noise models,
 compute cos f and sin f from E with the e they are given. Outside that interval
 the two compute different models, not the same model with different rounding.
+
+The planet blocks are abstractly typed, so `planet_e_w` is not inferred and its
+result is boxed. A call allocates what `planet_e_w(theta, k)::Tuple{T, T}` does
+for each planet, and nothing for the comparison: 64 bytes per planet. With
+:sesinw that is all `planet_e_w` costs; with :ew `planet_e_w` costs 32 bytes
+and the assertion boxes the tuple for the other 32.
 """
 @inline function _bridge_e_clamped(theta::Theta{T}) where {T}
     for k in planet_indices(theta)
