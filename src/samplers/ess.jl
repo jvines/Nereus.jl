@@ -132,9 +132,11 @@ function _sample_ess(target::NereusTarget, data::Data; n_steps::Int, n_burnin::I
     # draw was discarded), a 1e-3 width a 1e-6 sd.
     prior = MvNormal(centers, widths)
     # The box the draws are kept in: the prior bounds, i.e. the circular
-    # windows as they are now.
-    lo = Float64[ps.lo for ps in layout.unfrozen_priors]
-    hi = Float64[ps.hi for ps in layout.unfrozen_priors]
+    # windows as they are now. A WRAPPED angle has no box: its draws are
+    # relabelled into the chart instead of discarded (infinite bounds here,
+    # relabelled when the chains are built).
+    lo = Float64[is_wrapped(ps) ? -Inf : ps.lo for ps in layout.unfrozen_priors]
+    hi = Float64[is_wrapped(ps) ?  Inf : ps.hi for ps in layout.unfrozen_priors]
 
     # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
     # One state file per chain. Chain c is ESS seeded with `seed + c - 1`;

@@ -65,7 +65,7 @@ See the header of `src/circular.jl` for what is excluded and why.
 function is_circular(name::AbstractString, ps::PriorSpec, config)
     m = match(_CIRCULAR_NAME, name)
     m === nothing && return false
-    ps.dist isa Distributions.Uniform || return false
+    (ps.dist isa Distributions.Uniform || ps.dist isa WrappedUniform) || return false
     abs((ps.hi - ps.lo) - CIRCULAR_PERIOD) <=
         _CIRCULAR_SPAN_RTOL * CIRCULAR_PERIOD || return false
     if m.captures[1] == "Mo"
@@ -191,6 +191,11 @@ function circular_window(x::AbstractVector{<:Real}, lo::Real, lo_ref::Real;
     return k == 0 ? Float64(c) : Float64(c - k * period)
 end
 
+# The same prior over a moved chart: Uniform stays Uniform, a wrapped prior
+# stays wrapped (it must not regain the wall it exists to remove).
+_rewindow(ps::PriorSpec, lo::Real, hi::Real) =
+    is_wrapped(ps) ? PriorSpec(WrappedUniform(lo, hi), lo, hi) : UniformPrior(lo, hi)
+
 """
     set_circular_window!(params, i, lo; transforms = ()) -> (lo, hi)
 
@@ -212,7 +217,7 @@ function set_circular_window!(params::Params, i::Int, lo::Real; transforms = ())
     span = ps.hi - ps.lo
     lo = Float64(lo)
     hi = lo + span
-    L.unfrozen_priors[i] = UniformPrior(lo, hi)
+    L.unfrozen_priors[i] = _rewindow(ps, lo, hi)
     L.packed_priors.lowers[i] = lo
     L.packed_priors.uppers[i] = hi
     for pt in transforms

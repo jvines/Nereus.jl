@@ -263,7 +263,8 @@ const _KNOWN_PARAMETRIZATIONS = (
 const _KNOWN_STABILITY      = ("none", "amd", "gladman")
 const _KNOWN_PRIORS         = ("UniformPrior", "LogUniformPrior",
                                 "ModJeffreysPrior", "NormalPrior",
-                                "FixedPrior", "SinePrior", "BetaPrior")
+                                "FixedPrior", "SinePrior", "BetaPrior",
+                                "WrappedUniformPrior")
 # Valid `noise_models[].kind` values. Derived from _NOISE_TYPES (defined
 # further down, so this is a function, not a const) because the hand-written
 # tuple this replaced had drifted: it omitted ErrorScale, NightlyOffset,
@@ -1140,6 +1141,7 @@ const _NOISE_TYPES = Dict(
     "CeleriteRotationFM17"   => CeleriteRotationFM17,
     "ActivityDecorrelation"  => ActivityDecorrelation,
     "ARModel"                => ARModel,
+    "WrappedUniformPrior" => WrappedUniformPrior,
     "MAModel"                => MAModel,
     "ActivityJitter"         => ActivityJitter,
     "ActivityGP"             => ActivityGP,

@@ -18,6 +18,7 @@ const PACKED_MODJEFFREYS  = 3
 const PACKED_BETA         = 4
 const PACKED_FIXED        = 5
 const PACKED_SINE         = 6  # p(x) = sin(x)/2 on [0, π]
+const PACKED_WRAPPED      = 7  # uniform on a circle, chart [lo, hi): no wall
 
 """
     PackedPriors
@@ -68,6 +69,8 @@ function pack_priors(priors::AbstractVector{<:PriorSpec})
             pars[i, 1] = d.value
         elseif d isa Distributions.Uniform
             type_ids[i] = PACKED_UNIFORM
+        elseif d isa WrappedUniform
+            type_ids[i] = PACKED_WRAPPED
         elseif d isa Distributions.LogUniform
             type_ids[i] = PACKED_LOGUNIFORM
         elseif d isa Distributions.Truncated{<:Distributions.Normal}
@@ -109,7 +112,12 @@ dispatches on `tid` via if/elseif, no dynamic dispatch, Enzyme-safe.
 @inline function eval_packed_logpdf(x::Real, tid::Int,
                                      p1::Float64, p2::Float64,
                                      lo::Float64, hi::Float64)
-    # Bounds check (always, for all types)
+    # A wrapped angle has no wall: every finite value is a point of the
+    # circle, with the uniform density of the chart. Checked BEFORE the bounds.
+    if tid == PACKED_WRAPPED
+        return isfinite(x) ? -log(hi - lo) : -Inf
+    end
+    # Bounds check (always, for all other types)
     if isfinite(lo) && x < lo
         return -Inf
     end
