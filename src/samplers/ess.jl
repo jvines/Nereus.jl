@@ -126,7 +126,11 @@ function _sample_ess(target::NereusTarget, data::Data; n_steps::Int, n_burnin::I
         end
     end
 
-    prior = MvNormal(centers, widths .^ 2)
+    # `MvNormal(μ, v)` with a VECTOR `v` reads it as standard deviations. This
+    # passed `widths .^ 2`, so every coordinate's sd was its width SQUARED: a
+    # 2590 m/s width became a 6.7e6 m/s sd (the walk left the box and every
+    # draw was discarded), a 1e-3 width a 1e-6 sd.
+    prior = MvNormal(centers, widths)
     # The box the draws are kept in: the prior bounds, i.e. the circular
     # windows as they are now.
     lo = Float64[ps.lo for ps in layout.unfrozen_priors]
