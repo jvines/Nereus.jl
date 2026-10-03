@@ -361,13 +361,13 @@ end
 # element types even when the caller could not infer them.
 function _ms_fill_solve(L, y::Vector{T}, v, α, β, jitter, kk0::T, mk20::T,
                         U0, V0, dU0, dV0, φ0, φtie) where {T}
-    t = L.t; sid = L.sid; row = L.row
+    t = L.t; sid = L.sid; row = L.row; ties = L.has_ties
     N = length(t); r = size(U0, 2)
     U = Matrix{T}(undef, r, N)
     V = Matrix{T}(undef, r, N)
     A = Vector{T}(undef, N)
     @inbounds for i in 1:N
-        s = sid[i]; e = row[i]
+        s = sid[i]; e = ties ? row[i] : i
         αi = T(α[s]); βi = T(β[s])
         for c in 1:r
             U[c, i] = αi * U0[e, c] + βi * dU0[e, c]
@@ -376,16 +376,22 @@ function _ms_fill_solve(L, y::Vector{T}, v, α, β, jitter, kk0::T, mk20::T,
         A[i] = T(v[i]) + T(jitter[s])^2 + αi^2 * kk0 + βi^2 * mk20
     end
     φ = Matrix{T}(undef, r, max(N - 1, 0))
-    @inbounds for i in 1:(N - 1)
-        e = row[i]
-        if row[i + 1] == e
-            for c in 1:r
-                φ[c, i] = T(φtie[1, c])
+    if ties
+        @inbounds for i in 1:(N - 1)
+            e = row[i]
+            if row[i + 1] == e
+                for c in 1:r
+                    φ[c, i] = T(φtie[1, c])
+                end
+            else
+                for c in 1:r
+                    φ[c, i] = T(φ0[e, c])
+                end
             end
-        else
-            for c in 1:r
-                φ[c, i] = T(φ0[e, c])
-            end
+        end
+    else
+        @inbounds for i in 1:(N - 1), c in 1:r
+            φ[c, i] = T(φ0[i, c])
         end
     end
     return semiseparable_loglike(t, y, A, U, V, φ)
@@ -399,63 +405,127 @@ end
 # the sort and the C-fold redundant generator rows leave the per-call cost.
 # ---------------------------------------------------------------------------
 struct _MSLayout
-    t_all::Vector{Float64}       # input times, unsorted (lookup key)
-    series_id::Vector{Int}       # input series ids, unsorted (lookup key)
+    t_all::Vector{Float64}       # input times, unsorted (lookup key; empty if uncached)
+    series_id::Vector{Int}       # input series ids, unsorted (lookup key; empty if uncached)
     ord::Vector{Int}             # stable sortperm(t_all)
     t::Vector{Float64}           # t_all[ord]
     sid::Vector{Int}             # series_id[ord]
-    tu::Vector{Float64}          # distinct epochs of t, ascending
+    tu::Vector{Float64}          # distinct epochs of t, ascending (t itself without ties)
     dtu::Vector{Float64}         # diff(tu)
-    row::Vector{Int}             # t[i] === tu[row[i]]
+    row::Vector{Int}             # t[i] === tu[row[i]]; empty without ties (row i is epoch i)
     has_ties::Bool
 end
 
-function _ms_layout_build(t_all, series_id)
+# `keyed = false` builds a layout for one call only: no key copies, and without
+# ties no epoch arrays beyond the sorted times, so it allocates no more than the
+# per-call sort the cache replaces.
+function _ms_layout_build(t_all, series_id, keyed::Bool = true)
     ord = sortperm(t_all)                          # stable → simultaneous ties keep order
-    t   = Float64.(t_all[ord])
-    sid = Vector{Int}(series_id[ord])
-    N = length(t)
-    row = Vector{Int}(undef, N)
-    tu = Float64[]
+    N = length(ord)
+    t = Vector{Float64}(undef, N)
+    sid = Vector{Int}(undef, N)
     @inbounds for i in 1:N
-        # a tie only between identical finite values: t[i+1] − t[i] is then +0.0,
-        # the gap φtie is evaluated at (−0.0 vs 0.0, NaN and Inf stay distinct)
-        if i > 1 && t[i] === t[i - 1] && isfinite(t[i])
-            row[i] = row[i - 1]
-        else
-            push!(tu, t[i]); row[i] = length(tu)
+        j = ord[i]
+        t[i] = Float64(t_all[j]); sid[i] = Int(series_id[j])
+    end
+    # a tie only between identical finite values: t[i+1] − t[i] is then +0.0,
+    # the gap φtie is evaluated at (−0.0 vs 0.0, NaN and Inf stay distinct)
+    istie(i) = @inbounds(t[i] === t[i - 1] && isfinite(t[i]))
+    nties = count(istie, 2:N)
+    if nties == 0
+        tu = t; row = Int[]
+    else
+        tu = Vector{Float64}(undef, N - nties); row = Vector{Int}(undef, N)
+        e = 0
+        @inbounds for i in 1:N
+            if i == 1 || !istie(i)
+                e += 1; tu[e] = t[i]
+            end
+            row[i] = e
         end
     end
     dtu = length(tu) > 1 ? diff(tu) : Float64[]
-    return _MSLayout(Vector{Float64}(t_all), Vector{Int}(series_id), ord, t, sid,
-                     tu, dtu, row, length(tu) < N)
+    return _MSLayout(keyed ? Vector{Float64}(t_all) : Float64[],
+                     keyed ? Vector{Int}(series_id) : Int[],
+                     ord, t, sid, tu, dtu, row, nties > 0)
 end
 
 _same_bits(a::AbstractVector, b::AbstractVector) =
     length(a) == length(b) && all(i -> @inbounds(a[i] === b[i]), eachindex(a, b))
+# === on Float64 / Int is equality of the bits, so dense vectors compare as memory.
+_same_bits(a::Vector{T}, b::Vector{T}) where {T<:Union{Float64,Int}} =
+    length(a) == length(b) &&
+    GC.@preserve(a, b, ccall(:memcmp, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
+                             a, b, sizeof(a))) == 0
 
-# A few recent layouts, shared by all threads. The list is replaced, never
-# mutated, so a reader holds a consistent snapshot; two threads missing at once
-# both build and one entry is dropped, which costs a rebuild, not a wrong hit.
-# A hit needs the same bits in both keys, so a layout is never reused for
-# different data.
-mutable struct _MSLayoutCache
-    @atomic entries::Vector{_MSLayout}
+# Layouts shared by all threads, with a clock of lookups and, per entry, the
+# clock at its last hit. The entry list is replaced, never mutated, so a reader
+# holds a consistent snapshot; two threads missing at once both build and one
+# entry may be dropped, which costs a rebuild, not a wrong hit. A hit needs the
+# same bits in both keys, so a layout is never reused for different data.
+#
+# A newcomer is cached while there is room (`slots` entries, `rows` rows in all)
+# or once an entry has gone `idle` lookups without a hit and can make room. An
+# entry still in use is never evicted, so a fit cycling through more layouts
+# than fit keeps hitting on the cached ones and builds the rest per call
+# (uncached, as before the cache existed) instead of rebuilding and evicting on
+# every call; the layouts of an earlier fit go idle and give way to a new one.
+mutable struct _MSCached
+    const L::_MSLayout
+    @atomic last::Int
 end
-const _MS_LAYOUT_CACHE = _MSLayoutCache(_MSLayout[])
-const _MS_LAYOUT_SLOTS = 4
 
-function _ms_layout(t_all::AbstractVector, series_id::AbstractVector)
+mutable struct _MSLayoutCache
+    @atomic entries::Vector{_MSCached}
+    @atomic clock::Int
+    const slots::Int
+    const rows::Int
+    const idle::Int
+end
+_MSLayoutCache(; slots::Int = 16, rows::Int = 1 << 20, idle::Int = 1024) =
+    _MSLayoutCache(_MSCached[], 0, slots, rows, idle)
+
+const _MS_LAYOUT_CACHE = _MSLayoutCache()
+
+_ms_layout(t_all::AbstractVector, series_id::AbstractVector) =
+    _ms_layout(_MS_LAYOUT_CACHE, t_all, series_id)
+
+function _ms_layout(C::_MSLayoutCache, t_all::AbstractVector, series_id::AbstractVector)
     (eltype(t_all) === Float64 && eltype(series_id) === Int) ||
-        return _ms_layout_build(t_all, series_id)
-    entries = @atomic :acquire _MS_LAYOUT_CACHE.entries
-    for L in entries
-        _same_bits(L.t_all, t_all) && _same_bits(L.series_id, series_id) && return L
+        return _ms_layout_build(t_all, series_id, false)
+    now = @atomic :monotonic C.clock += 1
+    entries = @atomic :acquire C.entries
+    for E in entries
+        L = E.L
+        if _same_bits(L.t_all, t_all) && _same_bits(L.series_id, series_id)
+            @atomic :monotonic E.last = now
+            return L
+        end
     end
-    L = _ms_layout_build(t_all, series_id)
-    keep = entries[1:min(length(entries), _MS_LAYOUT_SLOTS - 1)]
-    @atomic :release _MS_LAYOUT_CACHE.entries = pushfirst!(keep, L)
+    keep = _ms_admit(C, entries, length(t_all), now)
+    keep === nothing && return _ms_layout_build(t_all, series_id, false)
+    L = _ms_layout_build(t_all, series_id, true)
+    push!(keep, _MSCached(L, now))
+    @atomic :release C.entries = keep
     return L
+end
+
+# The entries to keep when a layout of n rows is cached (a new vector), or
+# `nothing` if it is not: idle entries are dropped, least recently hit first,
+# only as far as needed to make room.
+function _ms_admit(C::_MSLayoutCache, entries::Vector{_MSCached}, n::Int, now::Int)
+    n > C.rows && return nothing
+    last = Int[(@atomic :monotonic E.last) for E in entries]
+    order = sortperm(last)                         # least recently hit first
+    rows = sum(E -> length(E.L.t), entries; init = 0)
+    drop = 0
+    while length(entries) - drop >= C.slots || rows + n > C.rows
+        drop < length(entries) || return nothing
+        k = order[drop + 1]
+        now - last[k] > C.idle || return nothing
+        rows -= length(entries[k].L.t); drop += 1
+    end
+    return entries[sort!(order[(drop + 1):end])]
 end
 
 # Element type of a kernel's hyperparameters (for AD promotion).
