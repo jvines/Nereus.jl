@@ -1374,6 +1374,14 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
     # block partition, so it keeps the dense build).
     if !agp.marginalize_indicators && n_total > n_rv_obs
         ep = view(data.t_rv, 1:n_rv_obs)
+        # With no Ġ coupling at all (use_derivative = false) the solver must
+        # see constants there, or it takes the dense likelihood for
+        # derivatives. A zero of a number type that cannot show it carries no
+        # derivative (ReverseDiff's tracked reals) is passed as a Float64 zero.
+        if !_agp_zero_is_constant(T) && ix.Vr == 0 && all(iszero, ix.b)
+            return activity_gp_joint_logpdf_lowrank(ep, chan_a, zeros(C),
+                amp, P, λe, λp, y_flat, σ²_flat)
+        end
         return ws === nothing ?
             activity_gp_joint_logpdf_lowrank(ep, chan_a, chan_b,
                 amp, P, λe, λp, y_flat, σ²_flat) :

@@ -3,6 +3,7 @@
 
 using Nereus, LinearAlgebra, Random, Test, ForwardDiff
 using Random: MersenneTwister
+import ReverseDiff, LogDensityProblemsAD
 
 # Transcription of the closed forms in the header of src/noise/activity_gp.jl:
 #   f   = -τ²/(2λe²) - sin²(πτ/P)/(2λp²)
@@ -501,6 +502,98 @@ end
             e = zeros(length(yv)); e[d] = h
             fd = (lp(yv .+ e) - lp(yv .- e)) / 2h
             @test g[d] ≈ fd rtol = 1e-4 atol = 1e-5
+        end
+    end
+end
+
+@testset "AGP whitened solver: ReverseDiff gradients at singular blocks" begin
+    # The dense route for derivatives was taken for ForwardDiff duals only, so
+    # ReverseDiff's tracked reals (sample_nuts with ad_backend = :ReverseDiff)
+    # still went through R at singular blocks: on the three-channel HD 18599
+    # model with every G coupling 0 those couplings' derivatives came out 0
+    # against −5.6e4, −3.1e3 and +5.1e4. Every number type that is not a plain
+    # float now takes it. References: the dense likelihood differentiated in
+    # BigFloat.
+    rng = MersenneTwister(1)
+    N, C = 20, 5
+    epochs = sort!(60 .* rand(rng, N))
+    σ² = 0.1 .+ rand(rng, C * N); y = randn(rng, C * N)
+    hyp = (1.0, 9.0, 30.0, 0.6)
+    a0 = [1.0, 0.5, -0.7, 0.3, 0.8]; b0 = [0.4, -0.2, 0.3, 0.1, 0.0]
+    nz = [0.3, -0.5, 0.2, 0.9, -0.4]
+    function rd_err(split, x; yy = y, s = σ²)
+        g = ReverseDiff.gradient(v -> Nereus.activity_gp_joint_logpdf_lowrank(
+                epochs, split(v)..., hyp..., yy, s), x)
+        gb = setprecision(BigFloat, 128) do
+            ForwardDiff.gradient(v -> _agp_dense(big.(epochs), split(v)..., big.(hyp)...,
+                                                 big.(yy), big.(s)), big.(x))
+        end
+        # Relative to the largest component (absolute where all are 0).
+        nb = maximum(abs, gb)
+        return Float64(maximum(abs.(g .- gb)) / (iszero(nb) ? one(nb) : nb)), gb
+    end
+    split5(x) = (x[1:C], x[C+1:2C])
+    for (what, x) in (("every G coupling 0", vcat(zeros(C), b0)),
+                      ("every Ġ coupling 0", vcat(a0, zeros(C))),
+                      ("Ġ couplings ∝ G couplings", vcat(a0, 0.5 .* a0)),
+                      ("every coupling 0", zeros(2C)))
+        e, gb = rd_err(split5, x)
+        @test e <= 1e-12
+        what == "every coupling 0" || @test maximum(abs, gb) > 1
+    end
+    for k in (2, 6, 10, 16, 100)
+        ϵ = 10.0^-k
+        @test rd_err(split5, vcat(ϵ .* a0, b0))[1] <= 1e-10
+        @test rd_err(split5, vcat(a0, ϵ .* b0))[1] <= 1e-10
+        @test rd_err(split5, vcat(a0, 0.7 .* a0 .+ ϵ .* nz))[1] <= 1e-10
+        @test rd_err(split5, ϵ .* vcat(a0, b0 .+ 0.1))[1] <= 1e-10
+    end
+    # No Ġ coupling at all. Float64 zeros are constants, so the blocks are
+    # 1×1 and the low-rank route is kept; tracked zeros cannot be told from
+    # parameters at 0 and take the dense route. Both are exact.
+    @test rd_err(x -> (x, zeros(C)), a0)[1] <= 1e-12
+    @test rd_err(x -> (x, zero(x)), a0)[1] <= 1e-12
+    @test Nereus._agp_zero_is_constant(Float64)
+    @test Nereus._agp_zero_is_constant(ForwardDiff.Dual{:t, Float64, 2})
+    @test !Nereus._agp_zero_is_constant(ReverseDiff.TrackedReal{Float64, Float64, Nothing})
+    @test !Nereus._agp_strictly_zero(zero(ReverseDiff.TrackedReal{Float64, Float64, Nothing}))
+    @test !Nereus._agp_all_strictly_zero(ReverseDiff.track(zeros(3)))
+    @test Nereus._agp_all_strictly_zero(zeros(3))
+
+    # Through the model, with the gradient object sample_nuts builds for
+    # ad_backend = :ReverseDiff, compile_tape = false: five channels with
+    # every G or every Ġ coupling at 0, three channels with every G coupling
+    # at 0, and use_derivative = false with every G coupling at 0. The
+    # reference is ForwardDiff on BigFloat, which takes the dense likelihood
+    # at these points.
+    for (kw, zeroed) in (((;), ["Vc", "Bc", "Fc", "Hc", "Lc"]),
+                         ((;), ["Vr", "Br", "Fr", "Hr"]),
+                         ((; channels = [:bis, :fwhm]), ["Vc", "Bc", "Fc"]),
+                         ((; use_derivative = false), ["Vc", "Bc", "Fc", "Hc", "Lc"]),
+                         ((; use_derivative = false), String[]))
+        data, params, _ = _agp_params(MersenneTwister(5); n = 12, kw...)
+        target = NereusTarget(params, data)
+        L = params.layout
+        th = Theta{Float64}(params)
+        _prior_theta!(th, params, MersenneTwister(6))
+        for n in zeroed; th.values[L.name_to_idx[n]] = 0.0; end
+        yv = Nereus.transform_forward([th.values[i] for i in L.unfrozen_idx],
+                                      target.transform)
+        ℓ = LogDensityProblemsAD.ADgradient(:ReverseDiff, target)
+        v, g = Nereus.LogDensityProblems.logdensity_and_gradient(ℓ, yv)
+        # The value comes from the dense likelihood here, so it differs from
+        # the Float64 log-density in the last digits.
+        @test v ≈ Nereus.LogDensityProblems.logdensity(target, yv) rtol = 1e-12
+        gb = setprecision(BigFloat, 128) do
+            lpb(z) = Nereus.LogDensityProblems.logdensity(target, z)
+            # One chunk size for every model: compiled once.
+            ForwardDiff.gradient(lpb, big.(yv),
+                ForwardDiff.GradientConfig(lpb, big.(yv), ForwardDiff.Chunk{6}()))
+        end
+        @test maximum(abs.(g .- gb)) <= 1e-10 * maximum(abs, gb)
+        for n in zeroed
+            d = findfirst(==(n), L.unfrozen_names)
+            @test abs(g[d] - gb[d]) <= 1e-10 * maximum(abs, gb)
         end
     end
 end

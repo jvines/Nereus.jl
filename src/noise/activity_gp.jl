@@ -1018,17 +1018,22 @@ as the dense Cholesky's without being smaller: at most 1.1e-5 nats against
 extreme prior draws where |log L| ~ 1e4 (medians 1e-9 for both).
 test/test_activity_gp_lowrank.jl checks it.
 
-Dual numbers (ForwardDiff) take the same route, with two exceptions. R_j is
+Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked reals,
+any type that is not a plain float) take the same route, with two
+exceptions. R_j is
 a square root of B_j, so it is not differentiable where B_j is singular
 (every G coupling 0, every Ġ coupling 0, or all channels' (a_c, b_c)
 parallel), and its derivative loses accuracy as B_j approaches that. And
 w = R⁻ᵀ·Mᵀ D⁻¹ y divides by R, so when every coupling is tiny against the
 noise its derivatives cancel to a relative error of about eps/SNR. When a
 block's smaller eigenvalue is below 1e-10 of its larger, or the GP's
-signal-to-noise is below 1e-6 at every epoch, dual inputs are evaluated with
+signal-to-noise is below 1e-6 at every epoch, such inputs are evaluated with
 the dense (C·N)² Cholesky instead, which is smooth there. A coupling that is
 a constant 0 (every Ġ coupling under `use_derivative = false`) is not a
-direction of the block and does not count. On the HD 18599 job this happens
+direction of the block and does not count; only a plain number, or a
+ForwardDiff dual whose partials are all 0, is known to be one, so the
+likelihood passes the missing Ġ couplings of a tracked number type as
+`Float64` zeros. On the HD 18599 job this happens
 at couplings that are exactly 0 (the prior box centre), at none of ~250
 prior draws and 150 near-posterior points with five channels, and at 2 of
 236 prior draws with RV and logR'HK alone. `Float64` values are exact at
@@ -1103,12 +1108,29 @@ end
     return (k, -fp * k, fp * k, -(fpp + fp * fp) * k)
 end
 
-# Zero in its value and in every partial derivative, at any nesting of
-# ForwardDiff duals (ForwardDiff 0.10's `iszero` looks at the value only).
-_agp_strictly_zero(x::Real) = iszero(x)
+# Zero in its value and in every derivative it carries. Plain numbers carry
+# none. ForwardDiff duals are checked at any nesting (ForwardDiff 0.10's
+# `iszero` looks at the value only). Any other number type (ReverseDiff's
+# tracked reals, for one) may carry derivatives that cannot be read here, so
+# its zeros are never taken for a missing coupling.
+_agp_strictly_zero(x::Union{AbstractFloat, Integer}) = iszero(x)
 _agp_strictly_zero(x::ForwardDiff.Dual) =
     _agp_strictly_zero(ForwardDiff.value(x)) &&
     all(_agp_strictly_zero, ForwardDiff.partials(x))
+_agp_strictly_zero(::Real) = false
+# Whether `zero(T)` reads as a constant to `_agp_strictly_zero`.
+_agp_zero_is_constant(::Type{<:Union{AbstractFloat, Integer}}) = true
+_agp_zero_is_constant(::Type{<:ForwardDiff.Dual{Tg, V}}) where {Tg, V} =
+    _agp_zero_is_constant(V)
+_agp_zero_is_constant(::Type) = false
+# Every element strictly zero. Indexed one by one: ReverseDiff's `all` on a
+# tracked array tests the values, not the tracked elements.
+function _agp_all_strictly_zero(v::AbstractVector)
+    @inbounds for i in eachindex(v)
+        _agp_strictly_zero(v[i]) || return false
+    end
+    return true
+end
 
 # Whether derivatives taken through the factors R_j of B are accurate here.
 # Two things break them. (1) R_j is a square root of B_j: not differentiable
@@ -1124,8 +1146,8 @@ _agp_strictly_zero(x::ForwardDiff.Dual) =
 function _agp_blocks_smooth(bGG::AbstractVector, bGd::AbstractVector,
                             bdd::AbstractVector, chan_a::AbstractVector,
                             chan_b::AbstractVector, k0GG::Real, k0dd::Real)
-    noG = all(_agp_strictly_zero, chan_a)
-    noD = all(_agp_strictly_zero, chan_b)
+    noG = _agp_all_strictly_zero(chan_a)
+    noD = _agp_all_strictly_zero(chan_b)
     noG && noD && return true
     snr = zero(promote_type(eltype(bGG), eltype(bdd), typeof(k0GG), typeof(k0dd)))
     @inbounds for j in eachindex(bGG)
@@ -1137,12 +1159,23 @@ function _agp_blocks_smooth(bGG::AbstractVector, bGd::AbstractVector,
         else
             (g > 0 && e > 0) || return false
             h = bGd[j]
-            # g·q, with q = e − h²/g the Schur complement the solver factors.
-            g * (e - h * h / g) >= 1e-10 * (g + e)^2 || return false
+            # det B_j = g·e − h², without a division: under reverse-mode AD
+            # this arithmetic is recorded too, and h²/g at a tiny g would put
+            # an infinite derivative on the tape.
+            g * e - h * h >= 1e-10 * (g + e)^2 || return false
         end
         snr = max(snr, k0GG * g + k0dd * e)
     end
     return snr >= 1e-6
+end
+
+# Whether any of these numbers, or any element of these vectors, is NaN.
+function _agp_nan_seen(yDy, logdetD, vs::AbstractVector...)
+    (isnan(yDy) || isnan(logdetD)) && return true
+    for x in vs, i in eachindex(x)
+        isnan(x[i]) && return true
+    end
+    return false
 end
 
 # The dense (C·N)² Gaussian log-density of the same Σ = M·K_g·Mᵀ + D,
@@ -1192,6 +1225,26 @@ function _agp_whitened_core!(A::AbstractMatrix,
         end
     end
 
+    kc = _qp_consts(amp, P, λe, λp)
+
+    # Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked
+    # reals, any type that is not a plain float): where derivatives through
+    # R lose their accuracy (a singular or nearly singular block of B, or a
+    # GP too faint against the noise; see _agp_blocks_smooth) the dense
+    # likelihood is smooth and is used instead. Decided before R is formed:
+    # a reverse-mode tape keeps every operation, and R's derivatives at a
+    # vanishing block are infinite even where R goes unused (0·Inf = NaN).
+    # Compiled out for Float64, whose values are exact at singular blocks.
+    if !(T <: AbstractFloat)
+        k0GG, _, _, k0dd = _qp_blocks_sincos(zero(eltype(epochs)), kc)
+        if !_agp_blocks_smooth(bGG, bGd, bdd, chan_a, chan_b, k0GG, k0dd)
+            # A NaN input gives NaN, as on the low-rank route below.
+            _agp_nan_seen(yDy, logdetD, bGG, bGd, bdd, v) && return convert(TA, NaN)
+            return convert(TA, _agp_dense_logpdf(epochs, chan_a, chan_b,
+                                                 amp, P, λe, λp, y_flat, σ²_flat))
+        end
+    end
+
     # B_j = R_jᵀ R_j with R_j = [r11 r12; 0 r22], and w = R⁻ᵀ v. A block with
     # no G information (bGG = 0, hence bGĠ = 0) factors as diag(0, √bĠĠ); a
     # rank-1 block (no Ġ information independent of G) gets r22 = 0. A zero
@@ -1221,19 +1274,6 @@ function _agp_whitened_core!(A::AbstractMatrix,
     # A NaN coupling, variance or residual gives NaN, as the dense likelihood
     # does, rather than whatever the Cholesky of a NaN matrix returns.
     isnan(ww) && return convert(TA, NaN)
-
-    kc = _qp_consts(amp, P, λe, λp)
-
-    # Dual numbers: where derivatives through R lose their accuracy (a
-    # singular or nearly singular block of B, or a GP too faint against the
-    # noise; see _agp_blocks_smooth) the dense likelihood is smooth and is
-    # used instead. Compiled out for Float64.
-    if T <: ForwardDiff.Dual
-        k0GG, _, _, k0dd = _qp_blocks_sincos(zero(eltype(epochs)), kc)
-        _agp_blocks_smooth(bGG, bGd, bdd, chan_a, chan_b, k0GG, k0dd) ||
-            return convert(TA, _agp_dense_logpdf(epochs, chan_a, chan_b,
-                                                 amp, P, λe, λp, y_flat, σ²_flat))
-    end
 
     # Upper triangle of A = I + R·K_g·Rᵀ, straight from the kernel blocks at
     # τ = t_j − t_k (j ≤ k). Rows j and N+j of R·g are r11·G_j + r12·Ġ_j and
