@@ -164,8 +164,75 @@ end
 # after a resume, and the data itself is in the run fingerprint.
 mutable struct PhotDataCache
     n_super::Int        # _phot_n_super(data); 0 = not computed yet (it is >= 1)
+    # Time order of the cadences, for `_phot_window_indices!`. `t_phot` is not
+    # sorted across instruments. Built on first use (`order_built`).
+    order_built::Bool
+    sortable::Bool              # every t_phot finite
+    perm::Vector{Int}           # t_phot[perm] == t_sorted
+    t_sorted::Vector{Float64}
 end
-PhotDataCache() = PhotDataCache(0)
+PhotDataCache() = PhotDataCache(0, false, false, Int[], Float64[])
+
+function _phot_time_order!(data::Data, cache::PhotDataCache)
+    if !cache.order_built
+        t = data.t_phot
+        cache.sortable = all(isfinite, t)
+        if cache.sortable
+            cache.perm = sortperm(t)
+            cache.t_sorted = t[cache.perm]
+        end
+        cache.order_built = true
+    end
+    return cache
+end
+
+# Append to `idx` every cadence i with |Δt| <= hw, where Δt = t_i - Tc folded
+# by P: the same set, from the same expression, as testing all n_obs cadences,
+# but only the cadences within hw + δ of a transit centre are tested, found by
+# binary search in the time order. δ is far above the rounding of the folded Δt
+# and of Tc + mP, so no cadence the test accepts is missed. Indices come in time
+# order, not index order; each one's flux is computed on its own, so the order
+# changes nothing. Falls back to the full scan when the window is not narrow
+# (hw >= P/4, NaN), or an input or a cadence time is not finite.
+function _phot_window_indices!(idx::Vector{Int}, data::Data, cache::PhotDataCache,
+                               Tc::Float64, P::Float64, hw::Float64)
+    t_phot = data.t_phot
+    n = length(t_phot)
+    n == 0 && return idx
+    _phot_time_order!(data, cache)
+    ts = cache.t_sorted
+    δ = cache.sortable ? 1e-6 + 1e-12 * (abs(ts[1]) + abs(ts[end]) + abs(Tc) + abs(P)) : 0.0
+    w = max(hw, 0.0) + δ
+    if !(cache.sortable && isfinite(Tc) && P > 0 && isfinite(P) && w < P / 4)
+        @inbounds for i in 1:n
+            Δt = t_phot[i] - Tc
+            Δt -= P * round(Δt / P)
+            abs(Δt) <= hw && push!(idx, i)
+        end
+        return idx
+    end
+    perm = cache.perm
+    fwd = Base.Order.Forward
+    r = 1
+    @inbounds while r <= n
+        c = Tc + round((ts[r] - Tc) / P) * P     # nearest transit centre
+        if ts[r] < c - w                          # before its window: jump in
+            r = searchsortedfirst(ts, c - w, r, n, fwd)
+        elseif ts[r] > c + w                      # after it: jump to the next
+            r = searchsortedfirst(ts, c + P - w, r, n, fwd)
+        else
+            hi = c + w
+            while r <= n && ts[r] <= hi
+                i = perm[r]
+                Δt = t_phot[i] - Tc
+                Δt -= P * round(Δt / P)
+                abs(Δt) <= hw && push!(idx, i)
+                r += 1
+            end
+        end
+    end
+    return idx
+end
 
 # `_phot_n_super(data)` reads every exposure time, about 20 us on 20k cadences,
 # and the workspace likelihood asked for it on every call.
@@ -1416,13 +1483,8 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
                 tight = _tight_gate_halfwidth(Pj, ej, wj, rrj, aj,
                                               max(abs(Tc_center), abs(Tpj)), T_dur_safe, 0.0)
                 tight < T_dur_safe && (T_dur_safe = tight)
-                @inbounds for i in 1:n_obs
-                    Δt = data.t_phot[i] - Tc_center
-                    Δt -= Pj * round(Δt / Pj)
-                    if abs(Δt) <= T_dur_safe
-                        push!(old_idx, i)
-                    end
-                end
+                _phot_window_indices!(old_idx, data, ws.phot_data, Tc_center, Pj,
+                                      T_dur_safe)
 
                 # 3. Compute flux at the in-transit indices. Threaded
                 # only when N is large enough to amortize spawn overhead;
