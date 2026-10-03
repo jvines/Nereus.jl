@@ -155,6 +155,7 @@ function sample_nested_ins(
         ll = rv_log_likelihood(theta, data, wb)
         isfinite(ll) || return -Inf
         ll += transit_log_likelihood(theta, data, wb)
+        ll += tomogram_log_likelihood(theta, data)  # residual maps
         return ll
     end
 

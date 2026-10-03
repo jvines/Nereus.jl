@@ -284,7 +284,8 @@ function sample_pt_whitening(
         lp = log_prior(theta)
         isfinite(lp) || return (-Inf, -Inf)
         ll = rv_log_likelihood(theta, data, wb) +
-             transit_log_likelihood(theta, data, wb)
+             transit_log_likelihood(theta, data, wb) +
+             tomogram_log_likelihood(theta, data)
         return (lp, ll)
     end
 

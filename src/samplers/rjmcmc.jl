@@ -521,6 +521,7 @@ end
     ll = rv_log_likelihood(theta, data)
     isfinite(ll) || return -Inf
     ll += transit_log_likelihood(theta, data)
+    ll += tomogram_log_likelihood(theta, data)      # residual maps
     return ll
 end
 
@@ -719,6 +720,7 @@ end
     ll = rv_log_likelihood(theta, data, ws)
     isfinite(ll) || return -Inf
     ll += transit_log_likelihood(theta, data, ws)
+    ll += tomogram_log_likelihood(theta, data)      # residual maps
     return ll
 end
 
