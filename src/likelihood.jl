@@ -123,8 +123,8 @@ function rv_log_likelihood(theta::Theta{T}, data::Data) where {T}
     ll_astrom = astrom_log_likelihood(theta, data)
     isfinite(ll_astrom) || return convert(T, -Inf)
 
-    # Indicator-floor (no-op unless an IndicatorFloor noise model is active
-    # — i.e. only in a trans-dim noise selection that includes ActivityGP).
+    # Indicator floor: zero unless an IndicatorFloor noise model is active
+    # (it is in every fixed-dim HD 18599 config, not only trans-dim runs).
     ll_ifloor = indicator_floor_log_likelihood(theta, data)
     isfinite(ll_ifloor) || return convert(T, -Inf)
 
@@ -672,9 +672,11 @@ function rv_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     ll_astrom = astrom_log_likelihood(theta, data)
     isfinite(ll_astrom) || return convert(T, -Inf)
 
-    # Indicator-floor (no-op unless an IndicatorFloor noise model is active
-    # — i.e. only in a trans-dim noise selection that includes ActivityGP).
-    ll_ifloor = indicator_floor_log_likelihood(theta, data)
+    # Indicator floor: zero unless an IndicatorFloor noise model is active.
+    # It is active in every fixed-dim HD 18599 config, not only in trans-dim
+    # selections, so this path uses the workspace method (same bits, no
+    # allocation).
+    ll_ifloor = indicator_floor_log_likelihood(theta, data, ws)
     isfinite(ll_ifloor) || return convert(T, -Inf)
 
     return ll + lp_ext + ll_astrom + ll_ifloor
@@ -928,12 +930,15 @@ function _active_activity_gps(theta::Theta, noise_models)
     return out
 end
 
-# Indicator-floor white likelihood for a trans-dim noise SELECTION that
-# includes ActivityGP (see the IndicatorFloor docstring). Scores each
-# floor channel as iid N(0, σ_floor² + err²), SKIPPING channels already
-# covered by an active joint ActivityGP (the AGP scores those). Returns
-# 0 when no active IndicatorFloor is configured — i.e. for every run
-# without an AGP-toggle, so this is a no-op on the entire existing suite.
+# Indicator-floor likelihood (see the IndicatorFloor docstring). Scores each
+# floor channel on its own — iid N(0, σ_floor² + err²) for `kernel = :white`,
+# a quasi-periodic GP for `kernel = :qp` — SKIPPING channels already covered
+# by an active joint ActivityGP (the AGP scores those). Returns 0 only when
+# no IndicatorFloor is active. Every fixed-dim HD 18599 config carries an
+# active :qp floor, where it is a large share of each RV evaluation; the
+# PTWorkspace path uses `indicator_floor_log_likelihood(theta, data, ws)`
+# below, which returns the same bits without allocating.
+#
 # Quasi-periodic GP log-likelihood for ONE indicator channel (dense Cholesky,
 # mirrors ActivityGP's k_GG block — VALUE term only, no derivative coupling).
 #   k(τ) = amp²·exp(−τ²/2λe² − sin²(πτ/P)/2λp²),  diag += err² + jit²
@@ -1034,6 +1039,175 @@ function indicator_floor_log_likelihood(theta::Theta{T}, data::Data) where {T}
             v2 = σf2 + e2
             total += -0.5 * (convert(T, vals[k])^2 / v2 + log(2π * v2))
         end
+    end
+    return total
+end
+
+# ---------------------------------------------------------------------
+# IndicatorFloor on the PTWorkspace path
+# ---------------------------------------------------------------------
+"""
+    RVNoiseScratch
+
+Scratch for the RV-side noise terms, one per `PTWorkspace` (so one per
+sampler slot, and never shared between tasks). Nothing in it is chain
+state: every buffer is overwritten before it is read, and the resolved
+layout slots are rebuilt whenever the layout or the noise model they were
+resolved for changes. Checkpoints leave it out.
+"""
+mutable struct RVNoiseScratch
+    # IndicatorFloor (:qp) — layout slots, resolved once per (layout, floor)
+    floor_key::Any                  # the layout.name_to_idx they come from
+    floor_model::Any                # the IndicatorFloor they belong to
+    floor_names::Vector{String}     # String(ch), per floor channel
+    floor_amp::Vector{Int}          # slot of ind_floor_<ch>_amp, 0 if absent
+    floor_jit::Vector{Int}          # slot of ind_floor_<ch>_jit, 0 if absent
+    floor_P::Int                    # slots of ind_floor_period / _lambda_e /
+    floor_le::Int                   # _lambda_p, 0 if absent
+    floor_lp::Int
+    # IndicatorFloor (:qp) — buffers, n_rv × n_rv
+    floor_K0::Matrix{Float64}       # kernel shape shared by every channel (upper)
+    floor_Σ::Matrix{Float64}        # one channel's covariance, factored in place
+    floor_α::Vector{Float64}        # Σ⁻¹ y
+end
+
+RVNoiseScratch() = RVNoiseScratch(nothing, nothing, String[], Int[], Int[], 0, 0, 0,
+                                  Matrix{Float64}(undef, 0, 0),
+                                  Matrix{Float64}(undef, 0, 0), Float64[])
+
+# Resolve the floor's layout slots once; later calls only compare two keys.
+function _floor_slots!(sc::RVNoiseScratch, layout, floor::IndicatorFloor)
+    idx = layout.name_to_idx
+    (sc.floor_key === idx && sc.floor_model === floor) && return sc
+    nc = length(floor.channels)
+    names = Vector{String}(undef, nc)
+    amp = zeros(Int, nc)
+    jit = zeros(Int, nc)
+    for (c, ch) in enumerate(floor.channels)
+        names[c] = String(ch)
+        amp[c] = get(idx, "ind_floor_$(ch)_amp", 0)
+        jit[c] = get(idx, "ind_floor_$(ch)_jit", 0)
+    end
+    sc.floor_names = names
+    sc.floor_amp = amp
+    sc.floor_jit = jit
+    sc.floor_P  = get(idx, "ind_floor_period", 0)
+    sc.floor_le = get(idx, "ind_floor_lambda_e", 0)
+    sc.floor_lp = get(idx, "ind_floor_lambda_p", 0)
+    sc.floor_key = idx
+    sc.floor_model = floor
+    return sc
+end
+
+"""
+    indicator_floor_log_likelihood(theta, data, ws) -> T
+
+`indicator_floor_log_likelihood(theta, data)` for the PTWorkspace path.
+For a `Float64` theta and the `:qp` kernel it returns the same bits without
+allocating: the kernel shape exp(−τ²/2λe² − sin²(πτ/P)/2λp²) depends only on
+the shared (P, λe, λp) and the RV epochs, so it is built once per call
+rather than once per channel, and each channel's Σ = amp²·K0 + diag(err² +
+jit²) is factored in place (`potrf!('U')`, then `potrs!`) in buffers held by
+`ws.rv_noise`. Every Σ entry is still `amp2 * exp(arg)` and the LAPACK calls
+are the ones `cholesky(Symmetric(Σ)) \\ y` makes, so nothing changes in the
+result. Any other case (ForwardDiff duals, the `:white` kernel) goes to the
+generic method.
+"""
+function indicator_floor_log_likelihood(theta::Theta{Float64}, data::Data, ws)
+    nm_list = theta.params.config.noise_models
+    floor = nothing
+    @inbounds for i in eachindex(nm_list)
+        nm = nm_list[i]
+        nm isa IndicatorFloor || continue
+        is_noise_model_active(theta, i) || continue
+        floor = nm; break
+    end
+    floor === nothing && return 0.0
+    floor.kernel === :qp || return indicator_floor_log_likelihood(theta, data)
+    return _qp_floor_ll_ws(theta, data, floor, ws.rv_noise)
+end
+
+indicator_floor_log_likelihood(theta::Theta, data::Data, ws) =
+    indicator_floor_log_likelihood(theta, data)
+
+function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloor,
+                         sc::RVNoiseScratch)
+    T = Float64
+    nm_list = theta.params.config.noise_models
+    covered = Set{Symbol}()
+    @inbounds for i in eachindex(nm_list)
+        nm = nm_list[i]
+        nm isa ActivityGP || continue
+        nm.indicators_only && continue
+        is_noise_model_active(theta, i) || continue
+        for ch in nm.channels
+            ch === :rv || push!(covered, ch)
+        end
+    end
+    _floor_slots!(sc, theta.params.layout, floor)
+    vals = theta.values
+    P   = vals[sc.floor_P]
+    λ_e = vals[sc.floor_le]
+    λ_p = vals[sc.floor_lp]
+    (P > 0 && λ_e > 0 && λ_p > 0) || return convert(T, -Inf)
+    t = data.t_rv
+    n = length(t)
+    if size(sc.floor_Σ, 1) != n
+        sc.floor_K0 = Matrix{Float64}(undef, n, n)
+        sc.floor_Σ  = Matrix{Float64}(undef, n, n)
+        sc.floor_α  = Vector{Float64}(undef, n)
+    end
+    K0 = sc.floor_K0
+    Σ  = sc.floor_Σ
+    α  = sc.floor_α
+    total = zero(T)
+    shape_done = false
+    for c in eachindex(floor.channels)
+        floor.channels[c] in covered && continue
+        name = sc.floor_names[c]
+        y = get(data.indicators, name, nothing)
+        y === nothing && continue
+        ai = sc.floor_amp[c]
+        ji = sc.floor_jit[c]
+        (ai == 0 || ji == 0) && continue
+        amp = vals[ai]; jit = vals[ji]
+        (amp > 0 && jit > 0) || return convert(T, -Inf)
+        # A channel not parallel to the RV epochs is an error in the generic
+        # method (`F \ y`); let it raise there.
+        length(y) == n || return indicator_floor_log_likelihood(theta, data)
+        errs = get(data.indicator_errs, name, nothing)
+        if !shape_done
+            inv_2λe2 = 1 / (2 * λ_e * λ_e)
+            inv_2λp2 = 1 / (2 * λ_p * λ_p)
+            π_P      = T(π) / P
+            @inbounds for j in 1:n
+                tj = t[j]
+                for i in 1:j
+                    τ = t[i] - tj
+                    s = sin(π_P * τ)
+                    K0[i, j] = exp(-τ * τ * inv_2λe2 - s * s * inv_2λp2)
+                end
+            end
+            shape_done = true
+        end
+        # Upper triangle only: potrf!('U') / potrs!('U') read nothing else.
+        amp2 = amp * amp
+        @inbounds for j in 1:n, i in 1:j
+            Σ[i, j] = amp2 * K0[i, j]
+        end
+        jit2 = jit * jit
+        @inbounds for i in 1:n
+            e2 = errs === nothing ? zero(T) : convert(T, errs[i])^2
+            Σ[i, i] += e2 + jit2
+        end
+        _, info = LinearAlgebra.LAPACK.potrf!('U', Σ)
+        F = Cholesky(Σ, 'U', info)
+        issuccess(F) || return convert(T, -Inf)
+        copyto!(α, y)
+        ldiv!(F, α)
+        ll = -0.5 * (dot(y, α) + logdet(F) + n * log(2π))
+        isfinite(ll) || return convert(T, -Inf)
+        total += ll
     end
     return total
 end
