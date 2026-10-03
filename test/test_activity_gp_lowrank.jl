@@ -54,3 +54,93 @@ end
     @test Σd ≈ Σb rtol = 1e-14
     @test issymmetric(Σd)
 end
+
+# ---------------------------------------------------------------------
+# Shared fixtures for the solver testsets below
+# ---------------------------------------------------------------------
+
+# Random inputs of the shape `_activity_gp_joint_ll` hands the low-rank
+# solver: N shared epochs, C channel-stacked blocks (RV first).
+function _agp_inputs(rng, N, C; amp = 1.0, P = 9.0, λe = 40.0, λp = 0.6)
+    epochs = sort!(80 .* rand(rng, N))
+    ca = randn(rng, C); cb = 0.5 .* randn(rng, C)
+    σ² = 0.05 .+ rand(rng, C * N)
+    y = randn(rng, C * N)
+    return (epochs, ca, cb, amp, P, λe, λp, y, σ²)
+end
+
+# An RV + four-indicator dataset with the five-channel ActivityGP of the
+# HD 18599 job (logR'HK has no derivative coupling), and a workspace for it.
+function _agp_params(rng; n = 30, use_derivative = true,
+                     channels = [:bis, :fwhm, :halpha, :logrhk],
+                     extra = (;), floor = false)
+    t = sort!(60 .* rand(rng, n))
+    inds = Dict(String(c) => randn(rng, n) for c in channels)
+    errs = Dict(String(c) => fill(0.3, n) for c in channels)
+    data = Data(; t_rv = t, rv = 3 .* randn(rng, n), rv_err = fill(1.0, n),
+                  rv_inst = ones(Int, n), indicators = inds, indicator_errs = errs)
+    nms = NoiseModel[ActivityGP(; channels, use_derivative, extra...)]
+    floor && push!(nms, IndicatorFloor(; channels))
+    params = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+                     instruments = InstrumentConfig(rv = ["SIM"]), data = data,
+                     M_s = 1.0, noise_models = nms)
+    ws = Nereus.PTWorkspace(params, 0, length(nms); n_obs = n)
+    return data, params, ws
+end
+
+# Draw every unfrozen parameter from its prior (inside its bounds).
+function _prior_theta!(theta, params, rng)
+    L = params.layout
+    for (d, ps) in enumerate(L.unfrozen_priors)
+        lo, hi = bounds(ps)
+        v = rand(rng, ps.dist)
+        k = 0
+        while !(lo <= v <= hi) && k < 1000
+            v = rand(rng, ps.dist); k += 1
+        end
+        lo <= v <= hi || (v = lo + (hi - lo) * rand(rng))
+        theta.values[L.unfrozen_idx[d]] = v
+    end
+    return theta
+end
+
+@testset "AGP low-rank solver on workspace buffers" begin
+    rng = MersenneTwister(11)
+    w = Nereus.AGPWorkspace()
+    @test w.N == 0
+    # Same operations on reused buffers: equal bit for bit, whatever the
+    # buffers held before (they are reused across sizes and calls here).
+    for (N, C) in ((17, 5), (31, 4), (17, 2), (8, 3), (31, 5))
+        for _ in 1:3
+            a = _agp_inputs(rng, N, C; λe = 10 + 100rand(rng), λp = 0.3 + rand(rng))
+            r_alloc = Nereus.activity_gp_joint_logpdf_lowrank(a...)
+            r_ws = Nereus.activity_gp_joint_logpdf_lowrank!(w, a...)
+            @test isfinite(r_alloc)
+            @test r_ws === r_alloc
+            @test w.N == N
+        end
+    end
+
+    # Through the likelihood: the workspace path equals the allocating path.
+    data, params, ws = _agp_params(rng)
+    theta = Theta{Float64}(params)
+    n_finite = 0
+    for _ in 1:60
+        _prior_theta!(theta, params, rng)
+        a = Nereus.rv_log_likelihood(theta, data, ws)
+        b = Nereus.rv_log_likelihood(theta, data)
+        @test isequal(a, b)
+        n_finite += isfinite(a)
+    end
+    @test n_finite > 30
+    @test ws.agp.N == length(data.t_rv)
+
+    # The four 2N×2N solver matrices are no longer allocated per call.
+    _prior_theta!(theta, params, rng)
+    Nereus.rv_log_likelihood(theta, data, ws)
+    N = length(data.t_rv)
+    @test (@allocated Nereus.rv_log_likelihood(theta, data, ws)) < (2N)^2 * 8
+
+    # Solver scratch is not part of a sampler checkpoint.
+    @test :agp ∉ keys(Nereus._ws_snapshot(ws))
+end

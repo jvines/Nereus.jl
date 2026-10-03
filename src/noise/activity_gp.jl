@@ -19,7 +19,7 @@
 #   modelling stellar activity signals in radial velocity data."
 
 using LinearAlgebra: Cholesky, cholesky, cholesky!, ldiv!, Symmetric, Diagonal,
-                     dot, logdet, diagind, I
+                     dot, logdet, diagind, I, LowerTriangular, mul!, transpose!
 
 # =====================================================================
 # Quasi-periodic kernel + analytic derivatives
@@ -803,6 +803,47 @@ function activity_gp_decompose_rv(chains, params::Params, data::Data;
 end
 
 """
+    AGPWorkspace()
+
+Reusable buffers for the ActivityGP joint likelihood, held by each
+`PTWorkspace` (one per sampler slot) so the per-call matrices of
+[`activity_gp_joint_logpdf_lowrank!`](@ref) are allocated once. Empty until an
+ActivityGP is evaluated, and resized when the number of epochs `N` changes.
+"""
+mutable struct AGPWorkspace
+    N::Int
+    Kg::Matrix{Float64}      # 2N×2N latent covariance, factored in place
+    L::Matrix{Float64}       # 2N×2N lower factor of Kg
+    BLg::Matrix{Float64}     # 2N×2N B·L
+    W::Matrix{Float64}       # 2N×2N I + Lᵀ·B·L, factored in place
+    bGG::Vector{Float64}     # N: the 2×2 blocks of B = Mᵀ D⁻¹ M
+    bGdG::Vector{Float64}
+    bdGdG::Vector{Float64}
+    v::Vector{Float64}       # 2N: Mᵀ D⁻¹ y
+    u::Vector{Float64}       # 2N: Lᵀ v
+    s::Vector{Float64}       # 2N: W⁻¹ u
+end
+
+function AGPWorkspace()
+    m() = Matrix{Float64}(undef, 0, 0)
+    z() = Float64[]
+    return AGPWorkspace(0, m(), m(), m(), m(), z(), z(), z(), z(), z(), z())
+end
+
+function _agp_resize!(w::AGPWorkspace, N::Int)
+    w.N == N && return w
+    n2 = 2N
+    w.Kg = Matrix{Float64}(undef, n2, n2); w.L = Matrix{Float64}(undef, n2, n2)
+    w.BLg = Matrix{Float64}(undef, n2, n2); w.W = Matrix{Float64}(undef, n2, n2)
+    w.bGG = Vector{Float64}(undef, N); w.bGdG = Vector{Float64}(undef, N)
+    w.bdGdG = Vector{Float64}(undef, N)
+    w.v = Vector{Float64}(undef, n2); w.u = Vector{Float64}(undef, n2)
+    w.s = Vector{Float64}(undef, n2)
+    w.N = N
+    return w
+end
+
+"""
     activity_gp_joint_logpdf_lowrank(epochs, chan_a, chan_b, amp, P, λe, λp,
                                       y_flat, σ²_flat) -> logpdf
 
@@ -827,12 +868,54 @@ function activity_gp_joint_logpdf_lowrank(epochs::AbstractVector{<:Real},
         chan_a::AbstractVector{T}, chan_b::AbstractVector{T},
         amp::Real, P::Real, λe::Real, λp::Real,
         y_flat::AbstractVector{T}, σ²_flat::AbstractVector{T}) where {T<:Real}
+    N = length(epochs); twoN = 2N
+    return _agp_lowrank_core!(Matrix{T}(undef, twoN, twoN), Matrix{T}(undef, twoN, twoN),
+                              Matrix{T}(undef, twoN, twoN), Matrix{T}(undef, twoN, twoN),
+                              Vector{T}(undef, N), Vector{T}(undef, N), Vector{T}(undef, N),
+                              Vector{T}(undef, twoN), Vector{T}(undef, twoN),
+                              Vector{T}(undef, twoN),
+                              epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
+end
+
+"""
+    activity_gp_joint_logpdf_lowrank!(w::AGPWorkspace, epochs, chan_a, chan_b,
+                                       amp, P, λe, λp, y_flat, σ²_flat) -> logpdf
+
+[`activity_gp_joint_logpdf_lowrank`](@ref) with its matrices and vectors taken
+from `w` instead of allocated, for the per-slot workspace of the samplers. Same
+operations, same result bit for bit. Inputs that are not `Float64` (dual
+numbers) take the allocating method.
+"""
+function activity_gp_joint_logpdf_lowrank!(w::AGPWorkspace, epochs::AbstractVector{<:Real},
+        chan_a::AbstractVector{Float64}, chan_b::AbstractVector{Float64},
+        amp::Real, P::Real, λe::Real, λp::Real,
+        y_flat::AbstractVector{Float64}, σ²_flat::AbstractVector{Float64})
+    _agp_resize!(w, length(epochs))
+    return _agp_lowrank_core!(w.Kg, w.L, w.BLg, w.W, w.bGG, w.bGdG, w.bdGdG,
+                              w.v, w.u, w.s,
+                              epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
+end
+activity_gp_joint_logpdf_lowrank!(::AGPWorkspace, epochs, chan_a, chan_b,
+                                   amp, P, λe, λp, y_flat, σ²_flat) =
+    activity_gp_joint_logpdf_lowrank(epochs, chan_a, chan_b, amp, P, λe, λp,
+                                     y_flat, σ²_flat)
+
+# The low-rank solver on caller-supplied buffers: `Kg`, `Lb`, `BLg`, `W` are
+# 2N×2N, `bGG`, `bGdG`, `bdGdG` length N, `v`, `u`, `s` length 2N. Every
+# element read is written first, so the buffers need no clearing.
+function _agp_lowrank_core!(Kg::AbstractMatrix{T}, Lb::AbstractMatrix{T},
+        BLg::AbstractMatrix{T}, W::AbstractMatrix{T},
+        bGG::AbstractVector{T}, bGdG::AbstractVector{T}, bdGdG::AbstractVector{T},
+        v::AbstractVector{T}, u::AbstractVector{T}, s::AbstractVector{T},
+        epochs::AbstractVector{<:Real},
+        chan_a::AbstractVector{T}, chan_b::AbstractVector{T},
+        amp::Real, P::Real, λe::Real, λp::Real,
+        y_flat::AbstractVector{T}, σ²_flat::AbstractVector{T}) where {T<:Real}
     N = length(epochs)
     C = length(chan_a)
     twoN = 2N
 
     # --- K_g: 2N×2N joint [G; Ġ] covariance from the 4 kernel blocks ---
-    Kg = Matrix{T}(undef, twoN, twoN)
     @inbounds for j in 1:N, i in 1:j
         τ = epochs[i] - epochs[j]
         kGG, kGdG, kdGG, kdGdG = activity_kernel_blocks(τ, amp, P, λe, λp)
@@ -847,15 +930,17 @@ function activity_gp_joint_logpdf_lowrank(epochs::AbstractVector{<:Real},
 
     L_g = cholesky!(Symmetric(Kg); check = false)
     issuccess(L_g) || return convert(T, -Inf)
-    Lg = L_g.L                                          # lower factor (2N×2N)
+    # Lower factor (2N×2N): the transpose of the upper factor `cholesky!` left
+    # in Kg — what `L_g.L` returns, written into Lb instead of a new matrix.
+    Lg = LowerTriangular(transpose!(Lb, Kg))
 
     # --- B = Mᵀ D⁻¹ M is 2×2-block diagonal: per epoch j only the three
     # coefficients (bGG, bGĠ, bĠĠ). v = Mᵀ D⁻¹ y. ---------------------
     # WHITENED Woodbury avoids forming K_g⁻¹:
     #   logdetΣ = logdetD + logdet(I + Lgᵀ B Lg)
     #   quad    = yᵀD⁻¹y − uᵀ(I + Lgᵀ B Lg)⁻¹u,   u = Lgᵀ v
-    bGG = zeros(T, N); bGdG = zeros(T, N); bdGdG = zeros(T, N)
-    v = zeros(T, twoN)
+    fill!(bGG, zero(T)); fill!(bGdG, zero(T)); fill!(bdGdG, zero(T))
+    fill!(v, zero(T))
     yDy = zero(T); logdetD = zero(T)
     @inbounds for c in 1:C
         ac = chan_a[c]; bc = chan_b[c]; off = (c - 1) * N
@@ -873,7 +958,6 @@ function activity_gp_joint_logpdf_lowrank(epochs::AbstractVector{<:Real},
     # BLg = B·Lg directly from the block structure (4N² vs a 2N³ gemm on a
     # 99%-zero B): rows j and N+j are linear combos of Lg rows j, N+j.
     Lgf = Lg                      # LowerTriangular wrapper over the factor
-    BLg = Matrix{T}(undef, twoN, twoN)
     @inbounds for k in 1:twoN
         for j in 1:N
             gjk = Lgf[j, k]; djk = Lgf[N+j, k]
@@ -882,14 +966,14 @@ function activity_gp_joint_logpdf_lowrank(epochs::AbstractVector{<:Real},
         end
     end
     # W = Lgᵀ·BLg — triangular×dense (trmm), not a full gemm.
-    W = transpose(Lgf) * BLg
+    mul!(W, transpose(Lgf), BLg)
     @inbounds for d in 1:twoN; W[d, d] += one(T); end
     F_C = cholesky!(Symmetric(W); check = false)
     issuccess(F_C) || return convert(T, -Inf)
     logdet_C = 2 * sum(log, @view F_C.factors[diagind(F_C.factors)])
 
-    u = transpose(Lgf) * v
-    quad = yDy - dot(u, F_C \ u)
+    mul!(u, transpose(Lgf), v)
+    quad = yDy - dot(u, ldiv!(F_C, copyto!(s, u)))
     logdetΣ = logdetD + logdet_C
     return convert(T, -0.5 * (quad + logdetΣ + (C * N) * log(2π)))
 end

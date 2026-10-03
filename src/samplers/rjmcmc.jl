@@ -632,6 +632,10 @@ mutable struct PTWorkspace
     # the white-noise path (no active phot AR/MA/GP). hash==0 ⇒ invalid.
     phot_ll_total_cache::Float64
     phot_ll_total_hash::UInt
+    # --- ActivityGP joint likelihood (agp) ---
+    # Buffers for the AGP low-rank solver, sized on first use; empty in runs
+    # without an ActivityGP. Scratch only, so not saved in checkpoints.
+    agp::AGPWorkspace
 end
 
 # `max_donors` sizes the donor-birth scratch buffer. It must be ≥ the number
@@ -706,6 +710,8 @@ function PTWorkspace(params::Params, max_kplanet::Int, n_noise::Int=0;
         # Total phot-ll cache (Fix B): value + hash, seeded invalid (0).
         0.0,
         zero(UInt),
+        # ActivityGP buffers (agp), sized on first use.
+        AGPWorkspace(),
     )
 end
 
@@ -1411,7 +1417,8 @@ end
 # The workspace: the RWM scales and their counters (adaptation state), and the
 # likelihood caches, which are restored as they were rather than rebuilt cold.
 # `scratch_theta` and `population` are proposal scratch that reference Params.
-const _WS_NOT_SAVED = (:scratch_theta, :population)
+# `agp` holds ActivityGP solver buffers, rebuilt on first use after a resume.
+const _WS_NOT_SAVED = (:scratch_theta, :population, :agp)
 
 function _ws_snapshot(ws::PTWorkspace)
     fs = Tuple(f for f in fieldnames(PTWorkspace) if f ∉ _WS_NOT_SAVED)

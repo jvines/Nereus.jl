@@ -551,7 +551,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     end
 
     return _apply_noise_and_eval(theta, data, predictions, residuals,
-                                  variances, noise_models, two_pi)
+                                  variances, noise_models, two_pi, ws)
 end
 
 """
@@ -818,8 +818,11 @@ end
 # AR step (Stage-1 prediction adjustment) still runs in that case;
 # MA / single-channel GP do not (composition rule documented in
 # `validate_noise_models`).
+# `ws` is the caller's PTWorkspace on the sampler path (nothing otherwise);
+# the ActivityGP solver takes its buffers from it.
 function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
-                                variances, noise_models, two_pi) where {T}
+                                variances, noise_models, two_pi,
+                                ws = nothing) where {T}
     for (nm_idx, nm) in enumerate(noise_models)
         is_noise_model_active(theta, nm_idx) || continue
         if nm isa ARModel && noise_channel(nm) === :rv
@@ -851,7 +854,7 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
         for agp in agp_list
             if agp.indicators_only
                 lli = _activity_gp_joint_ll(theta, data, predictions,
-                                              variances, agp)
+                                              variances, agp, ws)
                 isfinite(lli) || return convert(T, -Inf)
                 ind_only_ll += lli
             else
@@ -882,7 +885,7 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
         if global_agp !== nothing && isempty(scoped_agps)
             return ind_only_ll +
                    _activity_gp_joint_ll(theta, data, predictions,
-                                            variances, global_agp)
+                                            variances, global_agp, ws)
         elseif global_agp === nothing && !isempty(scoped_agps)
             return ind_only_ll +
                    _activity_gp_scoped_ll(theta, data, predictions,
@@ -1234,7 +1237,7 @@ end
 function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
                                  predictions::Vector{T},
                                  variances::Vector{T},
-                                 agp::ActivityGP) where {T}
+                                 agp::ActivityGP, ws = nothing) where {T}
     layout = theta.params.layout
     s = _gp_suffix(agp)
 
@@ -1399,9 +1402,12 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         # explicit block partition, so it keeps the dense build).
         if !agp.marginalize_indicators && n_total > n_rv_obs &&
            length(chan_a) >= 4
-            return activity_gp_joint_logpdf_lowrank(
-                view(data.t_rv, 1:n_rv_obs), chan_a, chan_b,
-                amp, P, λe, λp, y_flat, σ²_flat)
+            ep = view(data.t_rv, 1:n_rv_obs)
+            return ws === nothing ?
+                activity_gp_joint_logpdf_lowrank(ep, chan_a, chan_b,
+                    amp, P, λe, λp, y_flat, σ²_flat) :
+                activity_gp_joint_logpdf_lowrank!(ws.agp, ep, chan_a, chan_b,
+                    amp, P, λe, λp, y_flat, σ²_flat)
         end
         Σ = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv_obs),
                                             chan_a, chan_b, amp, P, λe, λp)
