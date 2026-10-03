@@ -88,6 +88,15 @@ function _validate_obliquity!(errs::Vector{String}, cfg)
         ld = _get(ocfg, :limb_darkening)
         (ld isa AbstractVector && length(ld) == 2 && all(v -> v isa Real, ld)) ||
             push!(errs, "`model.obliquity.limb_darkening` must be [u1, u2]")
+    elseif !_has(data_cfg, :transit_photometry)
+        # Without it the RM anomaly and the shadow read the first photometric
+        # band's pair, and with no photometry that is a uniform disc -- a model
+        # nobody chose, which moved the anomaly by up to ~130 m/s on NGTS-33.
+        push!(errs, "missing `model.obliquity.limb_darkening` = [u1, u2]: with no " *
+                    "`transit_photometry` block nothing else supplies the stellar limb " *
+                    "darkening, and the RM anomaly and the shadow would be computed for " *
+                    "a uniform disc. Give the spectroscopic band's quadratic pair " *
+                    "([0, 0] asks for a uniform disc explicitly)")
     end
     if _has(ocfg, :beta_p_floor)
         f = _get(ocfg, :beta_p_floor)

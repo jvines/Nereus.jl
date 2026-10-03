@@ -75,6 +75,13 @@ end
         @test occursin("does not exist", validation_errors(c))
         c = rj_config(out); c["model"]["obliquity"]["occultation"] = "ring"
         @test occursin("occultation", validation_errors(c))
+        # No light curve and no limb darkening would mean a uniform disc,
+        # silently: refused, with the fix in the message.
+        c = rj_config(out); delete!(c["model"]["obliquity"], "limb_darkening")
+        @test occursin("limb_darkening", validation_errors(c)) &&
+              occursin("uniform disc", validation_errors(c))
+        c["model"]["obliquity"]["limb_darkening"] = [0, 0]   # uniform, said explicitly
+        @test validation_errors(c) == ""
     end
 
     @testset "the fit kind selects the data blocks" begin

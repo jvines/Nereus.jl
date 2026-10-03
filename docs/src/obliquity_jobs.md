@@ -149,7 +149,8 @@ Any of them can be overridden by name through the job's `priors` block (or the
       "rr":   0.11577,
       "vsini": [25900, 1500],            // m/s
       "K":    [367.9, 26.9],             // m/s (with velocities)
-      "limb_darkening": [0.32, 0.30],    // quadratic u1, u2 of the spectroscopic band
+      "limb_darkening": [0.32, 0.30],    // quadratic u1, u2 of the spectroscopic band;
+                                         // required without transit_photometry
       "occultation": "disc",             // "disc" (default) | "point"
       "beta_p_floor": 0.0,               // m/s
       "shared_alpha": false,
@@ -181,8 +182,16 @@ section serves all three. `sigma0` may also be given for other RV instruments
 in `model.obliquity.sigma0` (`{"FEROS": 15000}`) — every RV instrument needs
 one, since an in-transit point of any instrument carries the anomaly.
 
+**Limb darkening.** The RM anomaly and the shadow are weighted by the stellar
+limb darkening of the spectroscopic band, `limb_darkening = [u1, u2]` (fixed;
+override `u1_spec` / `u2_spec` in `priors` to fit them). Without it they read
+the first photometric instrument's pair, so a job with no `transit_photometry`
+block must give it — otherwise the model would silently be a uniform disc.
+`[0, 0]` asks for a uniform disc explicitly.
+
 Schema errors are collected and reported before anything is read: an unknown
-fit kind or option, a missing `sigma0`, a stack without `t14_hours` or (with
+fit kind or option, a missing `sigma0`, missing `limb_darkening` without
+photometry, a stack without `t14_hours` or (with
 several stacks) without `berv`, a geometry value that is neither a number nor
 `[mean, sd > 0]`, a file that does not exist, `noise_menu` without a
 `transdim` block.
