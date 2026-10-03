@@ -604,13 +604,7 @@ function celerite_kernel_dense(t::AbstractVector, ar, cr, ac, bc, cc, dc)
     n = length(t)
     TT = promote_type(eltype(t), eltype(ar), eltype(cr), eltype(ac), eltype(bc),
                       eltype(cc), eltype(dc), Float64)
-    return _celerite_kernel_dense!(Matrix{TT}(undef, n, n), t, ar, cr, ac, bc, cc, dc)
-end
-
-function _celerite_kernel_dense!(K::AbstractMatrix, t::AbstractVector, ar, cr, ac, bc,
-                                 cc, dc)
-    n = length(t)
-    TT = eltype(K)
+    K = Matrix{TT}(undef, n, n)
     @inbounds for j in 1:n, i in 1:n
         τ = abs(t[i] - t[j])
         v = zero(TT)
@@ -1071,7 +1065,8 @@ function _tomo_night_works(nights::Vector{TomoNight})
                 nt_, nv = size(nt.R)
                 TomoNightWork(zeros(nt_, nv), zeros(nt_, nv), zeros(nt_, nt_), zeros(nv, nv),
                               SymEigenWork(nt_), SymEigenWork(nv), zeros(nt_, nv),
-                              zeros(nt_, nv), zeros(nt_), zeros(nv))
+                              zeros(nt_, nv), zeros(nt_), zeros(nv),
+                              KernelDistances(nt.t), KernelDistances(nt.grid))
             end for nt in nights]
 end
 
@@ -1128,12 +1123,12 @@ function _tomogram_ll_ws(theta::Theta{Float64}, data::Data, tw::TomoWorkspace)
         σw = sys.tomo_jit[j] > 0 ? theta.values[sys.tomo_jit[j]] :
                                    convert(T, _tomo_white_sigma(nt))
         σw > 0 || return convert(T, -Inf)
-        if !_tomo_temporal_kernel!(w.Kt, theta, nt)
+        if !_tomo_temporal_kernel!(w.Kt, w.tdist, theta, nt)
             ll += white_map_loglike(r, σw)
         else
             ℓv = theta.values[sys.tomo_ell_v[j]]
             ℓv > 0 || return convert(T, -Inf)
-            _kern!(w.Kv, nt.grid, ℓv)
+            _matern_upper!(w.Kv, w.vdist, ℓv, 1.0, false)
             ll += _kron_gp_loglike!(w, r, σw)
         end
         isfinite(ll) || return convert(T, -Inf)
@@ -1141,50 +1136,85 @@ function _tomogram_ll_ws(theta::Theta{Float64}, data::Data, tw::TomoWorkspace)
     return ll
 end
 
-# `_kern`, into K.
-function _kern!(K::Matrix{Float64}, x::Vector{Float64}, ℓ::Float64)
-    n = length(x)
-    @inbounds for j in 1:n, i in 1:n
-        K[i, j] = _matern32(x[i] - x[j], ℓ)
+# The kernel factors are filled in their UPPER triangle only -- all that
+# `Symmetric(K)` and dsyevr read -- and evaluated once per distinct pair
+# distance (`KernelDistances`): 57 Matern evaluations for a 57-point uniform
+# velocity grid instead of 3249. Every entry is the value the full build
+# gives it, since a stationary kernel sees only abs(x[i] - x[j]).
+
+# K[i, j] = _matern32(x[i] - x[j], ℓ), or σ2 times it with `scaled`, as
+# `_kern` and `σ2 .* _kern` compute them, for i <= j.
+function _matern_upper!(K::Matrix{Float64}, kd::KernelDistances, ℓ::Float64,
+                        σ2::Float64, scaled::Bool)
+    val, d = kd.val, kd.d
+    if scaled
+        @inbounds for c in eachindex(d); val[c] = σ2 * _matern32(d[c], ℓ); end
+    else
+        @inbounds for c in eachindex(d); val[c] = _matern32(d[c], ℓ); end
+    end
+    return _fill_upper!(K, kd)
+end
+
+# The celerite kernel of `celerite_kernel_dense`, per distance, i <= j.
+function _celerite_upper!(K::Matrix{Float64}, kd::KernelDistances, ar, cr, ac, bc, cc, dc)
+    val, d = kd.val, kd.d
+    @inbounds for c in eachindex(d)
+        τ = d[c]
+        v = zero(Float64)
+        for q in eachindex(ar); v += ar[q] * exp(-cr[q] * τ); end
+        for q in eachindex(ac)
+            v += exp(-cc[q] * τ) * (ac[q] * cos(dc[q] * τ) + bc[q] * sin(dc[q] * τ))
+        end
+        val[c] = v
+    end
+    return _fill_upper!(K, kd)
+end
+
+function _fill_upper!(K::Matrix{Float64}, kd::KernelDistances)
+    val, cls = kd.val, kd.cls
+    p = 0
+    @inbounds for j in 1:kd.n, i in 1:j
+        p += 1
+        K[i, j] = val[cls[p]]
     end
     return K
 end
 
-# `_tomo_temporal_kernel`, into K: true when an active model covering this
-# night built it, false for white.
-function _tomo_temporal_kernel!(K::Matrix{Float64}, theta::Theta{Float64}, nt::TomoNight)
+# `_tomo_temporal_kernel`, into the upper triangle of K: true when an active
+# model covering this night built it, false for white.
+function _tomo_temporal_kernel!(K::Matrix{Float64}, kd::KernelDistances,
+                                theta::Theta{Float64}, nt::TomoNight)
     cfg = theta.params.config
     for (i, m) in enumerate(cfg.noise_models)
         (m isa CovarianceNoise && noise_channel(m) === :tomo) || continue
         insts = noise_instruments(m)
         (isempty(insts) || nt.tag in insts) || continue
         is_noise_model_active(theta, i) || continue
-        _tomo_Kt!(K, theta, m, nt.t) && return true
+        _tomo_Kt!(K, kd, theta, m, nt.t) && return true
     end
     return false
 end
 
-function _tomo_Kt!(K::Matrix{Float64}, theta::Theta, m::MaternGP, t)
+function _tomo_Kt!(K::Matrix{Float64}, kd::KernelDistances, theta::Theta, m::MaternGP, t)
     s = _gp_suffix(m)
     σ = _tomo_p(theta, "matern_sigma$s"); ρ = _tomo_p(theta, "matern_rho$s")
     (σ === nothing || ρ === nothing || σ <= 0 || ρ <= 0) && return false
-    σ2 = σ^2
-    _kern!(K, t, ρ)
-    K .= σ2 .* K
+    _matern_upper!(K, kd, ρ, σ^2, true)
     return true
 end
 
-function _tomo_Kt!(K::Matrix{Float64}, theta::Theta, m::CeleriteSHO, t)
+function _tomo_Kt!(K::Matrix{Float64}, kd::KernelDistances, theta::Theta, m::CeleriteSHO, t)
     s = _gp_suffix(m)
     lS = _tomo_p(theta, "gp_log_S0$s"); lQ = _tomo_p(theta, "gp_log_Q$s")
     lw = _tomo_p(theta, "gp_log_omega0$s")
     (lS === nothing || lQ === nothing || lw === nothing) && return false
     ar, cr, ac, bc, cc, dc = sho_coefficients(exp(lS), exp(lQ), exp(lw))
-    _celerite_kernel_dense!(K, t, ar, cr, ac, bc, cc, dc)
+    _celerite_upper!(K, kd, ar, cr, ac, bc, cc, dc)
     return true
 end
 
-function _tomo_Kt!(K::Matrix{Float64}, theta::Theta, m::CovarianceNoise, t)
+function _tomo_Kt!(K::Matrix{Float64}, kd::KernelDistances, theta::Theta,
+                   m::CovarianceNoise, t)
     Kt = _tomo_Kt(theta, m, t)
     Kt === nothing && return false
     copyto!(K, Kt)

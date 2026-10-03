@@ -9,7 +9,8 @@
 using Test
 using Nereus
 using Nereus: Theta, PTWorkspace, TomoWorkspace, SymEigenWork, tomogram_log_likelihood,
-              set_param!, _sym_eigen!, _kern, obliquity_noise_menu
+              set_param!, _sym_eigen!, _kern, obliquity_noise_menu, KernelDistances,
+              _matern_upper!, _celerite_upper!, celerite_kernel_dense, sho_coefficients
 using LinearAlgebra: Symmetric, eigen
 using Random
 import ForwardDiff
@@ -121,6 +122,33 @@ include(joinpath(@__DIR__, "fixtures", "obliquity_synthetic.jl"))
             @test tomogram_log_likelihood(th, d, ws) === tomogram_log_likelihood(th, d)
             @test tomogram_log_likelihood(th, d2, ws) === tomogram_log_likelihood(th, d2)
         end
+    end
+
+    @testset "kernel factors from distance groups" begin
+        rng = MersenneTwister(8)
+        upper_same(A, B) = all(A[i, j] === B[i, j] for j in axes(A, 2) for i in 1:j)
+        grids = (collect(range(-42.0, 42.0; length = 57)),          # NGTS-33 velocities
+                 collect(range(-42, 42; length = 25)),
+                 2459986.4 .+ sort(rand(rng, 37)) ./ 5,             # exposure times
+                 [1.0, 1.0, 2.5, 2.5, 7.0],                          # repeated values
+                 [3.0])
+        for x in grids
+            kd = KernelDistances(x)
+            n = length(x)
+            for ℓ in (0.01, 1.7, 8.0, 59.9)
+                K = fill(NaN, n, n)
+                @test upper_same(_matern_upper!(K, kd, ℓ, 1.0, false), _kern(x, ℓ))
+                σ2 = 0.37^2
+                @test upper_same(_matern_upper!(K, kd, ℓ, σ2, true), σ2 .* _kern(x, ℓ))
+            end
+            for (S0, Q, w0) in ((2.0, 0.3, 5.0), (1e3, 4.0, 20.0))
+                c = sho_coefficients(S0, Q, w0)
+                K = fill(NaN, n, n)
+                @test upper_same(_celerite_upper!(K, kd, c...), celerite_kernel_dense(x, c...))
+            end
+        end
+        # A uniform grid has one distance per lag: 57 kernel evaluations, not 1653.
+        @test length(KernelDistances(grids[1]).d) == 57
     end
 
     @testset "dsyevr through preallocated buffers is eigen(Symmetric(K))" begin

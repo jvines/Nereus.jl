@@ -65,20 +65,57 @@ SymEigenWork(n::Int) = SymEigenWork(n, zeros(n, n), zeros(n), zeros(n, n),
                                     BlasInt(0), BlasInt(0))
 
 """
+    KernelDistances(x)
+
+The pairs (i <= j) of a coordinate vector grouped by `abs(x[i] - x[j])`, bit for
+bit: `cls[p]` is the group of the p-th upper-triangle entry in column order and
+`d[c]` that group's distance. A stationary kernel then needs one evaluation per
+group -- 57 instead of 1653 on a uniform 57-point velocity grid, whose
+differences are exact -- and gives every entry exactly the value a direct
+evaluation would. `val` holds the per-group values of the current call.
+"""
+struct KernelDistances
+    n::Int
+    cls::Vector{Int32}
+    d::Vector{Float64}
+    val::Vector{Float64}
+end
+
+function KernelDistances(x::AbstractVector{Float64})
+    n = length(x)
+    seen = Dict{UInt64,Int32}()
+    d = Float64[]
+    cls = Vector{Int32}(undef, n * (n + 1) ÷ 2)
+    p = 0
+    @inbounds for j in 1:n, i in 1:j
+        δ = abs(x[i] - x[j])
+        c = get!(seen, reinterpret(UInt64, δ)) do
+            push!(d, δ)
+            Int32(length(d))
+        end
+        p += 1
+        cls[p] = c
+    end
+    return KernelDistances(n, cls, d, zeros(length(d)))
+end
+
+"""
 Per-map scratch: shadow, residuals, both kernel factors and their
 eigensystems, and the product U_t' r U_v.
 """
 struct TomoNightWork
     M::Matrix{Float64}          # shadow model, n_t x n_v
     r::Matrix{Float64}          # residuals R - alpha M
-    Kt::Matrix{Float64}         # temporal factor K_t
-    Kv::Matrix{Float64}         # velocity factor K_v
+    Kt::Matrix{Float64}         # temporal factor K_t (upper triangle)
+    Kv::Matrix{Float64}         # velocity factor K_v (upper triangle)
     et::SymEigenWork
     ev::SymEigenWork
     Y::Matrix{Float64}          # U_t' r
     Z::Matrix{Float64}          # U_t' r U_v
     dt::Vector{Float64}
     dv::Vector{Float64}
+    tdist::KernelDistances      # exposure-time pairs (days)
+    vdist::KernelDistances      # velocity-grid pairs (km/s)
 end
 
 """
