@@ -385,12 +385,23 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
         βp = theta.values[layout.systemic.rm_beta_p]
     end
     point = obl.occultation === :point
+    # The limb-darkening law of the disc occultation, built once here rather
+    # than by `transit_flux(z, p, u1, u2)` at every in-transit epoch (a
+    # QuadLimbDark is immutable and `compute` reads it only). Built even for
+    # a uniform disc, which does not read it, so the state has one type.
+    ld = QuadLimbDark([u1, u2])
+    ld_uniform = iszero(u1) && iszero(u2)
 
     rel = t_ref !== nothing
     return (n_rm, (; j_active, λs, bs, rrs, a_Rs, v_sini, u1, u2,
                      is_reloaded, is_arome, σ0, βp, per_inst, σ0s, βps, point,
-                     rel, Tc0s, Mtrs))
+                     rel, Tc0s, Mtrs, ld, ld_uniform))
 end
+
+# `transit_flux(z, p, u1, u2)` with the law `_decode_rm_state` built from
+# (u1, u2), and its test for a uniform disc.
+_rm_disc_flux(uniform::Bool, ld::QuadLimbDark, z, p) =
+    uniform ? transit_flux_uniform(z, p) : compute(ld, z, p)
 
 """
     AROME_ROT_SIGMA = 0.5503
@@ -506,7 +517,7 @@ Sums the in-transit RM anomalies from all RM-enabled planets at time
             z2 = x_sky * x_sky + y_sky * y_sky
             limit = 1 + state.rrs[r]
             z2 > limit * limit && continue
-            1 - transit_flux(sqrt(z2), state.rrs[r], state.u1, state.u2)
+            1 - _rm_disc_flux(state.ld_uniform, state.ld, sqrt(z2), state.rrs[r])
         end
         Δflux > 0 || continue
         Δ += if state.is_arome[r]

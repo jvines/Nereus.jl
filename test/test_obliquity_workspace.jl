@@ -12,7 +12,8 @@ using Nereus: Theta, PTWorkspace, TomoWorkspace, SymEigenWork, tomogram_log_like
               set_param!, _sym_eigen!, _kern, obliquity_noise_menu, KernelDistances,
               _matern_upper!, _celerite_upper!, celerite_kernel_dense, sho_coefficients,
               _eval_channel_likelihood, ChannelWork, rv_log_likelihood, CeleriteSHO,
-              MaternGP, NoiseModel
+              MaternGP, NoiseModel, _rm_disc_flux, transit_flux, _decode_rm_state,
+              planet_indices
 using LinearAlgebra: Symmetric, eigen
 using Random
 import ForwardDiff
@@ -186,6 +187,25 @@ include(joinpath(@__DIR__, "fixtures", "obliquity_synthetic.jl"))
         f(ws)
         @test (@allocated f(ws)) <= 512
         @test (@allocated _eval_channel_likelihood(th, r, v, d.t_rv, d.rv_inst, :rv, 2π)) > 4096
+    end
+
+    @testset "RM: the limb-darkening law built once per call" begin
+        for (u1, u2) in ((OS_U1, OS_U2), (0.0, 0.0), (-0.0, 0.0), (0.6, 0.0), (0.0, 0.4),
+                         (1.0, 0.0))
+            ld = Nereus.QuadLimbDark([u1, u2])
+            uniform = iszero(u1) && iszero(u2)
+            for p in (0.05, OS_RR, 0.3), z in range(0.0, 1.0 + p + 0.05; length = 97)
+                @test _rm_disc_flux(uniform, ld, z, p) === transit_flux(z, p, u1, u2)
+            end
+        end
+        p = build()
+        th = seat!(Theta{Float64}(p), p, points(p, 5)[1])
+        _, st = _decode_rm_state(th, planet_indices(th), [OS_P]; t_ref = d.t_ref)
+        @test !st.ld_uniform
+        @test st.ld.u_n[2] === st.u1 && st.ld.u_n[3] === st.u2
+        ws = new_ws(p)
+        rv_log_likelihood(th, d, ws)
+        @test (@allocated rv_log_likelihood(th, d, ws)) < 3000
     end
 
     @testset "kernel factors from distance groups" begin
