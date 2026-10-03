@@ -1008,22 +1008,27 @@ The result is therefore the exact Gaussian log-density of Σ up to
 floating-point rounding. That rounding error grows with the conditioning of A
 (the signal-to-noise ratio and coherence length of the GP) as it does for a
 Float64 Cholesky of the dense Σ: it is the rounding of the kernel entries,
-amplified by that conditioning, in both. Against the dense likelihood
-evaluated in BigFloat, on the five-channel HD 18599 fit: at most 4e-12 nats
-near the posterior; on prior draws a median of 2e-9 and at most 2e-6 nats,
-the same as the Float64 dense Cholesky. With two or three channels A is as
-large as Σ (C = 2) or not much smaller, and the error is of the same order
-as the dense Cholesky's without being smaller: at most 1.1e-5 nats against
-4.1e-6 for RV + BIS, and 7.2e-6 against 5.6e-6 for RV + BIS + FWHM, at
-extreme prior draws where |log L| ~ 1e4 (medians 1e-9 for both).
-test/test_activity_gp_lowrank.jl checks it.
+amplified by that conditioning, in both. Measured against a BigFloat
+reference on the HD 18599 job, at 85 to 151 points per model (prior draws,
+prior-box corners, extreme hyperparameters, near-posterior and
+coupling-edge points, and the 12 points where the previous solver was
+furthest off), the largest errors seen were, with the Float64 dense
+Cholesky's at the same points in brackets: 3.6e-11 nats (1.5e-11) near the
+posterior with five channels; 6.5e-6 (6.6e-6) over all five-channel
+points; 1.5e-5 (1.6e-5) with RV + BIS and 1.8e-5 (1.8e-5) with
+RV + BIS + FWHM, at extreme draws where |log L| ~ 1e4. The medians were
+2e-10 to 3e-9. These are the largest errors in those samples, not bounds,
+and point by point either method's error can be the larger. With two or
+three channels A is as large as Σ (C = 2) or not much smaller, so there is
+no accuracy to gain over the dense Cholesky. test/test_activity_gp_lowrank.jl
+checks its own sample to 1e-10 nats.
 
 Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked reals,
 any type that is not a plain float) take the same route, with two
-exceptions. R_j is
-a square root of B_j, so it is not differentiable where B_j is singular
-(every G coupling 0, every Ġ coupling 0, or all channels' (a_c, b_c)
-parallel), and its derivative loses accuracy as B_j approaches that. And
+exceptions. R_j is a square root of B_j, so it is not differentiable where
+B_j is singular (every G coupling 0, every Ġ coupling 0, or all channels'
+(a_c, b_c) parallel), and its derivative loses accuracy as B_j approaches
+that. And
 w = R⁻ᵀ·Mᵀ D⁻¹ y divides by R, so when every coupling is tiny against the
 noise its derivatives cancel to a relative error of about eps/SNR. When a
 block's smaller eigenvalue is below 1e-10 of its larger, or the GP's
@@ -1033,11 +1038,26 @@ a constant 0 (every Ġ coupling under `use_derivative = false`) is not a
 direction of the block and does not count; only a plain number, or a
 ForwardDiff dual whose partials are all 0, is known to be one, so the
 likelihood passes the missing Ġ couplings of a tracked number type as
-`Float64` zeros. On the HD 18599 job this happens
-at couplings that are exactly 0 (the prior box centre), at none of ~250
+`Float64` zeros. On the HD 18599 job this happens at couplings that are
+exactly 0 (the prior box centre and points derived from it), at none of 248
 prior draws and 150 near-posterior points with five channels, and at 2 of
 236 prior draws with RV and logR'HK alone. `Float64` values are exact at
 singular blocks and always take the low-rank path.
+
+Below those thresholds the dense route's derivatives are accurate to about
+1e-15 (relative). Just above them the derivatives through R are not: they
+lose accuracy as eps over the signal-to-noise of the fainter latent
+direction. In probes approaching each threshold (a faint G direction, a
+faint Ġ direction, near-parallel couplings; three and five channels, 8 and
+18 epochs, four kernels from P = 3 d, λp = 0.3 to P = 60 d, λp = 4), the
+largest relative errors seen at points that keep the low-rank route, against
+the dense likelihood differentiated in BigFloat, were 2e-9 for gradients and
+4e-6 for Hessians with respect to the couplings passed here. With respect
+to couplings in units of the prior standard deviations of G and Ġ (the
+amplitudes the samplers move) they were 2e-10 and 1.4e-4, the latter at the
+longest, smoothest kernel. These are the largest errors in those samples,
+not bounds. Gradients are not affected in any practical sense; a MAP Hessian
+at such a point can be.
 
 `y_flat`, `σ²_flat` are the channel-stacked residuals and per-point
 variances (RV block first, then each indicator), length C·N. A NaN among
