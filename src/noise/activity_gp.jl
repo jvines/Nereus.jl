@@ -1066,9 +1066,10 @@ else. On the five-channel HD 18599 job, a ReverseDiff gradient
 That tape records this route, which has no branch on the values, so the
 AGP part of it gives the right value and gradient wherever it is replayed.
 
-With two or three channels the fallback is the dense (C·N)² Cholesky. That
-matrix is at most 1.5 times as large as A, and it is what the likelihood
-used for every evaluation before this branch.
+With two or three channels the fallback is the dense (C·N)² Cholesky. Its
+side C·N is at most 1.5 times A's 2N (about 3.4 times the work at C = 3,
+the same at C = 2), and it is what the likelihood used for every evaluation
+before this branch.
 
 A coupling that is a constant 0 (every Ġ coupling under
 `use_derivative = false`) is not a direction of the block and does not
@@ -1424,7 +1425,7 @@ function _agp_whitened_core!(A::AbstractMatrix,
     # smooth there is used instead: with four or more channels the latent is
     # conditioned one epoch at a time (_agp_sequential_logpdf!, on A's
     # buffer, about the work of the low-rank solve), with two or three the
-    # dense Cholesky of Σ, at most 1.5 times as large as A. Decided before R
+    # dense Cholesky of Σ, whose side is at most 1.5 times A's. Decided before R
     # is formed: a reverse-mode tape keeps every operation, and R's
     # derivatives at a vanishing block are infinite even where R goes unused
     # (0·Inf = NaN). Compiled out for Float64, whose values are exact at

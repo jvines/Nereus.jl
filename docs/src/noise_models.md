@@ -527,7 +527,7 @@ The HD 18599 K-gap scenario is the canonical use case.
 
 With every indicator at the RV epochs (`N` epochs, `C` channels including
 RV, `n_total = C·N`), the joint likelihood goes through
-`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1131`): it
+`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1132`): it
 whitens each epoch's 2×2 information block and factors one `(2N)²` matrix
 instead of the dense `(C·N)²`, and is exact up to rounding. Gradients
 (ForwardDiff, or ReverseDiff under `sample_nuts(ad_backend = :ReverseDiff)`)
@@ -539,7 +539,7 @@ differentiable or loses its derivative accuracy, and they come from a route
 that is smooth there. With four or more channels it conditions the latent
 on one epoch at a time, on the same `(2N)²` storage and at about the same
 cost as the low-rank solve; with two or three it is the dense likelihood,
-whose `(C·N)²` is then at most 1.5 times as large. The docstring of
+whose side `C·N` is then at most 1.5 times `2N`. The docstring of
 `activity_gp_joint_logpdf_lowrank` gives the accuracy measured on either
 side of those thresholds. The
 `marginalize_indicators` diagnostic and `indicators_only` scoring build the
