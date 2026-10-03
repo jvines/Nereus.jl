@@ -66,6 +66,15 @@ By default a config describes a **fit**: `run_job` builds the model from
 `data`/`model`/`priors` and runs the sampler in `sampler`. That is everything
 documented below.
 
+An **obliquity fit** (RM velocities, the Doppler shadow, or both) is a fit
+like any other: its RM nights and line-profile stacks are the `data` blocks
+`rm_nights` and `tomography`, and a `model.obliquity` block (in place of
+`max_kplanet` / `planet_modes`) states the fit kind and the model options. It
+runs through the same samplers, checkpoints and resumes the same way, and
+writes the same `chains.nc` and `summary.json`. The schema, the standard
+priors and a complete example are in
+[docs/src/obliquity_jobs.md](src/obliquity_jobs.md).
+
 One alternative kind exists:
 
 ### `"kind": "tomography"`
@@ -462,7 +471,9 @@ rather than a single number trusted.
 
 ### `data`
 The `data` block must contain at least one of `rv`, `transit_photometry`,
-`iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3` (`src/runner.jl:237-241`).
+`iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3`, `rm_nights`, `tomography`
+(`src/runner.jl:237-241`). The last two belong to an obliquity fit and need a
+`model.obliquity` block — see [obliquity_jobs.md](src/obliquity_jobs.md).
 
 - **`rv`** — `csv` (column-named) or inline `values`. Inline `values` requires
   `bjd`, `rv`, `rv_err`, `instrument`; any other key is an activity indicator.

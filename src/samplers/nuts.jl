@@ -129,7 +129,8 @@ function _draw_from_prior(target::NereusTarget, rng::AbstractRNG;
     set_unfrozen!(theta_dbg, last_x)
     lpr = log_prior(theta_dbg)
     llr = rv_log_likelihood(theta_dbg, target.data)
-    llt = isfinite(llr) ? transit_log_likelihood(theta_dbg, target.data) : NaN
+    llt = isfinite(llr) ? transit_log_likelihood(theta_dbg, target.data) +
+                          tomogram_log_likelihood(theta_dbg, target.data) : NaN
 
     x_med = Vector{Float64}(undef, n)
     @inbounds for i in 1:n

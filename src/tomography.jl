@@ -30,7 +30,7 @@
 
 using Statistics
 using Random: MersenneTwister, randperm, randn, rand
-using LinearAlgebra: Symmetric, eigen
+using LinearAlgebra: Symmetric, eigen, dot, BLAS, BlasInt
 using FFTW: fft, ifft, fftshift, ifftshift, fftfreq
 using AffineInvariantMCMC
 
@@ -504,7 +504,9 @@ _matern32(r::Real, ℓ::Real) = (x = sqrt(3.0) * abs(r) / ℓ; (1 + x) * exp(-x)
 
 function _kern(x::AbstractVector, ℓ::Real)
     n = length(x)
-    K = Matrix{Float64}(undef, n, n)
+    # Element type follows the inputs so a ForwardDiff length scale passes
+    # through; for Float64 inputs this is the Float64 matrix it always was.
+    K = Matrix{promote_type(eltype(x), typeof(ℓ), Float64)}(undef, n, n)
     @inbounds for j in 1:n, i in 1:n
         K[i, j] = _matern32(x[i] - x[j], ℓ)
     end
@@ -600,10 +602,12 @@ so a dense build is free — this would be the wrong call for a full RV series.
 """
 function celerite_kernel_dense(t::AbstractVector, ar, cr, ac, bc, cc, dc)
     n = length(t)
-    K = Matrix{Float64}(undef, n, n)
+    TT = promote_type(eltype(t), eltype(ar), eltype(cr), eltype(ac), eltype(bc),
+                      eltype(cc), eltype(dc), Float64)
+    K = Matrix{TT}(undef, n, n)
     @inbounds for j in 1:n, i in 1:n
         τ = abs(t[i] - t[j])
-        v = 0.0
+        v = zero(TT)
         for q in eachindex(ar); v += ar[q] * exp(-cr[q] * τ); end
         for q in eachindex(ac)
             v += exp(-cc[q] * τ) * (ac[q] * cos(dc[q] * τ) + bc[q] * sin(dc[q] * τ))
@@ -935,15 +939,28 @@ iqr_(x) = (s = sort(collect(x)); quantile(s, 0.75) - quantile(s, 0.25))
 Log-likelihood of every residual map in `data.tomo`. Returns 0 when there is no
 tomography, so it costs nothing for a normal fit.
 
-Geometry (λ, v sin i, b, a/R★) is read from the layout and is therefore SHARED
-with the RM velocities and the transit. Only the per-night nuisance parameters
-— shadow amplitude and local line width — are private to the tomogram, because
-they describe the CCF normalisation and the instrumental profile rather than
-the star.
+Geometry (λ, v sin i, b, a/R★, R_p/R★, the ephemeris and the eccentricity) is
+read from the layout and is therefore SHARED with the RM velocities and the
+transit. Each map n is a shadow plus Gaussian noise of covariance
 
-The noise term is white at this stage: the correlated (Kronecker) treatment
-becomes a noise-menu axis rather than a hardwired GP, so it is deliberately not
-reintroduced here as a fixed choice.
+    Σ_n = K_t,n ⊗ K_v(ℓ_v,n) + σ_n² I,
+
+with private per-night parameters: the shadow amplitude α (`tomo_alpha_<tag>`,
+or one shared `tomo_alpha`), the local line width σ_line, the velocity
+correlation length ℓ_v (Matérn-3/2) and the white term σ_n (`tomo_jit_<tag>`).
+The temporal factor K_t,n -- including its amplitude -- comes from the noise
+menu: the active `channel = :tomo` covariance model that covers the night
+(scoped by `instruments = [tag]`, or one global model for every night). No
+active model ⇒ white, `σ_n² I`.
+
+The shadow follows the FITTED ephemeris: night n is centred on the transit of
+the model orbit nearest its nominal `Tc`, so the maps and the velocities see
+the same Tc and P whether they are fixed or free. For a circular orbit the
+geometry is computed relative to that transit exactly as `shadow_map` does;
+for an eccentric one from `planet_sky_position`.
+
+Differentiable with ForwardDiff (the Kronecker term has an analytic
+derivative; see `kron_gp_loglike`), so gradient samplers can use it.
 """
 function tomogram_log_likelihood(theta::Theta{T}, data::Data) where {T}
     nights = data.tomo
@@ -951,90 +968,413 @@ function tomogram_log_likelihood(theta::Theta{T}, data::Data) where {T}
 
     layout = theta.params.layout
     sys    = layout.systemic
-    modes  = theta.params.config.planet_modes
+    cfg    = theta.params.config
+    modes  = cfg.planet_modes
 
-    # λ from the first planet with RM/GD enabled — the same slot the RM
-    # velocities read. Without one there is no obliquity to fit.
-    k_rm = findfirst(m -> has_any_rm(m) || has_gd(m), modes)
-    k_rm === nothing && return zero(T)
-    λ = planet_lambda(theta, k_rm)
+    # λ from the first planet with an obliquity -- the slot the RM velocities
+    # and gravity darkening read. Without one there is nothing to fit.
+    k = findfirst(has_obliquity, modes)
+    k === nothing && return zero(T)
+    λ = planet_lambda(theta, k)
     vsini_ms = system_vsini(theta)
     vsini_ms > 0 || return convert(T, -Inf)
     vsini = vsini_ms / 1000                       # maps are in km/s
 
-    b_raw, rr = planet_b_rr(theta, k_rm)
-    P = planet_P(theta, k_rm)
-    a_Rs = _tomo_a_Rs(theta, P)
+    b_raw, rr_raw = planet_b_rr(theta, k)
+    b, rr = cfg.parametrization.geom === :r1r2 ?
+        (b_raw * (1 - rr_raw) / 2, b_raw * (1 + rr_raw) / 2) : (b_raw, rr_raw)
+    P = planet_P(theta, k)
+    a_Rs = planet_a_Rs(theta, k, P)
     (isfinite(a_Rs) && a_Rs > 1) || return convert(T, -Inf)
-    b = b_raw
     (0 <= b < a_Rs) || return convert(T, -Inf)
-    inc = acos(b / a_Rs)
+    e, ω = planet_e_w(theta, k)
+    (0 <= e < 1) || return convert(T, -Inf)
+    Tp, Tc0 = _planet_tp_tc(theta, k, data.t_ref, P, e, ω)
+    circular = e == 0
+    inc = acos(b / a_Rs)                          # circular-orbit inclination
 
-    u1, u2 = _tomo_ld(theta)
+    u1, u2 = spectroscopic_ld(theta)
+    isfinite(u1) || return convert(T, -Inf)
 
     ll = zero(T)
     @inbounds for (j, nt) in enumerate(nights)
-        αi  = sys.tomo_alpha[j]
-        σi  = sys.tomo_sigma_line[j]
-        (αi > 0 && σi > 0) || return convert(T, -Inf)
-        α   = theta.values[αi]
-        σl  = theta.values[σi]
+        α  = theta.values[sys.tomo_alpha[j]]
+        σl = theta.values[sys.tomo_sigma_line[j]]
         (α >= 0 && σl > 0) || return convert(T, -Inf)
 
-        M = shadow_map(nt.t, nt.Tc, P, a_Rs, inc, λ, vsini, nt.grid, σl;
-                       rr = rr, u1 = u1, u2 = u2)
+        M = if circular
+            # This night's transit of the model ephemeris. Written as Tc0 + E·P
+            # so that a fixed ephemeris reproduces a night's Tc = Tc0 + E·P to
+            # the last bit.
+            E   = round((nt.Tc - _fd_value(Tc0)) / _fd_value(P))
+            Tcn = Tc0 + E * P
+            _shadow_map_circular(nt.t, Tcn, P, a_Rs, inc, λ, vsini, nt.grid, σl,
+                                 rr, u1, u2)
+        else
+            _shadow_map_orbit(nt.t, Tp, P, e, ω, b, a_Rs, λ, vsini, nt.grid, σl,
+                              rr, u1, u2)
+        end
         r = nt.R .- α .* M
-        σw = _tomo_white_sigma(nt)
-        # Temporal kernel from the noise MENU, not hardwired. Whether the
-        # pulsations are a damped oscillator, a rotation kernel or short-memory
-        # Matern is the question the menu exists to answer; nothing is assumed
-        # here. No active :tomo model ⇒ white, which is the null the others are
-        # compared against.
+        σw = sys.tomo_jit[j] > 0 ? theta.values[sys.tomo_jit[j]] :
+                                   convert(T, _tomo_white_sigma(nt))
+        σw > 0 || return convert(T, -Inf)
         Kt = _tomo_temporal_kernel(theta, nt)
         if Kt === nothing
             ll += white_map_loglike(r, σw)
         else
             ℓv = theta.values[sys.tomo_ell_v[j]]
             ℓv > 0 || return convert(T, -Inf)
-            ll += kron_gp_loglike(r, Kt, _kern(nt.grid, ℓv), σw)
+            ll += _kron_ll(r, Kt, _kern(nt.grid, ℓv), σw)
         end
         isfinite(ll) || return convert(T, -Inf)
     end
     return ll
 end
 
-"a/R★ from rho_s when available, else from M_s/R_s — mirrors _decode_rm_state."
-function _tomo_a_Rs(theta::Theta{T}, P) where {T}
-    layout = theta.params.layout
-    if layout.systemic.rho_s > 0
-        return rho_s_to_a_Rs(theta.values[layout.systemic.rho_s], P)
-    end
-    M_s = theta.params.config.M_s; R_s = theta.params.config.R_s
-    (M_s > 0 && R_s > 0) || return convert(T, NaN)
-    P_s = P * T(86400.0)
-    GM  = T(GM_SUN_CGS) * M_s
-    a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-    return a_cm / (R_s * T(R_SUN_CM))
+"""
+    tomogram_log_likelihood(theta, data, ws) -> ll
+
+`tomogram_log_likelihood(theta, data)` evaluated in the scratch of a sampler
+slot (`ws::PTWorkspace`, or a `TomoWorkspace`): the same model and the same
+arithmetic, bit for bit, without the ~0.9 MB the allocating path builds per
+call on the NGTS-33 maps. Not for concurrent use: one workspace per task, as
+for the RV buffers in the same `PTWorkspace`. Element types other than
+Float64 (ForwardDiff) take the allocating path.
+"""
+function tomogram_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
+    T === Float64 || return tomogram_log_likelihood(theta, data)
+    isempty(data.tomo) && return zero(T)
+    return _tomogram_ll_ws(theta, data, _tomo_workspace!(ws, theta.params, data.tomo))
 end
 
-"Quadratic limb darkening from the first PM instrument, else uniform disk."
-function _tomo_ld(theta::Theta{T}) where {T}
+_tomo_workspace!(tw::TomoWorkspace, params, nights) =
+    (tw.params === params && tw.nights_src === nights) ? tw :
+    (tw.params = params; tw.nights_src = nights; tw.nights = _tomo_night_works(nights); tw)
+
+function _tomo_workspace!(ws::PTWorkspace, params, nights)
+    tw = ws.tomo
+    tw === nothing && (tw = ws.tomo = TomoWorkspace(params, nights, _tomo_night_works(nights)))
+    return _tomo_workspace!(tw, params, nights)
+end
+
+TomoWorkspace(params, nights::Vector{TomoNight}) =
+    TomoWorkspace(params, nights, _tomo_night_works(nights))
+
+function _tomo_night_works(nights::Vector{TomoNight})
+    return [begin
+                nt_, nv = size(nt.R)
+                TomoNightWork(zeros(nt_, nv), zeros(nt_, nv), zeros(nt_, nt_), zeros(nv, nv),
+                              SymEigenWork(nt_), SymEigenWork(nv), zeros(nt_, nv),
+                              zeros(nt_, nv), zeros(nt_), zeros(nv),
+                              KernelDistances(nt.t), KernelDistances(nt.grid))
+            end for nt in nights]
+end
+
+function _tomogram_ll_ws(theta::Theta{Float64}, data::Data, tw::TomoWorkspace)
+    T = Float64
+    nights = data.tomo
     layout = theta.params.layout
-    n_pm = length(layout.systemic.ld_q1)
-    (n_pm > 0 && layout.systemic.ld_q1[1] > 0) || return (zero(T), zero(T))
-    q1 = theta.values[layout.systemic.ld_q1[1]]
-    q2 = theta.values[layout.systemic.ld_q2[1]]
-    return kipping_q_to_u(q1, q2)
+    sys    = layout.systemic
+    cfg    = theta.params.config
+    modes  = cfg.planet_modes
+
+    # Decoding exactly as `tomogram_log_likelihood(theta, data)`.
+    k = findfirst(has_obliquity, modes)
+    k === nothing && return zero(T)
+    λ = planet_lambda(theta, k)
+    vsini_ms = system_vsini(theta)
+    vsini_ms > 0 || return convert(T, -Inf)
+    vsini = vsini_ms / 1000
+
+    b_raw, rr_raw = planet_b_rr(theta, k)
+    b, rr = cfg.parametrization.geom === :r1r2 ?
+        (b_raw * (1 - rr_raw) / 2, b_raw * (1 + rr_raw) / 2) : (b_raw, rr_raw)
+    P = planet_P(theta, k)
+    a_Rs = planet_a_Rs(theta, k, P)
+    (isfinite(a_Rs) && a_Rs > 1) || return convert(T, -Inf)
+    (0 <= b < a_Rs) || return convert(T, -Inf)
+    e, ω = planet_e_w(theta, k)
+    (0 <= e < 1) || return convert(T, -Inf)
+    Tp, Tc0 = _planet_tp_tc(theta, k, data.t_ref, P, e, ω)
+    circular = e == 0
+    inc = acos(b / a_Rs)
+
+    u1, u2 = spectroscopic_ld(theta)
+    isfinite(u1) || return convert(T, -Inf)
+
+    ll = zero(T)
+    @inbounds for (j, nt) in enumerate(nights)
+        w  = tw.nights[j]
+        α  = theta.values[sys.tomo_alpha[j]]
+        σl = theta.values[sys.tomo_sigma_line[j]]
+        (α >= 0 && σl > 0) || return convert(T, -Inf)
+
+        if circular
+            E   = round((nt.Tc - Tc0) / P)
+            Tcn = Tc0 + E * P
+            _shadow_map_circular!(w.M, nt.t, Tcn, P, a_Rs, inc, λ, vsini, nt.grid, σl,
+                                  rr, u1, u2)
+        else
+            _shadow_map_orbit!(w.M, nt.t, Tp, P, e, ω, b, a_Rs, λ, vsini, nt.grid, σl,
+                               rr, u1, u2)
+        end
+        r = w.r
+        r .= nt.R .- α .* w.M
+        σw = sys.tomo_jit[j] > 0 ? theta.values[sys.tomo_jit[j]] :
+                                   convert(T, _tomo_white_sigma(nt))
+        σw > 0 || return convert(T, -Inf)
+        if !_tomo_temporal_kernel!(w.Kt, w.tdist, theta, nt)
+            ll += white_map_loglike(r, σw)
+        else
+            ℓv = theta.values[sys.tomo_ell_v[j]]
+            ℓv > 0 || return convert(T, -Inf)
+            _matern_upper!(w.Kv, w.vdist, ℓv, 1.0, false)
+            ll += _kron_gp_loglike!(w, r, σw)
+        end
+        isfinite(ll) || return convert(T, -Inf)
+    end
+    return ll
+end
+
+# The kernel factors are filled in their UPPER triangle only -- all that
+# `Symmetric(K)` and dsyevr read -- and evaluated once per distinct pair
+# distance (`KernelDistances`): 57 Matern evaluations for a 57-point uniform
+# velocity grid instead of 3249. Every entry is the value the full build
+# gives it, since a stationary kernel sees only abs(x[i] - x[j]).
+
+# K[i, j] = _matern32(x[i] - x[j], ℓ), or σ2 times it with `scaled`, as
+# `_kern` and `σ2 .* _kern` compute them, for i <= j.
+function _matern_upper!(K::Matrix{Float64}, kd::KernelDistances, ℓ::Float64,
+                        σ2::Float64, scaled::Bool)
+    val, d = kd.val, kd.d
+    if scaled
+        @inbounds for c in eachindex(d); val[c] = σ2 * _matern32(d[c], ℓ); end
+    else
+        @inbounds for c in eachindex(d); val[c] = _matern32(d[c], ℓ); end
+    end
+    return _fill_upper!(K, kd)
+end
+
+# The celerite kernel of `celerite_kernel_dense`, per distance, i <= j.
+function _celerite_upper!(K::Matrix{Float64}, kd::KernelDistances, ar, cr, ac, bc, cc, dc)
+    val, d = kd.val, kd.d
+    @inbounds for c in eachindex(d)
+        τ = d[c]
+        v = zero(Float64)
+        for q in eachindex(ar); v += ar[q] * exp(-cr[q] * τ); end
+        for q in eachindex(ac)
+            v += exp(-cc[q] * τ) * (ac[q] * cos(dc[q] * τ) + bc[q] * sin(dc[q] * τ))
+        end
+        val[c] = v
+    end
+    return _fill_upper!(K, kd)
+end
+
+function _fill_upper!(K::Matrix{Float64}, kd::KernelDistances)
+    val, cls = kd.val, kd.cls
+    p = 0
+    @inbounds for j in 1:kd.n, i in 1:j
+        p += 1
+        K[i, j] = val[cls[p]]
+    end
+    return K
+end
+
+# `_tomo_temporal_kernel`, into the upper triangle of K: true when an active
+# model covering this night built it, false for white.
+function _tomo_temporal_kernel!(K::Matrix{Float64}, kd::KernelDistances,
+                                theta::Theta{Float64}, nt::TomoNight)
+    cfg = theta.params.config
+    for (i, m) in enumerate(cfg.noise_models)
+        (m isa CovarianceNoise && noise_channel(m) === :tomo) || continue
+        insts = noise_instruments(m)
+        (isempty(insts) || nt.tag in insts) || continue
+        is_noise_model_active(theta, i) || continue
+        _tomo_Kt!(K, kd, theta, m, nt.t) && return true
+    end
+    return false
+end
+
+function _tomo_Kt!(K::Matrix{Float64}, kd::KernelDistances, theta::Theta, m::MaternGP, t)
+    s = _gp_suffix(m)
+    σ = _tomo_p(theta, "matern_sigma$s"); ρ = _tomo_p(theta, "matern_rho$s")
+    (σ === nothing || ρ === nothing || σ <= 0 || ρ <= 0) && return false
+    _matern_upper!(K, kd, ρ, σ^2, true)
+    return true
+end
+
+function _tomo_Kt!(K::Matrix{Float64}, kd::KernelDistances, theta::Theta, m::CeleriteSHO, t)
+    s = _gp_suffix(m)
+    lS = _tomo_p(theta, "gp_log_S0$s"); lQ = _tomo_p(theta, "gp_log_Q$s")
+    lw = _tomo_p(theta, "gp_log_omega0$s")
+    (lS === nothing || lQ === nothing || lw === nothing) && return false
+    ar, cr, ac, bc, cc, dc = sho_coefficients(exp(lS), exp(lQ), exp(lw))
+    _celerite_upper!(K, kd, ar, cr, ac, bc, cc, dc)
+    return true
+end
+
+function _tomo_Kt!(K::Matrix{Float64}, kd::KernelDistances, theta::Theta,
+                   m::CovarianceNoise, t)
+    Kt = _tomo_Kt(theta, m, t)
+    Kt === nothing && return false
+    copyto!(K, Kt)
+    return true
+end
+
+# `kron_gp_loglike(r, Kt, Kv, σ)` in the night's scratch. The eigensystems come
+# from the same LAPACK call `eigen(Symmetric(·))` makes, with the same
+# workspace sizes, and the product is formed in the order `Ut' * r * Uv`
+# chooses for these shapes, (Ut' r) Uv, by the same two `gemm` calls.
+function _kron_gp_loglike!(w::TomoNightWork, r::Matrix{Float64}, σ::Float64)
+    # Anything `eigen` would throw for: the allocating path, which throws it.
+    (_sym_eigen!(w.et, w.Kt) && _sym_eigen!(w.ev, w.Kv)) ||
+        return kron_gp_loglike(r, w.Kt, w.Kv, σ)
+    dt, dv = w.dt, w.dv
+    @inbounds for i in eachindex(dt); dt[i] = max(w.et.W[i], 0.0); end
+    @inbounds for k in eachindex(dv); dv[k] = max(w.ev.W[k], 0.0); end
+    BLAS.gemm!('T', 'N', 1.0, w.et.Z, r, 0.0, w.Y)
+    BLAS.gemm!('N', 'N', 1.0, w.Y, w.ev.Z, 0.0, w.Z)
+    Z = w.Z
+    σ2 = σ^2
+    σ2 > 0 || return -Inf
+    ll = -0.5 * length(Z) * log(2π)
+    @inbounds for k in axes(Z, 2), i in axes(Z, 1)
+        d = dt[i] * dv[k] + σ2
+        ll -= 0.5 * (Z[i, k]^2 / d + log(d))
+    end
+    return ll
 end
 
 """
-Per-map white scatter, estimated ONCE from the out-of-transit rows.
+    _sym_eigen!(ew::SymEigenWork, K) -> Bool
 
-Deliberately not a free parameter: a fitted noise scale on a map with thousands
-of pixels and one shadow will happily inflate to swallow the shadow, which is
-the same failure mode as a free RM amplitude absorbing pulsation power. When
-the noise menu lands this becomes a selectable model with a prior, not a
-silently fitted scale.
+Eigenvalues (`ew.W`) and eigenvectors (`ew.Z`) of the symmetric matrix whose
+upper triangle is that of `K`, by the `dsyevr` call `eigen(Symmetric(K))`
+makes (`LAPACK.syevr!('V', 'A', 'U', ...)`) with the `lwork`/`liwork` its
+workspace query returns -- so the same bits. `K` is not modified. False, with
+nothing computed, where `syevr!` would throw (a non-finite entry in the
+triangle, LAPACK reporting failure).
+"""
+function _sym_eigen!(ew::SymEigenWork, K::Matrix{Float64})
+    n = ew.n
+    A = ew.A
+    @inbounds for j in 1:n, i in 1:j
+        v = K[i, j]
+        isfinite(v) || return false
+        A[i, j] = v
+    end
+    if ew.lwork == 0
+        _syevr_call!(ew, BlasInt(-1), BlasInt(-1)) == 0 || return false
+        lwork = BlasInt(real(ew.work[1])); liwork = ew.iwork[1]
+        resize!(ew.work, lwork); resize!(ew.iwork, liwork)
+        ew.lwork = lwork; ew.liwork = liwork
+    end
+    return _syevr_call!(ew, ew.lwork, ew.liwork) == 0
+end
+
+# One dsyevr call, exactly as LinearAlgebra.LAPACK.syevr! makes it.
+function _syevr_call!(ew::SymEigenWork, lwork::BlasInt, liwork::BlasInt)
+    n = ew.n
+    if lwork < 0
+        length(ew.work) >= 1 || resize!(ew.work, 1)
+        length(ew.iwork) >= 1 || resize!(ew.iwork, 1)
+    end
+    m = Ref{BlasInt}()
+    info = Ref{BlasInt}()
+    ccall((BLAS.@blasfunc(dsyevr_), BLAS.libblastrampoline), Cvoid,
+          (Ref{UInt8}, Ref{UInt8}, Ref{UInt8}, Ref{BlasInt},
+           Ptr{Float64}, Ref{BlasInt}, Ref{Float64}, Ref{Float64},
+           Ref{BlasInt}, Ref{BlasInt}, Ref{Float64}, Ptr{BlasInt},
+           Ptr{Float64}, Ptr{Float64}, Ref{BlasInt}, Ptr{BlasInt},
+           Ptr{Float64}, Ref{BlasInt}, Ptr{BlasInt}, Ref{BlasInt},
+           Ref{BlasInt}, Clong, Clong, Clong),
+          'V', 'A', 'U', n,
+          ew.A, max(1, n), 0.0, 0.0,
+          0, 0, -1.0, m,
+          ew.W, ew.Z, max(1, n), ew.isuppz,
+          ew.work, lwork, ew.iwork, liwork,
+          info, 1, 1, 1)
+    (lwork < 0 || m[] == n) || return BlasInt(-999)
+    return info[]
+end
+
+_fd_value(x::Real) = x
+_fd_value(x::ForwardDiff.Dual) = _fd_value(ForwardDiff.value(x))
+
+# (Tp, Tc) of planet k from its time anchor.
+function _planet_tp_tc(theta::Theta, k::Int, t_ref, P, e, ω)
+    ta = planet_time_anchor(theta, k)
+    tm = theta.params.config.parametrization.time
+    if tm === :Tc
+        return tc_to_tp(ta, P, e, ω), ta
+    end
+    Tp = tm === :Mo ? t_ref - ta * P / (2π) : ta
+    return Tp, tp_to_tc(Tp, P, e, ω)
+end
+
+# The shadow for a circular orbit: `shadow_map`'s arithmetic, step for step,
+# generic in the element type.
+function _shadow_map_circular(t, Tc, P, a_Rs, inc, λ, vsini, grid, σ_line, rr, u1, u2)
+    TT = promote_type(typeof(Tc), typeof(P), typeof(a_Rs), typeof(inc), typeof(λ),
+                      typeof(vsini), typeof(σ_line), typeof(rr), typeof(u1), Float64)
+    M = Matrix{TT}(undef, length(t), length(grid))
+    return _shadow_map_circular!(M, t, Tc, P, a_Rs, inc, λ, vsini, grid, σ_line, rr, u1, u2)
+end
+
+# In place, into an n_t x n_v matrix (zeroed here).
+function _shadow_map_circular!(M, t, Tc, P, a_Rs, inc, λ, vsini, grid, σ_line, rr, u1, u2)
+    fill!(M, zero(eltype(M)))
+    sλ, cλ = sincos(λ)
+    norm = 1 - u1 / 3 - u2 / 6
+    @inbounds for i in eachindex(t)
+        ph = 2π * (t[i] - Tc) / P
+        x  = a_Rs * sin(ph)
+        y  = a_Rs * cos(ph) * cos(inc)
+        z  = a_Rs * cos(ph) * sin(inc)
+        (hypot(x, y) < 1 && z > 0) || continue
+        tr = vsini * (x * cλ - y * sλ)
+        r  = hypot(x, y)
+        μ  = sqrt(max(1 - r^2, zero(r)))
+        A  = rr^2 * (1 - u1 * (1 - μ) - u2 * (1 - μ)^2) / norm
+        for q in eachindex(grid)
+            M[i, q] = -A * exp(-0.5 * ((grid[q] - tr) / σ_line)^2)
+        end
+    end
+    return M
+end
+
+# The shadow for an eccentric orbit: positions from `planet_sky_position`, the
+# same geometry the RM anomaly uses.
+function _shadow_map_orbit(t, Tp, P, e, ω, b, a_Rs, λ, vsini, grid, σ_line, rr, u1, u2)
+    TT = promote_type(typeof(Tp), typeof(P), typeof(e), typeof(ω), typeof(b),
+                      typeof(a_Rs), typeof(λ), typeof(vsini), typeof(σ_line),
+                      typeof(rr), typeof(u1), Float64)
+    M = Matrix{TT}(undef, length(t), length(grid))
+    return _shadow_map_orbit!(M, t, Tp, P, e, ω, b, a_Rs, λ, vsini, grid, σ_line, rr, u1, u2)
+end
+
+function _shadow_map_orbit!(M, t, Tp, P, e, ω, b, a_Rs, λ, vsini, grid, σ_line, rr, u1, u2)
+    fill!(M, zero(eltype(M)))
+    sλ, cλ = sincos(λ)
+    norm = 1 - u1 / 3 - u2 / 6
+    @inbounds for i in eachindex(t)
+        x, y, z = planet_sky_position(t[i], P, e, ω, Tp, b, a_Rs)
+        r = hypot(x, y)
+        (r < 1 && z > 0) || continue
+        tr = vsini * (x * cλ - y * sλ)
+        μ  = sqrt(max(1 - r^2, zero(r)))
+        A  = rr^2 * (1 - u1 * (1 - μ) - u2 * (1 - μ)^2) / norm
+        for q in eachindex(grid)
+            M[i, q] = -A * exp(-0.5 * ((grid[q] - tr) / σ_line)^2)
+        end
+    end
+    return M
+end
+
+"""
+Per-map white scatter, from the out-of-transit-subtracted map. Only used when a
+`Params` has no `tomo_jit_<tag>` slot, which `_build_layout` always allocates
+now; kept for a layout built by older code.
 """
 _tomo_white_sigma(nt::TomoNight) = max(std(nt.R), 1e-8)
 
@@ -1042,23 +1382,27 @@ _tomo_white_sigma(nt::TomoNight) = max(std(nt.R), 1e-8)
 """
     _tomo_temporal_kernel(theta, night) -> Matrix | nothing
 
-Dense temporal covariance for one residual map, built from whichever
-`channel = :tomo` covariance model the noise menu currently has ACTIVE.
-`nothing` means no model is active, i.e. white — the null.
+Dense temporal covariance for one residual map, built from the
+`channel = :tomo` covariance model of the noise menu that is ACTIVE and covers
+this night: one scoped to it (`instruments = [night.tag]`) or a global one
+(`instruments = []`). `nothing` means none is active, i.e. white -- the null.
 
-Reading `is_noise_active` is what makes this trans-dimensional: the chain turns
-kernels on and off and the map likelihood follows, so the occupancy answers
-"which description do the pulsations prefer" with the same calibrated machinery
-used for RV noise, rather than the kernel being whatever the module author
-picked.
+Reading `is_noise_model_active` is what makes this trans-dimensional: the chain
+turns kernels on and off and the map likelihood follows, so the occupancy
+answers "which description do the pulsations prefer" with the same calibrated
+machinery used for RV noise, rather than the kernel being whatever the module
+author picked. Scoped per night, each night chooses for itself: the pulsation
+amplitude a night happens to catch is not shared between epochs a year apart.
 
-Time is in DAYS, as everywhere else in Nereus. The bespoke path used hours,
-which is why its priors are not transferable.
+Time is in DAYS, as everywhere else in Nereus. The kernel carries the
+amplitude; the velocity factor is unit-amplitude.
 """
 function _tomo_temporal_kernel(theta::Theta{T}, nt::TomoNight) where {T}
     cfg = theta.params.config
     for (i, m) in enumerate(cfg.noise_models)
-        (m isa CovarianceNoise && getfield(m, :channel) === :tomo) || continue
+        (m isa CovarianceNoise && noise_channel(m) === :tomo) || continue
+        insts = noise_instruments(m)
+        (isempty(insts) || nt.tag in insts) || continue
         # `is_noise_model_active` is the canonical check: true in fixed-dim,
         # true for untracked indices, and the mask otherwise. Rolling this by
         # hand gets the fixed-dim and untracked cases wrong.
@@ -1076,17 +1420,99 @@ end
 
 "Build K_t for a specific kernel family. Returns nothing if its params are absent."
 function _tomo_Kt(theta::Theta, m::MaternGP, t)
-    σ = _tomo_p(theta, "matern_sigma_tomo"); ρ = _tomo_p(theta, "matern_rho_tomo")
+    s = _gp_suffix(m)
+    σ = _tomo_p(theta, "matern_sigma$s"); ρ = _tomo_p(theta, "matern_rho$s")
     (σ === nothing || ρ === nothing || σ <= 0 || ρ <= 0) && return nothing
-    return (σ^2) .* _kern(collect(t), ρ)
+    return (σ^2) .* _kern(t, ρ)
 end
 
 function _tomo_Kt(theta::Theta, m::CeleriteSHO, t)
-    lS = _tomo_p(theta, "gp_log_S0_tomo"); lQ = _tomo_p(theta, "gp_log_Q_tomo")
-    lw = _tomo_p(theta, "gp_log_omega0_tomo")
+    s = _gp_suffix(m)
+    lS = _tomo_p(theta, "gp_log_S0$s"); lQ = _tomo_p(theta, "gp_log_Q$s")
+    lw = _tomo_p(theta, "gp_log_omega0$s")
     (lS === nothing || lQ === nothing || lw === nothing) && return nothing
-    ar, cr, ac, bc, cc, dc = sho_coefficients(10.0^lS, 10.0^lQ, 10.0^lw)
-    return celerite_kernel_dense(collect(t), ar, cr, ac, bc, cc, dc)
+    # NATURAL log, like every SHO in Nereus (gp.jl) and like their priors. This
+    # decoded 10^x while the default priors were natural-log boxes, so the
+    # kernel actually used had S0, Q and ω0 raised to the power log(10).
+    ar, cr, ac, bc, cc, dc = sho_coefficients(exp(lS), exp(lQ), exp(lw))
+    return celerite_kernel_dense(t, ar, cr, ac, bc, cc, dc)
 end
 
 _tomo_Kt(theta::Theta, m::CovarianceNoise, t) = nothing
+
+# ---------------------------------------------------------------------
+# The Kronecker likelihood under ForwardDiff
+# ---------------------------------------------------------------------
+#
+# `kron_gp_loglike` rests on two symmetric eigendecompositions, which have no
+# ForwardDiff rule. The log-likelihood itself is smooth, though, and its
+# derivative needs only the decompositions of the VALUES. With Σ = K_v ⊗ K_t
+# + σ² I acting on a map X as K_t X K_v + σ² X, α = Σ⁻¹ r (the matrix A) and
+# D_ik = d_t,i d_v,k + σ² in the joint eigenbasis,
+#
+#     dℓ = −⟨A, dr⟩ + ½ [⟨A, dK_t A K_v⟩ + ⟨A, K_t A dK_v⟩ + 2σ dσ ‖A‖²]
+#          − ½ [Σ_ik (U_tᵀ dK_t U_t)_ii d_v,k / D_ik
+#               + Σ_ik d_t,i (U_vᵀ dK_v U_v)_kk / D_ik + 2σ dσ Σ_ik 1/D_ik],
+#
+# the first bracket from the quadratic form and the second from log|Σ|. No
+# eigenvector derivatives appear, so (near-)degenerate eigenvalues are no
+# problem. Each partial costs two matrix products per factor.
+
+_kron_ll(r, Kt, Kv, σ) = kron_gp_loglike(r, Kt, Kv, σ)
+
+function _kron_ll(r::AbstractMatrix, Kt::AbstractMatrix, Kv::AbstractMatrix,
+                  σ::Real)
+    D = promote_type(eltype(r), eltype(Kt), eltype(Kv), typeof(σ))
+    D <: ForwardDiff.Dual || return kron_gp_loglike(r, Kt, Kv, σ)
+    return _kron_ll_dual(convert(Matrix{D}, r), convert(Matrix{D}, Kt),
+                         convert(Matrix{D}, Kv), convert(D, σ))
+end
+
+function _kron_ll_dual(r::Matrix{D}, Kt::Matrix{D}, Kv::Matrix{D},
+                       σ::D) where {D<:ForwardDiff.Dual}
+    ForwardDiff.valtype(D) === Float64 || throw(ArgumentError(
+        "the Doppler-tomography likelihood supports first derivatives " *
+        "(ForwardDiff over Float64) only; got $(D)"))
+    N  = ForwardDiff.npartials(D)
+    val = ForwardDiff.value
+    rv, Ktv, Kvv, σv = val.(r), val.(Kt), val.(Kv), val(σ)
+    σ2 = σv^2
+    σ2 > 0 || return D(-Inf)
+    Et = eigen(Symmetric(Ktv)); Ev = eigen(Symmetric(Kvv))
+    dt = max.(Et.values, 0.0); dv = max.(Ev.values, 0.0)
+    Ut, Uv = Et.vectors, Ev.vectors
+    Z  = Ut' * rv * Uv
+    Dm = dt .* dv' .+ σ2
+    ll = -0.5 * length(Z) * log(2π)
+    @inbounds for q in eachindex(Z)
+        ll -= 0.5 * (Z[q]^2 / Dm[q] + log(Dm[q]))
+    end
+    A   = Ut * (Z ./ Dm) * Uv'
+    AKv = A * Kvv
+    KtA = Ktv * A
+    invD = 1 ./ Dm
+    wt = invD * dv            # Σ_k d_v,k / D_ik
+    wv = invD' * dt           # Σ_i d_t,i / D_ik
+    sA2, sID = sum(abs2, A), sum(invD)
+    g = zeros(N)
+    dR  = similar(rv); dKt = similar(Ktv); dKv = similar(Kvv)
+    for p in 1:N
+        @inbounds for q in eachindex(r);  dR[q]  = ForwardDiff.partials(r[q], p);  end
+        @inbounds for q in eachindex(Kt); dKt[q] = ForwardDiff.partials(Kt[q], p); end
+        @inbounds for q in eachindex(Kv); dKv[q] = ForwardDiff.partials(Kv[q], p); end
+        dσ = ForwardDiff.partials(σ, p)
+        gp = -dot(A, dR)
+        quad = 2σv * dσ * sA2
+        ldet = 2σv * dσ * sID
+        if any(!iszero, dKt)
+            quad += dot(A, dKt * AKv)
+            ldet += dot(vec(sum(Ut .* (dKt * Ut); dims = 1)), wt)
+        end
+        if any(!iszero, dKv)
+            quad += dot(A, KtA * dKv)
+            ldet += dot(vec(sum(Uv .* (dKv * Uv); dims = 1)), wv)
+        end
+        g[p] = gp + 0.5 * quad - 0.5 * ldet
+    end
+    return D(ll, ForwardDiff.Partials{N,Float64}(Tuple(g)))
+end

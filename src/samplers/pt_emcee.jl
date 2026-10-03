@@ -621,7 +621,8 @@ function sample_pt_emcee(
         end
         lp = log_prior(theta) + log_jac
         isfinite(lp) || return (-Inf, -Inf)
-        ll_rv = rv_log_likelihood(theta, data, wb)
+        # The residual maps (Doppler tomography) are data: tempered with the RV.
+        ll_rv = rv_log_likelihood(theta, data, wb) + tomogram_log_likelihood(theta, data, wb)
         ll_tr = transit_log_likelihood(theta, data, wb)
         # UNTEMPERED TRANSIT (see `untemper_transit`): π_β ∝ prior·L_transit·L_RV^β.
         # Folding the transit into `lp` makes the within-chain acceptance
@@ -1098,8 +1099,11 @@ function sample_pt_emcee(
                               # minimum(acceptance_swap) since the sampler was
                               # written; the counters were right here and the
                               # readout never showed them.
-                              :min_swap => round(minimum(accept_swap ./ max.(propose_swap, 1)),
-                                                 digits = 3),
+                              # One rung (n_temps = 1) has no swaps: NaN, not
+                              # `minimum` of an empty vector, which threw.
+                              :min_swap => isempty(accept_swap) ? NaN :
+                                  round(minimum(accept_swap ./ max.(propose_swap, 1)),
+                                        digits = 3),
                               :Rhat => rhat_str,    # mean/worst over science params
                               :ESS => ess_str,      # mean(bulk)/worst(tail)
                               :nevals => n_evals_atomic[]))

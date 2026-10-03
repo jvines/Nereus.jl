@@ -451,7 +451,10 @@ Raises `ArgumentError` for the non-AS block types.
     # a/R*: prefer rho_s when available; otherwise fall back to
     # M_s, R_s (config) via Kepler's third law. Mirrors the logic in
     # transit_likelihood.jl.
-    a_Rs = _a_Rs_for_inc(theta, P)
+    k_blk = findfirst(b -> b === block, theta.params.layout.planet_blocks)
+    ai = (k_blk === nothing || isempty(theta.params.layout.systemic.a_Rs)) ? 0 :
+         theta.params.layout.systemic.a_Rs[k_blk]
+    a_Rs = ai > 0 ? theta.values[ai] : _a_Rs_for_inc(theta, P)
 
     # Geometric relation: cos i = b * (1 + e sin ω) / (a_Rs * (1 - e²))
     one_minus_e2 = 1 - e * e
@@ -890,6 +893,44 @@ Reads the fitted value straight out of `theta` by slot index.
 @inline function pm_trend_coef(theta::Theta{T}, ins_idx::Int, p::Int) where {T}
     slots = theta.params.layout.systemic.pm_trend[ins_idx]
     p <= length(slots) ? theta.values[slots[p]] : zero(T)
+end
+
+# =====================================================================
+# a/R★ accessor
+# =====================================================================
+
+"""
+    a_Rs_slot(theta, k) -> Int
+
+Index of planet `k`'s sampled `a_Rs_k<k>` slot, or `0` when a/R★ is not sampled
+directly (`parametrization.sample_a_Rs` off, or a planet without transit
+geometry).
+"""
+@inline function a_Rs_slot(theta::Theta, k::Int)
+    v = theta.params.layout.systemic.a_Rs
+    return (isempty(v) || k > length(v)) ? 0 : v[k]
+end
+
+"""
+    planet_a_Rs(theta, k, P) -> a/R★
+
+Scaled semi-major axis of planet `k` at period `P`, from whichever source the
+parametrization uses, in order: the sampled `a_Rs_k<k>` slot
+(`sample_a_Rs`), the shared stellar density `rho_s` (`use_rho_s`), or
+`(M_s, R_s)` through Kepler's third law. `NaN` when none is available.
+"""
+@inline function planet_a_Rs(theta::Theta{T}, k::Int, P) where {T}
+    ai = a_Rs_slot(theta, k)
+    ai > 0 && return theta.values[ai]
+    cfg = theta.params.config
+    if cfg.parametrization.use_rho_s
+        return rho_s_to_a_Rs(theta.values[theta.params.layout.systemic.rho_s], P)
+    end
+    M_s, R_s = cfg.M_s, cfg.R_s
+    (!isnan(M_s) && !isnan(R_s) && R_s > 0) || return convert(T, NaN)
+    P_s = P * T(86400.0)
+    GM  = T(GM_SUN_CGS) * M_s
+    return cbrt(GM * P_s^2 / (4 * T(π)^2)) / (R_s * T(R_SUN_CM))
 end
 
 # =====================================================================

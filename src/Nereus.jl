@@ -149,6 +149,7 @@ include("ttv_nbody_full.jl")       # full ODE backend via NbodyGradient.jl
 include("sampler_diagnostics.jl") # per-engine run health, persisted into every summary
 include("engines_registry.jl")   # the ONE sampler registry; api.jl and runner.jl derive from it
 include("runner.jl")               # JSON/dict-driven batch entry point
+include("runner_obliquity.jl")     # run_job: RM-night and line-profile data blocks, model.obliquity
 include("api.jl")                  # split-by-functionality public API (fit_*)
 include("features.jl")             # capability registry behind the API
 
@@ -179,6 +180,7 @@ export
     AbstractPrior, PriorSpec, Fixed, ModJeffreys,
     UniformPrior, NormalPrior, LogUniformPrior,
     BetaPrior, ModJeffreysPrior, FixedPrior, SinePrior,
+    WrappedUniformPrior, is_wrapped,
     bounds, is_fixed, fixed_value, in_support,
     prior_transform, prior_transform!,
     logpdf_sum, prior_to_dict, prior_from_dict,
@@ -194,6 +196,8 @@ export
     RVPM_RM_A, RVPMAS_RM_A,
     SB_SOURCE, BINARY, BINARY_RV, has_sb,
     has_ttv_nb, has_rm_r, has_rm_a, has_any_rm,
+    DT_SOURCE, PM_DT, has_dt, has_obliquity, ObliquityConfig,
+    planet_a_Rs, arome_beta_p, spectroscopic_ld,
     rm_reloaded_signal,
     ParametrizationConfig, InstrumentConfig, SystemicIndices,
     PlanetBlock, RVOnlyBlock, PMOnlyBlock, RVPMBlock,

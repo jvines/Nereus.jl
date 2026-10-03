@@ -284,7 +284,8 @@ function sample_pt_whitening(
         lp = log_prior(theta)
         isfinite(lp) || return (-Inf, -Inf)
         ll = rv_log_likelihood(theta, data, wb) +
-             transit_log_likelihood(theta, data, wb)
+             transit_log_likelihood(theta, data, wb) +
+             tomogram_log_likelihood(theta, data, wb)
         return (lp, ll)
     end
 
@@ -528,7 +529,7 @@ function sample_pt_whitening(
             d = findfirst(==(nm), layout.unfrozen_names)::Int
             set_circular_window!(params, d, lo; transforms = (target.transform,))
             if layout.unfrozen_priors[d].hi != hi
-                layout.unfrozen_priors[d] = UniformPrior(lo, hi)
+                layout.unfrozen_priors[d] = _rewindow(layout.unfrozen_priors[d], lo, hi)
                 layout.packed_priors.uppers[d] = hi
                 target.transform isa PackedTransforms &&
                     (target.transform.uppers[d] = hi)

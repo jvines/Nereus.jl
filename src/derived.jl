@@ -595,8 +595,13 @@ function compute_derived(chains, params::Params;
         # Period (days). Under :a_driven (orvara-style) the orbital slot is a_k
         # (AU) and there is no P_k — derive the period from Kepler's 3rd law,
         # P_yr² = a³ / (M_pri + M_sec).
-        if Symbol("P_k$k") in chain_syms
-            P = vec(Array(chains[Symbol("P_k$k")]))
+        # A parameter held FIXED (FixedPrior) is not a chain column: its draws
+        # are its value, repeated. An obliquity fit fixes P, b and a/R★ routinely.
+        _col(nm) = Symbol(nm) in chain_syms ? vec(Array(chains[Symbol(nm)])) :
+                   fill(Float64(get_param(Theta{Float64}(params), nm)), n_samples)
+        if Symbol("P_k$k") in chain_syms ||
+           haskey(params.layout.name_to_idx, "P_k$k")
+            P = _col("P_k$k")
         else
             a_au_s = vec(Array(chains[Symbol("a_k$k")]))
             msec_s = Symbol("M_sec_k$k") in chain_syms ?
@@ -660,8 +665,15 @@ function compute_derived(chains, params::Params;
 
         # a/R* and a(AU)
         has_rho = haskey(params.layout.name_to_idx, "rho_s")
-        if has_rho
-            rho_samples = vec(Array(chains[:rho_s]))
+        if haskey(params.layout.name_to_idx, "a_Rs_k$k")
+            # a/R★ sampled directly (`sample_a_Rs`)
+            a_Rs_samples = _col("a_Rs_k$k")
+            derived["a_Rs"] = a_Rs_samples
+            if rs !== nothing
+                derived["a_au"] = a_Rs_samples .* rs .* _RS ./ AU_CM
+            end
+        elseif has_rho
+            rho_samples = _col("rho_s")
             a_Rs_samples = rho_s_to_a_Rs.(rho_samples, P)
             derived["a_Rs"] = a_Rs_samples
             if rs !== nothing
@@ -689,11 +701,11 @@ function compute_derived(chains, params::Params;
         has_geom = has_geometry(block)
         if has_geom
             if parametrization.geom === :b_rr
-                b_samp = vec(Array(chains[Symbol("b_k$k")]))
-                rr_samp = vec(Array(chains[Symbol("rr_k$k")]))
+                b_samp = _col("b_k$k")
+                rr_samp = _col("rr_k$k")
             else  # :r1r2
-                r1 = vec(Array(chains[Symbol("r1_k$k")]))
-                r2 = vec(Array(chains[Symbol("r2_k$k")]))
+                r1 = _col("r1_k$k")
+                r2 = _col("r2_k$k")
                 rr_samp = r1 .* (1 .+ r2) ./ 2
                 b_samp = r1 .* (1 .- r2) ./ 2
             end

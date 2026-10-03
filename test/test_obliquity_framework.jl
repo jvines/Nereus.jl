@@ -37,9 +37,12 @@ using Random, Statistics
             th.values[s] = clamp((lo + hi) / 2, lo, hi)
         end
         set_param!(th, "n_p", 1.0)
-        set_param!(th, "Mo_k1",
+        # The ephemeris is the transit time itself (`time = :Tc`); a layout
+        # with the Mo anchor gets the equivalent mean anomaly.
+        haskey(p.layout.name_to_idx, "Mo_k1") && set_param!(th, "Mo_k1",
             mod(tp_to_mo(tc_to_tp(Tc, P, 0.0, 0.0), P, d.t_ref), 2π))
         for (k, v) in ("v_sin_i_star" => VSINI, "P_k1" => P, "b_k1" => 0.4,
+                       "Tc_k1" => Tc, "a_Rs_k1" => 6.81,
                        "rr_k1" => 0.116, "K_k1" => 100.0, "rho_s" => 0.52945,
                        "sesinw_k1" => 0.0, "secosw_k1" => 0.0)
             haskey(p.layout.name_to_idx, k) && set_param!(th, k, v)
@@ -99,11 +102,23 @@ using Random, Statistics
     end
 
     @testset "a_Rs is a constraint, not decoration" begin
-        # Without use_rho_s the geometry is fixed by (M_s, R_s, P), so a passed
-        # a_Rs would be silently ignored — the published value and its error
-        # would vanish from the fit while appearing in the call.
+        # Derived from (M_s, R_s, P) the geometry would ignore a passed a_Rs --
+        # the published value and its error would vanish from the fit while
+        # appearing in the call. By default a/R★ is SAMPLED, with the published
+        # (mean, sd) as its Gaussian prior; `a_Rs_param = :rho_s` keeps the
+        # older stellar-density conversion.
         _, _, p = setup()
-        @test "rho_s" in p.layout.names
+        @test "a_Rs_k1" in p.layout.names
+        @test !("rho_s" in p.layout.names)
+        ps = p.config.priors["a_Rs_k1"]
+        @test ps.dist isa Nereus.Truncated && ps.dist.untruncated.μ ≈ 6.81 &&
+              ps.dist.untruncated.σ ≈ 0.2
+        rng = MersenneTwister(4)
+        nights = [mk("CORALIE", Tc, 22, 25.0, rng)]
+        d, names = obliquity_data(nights)
+        pr = obliquity_params(d, names; P = P, Tc = Tc, b = (0.4, 0.05),
+                              a_Rs = (6.81, 0.2), a_Rs_param = :rho_s)
+        @test "rho_s" in pr.layout.names && !("a_Rs_k1" in pr.layout.names)
         for (a, PP) in ((6.81, P), (12.0, 10.0), (3.5, 1.2))
             @test rho_s_to_a_Rs(_a_Rs_to_rho_s(a, PP), PP) ≈ a rtol = 1e-10
         end

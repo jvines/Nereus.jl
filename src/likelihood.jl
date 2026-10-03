@@ -204,7 +204,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- Decode Rossiter-McLaughlin state (once) ---------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)   # RM enabled but M_s/R_s missing
 
     # --- Stage 1: Build predictions + variances -----------------------
@@ -240,7 +240,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
         # Rossiter-McLaughlin during in-transit windows — component A only
         # (the RM anomaly lives in the primary's deblended lines)
         (n_rm > 0 && comp == 1) && (pred += rm_contribution(t, n_rm, rm_state,
-                                                Ps, es, ws, Tps))
+                                                Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -386,8 +386,10 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- Decode RM state (once) --------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
+    ow = n_rm > 0 ? _rv_orbit_work!(ws, data) : nothing
+    n_rm > 0 && _refresh_rm_phase!(ow, n_rm, rm_state, Ps, es, ws_buf, Tps)
 
     # --- Stage 1: Build predictions + variances (reuse buffers) ------
     # γ-marginalization: omit the systemic offset from the per-point
@@ -412,9 +414,8 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
 
         # RM — component A only.
         (n_rm > 0 && data.rv_comp[i] == 1) &&
-            (pred += rm_contribution(t, n_rm, rm_state,
-                                     Ps, es, view(ws_buf, 1:n_rv_planets),
-                                     Tps))
+            (pred += _rm_contribution_cached(ow, i, n_rm, rm_state, es,
+                                             view(ws_buf, 1:n_rv_planets), ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -494,8 +495,13 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- RM state (once) ---------------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
+
+    # --- Orbital phases, kept across calls (see RVOrbitWork) ---------
+    ow = _rv_orbit_work!(ws, data)
+    _refresh_kepler!(ow, n_rv_planets, Ps, es, ws_buf, Tps, two_pi)
+    n_rm > 0 && _refresh_rm_phase!(ow, n_rm, rm_state, Ps, es, ws_buf, Tps)
 
     predictions = ws.predictions
     variances = ws.variances
@@ -517,16 +523,12 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
 
         comp = data.rv_comp[i]
         for jj in 1:n_rv_planets
-            M = two_pi * (t - Tps[jj]) / Ps[jj]
-            E = kepler_solve(M, es[jj])
-            f = true_anomaly(E, es[jj])
-            geom = cos(f + ws_buf[jj]) + es[jj] * cos(ws_buf[jj])
-            pred += _comp_rv(geom, comp, Ks[jj], cBs[jj])
+            pred += _comp_rv(ow.kep_geom[jj, i], comp, Ks[jj], cBs[jj])
         end
 
         (n_rm > 0 && comp == 1) &&
-            (pred += rm_contribution(t, n_rm, rm_state, Ps, es,
-                                     view(ws_buf, 1:n_rv_planets), Tps))
+            (pred += _rm_contribution_cached(ow, i, n_rm, rm_state, es,
+                                             view(ws_buf, 1:n_rv_planets), ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -748,7 +750,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- RM state (once) ---------------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
 
     predictions = Vector{T}(undef, n_obs)
@@ -779,7 +781,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         end
 
         (n_rm > 0 && comp == 1) && (pred += rm_contribution(t, n_rm, rm_state,
-                                                Ps, es, ws, Tps))
+                                                Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -848,7 +850,10 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
     #     disjoint `instruments` lists → per-instrument-group joint LL,
     #     summed. RV instruments NOT covered by any AGP fall back to
     #     the standard white-noise / celerite path.
-    agp_list = _active_activity_gps(theta, noise_models)
+    # (No active ActivityGP -- every fit without one -- reads a shared empty
+    # list instead of allocating one; neither list is ever mutated.)
+    agp_list = _active_activity_gp(theta, noise_models) === nothing ? _NO_ACTIVITY_GPS :
+               _active_activity_gps(theta, noise_models)
     # indicators_only AGPs score ONLY the indicator block log p(y_I|θ);
     # the RV path continues below (white noise / celerite) as if no GP
     # were registered, and the indicator term is ADDED to whichever
@@ -911,9 +916,99 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
         end
     end
 
-    return ind_only_ll +
-           _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
-                                     data.rv_inst, :rv, two_pi, ws)
+    # With a sampler workspace the channel is scored in its scratch (see
+    # `_eval_channel_likelihood(..., ws)`): the instrument-restricted GPs in
+    # the workspace's channel scratch, a global GP in its RV-noise scratch;
+    # same arithmetic.
+    ch_ll = ws === nothing ?
+        _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
+                                 data.rv_inst, :rv, two_pi) :
+        _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
+                                 data.rv_inst, :rv, two_pi, ws)
+    return ind_only_ll + ch_ll
+end
+
+const _NO_ACTIVITY_GPS = ActivityGP[]
+
+# ---------------------------------------------------------------------
+# Orbital phases of the RV epochs, kept across calls
+# ---------------------------------------------------------------------
+#
+# The Keplerian and the RM anomaly both start from Kepler's equation and the
+# true anomaly at every RV epoch, every call -- 45% of the NGTS-33 velocity
+# term, though P, the transit time, e and ω are fixed there and those
+# numbers never change. The workspace keeps, per planet, cos(f + ω) + e cos ω
+# for the Keplerian and (cos f, cos(f + ω), sin(f + ω)) for the RM, keyed on
+# the exact bits of the orbit elements they were computed from, and
+# recomputes a planet's row only when one of those changes. The values are
+# the same expressions on the same inputs, so the same bits.
+
+"""Orbital-phase scratch of the workspace RV likelihood; see `_refresh_kepler!`."""
+mutable struct RVOrbitWork
+    t::Vector{Float64}                  # the epochs (data.t_rv, by identity)
+    comp::Vector{Int}                   # their components (data.rv_comp, by identity)
+    kep_key::Vector{NTuple{4,UInt64}}   # per planet: bits of (P, e, ω, Tp)
+    kep_ok::Vector{Bool}
+    kep_geom::Matrix{Float64}           # planet x epoch: cos(f + ω) + e cos ω
+    rm_key::Vector{NTuple{6,UInt64}}    # per RM planet: bits of its phase inputs
+    rm_ok::Vector{Bool}
+    rm_cosf::Matrix{Float64}            # RM planet x epoch
+    rm_cosfw::Matrix{Float64}
+    rm_sinfw::Matrix{Float64}
+end
+
+function RVOrbitWork(t::Vector{Float64}, comp::Vector{Int}, nk::Int)
+    n = length(t)
+    z4 = (UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+    z6 = (UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+    return RVOrbitWork(t, comp, fill(z4, nk), fill(false, nk), zeros(nk, n),
+                       fill(z6, nk), fill(false, nk), zeros(nk, n), zeros(nk, n),
+                       zeros(nk, n))
+end
+
+_bits(x::Float64) = reinterpret(UInt64, x)
+
+# The Keplerian geometry of every epoch for planets 1:n, as the RV loop
+# computes it, refreshed where a planet's (P, e, ω, Tp) changed.
+function _refresh_kepler!(ow::RVOrbitWork, n::Int, Ps, es, ωs, Tps, two_pi::Float64)
+    t = ow.t
+    @inbounds for jj in 1:n
+        key = (_bits(Ps[jj]), _bits(es[jj]), _bits(ωs[jj]), _bits(Tps[jj]))
+        (ow.kep_ok[jj] && ow.kep_key[jj] == key) && continue
+        for i in eachindex(t)
+            M = two_pi * (t[i] - Tps[jj]) / Ps[jj]
+            E = kepler_solve(M, es[jj])
+            f = true_anomaly(E, es[jj])
+            ow.kep_geom[jj, i] = cos(f + ωs[jj]) + es[jj] * cos(ωs[jj])
+        end
+        ow.kep_key[jj] = key
+        ow.kep_ok[jj] = true
+    end
+    return ow
+end
+
+# The RM phase of every component-A epoch for RM planets 1:n_rm, as
+# `rm_contribution` computes it, refreshed where its inputs changed.
+function _refresh_rm_phase!(ow::RVOrbitWork, n_rm::Int, state, Ps, es, ωs, Tps)
+    t = ow.t
+    @inbounds for r in 1:n_rm
+        j = state.j_active[r]
+        key = state.rel ?
+            (_bits(state.Tc0s[r]), _bits(Ps[j]), _bits(es[j]), _bits(ωs[j]),
+             _bits(state.Mtrs[r]), UInt64(1)) :
+            (_bits(Ps[j]), _bits(es[j]), _bits(ωs[j]), _bits(Tps[j]), UInt64(0), UInt64(2))
+        (ow.rm_ok[r] && ow.rm_key[r] == key) && continue
+        for i in eachindex(t)
+            ow.comp[i] == 1 || continue
+            c, cw, sw = _rm_phase(t[i], r, j, state, Ps, es, ωs, Tps)
+            ow.rm_cosf[r, i] = c
+            ow.rm_cosfw[r, i] = cw
+            ow.rm_sinfw[r, i] = sw
+        end
+        ow.rm_key[r] = key
+        ow.rm_ok[r] = true
+    end
+    return ow
 end
 
 # Return the first active `ActivityGP` in `noise_models`, or `nothing`.
@@ -1722,7 +1817,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
     # RV — used by PPC, residuals, fit-health and all RV plots — includes the
     # in-transit RM anomaly. No-op for non-RM fits (n_rm == 0); a missing M_s/R_s
     # (n_rm == -1) simply skips RM here rather than poisoning predictions.
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && (n_rm = 0)
 
     # Build predictions + variances
@@ -1757,7 +1852,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
         end
 
         (n_rm > 0 && comp == 1) &&
-            (pred += rm_contribution(t, n_rm, rm_state, Ps, es, ws, Tps))
+            (pred += rm_contribution(t, n_rm, rm_state, Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred

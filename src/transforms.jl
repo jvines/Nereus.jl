@@ -52,7 +52,12 @@ function build_transform(params::Params)
         lowers[i] = isfinite(lo) ? lo : 0.0
         uppers[i] = isfinite(hi) ? hi : 0.0
 
-        if isfinite(lo) && isfinite(hi)
+        if is_wrapped(layout.unfrozen_priors[i])
+            # A wrapped angle has no boundary to map away: the sampler moves
+            # on the line and the density is periodic. A logit here would put
+            # back exactly the wall the wrapped prior exists to remove.
+            type_ids[i] = TRANSFORM_IDENTITY
+        elseif isfinite(lo) && isfinite(hi)
             type_ids[i] = TRANSFORM_LOGIT
         elseif isfinite(lo)
             type_ids[i] = TRANSFORM_LOG

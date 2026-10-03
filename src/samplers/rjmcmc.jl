@@ -521,6 +521,7 @@ end
     ll = rv_log_likelihood(theta, data)
     isfinite(ll) || return -Inf
     ll += transit_log_likelihood(theta, data)
+    ll += tomogram_log_likelihood(theta, data)      # residual maps
     return ll
 end
 
@@ -644,6 +645,15 @@ mutable struct PTWorkspace
     # Buffers for the AGP low-rank solver, sized on first use; empty in runs
     # without an ActivityGP. Scratch only, so not saved in checkpoints.
     agp::AGPWorkspace
+    # --- Residual-map (Doppler tomography) scratch ---
+    # Built on the first `tomogram_log_likelihood(theta, data, ws)` call;
+    # `nothing` for a fit without maps. See TomoWorkspace (tomography_data.jl).
+    tomo::Union{Nothing,TomoWorkspace}
+    # --- RV-channel scratch (instrument-restricted GPs) ---
+    # Built on first use by `_eval_channel_likelihood(..., ws)` (noise/gp.jl).
+    rv_channel::Union{Nothing,ChannelWork}
+    # --- Orbital phases of the RV epochs (likelihood.jl, RVOrbitWork) ---
+    rv_orbit::Union{Nothing,RVOrbitWork}
 end
 
 # `max_donors` sizes the donor-birth scratch buffer. It must be ≥ the number
@@ -724,7 +734,29 @@ function PTWorkspace(params::Params, max_kplanet::Int, n_noise::Int=0;
         PhotDataCache(),
         # ActivityGP buffers (agp), sized on first use.
         AGPWorkspace(),
+        # Residual-map scratch, built on first use.
+        nothing,
+        # RV-channel scratch, built on first use.
+        nothing,
+        # RV orbital phases, built on first use.
+        nothing,
     )
+end
+
+function _rv_orbit_work!(ws::PTWorkspace, data::Data)
+    ow = ws.rv_orbit
+    if ow === nothing || ow.t !== data.t_rv || ow.comp !== data.rv_comp
+        ow = ws.rv_orbit = RVOrbitWork(data.t_rv, data.rv_comp, length(ws.planet_Ps))
+    end
+    return ow
+end
+
+function _channel_work!(ws::PTWorkspace, params, times, inst, channel)
+    cw = ws.rv_channel
+    cw === nothing && (cw = ws.rv_channel = ChannelWork(params, times, inst, channel))
+    cw2 = _channel_work!(cw, params, times, inst, channel)
+    cw2 === cw || (ws.rv_channel = cw2)
+    return cw2
 end
 
 """Workspace-aware _eval_ll: threads pre-allocated buffers through."""
@@ -737,6 +769,7 @@ end
     ll = rv_log_likelihood(theta, data, ws)
     isfinite(ll) || return -Inf
     ll += transit_log_likelihood(theta, data, ws)
+    ll += tomogram_log_likelihood(theta, data, ws)  # residual maps
     return ll
 end
 

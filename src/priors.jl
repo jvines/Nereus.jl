@@ -217,6 +217,51 @@ Base.rand(rng::AbstractRNG, d::Sine) = quantile(d, rand(rng))
 Distributions.insupport(::Sine, x::Real) = (x >= 0) && (x <= π)
 
 # =====================================================================
+# WrappedUniform — uniform on a circle, wrapped rather than bounded
+# =====================================================================
+
+"""
+    WrappedUniform(lo, hi)
+
+Uniform distribution on a CIRCLE of circumference `hi - lo`, charted on
+`[lo, hi)`. Unlike `Uniform(lo, hi)`, a value outside the chart is not
+rejected: it is the same point of the circle as its representative inside,
+so the density is `1/(hi - lo)` at every finite `x`.
+
+This is what "λ is periodic and is wrapped, never bounded" means for a
+sampler. A `Uniform` prior on an angle puts a wall at the seam: a stretch
+move that crosses it is rejected, and an unconstrained sampler (NUTS,
+`pt_hmc`) sees a logit wall at ±π. With `WrappedUniform` neither exists --
+the walkers and the Hamiltonian trajectories cross freely, and the draws are
+relabelled into `[lo, hi)` when the run is summarised. It is only correct for
+a parameter the likelihood reads PERIODICALLY (through sin/cos); see
+`WrappedUniformPrior`.
+
+`quantile`, `rand` and `cdf` act on the chart `[lo, hi)`, so nested samplers
+and prior draws start inside it.
+"""
+struct WrappedUniform <: ContinuousUnivariateDistribution
+    lo::Float64
+    hi::Float64
+    function WrappedUniform(lo::Real, hi::Real)
+        lo < hi || throw(ArgumentError("WrappedUniform requires lo < hi"))
+        return new(Float64(lo), Float64(hi))
+    end
+end
+
+Distributions.minimum(d::WrappedUniform) = d.lo
+Distributions.maximum(d::WrappedUniform) = d.hi
+Distributions.params(d::WrappedUniform) = (d.lo, d.hi)
+Base.eltype(::Type{WrappedUniform}) = Float64
+Distributions.logpdf(d::WrappedUniform, x::Real) =
+    isfinite(x) ? -log(d.hi - d.lo) * one(float(x)) : oftype(float(x), -Inf)
+Distributions.cdf(d::WrappedUniform, x::Real) =
+    clamp((x - d.lo) / (d.hi - d.lo), zero(float(x)), one(float(x)))
+Distributions.quantile(d::WrappedUniform, u::Real) = d.lo + (d.hi - d.lo) * u
+Base.rand(rng::AbstractRNG, d::WrappedUniform) = quantile(d, rand(rng))
+Distributions.insupport(::WrappedUniform, x::Real) = isfinite(x)
+
+# =====================================================================
 # Fixed — marker for non-sampled parameters
 # =====================================================================
 
@@ -301,6 +346,35 @@ function NormalPrior(μ::Real, σ::Real)
     σ > 0 || throw(ArgumentError("NormalPrior requires σ > 0"))
     return PriorSpec(Normal(μ, σ), -Inf, Inf)
 end
+
+"""
+    WrappedUniformPrior(lo, hi)
+
+Uniform prior on a circle, charted on `[lo, hi)` and WRAPPED: a value outside
+the chart is not rejected but read as the same angle (density `1/(hi - lo)`
+everywhere). Use it for an angle the likelihood reads only periodically --
+the sky-projected obliquity `lambda_k<k>` is the case it exists for. The span
+must be one full period, `2π`, or the density would not be periodic.
+
+The sampler then has no wall at the seam (see `WrappedUniform`). `bounds`
+returns the chart, which is where prior draws and nested-sampling transforms
+land and where the reported draws are relabelled.
+"""
+function WrappedUniformPrior(lo::Real, hi::Real)
+    lo < hi || throw(ArgumentError("WrappedUniformPrior requires lo < hi"))
+    isapprox(hi - lo, 2π; rtol = 1e-4) || throw(ArgumentError(
+        "WrappedUniformPrior must span exactly one period (2π); got $(hi - lo). " *
+        "A wrapped prior over a different span is not periodic."))
+    return PriorSpec(WrappedUniform(lo, hi), lo, hi)
+end
+
+"""
+    is_wrapped(ps) -> Bool
+
+`true` for a `WrappedUniformPrior`: a circular parameter with no wall at its
+seam.
+"""
+is_wrapped(ps::PriorSpec) = ps.dist isa WrappedUniform
 
 """
     SinePrior()
@@ -414,6 +488,8 @@ fixed_value(ps::PriorSpec) = throw(ArgumentError("fixed_value called on non-fixe
 `true` iff `x` is within the hard bounds of the prior.
 """
 in_support(ps::PriorSpec, x::Real) = ps.lo <= x <= ps.hi
+# A wrapped angle has no wall: every finite value is a point of the circle.
+in_support(ps::PriorSpec{WrappedUniform}, x::Real) = isfinite(x)
 
 # --- logpdf ----------------------------------------------------------
 
@@ -798,6 +874,8 @@ function prior_to_dict(ps::PriorSpec)
         out["value"] = d.value
     elseif d isa Uniform
         out["type"] = "Uniform"
+    elseif d isa WrappedUniform
+        out["type"] = "WrappedUniform"
     elseif d isa LogUniform
         out["type"] = "LogUniform"
     elseif d isa Truncated{<:Normal}
@@ -832,6 +910,8 @@ function prior_from_dict(d::AbstractDict)
         return FixedPrior(d["value"])
     elseif t == "Uniform"
         return UniformPrior(d["lo"], d["hi"])
+    elseif t == "WrappedUniform"
+        return WrappedUniformPrior(d["lo"], d["hi"])
     elseif t == "LogUniform"
         return LogUniformPrior(d["lo"], d["hi"])
     elseif t == "Normal"

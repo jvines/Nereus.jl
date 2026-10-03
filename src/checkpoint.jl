@@ -92,11 +92,22 @@ function _content_hash(x, h::UInt, seen::IdDict{Any,Nothing})
     else
         for f in fieldnames(typeof(x))
             isdefined(x, f) || continue
+            _hash_skip(x, f) && continue
             h = _content_hash(getfield(x, f), hash(f, h), seen)
         end
     end
     return h
 end
+
+# Fields added to a hashed struct AFTER checkpoints of it were written are left
+# out of the hash while they hold the value that reproduces the old model, so
+# a run checkpointed before the field existed still resumes (its model is the
+# same model). Anything else is hashed as usual.
+_hash_skip(x, f::Symbol) = false
+_hash_skip(x::ParamsConfig, f::Symbol) =
+    f === :obliquity && is_default_obliquity(x.obliquity)
+_hash_skip(x::ParametrizationConfig, f::Symbol) =
+    f === :sample_a_Rs && !x.sample_a_Rs
 
 """
     write_checkpoint(path, sampler, fingerprint, state::NamedTuple)

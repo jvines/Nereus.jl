@@ -233,14 +233,17 @@ transit shape, not a feature you will see by eye.
 ## Building the inputs
 
 `joint_obliquity_fit` takes nights directly, but the framework path — a `Data`
-plus a `Params` you can hand to any sampler — goes through two functions.
+plus a `Params` you can hand to any sampler, or a `run_job` config — goes
+through two functions. **The full model, its options, the standard priors and
+a complete job config are in [Obliquity fits as Nereus targets](obliquity_jobs.md).**
 
 ```julia
 data, inst_names = obliquity_data(rm_nights; tomo_nights = tomo_nights)
 params = obliquity_params(data, inst_names;
                           P = 2.83, Tc = 2459000.123,
                           b = (0.30, 0.05), a_Rs = (5.6, 0.2),
-                          rr = (0.10, 0.02), vsini = (95_000.0, 3_000.0))
+                          rr = 0.10, vsini = (95_000.0, 3_000.0),
+                          sigma0 = rm_nights, ld = (0.32, 0.30))
 ```
 
 **`obliquity_data(rm_nights; tomo_nights, t_ref)`** assembles RM velocity
@@ -249,17 +252,17 @@ instrument**. That is structural, not cosmetic: each night gets its own offset
 and jitter, because a spectroscopic transit taken on a different night has its
 own velocity zero point and its own pulsation realisation. Night tags become
 the instrument names and must therefore be unique — a duplicate tag is an
-error, not a silent merge, since the two nights' offsets and jitters would
-otherwise collide.
+error, not a silent merge. Maps alone make a `Data` with no velocities at all.
 
-**`obliquity_params(data, inst_names; P, Tc, b, a_Rs, rr, vsini, ...)`** builds
-the parameter set. The transit-solution arguments are `(mean, sd)` tuples
-rather than scalars, and they enter as **priors, not fixed values** — an
-obliquity fit usually has no light curve of its own, so the geometry comes from
-a published solution and carries that solution's uncertainty into λ. `P` is
-pinned hard (a `NormalPrior` of fractional width `1e-6`); the ephemeris enters
-through `Mo_k1`, not a transit-time slot, so a published `sigma_Tc` is
-converted to a width `2π·sigma_Tc/P` in mean anomaly.
+**`obliquity_params(data, inst_names; P, Tc, b, a_Rs, rr, vsini, K, ...)`**
+builds the parameter set. Each geometry argument is a number, which FIXES it,
+or a `(mean, sd)` pair, which gives it a Gaussian prior: an obliquity fit
+usually has no light curve of its own, so the geometry comes from a published
+solution, fixed or with that solution's uncertainty. The ephemeris is the
+transit time itself (`Tc_k1`), a/R★ is sampled directly (`a_Rs_k1`), and λ is
+wrapped on the full circle. With `sigma0` (each night's measured CCF width)
+the anomaly is the ARoME kernel with the sub-planet width derived per night, so
+nothing rescales its amplitude.
 
 !!! warning "`vsini` units differ between the two paths"
     `obliquity_params` takes `vsini` in **m/s**, because it writes the
@@ -274,15 +277,10 @@ converted to a width `2π·sigma_Tc/P` in mean anomaly.
     km/s value to `obliquity_params` lands under its 100 m/s floor and will
     rail, rather than fail loudly.
 
-Set `arome = true` to use the ARoME CCF formulation (`RVPM_RM_A`) instead of
-Hirano; prefer it whenever `v sin i ≳ β_p`.
-
 !!! note "rm_velocity_fit is superseded"
     `rm_velocity_fit` still exists and emits a deprecation warning. RM
     velocities already flow through `rv_log_likelihood`, so a `Params` built
-    by `obliquity_params` covers the velocity-only case — use
-    `joint_obliquity_fit(...; use_tomogram = false)`, which keeps the
-    parameter space identical to the joint fit and so stays comparable to it.
+    by `obliquity_params` covers the velocity-only case through any sampler.
 
 ## Joint fits
 

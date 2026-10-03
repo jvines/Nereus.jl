@@ -12,7 +12,8 @@
 using Test
 using Nereus
 using Nereus: TomoNight, tomogram_log_likelihood, Theta, set_param!,
-              shadow_map, planet_lambda, system_vsini, n_unfrozen
+              shadow_map, planet_lambda, system_vsini, n_unfrozen,
+              tc_to_tp, tp_to_mo
 using Random, Statistics
 
 @testset "tomography in the framework" begin
@@ -59,6 +60,12 @@ using Random, Statistics
         set_param!(th, "lambda_k1", λ)
         set_param!(th, "v_sin_i_star", vsini_kms * 1000)
         set_param!(th, "P_k1", P)
+        # The shadow follows the FITTED ephemeris, so the orbit must put the
+        # transit where the map was simulated: circular, transiting at Tc.
+        set_param!(th, "sesinw_k1", 0.0); set_param!(th, "secosw_k1", 0.0)
+        set_param!(th, "Mo_k1", mod(tp_to_mo(tc_to_tp(Tc, P, 0.0, 0.0), P, d.t_ref), 2π))
+        set_param!(th, "b_k1", 0.4); set_param!(th, "rr_k1", 0.116)
+        set_param!(th, "tomo_jit_HARPS", 0.01)
         set_param!(th, "tomo_alpha_HARPS", α)
         set_param!(th, "tomo_sigma_line_HARPS", 6.0)
         haskey(p.layout.name_to_idx, "rho_s") && set_param!(th, "rho_s",

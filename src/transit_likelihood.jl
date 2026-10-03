@@ -579,7 +579,9 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         end
 
         # a/R* from rho_s or from M_s + R_s via Kepler's third law
-        if use_rho
+        if (ai = a_Rs_slot(theta, k)) > 0
+            a_Rs[j] = theta.values[ai]
+        elseif use_rho
             a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
         else
             M_s = theta.params.config.M_s
@@ -1039,7 +1041,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
             bs[j]  = b_raw
             rrs[j] = rr_raw
         end
-        if use_rho
+        if (ai = a_Rs_slot(theta, k)) > 0
+            a_Rs[j] = theta.values[ai]
+        elseif use_rho
             a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
         else
             M_s = theta.params.config.M_s
@@ -1365,7 +1369,9 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
             rrs[j] = rr_raw
         end
 
-        if use_rho
+        if (ai = a_Rs_slot(theta, k)) > 0
+            a_Rs[j] = theta.values[ai]
+        elseif use_rho
             a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
         else
             M_s = theta.params.config.M_s
