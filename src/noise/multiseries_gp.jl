@@ -342,42 +342,120 @@ function multiseries_loglike(t_all::AbstractVector{<:Real}, y_all::AbstractVecto
             "admissible kernel (SSMatern32/SSSHO/SSMEP/SSES/SSESP)."))
     end
 
-    ord = sortperm(t_all)                          # stable → simultaneous ties keep order
-    t  = Float64.(t_all[ord])
-    y  = Vector{T}(y_all[ord])
-    v  = var_all[ord]
-    sid = series_id[ord]
-    dt = N > 1 ? diff(t) : Float64[]
+    L = _ms_layout(t_all, series_id)
+    y = Vector{T}(y_all[L.ord])
+    v = var_all[L.ord]
 
-    U0, V0, dU0, dV0, φ0 = _generators(kernel, t, dt)
+    # Generators at the distinct epochs only; rows sharing an epoch share them.
+    U0, V0, dU0, dV0, φ0 = _generators(kernel, L.tu, L.dtu)
+    # φ across a tie is the generators' φ at a zero gap, exactly as a row-by-row
+    # evaluation computes it (exp(−λ·0.0), and products of those for SSESP).
+    φtie = L.has_ties ? _generators(kernel, [L.tu[1], L.tu[1]], [0.0])[5] : φ0
     kk0  = T(k0(kernel))
     mk20 = T(mk2_0(kernel))
-    return _ms_fill_solve(t, y, v, sid, α, β, jitter, kk0, mk20, U0, V0, dU0, dV0, φ0)
+    return _ms_fill_solve(L, y, v, α, β, jitter, kk0, mk20, U0, V0, dU0, dV0, φ0, φtie)
 end
 
-# Function barrier: per-row (α,β) mix of the N×r generators into the r×N
+# Function barrier: per-row (α,β) mix of the epoch generators into the r×N
 # solver layout, then the LDLᵀ solve. Compiled against the generators' concrete
 # element types even when the caller could not infer them.
-function _ms_fill_solve(t::Vector{Float64}, y::Vector{T}, v, sid, α, β, jitter,
-                        kk0::T, mk20::T, U0, V0, dU0, dV0, φ0) where {T}
+function _ms_fill_solve(L, y::Vector{T}, v, α, β, jitter, kk0::T, mk20::T,
+                        U0, V0, dU0, dV0, φ0, φtie) where {T}
+    t = L.t; sid = L.sid; row = L.row
     N = length(t); r = size(U0, 2)
     U = Matrix{T}(undef, r, N)
     V = Matrix{T}(undef, r, N)
     A = Vector{T}(undef, N)
     @inbounds for i in 1:N
-        s = sid[i]
+        s = sid[i]; e = row[i]
         αi = T(α[s]); βi = T(β[s])
         for c in 1:r
-            U[c, i] = αi * U0[i, c] + βi * dU0[i, c]
-            V[c, i] = αi * V0[i, c] + βi * dV0[i, c]
+            U[c, i] = αi * U0[e, c] + βi * dU0[e, c]
+            V[c, i] = αi * V0[e, c] + βi * dV0[e, c]
         end
         A[i] = T(v[i]) + T(jitter[s])^2 + αi^2 * kk0 + βi^2 * mk20
     end
     φ = Matrix{T}(undef, r, max(N - 1, 0))
-    @inbounds for i in 1:(N - 1), c in 1:r
-        φ[c, i] = T(φ0[i, c])
+    @inbounds for i in 1:(N - 1)
+        e = row[i]
+        if row[i + 1] == e
+            for c in 1:r
+                φ[c, i] = T(φtie[1, c])
+            end
+        else
+            for c in 1:r
+                φ[c, i] = T(φ0[e, c])
+            end
+        end
     end
     return semiseparable_loglike(t, y, A, U, V, φ)
+end
+
+# ---------------------------------------------------------------------------
+# Data-only layout of a multi-series input: the stable global time sort, the
+# series of each sorted row, and the distinct epochs (the ActivityGP joint puts
+# every channel on the RV epochs, so C channels share each one). It depends on
+# (t_all, series_id) alone, so it is built once per data set and then looked up:
+# the sort and the C-fold redundant generator rows leave the per-call cost.
+# ---------------------------------------------------------------------------
+struct _MSLayout
+    t_all::Vector{Float64}       # input times, unsorted (lookup key)
+    series_id::Vector{Int}       # input series ids, unsorted (lookup key)
+    ord::Vector{Int}             # stable sortperm(t_all)
+    t::Vector{Float64}           # t_all[ord]
+    sid::Vector{Int}             # series_id[ord]
+    tu::Vector{Float64}          # distinct epochs of t, ascending
+    dtu::Vector{Float64}         # diff(tu)
+    row::Vector{Int}             # t[i] === tu[row[i]]
+    has_ties::Bool
+end
+
+function _ms_layout_build(t_all, series_id)
+    ord = sortperm(t_all)                          # stable → simultaneous ties keep order
+    t   = Float64.(t_all[ord])
+    sid = Vector{Int}(series_id[ord])
+    N = length(t)
+    row = Vector{Int}(undef, N)
+    tu = Float64[]
+    @inbounds for i in 1:N
+        # a tie only between identical finite values: t[i+1] − t[i] is then +0.0,
+        # the gap φtie is evaluated at (−0.0 vs 0.0, NaN and Inf stay distinct)
+        if i > 1 && t[i] === t[i - 1] && isfinite(t[i])
+            row[i] = row[i - 1]
+        else
+            push!(tu, t[i]); row[i] = length(tu)
+        end
+    end
+    dtu = length(tu) > 1 ? diff(tu) : Float64[]
+    return _MSLayout(Vector{Float64}(t_all), Vector{Int}(series_id), ord, t, sid,
+                     tu, dtu, row, length(tu) < N)
+end
+
+_same_bits(a::AbstractVector, b::AbstractVector) =
+    length(a) == length(b) && all(i -> @inbounds(a[i] === b[i]), eachindex(a, b))
+
+# A few recent layouts, shared by all threads. The list is replaced, never
+# mutated, so a reader holds a consistent snapshot; two threads missing at once
+# both build and one entry is dropped, which costs a rebuild, not a wrong hit.
+# A hit needs the same bits in both keys, so a layout is never reused for
+# different data.
+mutable struct _MSLayoutCache
+    @atomic entries::Vector{_MSLayout}
+end
+const _MS_LAYOUT_CACHE = _MSLayoutCache(_MSLayout[])
+const _MS_LAYOUT_SLOTS = 4
+
+function _ms_layout(t_all::AbstractVector, series_id::AbstractVector)
+    (eltype(t_all) === Float64 && eltype(series_id) === Int) ||
+        return _ms_layout_build(t_all, series_id)
+    entries = @atomic :acquire _MS_LAYOUT_CACHE.entries
+    for L in entries
+        _same_bits(L.t_all, t_all) && _same_bits(L.series_id, series_id) && return L
+    end
+    L = _ms_layout_build(t_all, series_id)
+    keep = entries[1:min(length(entries), _MS_LAYOUT_SLOTS - 1)]
+    @atomic :release _MS_LAYOUT_CACHE.entries = pushfirst!(keep, L)
+    return L
 end
 
 # Element type of a kernel's hyperparameters (for AD promotion).
