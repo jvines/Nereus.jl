@@ -1023,6 +1023,17 @@ three channels A is as large as Σ (C = 2) or not much smaller, so there is
 no accuracy to gain over the dense Cholesky. test/test_activity_gp_lowrank.jl
 checks its own sample to 1e-10 nats.
 
+The whitening adds a second source of rounding error that the dense Cholesky
+does not have. Where the channels' couplings are nearly parallel, B_j is
+nearly rank 1, r22 = √(bĠĠ − bGĠ²/bGG) is computed from a difference that
+cancels, and w divides by it. (Exactly parallel couplings give r22 = 0 and
+are exact.) With five channels, 40 epochs and the Ġ couplings parallel to
+the G couplings to within 1e-7 to 1e-10, the error was up to 1.3e-7 nats,
+against at most 7e-13 for the dense Cholesky. On the HD 18599 job with
+RV + BIS, Br = 0 and Bc scaled by 1e-5, 1e-7 and 1e-9 at six prior draws, it
+was up to 2.8e-5 nats at |log L| ≈ 7e3, against 2.8e-6 for the dense
+Cholesky. That is above the 1.5e-5 quoted for RV + BIS in the sample above.
+
 Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked
 reals, any type that is not a plain float) take the same route, with two
 exceptions. R_j is a square root of B_j, so it is not differentiable where
