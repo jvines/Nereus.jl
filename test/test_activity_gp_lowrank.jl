@@ -270,11 +270,27 @@ end
         @test err(a) <= 1e-10
     end
 
-    # Two and three channels (now also on the low-rank path).
+    # Two and three channels (now also on the low-rank path): near the truth
+    # and across the same broad prior. A is then as large as the dense Σ
+    # (C = 2) or not much smaller, and both carry the same conditioning, so
+    # the low-rank error is of the order of the Float64 dense Cholesky's
+    # rather than below it; both are reported.
+    dense64(a) = Float64(abs(_agp_dense(a...) - _agp_exact_dense(a...)))
     for Cs in (2, 3)
         ys = y[1:(Cs * N)]; s2 = σ²[1:(Cs * N)]
         a = (epochs, ca0[1:Cs], cb0[1:Cs], 1.0, 9.0, 30.0, 0.6, ys, s2)
         @test err(a) <= 1e-10
+        worst_lr = 0.0; worst_dn = 0.0
+        for _ in 1:20
+            ca = randn(rng, Cs) .* σ[1:Cs] .* 10 .^ (3rand(rng, Cs) .- 1)
+            cb = randn(rng, Cs) .* σ[1:Cs] .* 10 .^ (3rand(rng, Cs) .- 1)
+            a = (epochs, ca, cb, 1.0, 3 + 27rand(rng), 5 * 100^rand(rng),
+                 0.2 * 25^rand(rng), ys, s2 .* (1 .+ rand(rng, Cs * N)))
+            e = err(a)
+            worst_lr = max(worst_lr, e); worst_dn = max(worst_dn, dense64(a))
+            @test e <= 1e-10
+        end
+        @info "AGP whitened solver, C = $Cs: worst |Δ| against BigFloat dense on prior draws" worst_lr worst_dn
     end
 
     # Workspace and allocating methods agree bit for bit; the workspace call

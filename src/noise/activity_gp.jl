@@ -983,10 +983,16 @@ and the identities above still hold exactly.
 The result is therefore the exact Gaussian log-density of Σ up to
 floating-point rounding. That rounding error grows with the conditioning of A
 (the signal-to-noise ratio and coherence length of the GP) as it does for a
-Float64 Cholesky of the dense Σ. Against the dense likelihood evaluated in
-BigFloat, on the five-channel HD 18599 fit: at most 4e-12 nats near the
-posterior; on prior draws a median of 2e-9 and at most 2e-6 nats, the same
-as the Float64 dense Cholesky. test/test_activity_gp_lowrank.jl checks it.
+Float64 Cholesky of the dense Σ: it is the rounding of the kernel entries,
+amplified by that conditioning, in both. Against the dense likelihood
+evaluated in BigFloat, on the five-channel HD 18599 fit: at most 4e-12 nats
+near the posterior; on prior draws a median of 2e-9 and at most 2e-6 nats,
+the same as the Float64 dense Cholesky. With two or three channels A is as
+large as Σ (C = 2) or not much smaller, and the error is of the same order
+as the dense Cholesky's without being smaller: at most 1.1e-5 nats against
+4.1e-6 for RV + BIS, and 7.2e-6 against 5.6e-6 for RV + BIS + FWHM, at
+extreme prior draws where |log L| ~ 1e4 (medians 1e-9 for both).
+test/test_activity_gp_lowrank.jl checks it.
 
 Dual numbers (ForwardDiff) take the same route, with two exceptions. R_j is
 a square root of B_j, so it is not differentiable where B_j is singular
