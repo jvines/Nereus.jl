@@ -66,6 +66,8 @@ function run_job(cfg::AbstractDict)
     end
 
     _validate_config(cfg)
+    # An obliquity job's RV-planet diagnostics are off unless asked for.
+    _obliquity_cfg(cfg) === nothing || (cfg = _obliquity_output_defaults(cfg))
     out_dir = String(_get(cfg, :output_dir; required = true))
     mkpath(out_dir)
     mkpath(joinpath(out_dir, "models"))
@@ -84,7 +86,8 @@ function run_job(cfg::AbstractDict)
 
         # --- Build data + star + params --------------------------------
         data, inst_names_rv, inst_names_pm, inst_names_as =
-            _build_data(_get(cfg, :data; default = Dict()))
+            _build_data(_get(cfg, :data; default = Dict());
+                        obliquity = _obliquity_cfg(cfg))
         star       = _build_star(_get(cfg, :star; default = Dict()))
         params, target, menu = _build_model(cfg, data, star, inst_names_rv,
                                               inst_names_pm, inst_names_as)
@@ -166,6 +169,8 @@ function run_job(cfg::AbstractDict)
         end
         _populate_summary!(summary, result, params, chains)
         _augment_evidence!(summary, params, data, chains)
+        _obliquity_cfg(cfg) === nothing ||
+            (summary["obliquity"] = _obliquity_summary(cfg, data, params))
         # Authoritative science contract: conditioned, unit-tagged fitted/derived
         # + model_selection + run_info, and the multi-format tables. Supersedes
         # the legacy unconditioned `params` block (which is inactive-slot junk in
@@ -253,7 +258,8 @@ const _KNOWN_PLANET_MODES   = ("RV_ONLY", "PM_ONLY", "RVPM", "RVAS",
                                 "RVPM_RM_R", "RVPMAS_RM_R",
                                 "RVPM_RM_A", "RVPMAS_RM_A",
                                 "RVPM_GD", "RVPM_RM_GD", "PM_GD",  # gravity darkening
-                                "BINARY", "BINARY_RV")   # SB2 double-lined binary
+                                "BINARY", "BINARY_RV",   # SB2 double-lined binary
+                                "PM_DT")                 # Doppler shadow, no velocities
 const _KNOWN_PARAMETRIZATIONS = (
     mass = ("K_driven", "M_sec_driven", "a_driven"),
     time = ("Tp", "Tc", "Mo"),
@@ -318,10 +324,17 @@ function _validate_config(cfg::AbstractDict)
     if _has(cfg, :data)
         data_cfg = _get(cfg, :data)
         has_any = any(_has(data_cfg, k) for k in
-            (:rv, :transit_photometry, :iad, :gost, :hgca, :relastrom, :gaia_dr3))
+            (:rv, :transit_photometry, :iad, :gost, :hgca, :relastrom, :gaia_dr3,
+             :rm_nights, :tomography))
         has_any || push!(errs,
             "`data` block must contain at least one of " *
-            "rv, transit_photometry, iad, gost, hgca, relastrom, gaia_dr3")
+            "rv, transit_photometry, iad, gost, hgca, relastrom, gaia_dr3, " *
+            "rm_nights, tomography")
+        if (_has(data_cfg, :rm_nights) || _has(data_cfg, :tomography)) &&
+           _obliquity_cfg(cfg) === nothing
+            push!(errs, "`data.rm_nights` / `data.tomography` are read by an obliquity " *
+                        "fit: add a `model.obliquity` block (see docs/src/obliquity.md)")
+        end
 
         if _has(data_cfg, :rv)
             rv = _get(data_cfg, :rv)
@@ -362,7 +375,17 @@ function _validate_config(cfg::AbstractDict)
     # ---- model ----
     if _has(cfg, :model)
         mdl = _get(cfg, :model)
-        _has(mdl, :max_kplanet) || push!(errs, "missing `model.max_kplanet`")
+        # An obliquity model is one planet by construction; its block states
+        # everything else.
+        if _has(mdl, :obliquity)
+            for k in (:max_kplanet, :planet_modes)
+                _has(mdl, k) && push!(errs, "`model.$k` cannot be combined with " *
+                    "`model.obliquity`, which sets the (one-planet) model itself")
+            end
+            _validate_obliquity!(errs, cfg)
+        else
+            _has(mdl, :max_kplanet) || push!(errs, "missing `model.max_kplanet`")
+        end
         if _has(mdl, :planet_modes)
             for m in _get(mdl, :planet_modes)
                 String(m) in _KNOWN_PLANET_MODES || push!(errs,
@@ -524,7 +547,7 @@ end
 # Data builder
 # =====================================================================
 
-function _build_data(data_cfg)
+function _build_data(data_cfg; obliquity = nothing)
     inst_names_rv = String[]
     inst_names_pm = String[]
     # Relative-astrometry imager names. Only these get `sigma_as_<name>`
@@ -606,6 +629,10 @@ function _build_data(data_cfg)
     if _has(data_cfg, :gaia_dr3)
         kw[:gaia_dr3] = _parse_gaia_dr3_block(_get(data_cfg, :gaia_dr3))
     end
+    # Obliquity: RM nights become RV instruments, line-profile stacks become
+    # residual maps (see runner_obliquity.jl).
+    obliquity === nothing ||
+        (inst_names_rv = _add_obliquity_data!(kw, inst_names_rv, data_cfg, obliquity))
 
     data = Data(; kw...)
     return data, inst_names_rv, inst_names_pm, inst_names_as
@@ -966,11 +993,14 @@ const _PLANET_MODES = Dict(
     # darkening asymmetry against the SAME lambda.
     "RVPM_GD" => RVPM_GD, "RVPM_RM_GD" => RVPM_RM_GD, "PM_GD" => PM_GD,
     "BINARY" => BINARY, "BINARY_RV" => BINARY_RV,   # SB2 double-lined binary
+    "PM_DT" => PM_DT,
 )
 
 function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
                       inst_names_as = String[])
     mdl = _get(cfg, :model; required = true)
+    _has(mdl, :obliquity) &&
+        return _build_obliquity_model(cfg, data, inst_names_rv, inst_names_pm)
     max_k = Int(_get(mdl, :max_kplanet; default = 1))
     modes_str = String.(_get(mdl, :planet_modes;
                               default = fill("RV_ONLY", max_k)))
@@ -1111,6 +1141,7 @@ const _PRIOR_TYPES = Dict(
     "FixedPrior"       => FixedPrior,
     "SinePrior"        => SinePrior,
     "BetaPrior"        => BetaPrior,
+    "WrappedUniformPrior" => WrappedUniformPrior,
 )
 
 function _build_priors(priors_cfg)
@@ -1141,7 +1172,6 @@ const _NOISE_TYPES = Dict(
     "CeleriteRotationFM17"   => CeleriteRotationFM17,
     "ActivityDecorrelation"  => ActivityDecorrelation,
     "ARModel"                => ARModel,
-    "WrappedUniformPrior" => WrappedUniformPrior,
     "MAModel"                => MAModel,
     "ActivityJitter"         => ActivityJitter,
     "ActivityGP"             => ActivityGP,
