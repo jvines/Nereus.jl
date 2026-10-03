@@ -7,16 +7,27 @@ using PairPlots: pairplot       # pull the entry-point into local scope
 
 """
     plot_trace(chains, params;
-                output=nothing, fmt=:png, figsize=FIG_TRACE)
+                output=nothing, fmt=:png, figsize=FIG_TRACE, max_points=1500)
 
 MCMC trace plots for all unfrozen parameters.
-One figure per parameter with chain value vs iteration.
+One figure per parameter with chain value vs iteration; returns them by name.
+
+Every line is thinned to at most `max_points` points: every k-th iteration,
+plotted at its true iteration number. 1500 is about one per pixel across the
+1200-pixel figure, as in `plot_traces_grouped`. A figure of several walkers is
+rasterized, so a `save_pdf` copy does not carry every walker as vector paths.
+Unthinned, a pt_emcee run of 100 walkers x 30000 steps drew 3M vertices per
+figure: the NGTS-33 global fit died partway through its trace set, and a
+7-parameter synthetic chain of that shape took 23.9 s and 2.2 GB (4.4 s and
+0.9 GB thinned).
 """
 function plot_trace(chains, params;
                      output::Union{Nothing, String}=nothing,
                      fmt::Symbol=:png,
                      save_pdf::Bool=false,
-                     figsize=FIG_TRACE)
+                     figsize=FIG_TRACE,
+                     max_points::Int=1500)
+    figs = Dict{String, Figure}()
     with_theme(nereus_theme()) do
         chain_names = Set(names(chains, :parameters))
 
@@ -29,28 +40,22 @@ function plot_trace(chains, params;
             ax = Axis(fig[1, 1];
                         xlabel="Iteration", ylabel=name)
             # Multi-chain: plot each chain as a separate thin line so the
-            # eye can spot stuck walkers / mode-hopping. Single-chain
-            # (or flat) case: plot as one solid line. Ensemble samplers
-            # (pt_emcee) stack walkers into a single long row vector with
-            # no chain axis — for those we thin to ≤3000 points so the
-            # trace shows the macro trajectory rather than a black blob.
+            # eye can spot stuck walkers / mode-hopping; every walker is kept,
+            # each thinned, and the lines are drawn as one bitmap. Single-chain
+            # (or flat) case: one solid line, thinned the same way, so the trace
+            # shows the macro trajectory rather than a black blob.
             if ndims(samp_arr) == 2 && size(samp_arr, 2) > 1
                 n_iter, n_chain = size(samp_arr)
+                xs = 1:cld(n_iter, max_points):n_iter
                 α = clamp(0.9 / sqrt(n_chain), 0.15, 0.85)
                 for c in 1:n_chain
-                    lines!(ax, 1:n_iter, view(samp_arr, :, c);
-                            color=(:black, α), linewidth=0.6)
+                    lines!(ax, xs, samp_arr[xs, c];
+                            color=(:black, α), linewidth=0.6, rasterize=2)
                 end
             else
                 samp = vec(samp_arr)
-                if length(samp) > 3000
-                    stride = cld(length(samp), 3000)
-                    xs = collect(1:stride:length(samp))
-                    samp = samp[xs]
-                else
-                    xs = collect(1:length(samp))
-                end
-                lines!(ax, xs, samp;
+                xs = 1:cld(length(samp), max_points):length(samp)
+                lines!(ax, xs, samp[xs];
                         color=(:black, 0.85), linewidth=1.0)
             end
 
@@ -59,8 +64,10 @@ function plot_trace(chains, params;
                 _save_plot(joinpath(output, "traces", "$name.$fmt"), fig;
                             save_pdf=save_pdf)
             end
+            figs[name] = fig
         end
     end
+    return figs
 end
 
 
