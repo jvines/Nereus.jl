@@ -584,6 +584,9 @@ mutable struct PTWorkspace
     predictions::Vector{Float64}  # length = n_rv
     variances::Vector{Float64}
     residuals::Vector{Float64}
+    # --- RV noise scratch (floor track: IndicatorFloor :qp buffers + resolved
+    #     layout slots). Scratch only, never chain state; not checkpointed. ---
+    rv_noise::RVNoiseScratch
     # --- Likelihood evaluation buffers (transit / phot path) ---
     transit_Ps::Vector{Float64}     # length = max_kplanet
     transit_es::Vector{Float64}
@@ -670,6 +673,8 @@ function PTWorkspace(params::Params, max_kplanet::Int, n_noise::Int=0;
         Vector{Float64}(undef, n_obs),
         Vector{Float64}(undef, n_obs),
         Vector{Float64}(undef, n_obs),
+        # RV noise scratch (floor track); sized on first use
+        RVNoiseScratch(),
         # Transit (phot) likelihood buffers — sized by max_kplanet
         # because per-planet decoded values, not per-cadence
         Vector{Float64}(undef, max_kplanet),
@@ -1417,9 +1422,10 @@ end
 
 # The workspace: the RWM scales and their counters (adaptation state), and the
 # likelihood caches, which are restored as they were rather than rebuilt cold.
-# `scratch_theta` and `population` are proposal scratch that reference Params.
+# `scratch_theta` and `population` are proposal scratch that reference Params;
+# `rv_noise` is likelihood scratch (buffers and resolved layout slots).
 # `phot_data` is derived from the data alone and is rebuilt on first use.
-const _WS_NOT_SAVED = (:scratch_theta, :population, :phot_data)
+const _WS_NOT_SAVED = (:scratch_theta, :population, :rv_noise, :phot_data)
 
 function _ws_snapshot(ws::PTWorkspace)
     fs = Tuple(f for f in fieldnames(PTWorkspace) if f ∉ _WS_NOT_SAVED)
