@@ -212,7 +212,7 @@ function _ess_chain(target::NereusTarget, data::Data, prior, lo::Vector{Float64}
         ll += transit_log_likelihood(theta_buf, data, ws_buf)
         # The residual maps are data too. Without this term ESS sampled a
         # Doppler-tomography target as if it had no maps at all.
-        ll += tomogram_log_likelihood(theta_buf, data)
+        ll += tomogram_log_likelihood(theta_buf, data, ws_buf)
         isfinite(ll) || return -1e300
         return ll
     end

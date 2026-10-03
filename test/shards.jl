@@ -48,6 +48,7 @@ const TEST_UNITS = [
     (name = "test_tomography_framework.jl", seconds = 1, files = ["test_tomography_framework.jl"]),
     (name = "test_obliquity_framework.jl", seconds = 1, files = ["test_obliquity_framework.jl"]),
     (name = "test_tomo_noise_menu.jl", seconds = 1, files = ["test_tomo_noise_menu.jl"]),
+    (name = "test_obliquity_workspace.jl", seconds = 20, files = ["test_obliquity_workspace.jl"]),
     (name = "test_obliquity_joint_framework.jl", seconds = 1, files = ["test_obliquity_joint_framework.jl"]),
     (name = "test_obliquity_target.jl", seconds = 45, files = ["test_obliquity_target.jl"]),
     (name = "test_obliquity_parity.jl", seconds = 15, files = ["test_obliquity_parity.jl"]),

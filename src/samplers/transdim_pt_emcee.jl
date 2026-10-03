@@ -727,7 +727,7 @@ function sample_transdim_pt_emcee(
         lp = spike_slab_log_prior(theta, strategy, inclusion_prior)
         isfinite(lp) || return (-Inf, -Inf)
         # The residual maps (Doppler tomography) are data: tempered with the RV.
-        ll_rv = rv_log_likelihood(theta, data, wb) + tomogram_log_likelihood(theta, data)
+        ll_rv = rv_log_likelihood(theta, data, wb) + tomogram_log_likelihood(theta, data, wb)
         ll_tr = transit_log_likelihood(theta, data, wb)
         # UNTEMPERED TRANSIT (see `untemper_transit`): fold the transit term into
         # the untempered reference, so the tempered path is
@@ -749,7 +749,7 @@ function sample_transdim_pt_emcee(
     # acceptance ratio.
     @inline function split_ref(lp0::Float64, th, slot::Int)
         ll_rv = rv_log_likelihood(th, data, thread_ws[slot]) +
-                tomogram_log_likelihood(th, data)
+                tomogram_log_likelihood(th, data, thread_ws[slot])
         ll_tr = transit_log_likelihood(th, data, thread_ws[slot])
         return untemper_transit ? (lp0 + ll_tr, ll_rv) : (lp0, ll_rv + ll_tr)
     end

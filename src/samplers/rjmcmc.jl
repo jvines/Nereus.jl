@@ -633,6 +633,10 @@ mutable struct PTWorkspace
     # the white-noise path (no active phot AR/MA/GP). hash==0 ⇒ invalid.
     phot_ll_total_cache::Float64
     phot_ll_total_hash::UInt
+    # --- Residual-map (Doppler tomography) scratch ---
+    # Built on the first `tomogram_log_likelihood(theta, data, ws)` call;
+    # `nothing` for a fit without maps. See TomoWorkspace (tomography_data.jl).
+    tomo::Union{Nothing,TomoWorkspace}
 end
 
 # `max_donors` sizes the donor-birth scratch buffer. It must be ≥ the number
@@ -707,6 +711,8 @@ function PTWorkspace(params::Params, max_kplanet::Int, n_noise::Int=0;
         # Total phot-ll cache (Fix B): value + hash, seeded invalid (0).
         0.0,
         zero(UInt),
+        # Residual-map scratch, built on first use.
+        nothing,
     )
 end
 
@@ -720,7 +726,7 @@ end
     ll = rv_log_likelihood(theta, data, ws)
     isfinite(ll) || return -Inf
     ll += transit_log_likelihood(theta, data, ws)
-    ll += tomogram_log_likelihood(theta, data)      # residual maps
+    ll += tomogram_log_likelihood(theta, data, ws)  # residual maps
     return ll
 end
 

@@ -352,7 +352,7 @@ function _ns_inner(target::NereusTarget, data::Data;
         ll = rv_log_likelihood(theta, data, wb)
         isfinite(ll) || return -Inf
         ll += transit_log_likelihood(theta, data, wb)
-        ll += tomogram_log_likelihood(theta, data)  # residual maps
+        ll += tomogram_log_likelihood(theta, data, wb)  # residual maps
         return ll
     end
 

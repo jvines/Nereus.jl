@@ -203,7 +203,7 @@ function sample_pa(
         isfinite(lp) || return (-Inf, -Inf)
         ll = rv_log_likelihood(theta, data, wb) +
              transit_log_likelihood(theta, data, wb) +
-             tomogram_log_likelihood(theta, data)
+             tomogram_log_likelihood(theta, data, wb)
         return (lp, ll)
     end
 

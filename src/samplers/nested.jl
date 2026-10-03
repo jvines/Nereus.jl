@@ -188,7 +188,7 @@ function sample_nested(
         ll = rv_log_likelihood(tb, data, wb)
         isfinite(ll) || return -1e300
         ll += transit_log_likelihood(tb, data, wb)
-        ll += tomogram_log_likelihood(tb, data)     # residual maps
+        ll += tomogram_log_likelihood(tb, data, wb) # residual maps
         isfinite(ll) || return -1e300
         return ll
     end

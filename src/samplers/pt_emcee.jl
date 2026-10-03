@@ -622,7 +622,7 @@ function sample_pt_emcee(
         lp = log_prior(theta) + log_jac
         isfinite(lp) || return (-Inf, -Inf)
         # The residual maps (Doppler tomography) are data: tempered with the RV.
-        ll_rv = rv_log_likelihood(theta, data, wb) + tomogram_log_likelihood(theta, data)
+        ll_rv = rv_log_likelihood(theta, data, wb) + tomogram_log_likelihood(theta, data, wb)
         ll_tr = transit_log_likelihood(theta, data, wb)
         # UNTEMPERED TRANSIT (see `untemper_transit`): π_β ∝ prior·L_transit·L_RV^β.
         # Folding the transit into `lp` makes the within-chain acceptance

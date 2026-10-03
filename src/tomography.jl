@@ -30,7 +30,7 @@
 
 using Statistics
 using Random: MersenneTwister, randperm, randn, rand
-using LinearAlgebra: Symmetric, eigen, dot
+using LinearAlgebra: Symmetric, eigen, dot, BLAS, BlasInt
 using FFTW: fft, ifft, fftshift, ifftshift, fftfreq
 using AffineInvariantMCMC
 
@@ -604,7 +604,13 @@ function celerite_kernel_dense(t::AbstractVector, ar, cr, ac, bc, cc, dc)
     n = length(t)
     TT = promote_type(eltype(t), eltype(ar), eltype(cr), eltype(ac), eltype(bc),
                       eltype(cc), eltype(dc), Float64)
-    K = Matrix{TT}(undef, n, n)
+    return _celerite_kernel_dense!(Matrix{TT}(undef, n, n), t, ar, cr, ac, bc, cc, dc)
+end
+
+function _celerite_kernel_dense!(K::AbstractMatrix, t::AbstractVector, ar, cr, ac, bc,
+                                 cc, dc)
+    n = length(t)
+    TT = eltype(K)
     @inbounds for j in 1:n, i in 1:n
         τ = abs(t[i] - t[j])
         v = zero(TT)
@@ -1031,6 +1037,237 @@ function tomogram_log_likelihood(theta::Theta{T}, data::Data) where {T}
     return ll
 end
 
+"""
+    tomogram_log_likelihood(theta, data, ws) -> ll
+
+`tomogram_log_likelihood(theta, data)` evaluated in the scratch of a sampler
+slot (`ws::PTWorkspace`, or a `TomoWorkspace`): the same model and the same
+arithmetic, bit for bit, without the ~0.9 MB the allocating path builds per
+call on the NGTS-33 maps. Not for concurrent use: one workspace per task, as
+for the RV buffers in the same `PTWorkspace`. Element types other than
+Float64 (ForwardDiff) take the allocating path.
+"""
+function tomogram_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
+    T === Float64 || return tomogram_log_likelihood(theta, data)
+    isempty(data.tomo) && return zero(T)
+    return _tomogram_ll_ws(theta, data, _tomo_workspace!(ws, theta.params, data.tomo))
+end
+
+_tomo_workspace!(tw::TomoWorkspace, params, nights) =
+    (tw.params === params && tw.nights_src === nights) ? tw :
+    (tw.params = params; tw.nights_src = nights; tw.nights = _tomo_night_works(nights); tw)
+
+function _tomo_workspace!(ws::PTWorkspace, params, nights)
+    tw = ws.tomo
+    tw === nothing && (tw = ws.tomo = TomoWorkspace(params, nights, _tomo_night_works(nights)))
+    return _tomo_workspace!(tw, params, nights)
+end
+
+TomoWorkspace(params, nights::Vector{TomoNight}) =
+    TomoWorkspace(params, nights, _tomo_night_works(nights))
+
+function _tomo_night_works(nights::Vector{TomoNight})
+    return [begin
+                nt_, nv = size(nt.R)
+                TomoNightWork(zeros(nt_, nv), zeros(nt_, nv), zeros(nt_, nt_), zeros(nv, nv),
+                              SymEigenWork(nt_), SymEigenWork(nv), zeros(nt_, nv),
+                              zeros(nt_, nv), zeros(nt_), zeros(nv))
+            end for nt in nights]
+end
+
+function _tomogram_ll_ws(theta::Theta{Float64}, data::Data, tw::TomoWorkspace)
+    T = Float64
+    nights = data.tomo
+    layout = theta.params.layout
+    sys    = layout.systemic
+    cfg    = theta.params.config
+    modes  = cfg.planet_modes
+
+    # Decoding exactly as `tomogram_log_likelihood(theta, data)`.
+    k = findfirst(has_obliquity, modes)
+    k === nothing && return zero(T)
+    λ = planet_lambda(theta, k)
+    vsini_ms = system_vsini(theta)
+    vsini_ms > 0 || return convert(T, -Inf)
+    vsini = vsini_ms / 1000
+
+    b_raw, rr_raw = planet_b_rr(theta, k)
+    b, rr = cfg.parametrization.geom === :r1r2 ?
+        (b_raw * (1 - rr_raw) / 2, b_raw * (1 + rr_raw) / 2) : (b_raw, rr_raw)
+    P = planet_P(theta, k)
+    a_Rs = planet_a_Rs(theta, k, P)
+    (isfinite(a_Rs) && a_Rs > 1) || return convert(T, -Inf)
+    (0 <= b < a_Rs) || return convert(T, -Inf)
+    e, ω = planet_e_w(theta, k)
+    (0 <= e < 1) || return convert(T, -Inf)
+    Tp, Tc0 = _planet_tp_tc(theta, k, data.t_ref, P, e, ω)
+    circular = e == 0
+    inc = acos(b / a_Rs)
+
+    u1, u2 = spectroscopic_ld(theta)
+    isfinite(u1) || return convert(T, -Inf)
+
+    ll = zero(T)
+    @inbounds for (j, nt) in enumerate(nights)
+        w  = tw.nights[j]
+        α  = theta.values[sys.tomo_alpha[j]]
+        σl = theta.values[sys.tomo_sigma_line[j]]
+        (α >= 0 && σl > 0) || return convert(T, -Inf)
+
+        if circular
+            E   = round((nt.Tc - Tc0) / P)
+            Tcn = Tc0 + E * P
+            _shadow_map_circular!(w.M, nt.t, Tcn, P, a_Rs, inc, λ, vsini, nt.grid, σl,
+                                  rr, u1, u2)
+        else
+            _shadow_map_orbit!(w.M, nt.t, Tp, P, e, ω, b, a_Rs, λ, vsini, nt.grid, σl,
+                               rr, u1, u2)
+        end
+        r = w.r
+        r .= nt.R .- α .* w.M
+        σw = sys.tomo_jit[j] > 0 ? theta.values[sys.tomo_jit[j]] :
+                                   convert(T, _tomo_white_sigma(nt))
+        σw > 0 || return convert(T, -Inf)
+        if !_tomo_temporal_kernel!(w.Kt, theta, nt)
+            ll += white_map_loglike(r, σw)
+        else
+            ℓv = theta.values[sys.tomo_ell_v[j]]
+            ℓv > 0 || return convert(T, -Inf)
+            _kern!(w.Kv, nt.grid, ℓv)
+            ll += _kron_gp_loglike!(w, r, σw)
+        end
+        isfinite(ll) || return convert(T, -Inf)
+    end
+    return ll
+end
+
+# `_kern`, into K.
+function _kern!(K::Matrix{Float64}, x::Vector{Float64}, ℓ::Float64)
+    n = length(x)
+    @inbounds for j in 1:n, i in 1:n
+        K[i, j] = _matern32(x[i] - x[j], ℓ)
+    end
+    return K
+end
+
+# `_tomo_temporal_kernel`, into K: true when an active model covering this
+# night built it, false for white.
+function _tomo_temporal_kernel!(K::Matrix{Float64}, theta::Theta{Float64}, nt::TomoNight)
+    cfg = theta.params.config
+    for (i, m) in enumerate(cfg.noise_models)
+        (m isa CovarianceNoise && noise_channel(m) === :tomo) || continue
+        insts = noise_instruments(m)
+        (isempty(insts) || nt.tag in insts) || continue
+        is_noise_model_active(theta, i) || continue
+        _tomo_Kt!(K, theta, m, nt.t) && return true
+    end
+    return false
+end
+
+function _tomo_Kt!(K::Matrix{Float64}, theta::Theta, m::MaternGP, t)
+    s = _gp_suffix(m)
+    σ = _tomo_p(theta, "matern_sigma$s"); ρ = _tomo_p(theta, "matern_rho$s")
+    (σ === nothing || ρ === nothing || σ <= 0 || ρ <= 0) && return false
+    σ2 = σ^2
+    _kern!(K, t, ρ)
+    K .= σ2 .* K
+    return true
+end
+
+function _tomo_Kt!(K::Matrix{Float64}, theta::Theta, m::CeleriteSHO, t)
+    s = _gp_suffix(m)
+    lS = _tomo_p(theta, "gp_log_S0$s"); lQ = _tomo_p(theta, "gp_log_Q$s")
+    lw = _tomo_p(theta, "gp_log_omega0$s")
+    (lS === nothing || lQ === nothing || lw === nothing) && return false
+    ar, cr, ac, bc, cc, dc = sho_coefficients(exp(lS), exp(lQ), exp(lw))
+    _celerite_kernel_dense!(K, t, ar, cr, ac, bc, cc, dc)
+    return true
+end
+
+function _tomo_Kt!(K::Matrix{Float64}, theta::Theta, m::CovarianceNoise, t)
+    Kt = _tomo_Kt(theta, m, t)
+    Kt === nothing && return false
+    copyto!(K, Kt)
+    return true
+end
+
+# `kron_gp_loglike(r, Kt, Kv, σ)` in the night's scratch. The eigensystems come
+# from the same LAPACK call `eigen(Symmetric(·))` makes, with the same
+# workspace sizes, and the product is formed in the order `Ut' * r * Uv`
+# chooses for these shapes, (Ut' r) Uv, by the same two `gemm` calls.
+function _kron_gp_loglike!(w::TomoNightWork, r::Matrix{Float64}, σ::Float64)
+    # Anything `eigen` would throw for: the allocating path, which throws it.
+    (_sym_eigen!(w.et, w.Kt) && _sym_eigen!(w.ev, w.Kv)) ||
+        return kron_gp_loglike(r, w.Kt, w.Kv, σ)
+    dt, dv = w.dt, w.dv
+    @inbounds for i in eachindex(dt); dt[i] = max(w.et.W[i], 0.0); end
+    @inbounds for k in eachindex(dv); dv[k] = max(w.ev.W[k], 0.0); end
+    BLAS.gemm!('T', 'N', 1.0, w.et.Z, r, 0.0, w.Y)
+    BLAS.gemm!('N', 'N', 1.0, w.Y, w.ev.Z, 0.0, w.Z)
+    Z = w.Z
+    σ2 = σ^2
+    σ2 > 0 || return -Inf
+    ll = -0.5 * length(Z) * log(2π)
+    @inbounds for k in axes(Z, 2), i in axes(Z, 1)
+        d = dt[i] * dv[k] + σ2
+        ll -= 0.5 * (Z[i, k]^2 / d + log(d))
+    end
+    return ll
+end
+
+"""
+    _sym_eigen!(ew::SymEigenWork, K) -> Bool
+
+Eigenvalues (`ew.W`) and eigenvectors (`ew.Z`) of the symmetric matrix whose
+upper triangle is that of `K`, by the `dsyevr` call `eigen(Symmetric(K))`
+makes (`LAPACK.syevr!('V', 'A', 'U', ...)`) with the `lwork`/`liwork` its
+workspace query returns -- so the same bits. `K` is not modified. False, with
+nothing computed, where `syevr!` would throw (a non-finite entry in the
+triangle, LAPACK reporting failure).
+"""
+function _sym_eigen!(ew::SymEigenWork, K::Matrix{Float64})
+    n = ew.n
+    A = ew.A
+    @inbounds for j in 1:n, i in 1:j
+        v = K[i, j]
+        isfinite(v) || return false
+        A[i, j] = v
+    end
+    if ew.lwork == 0
+        _syevr_call!(ew, BlasInt(-1), BlasInt(-1)) == 0 || return false
+        lwork = BlasInt(real(ew.work[1])); liwork = ew.iwork[1]
+        resize!(ew.work, lwork); resize!(ew.iwork, liwork)
+        ew.lwork = lwork; ew.liwork = liwork
+    end
+    return _syevr_call!(ew, ew.lwork, ew.liwork) == 0
+end
+
+# One dsyevr call, exactly as LinearAlgebra.LAPACK.syevr! makes it.
+function _syevr_call!(ew::SymEigenWork, lwork::BlasInt, liwork::BlasInt)
+    n = ew.n
+    if lwork < 0
+        length(ew.work) >= 1 || resize!(ew.work, 1)
+        length(ew.iwork) >= 1 || resize!(ew.iwork, 1)
+    end
+    m = Ref{BlasInt}()
+    info = Ref{BlasInt}()
+    ccall((BLAS.@blasfunc(dsyevr_), BLAS.libblastrampoline), Cvoid,
+          (Ref{UInt8}, Ref{UInt8}, Ref{UInt8}, Ref{BlasInt},
+           Ptr{Float64}, Ref{BlasInt}, Ref{Float64}, Ref{Float64},
+           Ref{BlasInt}, Ref{BlasInt}, Ref{Float64}, Ptr{BlasInt},
+           Ptr{Float64}, Ptr{Float64}, Ref{BlasInt}, Ptr{BlasInt},
+           Ptr{Float64}, Ref{BlasInt}, Ptr{BlasInt}, Ref{BlasInt},
+           Ref{BlasInt}, Clong, Clong, Clong),
+          'V', 'A', 'U', n,
+          ew.A, max(1, n), 0.0, 0.0,
+          0, 0, -1.0, m,
+          ew.W, ew.Z, max(1, n), ew.isuppz,
+          ew.work, lwork, ew.iwork, liwork,
+          info, 1, 1, 1)
+    (lwork < 0 || m[] == n) || return BlasInt(-999)
+    return info[]
+end
+
 _fd_value(x::Real) = x
 _fd_value(x::ForwardDiff.Dual) = _fd_value(ForwardDiff.value(x))
 
@@ -1050,7 +1287,13 @@ end
 function _shadow_map_circular(t, Tc, P, a_Rs, inc, λ, vsini, grid, σ_line, rr, u1, u2)
     TT = promote_type(typeof(Tc), typeof(P), typeof(a_Rs), typeof(inc), typeof(λ),
                       typeof(vsini), typeof(σ_line), typeof(rr), typeof(u1), Float64)
-    M = zeros(TT, length(t), length(grid))
+    M = Matrix{TT}(undef, length(t), length(grid))
+    return _shadow_map_circular!(M, t, Tc, P, a_Rs, inc, λ, vsini, grid, σ_line, rr, u1, u2)
+end
+
+# In place, into an n_t x n_v matrix (zeroed here).
+function _shadow_map_circular!(M, t, Tc, P, a_Rs, inc, λ, vsini, grid, σ_line, rr, u1, u2)
+    fill!(M, zero(eltype(M)))
     sλ, cλ = sincos(λ)
     norm = 1 - u1 / 3 - u2 / 6
     @inbounds for i in eachindex(t)
@@ -1076,7 +1319,12 @@ function _shadow_map_orbit(t, Tp, P, e, ω, b, a_Rs, λ, vsini, grid, σ_line, r
     TT = promote_type(typeof(Tp), typeof(P), typeof(e), typeof(ω), typeof(b),
                       typeof(a_Rs), typeof(λ), typeof(vsini), typeof(σ_line),
                       typeof(rr), typeof(u1), Float64)
-    M = zeros(TT, length(t), length(grid))
+    M = Matrix{TT}(undef, length(t), length(grid))
+    return _shadow_map_orbit!(M, t, Tp, P, e, ω, b, a_Rs, λ, vsini, grid, σ_line, rr, u1, u2)
+end
+
+function _shadow_map_orbit!(M, t, Tp, P, e, ω, b, a_Rs, λ, vsini, grid, σ_line, rr, u1, u2)
+    fill!(M, zero(eltype(M)))
     sλ, cλ = sincos(λ)
     norm = 1 - u1 / 3 - u2 / 6
     @inbounds for i in eachindex(t)
