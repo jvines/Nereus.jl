@@ -552,7 +552,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     end
 
     return _apply_noise_and_eval(theta, data, predictions, residuals,
-                                  variances, noise_models, two_pi)
+                                  variances, noise_models, two_pi, ws)
 end
 
 """
@@ -822,8 +822,11 @@ end
 # AR step (Stage-1 prediction adjustment) still runs in that case;
 # MA / single-channel GP do not (composition rule documented in
 # `validate_noise_models`).
+#
+# `ws` (a PTWorkspace, or nothing) only lends scratch to the RV-channel GP.
 function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
-                                variances, noise_models, two_pi) where {T}
+                                variances, noise_models, two_pi,
+                                ws = nothing) where {T}
     for (nm_idx, nm) in enumerate(noise_models)
         is_noise_model_active(theta, nm_idx) || continue
         if nm isa ARModel && noise_channel(nm) === :rv
@@ -908,7 +911,7 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
 
     return ind_only_ll +
            _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
-                                     data.rv_inst, :rv, two_pi)
+                                     data.rv_inst, :rv, two_pi, ws)
 end
 
 # Return the first active `ActivityGP` in `noise_models`, or `nothing`.
@@ -1073,12 +1076,14 @@ mutable struct RVNoiseScratch
     floor_α::Vector{Float64}        # Σ⁻¹ y
     # ActivityDecorrelation / ActivityJitter / ErrorScale slots (noise/activity.jl)
     mods::RVModifierSlots
+    # CeleriteRotation coefficients, solver arrays and slots (noise/gp.jl)
+    cel::CeleriteWork
 end
 
 RVNoiseScratch() = RVNoiseScratch(nothing, nothing, String[], Int[], Int[], 0, 0, 0,
                                   Matrix{Float64}(undef, 0, 0),
                                   Matrix{Float64}(undef, 0, 0), Float64[],
-                                  RVModifierSlots())
+                                  RVModifierSlots(), CeleriteWork())
 
 # Resolve the floor's layout slots once; later calls only compare two keys.
 function _floor_slots!(sc::RVNoiseScratch, layout, floor::IndicatorFloor)
@@ -1135,20 +1140,24 @@ end
 indicator_floor_log_likelihood(theta::Theta, data::Data, ws) =
     indicator_floor_log_likelihood(theta, data)
 
-function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloor,
-                         sc::RVNoiseScratch)
-    T = Float64
-    nm_list = theta.params.config.noise_models
-    covered = Set{Symbol}()
+# Is floor channel `ch` scored by an active joint ActivityGP (so the floor
+# skips it)? The `covered` set of the generic method, without building it.
+@inline function _floor_channel_covered(theta::Theta, nm_list, ch::Symbol)
+    ch === :rv && return false
     @inbounds for i in eachindex(nm_list)
         nm = nm_list[i]
         nm isa ActivityGP || continue
         nm.indicators_only && continue
         is_noise_model_active(theta, i) || continue
-        for ch in nm.channels
-            ch === :rv || push!(covered, ch)
-        end
+        ch in nm.channels && return true
     end
+    return false
+end
+
+function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloor,
+                         sc::RVNoiseScratch)
+    T = Float64
+    nm_list = theta.params.config.noise_models
     _floor_slots!(sc, theta.params.layout, floor)
     vals = theta.values
     P   = vals[sc.floor_P]
@@ -1168,7 +1177,7 @@ function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloo
     total = zero(T)
     shape_done = false
     for c in eachindex(floor.channels)
-        floor.channels[c] in covered && continue
+        _floor_channel_covered(theta, nm_list, floor.channels[c]) && continue
         name = sc.floor_names[c]
         y = get(data.indicators, name, nothing)
         y === nothing && continue

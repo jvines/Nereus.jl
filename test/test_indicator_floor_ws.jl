@@ -41,6 +41,9 @@ function _set!(th, p, x)
     th
 end
 
+# Allocation probe behind a function barrier (concrete argument types).
+_floor_ws_alloc(th, d, ws) = @allocated indicator_floor_log_likelihood(th, d, ws)
+
 @testset "IndicatorFloor :qp workspace path" begin
     rng = MersenneTwister(20261003)
     # :halpha is configured but absent from the data (skipped); :logrhk has
@@ -121,7 +124,7 @@ end
         _set!(th, p, xs[1])
         indicator_floor_log_likelihood(th, d, ws)
         _set!(th, p, xs[2])
-        @test (@allocated indicator_floor_log_likelihood(th, d, ws)) < 1024
+        @test _floor_ws_alloc(th, d, ws) == 0
     end
 
     @testset "duals take the generic method" begin
