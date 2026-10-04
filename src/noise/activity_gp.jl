@@ -1122,7 +1122,7 @@ kernels unless stated otherwise:
   up to 7.3e-6. At 100 and 200 epochs (one kernel, against the Float64 dense
   likelihood) they reached 1.2e-3 nats and 1.8e-4.
 - Parallel couplings, noise variance about 1e-8: up to 0.76 nats and
-  7.5e-2, where the dense Cholesky stays within 4.1e-6 nats and 1.5e-6.
+  7.5e-2, where the dense Cholesky reached 4.12e-6 nats and 1.54e-6.
 - Every Ġ coupling 0, noise variance about 1e-8, 80 epochs: a derivative
   error of 2.5e-5, against 9e-8 for the dense Cholesky.
 - At noise variance 1e-5 (100 and 200 epochs, one kernel, against the
