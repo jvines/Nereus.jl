@@ -312,4 +312,30 @@ include(joinpath(@__DIR__, "fixtures", "obliquity_synthetic.jl"))
         @test typeof(e1) == typeof(e2)
         @test sprint(showerror, e1) == sprint(showerror, e2)
     end
+
+    # rjmcmc checkpoints a workspace with `_ws_snapshot`. The obliquity scratch
+    # is rebuilt on first use, so it is left out, and a workspace restored from
+    # the snapshot of a warm one gives the same bits.
+    @testset "checkpoint snapshot leaves the obliquity scratch out" begin
+        p = build()
+        ws = new_ws(p)
+        th = Theta{Float64}(p)
+        pts = points(p, 10)
+        ref = Float64[]
+        for x in pts
+            seat!(th, p, x)
+            push!(ref, rv_log_likelihood(th, d, ws) + tomogram_log_likelihood(th, d, ws))
+        end
+        @test ws.tomo !== nothing && ws.rv_orbit !== nothing
+        snap = Nereus._ws_snapshot(ws)
+        @test isempty(intersect(keys(snap), (:tomo, :rv_channel, :rv_orbit)))
+        ws2 = Nereus._ws_restore!(new_ws(p), snap)
+        @test ws2.tomo === nothing && ws2.rv_channel === nothing && ws2.rv_orbit === nothing
+        got = Float64[]
+        for x in pts
+            seat!(th, p, x)
+            push!(got, rv_log_likelihood(th, d, ws2) + tomogram_log_likelihood(th, d, ws2))
+        end
+        @test all(got .=== ref)
+    end
 end

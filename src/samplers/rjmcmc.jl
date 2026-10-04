@@ -1468,7 +1468,11 @@ end
 # `rv_noise` is likelihood scratch (buffers and resolved layout slots).
 # `phot_data` is derived from the data alone and is rebuilt on first use.
 # `agp` holds ActivityGP solver buffers, rebuilt on first use after a resume.
-const _WS_NOT_SAVED = (:scratch_theta, :population, :rv_noise, :phot_data, :agp)
+# `tomo`, `rv_channel` and `rv_orbit` are the residual-map, RV-channel and
+# orbital-phase scratch: rebuilt on first use, and `tomo` and `rv_channel` hold
+# a reference to Params that a snapshot would deep-copy.
+const _WS_NOT_SAVED = (:scratch_theta, :population, :rv_noise, :phot_data, :agp,
+                       :tomo, :rv_channel, :rv_orbit)
 
 function _ws_snapshot(ws::PTWorkspace)
     fs = Tuple(f for f in fieldnames(PTWorkspace) if f ∉ _WS_NOT_SAVED)
