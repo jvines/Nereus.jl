@@ -18,10 +18,10 @@ The choices are bundled in `ParametrizationConfig` and `PlanetDataSources`.
 ## `PlanetDataSources` — which observables a planet contributes to
 
 A planet is described by the **set** of data sources that see it
-(`src/model.jl:71`). It is a composable `Set{Symbol}`, not an enum, so
+(`src/model.jl:90`). It is a composable `Set{Symbol}`, not an enum, so
 RV / photometry / astrometry / Rossiter–McLaughlin / TTV compose
 cleanly. Nereus exports the common combinations as named constants
-(`src/model.jl:91`–`121`):
+(`src/model.jl:120`–`462`):
 
 | Constant | Sources | Use case |
 |---|---|---|
@@ -63,9 +63,9 @@ PlanetDataSources(:RV, :PM)       # ≡ RVPM
 PlanetDataSources(:PM)            # ≡ PM_ONLY
 ```
 
-Membership tests use `in` (`src/model.jl:77`); predicate helpers
+Membership tests use `in` (`src/model.jl:96`); predicate helpers
 `has_rv`, `has_pm`, `has_as`, `has_rm`, `has_rm_r`, `has_any_rm`,
-`has_ttv`, `has_ttv_nb` are exported (`src/model.jl:131`–`138`).
+`has_ttv`, `has_ttv_nb` are exported (`src/model.jl:472`–`562`).
 
 You pass one mode per planet to `Params`:
 
@@ -84,19 +84,19 @@ have `K`, PM planets have `b`, `rr`, AS planets have `inc`/`Omega`, RM
 planets add `lambda`, …). See [Priors → Naming convention](priors.md#naming-convention)
 for the per-mode parameter list, and the `PlanetBlock` subtypes
 (`RVOnlyBlock`, `PMOnlyBlock`, `RVPMBlock`, `RVASBlock`,
-`RVPMASBlock`) in `src/model.jl:316`–`434` for the exact slot order.
+`RVPMASBlock`) in `src/model.jl:781`–`916` for the exact slot order.
 
 !!! warning "Astrometry requires RV"
-    `_make_block` (`src/model.jl:781`) rejects pure-AS and PM+AS
+    `_make_block` (`src/model.jl:1526`) rejects pure-AS and PM+AS
     planets — every astrometric planet must also carry `:RV`. RM and
     TTV both require `:PM` (you need a transit window / transit
     observations), enforced by the constant definitions.
 
 ### run_job equivalent
 
-In the `model.planet_modes` array (`src/runner.jl:690`), pass the
+In the `model.planet_modes` array (`src/runner.jl:981`), pass the
 constant **names** as strings. The schema validator
-(`src/runner.jl:180`) recognises exactly:
+(`src/runner.jl:252`) recognises exactly:
 
 ```
 RV_ONLY, PM_ONLY, RVPM, RVAS, RVPMAS,
@@ -123,14 +123,14 @@ ParametrizationConfig(;
 )
 ```
 
-Defined in `src/model.jl:175`–`208`. The keyword constructor validates
+Defined in `src/model.jl:616`–`656`. The keyword constructor validates
 `ew`, `time`, `geom`, and `mass` and throws an `ArgumentError` on any
 unknown value, so a typo fails fast at construction.
 
 ### `ew::Symbol` — eccentricity parametrisation
 
 The two eccentricity slots (`e1`, `e2`) are named and decoded
-according to this choice (`src/model.jl:717`–`726`, decoded in
+according to this choice (`src/model.jl:1460`–`1470`, decoded in
 `src/parameters.jl` `planet_e_w`; conversions in `src/orbit.jl`):
 
 - `:sesinw` (default) — sample `(√e·sin ω, √e·cos ω)`, named
@@ -139,7 +139,7 @@ according to this choice (`src/model.jl:717`–`726`, decoded in
   Jenkins convention). Conversion `sesinw_to_ew` (`src/orbit.jl:108`).
 - `:esinw` — sample `(e·sin ω, e·cos ω)`, named `esinw_kN` /
   `ecosw_kN`. Implicit prior `e ∝ 1` (linear) → biased toward higher
-  `e`. Conversion `esinw_to_ew` (`src/orbit.jl:120`).
+  `e`. Conversion `esinw_to_ew` (`src/orbit.jl:128`).
 - `:ew` — sample `e` and `ω` directly, named `ecc_kN` / `w_kN`. Use
   when you want an explicit prior on `e` (e.g. `BetaPrior(0.867, 3.03)`
   for Kipping 2013, or a `NormalPrior` from an external constraint).
@@ -160,18 +160,18 @@ transiently propose `s²+c² > 1`.
 ### `time::Symbol` — orbital time anchor
 
 The single time slot (`t`) is named and decoded per this choice
-(`src/model.jl:729`; conversions `src/orbit.jl:160`–`208`):
+(`src/model.jl:1473`; conversions `src/orbit.jl:157`–`218`):
 
 - `:Mo` (the default, in the Julia API and run_job) — sample mean anomaly `M₀` at the
   reference epoch `t_ref` (= `data.t_ref`, the data median). Best
   conditioning for poorly-constrained periods (mid-baseline anchor
-  reduces P–Tp covariance). `mo_to_tp` (`src/orbit.jl:165`).
+  reduces P–Tp covariance). `mo_to_tp` (`src/orbit.jl:175`).
 - `:Tp` — sample time of periastron passage. Natural for visual orbits
-  where Tp has direct geometric meaning. `tp_to_mo` (`src/orbit.jl:174`).
+  where Tp has direct geometric meaning. `tp_to_mo` (`src/orbit.jl:184`).
 - `:Tc` — sample time of transit centre (inferior conjunction). Right
   for `RVPM`/`PM_ONLY`/transit fits: the transit ephemeris constrains
   `Tc` directly, and `Tp` becomes derived via `tc_to_tp`
-  (`src/orbit.jl:184`, transit at `f = π/2 − ω`). Required for the
+  (`src/orbit.jl:194`, transit at `f = π/2 − ω`). Required for the
   `ttv_oc` plot (it reads `Tc_kN` by name).
 
 !!! warning "Keep a Tp or Tc prior within one period"
@@ -187,7 +187,7 @@ The single time slot (`t`) is named and decoded per this choice
 ### `geom::Symbol` — transit geometry parametrisation
 
 The two transit-geometry slots (present only for PM planets,
-`src/model.jl:732`) are named and decoded per this choice:
+`src/model.jl:1475`–`1484`) are named and decoded per this choice:
 
 - `:b_rr` (default) — `b` (impact parameter) and `rr = R_p/R_⋆`, named
   `b_kN` / `rr_kN`. Standard.
@@ -196,8 +196,8 @@ The two transit-geometry slots (present only for PM planets,
   allowed `(b, rr)` region with uniform density, explicitly excluding
   the `b > 1 + rr` prohibited region from the prior box. Cleaner for
   transit fits where `b` is near 1 (grazing). Decoded in
-  `planet_b_rr` (`src/parameters.jl:360`); the RM path converts
-  `(r1, r2) → (b, rr)` internally (`src/rm.jl:193`).
+  `planet_b_rr` (`src/parameters.jl:396`); the RM path converts
+  `(r1, r2) → (b, rr)` internally (`src/rm.jl:351`).
 
 ### `use_rho_s::Bool` — stellar-density parametrisation
 
@@ -205,14 +205,14 @@ The two transit-geometry slots (present only for PM planets,
   `P + M_⋆ + R_⋆` via Kepler III (so `M_s` and `R_s` must be set on
   `Params`).
 - `true` — a single **shared** stellar density `rho_s` slot is sampled
-  (`src/model.jl:1006`) and `a/R_⋆` is derived from `rho_s + P` for
+  (`src/model.jl:1800`) and `a/R_⋆` is derived from `rho_s + P` for
   every transiting planet (`rho_s_to_a_Rs`). Use for multi-planet
   transiting systems: `rho_s` is one physical quantity shared across
   the system, and sampling it directly trades N per-planet
   density-equivalent parameters for one. Standard for TESS-style
   transit fits ([Vines+ 2023](https://ui.adsabs.harvard.edu/abs/2023MNRAS.518.2627V/abstract)
   Table 7 convention). The RM `a/R_⋆` also prefers the `rho_s` path
-  when present (`src/rm.jl:204`).
+  when present (`src/rm.jl:361`).
 
 ```julia
 parametrization = ParametrizationConfig(time = :Tc, geom = :b_rr, use_rho_s = true)
@@ -222,7 +222,7 @@ priors["rho_s"] = NormalPrior(2.241, 0.479, 0.1, 10.0)   # ARIADNE-derived
 ### `mass::Symbol` — mass / first-two-slot parametrisation
 
 Controls how the first one or two planet slots are named and what they
-mean (`src/model.jl:700`–`714`; mass-function machinery in
+mean (`src/model.jl:1434`–`1458`; mass-function machinery in
 `src/parameters.jl`):
 
 - `:K_driven` (default) — sample RV `K`; derive `M_sec` from the mass
@@ -260,7 +260,7 @@ a prior that respects that geometry. Only relevant for planets carrying
 
 ### `marginalize_gamma::Bool` — analytic γ marginalisation
 
-(`src/model.jl:182`–`190`.) When `true`, the per-instrument RV systemic
+(`src/model.jl:623`–`631`.) When `true`, the per-instrument RV systemic
 offset `γ` is **analytically marginalised** (orvara's approach). Because
 `γ` enters the RV model linearly (`pred = γ + Keplerian + trend`), the
 likelihood is Gaussian in `γ` and each instrument's `γ` integrates in
@@ -284,7 +284,7 @@ evidence) and the RV likelihood uses the γ-marginalised path
 
 ### run_job coverage of `ParametrizationConfig`
 
-The `model.parametrization` block in run_job (`src/runner.jl:708`–`715`)
+The `model.parametrization` block in run_job (`src/runner.jl:1015`–`1030`)
 maps only these keys, with these accepted string values:
 
 | run_job key | accepted strings | maps to | default |
@@ -308,14 +308,14 @@ maps only these keys, with these accepted string values:
 
 !!! warning "run_job gaps vs the Julia API"
     Several Julia-API options are **not** reachable through run_job
-    today (`src/runner.jl:709`):
+    today (`src/runner.jl:1015`):
     - `use_rho_s` and `obs_prior` are never read from the config — set
       them by constructing `Params`/`ParametrizationConfig` directly.
     - `ew = :esinw` and `geom = :r1r2` are valid in Julia but **absent
       from the run_job string maps** (`_EW_PARAM`, `_GEOM_PARAM`,
-      `src/runner.jl:687`–`688`).
+      `src/runner.jl:978`–`979`).
     - The schema validator advertises `geom = "b_r"`
-      (`src/runner.jl:191`) and the map yields `:b_r`, but
+      (`src/runner.jl:267`) and the map yields `:b_r`, but
       `ParametrizationConfig` only accepts `:b_rr`/`:r1r2` — passing
       `geom: "b_r"` therefore throws at model construction. Use
       `b_rr`.
@@ -331,19 +331,19 @@ Slots added to the layout:
 
 - **`v_sin_i_star`** — system-level stellar projected rotation
   `V·sin(i_*)`, in **m/s**, shared across every RM planet (added once,
-  `src/model.jl:1035`). Default prior `LogUniformPrior(500, 100_000)`
-  m/s (`src/default_priors.jl:299`); override with a `NormalPrior` when
+  `src/model.jl:1840`). Default prior `LogUniformPrior(500, 100_000)`
+  m/s (`src/default_priors.jl:445`); override with a `NormalPrior` when
   spectroscopic `v sin i` is measured. Read via `system_vsini`
-  (`src/parameters.jl:541`).
+  (`src/parameters.jl:582`).
 - **`lambda_kN`** — per-planet sky-projected obliquity `λ`, in
-  **radians** (`src/model.jl:756`). Default prior `UniformPrior(-π, π)`
-  (`src/default_priors.jl:304`); tighten to `NormalPrior(0, π/8)` for
-  aligned systems. Read via `planet_lambda` (`src/parameters.jl:554`).
+  **radians** (`src/model.jl:1502`). Default prior `UniformPrior(-π, π)`
+  (`src/default_priors.jl:485`); tighten to `NormalPrior(0, π/8)` for
+  aligned systems. Read via `planet_lambda` (`src/parameters.jl:635`).
 
 The leading-order Hirano model is `ΔRV_RM(t) = −Δflux(t) · v_p(t)` with
 `v_p = V·sin(i_*)·(x_sky cos λ − y_sky sin λ)` (`rm_signal`,
-`src/rm.jl:65`). The `:RM_R` Reloaded variant
-(`rm_reloaded_signal`, `src/rm.jl:289`) instead integrates the
+`src/rm.jl:71`). The `:RM_R` Reloaded variant
+(`rm_reloaded_signal`, `src/rm.jl:611`) instead integrates the
 intensity-weighted line-of-sight velocity over the planet's
 sky-projected disk (21×21 sub-cells), more accurate at high `rr` /
 high `b`, reducing to Hirano in the small-planet limit.
@@ -352,7 +352,7 @@ The RM term is now part of `rv_predictions` (`src/likelihood.jl:1859`),
 so PPC, residuals, fit-health diagnostics and **all** RV plots are
 RM-consistent — not just the likelihood. `a/R_⋆` for the RM geometry
 comes from `rho_s` when `use_rho_s = true`, otherwise from
-`M_s + R_s + P` (`src/rm.jl:204`); if neither is available the RM term
+`M_s + R_s + P` (`src/rm.jl:361`); if neither is available the RM term
 is skipped (predictions) or the fit fails loud (likelihood).
 
 ```julia
@@ -381,7 +381,7 @@ fit run, so it is documented here; the noise model itself lives in
 [Noise models → `ActivityGP`](noise_models.md).
 
 In run_job, declare the noise model in `noise_models`
-(`src/runner.jl:787`, `_build_noise_models` `src/runner.jl:801`):
+(`src/runner.jl:1036`, `_build_noise_models` `src/runner.jl:1202`):
 
 ```json
 "noise_models": [
@@ -391,16 +391,16 @@ In run_job, declare the noise model in `noise_models`
 ]
 ```
 
-`channels` is symbolised for you (`src/runner.jl:824`); valid channels
+`channels` is symbolised for you (`src/runner.jl:1232`); valid channels
 are `bis`, `fwhm`, `logrhk` (no derivative term), `halpha`
-(`src/noise/types.jl:280`–`303`). `ActivityGP` deliberately has **no**
+(`src/noise/types.jl:386`–`398`). `ActivityGP` deliberately has **no**
 kernel-amplitude parameter (unit-variance latent `G(t)`); all scale
 lives in the per-channel couplings (`Vc/Vr`, `Bc/Br`, …).
 
 Supply the indicator data alongside the RV data:
 
 - **`values` RV block** — add `<name>` and `<name>_err` arrays next to
-  `bjd`/`rv`/`rv_err`/`instrument` (`src/runner.jl:464`–`492`). A
+  `bjd`/`rv`/`rv_err`/`instrument` (`src/runner.jl:670`–`714`). A
   `<name>_err` key is treated as the error for `<name>` **only when
   `<name>` is also present**; a lone `<name>_err` is itself an
   indicator value:
@@ -415,7 +415,7 @@ Supply the indicator data alongside the RV data:
 
 - **`csv` RV block** — list the indicator columns in `indicator_cols`
   and provide a matching `<col>_err` column for each
-  (`src/runner.jl:501`–`533`):
+  (`src/runner.jl:716`–`784`):
 
   ```json
   "rv": { "csv": "rvs.csv",
@@ -437,7 +437,7 @@ Diagnose the latent process with the `activity_gp_latent` /
 InstrumentConfig(; rv = String[], pm = String[])
 ```
 
-Instrument names (`src/model.jl:223`), used only to build parameter
+Instrument names (`src/model.jl:681`), used only to build parameter
 names like `gamma_HARPS_PRE`. The likelihood operates on integer
 indices (`rv_inst`, `phot_inst` in `Data`).
 
@@ -472,7 +472,7 @@ Params(;
 )
 ```
 
-Returns a `Params` value with two fields (`src/model.jl:672`):
+Returns a `Params` value with two fields (`src/model.jl:1367`):
 
 - `params.config` — the immutable `ParamsConfig` (data sources,
   instruments, parametrisation, priors, stability, M_s/R_s, …)
@@ -482,12 +482,12 @@ Returns a `Params` value with two fields (`src/model.jl:672`):
   `planet_blocks`, `systemic`, `packed_priors`)
 
 Everything for the hot path is precomputed by `_build_layout`
-(`src/model.jl:883`), which also **validates** that every layout slot
+(`src/model.jl:1650`), which also **validates** that every layout slot
 has a prior, rejects unknown prior keys (typo detection), enforces
 globally-unique parameter names, and runs `validate_physical` on each
 prior.
 
-Useful accessors (`src/model.jl:1147`–`1169`):
+Useful accessors (`src/model.jl:2064`–`2086`):
 
 ```julia
 n_total(params)       # total parameter count
@@ -500,28 +500,28 @@ param_index(params, "K_k1")   # index into the theta vector
 
 - `trend_order` adds a long-term RV trend on the systemic velocity:
   `1` adds a `dvdt` slot (linear), `2` also adds `d2vdt2` (quadratic)
-  (`src/model.jl:1012`–`1021`).
+  (`src/model.jl:1815`–`1824`).
 - `phot_trend_order` adds a per-PM-instrument photometric baseline
   polynomial `1 + offset + Σ c_p·xᵖ` in normalised time, sharing the
   `offset` grouping; coefficients are named `phot_cP_<label>` with a
-  default `NormalPrior(0, 0.05, -0.5, 0.5)` (`src/model.jl:960`–`980`).
+  default `NormalPrior(0, 0.05, -0.5, 0.5)` (`src/model.jl:1752`–`1772`).
 
 ### `stability` — multi-planet stability prior
 
 A hard prior rejecting dynamically unstable multi-planet configs.
 One of `:none`, `:amd` (AMD criterion), or `:gladman` (Gladman 1993
-Hill-stability), validated in `src/params_constructor.jl:69`. The
-Julia `Params` default is `:amd` (`src/params_constructor.jl:55`); the
-run_job default is `none` (`src/runner.jl:734`). A non-`:none` choice
+Hill-stability), validated in `src/params_constructor.jl:100`. The
+Julia `Params` default is `:amd` (`src/params_constructor.jl:85`); the
+run_job default is `none` (`src/runner.jl:1086`). A non-`:none` choice
 requires a finite `M_s` for `max_kplanet ≥ 2`
-(`src/params_constructor.jl:71`).
+(`src/params_constructor.jl:102`).
 
 ### `sharing` — parameter group sharing
 
 For multi-pipeline datasets where the same physical instrument is
 reduced by multiple pipelines (e.g. HARPS-DRS vs HARPS-TERRA), some
 parameters should be shared. Pass a dict mapping a **category** to
-groups of instrument names (`_instrument_groups`, `src/model.jl:835`):
+groups of instrument names (`_instrument_groups`, `src/model.jl:1602`):
 
 ```julia
 sharing = Dict(
@@ -530,7 +530,7 @@ sharing = Dict(
 )
 ```
 
-Valid categories (`src/model.jl:602`): RV `:sigma`, `:gamma`; PM
+Valid categories (`src/model.jl:1295`): RV `:sigma`, `:gamma`; PM
 `:pm_jitter`, `:pm_offset`, `:pm_dilution`; and `:ld` (the `q1`/`q2`
 pair). Instruments listed in the same inner vector share one slot;
 instruments in no group keep their own. Group labels join names with
@@ -542,9 +542,9 @@ noise-model `instruments` field rather than this dict — see
 
 ### `external_priors` — priors on derived quantities
 
-`ExternalPrior(quantity, prior, per_planet)` (`src/model.jl:531`)
+`ExternalPrior(quantity, prior, per_planet)` (`src/model.jl:1146`)
 applies a prior to a value **derived** from sampled parameters, not a
-sampled slot itself. Supported quantities (`src/model.jl:537`):
+sampled slot itself. Supported quantities (`src/model.jl:1152`):
 
 - `:ecc` — eccentricity, `per_planet = true` (evaluated per active planet)
 - `:rho_s` — stellar density, `per_planet = false` (global, once)

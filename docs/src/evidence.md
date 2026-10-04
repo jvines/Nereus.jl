@@ -27,7 +27,7 @@ modern variants (TI+, SS+, H+) from [Peña & Jenkins 2026](https://ui.adsabs.har
 (arXiv:2509.24870, A&A 706 A323, "Closing the evidence gap:
 reddemcee"). All four are computed jointly on the same chain and
 reported as a single `EvidenceReport`
-(`src/samplers/evidence.jl:396`).
+(`src/samplers/evidence.jl:432`).
 
 For **nested samplers**, `log Z` is produced natively by the
 algorithm — see [`sample_nested`](samplers.md) and friends, which
@@ -52,18 +52,18 @@ Every parallel-tempering sampler feeds the same
 
 | Sampler | Trans-dim? | log Z field | Full stack field | log Z headline |
 |---|---|---|---|---|
-| `sample_pt` | both | 2nd tuple element | — | TI+ (`pt.jl:545`) |
-| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:576`) |
-| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:1423`) |
-| `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_whitening.jl:507`) |
-| `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | TI+ (`pt_hmc.jl:264`) |
+| `sample_pt` | both | 2nd tuple element | — | TI+ (`pt.jl:790`) |
+| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:1158`) |
+| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:2165`) |
+| `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_whitening.jl:731`) |
+| `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | TI+ (`pt_hmc.jl:447`) |
 
 Notes for a production reader:
 
 - **Field name differs by sampler.** `PTemceeResult` and
   `PTWhiteningResult` expose the bundled stack as `.evidence`
   (typed `EvidenceReport`), whereas `TransDimPTemceeResult` exposes it
-  as `.evidence_report` (typed `Any`, `transdim_pt_emcee.jl:37`). The
+  as `.evidence_report` (typed `Any`, `transdim_pt_emcee.jl:45`). The
   tuple-returning samplers (`sample_pt`, `sample_pt_hmc`) put the
   scalar `log_evidence` in the tuple; `sample_pt_hmc` additionally
   returns the full `EvidenceReport` as a third element.
@@ -76,7 +76,7 @@ Notes for a production reader:
   [Practical guidance](#practical-guidance)).
 - **`sample_pt` return shape is history-dependent.** Fixed-dim returns
   `(chains, log_evidence)`; a user-supplied `td::TransDimConfig`
-  returns `(chains, log_evidence, n_evals)` (`pt.jl:181`).
+  returns `(chains, log_evidence, n_evals)` (`pt.jl:223`).
 - **`init_strategy` does not change the evidence path.** `sample_pt`
   takes `init_strategy = :prior` (default) or `:pathfinder`, which only
   decides where the replicas *start*; the ladder, the accumulator and
@@ -100,7 +100,7 @@ report = evidence_report(acc, betas)
 `log_L_per_chain[k]` is the current log-likelihood of the replica (or
 walker-averaged log-likelihood) at inverse temperature `betas[k]`.
 
-`acc` carries (`evidence.jl:44-51`):
+`acc` carries (`evidence.jl:44-52`):
 - `n[k]` — sample count per temperature
 - `sum_logL[k]`, `sum_logL2[k]` — running first and second moments of
   `log L` per temperature (mean and variance per β)
@@ -109,10 +109,10 @@ walker-averaged log-likelihood) at inverse temperature `betas[k]`.
   (`n_chains − 1` of them; allocated to `-Inf`)
 - `started` — guards against the 0/0 of an empty accumulator
 
-`update_evidence!` (`evidence.jl:80`) accumulates `log L` and `log L²`
+`update_evidence!` (`evidence.jl:82`) accumulates `log L` and `log L²`
 per chain, and the half-Δβ-scaled logsumexp legs per pair. It is fed
 internally by every sampler in the table above. All numerically
-sensitive sums go through `_logaddexp` (`evidence.jl:66`), which is
+sensitive sums go through `_logaddexp` (`evidence.jl:68`), which is
 `-Inf`-safe.
 
 ## The four estimators
@@ -132,7 +132,7 @@ by quadrature error proportional to `Δβ² · d²⟨log L⟩/dβ²`.
 ti_trapezoidal(mean_logL_per_temp, betas) -> log_Z
 ```
 
-`src/samplers/evidence.jl:113`. It integrates **ascending in β** —
+`src/samplers/evidence.jl:124`. It integrates **ascending in β** —
 the PT ladder is stored descending (β: 1→0, cold→hot), and integrating
 in array order would yield `∫₁⁰ = −log Z`. The function sorts ascending
 so the sign is `+log Z` regardless of ladder direction. (This sign-flip
@@ -142,12 +142,12 @@ every Bayes factor; caught by the toy-Z gate vs nested sampling on
 
 ### TI+ — PCHIP-interpolated TI
 
-reddemcee §2 (`src/samplers/evidence.jl:232`). Interpolate
+reddemcee §2 (`src/samplers/evidence.jl:243`). Interpolate
 ⟨log L⟩(β) with a monotonicity-preserving cubic Hermite (PCHIP;
-Fritsch & Carlson 1980, implemented inline at `evidence.jl:146`) and
+Fritsch & Carlson 1980, implemented inline at `evidence.jl:157`) and
 integrate the smooth interpolant analytically over each Hermite
 segment. Each segment integrates in closed form to
-`(h/2)(yₖ + yₖ₊₁) + (h²/12)(dₖ − dₖ₊₁)` (`evidence.jl:193`).
+`(h/2)(yₖ + yₖ₊₁) + (h²/12)(dₖ − dₖ₊₁)` (`evidence.jl:200`).
 Discretisation error is estimated by Richardson extrapolation on a
 coarse ladder (every other β, anchored at the endpoints; only when
 `n ≥ 5`).
@@ -169,7 +169,7 @@ SS+ is the better estimator in this regime.
 
 ### SS+ — geometric-bridge stepping stones
 
-reddemcee Eq. 22 (`src/samplers/evidence.jl:300`). For each adjacent
+reddemcee Eq. 22 (`src/samplers/evidence.jl:311`). For each adjacent
 pair `(β_k, β_{k+1})` with `Δβ = β_{k+1} − β_k`:
 
 ```
@@ -181,13 +181,13 @@ Both expectations stream via logsumexp on the accumulator
 (`ss_lse_fwd`/`ss_lse_bwd`). Halving the exponent (vs the one-leg
 standard SS) reduces variance when adjacent temperatures are well
 separated. Carries the same descending-ladder sign flip as the TI
-integrators (`evidence.jl:315`).
+integrators (`evidence.jl:326`).
 
 ```julia
 log_Z, σ_Z = ss_plus(acc, betas)
 ```
 
-`σ_Z` is a coarse `1/√n_min` bound (`evidence.jl:317`) — the per-pair
+`σ_Z` is a coarse `1/√n_min` bound (`evidence.jl:327`) — the per-pair
 MC error on the logsumexp estimates is hard to estimate without
 retaining samples; the bound is conservative.
 
@@ -196,7 +196,7 @@ posteriors. Use this number when the others disagree.
 
 ### H+ — hybrid TI+ ⊕ SS+
 
-reddemcee Eq. 23–24 (`src/samplers/evidence.jl:340`). Find `β*` =
+reddemcee Eq. 23–24 (`src/samplers/evidence.jl:370`). Find `β*` =
 first interior knot where the integrand satisfies
 `2 ⟨log L⟩_k ≥ ⟨log L⟩_{k+1}` (rectangle dominates triangle — TI's
 quadrature error explodes past this knot). Use TI+ on `[0, β*]` (where
@@ -209,12 +209,12 @@ log_Z, σ_Z, β_star = hybrid_evidence(acc, betas)
 
 If no `β*` exists (well-behaved integrand all the way), H+ falls back
 to pure TI+ and returns `β_star = 1.0`. With fewer than 3 temperatures
-it also degrades to TI+ (`evidence.jl:343`).
+it also degrades to TI+ (`evidence.jl:373`).
 
 ## `evidence_report` — the bundled output
 
-`evidence_report(acc, betas)` (`src/samplers/evidence.jl:404`) returns
-an `EvidenceReport` (`evidence.jl:396`):
+`evidence_report(acc, betas)` (`src/samplers/evidence.jl:461`) returns
+an `EvidenceReport` (`evidence.jl:432`):
 
 ```julia
 struct EvidenceReport
@@ -230,7 +230,7 @@ Access the numbers directly: `report.ti_plus[1]` is TI+ log Z,
 `report.ti_plus[2]` its σ; likewise `report.ss_plus`, `report.hybrid`,
 `report.ti`; `report.hybrid_beta_star` is the H+ switch knot.
 
-Pretty-printed via `show(::IO, ::EvidenceReport)` (`evidence.jl:414`):
+Pretty-printed via `show(::IO, ::EvidenceReport)` (`evidence.jl:471`):
 
 ```
 EvidenceReport:
@@ -274,9 +274,9 @@ When you drive Nereus via `Nereus.run_job` (the JSON/Dict
 dispatcher — see [JOB_CONFIG.md](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md)),
 every sampler result is normalised so `log_evidence` is always present,
 and the run summary surfaces it as the JSON key **`log_z`**
-(`src/runner.jl:2045`). Samplers with no evidence at all (e.g.
+(`src/runner.jl:2442`). Samplers with no evidence at all (e.g.
 `map`, `nuts`, `rjmcmc`, `moms`) return `log_evidence = NaN`
-(`runner.jl:1323`, `1329`, `1374`) and the value is written only when
+(`runner.jl:1431`, `1437`, `1482`) and the value is written only when
 finite (the JSON contract forbids raw `NaN`). Note that `pa`/`smc`
 (population annealing) and the nested family (`nested`, `nested_ins`,
 `nested_dynamic`, `daedalus`) carry their own `log_evidence` that is
@@ -285,7 +285,7 @@ population-annealing free-energy estimate, the NS family report
 Skilling/Feroz `log Z`. The
 sampler names that route through the PT evidence stack are
 `"pt"`, `"pt_emcee"`, `"transdim_pt_emcee"`,
-`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:241`, `1270`–`1385`).
+`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1402`–`1461`).
 
 **`summary.json` carries an `evidence` block**, not just `log_z`: every
 estimator the run produced with its standard error, plus `reported` naming
@@ -311,7 +311,7 @@ the one badly mixed run (worst R-hat 3.91). If you have results from a
 `run_job` fit predating this, re-run or recompute the evidence.
 
 The same `log_z` is fed into the LOO/log-Z model-comparison summary
-(`loo_compare_log_z`, `runner.jl:1867`) so cross-run Bayes factors are
+(`loo_compare_log_z`, `runner.jl:2254`) so cross-run Bayes factors are
 consistent.
 
 ## Validation status
@@ -643,8 +643,8 @@ until it is resolved.
   ladder inflates TI quadrature error and destabilises the SS+ pairs.
   `sample_pt_hmc` and `sample_pt_emcee`/`sample_pt_whitening` support
   `adapt_ladder` to re-grid β by thermodynamic length (√Var log L),
-  which minimises discretisation error (`pt_hmc.jl:191`,
-  `pt_emcee.jl:61`).
+  which minimises discretisation error (`pt_hmc.jl:99`,
+  `pt_emcee.jl:987`).
 - **Bayes factors across runs**: compute as `Δ log Z`, with σ combined
   in quadrature. Use the **same estimator** for both runs (e.g. both
   SS+). Through `run_job`, compare the `log_z` summary keys. **If either

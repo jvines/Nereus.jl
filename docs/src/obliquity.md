@@ -271,7 +271,7 @@ nothing rescales its amplitude.
 
     `joint_obliquity_fit` and `tomogram_bayes` take it in **km/s**, matching
     the tomographic `vgrid`, and convert internally for the RV kernel
-    (`obliquity_joint.jl:163`). There 95 km/s is `(95.0, 3.0)`.
+    (`obliquity_joint.jl:193`). There 95 km/s is `(95.0, 3.0)`.
 
     Both are self-consistent; they are simply different interfaces. Passing a
     km/s value to `obliquity_params` lands under its 100 m/s floor and will
