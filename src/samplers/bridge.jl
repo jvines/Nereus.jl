@@ -381,22 +381,45 @@ every point, but not to the bit:
   (3e-15 relative) on prior draws of an RV + astrometry fit. With any noise
   model, on the RV or only on the photometry, the RV goes through
   `_rv_ll_with_noise`, which evaluates each cadence as the other method does,
-  in the same order. That gives the same bits except for an active
-  IndicatorFloor with `kernel = :qp`, whose workspace path builds its kernel
-  sines by the angle-difference identity: with that floor the RV differs in
-  the last bits at most points, up to 3e-8 nats on the HD 18599 fits and
-  2.15e-7 nats at one prior draw of the activity-decorrelation fit. Without it
-  the RV gave the same bits on every fit measured (activity GP, the
-  trans-dimensional job, RM with tomography, and a CeleriteSHO on the
+  in the same order. That gives the same bits except where an active
+  IndicatorFloor with `kernel = :qp` scores a channel, that is a floor
+  channel that no active joint ActivityGP covers and that has indicator data
+  and its amplitude and jitter slots. The workspace path builds that floor's
+  kernel sines by the angle-difference identity, so the floor term, and with
+  it the RV log L, differs in the last bits at most points. On 300 prior
+  draws of each HD 18599 fit with such a floor the RV matched at 31 to 113 of
+  them. With RV and photometry it differed by up to 1.5e-6 nats with activity
+  decorrelation, 5.0e-7 with white noise, 4.5e-7 with the GP rotation and
+  1.3e-7 with the error scale; with RV only, by up to 6.0e-7 with the GP
+  rotation, 3.0e-7 with white noise, 2.8e-7 with the error scale and 1.8e-7
+  with activity decorrelation. The floor term alone differed by the same
+  amounts. At 200 points close to a high-posterior point of each fit the
+  largest difference was 1.1e-10 nats. A floor whose every channel an active
+  ActivityGP covers scores nothing in either method, so the RV gives the same
+  bits: on the HD 18599 activity-GP fit, whose floor is active and has the
+  ActivityGP's four channels, at every one of those 300 draws and 200
+  points, and in the trans-dimensional job, whose menu always carries a `:qp`
+  floor on the ActivityGP's channels, in every state with the ActivityGP on.
+  In a state with the ActivityGP off the floor scores its channels, and the
+  RV matched at 42 to 130 of 300 prior draws per state, up to 5.0e-7 nats
+  apart. With no `:qp` floor that scores a channel the RV gave the same bits
+  on every fit measured (RM with tomography, and a CeleriteSHO on the
   photometry only, with and without gravity darkening).
 - Photometry: the workspace method computes each cadence's sky separation by
   the same angle-sum route and sums every cadence in one pass, where the other
   sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
   a 20k-point light curve the whole log density differed by up to 5.4e-9 nats
-  near the reference point. On 300 prior draws per fit (floor on, RV and
-  photometry together) the largest relative differences in the whole density
-  were 1.9e-11 on the white-noise fit, 2.1e-11 with the GP rotation, 1.8e-12
-  with the activity GP and 4.7e-11 with activity decorrelation.
+  near the reference point.
+
+In the whole density, on 300 prior draws per HD 18599 joint fit (floor on,
+RV and photometry together), the largest relative differences were 1.9e-11
+on the white-noise fit, 2.1e-11 with the GP rotation, 1.8e-12 with the
+activity GP and 4.7e-11 with activity decorrelation. On the three fits whose
+floor scores its channels the RV floor term set those: at the draw that gave
+each, the RV differed by 8.0e-8 nats (white noise), 6.8e-9 (GP rotation) and
+1.9e-8 (activity decorrelation), the photometry by 7.3e-11, 1.3e-10 and
+6.5e-10. With the activity GP, whose RV matches, the whole difference is the
+photometry's.
 
 All of these are sample maxima, not bounds. Relative figures are |difference|
 / max(1, |log p|), and rounding does not bound that ratio: where |log p| is
@@ -411,16 +434,16 @@ and 4.7e-11 relative to max(1, |log p|)).
 
 The same bits as `_logdensity_parts` come out for the tomogram, for the
 photometry wherever it takes the allocating method, for the RV of a fit with
-any noise model other than an active `:qp` IndicatorFloor, and for the whole
-density at a clamped e. A gravity-darkened fit, whose photometry always takes
-the allocating method, is therefore bit-identical whenever it has no RV data,
-or has a noise model on either channel and no active `:qp` floor. Only a
-gravity-darkened fit with RV data and no noise model at all, or with an active
-`:qp` floor, carries the workspace RV rounding, like any other such fit: on
-a one-planet RVPM_GD fit the RV log L matched at 72 of 420 points (up to
-5.1e-11 nats apart); on a two-band, two-planet one the whole density matched
-at 410 of 500 (up to 4.7e-10 nats, 1.4e-15 relative), and one bridge_evidence
-of five moved log Z by 4.5e-13.
+a noise model and no active `:qp` IndicatorFloor that scores a channel, and
+for the whole density at a clamped e. A gravity-darkened fit, whose
+photometry always takes the allocating method, is therefore bit-identical
+whenever it has no RV data, or has a noise model on either channel and no
+such floor. Only a gravity-darkened fit with RV data and either no noise
+model at all or a `:qp` floor that scores a channel carries the workspace RV
+rounding, like any other such fit: on a one-planet RVPM_GD fit the RV log L
+matched at 72 of 420 points (up to 5.1e-11 nats apart); on a two-band,
+two-planet one the whole density matched at 410 of 500 (up to 4.7e-10 nats,
+1.4e-15 relative), and one bridge_evidence of five moved log Z by 4.5e-13.
 """
 function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
     target = ev.target
