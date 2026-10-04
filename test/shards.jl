@@ -8,7 +8,10 @@
 # from the same `_rng` stream and so stay together. `seconds` is its measured
 # cost on the x86_64 CI runner -- all the assignment needs. A unit missing a
 # measurement counts as DEFAULT_SECONDS; a test file missing from this list is
-# an error, so a new file cannot be skipped silently.
+# an error, so a new file cannot be skipped silently. The entries for the files
+# added by the perf tracks (transit window, floor and celerite workspace, AGP
+# low-rank solver, noise models, bridge workspace) were measured on the arm64
+# builder instead: one process per file, -t 3, four files at a time.
 #
 # Units are dealt longest-first to the least-loaded shard (LPT): deterministic,
 # so a unit runs in the same shard on every run and every machine.
@@ -91,8 +94,16 @@ const TEST_UNITS = [
     (name = "test_pt_donor_buffer.jl", seconds = 1, files = ["test_pt_donor_buffer.jl"]),
     (name = "test_transdim_activity_columns.jl", seconds = 3, files = ["test_transdim_activity_columns.jl"]),
     (name = "test_activity_gp.jl", seconds = 3, files = ["test_activity_gp.jl"]),
+    (name = "test_activity_gp_lowrank.jl", seconds = 209, files = ["test_activity_gp_lowrank.jl"]),
+    (name = "test_indicator_floor_ws.jl", seconds = 12, files = ["test_indicator_floor_ws.jl"]),
+    (name = "test_celerite_ws.jl", seconds = 11, files = ["test_celerite_ws.jl"]),
+    (name = "test_rv_modifier_slots.jl", seconds = 12, files = ["test_rv_modifier_slots.jl"]),
     (name = "test_multiseries_gp.jl", seconds = 12, files = ["test_multiseries_gp.jl"]),
+    (name = "test_multiseries_layout.jl", seconds = 4, files = ["test_multiseries_layout.jl"]),
+    (name = "test_multiseries_typestab.jl", seconds = 5, files = ["test_multiseries_typestab.jl"]),
     (name = "test_parametric_noise.jl", seconds = 7, files = ["test_parametric_noise.jl"]),
+    (name = "test_nightly_closed_form.jl", seconds = 11, files = ["test_nightly_closed_form.jl"]),
+    (name = "test_harmonic_factor_index.jl", seconds = 3, files = ["test_harmonic_factor_index.jl"]),
     (name = "test_harmonic_external.jl", seconds = 1, files = ["test_harmonic_external.jl"]),
     (name = "test_transdim_caches.jl", seconds = 1, files = ["test_transdim_caches.jl"]),
     (name = "test_birth_death_reversibility.jl", seconds = 1, files = ["test_birth_death_reversibility.jl"]),
@@ -101,10 +112,18 @@ const TEST_UNITS = [
     (name = "test_locor.jl", seconds = 9, files = ["test_locor.jl"]),
     (name = "test_locor_io.jl", seconds = 1, files = ["test_locor_io.jl"]),
     (name = "test_lightcurve.jl", seconds = 2, files = ["test_lightcurve.jl"]),
+    # The transit window and its cache (test/fixtures/transit_gate_target.jl).
+    (name = "test_phot_n_super_cache.jl", seconds = 8, files = ["test_phot_n_super_cache.jl"]),
+    (name = "test_transit_window_search.jl", seconds = 10, files = ["test_transit_window_search.jl"]),
+    (name = "test_transit_window_tight.jl", seconds = 18, files = ["test_transit_window_tight.jl"]),
+    (name = "test_transit_window_superset.jl", seconds = 28, files = ["test_transit_window_superset.jl"]),
+    (name = "test_transit_occultation.jl", seconds = 21, files = ["test_transit_occultation.jl"]),
     # Evidence estimators that do not temper from the prior, and the Rajpaul
     # kernel gradient check: all three carried assertions but were not run
     # until they were listed.
     (name = "test_bridge_evidence.jl", seconds = 1, files = ["test_bridge_evidence.jl"]),
+    (name = "test_bridge_workspace.jl", seconds = 23, files = ["test_bridge_workspace.jl"]),
+    (name = "test_bridge_threading.jl", seconds = 15, files = ["test_bridge_threading.jl"]),
     (name = "test_reference_path_evidence.jl", seconds = 6, files = ["test_reference_path_evidence.jl"]),
     (name = "test_phot_determinism.jl", seconds = 1, files = ["test_phot_determinism.jl"]),
     (name = "test_phot_supersampling.jl", seconds = 2, files = ["test_phot_supersampling.jl"]),
