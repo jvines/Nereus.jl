@@ -9,9 +9,12 @@
 # channel's base covariance B (white diagonal, or one celerite GP) and are
 # scored by Woodbury — Σ = B + FFᵀ factored through B's own solve + logdet,
 # so they compose freely with the base and with each other without tripping
-# the "at most one CovarianceNoise" rule. All routines are T-generic
-# (ForwardDiff-safe): the base celerite solve is generic and the Woodbury
-# core is plain linear algebra.
+# the "at most one CovarianceNoise" rule. A lone NightlyOffset on a white
+# base is the rank-1 case of Woodbury on each night's block, scored in closed
+# form (determinant lemma and Sherman–Morrison per night; see
+# `_woodbury_white_ll(y, variances, ::_NightlyFactor, two_pi)`). All routines
+# are T-generic (ForwardDiff-safe): the base celerite solve is generic and the
+# Woodbury core is plain linear algebra.
 #
 # References: Delisle, Hara & Ségransan 2020 (S+LEAF, arXiv:2004.10678) for
 # the LEAF calibration block NightlyOffset approximates; Boisse+ 2011 for the

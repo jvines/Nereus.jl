@@ -529,10 +529,13 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     a_Rs = Vector{T}(undef, n_transit)
     transits = Vector{Bool}(undef, n_transit)  # geometry gate result
     # Phase-distance early-out cache (skips kepler_solve for points
-    # clearly outside the transit window). Tc_centers[j] = circular-orbit
-    # Tc estimate; T_dur_safe[j] = generous upper bound on transit
-    # half-duration. For points where mod(|t - Tc|, P) > T_dur_safe we
-    # know z >> 1+rr without solving Kepler.
+    # outside the transit window). Tc_centers[j] = the transit centre
+    # (tp_to_tc); T_dur_safe[j] = the window half-width from
+    # `_set_transit_windows!`, a bound from the orbit that holds every
+    # cadence with the planet in front of the star and z < 1 + rr. A point
+    # with mod(|t - Tc|, P) > T_dur_safe has flux exactly 1 without solving
+    # Kepler. Cadences inside it with the planet behind the star are
+    # occultations, given no dip by the sign of sin(ω + f).
     Tc_centers = Vector{T}(undef, n_transit)
     T_dur_safe = Vector{T}(undef, n_transit)
 

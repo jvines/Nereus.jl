@@ -1035,12 +1035,14 @@ end
 # Indicator-floor likelihood (see the IndicatorFloor docstring). Scores each
 # floor channel on its own — iid N(0, σ_floor² + err²) for `kernel = :white`,
 # a quasi-periodic GP for `kernel = :qp` — SKIPPING channels already covered
-# by an active joint ActivityGP (the AGP scores those). Returns 0 only when
-# no IndicatorFloor is active. Every fixed-dim HD 18599 config carries an
-# active :qp floor, where it is a large share of each RV evaluation; the
-# PTWorkspace path uses `indicator_floor_log_likelihood(theta, data, ws)`
-# below, which does not allocate and agrees with this one to ≲ 1e-12 in
-# the kernel.
+# by an active joint ActivityGP (the AGP scores those). Returns 0 when no
+# IndicatorFloor is active, and also when every floor channel is skipped:
+# covered by an active ActivityGP, without indicator data, or without its
+# amplitude/jitter parameters. Every fixed-dim HD 18599 config carries an
+# active :qp floor; where no ActivityGP covers its channels it is a large
+# share of each RV evaluation. The PTWorkspace path uses
+# `indicator_floor_log_likelihood(theta, data, ws)` below, which does not
+# allocate and agrees with this one to ≲ 1e-12 in the kernel.
 #
 # Quasi-periodic GP log-likelihood for ONE indicator channel (dense Cholesky,
 # mirrors ActivityGP's k_GG block — VALUE term only, no derivative coupling).

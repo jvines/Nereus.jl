@@ -585,8 +585,11 @@ mutable struct PTWorkspace
     predictions::Vector{Float64}  # length = n_rv
     variances::Vector{Float64}
     residuals::Vector{Float64}
-    # --- RV noise scratch (floor track: IndicatorFloor :qp buffers + resolved
-    #     layout slots). Scratch only, never chain state; not checkpointed. ---
+    # --- RV noise scratch (floor track): IndicatorFloor :qp buffers and
+    #     layout slots, the ActivityDecorrelation / ActivityJitter /
+    #     ErrorScale slots (`mods`) and the CeleriteRotation coefficients,
+    #     solver arrays and slots (`cel`). Scratch only, never chain state;
+    #     not checkpointed. ---
     rv_noise::RVNoiseScratch
     # --- Likelihood evaluation buffers (transit / phot path) ---
     transit_Ps::Vector{Float64}     # length = max_kplanet
