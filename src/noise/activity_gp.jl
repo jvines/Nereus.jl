@@ -1093,20 +1093,46 @@ synthetic singular blocks with two to five channels (every G coupling 0,
 every Ġ coupling 0, parallel couplings, every coupling 0, one channel
 uncoupled; one seed per configuration), gradients and Hessians agreed with
 the dense likelihood differentiated in BigFloat to 2e-14 or better on both
-fallbacks. The sequential route's rounding grows faster with the
-signal-to-noise than the whitened solve's or the dense Cholesky's, because
-its updates of K cancel once the latent is well determined. The earlier
-sample of HD 18599 points
-was made singular three ways (every Ġ coupling 0, every G coupling 0, and Ġ
-couplings proportional to G couplings; 585 points over the five-channel,
-use_derivative = false and four-channel models). Against BigFloat, the
-sequential route's largest value errors were 1.0e-5, 3.7e-6 and 1.7e-4 nats
-in those three cases, against 1.0e-5, 3.7e-6 and 6.8e-6 for the dense
-Cholesky. Its largest relative errors in a directional derivative were
-1.2e-7, 1.5e-8 and 2.0e-6, against 1.2e-7, 1.4e-8 and 5.7e-7. On the
-five-channel model with Ġ couplings the medians were 3e-10 to 1.3e-9 nats
-and 2e-13 to 2e-12, and near the posterior the value errors were at most
-4e-11 nats for both routes.
+fallbacks. An independent sample (two to eight channels, four kernels) gave
+at most 2.2e-14 for gradients and 5.2e-14 for Hessians. Both are sample
+maxima, not bounds.
+
+The sequential route's rounding grows faster with the signal-to-noise than
+the whitened solve's or the dense Cholesky's, because its updates of K
+cancel once the latent is well determined. The earlier sample of HD 18599
+points was made singular three ways (every Ġ coupling 0, 163 points; every
+G coupling 0, 259 points; Ġ couplings proportional to G couplings, 163
+points; 585 in all, over the five-channel, use_derivative = false and
+four-channel models). Against BigFloat, the sequential route's largest value
+errors were 3.7e-6, 1.65e-5 and 1.7e-4 nats in those three cases, against
+3.7e-6, 1.64e-5 and 6.8e-6 for the dense Cholesky. Its largest relative
+errors in a directional derivative were 1.5e-8, 1.25e-7 and 2.0e-6, against
+1.4e-8, 1.24e-7 and 5.7e-7. On the five-channel model with Ġ couplings the
+medians were 3e-10 to 1.3e-9 nats and 2e-13 to 2e-12, and near the
+posterior the value errors were at most 4e-11 nats for both routes.
+
+At higher signal-to-noise than the job's, the sequential route's error at
+singular blocks grows far faster than the dense Cholesky's that it replaces
+with four or more channels. On synthetic five-channel data drawn from the
+model (unit latent variance, 40 and 80 epochs, two kernels), against
+BigFloat:
+
+- Parallel couplings, noise variance about 1e-6 (signal-to-noise about
+  1000): value errors up to 1.2e-3 nats and directional-derivative errors
+  up to 1.8e-4.
+- Parallel couplings, noise variance about 1e-8: up to 0.76 nats and
+  7.5e-2, where the dense Cholesky stays within 2.3e-6 nats and 1.5e-6.
+- Every Ġ coupling 0, noise variance about 1e-8, 80 epochs: a derivative
+  error of 2.5e-5, against 9e-8 for the dense Cholesky.
+- At noise variance 1e-5 and above, every error was at most 3e-6 nats.
+
+These are sample maxima, not bounds. Only AD number types at singular
+blocks take this route (`Float64` evaluations never do), except that the
+compiled ReverseDiff tape above replays it at every point. At non-singular
+points of the same signal-to-noise the sequential route was about as
+accurate as the low-rank one, so the tape is not affected there. On the
+HD 18599 job the route is taken only at couplings that are exactly 0 (see
+above), where the errors are the ones in the previous paragraph.
 
 Just above the thresholds the derivatives through R lose accuracy as eps/λ,
 where λ is the signal-to-noise of the fainter latent direction at its
