@@ -463,7 +463,7 @@ Parameters:
   `planet_lambda(theta, k)`.
 
 The RM term is now folded into `rv_predictions`
-(`src/likelihood.jl:1400`), so the predicted RV used by the PPC,
+(`src/likelihood.jl:1859`), so the predicted RV used by the PPC,
 residuals, fit-health metrics, and every RV plot is RM-consistent
 (no-op for non-RM fits). Use the dedicated `rm_anomaly` plot
 (`plot_rm`, `src/plotting/rm_plots.jl:51`) to inspect the in-transit

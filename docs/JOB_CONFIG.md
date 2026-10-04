@@ -509,13 +509,13 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
 
 ### `model.planet_modes` and Rossiter-McLaughlin
 - One mode per planet slot. The `*_RM` / `*_RM_R` modes add the in-transit RM
-  RV anomaly to **`rv_predictions`** itself (`src/likelihood.jl:1368-1369,1439`),
+  RV anomaly to **`rv_predictions`** itself (`src/likelihood.jl:1824,1859`),
   so PPC, residuals, and all RV plots are RM-consistent. They introduce two
   parameters: **`v_sin_i_star`** (stellar V·sin i*, m/s) and **`lambda_k<k>`**
   (sky-projected obliquity λ, rad) — defaults `LogUniformPrior(500, 100000)`
   and `UniformPrior(-π, π)` (`src/default_priors.jl:299-304`). RM modes require
   `M_s` and `R_s`; a missing stellar pair silently skips the RM term rather than
-  poisoning predictions (`src/likelihood.jl:165, 1368-1369`).
+  poisoning predictions (`src/rm.jl:319`, `src/likelihood.jl:1822-1824`).
 - `*_RM` is Hirano+ 2011 (analytic, fast); `*_RM_R` is the Reloaded RM of
   Cegla+ 2016 (numerical disk integration, accurate at large `rr`).
 

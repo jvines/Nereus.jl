@@ -348,7 +348,7 @@ intensity-weighted line-of-sight velocity over the planet's
 sky-projected disk (21×21 sub-cells), more accurate at high `rr` /
 high `b`, reducing to Hirano in the small-planet limit.
 
-The RM term is now part of `rv_predictions` (`src/likelihood.jl:1370`),
+The RM term is now part of `rv_predictions` (`src/likelihood.jl:1859`),
 so PPC, residuals, fit-health diagnostics and **all** RV plots are
 RM-consistent — not just the likelihood. `a/R_⋆` for the RM geometry
 comes from `rho_s` when `use_rho_s = true`, otherwise from

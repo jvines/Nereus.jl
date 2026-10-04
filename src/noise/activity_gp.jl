@@ -1114,17 +1114,19 @@ posterior the value errors were at most 4e-11 nats for both routes.
 At higher signal-to-noise than the job's, the sequential route's error at
 singular blocks grows far faster than the dense Cholesky's that it replaces
 with four or more channels. On synthetic five-channel data drawn from the
-model (unit latent variance, 40 and 80 epochs, two kernels), against
-BigFloat:
+model (unit latent variance), against BigFloat at 40 and 80 epochs with two
+kernels unless stated otherwise:
 
 - Parallel couplings, noise variance about 1e-6 (signal-to-noise about
-  1000): value errors up to 1.2e-3 nats and directional-derivative errors
-  up to 1.8e-4.
+  1000): value errors up to 5.3e-4 nats and directional-derivative errors
+  up to 7.3e-6. At 100 and 200 epochs (one kernel, against the Float64 dense
+  likelihood) they reached 1.2e-3 nats and 1.8e-4.
 - Parallel couplings, noise variance about 1e-8: up to 0.76 nats and
-  7.5e-2, where the dense Cholesky stays within 2.3e-6 nats and 1.5e-6.
+  7.5e-2, where the dense Cholesky stays within 4.1e-6 nats and 1.5e-6.
 - Every Ġ coupling 0, noise variance about 1e-8, 80 epochs: a derivative
   error of 2.5e-5, against 9e-8 for the dense Cholesky.
-- At noise variance 1e-5 and above, every error was at most 3e-6 nats.
+- At noise variance 1e-5 (100 and 200 epochs, one kernel, against the
+  Float64 dense likelihood), every error was at most 3.1e-6 nats.
 
 These are sample maxima, not bounds. Only AD number types at singular
 blocks take this route (`Float64` evaluations never do), except that the

@@ -1035,7 +1035,9 @@ end
 # Indicator-floor likelihood (see the IndicatorFloor docstring). Scores each
 # floor channel on its own — iid N(0, σ_floor² + err²) for `kernel = :white`,
 # a quasi-periodic GP for `kernel = :qp` — SKIPPING channels already covered
-# by an active joint ActivityGP (the AGP scores those). Returns 0 when no
+# by an active joint ActivityGP (the AGP scores those). With `kernel = :qp` it
+# returns -Inf first when ind_floor_period, lambda_e or lambda_p is not
+# positive (outside the prior support). Otherwise it returns 0 when no
 # IndicatorFloor is active, and also when every floor channel is skipped:
 # covered by an active ActivityGP, without indicator data, or without its
 # amplitude/jitter parameters. Every fixed-dim HD 18599 config carries an

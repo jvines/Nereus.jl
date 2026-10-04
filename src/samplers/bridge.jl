@@ -381,18 +381,22 @@ every point, but not to the bit:
   (3e-15 relative) on prior draws of an RV + astrometry fit. With any noise
   model, on the RV or only on the photometry, the RV goes through
   `_rv_ll_with_noise`, which evaluates each cadence as the other method does,
-  in the same order, and gave the same bits on every fit measured (GP
-  rotation, activity GP, activity decorrelation, error scale, white noise with
-  the floor, the trans-dimensional job, RM with tomography, and a CeleriteSHO
-  on the photometry only, with and without gravity darkening).
+  in the same order. That gives the same bits except for an active
+  IndicatorFloor with `kernel = :qp`, whose workspace path builds its kernel
+  sines by the angle-difference identity: with that floor the RV differs in
+  the last bits at most points, up to 3e-8 nats on the HD 18599 fits and
+  2.15e-7 nats at one prior draw of the activity-decorrelation fit. Without it
+  the RV gave the same bits on every fit measured (activity GP, the
+  trans-dimensional job, RM with tomography, and a CeleriteSHO on the
+  photometry only, with and without gravity darkening).
 - Photometry: the workspace method computes each cadence's sky separation by
   the same angle-sum route and sums every cadence in one pass, where the other
   sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
   a 20k-point light curve the whole log density differed by up to 5.4e-9 nats
-  near the reference point. On 300 prior draws per fit the largest relative
-  differences were 1.7e-11 on the white-noise fit, 2.6e-12 with the GP
-  rotation, 2.5e-12 with the activity GP and 1.6e-12 with activity
-  decorrelation (9.7e-12 in an earlier sample of that fit).
+  near the reference point. On 300 prior draws per fit (floor on, RV and
+  photometry together) the largest relative differences in the whole density
+  were 1.9e-11 on the white-noise fit, 2.1e-11 with the GP rotation, 1.8e-12
+  with the activity GP and 4.7e-11 with activity decorrelation.
 
 All of these are sample maxima, not bounds. Relative figures are |difference|
 / max(1, |log p|), and rounding does not bound that ratio: where |log p| is
@@ -407,11 +411,12 @@ and 4.7e-11 relative to max(1, |log p|)).
 
 The same bits as `_logdensity_parts` come out for the tomogram, for the
 photometry wherever it takes the allocating method, for the RV of a fit with
-any noise model, and for the whole density at a clamped e. A gravity-darkened
-fit, whose photometry always takes the allocating method, is therefore
-bit-identical whenever it has no RV data or has any noise model, on either
-channel. Only a gravity-darkened fit with RV data and no noise model at all
-carries the workspace RV rounding, like any other fit without noise models: on
+any noise model other than an active `:qp` IndicatorFloor, and for the whole
+density at a clamped e. A gravity-darkened fit, whose photometry always takes
+the allocating method, is therefore bit-identical whenever it has no RV data,
+or has a noise model on either channel and no active `:qp` floor. Only a
+gravity-darkened fit with RV data and no noise model at all, or with an active
+`:qp` floor, carries the workspace RV rounding, like any other such fit: on
 a one-planet RVPM_GD fit the RV log L matched at 72 of 420 points (up to
 5.1e-11 nats apart); on a two-band, two-planet one the whole density matched
 at 410 of 500 (up to 4.7e-10 nats, 1.4e-15 relative), and one bridge_evidence
