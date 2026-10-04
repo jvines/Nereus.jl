@@ -294,13 +294,21 @@ end
 """
     _bridge_phot_ws(params) -> Bool
 
-Whether `transit_log_likelihood(theta, data, ws)` computes the same model as
-`transit_log_likelihood(theta, data)` for this fit. It does not when a planet
-has gravity darkening (`:GD`): the workspace method has no gravity-darkened
-transit, and it hands over to the other method only for TTVs, exposures
+Whether the evaluator's photometry goes through the workspace method
+`transit_log_likelihood(theta, data, ws)`. Not when a planet has gravity
+darkening (`:GD`): those fits take `transit_log_likelihood(theta, data)`.
+
+The workspace method had no gravity-darkened transit when the bridge first
+used it, and it handed over to the other method only for TTVs, exposures
 longer than 2 min and photometric noise models. A gravity-darkened fit with
 2-min or shorter cadences therefore took the plain transit there, and its log
-density did not depend on i_star or lambda.
+density did not depend on i_star or lambda. The workspace method now computes
+each cadence's gravity-darkened flux with the same calls as the allocating
+one. Gravity-darkened fits still take the allocating method here, which keeps
+their photometry at the bits of `_logdensity_parts`; through the workspace it
+would match to rounding, not always to the bit (the summation order on light
+curves longer than 4096 cadences, and the angle-sum route of any planet
+without gravity darkening).
 """
 _bridge_phot_ws(params) = !any(has_gd, params.config.planet_modes)
 
@@ -341,13 +349,15 @@ draw with (`rv_log_likelihood(theta, data, ws)`, `transit_log_likelihood(theta,
 data, ws)`) and the evaluator's own `Theta`, so that a call does not allocate
 the likelihood's buffers afresh.
 
-Where the workspace methods compute a different model from the allocating
-ones, it takes the allocating methods:
+It takes the allocating methods where the workspace methods compute a
+different model, and for gravity-darkened photometry:
 
-- Gravity darkening: the workspace transit has none, so a fit with a :GD planet
-  takes the allocating photometry (`_bridge_phot_ws`). TTV fits, exposures
-  longer than 2 min and photometric noise models are handed over by the
-  workspace method itself.
+- Gravity darkening: a fit with a :GD planet takes the allocating photometry
+  (`_bridge_phot_ws`). The workspace transit had no gravity darkening when
+  the bridge first used it; it has now, and the allocating method keeps these
+  fits at the bits of `_logdensity_parts`. TTV fits, exposures longer than
+  2 min and photometric noise models are handed over by the workspace method
+  itself.
 - Eccentricity outside [0, 0.9999] (`_bridge_e_clamped`): the allocating
   methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
   the workspace photometry, and the workspace RV of a fit with no noise models,
@@ -378,14 +388,22 @@ every point, but not to the bit:
 - Photometry: the workspace method computes each cadence's sky separation by
   the same angle-sum route and sums every cadence in one pass, where the other
   sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
-  a 20k-point light curve the whole log density differs by at most 5.4e-9 nats
-  near the reference point, and on prior draws by at most 1e-11 relative
-  (1.6e-12 with the GP rotation, 9.7e-12 with activity decorrelation).
+  a 20k-point light curve the whole log density differed by up to 5.4e-9 nats
+  near the reference point. On 300 prior draws per fit the largest relative
+  differences were 1.7e-11 on the white-noise fit, 2.6e-12 with the GP
+  rotation, 2.5e-12 with the activity GP and 1.6e-12 with activity
+  decorrelation (9.7e-12 in an earlier sample of that fit).
 
-Relative figures are |difference| / max(1, |log p|). The largest measured on any
-fit, over 15078 points on 28 fits, is 1.03e-11: 1.9e-10 nats at a point where
-log p = -18.2, near the best point of a two-planet RV + transit fit (10k-point
-light curve, ρ⋆ and the mean anomaly as parameters, the Gladman stability check).
+All of these are sample maxima, not bounds. Relative figures are |difference|
+/ max(1, |log p|), and rounding does not bound that ratio: where |log p| is
+below 1, terms of thousands of nats cancel and leave their rounding. At such
+points between the posterior and the prior of the HD 18599 fits it reached
+3.6e-7. Relative to |log prior| + |log L_RV| + |log L_phot|, the
+largest difference measured was 2.9e-11. On a two-planet RV + transit fit
+(10k-point light curve, ρ⋆ and the mean anomaly as parameters, the Gladman
+stability check) it was 1.9e-10 nats at a point near the best one where
+log p = -18.2, and 1.2e-10 nats on a prior draw where log p = 2.46 (1.03e-11
+and 4.7e-11 relative to max(1, |log p|)).
 
 The same bits as `_logdensity_parts` come out for the tomogram, for the
 photometry wherever it takes the allocating method, for the RV of a fit with

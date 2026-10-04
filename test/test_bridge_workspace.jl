@@ -8,14 +8,17 @@
 # workspace photometry computes each cadence's sky separation by the same route
 # and sums every cadence in one pass, where `_logdensity_parts` sums fixed
 # 4096-point chunks and then the chunk totals. Near the posterior of a 20k-point
-# light curve they differ by a few 1e-9 nats. Relative to max(1, |log p|) the
-# largest difference measured on any fit is 1.03e-11. Anything much larger is
-# a bug in one of the two, not rounding.
+# light curve they differ by a few 1e-9 nats. Relative to |log prior| +
+# |log L_RV| + |log L_phot| the largest difference measured is 2.9e-11 (a
+# sample maximum); a difference much larger than that, on that scale, is a bug
+# in one of the two, not rounding. Relative to max(1, |log p|), the scale the
+# tests below use, rounding has no bound: where |log p| < 1 those terms cancel
+# and leave their rounding, up to 3.6e-7 relative in the samples measured.
 #
-# That holds because the evaluator steps around the places where the workspace
-# methods compute another model: a planet with gravity darkening, and any
-# planet whose e `true_anomaly` clamps (outside [0, 0.9999]). There it takes
-# the allocating methods and gives the same bits as `_logdensity_parts`.
+# That holds because the evaluator takes the allocating methods at any planet
+# whose e `true_anomaly` clamps (outside [0, 0.9999]), where the workspace
+# methods compute another model, and for the photometry of a fit with a
+# gravity-darkened planet. There it gives the same bits as `_logdensity_parts`.
 using Test, Nereus, Random, MCMCChains
 using Nereus: _BridgeEvaluator, _bridge_logdensity!, _logdensity_parts
 
@@ -110,12 +113,15 @@ _ref(tg, y) = (a = _logdensity_parts(tg, y); Float64(a[1]) + Float64(a[2]))
     end
 end
 
-# Gravity darkening. The workspace transit method has no gravity-darkened model
-# (transit_likelihood.jl); it hands over to the allocating method only for TTVs,
-# for exposures longer than 2 min and for photometric noise models. So on a fit
-# with a :GD planet and every cadence at 2 min or shorter, an evaluator that
-# called it integrated a posterior with no gravity darkening: flat in i_star
-# and lambda, and thousands of nats away from `_logdensity_parts`.
+# Gravity darkening. The workspace transit method had no gravity-darkened model
+# when the evaluator was written; it handed over to the allocating method only
+# for TTVs, for exposures longer than 2 min and for photometric noise models.
+# So on a fit with a :GD planet and every cadence at 2 min or shorter, an
+# evaluator that called it integrated a posterior with no gravity darkening:
+# flat in i_star and lambda, and thousands of nats away from
+# `_logdensity_parts`. The workspace method now has gravity darkening
+# (test_gd_workspace_likelihood.jl); the evaluator still takes the allocating
+# photometry for these fits, and must see i_star and lambda.
 const _BW_GD_P, _BW_GD_ARS = 2.827969, 6.815
 const _BW_GD_T = collect(range(-0.09, 0.09; length = 301))
 const _BW_GD_TRV = collect(range(0.0, 20.0; length = 30))
@@ -280,11 +286,12 @@ end
 
 # A two-planet RV + transit fit with ρ⋆ and the mean anomaly as parameters and
 # the Gladman stability check, no noise models, two RV and two photometric
-# instruments. The largest difference relative to max(1, |log p|) measured on
-# any fit, 1.03e-11, was on this kind of fit (with e up to 0.98 and b up to
-# 1.3), at a point where log p = -18.2: 1.9e-10 nats, still rounding. Here e
-# and b are narrower so that prior draws give finite densities. The relative
-# bound allows for points where |log p| is that small.
+# instruments. On this kind of fit (with e up to 0.98 and b up to 1.3) a
+# difference of 1.9e-10 nats was measured near the best point, where
+# log p = -18.2, and 1.2e-10 nats on a prior draw where log p = 2.46: 1.03e-11
+# and 4.7e-11 relative to max(1, |log p|), still rounding. Here e and b are
+# narrower so that prior draws give finite densities. The relative bound
+# allows for points where |log p| is that small, not for |log p| < 1.
 @testset "bridge evaluator on a two-planet fit with rho_s, Mo and stability" begin
     un(a, b) = Dict{String, Any}("type" => "UniformPrior", "args" => [a, b])
     rng = MersenneTwister(11)
