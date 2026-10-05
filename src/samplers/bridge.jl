@@ -401,8 +401,9 @@ every point, but not to the bit:
   points, and in the trans-dimensional job, whose menu always carries a `:qp`
   floor on the ActivityGP's channels, in every state with the ActivityGP on.
   In a state with the ActivityGP off the floor scores its channels, and the
-  RV matched at 42 to 130 of 300 prior draws per state, up to 5.0e-7 nats
-  apart. With no `:qp` floor that scores a channel the RV gave the same bits
+  RV matched at 42 to 111 of 300 prior draws in each state the job can reach
+  (floor alone, or with one of ErrorScale, CeleriteRotation or activity
+  decorrelation), up to 5.0e-7 nats apart. With no `:qp` floor that scores a channel the RV gave the same bits
   on every fit measured (RM with tomography, and a CeleriteSHO on the
   photometry only, with and without gravity darkening).
 - Photometry: the workspace method computes each cadence's sky separation by

@@ -169,7 +169,7 @@ function _base_generators(terms, t::AbstractVector{<:Real}, dt::AbstractVector{<
 end
 
 # ---------------------------------------------------------------------------
-# Semiseparable Cholesky + solve (celerite LDLᵀ; adapted from gp.jl:104 to take
+# Semiseparable Cholesky + solve (celerite LDLᵀ; adapted from gp.jl:122 to take
 # generic (A,U,V,φ)). U,V are r×N, φ is r×(N−1). Returns T(−Inf) on D≤0.
 # ---------------------------------------------------------------------------
 function semiseparable_loglike(t::Vector{Float64}, y::AbstractVector{T},
