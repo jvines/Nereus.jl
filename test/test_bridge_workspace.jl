@@ -114,11 +114,11 @@ end
 
 # Gravity darkening. The workspace transit method had no gravity-darkened model
 # when the evaluator was written; it handed over to the allocating method only
-# for TTVs, for exposures longer than 2 min and for photometric noise models.
-# So on a fit with a :GD planet and every cadence at 2 min or shorter, an
-# evaluator that called it integrated a posterior with no gravity darkening:
-# flat in i_star and lambda, and thousands of nats away from
-# `_logdensity_parts`. The workspace method now has gravity darkening
+# for TTVs, for supersampled exposures (then longer than 2 min, now longer than
+# 3 min) and for photometric noise models. So on a fit with a :GD planet and no
+# supersampled cadence, an evaluator that called it integrated a posterior with
+# no gravity darkening: flat in i_star and lambda, and thousands of nats away
+# from `_logdensity_parts`. The workspace method now has gravity darkening
 # (test_gd_workspace_likelihood.jl); the evaluator still takes the allocating
 # photometry for these fits, and must see i_star and lambda.
 const _BW_GD_P, _BW_GD_ARS = 2.827969, 6.815

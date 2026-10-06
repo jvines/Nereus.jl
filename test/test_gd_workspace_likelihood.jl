@@ -3,9 +3,9 @@
 # Every sampler that keeps a PTWorkspace per walker -- pt_emcee, ESS, rjmcmc,
 # transdim_pt_emcee, nested -- calls `transit_log_likelihood(theta, data, ws)`.
 # That method had no gravity darkening at all: at a fixed :GD point it returned
-# the same value for every i_star, λ and β, so a GD fit whose cadences are all
-# <= 2 min (no supersampling, so the cached path is taken) sampled i_star from
-# its prior. The non-workspace method had it right and is the reference here.
+# the same value for every i_star, λ and β, so a GD fit whose cadences were all
+# <= 2 min (then the supersampling limit, now 3 min; no supersampling, so the
+# cached path is taken) sampled i_star from its prior. The non-workspace method had it right and is the reference here.
 #
 # Per cadence the two methods now compute a :GD planet's flux with the same
 # calls on the same arguments, so they agree bit for bit wherever they also sum

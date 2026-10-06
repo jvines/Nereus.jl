@@ -299,10 +299,10 @@ Whether the evaluator's photometry goes through the workspace method
 darkening (`:GD`): those fits take `transit_log_likelihood(theta, data)`.
 
 The workspace method had no gravity-darkened transit when the bridge first
-used it, and it handed over to the other method only for TTVs, exposures
-longer than 2 min and photometric noise models. A gravity-darkened fit with
-2-min or shorter cadences therefore took the plain transit there, and its log
-density did not depend on i_star or lambda. The workspace method now computes
+used it, and it handed over to the other method only for TTVs, supersampled
+exposures (then longer than 2 min, now longer than 3 min) and photometric noise
+models. A gravity-darkened fit with no supersampled cadence therefore took the
+plain transit there, and its log density did not depend on i_star or lambda. The workspace method now computes
 each cadence's gravity-darkened flux with the same calls as the allocating
 one. Gravity-darkened fits still take the allocating method here, which keeps
 their photometry at the bits of `_logdensity_parts`; through the workspace it
