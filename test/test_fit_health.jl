@@ -151,6 +151,21 @@ _find_check(r, name) = r.checks[findfirst(c -> c.name === name, r.checks)]
         @test_throws ArgumentError assess_fit(ch; active = Dict(:P2 => on[1:10]))
     end
 
+    @testset "trans-dim indicator columns are bookkeeping, not parameters" begin
+        # planet_active_k and n_planets are model indicators, like noise_active_k.
+        # A companion present in every draw leaves its indicator constant, with a
+        # NaN R-hat that the convergence check counted as a failure.
+        rng = MersenneTwister(41)
+        n = 20_000
+        cols = hcat(7.9 .+ 0.1 .* randn(rng, n), ones(n), fill(2.0, n),
+                    Float64.(rand(rng, n) .< 0.3))
+        ch = Chains(reshape(cols, n, 4, 1),
+                    [:a_k1, :planet_active_1, :n_planets, :planet_active_2])
+        r = assess_fit(ch; ensemble = true)
+        @test _find_check(r, :convergence).status === :ok
+        @test r.overall === :ok
+    end
+
     @testset "log_scale_shift: the scale each prior is flat on" begin
         @test Nereus.log_scale_shift(LogUniformPrior(0.1, 3000.0)) == 0.0
         @test Nereus.log_scale_shift(ModJeffreysPrior(2.0, 100.0)) == 2.0

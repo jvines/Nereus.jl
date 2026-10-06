@@ -259,9 +259,11 @@ end
 # Parameter-name resolution
 # =====================================================================
 
-# Bookkeeping columns we never want to convergence/rail-test directly.
-const _SKIP_NAME_PREFIXES = ("noise_active", "noise_model")
-const _SKIP_NAME_EXACT = (:lp, :log_density, :logp, :n_p, :Np, :weights, :weight)
+# Bookkeeping columns we never want to convergence/rail-test directly. The
+# trans-dim indicators are among them: a component present in every draw leaves
+# its indicator constant, and a constant column has no R-hat.
+const _SKIP_NAME_PREFIXES = ("noise_active", "noise_model", "planet_active")
+const _SKIP_NAME_EXACT = (:lp, :log_density, :logp, :n_p, :Np, :n_planets, :weights, :weight)
 
 function _is_bookkeeping(sym::Symbol)
     sym in _SKIP_NAME_EXACT && return true
