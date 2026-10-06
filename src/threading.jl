@@ -80,3 +80,56 @@ current pool, at least one. Buffer counts are sized from this, and the actual
 chunk count from `_chunk_ranges` never exceeds it.
 """
 _nthread_chunks() = max(1, Threads.nthreads())
+
+const _SERIAL_INNER_KEY = :nereus_serial_inner_loops
+
+"""
+    _serial_inner_loops!()
+
+Marks the current task as one of a sampler loop that already gives every thread
+its own task, such as a `pt_emcee` half-step with at least `nthreads()` walker
+updates. Likelihood loops written with `@_threads_unless_nested` then run
+serially in this task. The mark is task-local: the caller's task, and the tasks
+of a loop that leaves threads idle (`sample_pt`'s `@threads` over 10 chains on
+90 threads), keep threading their inner loops.
+"""
+_serial_inner_loops!() = (task_local_storage(_SERIAL_INNER_KEY, true); nothing)
+
+"""
+    _inner_loops_serial() -> Bool
+
+Whether `_serial_inner_loops!` marked the current task. Allocation-free, and
+false for a task with no task-local storage at all.
+"""
+function _inner_loops_serial()
+    s = current_task().storage
+    return s isa IdDict{Any,Any} && get(s, _SERIAL_INNER_KEY, false) === true
+end
+
+"""
+    @_threads_unless_nested for ... end
+
+`Threads.@threads`, or the same loop run serially when the current task is
+marked by `_serial_inner_loops!`. For loops inside a likelihood: a nested
+`@threads` spawns one task per thread whatever its trip count (Julia 1.11
+`Base.Threads.threading_run` spawns `threadpoolsize()` tasks per call). Under
+`pt_emcee` on 90 threads the NGTS-33 photometry reduction, five 4096-point
+chunks, spawned 90 tasks per likelihood call: 91 KB per call against 9.5 KB
+serial, a stop-the-world GC every ~0.4 s, and each walker's call waiting on
+chunks queued behind the other walkers. The loop body must be correct under
+either schedule, as any `@threads` body already is. Both branches run the loop
+in a closure: inlined into the NGTS-33 photometry likelihood, the plain loop
+passed every per-point call boxed arguments (2.3 MB per likelihood call); inside
+a closure, as `@threads` puts it, it allocates nothing per point.
+"""
+macro _threads_unless_nested(loop)
+    (loop isa Expr && loop.head === :for) ||
+        throw(ArgumentError("@_threads_unless_nested expects a `for` loop"))
+    return esc(quote
+        if $(GlobalRef(@__MODULE__, :_inner_loops_serial))()
+            (() -> $loop)()
+        else
+            Base.Threads.@threads $loop
+        end
+    end)
+end

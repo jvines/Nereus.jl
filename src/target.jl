@@ -366,6 +366,18 @@ mutable struct EnzymeGradientConfig
 end
 
 function EnzymeGradientConfig(target::NereusTarget{PackedTransforms})
+    # `_logdensity_for_enzyme` evaluates the prior and the white-noise RV
+    # likelihood only. On a target with more than that it would differentiate
+    # a DIFFERENT posterior, silently. Refuse instead.
+    cfg = target.params.config
+    dropped = String[]
+    isempty(target.data.tomo) || push!(dropped, "Doppler tomography")
+    isempty(cfg.noise_models) || push!(dropped, "noise models")
+    isempty(target.data.t_phot) || push!(dropped, "transit photometry")
+    isempty(dropped) || throw(ArgumentError(
+        "ad_backend = :Enzyme differentiates only the prior and the white-noise " *
+        "RV likelihood, and this target also has " * join(dropped, ", ") *
+        ", which it would silently drop. Use ad_backend = :ForwardDiff."))
     pp = target.params.layout.packed_priors
     pt = target.transform
     dim = n_unfrozen(target.params)

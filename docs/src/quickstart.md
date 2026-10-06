@@ -480,7 +480,7 @@ chains, log_ev = res.chains, res.log_evidence
 #     diagnostic at all — it fails silently.
 #   - Pathfinder's MVN approximation is poor on sharp curved ridges and seeds
 #     every replica into one spurious basin, producing pristine R-hat/ESS at a
-#     wrong orbit (see src/samplers/pt.jl:133 — HD 159062: a = 34.5 vs ~58).
+#     wrong orbit (see src/samplers/pt.jl:174 — HD 159062: a = 34.5 vs ~58).
 # Together they are the worst available combination for this kind of fit.
 print_results(summarize_fitted(chains, params),
               summarize_derived(chains, params))

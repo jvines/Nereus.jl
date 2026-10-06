@@ -49,6 +49,18 @@ using Random
     @test length(unique(vals)) == 1
     @test all(==(vals[1]), vals)
 
+    # Inside a sampler task that fills every thread (pt_emcee marks its walker
+    # tasks) the chunks run serially: same partition, same bits, and nothing
+    # allocated per point. Inlined into the likelihood instead of run in a
+    # closure, the serial loop boxed the arguments of every per-point call.
+    marked = fetch(Threads.@spawn begin
+        Nereus._serial_inner_loops!()
+        v = Nereus.transit_log_likelihood(th, target.data)
+        (v, @allocated Nereus.transit_log_likelihood(th, target.data))
+    end)
+    @test marked[1] === vals[1]
+    @test marked[2] < 16 * n
+
     # The partition must not depend on nthreads(), or two machines disagree.
     @test Nereus._PHOT_REDUCE_CHUNK isa Integer
     @test Nereus._PHOT_REDUCE_CHUNK > 0

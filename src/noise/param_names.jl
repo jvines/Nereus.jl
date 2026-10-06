@@ -304,7 +304,11 @@ function validate_noise_models(models::Vector{<:NoiseModel}; transdim::Bool=fals
 
     # Restricted GPs on the same channel must have pairwise-disjoint
     # instrument sets — otherwise an observation is covered by two GPs
-    # at once and the likelihood is double-counted.
+    # at once and the likelihood is double-counted. Under trans-dim two
+    # competing kernels for the SAME instruments are the point (a per-night
+    # menu), and a noise_exclusion_groups entry keeps them from being active
+    # together -- the same contract as for several global GPs above.
+    transdim && (restricted_per_channel = Dict{Symbol, Vector{Set{String}}}())
     for (ch, sets) in restricted_per_channel
         for i in 1:length(sets), j in (i + 1):length(sets)
             inter = intersect(sets[i], sets[j])

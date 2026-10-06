@@ -23,7 +23,7 @@ function _rm_curve_at(theta, data, t_grid)
              param.time === :Tp ? ta : tc_to_tp(ta, P, e, w)
         push!(Ps, P); push!(es, e); push!(ws, w); push!(Tps, Tp)
     end
-    n_rm, st = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, st = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     (n_rm isa Int && n_rm > 0) || return zeros(length(t_grid))
     return Float64[rm_contribution(t, n_rm, st, Ps, es, ws, Tps) for t in t_grid]
 end

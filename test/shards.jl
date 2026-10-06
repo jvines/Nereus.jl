@@ -8,7 +8,10 @@
 # from the same `_rng` stream and so stay together. `seconds` is its measured
 # cost on the x86_64 CI runner -- all the assignment needs. A unit missing a
 # measurement counts as DEFAULT_SECONDS; a test file missing from this list is
-# an error, so a new file cannot be skipped silently.
+# an error, so a new file cannot be skipped silently. The entries for the files
+# added by the perf tracks (transit window, floor and celerite workspace, AGP
+# low-rank solver, noise models, bridge workspace) are the unit times of a
+# four-shard run on the arm64 builder instead (-t 3 per shard).
 #
 # Units are dealt longest-first to the least-loaded shard (LPT): deterministic,
 # so a unit runs in the same shard on every run and every machine.
@@ -43,16 +46,23 @@ const TEST_UNITS = [
     (name = "test_new_samplers.jl", seconds = 34, files = ["test_new_samplers.jl"]),
     (name = "test_runner_dispatch.jl", seconds = 31, files = ["test_runner_dispatch.jl"]),
     (name = "test_rm.jl", seconds = 1, files = ["test_rm.jl"]),
+    (name = "test_rv_offset_priors.jl", seconds = 5, files = ["test_rv_offset_priors.jl"]),
     (name = "test_tomography.jl", seconds = 15, files = ["test_tomography.jl"]),
     (name = "test_tomography_framework.jl", seconds = 1, files = ["test_tomography_framework.jl"]),
     (name = "test_obliquity_framework.jl", seconds = 1, files = ["test_obliquity_framework.jl"]),
     (name = "test_tomo_noise_menu.jl", seconds = 1, files = ["test_tomo_noise_menu.jl"]),
+    (name = "test_obliquity_workspace.jl", seconds = 20, files = ["test_obliquity_workspace.jl"]),
     (name = "test_obliquity_joint_framework.jl", seconds = 1, files = ["test_obliquity_joint_framework.jl"]),
+    (name = "test_obliquity_target.jl", seconds = 45, files = ["test_obliquity_target.jl"]),
+    (name = "test_obliquity_parity.jl", seconds = 15, files = ["test_obliquity_parity.jl"]),
+    # Every sampler through run_job on an obliquity target; pt_hmc dominates.
+    (name = "test_obliquity_runjob.jl", seconds = 400, files = ["test_obliquity_runjob.jl"]),
     (name = "test_as_coupling_mask.jl", seconds = 1, files = ["test_as_coupling_mask.jl"]),
     (name = "test_as_coupling_move.jl", seconds = 1, files = ["test_as_coupling_move.jl"]),
     (name = "test_obliquity_joint.jl", seconds = 94, files = ["test_obliquity_joint.jl"]),
     (name = "test_simulate_obliquity.jl", seconds = 19, files = ["test_simulate_obliquity.jl"]),
     (name = "test_gravity_darkening.jl", seconds = 3, files = ["test_gravity_darkening.jl"]),
+    (name = "test_gd_workspace_likelihood.jl", seconds = 12, files = ["test_gd_workspace_likelihood.jl"]),
     (name = "test_informed_noise_birth.jl", seconds = 1, files = ["test_informed_noise_birth.jl"]),
     (name = "test_annealed_noise_birth.jl", seconds = 2, files = ["test_annealed_noise_birth.jl"]),
     (name = "test_solution_ladder.jl", seconds = 1, files = ["test_solution_ladder.jl"]),
@@ -66,6 +76,16 @@ const TEST_UNITS = [
     # shards. The trans-dim one is the single heaviest unit of the suite: LPT
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.
     (name = "test_pt_emcee_stranded.jl", seconds = 65, files = ["test_pt_emcee_stranded.jl"]),
+    (name = "test_pt_emcee_resume.jl", seconds = 60, files = ["test_pt_emcee_resume.jl"]),
+    (name = "test_pt_resume.jl", seconds = 36, files = ["test_pt_resume.jl"]),
+    (name = "test_pt_hmc_resume.jl", seconds = 69, files = ["test_pt_hmc_resume.jl"]),
+    (name = "test_pt_whitening_resume.jl", seconds = 20, files = ["test_pt_whitening_resume.jl"]),
+    (name = "test_transdim_pt_emcee_resume.jl", seconds = 30, files = ["test_transdim_pt_emcee_resume.jl"]),
+    (name = "test_rjmcmc_resume.jl", seconds = 22, files = ["test_rjmcmc_resume.jl"]),
+    (name = "test_nuts_resume.jl", seconds = 64, files = ["test_nuts_resume.jl"]),
+    (name = "test_ensemble_resume.jl", seconds = 36, files = ["test_ensemble_resume.jl"]),
+    (name = "test_ess_resume.jl", seconds = 31, files = ["test_ess_resume.jl"]),
+    (name = "test_moms_resume.jl", seconds = 45, files = ["test_moms_resume.jl"]),
     (name = "test_transdim_pt_emcee_defaults.jl", seconds = 375, files = ["test_transdim_pt_emcee_defaults.jl"]),
     (name = "test_circular.jl", seconds = 87, files = ["test_circular.jl"]),
     (name = "test_node_flip.jl", seconds = 86, files = ["test_node_flip.jl"]),
@@ -74,8 +94,16 @@ const TEST_UNITS = [
     (name = "test_pt_donor_buffer.jl", seconds = 1, files = ["test_pt_donor_buffer.jl"]),
     (name = "test_transdim_activity_columns.jl", seconds = 3, files = ["test_transdim_activity_columns.jl"]),
     (name = "test_activity_gp.jl", seconds = 3, files = ["test_activity_gp.jl"]),
+    (name = "test_activity_gp_lowrank.jl", seconds = 206, files = ["test_activity_gp_lowrank.jl"]),
+    (name = "test_indicator_floor_ws.jl", seconds = 3, files = ["test_indicator_floor_ws.jl"]),
+    (name = "test_celerite_ws.jl", seconds = 2, files = ["test_celerite_ws.jl"]),
+    (name = "test_rv_modifier_slots.jl", seconds = 2, files = ["test_rv_modifier_slots.jl"]),
     (name = "test_multiseries_gp.jl", seconds = 12, files = ["test_multiseries_gp.jl"]),
+    (name = "test_multiseries_layout.jl", seconds = 3, files = ["test_multiseries_layout.jl"]),
+    (name = "test_multiseries_typestab.jl", seconds = 3, files = ["test_multiseries_typestab.jl"]),
     (name = "test_parametric_noise.jl", seconds = 7, files = ["test_parametric_noise.jl"]),
+    (name = "test_nightly_closed_form.jl", seconds = 3, files = ["test_nightly_closed_form.jl"]),
+    (name = "test_harmonic_factor_index.jl", seconds = 1, files = ["test_harmonic_factor_index.jl"]),
     (name = "test_harmonic_external.jl", seconds = 1, files = ["test_harmonic_external.jl"]),
     (name = "test_transdim_caches.jl", seconds = 1, files = ["test_transdim_caches.jl"]),
     (name = "test_birth_death_reversibility.jl", seconds = 1, files = ["test_birth_death_reversibility.jl"]),
@@ -84,18 +112,30 @@ const TEST_UNITS = [
     (name = "test_locor.jl", seconds = 9, files = ["test_locor.jl"]),
     (name = "test_locor_io.jl", seconds = 1, files = ["test_locor_io.jl"]),
     (name = "test_lightcurve.jl", seconds = 2, files = ["test_lightcurve.jl"]),
+    # The transit window and its cache (test/fixtures/transit_gate_target.jl).
+    (name = "test_phot_n_super_cache.jl", seconds = 1, files = ["test_phot_n_super_cache.jl"]),
+    (name = "test_transit_window_search.jl", seconds = 2, files = ["test_transit_window_search.jl"]),
+    (name = "test_transit_window_tight.jl", seconds = 9, files = ["test_transit_window_tight.jl"]),
+    (name = "test_transit_window_superset.jl", seconds = 19, files = ["test_transit_window_superset.jl"]),
+    (name = "test_transit_occultation.jl", seconds = 12, files = ["test_transit_occultation.jl"]),
+    # The bridge-sampling evaluator through the workspace likelihoods.
+    (name = "test_bridge_workspace.jl", seconds = 5, files = ["test_bridge_workspace.jl"]),
+    (name = "test_bridge_threading.jl", seconds = 1, files = ["test_bridge_threading.jl"]),
     # Evidence estimators that do not temper from the prior, and the Rajpaul
     # kernel gradient check: all three carried assertions but were not run
     # until they were listed.
     (name = "test_bridge_evidence.jl", seconds = 1, files = ["test_bridge_evidence.jl"]),
     (name = "test_reference_path_evidence.jl", seconds = 6, files = ["test_reference_path_evidence.jl"]),
     (name = "test_phot_determinism.jl", seconds = 1, files = ["test_phot_determinism.jl"]),
+    (name = "test_phot_supersampling.jl", seconds = 2, files = ["test_phot_supersampling.jl"]),
     (name = "test_sampler_determinism.jl", seconds = 198, files = ["test_sampler_determinism.jl"]),
     (name = "test_bls_informed_phot.jl", seconds = 2, files = ["test_bls_informed_phot.jl"]),
     (name = "test_evidence_curved.jl", seconds = 5, files = ["test_evidence_curved.jl"]),
     (name = "test_evidence_headline.jl", seconds = 6, files = ["test_evidence_headline.jl"]),
     (name = "test_mode_laplace.jl", seconds = 6, files = ["test_mode_laplace.jl"]),
     (name = "verify_rajpaul_kernel_fd.jl", seconds = 1, files = ["verify_rajpaul_kernel_fd.jl"]),
+    (name = "test_plot_corner_thinning.jl", seconds = 20, files = ["test_plot_corner_thinning.jl"]),
+    (name = "test_plot_trace_thinning.jl", seconds = 20, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 1, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 5, files = ["test_plot_patterns.jl"]),

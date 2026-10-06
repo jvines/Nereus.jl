@@ -420,6 +420,20 @@ in place.
   solutions, and swaps alone left Gaia-4 at 61/39 where the symmetry demands
   50/50, with R-hat 1.003. Costs one likelihood evaluation per proposal; never
   offered to a planet with RV, transit or any other data. `0` disables it.
+- `checkpoint=nothing` — path of a state file. The sampler writes its whole
+  state there (every rung's walkers, the ladder, every RNG stream, the counters,
+  the ladder history, the evidence accumulators and the kept draws) at the end
+  of the run and every `checkpoint_interval` seconds during it, replacing the
+  file atomically. `run_job` sets it to `pt_emcee_state.jls` in `output_dir`
+  unless the job gives one.
+- `checkpoint_interval::Real=900` — seconds between checkpoints during the run.
+- `resume::Bool=false` — continue from `checkpoint` instead of initialising:
+  a run that was killed, or a finished one that needs more steps. `n_steps` is
+  the new TOTAL, counted from the start of the original run; the draws already
+  kept stay, and the new ones are appended. The continuation is bit-identical to
+  an uninterrupted run of `n_steps`, at any thread count. Refused, with the
+  differences listed, if the checkpoint came from different data, priors,
+  parameters, walkers, rungs, burn-in, thinning, seed or move settings.
 """
 function sample_pt_emcee(
     target::NereusTarget,
@@ -455,6 +469,9 @@ function sample_pt_emcee(
     untemper_transit::Bool = false,
     prune_stranded::Bool = true,
     node_flip::Real = 0.1,
+    checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
+    checkpoint_interval::Real = 900.0,
+    resume::Bool = false,
 )
     # JSON delivers floats-as-Int and arrays-as-JSON3.Array; normalize.
     stretch_a       = Float64(stretch_a)
@@ -463,6 +480,9 @@ function sample_pt_emcee(
         "node_flip is a probability; got $node_flip"))
     ladder_adapt_ν0 = Float64(ladder_adapt_ν0)
     ladder_adapt_K  = Float64(ladder_adapt_K)
+    ck_path = checkpoint === nothing ? nothing : String(checkpoint)
+    resume && ck_path === nothing && throw(ArgumentError(
+        "resume = true needs `checkpoint`, the state file to continue from"))
     # UNTEMPERED TRANSIT: hold the transit term in the reference measure so the
     # ladder only has to bridge the RV likelihood. The 16k-point transit dominates
     # σ(logL) — hence Δβ·σ — while carrying no information that differs between
@@ -548,6 +568,19 @@ function sample_pt_emcee(
     length(βs) == n_temps || throw(ArgumentError(
         "Provided `betas` has length $(length(βs)), expected $n_temps"))
 
+    # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
+    # The fingerprint takes the ladder as built, before any adaptation. On resume
+    # the saved state replaces initialisation below and is put back just before
+    # the main loop, which then carries on from step `step0 + 1`.
+    ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
+        n_burnin, thin, seed, stretch_a, ladder = copy(βs), adapt_ladder,
+        ladder_adapt_window, ladder_adapt_ν0, ladder_adapt_K, untemper_transit,
+        prune_stranded, node_flip)
+    ck = resume ? read_checkpoint(ck_path, "pt_emcee", ck_fp) : nothing
+    step0 = ck === nothing ? 0 : ck.step::Int
+    step0 <= n_steps || throw(ArgumentError(
+        "the checkpoint is at step $step0; n_steps = $n_steps would end before it"))
+
     # --- Per-slot mutable state -----------------------------------------
     # Keyed by CHUNK, never by `Threads.threadid()`: the id spans every
     # threadpool while `Threads.nthreads()` counts only the default one, so
@@ -588,7 +621,8 @@ function sample_pt_emcee(
         end
         lp = log_prior(theta) + log_jac
         isfinite(lp) || return (-Inf, -Inf)
-        ll_rv = rv_log_likelihood(theta, data, wb)
+        # The residual maps (Doppler tomography) are data: tempered with the RV.
+        ll_rv = rv_log_likelihood(theta, data, wb) + tomogram_log_likelihood(theta, data, wb)
         ll_tr = transit_log_likelihood(theta, data, wb)
         # UNTEMPERED TRANSIT (see `untemper_transit`): π_β ∝ prior·L_transit·L_RV^β.
         # Folding the transit into `lp` makes the within-chain acceptance
@@ -606,7 +640,7 @@ function sample_pt_emcee(
     # concentrated near plausible modes. Each walker gets a fresh draw.
     # Pre-built init draws for :pathfinder and :map_scatter strategies.
     # `:prior` builds draws per-walker inside the parallel loop below.
-    pf_draws = if init === nothing && init_strategy === :pathfinder
+    pf_draws = if ck === nothing && init === nothing && init_strategy === :pathfinder
         n_pf_draws = n_temps * n_walkers_eff
         try
             pf = pathfinder_init(target;
@@ -620,7 +654,7 @@ function sample_pt_emcee(
             @warn "Pathfinder warm-start failed; falling back to :map_scatter" exception=(e, catch_backtrace())
             nothing
         end
-    elseif init === nothing && init_strategy === :map_scatter
+    elseif ck === nothing && init === nothing && init_strategy === :map_scatter
         # MAP point in BOUNDED space + per-parameter scatter sized to
         # 1% of the prior range (for uniform priors) or 1·σ (for normal
         # priors). This keeps walkers in a tight in-support cluster
@@ -674,7 +708,10 @@ function sample_pt_emcee(
     # Buffers are keyed by CHUNK, never by `Threads.threadid()` (see
     # src/threading.jl); `:static` keeps the 1:1 chunk-to-thread mapping, but
     # the buffers no longer depend on it.
-    init_chunks = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
+    # On resume no walker is drawn: the loop gets no chunks, and the saved
+    # walkers and rng_master (whose draw of `init_seeds` above is undone by the
+    # restore) are put back before the main loop.
+    init_chunks = _chunk_ranges(ck === nothing ? n_temps * n_walkers_eff : 0, n_slots)
     Threads.@threads :static for slot in 1:length(init_chunks)
         for task_idx in init_chunks[slot]
             t = (task_idx - 1) ÷ n_walkers_eff + 1
@@ -774,6 +811,9 @@ function sample_pt_emcee(
     # reasoning as the init loop above (see src/threading.jl).
     chunks_h1 = _chunk_ranges(length(tasks_h1), n_slots)
     chunks_h2 = _chunk_ranges(length(tasks_h2), n_slots)
+    # The half-step uses the chunk count only, for its number of slots; the
+    # walkers themselves are handed out through this counter.
+    next_task = Threads.Atomic{Int}(1)
 
     # One RNG per WALKER SLOT, not per thread. Task->thread assignment
     # changes with `-t`, so drawing from a per-thread stream makes the
@@ -799,8 +839,22 @@ function sample_pt_emcee(
         partner_hi = active_half === :h1 ? n_walkers_eff : half
         task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
         chunks     = active_half === :h1 ? chunks_h1 : chunks_h2
+        # Every thread has a slot of walkers: the likelihood's own threaded
+        # loops would only queue tasks behind the other slots (src/threading.jl).
+        fills_threads = length(chunks) >= Threads.nthreads()
+        n_tasks = length(tasks)
+        next_task[] = 1
         Threads.@threads :static for slot in 1:length(chunks)
-            for task_idx in chunks[slot]
+            fills_threads && _serial_inner_loops!()
+            # Each slot takes the next walker as it frees up, not a fixed block:
+            # `tasks` runs cold to hot and a walker's cost differs between rungs,
+            # so fixed blocks left threads idle at the end of every half-step
+            # (NGTS-33, 90 threads: threads 1-12 0.9 busy, the last 50 0.45). The
+            # chain stays bit-identical: a walker's draws come from its own RNG,
+            # and it reads only the other half, which no task writes this pass.
+            while true
+                task_idx = Threads.atomic_add!(next_task, 1)
+                task_idx > n_tasks && break
                 t, w = tasks[task_idx]
                 β = βs[t]
                 trng = task_rngs[task_idx]
@@ -834,14 +888,49 @@ function sample_pt_emcee(
     end
 
     # --- Progress bar (per-step accept rate + ETA) --------------------
-    pb = ProgressBar("pt_emcee"; total = n_steps, enabled = show_progress)
+    pb = ProgressBar("pt_emcee"; total = n_steps, enabled = show_progress,
+                     start = step0)
 
     # --- Live convergence readout + optional run-until-converged ------
     rhat_str = "—"; ess_str = "—"      # cached "mean/worst" displays
     conv_run = 0; converged_at = 0     # consecutive passing checks; stop step
 
+    # --- Resume: put the saved run back exactly as it stopped ----------
+    # In place throughout: the closures above captured these arrays, and
+    # rebinding a captured variable would box it. A checkpoint that stopped on
+    # the convergence gate starts with the gate open again (`converged_at` = 0):
+    # resuming means more steps were asked for.
+    if ck !== nothing
+        state .= ck.state; logπ_arr .= ck.logπ; logL_arr .= ck.logL; βs .= ck.betas
+        copy!(rng_master, ck.rng_master)
+        foreach(copy!, rngs_h1, ck.rngs_h1); foreach(copy!, rngs_h2, ck.rngs_h2)
+        foreach(copy!, rngs_flip, ck.rngs_flip)
+        accept_within .= ck.accept_within; propose_within .= ck.propose_within
+        accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
+        flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
+        pruned .= ck.pruned
+        n_evals_atomic[] = ck.n_evals::Int
+        β_hist[1:step0, :] .= ck.β_hist; swap_hist[1:step0, :] .= ck.swap_hist
+        smd_hist[1:step0, :] .= ck.smd_hist
+        keep_idx = ck.keep_idx::Int
+        samples[1:keep_idx, :] .= ck.samples; lp_samples[1:keep_idx] .= ck.lp_samples
+        for f in fieldnames(EvidenceAccumulator)
+            setfield!(evidence_acc, f, getfield(ck.evidence, f))
+        end
+        conv_run = ck.conv_run::Int; rhat_str = ck.rhat_str::String
+        ess_str = ck.ess_str::String
+        # Windows the saved walkers live in (moved by the burn-in re-cut).
+        for (nm, (lo, _)) in ck.windows
+            set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
+                                 lo; transforms = (target.transform,))
+        end
+        merge!(recut_moved, ck.recut_moved)
+        n_done = step0
+    end
+    last_ck = time()
+
     # --- Main loop ----------------------------------------------------
-    for step in 1:n_steps
+    for step in (step0 + 1):n_steps
         do_half_step!(tasks_h1, :h1)
         do_half_step!(tasks_h2, :h2)
 
@@ -1010,11 +1099,31 @@ function sample_pt_emcee(
                               # minimum(acceptance_swap) since the sampler was
                               # written; the counters were right here and the
                               # readout never showed them.
-                              :min_swap => round(minimum(accept_swap ./ max.(propose_swap, 1)),
-                                                 digits = 3),
+                              # One rung (n_temps = 1) has no swaps: NaN, not
+                              # `minimum` of an empty vector, which threw.
+                              :min_swap => isempty(accept_swap) ? NaN :
+                                  round(minimum(accept_swap ./ max.(propose_swap, 1)),
+                                        digits = 3),
                               :Rhat => rhat_str,    # mean/worst over science params
                               :ESS => ess_str,      # mean(bulk)/worst(tail)
                               :nevals => n_evals_atomic[]))
+        end
+
+        # ---- Checkpoint: every `checkpoint_interval` s, on the last step, and
+        # before an early stop (src/checkpoint.jl) -------------------------
+        if ck_path !== nothing && (step == n_steps || (convergence_stop && converged_at > 0) ||
+                                   time() - last_ck >= checkpoint_interval)
+            write_checkpoint(ck_path, "pt_emcee", ck_fp, (; step,
+                state, logπ = logπ_arr, logL = logL_arr, betas = βs, rng_master,
+                rngs_h1, rngs_h2, rngs_flip, accept_within, propose_within,
+                accept_swap, propose_swap, flip_proposed, flip_accepted, pruned,
+                n_evals = n_evals_atomic[], β_hist = β_hist[1:step, :],
+                swap_hist = swap_hist[1:step, :], smd_hist = smd_hist[1:step, :],
+                keep_idx, samples = samples[1:keep_idx, :],
+                lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
+                conv_run, rhat_str, ess_str, windows = circular_windows(params),
+                recut_moved))
+            last_ck = time()
         end
 
         # ---- Run-until-converged: stop once the science params clear the

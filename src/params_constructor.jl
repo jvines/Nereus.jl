@@ -53,6 +53,9 @@ fallback bounds are used.
 - `R_s::Float64` — stellar radius (R_sun); needed for transit a/R* computation
 - `external_priors::Vector{ExternalPrior}` — priors on derived quantities (ecc, rho_s)
 - `sharing::Dict{Symbol, Vector{Vector{String}}}` — instrument parameter sharing groups
+- `obliquity::ObliquityConfig` — RM / Doppler-tomography model options
+  (per-night CCF widths, occulted-flux formula, spectroscopic limb darkening,
+  shared shadow amplitude). The default is the pre-option model.
 
 # Examples
 
@@ -87,6 +90,7 @@ function Params(;
     transdim_noise::Bool = false,
     ttv_n_transits::Dict{Int, Int} = Dict{Int, Int}(),
     ttv_backend::Symbol = :ttvfaster,
+    obliquity::ObliquityConfig = ObliquityConfig(),
 )
     max_kplanet >= 0 || throw(ArgumentError("max_kplanet must be ≥ 0"))
     trend_order in (0, 1, 2) || throw(ArgumentError(
@@ -162,7 +166,7 @@ function Params(;
                           instruments, Dict{String, PriorSpec}(),
                           trend_order, phot_trend_order, nm_vec, stability, M_s, R_s,
                           external_priors, sharing, ttv_n_transits,
-                          ttv_backend)
+                          ttv_backend, obliquity)
 
     # Generate defaults from data (or use generic fallbacks)
     data_for_priors = data !== nothing ? data :
@@ -172,6 +176,20 @@ function Params(;
     # User overrides take precedence
     if priors !== nothing
         for (k, v) in priors
+            # Under γ-marginalization the offset is integrated out, not sampled,
+            # so there is nothing for a prior on it to act on. Accepting one
+            # unfroze the slot: the sampler then walked a dimension the
+            # likelihood never read, and the "posterior" on the offset was the
+            # prior handed in.
+            if parametrization.marginalize_gamma && startswith(k, "gamma_") &&
+               !is_fixed(v)
+                throw(ArgumentError(
+                    "a prior was given for `$k`, but " *
+                    "parametrization.marginalize_gamma=true integrates the RV " *
+                    "offsets analytically and does not sample them, so it " *
+                    "cannot be applied. Drop the prior, or set " *
+                    "marginalize_gamma=false to sample the offset under it."))
+            end
             defaults[k] = v
         end
     end
@@ -182,7 +200,7 @@ function Params(;
     config = ParamsConfig(max_kplanet, parametrization, modes_vec,
                           instruments, defaults, trend_order, phot_trend_order, nm_vec,
                           stability, M_s, R_s, external_priors, sharing,
-                          ttv_n_transits, ttv_backend)
+                          ttv_n_transits, ttv_backend, obliquity)
     layout = _build_layout(config; data=data)
     return Params(config, layout)
 end

@@ -692,7 +692,9 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
             rrs[j] = rr_raw
         end
 
-        if use_rho
+        if (ai = a_Rs_slot(theta, k)) > 0
+            a_Rs[j] = theta.values[ai]
+        elseif use_rho
             a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
         else
             M_s = theta.params.config.M_s

@@ -26,9 +26,21 @@
 #
 # CONVENTIONS (shared with rm.jl so λ means the same thing in both):
 #   x_sky  along the projected orbital motion, in stellar radii
-#   y_sky  along the projected impact-parameter axis
-#   λ      sky-projected angle between the stellar spin axis and the orbit normal
-#   i★     stellar inclination; 90° = equator-on, 0° = pole-on
+#   y_sky  along the projected impact-parameter axis: +b at mid-transit, exactly
+#          as `planet_sky_position` returns it
+#   λ      sky-projected angle between the stellar spin axis and the orbit normal.
+#          The projected spin axis is the line through (sin λ, cos λ) -- where
+#          the RM kernels' sub-planet velocity x cos λ − y sin λ vanishes.
+#   i★     angle between the spin vector and the line of sight, on (0°, 180°),
+#          measured the way the orbital inclination is, so that
+#              cos ψ = cos i★ cos i + sin i★ sin i cos λ.
+#          90° = equator-on. Below 90° the visible pole sits at
+#          −sin i★ (sin λ, cos λ) on the sky: for an aligned orbit that is the
+#          far side of disc centre from the transit chord, as it must be when
+#          the orbit lies in the equatorial plane. Above 90° it is the mirror
+#          point. Darkening cannot tell a spin vector from its reverse, so
+#          (i★, λ) and (180° − i★, λ + 180°) are the same star here; it takes a
+#          measurement of the SENSE of rotation (RM, tomography) to split them.
 #   β      gravity-darkening exponent; 0.25 for a radiative envelope (von Zeipel),
 #          ~0.08 for convective (Lucy 1967). A9V here ⇒ radiative.
 
@@ -108,14 +120,12 @@ Everything in the brightness map that does NOT depend on where the planet is:
 the two rotation matrices, and the single scale factor that carries both the
 polar-gravity normalisation and the disc average.
 
-This exists for speed, and the speed matters more than it looks. The photometric
-likelihood evaluates the brightness once per cadence -- 61 000 times per call
-for a representative A-star transit -- and the disc average is memoised
-behind a lock. Recomputing it
-per cadence meant acquiring a global mutex 61 000 times per likelihood
-evaluation from every thread at once, which serialised a `Threads.@threads` loop
-back down to roughly one core. Hoisting it here costs one lock per likelihood
-call instead of one per point.
+This exists for speed. The photometric likelihood evaluates the brightness once
+per cadence -- 61 000 times per call for a representative A-star transit -- and
+the disc average is a 96 x 96 integral, so it belongs here, once per call, and
+never in the per-cadence path. It is not cached across calls (see
+`_gd_disc_mean`): a shared cache needs a lock, and parallel walkers then queue on
+it for values none of them reuse.
 """
 @inline function gd_context(i_star::Real, λ::Real, ω_frac::Real, β::Real = 0.25)
     ω = clamp(float(ω_frac), 0.0, 0.999)
@@ -145,8 +155,13 @@ disc centre, normalised so the disc average is 1. Returns 1.0 off the disc, and
     ρ2 = x_sky^2 + y_sky^2
     ρ2 >= 1 && return one(promote_type(typeof(x_sky), typeof(ctx.scale)))
 
-    # rotate sky coords so +Y' lies along the projected stellar spin axis
-    yr = -x_sky * ctx.sλ + y_sky * ctx.cλ
+    # Component of the sky position along the projected spin axis. The axis is
+    # the line through (sin λ, cos λ) in `planet_sky_position`'s frame, and the
+    # minus sign is which end of it leans toward the observer (see CONVENTIONS).
+    # This read `-x sλ + y cλ`, correct for y_sky = −b at mid-transit; when
+    # `planet_sky_position` moved to +b the map was left behind, mirrored in y
+    # against the chord it is evaluated on -- λ entered as 180° − λ.
+    yr = -(x_sky * ctx.sλ + y_sky * ctx.cλ)
     zr = sqrt(max(1 - ρ2, zero(ρ2)))              # toward the observer
 
     # spin axis = (0, sin i★, cos i★): +y' is its sky projection, +z is toward us.
@@ -158,16 +173,16 @@ disc centre, normalised so the disc average is 1. Returns 1.0 off the disc, and
 end
 
 # Disc-averaged brightness: the normalisation depends only on (i★, ω, β), not on
-# where the planet is, so it must not be recomputed per cadence.
+# where the planet is, so it is computed once per likelihood call, per band (see
+# `_gd_contexts`), never per cadence.
 #
-# The cache is Float64-only and lock-guarded. Float64-only because a ForwardDiff
-# Dual cannot be a `NTuple{3,Float64}` key, and because caching would silently
-# drop d<I>/di★ from the gradient -- i★ is exactly the parameter being measured,
-# so that derivative is the whole signal. Lock-guarded because the photometric
-# likelihood evaluates this from inside `Threads.@threads`, and a concurrent
-# `get!` on a growing Dict corrupts it.
-const _GD_MEAN_CACHE = Dict{NTuple{3, Float64}, Float64}()
-const _GD_MEAN_LOCK  = ReentrantLock()
+# It is NOT cached across calls. A global cache needed a lock, and with the sampler
+# evaluating many walkers in parallel every walker queued on that lock to compute a
+# value no other walker would reuse: the key was (i★, ω, β) rounded to 1e-5, every
+# proposal moves i★ and ω, so the cache never hit, grew without bound, and on a
+# near-miss returned the value computed at whichever nearby point got there first,
+# which made the likelihood depend on thread scheduling. Computing it directly
+# also keeps d<I>/di★ in any AD gradient.
 
 function _gd_disc_mean_raw(i_star, ω_frac, β)
     n = 96
@@ -190,19 +205,7 @@ function _gd_disc_mean_raw(i_star, ω_frac, β)
     return wsum > 0 ? tot / wsum : one(tot)
 end
 
-function _gd_disc_mean(i_star, ω_frac, β)
-    if i_star isa Float64 && ω_frac isa Float64 && β isa Float64
-        key = (round(i_star, digits = 5), round(ω_frac, digits = 5),
-               round(β, digits = 5))
-        lock(_GD_MEAN_LOCK) do
-            get!(_GD_MEAN_CACHE, key) do
-                _gd_disc_mean_raw(i_star, ω_frac, β)
-            end
-        end
-    else
-        _gd_disc_mean_raw(i_star, ω_frac, β)   # AD path: differentiate through it
-    end
-end
+_gd_disc_mean(i_star, ω_frac, β) = _gd_disc_mean_raw(i_star, ω_frac, β)
 
 """
     transit_flux_gd(x_sky, y_sky, z_los, rp, u1, u2, i_star, λ, ω_frac, β) -> F

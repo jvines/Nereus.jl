@@ -7,16 +7,27 @@ using PairPlots: pairplot       # pull the entry-point into local scope
 
 """
     plot_trace(chains, params;
-                output=nothing, fmt=:png, figsize=FIG_TRACE)
+                output=nothing, fmt=:png, figsize=FIG_TRACE, max_points=1500)
 
 MCMC trace plots for all unfrozen parameters.
-One figure per parameter with chain value vs iteration.
+One figure per parameter with chain value vs iteration; returns them by name.
+
+Every line is thinned to at most `max_points` points: every k-th iteration,
+plotted at its true iteration number. 1500 is about one per pixel across the
+1200-pixel figure, as in `plot_traces_grouped`. A figure of several walkers is
+rasterized, so a `save_pdf` copy does not carry every walker as vector paths.
+Unthinned, a pt_emcee run of 100 walkers x 30000 steps drew 3M vertices per
+figure: the NGTS-33 global fit died partway through its trace set, and a
+7-parameter synthetic chain of that shape took 23.9 s and 2.2 GB (4.4 s and
+0.9 GB thinned).
 """
 function plot_trace(chains, params;
                      output::Union{Nothing, String}=nothing,
                      fmt::Symbol=:png,
                      save_pdf::Bool=false,
-                     figsize=FIG_TRACE)
+                     figsize=FIG_TRACE,
+                     max_points::Int=1500)
+    figs = Dict{String, Figure}()
     with_theme(nereus_theme()) do
         chain_names = Set(names(chains, :parameters))
 
@@ -29,28 +40,22 @@ function plot_trace(chains, params;
             ax = Axis(fig[1, 1];
                         xlabel="Iteration", ylabel=name)
             # Multi-chain: plot each chain as a separate thin line so the
-            # eye can spot stuck walkers / mode-hopping. Single-chain
-            # (or flat) case: plot as one solid line. Ensemble samplers
-            # (pt_emcee) stack walkers into a single long row vector with
-            # no chain axis — for those we thin to ≤3000 points so the
-            # trace shows the macro trajectory rather than a black blob.
+            # eye can spot stuck walkers / mode-hopping; every walker is kept,
+            # each thinned, and the lines are drawn as one bitmap. Single-chain
+            # (or flat) case: one solid line, thinned the same way, so the trace
+            # shows the macro trajectory rather than a black blob.
             if ndims(samp_arr) == 2 && size(samp_arr, 2) > 1
                 n_iter, n_chain = size(samp_arr)
+                xs = 1:cld(n_iter, max_points):n_iter
                 α = clamp(0.9 / sqrt(n_chain), 0.15, 0.85)
                 for c in 1:n_chain
-                    lines!(ax, 1:n_iter, view(samp_arr, :, c);
-                            color=(:black, α), linewidth=0.6)
+                    lines!(ax, xs, samp_arr[xs, c];
+                            color=(:black, α), linewidth=0.6, rasterize=2)
                 end
             else
                 samp = vec(samp_arr)
-                if length(samp) > 3000
-                    stride = cld(length(samp), 3000)
-                    xs = collect(1:stride:length(samp))
-                    samp = samp[xs]
-                else
-                    xs = collect(1:length(samp))
-                end
-                lines!(ax, xs, samp;
+                xs = 1:cld(length(samp), max_points):length(samp)
+                lines!(ax, xs, samp[xs];
                         color=(:black, 0.85), linewidth=1.0)
             end
 
@@ -59,8 +64,10 @@ function plot_trace(chains, params;
                 _save_plot(joinpath(output, "traces", "$name.$fmt"), fig;
                             save_pdf=save_pdf)
             end
+            figs[name] = fig
         end
     end
+    return figs
 end
 
 
@@ -199,7 +206,7 @@ end
 """
     plot_corner(chains, params;
                  output=nothing, fmt=:png,
-                 params_to_plot=nothing, density=:hexbin)
+                 params_to_plot=nothing, density=:hexbin, max_draws=200_000)
 
 Corner plot using PairPlots.jl.
 `params_to_plot`: optional list of parameter name strings to include
@@ -217,18 +224,41 @@ corner is 4.2 million path elements and the SAVE alone measured 16.4 s against
 1.3 s to render it — 17.7 s in total, the single most expensive figure Nereus
 produces. The hexbin draws the same 150,000 draws in 3.8 s.
 
-Thinning the scatter is not the fix and was measured and rejected: at 10,000 of
-150,000 draws the cloud all but vanishes at the same alpha, and the panel limits
-move, because they follow the thinned extrema. `rasterize` is not the fix
+`max_draws` caps what is drawn: above it, every k-th draw is plotted, and the
+panel limits are set from the FULL sample (padded 5%, as Makie's own autolimits
+are), because limits that follow a thinned subset move. The cost is linear in the
+draws in both layers (at 3,000,000 draws of 7 parameters the hexbin alone took
+11.8 s and the contours 14.8 s; both at 200,000 took 1.7 s), and the 37-parameter
+NGTS-33 corner of 3,000,000 draws took 37 minutes. 200,000 draws give the same
+contours; what thins out is the outermost hexes, the few drawn by a handful of
+draws (on a heavy-tailed test parameter the cloud reached about 100 with every
+draw and about 75 thinned, inside the same pinned limits). Pass a larger
+`max_draws`, or `typemax(Int)`, to keep them. Below the cap nothing is thinned.
+
+Thinning was measured and rejected as the fix for `:scatter` at 10,000 of
+150,000 draws: the cloud all but vanishes at the same alpha, and the panel limits
+moved with the thinned extrema (now pinned, as above). `rasterize` is not the fix
 either — `PairPlots.Scatter` drops the keyword, and setting it on the plot
 objects after `pairplot` returns produces a byte-identical PNG.
 """
+# A corner panel's limits from the full sample: its finite extrema padded 5%, as
+# Makie's autolimits pad. No limits (`(;)`) for a constant or empty column.
+function _corner_lims(x::AbstractVector)
+    f = filter(isfinite, x)
+    isempty(f) && return (;)
+    lo, hi = extrema(f)
+    hi > lo || return (;)
+    pad = 0.05 * (hi - lo)
+    return (; lims = (; low = lo - pad, high = hi + pad))
+end
+
 function plot_corner(chains, params;
                       output::Union{Nothing, String}=nothing,
                       fmt::Symbol=:png,
                       save_pdf::Bool=false,
                       params_to_plot::Union{Nothing, Vector{String}}=nothing,
-                      density::Symbol=:hexbin)
+                      density::Symbol=:hexbin,
+                      max_draws::Int=200_000)
     # PairPlots is loaded at the top of this file (see `using PairPlots`
     # there). The earlier pattern used `@eval using PairPlots` inside the
     # function body, which triggered Julia's world-age limitation:
@@ -249,8 +279,14 @@ function plot_corner(chains, params;
         # straight from the column names. (The `labels=Vector{String}`
         # kwarg form was deprecated; current API wants Dict{Symbol,…} —
         # avoid the issue entirely by going through a named column source.)
-        data_nt = NamedTuple{Tuple(Symbol.(pnames))}(
-            (vec(Array(chains[Symbol(name)])) for name in pnames))
+        cols = [vec(Array(chains[Symbol(name)])) for name in pnames]
+        n_draws = isempty(cols) ? 0 : length(first(cols))
+        keep = 1:max(1, cld(n_draws, max_draws)):n_draws     # every k-th draw
+        data_nt = NamedTuple{Tuple(Symbol.(pnames))}(Tuple(c[keep] for c in cols))
+        # Thinned: pin each panel to the full sample's range (see docstring).
+        pin = length(keep) < n_draws ?
+            (; axis = NamedTuple{Tuple(Symbol.(pnames))}(Tuple(
+                _corner_lims(c) for c in cols))) : (;)
 
         density in (:hexbin, :scatter) || throw(ArgumentError(
             "plot_corner: density must be :hexbin or :scatter, got $(repr(density))"))
@@ -264,7 +300,7 @@ function plot_corner(chains, params;
              PairPlots.Contour(color = :black)) :
             (PairPlots.Scatter(markersize = 1, color = (NEREUS_COLORS.post, 0.1)),
              PairPlots.Contour())
-        fig = Base.invokelatest(pairplot, data_nt => layers)
+        fig = Base.invokelatest(pairplot, data_nt => layers; pin...)
 
         if output !== nothing
             mkpath(output)

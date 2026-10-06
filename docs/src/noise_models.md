@@ -48,12 +48,12 @@ params = Params(;
 ]
 ```
 
-`run_job` recognises thirteen `kind`s (`_NOISE_TYPES`, `src/runner.jl:916`):
+`run_job` recognises thirteen `kind`s (`_NOISE_TYPES`, `src/runner.jl:1169`):
 `CeleriteRotation`, `CeleriteSHO`, `CeleriteRotationFM17`,
 `ActivityDecorrelation`, `ARModel`, `MAModel`, `ActivityJitter`,
 `ActivityGP`, `ErrorScale`, `NightlyOffset`, `HarmonicBlock`, `StudentT`,
 `MaternGP`. The top-level `channel`/`instruments` are injected only into
-constructors that accept them (`src/runner.jl:980-983`): the Celerite GPs
+constructors that accept them (`src/runner.jl:1242-1245`): the Celerite GPs
 take both, `ARModel`/`MAModel` take `channel` only, `ActivityGP` takes
 `channels` (note the plural — supply it in `kwargs`), and the
 `MeanModifier`s take neither. `IndicatorFloor` is **not** in `_NOISE_TYPES`
@@ -98,7 +98,7 @@ ActivityDecorrelation(;
   The per-instrument central-difference derivative `data.indicator_derivs`
   is auto-computed at `Data` construction; `NaN` at endpoints/gaps and
   non-finite indicator values are skipped in the sum
-  (`src/noise/activity.jl:44,57`).
+  (`src/noise/activity.jl:59,70`).
 
 Parameter names (`src/noise/param_names.jl:11`):
 - `C_<ind>_<INST>` per (indicator, instrument) — coefficient on `Ind(t)`.
@@ -124,7 +124,7 @@ measurement error (`src/noise/activity.jl:17`):
 ActivityJitter(; indicator::String = "log_rhk")
 ```
 
-Parameter names (per RV instrument, `src/noise/param_names.jl:78`):
+Parameter names (per RV instrument, `src/noise/param_names.jl:79`):
 `jit_base_<ind>_<INST>` and `jit_act_<ind>_<INST>`. The indicator name
 is baked into both so that multiple `ActivityJitter` models targeting
 different indicators on the same instrument don't collide.
@@ -162,7 +162,7 @@ ARModel(;
 )
 ```
 
-Parameter names (`src/noise/param_names.jl:58`): `ar_phi_<j>_<INST>$s`,
+Parameter names (`src/noise/param_names.jl:59`): `ar_phi_<j>_<INST>$s`,
 `ar_alpha_<j>_<INST>$s` per (order, instrument) when
 `per_instrument = true`; bare `ar_phi_<j>$s`, `ar_alpha_<j>$s` otherwise.
 `$s` is the channel suffix — empty for `:rv`, `_phot` for `:phot`.
@@ -181,7 +181,7 @@ MAModel(;
 )
 ```
 
-Parameter names (`src/noise/param_names.jl:38`): `ma_omega_<j>_<INST>$s`,
+Parameter names (`src/noise/param_names.jl:39`): `ma_omega_<j>_<INST>$s`,
 `ma_beta_<j>_<INST>$s` (per-instrument) or `ma_omega_<j>$s`,
 `ma_beta_<j>$s` (global).
 
@@ -211,7 +211,7 @@ independently under trans-dim.
 If a *global* Stage 3 GP is active on the same channel, AR/MA are
 blocked (the algebra doesn't compose cleanly — GP residuals are already
 correlated through the kernel). `validate_noise_models`
-(`src/noise/param_names.jl:266`) enforces this at construction (unless
+(`src/noise/param_names.jl:250`) enforces this at construction (unless
 `transdim=true`), and the trans-dim proposal layer enforces it at
 runtime. A *restricted* (per-instrument) GP does **not** block AR/MA on
 the same channel, because it only covers a subset of observations.
@@ -220,7 +220,7 @@ the same channel, because it only covers a subset of observations.
 
 GP kernels via the celerite ([Foreman-Mackey+ 2017](https://ui.adsabs.harvard.edu/abs/2017AJ....154..220F/abstract), 2018)
 semi-separable formulation — O(n) likelihood evaluation regardless of
-data length (`celerite_loglike` in `src/noise/gp.jl:104`). The
+data length (`celerite_loglike` in `src/noise/gp.jl:122`). The
 multivariate `ActivityGP` is also a `CovarianceNoise` but is built
 dense (O(n³)); it is documented separately below.
 
@@ -231,11 +231,11 @@ All Stage 3 models carry two scoping fields:
   the channel (acts on all instruments); non-empty restricts the GP to
   the listed instruments, with white noise covering the rest. Multiple
   per-instrument GPs with pairwise-disjoint `instruments` sets can
-  coexist on the same channel (`src/noise/gp.jl:714`,
-  `_eval_channel_likelihood`).
+  coexist on the same channel (`src/noise/gp.jl:891`,
+  `_eval_channel_likelihood_general`).
 
 Parameter names get a suffix `$s` built by `_gp_suffix`
-(`src/noise/param_names.jl:127`): empty for global `:rv`; `_phot` for a
+(`src/noise/param_names.jl:158`): empty for global `:rv`; `_phot` for a
 global `:phot` GP; `_HARPS` / `_HARPS+FEROS` / `_phot_TESS` for
 per-instrument scoping.
 
@@ -249,8 +249,8 @@ Overdamped (`Q < 0.5`) → two real terms; underdamped → one complex term
 CeleriteSHO(; channel::Symbol = :rv, instruments::Vector{String} = String[])
 ```
 
-Three **log-space** fitted parameters (`src/noise/param_names.jl:141`,
-`src/noise/gp.jl:427`):
+Three **log-space** fitted parameters (`src/noise/param_names.jl:172`,
+`src/noise/gp.jl:497`):
 
 | Param | Meaning |
 |---|---|
@@ -269,14 +269,14 @@ run_job form: `{"kind": "CeleriteSHO", "channel": "rv", "instruments":
 celerite2 rotation kernel ([Foreman-Mackey 2018, RNAAS 2, 31](https://ui.adsabs.harvard.edu/abs/2018RNAAS...2...31F/abstract)), the
 **physically motivated** rotation model. Two SHO terms at `P_rot` and
 `P_rot/2` (fundamental + first harmonic), each with its own quality
-factor (`rotation_coefficients`, `src/noise/gp.jl:71`).
+factor (`rotation_coefficients`, `src/noise/gp.jl:82`).
 
 ```julia
 CeleriteRotation(; channel::Symbol = :rv, instruments::Vector{String} = String[])
 ```
 
-Five fitted parameters (`src/noise/param_names.jl:152`,
-`src/noise/gp.jl:444`):
+Five fitted parameters (`src/noise/param_names.jl:188`,
+`src/noise/gp.jl:514`):
 
 | Param | Meaning | Default prior |
 |---|---|---|
@@ -286,7 +286,7 @@ Five fitted parameters (`src/noise/param_names.jl:152`,
 | `gp_dQ$s`     | `Q1 − Q2`, difference in quality factors | `Uniform(0, 5)` |
 | `gp_f$s`      | fractional amplitude of the secondary mode, `0 ≤ f ≤ 1` | `Uniform(0.01, 0.99)` |
 
-(Priors from `src/default_priors.jl:505`.) Use when the star has clear
+(Priors from `src/default_priors.jl:771`.) Use when the star has clear
 rotation modulation and you want each harmonic's coherence to vary
 independently. Default for active stars.
 
@@ -298,7 +298,7 @@ run_job form: `{"kind": "CeleriteRotation", "channel": "rv",
 Original [Foreman-Mackey+ 2017](https://ui.adsabs.harvard.edu/abs/2017AJ....154..220F/abstract) celerite rotation kernel, as used
 in astroEMPEROR. One real exponential + one damped cosine sharing a
 single decay timescale (`rotation_fm17_coefficients`,
-`src/noise/gp.jl:53`):
+`src/noise/gp.jl:64`):
 
 ```
 k(τ) = a (1+f)/(2+f) exp(−τ/τ_decay) + a/(2+f) exp(−τ/τ_decay) cos(2π τ / P)
@@ -308,8 +308,8 @@ k(τ) = a (1+f)/(2+f) exp(−τ/τ_decay) + a/(2+f) exp(−τ/τ_decay) cos(2π 
 CeleriteRotationFM17(; channel::Symbol = :rv, instruments::Vector{String} = String[])
 ```
 
-Four **log-space** fitted parameters (`src/noise/param_names.jl:146`,
-`src/noise/gp.jl:462`):
+Four **log-space** fitted parameters (`src/noise/param_names.jl:182`,
+`src/noise/gp.jl:627`):
 
 | Param | Meaning |
 |---|---|
@@ -342,7 +342,7 @@ combinations of `G(t)` and its time derivative `dG/dt`
 The joint data covariance is assembled from four analytic kernel blocks
 `k_GG`, `k_GdotG`, `k_dotGG`, `k_dotGdotG` (closed-form derivatives of
 the quasi-periodic kernel `k(τ) = σ² exp(−τ²/2λ_e² − sin²(πτ/P)/2λ_p²)`,
-`activity_kernel_blocks`, `src/noise/activity_gp.jl:50`) weighted by the
+`activity_kernel_blocks`, `src/noise/activity_gp.jl:51`) weighted by the
 per-observation channel coefficients. This is the principled framework
 for activity decorrelation on noisy K-dwarfs — it captures
 rotation-phase-shifted activity-RV coupling that single-channel BIS
@@ -361,7 +361,7 @@ ActivityGP(;
 ```
 
 Valid indicator channel symbols (`_ACTIVITY_GP_COEFFS`,
-`src/noise/types.jl:354`): `:bis`, `:fwhm`, `:logrhk`, `:halpha`. `:rv`
+`src/noise/types.jl:627`): `:bis`, `:fwhm`, `:logrhk`, `:halpha`. `:rv`
 is always an active channel implicitly and is **not** listed in
 `channels`.
 
@@ -371,8 +371,8 @@ is always an active channel implicitly and is **not** listed in
 **no kernel amplitude parameter** (a free amplitude is an exact
 non-identifiability against the channel couplings; it destabilised log Z
 by ~80 nats run-to-run on HD 18599). All scale lives in the couplings.
-Names from `src/noise/param_names.jl:160`, priors from
-`src/default_priors.jl:533`:
+Names from `src/noise/param_names.jl:196`, priors from
+`src/default_priors.jl:856`:
 
 | Parameter | Meaning | Default prior |
 |---|---|---|
@@ -392,7 +392,7 @@ Notes on the couplings:
   like-for-like comparison.
 - The derivative coefficients are sampled as **amplitudes** in the
   channel's data units; the likelihood divides by `std(Ġ) = sqrt(1/λ_e²
-  + π²/(P²λ_p²))` at evaluation (`src/noise/gp.jl:600`). This avoids the
+  + π²/(P²λ_p²))` at evaluation (`src/noise/gp.jl:765`). This avoids the
   unpenalised `(λ_e, λ_p, Vr)` ridge where `Var(Ġ) → 0` and the raw
   coefficient rails.
 - The `λ_p` floor of `0.25` keeps the kernel out of the
@@ -408,7 +408,7 @@ Notes on the couplings:
 `ActivityGP` requires both the indicator **values** and their **1σ
 errors** for every non-`:rv` channel. Errors are mandatory (the
 `activity_gp_predict`/likelihood paths throw / return `nothing` without
-`data.indicator_errs`, `src/noise/activity_gp.jl:614,637`).
+`data.indicator_errs`, `src/noise/activity_gp.jl:637,842`).
 
 - **Julia API:** `Data(; indicators = Dict("bis" => …, "fwhm" => …),
   indicator_errs = Dict("bis" => …, "fwhm" => …), …)` with string keys
@@ -417,7 +417,7 @@ errors** for every non-`:rv` channel. Errors are mandatory (the
   arrays alongside `bjd`/`rv`/`rv_err`/`instrument`. Any extra key is
   treated as an indicator value; a `<name>_err` key whose base `<name>`
   is also present becomes that indicator's error
-  (`_split_indicator_errs`, `src/runner.jl:480`):
+  (`_split_indicator_errs`, `src/runner.jl:701`):
 
   ```json
   "rv": { "values": {
@@ -429,7 +429,7 @@ errors** for every non-`:rv` channel. Errors are mandatory (the
 
 - **run_job, CSV RV block:** list the indicator columns in
   `indicator_cols`; a matching `<col>_err` column supplies the error
-  (`src/runner.jl:524`):
+  (`src/runner.jl:770`):
 
   ```json
   "rv": { "csv": "rvs.csv", "indicator_cols": ["bis", "fwhm"] }
@@ -439,8 +439,8 @@ errors** for every non-`:rv` channel. Errors are mandatory (the
 #### run_job form
 
 `ActivityGP` is **run_job-drivable** (`_NOISE_TYPES`,
-`src/runner.jl:787`). Supply `channels` as a kwarg (strings are
-symbolised, `src/runner.jl:824`):
+`src/runner.jl:1177`). Supply `channels` as a kwarg (strings are
+symbolised, `src/runner.jl:1232`):
 
 ```json
 { "kind": "ActivityGP", "instruments": [],
@@ -457,7 +457,7 @@ required.
 `marginalize_indicators = true` switches the likelihood from the joint
 `log p(RV, indicators | θ)` to the conditional Gaussian `log p(RV |
 indicators, θ)`. It is **DIAGNOSTIC ONLY** — never use it as a
-model-selection / log-Z objective (`src/noise/types.jl:316`). The
+model-selection / log-Z objective (`src/noise/types.jl:437`). The
 conditional drops the indicator marginal `log p(y_I | θ)`, the only term
 anchoring the kernel + couplings to the indicator data; the model can
 then buy unbounded conditional sharpness for free (couplings rail, `λ_p`
@@ -471,16 +471,16 @@ For an honest log-Z comparison against `ActivityDecorrelation`, use the
 
 which equals `log p(y_R | y_I)` with hyperparameters anchored by
 `p(θ | y_I)`. The second term is produced by an `ActivityGP` with
-`indicators_only = true` (`src/noise/types.jl:342`): the likelihood
+`indicators_only = true` (`src/noise/types.jl:450`): the likelihood
 scores **only** the indicator block `log p(y_I | θ)` and the RV path
 falls through the standard white/celerite machinery untouched. In
 `indicators_only` mode the RV couplings `Vc`/`Vr` are not sampled
-(`src/noise/param_names.jl:174`).
+(`src/noise/param_names.jl:210`).
 
 #### Latent-G recovery + RV decomposition
 
 - [`activity_gp_predict(chains, params, data)`](@ref)
-  (`src/noise/activity_gp.jl:517`) returns the posterior over the
+  (`src/noise/activity_gp.jl:516`) returns the posterior over the
   inferred activity process `G(t)` **and** its derivative `dG/dt` at a
   dense prediction grid (default 200 points spanning the RV baseline),
   conditioning the joint covariance per posterior draw. Returns
@@ -498,7 +498,7 @@ falls through the standard white/celerite machinery untouched. In
   [`plot_activity_gp_decomposition`](@ref) draw the paper figures.
   `run_job` emits them automatically as `activity_gp_latent.png` and
   `activity_gp_decomposition.png` whenever an `ActivityGP` is configured
-  (`src/runner.jl:1337,1349`).
+  (`src/runner.jl:2056,2068`).
 
 #### Trans-dim head-to-head with `ActivityDecorrelation`
 
@@ -525,21 +525,35 @@ The HD 18599 K-gap scenario is the canonical use case.
 
 #### Cost
 
-The joint covariance is built dense — `O(n_total³)` Cholesky per
-likelihood call, where `n_total = n_rv + Σᵢ n_indᵢ`. Tractable up to
-~500 total observations. A Woodbury / low-rank route
-(`activity_gp_joint_logpdf_lowrank`, `src/noise/activity_gp.jl:827`) and
-a block-factored builder (`activity_gp_covariance_blocked`,
-`src/noise/activity_gp.jl:425`) reduce the dominant factorisation from
-`(C·N)²` to `(2N)²` for the common same-epoch case. The celerite-block
-O(n) route is a dead-end for the QP joint covariance (its kernel is not
-a finite sum of damped exponentials, and the FM17 celerite form carries
-a `|τ|` kink that makes `Var(dG/dt)` formally infinite — see the
-warning at `src/noise/activity_gp.jl:75`).
+With every indicator at the RV epochs (`N` epochs, `C` channels including
+RV, `n_total = C·N`), the joint likelihood goes through
+`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1161`): it
+whitens each epoch's 2×2 information block and factors one `(2N)²` matrix
+instead of the dense `(C·N)²`, and is exact up to rounding. Gradients
+(ForwardDiff, or ReverseDiff under `sample_nuts(ad_backend = :ReverseDiff)`)
+take the same route, except where an information block is
+singular or nearly so (couplings at exactly 0, parallel across channels,
+or one of G and dG/dt far fainter than the other) or the GP's
+signal-to-noise is below 1e-6 at every epoch: there the whitening is not
+differentiable or loses its derivative accuracy, and they come from a route
+that is smooth there. With four or more channels it conditions the latent
+on one epoch at a time, on the same `(2N)²` storage and at about the same
+cost as the low-rank solve; with two or three it is the dense likelihood,
+whose side `C·N` is then at most 1.5 times `2N`. The docstring of
+`activity_gp_joint_logpdf_lowrank` gives the accuracy measured on either
+side of those thresholds. The
+`marginalize_indicators` diagnostic and `indicators_only` scoring build the
+dense covariance with the block-factored builder
+(`activity_gp_covariance_blocked`, `src/noise/activity_gp.jl:424`), an
+`O(n_total³)` Cholesky per likelihood call, tractable up to ~500 total
+observations. The celerite-block O(n) route is a dead-end for the QP joint
+covariance (its kernel is not a finite sum of damped exponentials, and the
+FM17 celerite form carries a `|τ|` kink that makes `Var(dG/dt)` formally
+infinite — see the warning at `src/noise/activity_gp.jl:75`).
 
 ### `IndicatorFloor`
 
-Null model for the activity-indicator channels (`src/noise/types.jl:71`).
+Null model for the activity-indicator channels (`src/noise/types.jl:191`).
 It scores the indicator data block so a trans-dim noise selection that
 includes `ActivityGP` is **well-posed**: AGP scores the joint
 `p(RV, indicators)` while every other noise model scores only `p(RV)`,
@@ -565,7 +579,7 @@ IndicatorFloor(;
 
 - `:white` — iid Gaussian about zero,
   `y_{I,c,i} ~ N(0, σ_floor_c² + err_i²)`. One param `ind_floor_<ch>`
-  per channel (`src/noise/param_names.jl:101`).
+  per channel (`src/noise/param_names.jl:103`).
 - `:qp` — a per-channel quasi-periodic GP (the same kernel family AGP
   uses for its indicator block), with **shared** `ind_floor_period`,
   `ind_floor_lambda_e`, `ind_floor_lambda_p` and per-channel
@@ -734,7 +748,7 @@ twelve dimensions.
 ## Composition rules
 
 These are enforced automatically by `validate_noise_models`
-(`src/noise/param_names.jl:214`) and the trans-dim proposal layer:
+(`src/noise/param_names.jl:250`) and the trans-dim proposal layer:
 
 1. **Stage 1 + anything** — always allowed.
 2. **AR + MA** — always allowed (real ARMA = AR + MA, not "either/or").
@@ -746,7 +760,7 @@ These are enforced automatically by `validate_noise_models`
    A global on `:rv` and a global on `:phot` coexist fine.
 5. **`ActivityGP`** is handled by the Rajpaul routing in
    `rv_log_likelihood`; it is skipped by the celerite channel path
-   (`src/noise/gp.jl:735`). Treat it as one global `CovarianceNoise` on
+   (`src/noise/gp.jl:913`). Treat it as one global `CovarianceNoise` on
    `:rv`.
 
 Under `transdim_noise = true`, rule 3's mutual exclusion is relaxed at
@@ -775,7 +789,7 @@ td = TransDimConfig(;
 ```
 
 Every model in every exclusion group must also be in `toggleable`
-(`src/transdim/config.jl:148`). AR + MA stay composable (no group),
+(`src/transdim/config.jl:157`). AR + MA stay composable (no group),
 AR/MA + global GP still blocked by the Stage 2 vs Stage 3 typing rule,
 only the BIS↔GP exclusion is added.
 
@@ -789,37 +803,37 @@ includes RM, an in-transit RV anomaly is added to the RV prediction.
 
 - Modes: `RVPM_RM`, `RVPMAS_RM` (Hirano leading-order),
   `RVPM_RM_R`, `RVPMAS_RM_R` (Reloaded RM, Cegla+ 2016), plus
-  `RVPM_RM_TTV` (`src/model.jl:98`; run_job map at `src/runner.jl:693`).
+  `RVPM_RM_TTV` (`src/model.jl:376`; run_job map at `src/runner.jl:986`).
 - Physics: `ΔRV_RM(t) = −Δflux(t) · v_p(t)` with
   `v_p = V·sin(i_*)·(x_sky cos λ − y_sky sin λ)`
   ([Hirano+ 2011](https://ui.adsabs.harvard.edu/abs/2011ApJ...742...69H/abstract), `src/rm.jl`); the Reloaded variant integrates the
   intensity-weighted line-of-sight velocity over the planet's disk
-  (`rm_reloaded_signal`, `src/rm.jl:289`).
+  (`rm_reloaded_signal`, `src/rm.jl:611`).
 - Parameters: a system-level `v_sin_i_star` (m/s,
   `LogUniform(500, 1e5)`) and a per-planet sky-projected obliquity
   `lambda_k<k>` (rad, `Uniform(−π, π)`); priors at
-  `src/default_priors.jl:299`.
+  `src/default_priors.jl:445,485`.
 - The RM contribution is included in `rv_predictions`
-  (`src/likelihood.jl:1400`), so PPC residuals, the RV time-series
+  (`src/likelihood.jl:1859`), so PPC residuals, the RV time-series
   overlay and phase folds are all RM-consistent.
 - Diagnostic plot: `rm_anomaly` (`plot_rm`, `src/plotting/rm_plots.jl`),
   emitted by `run_job` when any planet mode has RM.
 
 ## Related run_job plots and diagnostics
 
-- `rv_components` (`plot_rv_components`, `src/plotting/rv_plots.jl:243`)
+- `rv_components` (`plot_rv_components`, `src/plotting/rv_plots.jl:255`)
   — RV model decomposition into its pieces (Keplerian(s), GP/AGP
   activity, total). Distinct from `rv_timeseries`. Auto-emitted when
   there are ≥2 planets or any `CovarianceNoise`/`ActivityGP` is active
-  (`src/runner.jl:1370`).
+  (`src/runner.jl:1671`).
 - `transit_overlay` (`plot_transit_overlay_fit`,
-  `src/plotting/ttv_plots.jl:328`) — per-transit QC gallery.
+  `src/plotting/ttv_plots.jl:342`) — per-transit QC gallery.
 - `ttv_oc` (`plot_ttv_oc`, `src/plotting/ttv_plots.jl:144`) — O-C
   transit-timing diagram. For a single-planet fit it renders the
   data-only O-C (no N-body envelope: `planet_b_k = 0` skips the
-  perturber path, `src/plotting/ttv_plots.jl:185`).
+  perturber path, `src/plotting/ttv_plots.jl:199`).
 - The PPC residual GLS periodogram is a *leftover-periodicity flag*, not
   a publication periodogram: its frequency grid is capped at 20 000 and
   it uses the analytic FAP (`fap_method = :analytic`) so it stays fast
-  on long-baseline RV (`src/diagnostics/ppc.jl:278`). Explicit
+  on long-baseline RV (`src/diagnostics/ppc.jl:281,287`). Explicit
   periodogram plots still use the full bootstrap path.

@@ -47,8 +47,10 @@ using Random, Statistics
             th.values[s] = clamp((lo + hi) / 2, lo, hi)
         end
         set_param!(th, "n_p", 1.0)
-        set_param!(th, "Mo_k1", mod(tp_to_mo(tc_to_tp(Tc,P,0.0,0.0), P, d.t_ref), 2π))
+        haskey(p.layout.name_to_idx, "Mo_k1") &&
+            set_param!(th, "Mo_k1", mod(tp_to_mo(tc_to_tp(Tc,P,0.0,0.0), P, d.t_ref), 2π))
         for (k, v) in ("v_sin_i_star"=>VS*1000, "P_k1"=>P, "b_k1"=>BIMP,
+                       "Tc_k1"=>Tc, "a_Rs_k1"=>AR, "tomo_jit_HARPSmap"=>0.003,
                        "rr_k1"=>0.116, "K_k1"=>100.0,
                        "rho_s"=>Nereus._a_Rs_to_rho_s(AR, P),
                        "sesinw_k1"=>0.0, "secosw_k1"=>0.0,

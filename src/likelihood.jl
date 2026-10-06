@@ -123,8 +123,8 @@ function rv_log_likelihood(theta::Theta{T}, data::Data) where {T}
     ll_astrom = astrom_log_likelihood(theta, data)
     isfinite(ll_astrom) || return convert(T, -Inf)
 
-    # Indicator-floor (no-op unless an IndicatorFloor noise model is active
-    # — i.e. only in a trans-dim noise selection that includes ActivityGP).
+    # Indicator floor: zero unless an IndicatorFloor noise model is active
+    # (it is in every fixed-dim HD 18599 config, not only trans-dim runs).
     ll_ifloor = indicator_floor_log_likelihood(theta, data)
     isfinite(ll_ifloor) || return convert(T, -Inf)
 
@@ -204,7 +204,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- Decode Rossiter-McLaughlin state (once) ---------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)   # RM enabled but M_s/R_s missing
 
     # --- Stage 1: Build predictions + variances -----------------------
@@ -240,7 +240,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
         # Rossiter-McLaughlin during in-transit windows — component A only
         # (the RM anomaly lives in the primary's deblended lines)
         (n_rm > 0 && comp == 1) && (pred += rm_contribution(t, n_rm, rm_state,
-                                                Ps, es, ws, Tps))
+                                                Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -386,8 +386,10 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- Decode RM state (once) --------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
+    ow = n_rm > 0 ? _rv_orbit_work!(ws, data) : nothing
+    n_rm > 0 && _refresh_rm_phase!(ow, n_rm, rm_state, Ps, es, ws_buf, Tps)
 
     # --- Stage 1: Build predictions + variances (reuse buffers) ------
     # γ-marginalization: omit the systemic offset from the per-point
@@ -412,9 +414,8 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
 
         # RM — component A only.
         (n_rm > 0 && data.rv_comp[i] == 1) &&
-            (pred += rm_contribution(t, n_rm, rm_state,
-                                     Ps, es, view(ws_buf, 1:n_rv_planets),
-                                     Tps))
+            (pred += _rm_contribution_cached(ow, i, n_rm, rm_state, es,
+                                             view(ws_buf, 1:n_rv_planets), ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -494,11 +495,18 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- RM state (once) ---------------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
+
+    # --- Orbital phases, kept across calls (see RVOrbitWork) ---------
+    ow = _rv_orbit_work!(ws, data)
+    _refresh_kepler!(ow, n_rv_planets, Ps, es, ws_buf, Tps, two_pi)
+    n_rm > 0 && _refresh_rm_phase!(ow, n_rm, rm_state, Ps, es, ws_buf, Tps)
 
     predictions = ws.predictions
     variances = ws.variances
+    # ActivityDecorrelation / ActivityJitter / ErrorScale slots, resolved once.
+    sl = _modifier_slots!(ws.rv_noise.mods, theta, data, noise_models)
 
     @inbounds for i in 1:n_obs
         t = data.t_rv[i]; obs_err = data.rv_err[i]; ins_idx = data.rv_inst[i]
@@ -509,22 +517,18 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityDecorrelation
-                pred = apply_activity_decorrelation(pred, theta, data, nm, ins_idx, i)
+                pred = _ad_term(pred, theta, data, nm, sl, nm_idx, ins_idx, i)
             end
         end
 
         comp = data.rv_comp[i]
         for jj in 1:n_rv_planets
-            M = two_pi * (t - Tps[jj]) / Ps[jj]
-            E = kepler_solve(M, es[jj])
-            f = true_anomaly(E, es[jj])
-            geom = cos(f + ws_buf[jj]) + es[jj] * cos(ws_buf[jj])
-            pred += _comp_rv(geom, comp, Ks[jj], cBs[jj])
+            pred += _comp_rv(ow.kep_geom[jj, i], comp, Ks[jj], cBs[jj])
         end
 
         (n_rm > 0 && comp == 1) &&
-            (pred += rm_contribution(t, n_rm, rm_state, Ps, es,
-                                     view(ws_buf, 1:n_rv_planets), Tps))
+            (pred += _rm_contribution_cached(ow, i, n_rm, rm_state, es,
+                                             view(ws_buf, 1:n_rv_planets), ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -533,12 +537,11 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityJitter
-                var_i = apply_activity_jitter(obs_err * obs_err, theta, data, nm, ins_idx, i)
-            elseif nm isa ErrorScale && _errorscale_covers(theta, nm, ins_idx)
+                var_i = _aj_variance(obs_err * obs_err, theta, data, nm, sl, nm_idx, ins_idx, i)
+            elseif nm isa ErrorScale && sl.es_cov[nm_idx][ins_idx]
                 # Multiplicative error-scale REPLACES additive jitter: f²·σ_formal²
                 # (whenever it covers this instrument — independent of the drawn f).
-                f2 = error_scale_factor(theta, nm, ins_idx)
-                var_i = f2 * obs_err * obs_err
+                var_i = _es_variance(obs_err, theta, nm, sl, nm_idx, ins_idx)
             end
         end
         variances[i] = var_i
@@ -551,7 +554,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     end
 
     return _apply_noise_and_eval(theta, data, predictions, residuals,
-                                  variances, noise_models, two_pi)
+                                  variances, noise_models, two_pi, ws)
 end
 
 """
@@ -672,9 +675,11 @@ function rv_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     ll_astrom = astrom_log_likelihood(theta, data)
     isfinite(ll_astrom) || return convert(T, -Inf)
 
-    # Indicator-floor (no-op unless an IndicatorFloor noise model is active
-    # — i.e. only in a trans-dim noise selection that includes ActivityGP).
-    ll_ifloor = indicator_floor_log_likelihood(theta, data)
+    # Indicator floor: zero unless an IndicatorFloor noise model is active.
+    # It is active in every fixed-dim HD 18599 config, not only in trans-dim
+    # selections, so this path uses the workspace method (no allocation;
+    # agrees with the generic method to ≲ 1e-12 in the kernel, see there).
+    ll_ifloor = indicator_floor_log_likelihood(theta, data, ws)
     isfinite(ll_ifloor) || return convert(T, -Inf)
 
     return ll + lp_ext + ll_astrom + ll_ifloor
@@ -745,11 +750,13 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
     trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
 
     # --- RM state (once) ---------------------------------------------
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && return convert(T, -Inf)
 
     predictions = Vector{T}(undef, n_obs)
     variances = Vector{T}(undef, n_obs)
+    # ActivityDecorrelation / ActivityJitter / ErrorScale slots, once per call.
+    sl = _modifier_slots!(RVModifierSlots(), theta, data, noise_models)
 
     @inbounds for i in 1:n_obs
         t = data.t_rv[i]; obs_err = data.rv_err[i]; ins_idx = data.rv_inst[i]
@@ -760,7 +767,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityDecorrelation
-                pred = apply_activity_decorrelation(pred, theta, data, nm, ins_idx, i)
+                pred = _ad_term(pred, theta, data, nm, sl, nm_idx, ins_idx, i)
             end
         end
 
@@ -774,7 +781,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         end
 
         (n_rm > 0 && comp == 1) && (pred += rm_contribution(t, n_rm, rm_state,
-                                                Ps, es, ws, Tps))
+                                                Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -783,12 +790,11 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityJitter
-                var_i = apply_activity_jitter(obs_err * obs_err, theta, data, nm, ins_idx, i)
-            elseif nm isa ErrorScale && _errorscale_covers(theta, nm, ins_idx)
+                var_i = _aj_variance(obs_err * obs_err, theta, data, nm, sl, nm_idx, ins_idx, i)
+            elseif nm isa ErrorScale && sl.es_cov[nm_idx][ins_idx]
                 # Multiplicative error-scale REPLACES additive jitter: f²·σ_formal²
                 # (whenever it covers this instrument — independent of the drawn f).
-                f2 = error_scale_factor(theta, nm, ins_idx)
-                var_i = f2 * obs_err * obs_err
+                var_i = _es_variance(obs_err, theta, nm, sl, nm_idx, ins_idx)
             end
         end
         variances[i] = var_i
@@ -818,8 +824,13 @@ end
 # AR step (Stage-1 prediction adjustment) still runs in that case;
 # MA / single-channel GP do not (composition rule documented in
 # `validate_noise_models`).
+#
+# `ws` is the caller's PTWorkspace on the sampler path (nothing otherwise).
+# It lends scratch to the RV-channel GP, and the ActivityGP solver takes its
+# buffers from it.
 function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
-                                variances, noise_models, two_pi) where {T}
+                                variances, noise_models, two_pi,
+                                ws = nothing) where {T}
     for (nm_idx, nm) in enumerate(noise_models)
         is_noise_model_active(theta, nm_idx) || continue
         if nm isa ARModel && noise_channel(nm) === :rv
@@ -839,7 +850,10 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
     #     disjoint `instruments` lists → per-instrument-group joint LL,
     #     summed. RV instruments NOT covered by any AGP fall back to
     #     the standard white-noise / celerite path.
-    agp_list = _active_activity_gps(theta, noise_models)
+    # (No active ActivityGP -- every fit without one -- reads a shared empty
+    # list instead of allocating one; neither list is ever mutated.)
+    agp_list = _active_activity_gp(theta, noise_models) === nothing ? _NO_ACTIVITY_GPS :
+               _active_activity_gps(theta, noise_models)
     # indicators_only AGPs score ONLY the indicator block log p(y_I|θ);
     # the RV path continues below (white noise / celerite) as if no GP
     # were registered, and the indicator term is ADDED to whichever
@@ -851,7 +865,7 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
         for agp in agp_list
             if agp.indicators_only
                 lli = _activity_gp_joint_ll(theta, data, predictions,
-                                              variances, agp)
+                                              variances, agp, ws)
                 isfinite(lli) || return convert(T, -Inf)
                 ind_only_ll += lli
             else
@@ -882,7 +896,7 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
         if global_agp !== nothing && isempty(scoped_agps)
             return ind_only_ll +
                    _activity_gp_joint_ll(theta, data, predictions,
-                                            variances, global_agp)
+                                            variances, global_agp, ws)
         elseif global_agp === nothing && !isempty(scoped_agps)
             return ind_only_ll +
                    _activity_gp_scoped_ll(theta, data, predictions,
@@ -902,9 +916,99 @@ function _apply_noise_and_eval(theta::Theta{T}, data, predictions, residuals,
         end
     end
 
-    return ind_only_ll +
-           _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
-                                     data.rv_inst, :rv, two_pi)
+    # With a sampler workspace the channel is scored in its scratch (see
+    # `_eval_channel_likelihood(..., ws)`): the instrument-restricted GPs in
+    # the workspace's channel scratch, a global GP in its RV-noise scratch;
+    # same arithmetic.
+    ch_ll = ws === nothing ?
+        _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
+                                 data.rv_inst, :rv, two_pi) :
+        _eval_channel_likelihood(theta, residuals, variances, data.t_rv,
+                                 data.rv_inst, :rv, two_pi, ws)
+    return ind_only_ll + ch_ll
+end
+
+const _NO_ACTIVITY_GPS = ActivityGP[]
+
+# ---------------------------------------------------------------------
+# Orbital phases of the RV epochs, kept across calls
+# ---------------------------------------------------------------------
+#
+# The Keplerian and the RM anomaly both start from Kepler's equation and the
+# true anomaly at every RV epoch, every call -- 45% of the NGTS-33 velocity
+# term, though P, the transit time, e and ω are fixed there and those
+# numbers never change. The workspace keeps, per planet, cos(f + ω) + e cos ω
+# for the Keplerian and (cos f, cos(f + ω), sin(f + ω)) for the RM, keyed on
+# the exact bits of the orbit elements they were computed from, and
+# recomputes a planet's row only when one of those changes. The values are
+# the same expressions on the same inputs, so the same bits.
+
+"""Orbital-phase scratch of the workspace RV likelihood; see `_refresh_kepler!`."""
+mutable struct RVOrbitWork
+    t::Vector{Float64}                  # the epochs (data.t_rv, by identity)
+    comp::Vector{Int}                   # their components (data.rv_comp, by identity)
+    kep_key::Vector{NTuple{4,UInt64}}   # per planet: bits of (P, e, ω, Tp)
+    kep_ok::Vector{Bool}
+    kep_geom::Matrix{Float64}           # planet x epoch: cos(f + ω) + e cos ω
+    rm_key::Vector{NTuple{6,UInt64}}    # per RM planet: bits of its phase inputs
+    rm_ok::Vector{Bool}
+    rm_cosf::Matrix{Float64}            # RM planet x epoch
+    rm_cosfw::Matrix{Float64}
+    rm_sinfw::Matrix{Float64}
+end
+
+function RVOrbitWork(t::Vector{Float64}, comp::Vector{Int}, nk::Int)
+    n = length(t)
+    z4 = (UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+    z6 = (UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+    return RVOrbitWork(t, comp, fill(z4, nk), fill(false, nk), zeros(nk, n),
+                       fill(z6, nk), fill(false, nk), zeros(nk, n), zeros(nk, n),
+                       zeros(nk, n))
+end
+
+_bits(x::Float64) = reinterpret(UInt64, x)
+
+# The Keplerian geometry of every epoch for planets 1:n, as the RV loop
+# computes it, refreshed where a planet's (P, e, ω, Tp) changed.
+function _refresh_kepler!(ow::RVOrbitWork, n::Int, Ps, es, ωs, Tps, two_pi::Float64)
+    t = ow.t
+    @inbounds for jj in 1:n
+        key = (_bits(Ps[jj]), _bits(es[jj]), _bits(ωs[jj]), _bits(Tps[jj]))
+        (ow.kep_ok[jj] && ow.kep_key[jj] == key) && continue
+        for i in eachindex(t)
+            M = two_pi * (t[i] - Tps[jj]) / Ps[jj]
+            E = kepler_solve(M, es[jj])
+            f = true_anomaly(E, es[jj])
+            ow.kep_geom[jj, i] = cos(f + ωs[jj]) + es[jj] * cos(ωs[jj])
+        end
+        ow.kep_key[jj] = key
+        ow.kep_ok[jj] = true
+    end
+    return ow
+end
+
+# The RM phase of every component-A epoch for RM planets 1:n_rm, as
+# `rm_contribution` computes it, refreshed where its inputs changed.
+function _refresh_rm_phase!(ow::RVOrbitWork, n_rm::Int, state, Ps, es, ωs, Tps)
+    t = ow.t
+    @inbounds for r in 1:n_rm
+        j = state.j_active[r]
+        key = state.rel ?
+            (_bits(state.Tc0s[r]), _bits(Ps[j]), _bits(es[j]), _bits(ωs[j]),
+             _bits(state.Mtrs[r]), UInt64(1)) :
+            (_bits(Ps[j]), _bits(es[j]), _bits(ωs[j]), _bits(Tps[j]), UInt64(0), UInt64(2))
+        (ow.rm_ok[r] && ow.rm_key[r] == key) && continue
+        for i in eachindex(t)
+            ow.comp[i] == 1 || continue
+            c, cw, sw = _rm_phase(t[i], r, j, state, Ps, es, ωs, Tps)
+            ow.rm_cosf[r, i] = c
+            ow.rm_cosfw[r, i] = cw
+            ow.rm_sinfw[r, i] = sw
+        end
+        ow.rm_key[r] = key
+        ow.rm_ok[r] = true
+    end
+    return ow
 end
 
 # Return the first active `ActivityGP` in `noise_models`, or `nothing`.
@@ -928,12 +1032,20 @@ function _active_activity_gps(theta::Theta, noise_models)
     return out
 end
 
-# Indicator-floor white likelihood for a trans-dim noise SELECTION that
-# includes ActivityGP (see the IndicatorFloor docstring). Scores each
-# floor channel as iid N(0, σ_floor² + err²), SKIPPING channels already
-# covered by an active joint ActivityGP (the AGP scores those). Returns
-# 0 when no active IndicatorFloor is configured — i.e. for every run
-# without an AGP-toggle, so this is a no-op on the entire existing suite.
+# Indicator-floor likelihood (see the IndicatorFloor docstring). Scores each
+# floor channel on its own — iid N(0, σ_floor² + err²) for `kernel = :white`,
+# a quasi-periodic GP for `kernel = :qp` — SKIPPING channels already covered
+# by an active joint ActivityGP (the AGP scores those). With `kernel = :qp` it
+# returns -Inf first when ind_floor_period, lambda_e or lambda_p is not
+# positive (outside the prior support). Otherwise it returns 0 when no
+# IndicatorFloor is active, and also when every floor channel is skipped:
+# covered by an active ActivityGP, without indicator data, or without its
+# amplitude/jitter parameters. Every fixed-dim HD 18599 config carries an
+# active :qp floor; where no ActivityGP covers its channels it is a large
+# share of each RV evaluation. The PTWorkspace path uses
+# `indicator_floor_log_likelihood(theta, data, ws)` below, which does not
+# allocate and agrees with this one to ≲ 1e-12 in the kernel.
+#
 # Quasi-periodic GP log-likelihood for ONE indicator channel (dense Cholesky,
 # mirrors ActivityGP's k_GG block — VALUE term only, no derivative coupling).
 #   k(τ) = amp²·exp(−τ²/2λe² − sin²(πτ/P)/2λp²),  diag += err² + jit²
@@ -1034,6 +1146,208 @@ function indicator_floor_log_likelihood(theta::Theta{T}, data::Data) where {T}
             v2 = σf2 + e2
             total += -0.5 * (convert(T, vals[k])^2 / v2 + log(2π * v2))
         end
+    end
+    return total
+end
+
+# ---------------------------------------------------------------------
+# IndicatorFloor on the PTWorkspace path
+# ---------------------------------------------------------------------
+"""
+    RVNoiseScratch
+
+Scratch for the RV-side noise terms, one per `PTWorkspace` (so one per
+sampler slot, and never shared between tasks). Nothing in it is chain
+state: every buffer is overwritten before it is read, and the resolved
+layout slots are rebuilt whenever the layout or the noise model they were
+resolved for changes. Checkpoints leave it out.
+"""
+mutable struct RVNoiseScratch
+    # IndicatorFloor (:qp) — layout slots, resolved once per (layout, floor)
+    floor_key::Any                  # the layout.name_to_idx they come from
+    floor_model::Any                # the IndicatorFloor they belong to
+    floor_names::Vector{String}     # String(ch), per floor channel
+    floor_amp::Vector{Int}          # slot of ind_floor_<ch>_amp, 0 if absent
+    floor_jit::Vector{Int}          # slot of ind_floor_<ch>_jit, 0 if absent
+    floor_P::Int                    # slots of ind_floor_period / _lambda_e /
+    floor_le::Int                   # _lambda_p, 0 if absent
+    floor_lp::Int
+    # IndicatorFloor (:qp) — buffers, n_rv × n_rv
+    floor_K0::Matrix{Float64}       # kernel shape shared by every channel (upper)
+    floor_Σ::Matrix{Float64}        # one channel's covariance, factored in place
+    floor_α::Vector{Float64}        # Σ⁻¹ y
+    floor_s::Vector{Float64}        # sin(π(t_i − t_mid)/P), n_rv
+    floor_c::Vector{Float64}        # cos(π(t_i − t_mid)/P), n_rv
+    # ActivityDecorrelation / ActivityJitter / ErrorScale slots (noise/activity.jl)
+    mods::RVModifierSlots
+    # CeleriteRotation coefficients, solver arrays and slots (noise/gp.jl)
+    cel::CeleriteWork
+end
+
+RVNoiseScratch() = RVNoiseScratch(nothing, nothing, String[], Int[], Int[], 0, 0, 0,
+                                  Matrix{Float64}(undef, 0, 0),
+                                  Matrix{Float64}(undef, 0, 0), Float64[],
+                                  Float64[], Float64[],
+                                  RVModifierSlots(), CeleriteWork())
+
+# Resolve the floor's layout slots once; later calls only compare two keys.
+function _floor_slots!(sc::RVNoiseScratch, layout, floor::IndicatorFloor)
+    idx = layout.name_to_idx
+    (sc.floor_key === idx && sc.floor_model === floor) && return sc
+    nc = length(floor.channels)
+    names = Vector{String}(undef, nc)
+    amp = zeros(Int, nc)
+    jit = zeros(Int, nc)
+    for (c, ch) in enumerate(floor.channels)
+        names[c] = String(ch)
+        amp[c] = get(idx, "ind_floor_$(ch)_amp", 0)
+        jit[c] = get(idx, "ind_floor_$(ch)_jit", 0)
+    end
+    sc.floor_names = names
+    sc.floor_amp = amp
+    sc.floor_jit = jit
+    sc.floor_P  = get(idx, "ind_floor_period", 0)
+    sc.floor_le = get(idx, "ind_floor_lambda_e", 0)
+    sc.floor_lp = get(idx, "ind_floor_lambda_p", 0)
+    sc.floor_key = idx
+    sc.floor_model = floor
+    return sc
+end
+
+"""
+    indicator_floor_log_likelihood(theta, data, ws) -> T
+
+`indicator_floor_log_likelihood(theta, data)` for the PTWorkspace path.
+For a `Float64` theta and the `:qp` kernel it does not allocate: the
+kernel shape exp(−τ²/2λe² − sin²(πτ/P)/2λp²) depends only on the shared
+(P, λe, λp) and the RV epochs, so it is built once per call rather than
+once per channel, and each channel's Σ = amp²·K0 + diag(err² + jit²) is
+factored in place (`potrf!('U')`, then `potrs!`, the calls
+`cholesky(Symmetric(Σ)) \\ y` makes) in buffers held by `ws.rv_noise`.
+
+The kernel's sin(π(tᵢ − tⱼ)/P) come from the angle-difference identity
+(n `sincos` calls instead of n(n+1)/2 `sin` calls), so the result is not
+bit-identical to the generic method: ≲ 1e-12 in the kernel entries
+(1e-13 at P ~ 10 d), which log L inherits times the conditioning of Σ:
+≲ 1e-10 nats near the HD 18599 posterior, up to ~1e-10 relative over its
+prior, more where Σ is near singular. Everything else in Σ and the solve
+is computed as in the generic method. Any other case (ForwardDiff duals,
+the `:white` kernel) goes to the generic method.
+"""
+function indicator_floor_log_likelihood(theta::Theta{Float64}, data::Data, ws)
+    nm_list = theta.params.config.noise_models
+    floor = nothing
+    @inbounds for i in eachindex(nm_list)
+        nm = nm_list[i]
+        nm isa IndicatorFloor || continue
+        is_noise_model_active(theta, i) || continue
+        floor = nm; break
+    end
+    floor === nothing && return 0.0
+    floor.kernel === :qp || return indicator_floor_log_likelihood(theta, data)
+    return _qp_floor_ll_ws(theta, data, floor, ws.rv_noise)
+end
+
+indicator_floor_log_likelihood(theta::Theta, data::Data, ws) =
+    indicator_floor_log_likelihood(theta, data)
+
+# Is floor channel `ch` scored by an active joint ActivityGP (so the floor
+# skips it)? The `covered` set of the generic method, without building it.
+@inline function _floor_channel_covered(theta::Theta, nm_list, ch::Symbol)
+    ch === :rv && return false
+    @inbounds for i in eachindex(nm_list)
+        nm = nm_list[i]
+        nm isa ActivityGP || continue
+        nm.indicators_only && continue
+        is_noise_model_active(theta, i) || continue
+        ch in nm.channels && return true
+    end
+    return false
+end
+
+function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloor,
+                         sc::RVNoiseScratch)
+    T = Float64
+    nm_list = theta.params.config.noise_models
+    _floor_slots!(sc, theta.params.layout, floor)
+    vals = theta.values
+    P   = vals[sc.floor_P]
+    λ_e = vals[sc.floor_le]
+    λ_p = vals[sc.floor_lp]
+    (P > 0 && λ_e > 0 && λ_p > 0) || return convert(T, -Inf)
+    t = data.t_rv
+    n = length(t)
+    if size(sc.floor_Σ, 1) != n
+        sc.floor_K0 = Matrix{Float64}(undef, n, n)
+        sc.floor_Σ  = Matrix{Float64}(undef, n, n)
+        sc.floor_α  = Vector{Float64}(undef, n)
+        sc.floor_s  = Vector{Float64}(undef, n)
+        sc.floor_c  = Vector{Float64}(undef, n)
+    end
+    K0 = sc.floor_K0
+    Σ  = sc.floor_Σ
+    α  = sc.floor_α
+    total = zero(T)
+    shape_done = false
+    for c in eachindex(floor.channels)
+        _floor_channel_covered(theta, nm_list, floor.channels[c]) && continue
+        name = sc.floor_names[c]
+        y = get(data.indicators, name, nothing)
+        y === nothing && continue
+        ai = sc.floor_amp[c]
+        ji = sc.floor_jit[c]
+        (ai == 0 || ji == 0) && continue
+        amp = vals[ai]; jit = vals[ji]
+        (amp > 0 && jit > 0) || return convert(T, -Inf)
+        # A channel not parallel to the RV epochs is an error in the generic
+        # method (`F \ y`); let it raise there.
+        length(y) == n || return indicator_floor_log_likelihood(theta, data)
+        errs = get(data.indicator_errs, name, nothing)
+        if !shape_done
+            inv_2λe2 = 1 / (2 * λ_e * λ_e)
+            inv_2λp2 = 1 / (2 * λ_p * λ_p)
+            π_P      = T(π) / P
+            # sin(π(tᵢ − tⱼ)/P) by the angle-difference identity from n
+            # sincos calls instead of n(n+1)/2 sin calls, angles measured from
+            # the middle of the RV baseline to keep them small. Not
+            # bit-identical to the generic method: ≲ 1e-12 in the kernel; in
+            # log L that is ≲ 1e-10 nats near the HD 18599 posterior and up to
+            # ~1e-10 relative over its prior, more where Σ is near singular.
+            sa = sc.floor_s
+            ca = sc.floor_c
+            tlo, thi = extrema(t)
+            t_mid = (tlo + thi) / 2
+            @inbounds for i in 1:n
+                sa[i], ca[i] = sincos(π_P * (t[i] - t_mid))
+            end
+            @inbounds for j in 1:n
+                tj = t[j]; sj = sa[j]; cj = ca[j]
+                for i in 1:j
+                    τ = t[i] - tj
+                    s = sa[i] * cj - ca[i] * sj
+                    K0[i, j] = exp(-τ * τ * inv_2λe2 - s * s * inv_2λp2)
+                end
+            end
+            shape_done = true
+        end
+        # Upper triangle only: potrf!('U') / potrs!('U') read nothing else.
+        amp2 = amp * amp
+        @inbounds for j in 1:n, i in 1:j
+            Σ[i, j] = amp2 * K0[i, j]
+        end
+        jit2 = jit * jit
+        @inbounds for i in 1:n
+            e2 = errs === nothing ? zero(T) : convert(T, errs[i])^2
+            Σ[i, i] += e2 + jit2
+        end
+        _, info = LinearAlgebra.LAPACK.potrf!('U', Σ)
+        F = Cholesky(Σ, 'U', info)
+        issuccess(F) || return convert(T, -Inf)
+        copyto!(α, y)
+        ldiv!(F, α)
+        ll = -0.5 * (dot(y, α) + logdet(F) + n * log(2π))
+        isfinite(ll) || return convert(T, -Inf)
+        total += ll
     end
     return total
 end
@@ -1234,16 +1548,22 @@ end
 function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
                                  predictions::Vector{T},
                                  variances::Vector{T},
-                                 agp::ActivityGP) where {T}
-    layout = theta.params.layout
-    s = _gp_suffix(agp)
+                                 agp::ActivityGP, ws = nothing) where {T}
+    # Parameter indices and indicator data, resolved by name: once per
+    # workspace on the sampler path (again if an indicator vector is replaced
+    # or resized), on every call otherwise. Validates that each indicator
+    # channel is present and parallel to the RVs.
+    name_to_idx = theta.params.layout.name_to_idx
+    ix = ws === nothing ? _agp_index(name_to_idx, data, agp) :
+                          _agp_index!(ws.agp, name_to_idx, data, agp)
+    # Buffers come from the workspace on the (Float64) sampler path.
+    use_ws = ws !== nothing && T === Float64
 
     # Unit-variance G(t) (Rajpaul+ 2015); guarded lookup for legacy chains.
-    amp_idx = get(layout.name_to_idx, "gp_act_amp$s", 0)
-    amp = amp_idx == 0 ? one(T) : theta.values[amp_idx]
-    P   = theta.values[layout.name_to_idx["gp_act_period$s"]]
-    λe  = theta.values[layout.name_to_idx["gp_act_lambda_e$s"]]
-    λp  = theta.values[layout.name_to_idx["gp_act_lambda_p$s"]]
+    amp = ix.amp == 0 ? one(T) : theta.values[ix.amp]
+    P   = theta.values[ix.P]
+    λe  = theta.values[ix.λe]
+    λp  = theta.values[ix.λp]
     (amp > 0 && P > 0 && λe > 0 && λp > 0) || return convert(T, -Inf)
 
     # Derivative couplings sampled as amplitudes (see the scoped twin):
@@ -1251,43 +1571,24 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
     inv_sdG = 1 / sqrt(1 / (λe * λe) + π * π / (P * P * λp * λp))
 
     # indicators_only mode scores no RV channel — couplings absent.
-    Vc = agp.indicators_only ? zero(T) :
-         theta.values[layout.name_to_idx["Vc$s"]]
-    Vr = (agp.use_derivative && !agp.indicators_only) ?
-         theta.values[layout.name_to_idx["Vr$s"]] * inv_sdG : zero(T)
+    Vc = ix.Vc == 0 ? zero(T) : theta.values[ix.Vc]
+    Vr = ix.Vr == 0 ? zero(T) : theta.values[ix.Vr] * inv_sdG
 
     n_rv_obs = length(data.rv)
 
-    # Indicator channels — verify data is present.
-    ind_meta = Tuple{Symbol, Vector{Float64}, Vector{Float64}, T, T, T}[]
+    # Per-channel couplings (RV first, then the indicators in agp.channels
+    # order) and indicator jitter².
+    n_ind = length(ix.a)
+    C = n_ind + 1
+    chan_a, chan_b, jit2 = use_ws ? _agp_coef_buffers!(ws.agp, C) :
+                           (Vector{T}(undef, C), Vector{T}(undef, C), Vector{T}(undef, C))
+    chan_a[1] = Vc; chan_b[1] = Vr; jit2[1] = zero(T)
     n_total = n_rv_obs
-    for ch in agp.channels
-        ch === :rv && continue
-        name = String(ch)
-        haskey(data.indicators, name) || throw(ArgumentError(
-            "ActivityGP requires data.indicators[\"$name\"] for channel :$ch"))
-        haskey(data.indicator_errs, name) || throw(ArgumentError(
-            "ActivityGP requires data.indicator_errs[\"$name\"] for channel :$ch"))
-        vals = data.indicators[name]
-        errs = data.indicator_errs[name]
-        # Data-model invariant: indicators are parallel to the RV data (one
-        # value per RV epoch). The joint path places indicator k at epoch
-        # data.t_rv[k]; only valid when lengths match. Fail clearly rather
-        # than OOB (n_ind > n_rv) or silently-wrong epochs (n_ind < n_rv).
-        length(vals) == n_rv_obs && length(errs) == n_rv_obs ||
-            throw(ArgumentError(
-                "ActivityGP indicator :$ch has $(length(vals)) values (errs " *
-                "$(length(errs))) but there are $n_rv_obs RV observations — " *
-                "indicators must be parallel to the RV data (one value per " *
-                "RV epoch)."))
-        cg, cd = _ACTIVITY_GP_COEFFS[ch]
-        a_coef = theta.values[layout.name_to_idx[string(cg, s)]]
-        b_coef = (cd === nothing || !agp.use_derivative) ? zero(T) :
-                  theta.values[layout.name_to_idx[string(cd, s)]] * inv_sdG
-        jit_idx = get(layout.name_to_idx, "gp_act_jit_$(ch)$s", 0)
-        jit² = jit_idx == 0 ? zero(T) : theta.values[jit_idx]^2
-        push!(ind_meta, (ch, vals, errs, a_coef, b_coef, jit²))
-        n_total += length(vals)
+    @inbounds for k in 1:n_ind
+        chan_a[k + 1] = theta.values[ix.a[k]]
+        chan_b[k + 1] = ix.b[k] == 0 ? zero(T) : theta.values[ix.b[k]] * inv_sdG
+        jit2[k + 1]   = ix.jit[k] == 0 ? zero(T) : theta.values[ix.jit[k]]^2
+        n_total += length(ix.vals[k])
     end
 
     if agp.indicators_only
@@ -1303,15 +1604,16 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         y_I  = Vector{T}(undef, n_ind_total)
         σ²_I = Vector{T}(undef, n_ind_total)
         off = 0
-        for (ch, vals, errs, a_coef, b_coef, jit²) in ind_meta
+        for k in 1:n_ind
+            vals = ix.vals[k]; errs = ix.errs[k]; jit² = jit2[k + 1]
             @inbounds for i in 1:length(vals)
                 y_I[off + i]  = convert(T, vals[i])
                 σ²_I[off + i] = convert(T, errs[i]^2) + jit²
             end
             off += length(vals)
         end
-        chan_aI = T[m[4] for m in ind_meta]
-        chan_bI = T[m[5] for m in ind_meta]
+        chan_aI = chan_a[2:C]
+        chan_bI = chan_b[2:C]
         Σ_I = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv_obs),
                                               chan_aI, chan_bI,
                                               amp, P, λe, λp)
@@ -1325,31 +1627,20 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
                                    n_ind_total * log(2π)))
     end
 
-    t_flat       = Vector{Float64}(undef, n_total)
-    y_flat       = Vector{T}(undef, n_total)
-    σ²_flat      = Vector{T}(undef, n_total)
-    a_flat       = Vector{T}(undef, n_total)
-    b_flat       = Vector{T}(undef, n_total)
-    channel_flat = Vector{Symbol}(undef, n_total)
-
+    # Channel-stacked residuals and variances: RV block, then each indicator.
+    y_flat, σ²_flat = use_ws ? _agp_flat_buffers!(ws.agp, n_total) :
+                      (Vector{T}(undef, n_total), Vector{T}(undef, n_total))
     @inbounds for i in 1:n_rv_obs
-        t_flat[i]       = data.t_rv[i]
-        y_flat[i]       = data.rv[i] - predictions[i]
-        σ²_flat[i]      = variances[i]
-        a_flat[i]       = Vc
-        b_flat[i]       = Vr
-        channel_flat[i] = :rv
+        y_flat[i]  = data.rv[i] - predictions[i]
+        σ²_flat[i] = variances[i]
     end
     offset = n_rv_obs
-    for (ch, vals, errs, a_coef, b_coef, jit²) in ind_meta
+    for k in 1:n_ind
+        vals = ix.vals[k]; errs = ix.errs[k]; jit² = jit2[k + 1]
         n_ch = length(vals)
         @inbounds for i in 1:n_ch
-            t_flat[offset + i]       = data.t_rv[i]
-            y_flat[offset + i]       = convert(T, vals[i])
-            σ²_flat[offset + i]      = convert(T, errs[i]^2) + jit²
-            a_flat[offset + i]       = a_coef
-            b_flat[offset + i]       = b_coef
-            channel_flat[offset + i] = ch
+            y_flat[offset + i]  = convert(T, vals[i])
+            σ²_flat[offset + i] = convert(T, errs[i]^2) + jit²
         end
         offset += n_ch
     end
@@ -1363,52 +1654,59 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
     # marginalize/conditional diagnostic keeps the explicit dense partition.
     if agp.latent_kernel !== :qp_dense && !agp.marginalize_indicators
         kern = _ss_latent_kernel(agp.latent_kernel, amp, P, λe, λp)
+        t_flat    = Vector{Float64}(undef, n_total)
         series_id = Vector{Int}(undef, n_total)
         @inbounds for i in 1:n_rv_obs
+            t_flat[i]    = data.t_rv[i]
             series_id[i] = 1
         end
         soff = n_rv_obs
-        for (s, m) in enumerate(ind_meta)
-            n_ch = length(m[2])
+        for k in 1:n_ind
+            n_ch = length(ix.vals[k])
             @inbounds for i in 1:n_ch
-                series_id[soff + i] = s + 1
+                t_flat[soff + i]    = data.t_rv[i]
+                series_id[soff + i] = k + 1
             end
             soff += n_ch
         end
-        α_ss = T[Vc, (m[4] for m in ind_meta)...]
-        β_ss = T[Vr, (m[5] for m in ind_meta)...]
+        α_ss = chan_a[1:C]
+        β_ss = chan_b[1:C]
         # σ²_flat already carries the per-channel measurement variance + jitter.
         return multiseries_loglike(t_flat, y_flat, σ²_flat, series_id,
                                     α_ss, β_ss, kern)
     end
 
-    # Build covariance + diagonal measurement noise. Block-factored assembly
-    # when every channel shares the RV epochs and has per-channel-constant
-    # (a, b) — the standard Rajpaul layout (indicators 1:1 with RVs at the same
-    # epochs). Numerically identical to the dense builder; transcendentals
-    # evaluated C²× fewer times. Falls back to the dense builder if an
-    # indicator vector isn't aligned 1:1 with the RVs (unequal length).
-    if all(m -> length(m[2]) == n_rv_obs, ind_meta)
-        chan_a = T[Vc, (m[4] for m in ind_meta)...]
-        chan_b = T[Vr, (m[5] for m in ind_meta)...]
-        # LOW-RANK joint: the C channels observe linear combos of a 2N
-        # latent (G, Ġ), so Σ = M·K_g·Mᵀ + D and the dominant factorization
-        # drops from (C·N)² to (2N)² — ~4× faster at C=5 (machine-precision
-        # identical; validated). Only when it pays (C ≥ 4 ⇒ 2N < C·N) and
-        # we score the joint (the marginalize/conditional path needs the
-        # explicit block partition, so it keeps the dense build).
-        if !agp.marginalize_indicators && n_total > n_rv_obs &&
-           length(chan_a) >= 4
-            return activity_gp_joint_logpdf_lowrank(
-                view(data.t_rv, 1:n_rv_obs), chan_a, chan_b,
+    # LOW-RANK joint: the C channels observe linear combos of a 2N latent
+    # (G, Ġ), so Σ = M·K_g·Mᵀ + D and the one factorization is a (2N)²
+    # Cholesky instead of the dense (C·N)² (exact up to rounding; see
+    # activity_gp_joint_logpdf_lowrank). It is faster than the dense build
+    # from C = 2 on, since it also skips the C² block assembly. Used whenever
+    # we score the joint (the marginalize/conditional path needs the explicit
+    # block partition, so it keeps the dense build).
+    if !agp.marginalize_indicators && n_total > n_rv_obs
+        ep = view(data.t_rv, 1:n_rv_obs)
+        # With no Ġ coupling at all (use_derivative = false) the solver must
+        # see constants there, or derivatives take its fallback for singular
+        # blocks at every point. A zero of a number type that cannot show it
+        # carries no derivative (ReverseDiff's tracked reals) is passed as a
+        # Float64 zero.
+        if !_agp_zero_is_constant(T) && ix.Vr == 0 && all(iszero, ix.b)
+            return activity_gp_joint_logpdf_lowrank(ep, chan_a, zeros(C),
                 amp, P, λe, λp, y_flat, σ²_flat)
         end
-        Σ = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv_obs),
-                                            chan_a, chan_b, amp, P, λe, λp)
-    else
-        Σ = activity_gp_covariance(t_flat, channel_flat, a_flat, b_flat,
-                                     amp, P, λe, λp)
+        return ws === nothing ?
+            activity_gp_joint_logpdf_lowrank(ep, chan_a, chan_b,
+                amp, P, λe, λp, y_flat, σ²_flat) :
+            activity_gp_joint_logpdf_lowrank!(ws.agp, ep, chan_a, chan_b,
+                amp, P, λe, λp, y_flat, σ²_flat)
     end
+
+    # Dense covariance + diagonal measurement noise, assembled by blocks:
+    # every channel shares the RV epochs (_agp_index refuses indicators that
+    # are not parallel to the RVs) and has per-channel-constant (a, b), so
+    # the transcendentals are evaluated C²× fewer times than pair by pair.
+    Σ = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv_obs),
+                                        chan_a, chan_b, amp, P, λe, λp)
     @inbounds for i in 1:n_total
         Σ[i, i] += σ²_flat[i]
     end
@@ -1523,12 +1821,14 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
     # RV — used by PPC, residuals, fit-health and all RV plots — includes the
     # in-transit RM anomaly. No-op for non-RM fits (n_rm == 0); a missing M_s/R_s
     # (n_rm == -1) simply skips RM here rather than poisoning predictions.
-    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps)
+    n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
     n_rm == -1 && (n_rm = 0)
 
     # Build predictions + variances
     predictions = Vector{T}(undef, n_obs)
     variances   = Vector{T}(undef, n_obs)
+    # ActivityDecorrelation / ActivityJitter / ErrorScale slots, once per call.
+    sl = _modifier_slots!(RVModifierSlots(), theta, data, noise_models)
 
     @inbounds for i in 1:n_obs
         t       = data.t_rv[i]
@@ -1542,7 +1842,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityDecorrelation
-                pred = apply_activity_decorrelation(pred, theta, data, nm, ins_idx, i)
+                pred = _ad_term(pred, theta, data, nm, sl, nm_idx, ins_idx, i)
             end
         end
 
@@ -1556,7 +1856,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
         end
 
         (n_rm > 0 && comp == 1) &&
-            (pred += rm_contribution(t, n_rm, rm_state, Ps, es, ws, Tps))
+            (pred += rm_contribution(t, n_rm, rm_state, Ps, es, ws, Tps, ins_idx))
 
         sigma = rv_sigma(theta, ins_idx)
         predictions[i] = pred
@@ -1565,12 +1865,11 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
             if nm isa ActivityJitter
-                var_i = apply_activity_jitter(obs_err * obs_err, theta, data, nm, ins_idx, i)
-            elseif nm isa ErrorScale && _errorscale_covers(theta, nm, ins_idx)
+                var_i = _aj_variance(obs_err * obs_err, theta, data, nm, sl, nm_idx, ins_idx, i)
+            elseif nm isa ErrorScale && sl.es_cov[nm_idx][ins_idx]
                 # Multiplicative error-scale REPLACES additive jitter: f²·σ_formal²
                 # (whenever it covers this instrument — independent of the drawn f).
-                f2 = error_scale_factor(theta, nm, ins_idx)
-                var_i = f2 * obs_err * obs_err
+                var_i = _es_variance(obs_err, theta, nm, sl, nm_idx, ins_idx)
             end
         end
         variances[i] = var_i
