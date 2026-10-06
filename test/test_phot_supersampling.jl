@@ -19,8 +19,13 @@ using Nereus: _phot_n_super_point, _phot_transit_product, _parse_photometry_bloc
 
     @testset "sub-samples from the cadence's own exposure" begin
         d(s) = s / 86_400.0
+        # Up to 3 min a cadence is evaluated at its mid-time; above, ~1 sub-sample
+        # per minute, at most 30.
         @test _phot_n_super_point(d(5.0))    == 1      # Swope-like
-        @test _phot_n_super_point(d(120.0))  == 1      # TESS 2-min: at the 2-min limit
+        @test _phot_n_super_point(d(120.0))  == 1      # TESS 2-min
+        @test _phot_n_super_point(d(121.5))  == 1      # NGTS: was 3 under a 2-min limit
+        @test _phot_n_super_point(d(180.0))  == 1      # at the 3-min limit
+        @test _phot_n_super_point(d(181.0))  == 4
         @test _phot_n_super_point(d(200.0))  == 4      # TESS 200-s
         @test _phot_n_super_point(d(600.0))  == 10     # TESS 10-min
         @test _phot_n_super_point(d(1800.0)) == 30     # TESS 30-min
@@ -46,8 +51,9 @@ using Nereus: _phot_n_super_point, _phot_transit_product, _parse_photometry_bloc
 
         t_in = 0.03                                  # in transit, near ingress
         n_dataset = 10                               # a 600-s band is in the fit
-        # 120-s cadence: instantaneous, whatever the dataset maximum is.
+        # 120-s and 121.5-s cadences: instantaneous, whatever the dataset maximum is.
         @test prod(t_in, 120.0 / 86_400, n_dataset) == instant(t_in)
+        @test prod(t_in, 121.5 / 86_400, n_dataset) == instant(t_in)
         # 600-s cadence: the mean over its own 10 sub-samples.
         texp = 600.0 / 86_400
         manual = sum(instant(t_in + ((2s - 10 - 1) / 20) * texp) for s in 1:10) / 10

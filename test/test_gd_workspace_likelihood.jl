@@ -141,7 +141,7 @@ ll_direct(th, tg) = Nereus.transit_log_likelihood(th, tg.data)
     # previous one; each draw is evaluated twice (the second a cache hit) and
     # every fifth also on a fresh workspace.
     configs = [
-        # 2-min and 1-min cadences, both exposures at or under 2 min: cached path.
+        # 2-min and 1-min cadences, both exposures at or under 3 min: cached path.
         ("PM_GD 2-min + 1-min", [Nereus.PM_GD], gdw_data()),
         ("PM_GD, no exposure times", [Nereus.PM_GD], gdw_data(; exp1 = nothing)),
         ("PM_GD, 20-s cadence", [Nereus.PM_GD],

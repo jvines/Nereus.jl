@@ -133,7 +133,7 @@ end
 
 # Supersampling factor for finite-exposure integration (Kipping 2010). Targets a
 # ≈1-min sub-cadence; returns 1 (instantaneous — no supersampling, fast/cached
-# paths used unchanged) when exposures are absent or short (≤2 min, e.g. TESS
+# paths used unchanged) when exposures are absent or short (≤3 min, e.g. TESS
 # 2-min / Kepler short-cadence). Capped at 30 to bound cost on long cadence.
 function _phot_n_super(data::Data)
     isempty(data.exposure_times) && return 1
@@ -362,15 +362,20 @@ function _set_transit_windows!(T_dur_safe, n_transit::Int, transits, r_for_j, tt
 end
 
 # Supersampling factor for ONE cadence, from that cadence's own exposure (days).
-# Same rule as above: ≈1-min sub-cadence, none at or below 2 min, capped at 30.
+# Same rule as above: ≈1-min sub-cadence, none at or below 3 min, capped at 30.
 # `_phot_n_super(data)` is the dataset maximum and only says whether any cadence
 # needs integrating; the per-point count must come from here. Applying the maximum
 # to every point integrated a 2-min or 5-s cadence as finely as the longest
 # exposure in the fit (10 sub-samples whenever a 10-min band was present), which
 # costs time and changes nothing for the short cadences.
+#
+# The limit was 2 min, which integrated a 121.5-s cadence over 3 sub-samples and
+# a 120-s one not at all. It is 3 min: cadences up to that are evaluated at their
+# mid-time, and longer ones keep the counts they had (200 s: 4, 600 s: 10,
+# 1800 s: 30).
 @inline function _phot_n_super_point(texp::Real)
     m = texp * 1440.0                       # days → minutes
-    (isfinite(m) && m > 2.0) || return 1
+    (isfinite(m) && m > 3.0) || return 1
     return clamp(ceil(Int, m), 1, 30)
 end
 

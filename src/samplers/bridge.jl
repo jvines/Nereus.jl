@@ -355,7 +355,7 @@ different model, and for gravity-darkened photometry:
   (`_bridge_phot_ws`). The workspace transit had no gravity darkening when
   the bridge first used it; it has now, and the allocating method keeps these
   fits at the bits of `_logdensity_parts`. TTV fits, exposures longer than
-  2 min and photometric noise models are handed over by the workspace method
+  3 min and photometric noise models are handed over by the workspace method
   itself.
 - Eccentricity outside [0, 0.9999] (`_bridge_e_clamped`): the allocating
   methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
