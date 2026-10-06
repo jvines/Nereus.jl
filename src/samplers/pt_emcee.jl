@@ -40,8 +40,10 @@
 #   per-step allocation.
 # - **reddemcee evidence stack**: feeds EvidenceAccumulator for
 #   TI+ / SS+ / H+ in addition to vanilla trapezoidal TI.
-# - **Progress bar**: Nereus's `ProgressBar` with per-step accept rate
-#   + ETA.
+# - **Progress bar**: Nereus's `ProgressBar` with acceptance, the ladder's
+#   swap rates, the cold log-posterior, R-hat/ESS naming the worst science
+#   parameter (over a rolling window during burn-in) and ETA; and an optional
+#   JSON-lines progress log of the same, one line per check.
 #
 # Caveat: affine-invariance of the stretch move is broken under
 # tempering. Cite Vousden+ 2016 (the `ptemcee` package), not emcee.
@@ -57,6 +59,7 @@ end
 using MCMCChains
 using Statistics: cov, quantile, median
 using LinearAlgebra: cholesky, logdet, Symmetric, norm, I, issuccess
+import Dates, JSON3
 
 export sample_pt_emcee, PTemceeResult, mode_laplace_evidence
 
@@ -282,6 +285,99 @@ _pt_swap_str(s) = s.worst == 0 ? "—" :
                   @sprintf("%.3f/%.3f(%d-%d)", s.mean, s.min, s.worst, s.worst + 1)
 
 # ------------------------------------------------------------------
+# The progress log (`progress_log` in sample_pt_emcee): one JSON object per
+# line, per diagnostic check and one at the end, so a long run leaves a
+# history that can be read back while it runs. Each line goes out as one
+# append of the whole line, so a reader polling the file never sees half of
+# one. Logging must never cost the run: any failure warns once and the run
+# carries on.
+# ------------------------------------------------------------------
+function _pt_log_warn(path::String, err, warned::Base.RefValue{Bool})
+    warned[] || @warn "sample_pt_emcee: cannot write the progress log; the run " *
+                      "continues without it" path exception = err
+    warned[] = true
+    return nothing
+end
+
+# A fresh run starts the file over. A resumed one keeps the lines up to the
+# step it resumes from, dropping any that a killed run wrote after its last
+# checkpoint (and a torn last line), so the steps in the file only increase.
+function _pt_log_start!(path::String, resume::Bool, step0::Int,
+                        warned::Base.RefValue{Bool})
+    try
+        mkpath(dirname(abspath(path)))
+        kept = String[]
+        if resume && isfile(path)
+            for ln in eachline(path)
+                rec = try JSON3.read(ln) catch; nothing end
+                rec isa JSON3.Object && get(rec, :step, typemax(Int)) <= step0 &&
+                    push!(kept, ln)
+            end
+        end
+        tmp = path * ".tmp"
+        open(io -> foreach(ln -> println(io, ln), kept), tmp, "w")
+        mv(tmp, path; force = true)
+    catch err
+        _pt_log_warn(path, err, warned)
+    end
+    return nothing
+end
+
+# The [first, last] step the burn-in window covers at `step`.
+function _pt_burn_window(step::Int, stride::Int, count::Int)
+    count == 0 && return nothing
+    hi = (step ÷ stride) * stride
+    return [hi - (count - 1) * stride, hi]
+end
+
+# Builds the line from `kw` (see `_pt_progress_record`) inside the guard too.
+function _pt_log_line(path::String, warned::Base.RefValue{Bool}; kw...)
+    try
+        line = JSON3.write(_pt_progress_record(; kw...)) * "\n"
+        open(io -> write(io, line), path, "a")
+    catch err
+        _pt_log_warn(path, err, warned)
+    end
+    return nothing
+end
+
+# One line of the log. `diag` is a `_pt_cube_diag` result or `nothing`, and
+# `window` the [first, last] step it covers: the burn-in window during burn-in,
+# every kept draw after it. Non-finite numbers are written as null.
+function _pt_progress_record(; step::Int, n_steps::Int, n_burnin::Int, final::Bool,
+                             elapsed::Float64, rate::Float64, n_evals::Int,
+                             accept_within, propose_within, accept_swap, propose_swap,
+                             lp::NTuple{2,Float64}, diag, window,
+                             names::AbstractVector{<:AbstractString})
+    r(x, d) = isfinite(x) ? round(x; digits = d) : nothing
+    per(f, d) = diag === nothing ? nothing :
+        NamedTuple{Tuple(Symbol.(names))}(Tuple(r(x, d) for x in getfield(diag, f)))
+    sumd(f, d) = diag === nothing ? nothing : r(getfield(diag, f), d)
+    worst(f) = diag === nothing || getfield(diag, f) == 0 ? nothing :
+               names[getfield(diag, f)]
+    sw = _pt_swap_summary(accept_swap, propose_swap)
+    n_prop = sum(propose_within)
+    return (; time = Dates.format(Dates.now(Dates.UTC), "yyyy-mm-ddTHH:MM:SS") * "Z",
+              step, n_steps, n_burnin, phase = step <= n_burnin ? "burn" : "sample",
+              final, elapsed_s = r(elapsed, 1),
+              eta_s = final ? 0.0 : rate > 0 ? r((n_steps - step) / rate, 1) : nothing,
+              steps_per_s = r(rate, 4), n_evals,
+              acc = n_prop > 0 ? r(sum(accept_within) / n_prop, 4) : nothing,
+              beta1_acc = r(accept_within[1] / max(propose_within[1], 1), 4),
+              swap_acc = [r(x, 4) for x in sw.rates],
+              swap_mean = r(sw.mean, 4), swap_min = r(sw.min, 4),
+              swap_worst_pair = sw.worst == 0 ? nothing : [sw.worst, sw.worst + 1],
+              lp_median = r(lp[1], 3), lp_max = r(lp[2], 3),
+              diag_window = window,
+              rhat_mean = sumd(:mean_rhat, 5), rhat_max = sumd(:max_rhat, 5),
+              rhat_worst = worst(:worst_rhat),
+              bulk_ess_mean = sumd(:mean_bulk, 1), tail_ess_min = sumd(:min_tail, 1),
+              tail_ess_worst = worst(:worst_tail),
+              rhat = per(:rhat, 5), bulk_ess = per(:bulk_ess, 1),
+              tail_ess = per(:tail_ess, 1))
+end
+
+# ------------------------------------------------------------------
 # Circular re-cut of a tempered ensemble (see src/circular.jl).
 #
 # Walkers live in bounded space, so a full-circle angle's prior window acts as
@@ -471,7 +567,18 @@ in place.
   `:pathfinder`).
 - `seed::Int=1`
 - `thin::Int=1` — thinning factor on β=1 posterior output.
-- `show_progress::Bool=true` — display the per-step progress bar.
+- `show_progress::Bool=true` — display the per-step progress bar. After the
+  bar: `acc` (stretch acceptance, all rungs) and `β1_acc` (cold rung);
+  `swap=mean/min(k-(k+1))`, the adjacent-pair swap acceptance over the ladder
+  and the pair with the lowest; `lp=median/max`, the cold rung's log-posterior
+  over the walkers; `Rhat=mean/worst(name)` and `ESS=mean bulk/worst
+  tail(name)` over the science parameters (`science_params`; default the
+  planet parameters and rho_s) from the kept draws, every `diag_every` steps
+  (default `max(200, n_steps ÷ 40)`). Until the first such check they come from
+  a rolling window of the last `diag_every` burn-in steps of the cold rung and
+  read `Rhat(burn)=` / `ESS(burn)=`: whether the walkers agree with each other
+  now, not a statement about the posterior, and never used by
+  `convergence_stop`.
 - `prune_stranded::Bool=true` — every 50 steps through the first three quarters
   of burn-in, move walkers stranded far below their rung's mode onto walkers in
   it. Only walkers whose likelihood is so low that the whole region below it
@@ -503,6 +610,25 @@ in place.
   an uninterrupted run of `n_steps`, at any thread count. Refused, with the
   differences listed, if the checkpoint came from different data, priors,
   parameters, walkers, rungs, burn-in, thinning, seed or move settings.
+- `progress_log=nothing` — path of a progress log, so a long run leaves a
+  history that can be read while it runs (the progress line is overwritten in
+  place). One JSON object per line, at every diagnostic check of the readout
+  above (burn-in included) and one at the end (`"final": true`), with `step`,
+  `n_steps`, `n_burnin`, `phase` (`"burn"`/`"sample"`), `time` (UTC),
+  `elapsed_s`, `eta_s`, `steps_per_s`, `n_evals`, `acc`, `beta1_acc`,
+  `swap_acc` (per adjacent pair, cold first), `swap_mean`, `swap_min`,
+  `swap_worst_pair`, `lp_median`, `lp_max`, and per science parameter `rhat`,
+  `bulk_ess` and `tail_ess` (name => value) with `rhat_mean`, `rhat_max`,
+  `rhat_worst`, `bulk_ess_mean`, `tail_ess_min` and `tail_ess_worst`.
+  `diag_window` is the [first, last] step those cover: the rolling window
+  during burn-in, every kept draw after it. Non-finite values are null; the
+  timings count from this call, so they restart on a resume. A fresh run
+  starts the file over; a resumed one keeps the lines up to the step it
+  resumes from and appends. Each line is one append, so a reader never sees
+  half of one, and a failure to write warns once and never stops the run.
+  Neither this nor `show_progress` changes the chain. `run_job` sets it to
+  `progress.jsonl` in `output_dir` unless the job gives one (`null` turns it
+  off).
 """
 function sample_pt_emcee(
     target::NereusTarget,
@@ -541,6 +667,7 @@ function sample_pt_emcee(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    progress_log::Union{Nothing,AbstractString,Symbol} = nothing,
 )
     # JSON delivers floats-as-Int and arrays-as-JSON3.Array; normalize.
     stretch_a       = Float64(stretch_a)
@@ -552,6 +679,8 @@ function sample_pt_emcee(
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))
+    plog = progress_log === nothing ? nothing : String(progress_log)
+    plog_warned = Ref(false)
     # UNTEMPERED TRANSIT: hold the transit term in the reference measure so the
     # ladder only has to bridge the RV likelihood. The 16k-point transit dominates
     # σ(logL) — hence Δβ·σ — while carrying no information that differs between
@@ -977,7 +1106,7 @@ function sample_pt_emcee(
     # most 500 rows. Memory and cost are flat in the run length. A window says
     # whether the walkers agree NOW; it is not the gate, which reads only the
     # kept draws. Not checkpointed: after a resume the window refills.
-    burn_on     = n_burnin > 0 && show_progress
+    burn_on     = n_burnin > 0 && (show_progress || plog !== nothing)
     burn_stride = max(1, cld(diag_cadence, 500))
     burn_ring   = Array{Float64,3}(undef, burn_on ? max(4, diag_cadence ÷ burn_stride) : 0,
                                    length(science_cols), n_walkers_eff)
@@ -1019,6 +1148,8 @@ function sample_pt_emcee(
         n_done = step0
     end
     last_ck = time()
+    plog === nothing || _pt_log_start!(plog, resume, step0, plog_warned)
+    t_loop = time()
 
     # --- Main loop ----------------------------------------------------
     for step in (step0 + 1):n_steps
@@ -1146,11 +1277,11 @@ function sample_pt_emcee(
             burn_next  = burn_next % size(burn_ring, 1) + 1
             burn_count = min(burn_count + 1, size(burn_ring, 1))
         end
-        if burn_on && step <= n_burnin && (step % diag_cadence == 0 || step == n_burnin)
-            bdiag = _pt_ring_diag(burn_ring, burn_next, burn_count)
-            if bdiag !== nothing
-                burn_rhat_str, burn_ess_str = _pt_diag_strings(bdiag, sci_names)
-            end
+        burn_check = burn_on && step <= n_burnin &&
+                     (step % diag_cadence == 0 || step == n_burnin)
+        bdiag = burn_check ? _pt_ring_diag(burn_ring, burn_next, burn_count) : nothing
+        if bdiag !== nothing
+            burn_rhat_str, burn_ess_str = _pt_diag_strings(bdiag, sci_names)
         end
 
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
@@ -1185,17 +1316,31 @@ function sample_pt_emcee(
         # ---- Periodic convergence diagnostic (β=1 science params) ----
         # Mean/worst R-hat and bulk/tail ESS over the gating set; drives both
         # the live readout and (optionally) the run-until-converged stop.
-        if step > n_burnin && (step - n_burnin) % diag_cadence == 0
-            diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols)
-            if diag !== nothing
-                rhat_str, ess_str = _pt_diag_strings(diag, sci_names)
-                if convergence_stop
-                    pass = step >= min_steps && diag.max_rhat < rhat_threshold &&
-                           diag.min_tail > tail_ess_threshold
-                    conv_run = pass ? conv_run + 1 : 0
-                    conv_run >= n_converged_checks && (converged_at = step)
-                end
+        post_check = step > n_burnin && (step - n_burnin) % diag_cadence == 0
+        pdiag = post_check ?
+            _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols) : nothing
+        if pdiag !== nothing
+            rhat_str, ess_str = _pt_diag_strings(pdiag, sci_names)
+            if convergence_stop
+                pass = step >= min_steps && pdiag.max_rhat < rhat_threshold &&
+                       pdiag.min_tail > tail_ess_threshold
+                conv_run = pass ? conv_run + 1 : 0
+                conv_run >= n_converged_checks && (converged_at = step)
             end
+        end
+
+        # ---- Progress log: one line per diagnostic check -------------
+        if plog !== nothing && (burn_check || post_check)
+            el = time() - t_loop
+            _pt_log_line(plog, plog_warned; step, n_steps, n_burnin,
+                final = false, elapsed = el, rate = (step - step0) / max(el, 1e-9),
+                n_evals = n_evals_atomic[], accept_within, propose_within,
+                accept_swap, propose_swap,
+                lp = _pt_cold_lp(state, logπ_arr, logL_arr, flat_shift),
+                diag = burn_check ? bdiag : pdiag,
+                window = burn_check ? _pt_burn_window(step, burn_stride, burn_count) :
+                                      [n_burnin + 1, step],
+                names = sci_names)
         end
 
         # ---- Progress update ----------------------------------------
@@ -1266,6 +1411,25 @@ function sample_pt_emcee(
         @warn "pt_emcee: hit max_steps=$n_steps WITHOUT meeting the convergence gate " *
               "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)) on science params — " *
               "results may be unconverged (last $rhat_str Rhat, $ess_str ESS)"
+    end
+
+    # The last line of the progress log: where the run ended, with the
+    # diagnostics of everything it kept (or of the burn-in window, if it
+    # ended there).
+    if plog !== nothing
+        el = time() - t_loop
+        ended_post = n_done > n_burnin
+        _pt_log_line(plog, plog_warned; step = n_done, n_steps, n_burnin,
+            final = true, elapsed = el, rate = (n_done - step0) / max(el, 1e-9),
+            n_evals = n_evals_atomic[], accept_within, propose_within,
+            accept_swap, propose_swap,
+            lp = _pt_cold_lp(state, logπ_arr, logL_arr, flat_shift),
+            diag = ended_post ?
+                _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols) :
+                _pt_ring_diag(burn_ring, burn_next, burn_count),
+            window = ended_post ? [n_burnin + 1, n_done] :
+                                  _pt_burn_window(n_done, burn_stride, burn_count),
+            names = sci_names)
     end
 
     samples = samples[1:keep_idx, :]

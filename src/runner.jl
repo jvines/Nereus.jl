@@ -1395,6 +1395,14 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
         kw[:checkpoint] = joinpath(String(_get(cfg, :output_dir; required = true)),
                                    "$(name)_state.jls")
     end
+    # Likewise a sampler that keeps a progress log (one JSON line per
+    # convergence check, readable while it runs) keeps it in the output
+    # directory, unless the job names another file or turns it off with null.
+    if haskey(_SAMPLER_FNS, name) && !haskey(kw, :progress_log) &&
+       any(m -> :progress_log in Base.kwarg_decl(m), methods(_SAMPLER_FNS[name]))
+        kw[:progress_log] = joinpath(String(_get(cfg, :output_dir; required = true)),
+                                     "progress.jsonl")
+    end
 
     td_block = _get(cfg, :transdim; default = nothing)
     td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
