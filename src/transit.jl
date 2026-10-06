@@ -1,4 +1,5 @@
 using Transits: QuadLimbDark, compute
+import ForwardDiff
 
 # Transit light-curve model.
 #
@@ -197,6 +198,86 @@ end
     # Sky-projected separation
     sin_wf, cos_wf = sincos(ω + f)
     z = a_Rs * r_over_a * sqrt(max(1 - sin_i_sq * sin_wf^2, zero(t)))
+    return z, sin_wf
+end
+
+# Sky positions for the photometric likelihood, which evaluates one orbit at
+# every cadence and sub-sample of a call (~10⁴). `planet_sky_position` and
+# `sky_separation` rebuild sin ω, cos ω, √(1−e²), cos i and sin i at each time;
+# `_sky_orbit` builds them once per call. The phase then comes from one
+# sincos(E), by the half-angle identity
+#
+#     cos f = (cos E − e) / (1 − e cos E),   sin f = √(1−e²) sin E / (1 − e cos E),
+#
+# instead of sincos(E/2), an atan, and cos f and sincos(f + ω) after it. When e is
+# exactly zero -- a Float64 0, or a Dual whose value and partials are all zero,
+# i.e. a fixed e -- E = M and Kepler's equation is not solved; a free e that
+# happens to be zero keeps the solver, so ∂/∂e still propagates.
+#
+# `ef` is the e of the true anomaly: `true_anomaly`'s clamp to [0, 0.9999] by
+# default, as `planet_sky_position` and `sky_separation` have it, or e itself for
+# the workspace refresh of an ordinary planet, which never clamped (see
+# `_bridge_e_clamped`). The two agree for every e ≤ 0.9999.
+struct _SkyOrbit{T}
+    P::T
+    Tp::T
+    e::T            # Kepler's equation and the orbital radius
+    ef::T           # the true anomaly's e
+    sq::T           # √(1 − ef²)
+    sω::T
+    cω::T
+    ome2::T         # 1 − e²
+    aR::T
+    cosi::T         # `planet_sky_position`'s inclination (clamped to [−1, 1])
+    sini::T
+    sin_i_sq::T     # `sky_separation`'s 1 − cos² i (cos i not clamped)
+    circ::Bool      # e exactly zero and not a free parameter: E = M
+end
+
+@inline _is_const_zero(x::AbstractFloat) = iszero(x)
+@inline _is_const_zero(x::ForwardDiff.Dual) =
+    _is_const_zero(ForwardDiff.value(x)) && iszero(ForwardDiff.partials(x))
+@inline _is_const_zero(x::Real) = false
+
+@inline function _sky_orbit(P::Real, e::Real, ω::Real, Tp::Real, b::Real, a_Rs::Real,
+                            ef::Real = min(max(e, zero(e)), oftype(e, 0.9999)))
+    T = promote_type(typeof(P), typeof(e), typeof(ω), typeof(Tp), typeof(b),
+                     typeof(a_Rs), typeof(ef))
+    sω, cω = sincos(ω)
+    ome2 = 1 - e * e
+    # as `_sky_from_phase` (rm.jl) builds it
+    cosi = clamp(b * (1 + e * sω) / max(a_Rs * ome2, eps()), -1.0, 1.0)
+    sini = sqrt(max(1 - cosi * cosi, zero(cosi)))
+    # as `_sky_separation_signed` builds it
+    cos_i = b * ((1 + e * sω) / ome2) / a_Rs
+    return _SkyOrbit{T}(P, Tp, e, ef, sqrt(max(1 - ef * ef, zero(ef))), sω, cω,
+                        ome2, a_Rs, cosi, sini, 1 - cos_i * cos_i, _is_const_zero(e))
+end
+
+# cos f, sin f, r/a and sin(ω + f) at time t.
+@inline function _orbit_phase(o::_SkyOrbit, t::Real)
+    M = 2π * (t - o.Tp) / o.P
+    E = o.circ ? M : kepler_solve(M, o.e)
+    sinE, cosE = sincos(E)
+    denom = 1 - o.ef * cosE
+    cosf = (cosE - o.ef) / denom
+    sinf = o.sq * sinE / denom
+    r_over_a = o.ome2 / (1 + o.e * cosf)
+    return cosf, sinf, r_over_a, o.sω * cosf + o.cω * sinf
+end
+
+# `planet_sky_position(t, ...)`: (x_sky, y_sky, z_los) in stellar radii.
+@inline function _sky_position(o::_SkyOrbit, t::Real)
+    cosf, sinf, r_over_a, sin_wf = _orbit_phase(o, t)
+    cos_wf = o.cω * cosf - o.sω * sinf
+    r = o.aR * r_over_a
+    return (r * (-cos_wf), r * (sin_wf * o.cosi), r * (sin_wf * o.sini))
+end
+
+# `_sky_separation_signed(t, ...)`: z and sin(ω + f), > 0 with the planet in front.
+@inline function _sky_separation_signed(o::_SkyOrbit, t::Real)
+    _, _, r_over_a, sin_wf = _orbit_phase(o, t)
+    z = o.aR * r_over_a * sqrt(max(1 - o.sin_i_sq * sin_wf * sin_wf, zero(sin_wf)))
     return z, sin_wf
 end
 

@@ -5,9 +5,8 @@
 # The two are the same function up to rounding, not to the bit. On a fit with
 # no noise models at all (on any channel) the workspace RV method caches each
 # planet's velocity curve and computes cos(f+ω) by the angle-sum identity; the
-# workspace photometry computes each cadence's sky separation by the same route
-# and sums every cadence in one pass, where `_logdensity_parts` sums fixed
-# 4096-point chunks and then the chunk totals. Near the posterior of a 20k-point
+# workspace photometry sums every cadence in one pass, where `_logdensity_parts`
+# sums fixed 4096-point chunks and then the chunk totals. Near the posterior of a 20k-point
 # light curve they differ by a few 1e-9 nats. Relative to |log prior| +
 # |log L_RV| + |log L_phot| the largest difference measured is 2.9e-11 (a
 # sample maximum); a difference much larger than that, on that scale, is a bug

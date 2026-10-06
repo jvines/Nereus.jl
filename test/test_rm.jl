@@ -3,6 +3,7 @@
 using Test
 using Nereus
 using Random: MersenneTwister
+using ForwardDiff
 
 @testset "Rossiter-McLaughlin (Hirano+ 2011)" begin
     # ----- rm_signal math sanity -----------------------------------
@@ -270,4 +271,69 @@ end
                                               [planet_P(theta_a, 1)])
     @test n_rm_a == 1
     @test st_a.is_reloaded == [false]
+end
+
+# The photometric likelihood takes sky positions from per-call orbit constants
+# (`_sky_orbit`, `_sky_position`, `_sky_separation_signed(o, t)`) instead of
+# `planet_sky_position` and `sky_separation`: the same quantities, with the true
+# anomaly from one sincos(E) by the half-angle identity, and Kepler's equation
+# skipped when e is a fixed zero.
+@testset "sky position from per-call orbit constants" begin
+    _sky_orbit, _sky_position = Nereus._sky_orbit, Nereus._sky_position
+    sep = Nereus._sky_separation_signed
+    rng = MersenneTwister(11)
+    worst = Dict("circular" => 0.0, "e < 0.95" => 0.0, "0.95 <= e <= 0.999" => 0.0)
+    n_flip = 0
+    for k in 1:3000
+        cls = ("circular", "e < 0.95", "0.95 <= e <= 0.999")[k % 3 + 1]
+        e = cls == "circular" ? 0.0 : cls == "e < 0.95" ? 0.95 * rand(rng) :
+            0.95 + 0.049 * rand(rng)
+        P  = exp(log(0.5) + rand(rng) * log(400))
+        ω  = 2π * rand(rng) - π
+        aR = 2 + 60 * rand(rng)
+        b  = 1.2 * rand(rng)
+        Tp = 2_459_000.0 + 1000 * rand(rng)
+        o = _sky_orbit(P, e, ω, Tp, b, aR)
+        @test o.circ == (e == 0)
+        for _ in 1:20
+            t = Tp + P * 100 * (rand(rng) - 0.5)        # ±50 orbits from Tp
+            d = maximum(abs.(planet_sky_position(t, P, e, ω, Tp, b, aR) .- _sky_position(o, t)))
+            z0, s0 = sep(t, P, e, ω, Tp, b, aR)
+            z1, s1 = sep(o, t)
+            worst[cls] = max(worst[cls], d / aR, abs(z0 - z1) / aR)
+            n_flip += abs(s0) > 1e-9 && sign(s0) != sign(s1)
+        end
+    end
+    @info "sky position vs planet_sky_position / sky_separation, max |Δ| / (a/R*)" worst
+    # Rounding, ~1e-14. Above e = 0.95 cos f and r are ill-conditioned near
+    # apoastron in both forms; they still agree far inside the Kepler solver's
+    # own 1e-10 tolerance, which sets the accuracy of either.
+    @test worst["circular"] < 1e-13 && worst["e < 0.95"] < 1e-13
+    @test worst["0.95 <= e <= 0.999"] < 1e-10
+    @test n_flip == 0
+
+    # The true anomaly's e: clamped to 0.9999 as `true_anomaly` does, unless the
+    # caller passes its own (the workspace refresh of an ordinary planet).
+    @test _sky_orbit(3.0, 0.99995, 0.3, 0.0, 0.2, 400.0).ef == 0.9999
+    @test _sky_orbit(3.0, 0.99995, 0.3, 0.0, 0.2, 400.0, 0.99995).ef == 0.99995
+    # Kepler's equation is skipped only for an e that is zero and fixed.
+    @test _sky_orbit(3.0, ForwardDiff.Dual(0.0, 0.0), 0.3, 0.0, 0.2, 8.0).circ
+    @test !_sky_orbit(3.0, ForwardDiff.Dual(0.0, 1.0), 0.3, 0.0, 0.2, 8.0).circ
+    @test !_sky_orbit(3.0, 1e-300, 0.3, 0.0, 0.2, 8.0).circ
+
+    # ForwardDiff through the orbit constants: the derivatives of the old routine.
+    ts = collect(range(0.6, 0.9; length = 50))
+    for (e, free_e) in ((0.3, true), (0.0, false))
+        x0 = [2.83, e, 0.7, 0.05, 0.6, 7.5]                # P, e, ω, Tp, b, a/R*
+        sel = free_e ? (1:6) : [1, 3, 4, 5, 6]
+        function sum_pos(v, f)
+            x = convert(Vector{eltype(v)}, x0); x[sel] = v
+            return sum(sum(f(t, x...) .* (1, 2, 3)) for t in ts)
+        end
+        lib(t, P, e, ω, Tp, b, aR) = planet_sky_position(t, P, e, ω, Tp, b, aR)
+        hoisted(t, P, e, ω, Tp, b, aR) = _sky_position(_sky_orbit(P, e, ω, Tp, b, aR), t)
+        g_lib = ForwardDiff.gradient(v -> sum_pos(v, lib), x0[sel])
+        g_new = ForwardDiff.gradient(v -> sum_pos(v, hoisted), x0[sel])
+        @test g_new ≈ g_lib rtol = 1e-10
+    end
 end

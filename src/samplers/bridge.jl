@@ -307,8 +307,7 @@ each cadence's gravity-darkened flux with the same calls as the allocating
 one. Gravity-darkened fits still take the allocating method here, which keeps
 their photometry at the bits of `_logdensity_parts`; through the workspace it
 would match to rounding, not always to the bit (the summation order on light
-curves longer than 4096 cadences, and the angle-sum route of any planet
-without gravity darkening).
+curves longer than 4096 cadences).
 """
 _bridge_phot_ws(params) = !any(has_gd, params.config.planet_modes)
 
@@ -406,11 +405,13 @@ every point, but not to the bit:
   decorrelation), up to 5.0e-7 nats apart. With no `:qp` floor that scores a channel the RV gave the same bits
   on every fit measured (RM with tomography, and a CeleriteSHO on the
   photometry only, with and without gravity darkening).
-- Photometry: the workspace method computes each cadence's sky separation by
-  the same angle-sum route and sums every cadence in one pass, where the other
-  sums fixed chunks and then the chunk totals. On the HD 18599 joint fits with
-  a 20k-point light curve the whole log density differed by up to 5.4e-9 nats
-  near the reference point.
+- Photometry: the workspace method sums every cadence in one pass, where the
+  other sums fixed chunks and then the chunk totals. Both take each cadence's
+  sky separation from the same per-call orbit constants (`_sky_orbit`); when
+  the figures here were measured the allocating method still took it from
+  `sky_separation`, a different route. On the HD 18599 joint fits with a
+  20k-point light curve the whole log density then differed by up to 5.4e-9
+  nats near the reference point.
 
 In the whole density, on 300 prior draws per HD 18599 joint fit (floor on,
 RV and photometry together), the largest relative differences were 1.9e-11

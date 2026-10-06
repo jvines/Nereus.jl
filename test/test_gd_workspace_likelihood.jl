@@ -12,10 +12,9 @@
 # in the same order: up to `_PHOT_REDUCE_CHUNK` cadences, where both are one
 # sequential pass. Above it the non-workspace method sums fixed chunks and the
 # workspace one a single pass (an order every non-GD fit shares, so it is left
-# as it was), and they agree to rounding. A non-GD planet's row in the
-# workspace uses its own closed form for z, which differs from `sky_separation`
-# in the last bits, so a fit that mixes :GD and ordinary planets also agrees to
-# rounding only.
+# as it was), and they agree to rounding. An ordinary planet's row takes z from
+# the same per-call orbit constants (`_sky_orbit`) in both methods, so a fit that
+# mixes :GD and ordinary planets agrees bit for bit too.
 using Test
 using Nereus
 using Random
@@ -153,6 +152,7 @@ ll_direct(th, tg) = Nereus.transit_log_likelihood(th, tg.data)
         ("RVPM_GD with RVs", [Nereus.RVPM_GD], gdw_with_rv(gdw_data())),
         ("RVPM_RM_GD with RVs", [Nereus.RVPM_RM_GD], gdw_with_rv(gdw_data())),
         ("two :GD planets", [Nereus.PM_GD, Nereus.PM_GD], gdw_data(; seed = 8)),
+        ("a :GD and an ordinary planet", [Nereus.PM_GD, PM_ONLY], gdw_data(; seed = 8)),
         ("β fixed at von Zeipel", [Nereus.PM_GD], gdw_data(; seed = 9)),
     ]
     @testset "=== the non-workspace likelihood: $name" for (ci, (name, modes, data)) in
@@ -230,17 +230,14 @@ ll_direct(th, tg) = Nereus.transit_log_likelihood(th, tg.data)
     # More cadences than one reduction chunk: the two methods sum in different
     # orders and agree to rounding, 1e-12 relative. The 20-s band also puts
     # more than 2000 cadences in the window, the size at which the refresh of a
-    # row is split across threads; the value must not depend on that. The
-    # mixed fit is held to 1e-10 instead: its ordinary planet's row is the
-    # workspace's own z, which already differed from the non-workspace one by
-    # up to ~1e-11 relative for an ordinary fit, before gravity darkening.
+    # row is split across threads; the value must not depend on that.
     @testset "agrees to rounding above one reduction chunk" begin
         for (modes, data, rtol) in (([Nereus.PM_GD], gdw_data(; t2 = 9.0), 1e-12),
                                     ([Nereus.PM_GD], gdw_data(; t1 = 0.4, t2 = 2.2,
                                          step1 = 20.0, exp1 = 20.0, nights = ()), 1e-12),
-                                    ([Nereus.PM_GD, PM_ONLY], gdw_data(; seed = 8), 1e-10))
+                                    ([Nereus.PM_GD, PM_ONLY], gdw_data(; t2 = 9.0), 1e-12))
             tg = gdw_target(modes; data)
-            @test length(modes) == 2 || length(data.t_phot) > Nereus._PHOT_REDUCE_CHUNK
+            @test length(data.t_phot) > Nereus._PHOT_REDUCE_CHUNK
             th = Nereus.Theta{Float64}(tg.params)
             ws = gdw_ws(tg)
             worst = 0.0

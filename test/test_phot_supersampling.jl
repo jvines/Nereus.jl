@@ -40,7 +40,9 @@ using Nereus: _phot_n_super_point, _phot_transit_product, _parse_photometry_bloc
         prod(t, texp, n_super) = _phot_transit_product(t, texp, ld, 1, transits,
             Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers, T_dur_safe, r_for_j,
             nothing, n_super)
-        instant(t) = transit_flux(ld, sky_separation(t, P, 0.0, π / 2, 0.0, b, aRs), rr)
+        # z as the product computes it, from the call's orbit constants
+        orb = Nereus._sky_orbit(P, 0.0, π / 2, 0.0, b, aRs)
+        instant(t) = transit_flux(ld, Nereus._sky_separation_signed(orb, t)[1], rr)
 
         t_in = 0.03                                  # in transit, near ingress
         n_dataset = 10                               # a 600-s band is in the fit

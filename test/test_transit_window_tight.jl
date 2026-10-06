@@ -27,7 +27,7 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
 function tw_zsep(t, P, e, ω, Tp, b, aR)
     ome2 = 1 - e * e; s1 = sqrt(ome2); sω, cω = sincos(ω)
     cos_i = b * ((1 + e * sω) / ome2) / aR; si2 = 1 - cos_i * cos_i
-    M = 2π / P * (t - Tp); E = kepler_solve(M, e); sE, cE = sincos(E)
+    M = 2π * (t - Tp) / P; E = iszero(e) ? M : kepler_solve(M, e); sE, cE = sincos(E)
     d = 1 - e * cE; cf = (cE - e) / d; sf = s1 * sE / d
     roa = ome2 / (1 + e * cf); swf = sω * cf + cω * sf
     return aR * roa * sqrt(max(1 - si2 * swf * swf, 0.0)), swf

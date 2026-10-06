@@ -34,26 +34,11 @@ const _PHOT_REDUCE_CHUNK = 4096
                                        lds::AbstractVector,
                                        flux_cache::AbstractMatrix{Float64})
     a > b && return nothing
-    one_minus_e2  = 1 - e * e
-    sqrt_1_me2    = sqrt(one_minus_e2)
-    sinω, cosω    = sincos(ω)
-    e_factor      = (1 + e * sinω) / one_minus_e2
-    cos_i         = b_imp * e_factor / a_Rs
-    sin_i_sq      = 1 - cos_i * cos_i
-    two_pi_over_P = 2π / P
+    # Orbit constants once per chunk; the true anomaly takes e unclamped here.
+    o = _sky_orbit(P, e, ω, Tp, b_imp, a_Rs, e)
     @inbounds for k in a:b
         i = idx[k]
-        t = data.t_phot[i]
-        M = two_pi_over_P * (t - Tp)
-        E = kepler_solve(M, e)
-        sinE, cosE = sincos(E)
-        denom = 1 - e * cosE
-        cosf  = (cosE - e) / denom
-        sinf  = sqrt_1_me2 * sinE / denom
-        r_over_a = one_minus_e2 / (1 + e * cosf)
-        sin_wf   = sinω * cosf + cosω * sinf
-        z = a_Rs * r_over_a *
-            sqrt(max(1 - sin_i_sq * sin_wf * sin_wf, 0.0))
+        z, sin_wf = _sky_separation_signed(o, data.t_phot[i])
         ld_i = lds[data.phot_inst[i]]
         # Behind the star (sin(ω+f) <= 0) it is an occultation: no dip.
         flux_cache[j, i] = sin_wf > 0 ? transit_flux(ld_i, z, rr) : 1.0
@@ -415,7 +400,7 @@ end
 @inline function _phot_transit_product(t::Float64, texp::Float64, ld,
         n_transit::Int, transits, Ps::AbstractVector{T}, es, ws, Tps, bs, a_Rs,
         rrs, Tc_centers, T_dur_safe, r_for_j, ttv_state, n_super::Int,
-        gd = nothing, gd_ctxs = nothing, ins_idx::Int = 0) where {T}
+        gd = nothing, gd_ctxs = nothing, ins_idx::Int = 0, sky = nothing) where {T}
     tprod = one(T)
     # `n_super` (dataset maximum) only switches integration on; the number of
     # sub-samples is this cadence's own, so short cadences stay instantaneous.
@@ -428,33 +413,38 @@ end
         t_eff = r_for_j[j] > 0 ?
             ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tps) : t
         use_gd = gd !== nothing && gd.on[j]
+        # The callers pass this call's orbit constants (`_sky_orbits`); built
+        # here when they do not.
+        orb = sky === nothing ? _sky_orbit(Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j]) :
+                                sky[j]
         if ns > 1 && texp > 0
             fsum = zero(T)
             for s in 1:ns
                 tsub = t_eff + ((2s - ns - 1) / (2 * ns)) * texp
                 if use_gd
-                    x, y, zl = planet_sky_position(tsub, Ps[j], es[j], ws[j], Tps[j],
-                                                    bs[j], a_Rs[j])
+                    x, y, zl = _sky_position(orb, tsub)
                     fsum += transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
                 else
-                    zs, sw = _sky_separation_signed(tsub, Ps[j], es[j], ws[j], Tps[j],
-                                                    bs[j], a_Rs[j])
+                    zs, sw = _sky_separation_signed(orb, tsub)
                     # Behind the star (sin(ω+f) <= 0): an occultation, no dip.
                     fsum += sw > 0 ? transit_flux(ld, zs, rrs[j]) : one(T)
                 end
             end
             tprod *= fsum / ns
         elseif use_gd
-            x, y, zl = planet_sky_position(t_eff, Ps[j], es[j], ws[j], Tps[j],
-                                            bs[j], a_Rs[j])
+            x, y, zl = _sky_position(orb, t_eff)
             tprod *= transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
         else
-            z, sw = _sky_separation_signed(t_eff, Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j])
+            z, sw = _sky_separation_signed(orb, t_eff)
             tprod *= sw > 0 ? transit_flux(ld, z, rrs[j]) : one(T)
         end
     end
     return tprod
 end
+
+# Every transit planet's orbit constants for this call (`_sky_orbit`, transit.jl).
+_sky_orbits(n_transit::Int, Ps, es, ws, Tps, bs, a_Rs) =
+    [_sky_orbit(Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j]) for j in 1:n_transit]
 
 # Per-instrument flux dilution / third light: observed = (1−D)·transit + D, with
 # D = contaminant flux fraction ∈ [0,1). D=0 (the default FixedPrior) ⇒ identity.
@@ -754,6 +744,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         has_exp = !isempty(data.exposure_times)
         trends_c = _phot_trend_cache(theta, n_pm)
         inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
+        sky_c = _sky_orbits(n_transit, Ps, es, ws, Tps, bs, a_Rs)
 
         # DETERMINISTIC REDUCTION. This accumulator used to be
         # `local_total[Threads.threadid()] += ...` under `Threads.@threads`
@@ -804,7 +795,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
             tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers, T_dur_safe,
                         r_for_j, ttv_state, n_super,
-                        gd_s, gd_c, ins_idx)
+                        gd_s, gd_c, ins_idx, sky_c)
             model_flux = _phot_continuum(t, t_ref, inv_th, offset, trends_c[ins_idx]) *
                          _apply_dilution(tprod, dilutions[ins_idx])
 
@@ -848,6 +839,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     has_exp_s = !isempty(data.exposure_times)
     trends_cs = _phot_trend_cache(theta, n_pm_s)
     inv_th_s = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
+    sky_cs = _sky_orbits(n_transit, Ps, es, ws, Tps, bs, a_Rs)
 
     predictions = Vector{T}(undef, n_obs)
     variances   = Vector{T}(undef, n_obs)
@@ -873,7 +865,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
                 tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                             Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
                             T_dur_safe, r_for_j, ttv_state, n_super_s,
-                        gd_s, gd_c, ins_idx)
+                        gd_s, gd_c, ins_idx, sky_cs)
                 predictions[i] = _phot_continuum(t, t_ref, inv_th_s, offset,
                                      trends_cs[ins_idx]) *
                                  _apply_dilution(tprod, dilutions_s[ins_idx])
@@ -894,7 +886,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
             tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
                         T_dur_safe, r_for_j, ttv_state, n_super_s,
-                        gd_s, gd_c, ins_idx)
+                        gd_s, gd_c, ins_idx, sky_cs)
             predictions[i] = _phot_continuum(t, t_ref, inv_th_s, offset,
                                  trends_cs[ins_idx]) *
                              _apply_dilution(tprod, dilutions_s[ins_idx])
@@ -1119,6 +1111,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
                           rrs, a_Rs, Tc_centers, Tps,
                           n_super_p > 1 ? _phot_max_exposure(data) / 2 : 0.0)
+    sky_p = _sky_orbits(n_transit, Ps, es, ws, Tps, bs, a_Rs)
 
     # Threaded for Float64 (no Duals = no GC thrashing), serial otherwise.
     if T <: AbstractFloat
@@ -1133,7 +1126,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
                 tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                             Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
                             T_dur_safe, r_for_j, ttv_state, n_super_p,
-                        gd_s, gd_c, ins_idx)
+                        gd_s, gd_c, ins_idx, sky_p)
                 predictions[i] = _phot_continuum(t, t_ref_p, inv_th_p, offset,
                                      trends_cp[ins_idx]) *
                                  _apply_dilution(tprod, dilutions[ins_idx])
@@ -1151,7 +1144,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
             tprod = _phot_transit_product(t, texp, ld, n_transit, transits,
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
                         T_dur_safe, r_for_j, ttv_state, n_super_p,
-                        gd_s, gd_c, ins_idx)
+                        gd_s, gd_c, ins_idx, sky_p)
             predictions[i] = _phot_continuum(t, t_ref_p, inv_th_p, offset,
                                  trends_cp[ins_idx]) *
                              _apply_dilution(tprod, dilutions[ins_idx])
@@ -1250,9 +1243,10 @@ end
 # `_phot_sparse_refresh` for the workspace flux cache with one more argument:
 # `nothing` for an ordinary row, which is the method above unchanged, or the
 # `_gd_contexts` matrix for a row whose planet uses :GD. A :GD row's flux at
-# each cadence comes from the same `planet_sky_position` and `transit_flux_gd`
-# calls, on the same arguments, as the instantaneous gravity-darkened branch of
-# `_phot_transit_product`, so it is bit-identical to the non-workspace one.
+# each cadence comes from the same `_sky_orbit`, `_sky_position` and
+# `transit_flux_gd` calls, on the same arguments, as the instantaneous
+# gravity-darkened branch of `_phot_transit_product`, so it is bit-identical to
+# the non-workspace one.
 @inline _phot_sparse_refresh(a::Int, b::Int, j::Int, data::Data,
                              idx::AbstractVector{Int}, P::Float64, e::Float64,
                              ω::Float64, Tp::Float64, b_imp::Float64, a_Rs::Float64,
@@ -1270,10 +1264,11 @@ end
                                        flux_cache::AbstractMatrix{Float64},
                                        gd_ctxs::AbstractMatrix)
     a > b && return nothing
+    o = _sky_orbit(P, e, ω, Tp, b_imp, a_Rs)
     @inbounds for k in a:b
         i = idx[k]
         ins_idx = data.phot_inst[i]
-        x, y, zl = planet_sky_position(data.t_phot[i], P, e, ω, Tp, b_imp, a_Rs)
+        x, y, zl = _sky_position(o, data.t_phot[i])
         flux_cache[j, i] = transit_flux_gd(lds[ins_idx], gd_ctxs[j, ins_idx],
                                            x, y, zl, rr)
     end
