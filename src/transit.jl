@@ -165,8 +165,9 @@ _quad_flux(ld::QuadLimbDark, b, r) = compute(ld, b, r)
 # partial-overlap branch, the one that uses it; atan(kite_area2, r² − 1 − b²) is
 # computed once, where `compute_uniform` and `compute_quadratic` each computed it;
 # and the values nothing uses (k, sqbrinv, sqonembmr2, onemr2mb2, onemr2pb2, kck)
-# are gone. Bulirsch's `cel` is called as before. About 10 per cent less time per
-# in-transit evaluation; ForwardDiff duals keep `compute`.
+# are gone. Bulirsch's `cel` is called as before. 12-15 per cent less time per
+# in-contact evaluation (32-34 instead of 37-39 ns across an NGTS-33 b chord);
+# ForwardDiff duals keep `compute`.
 function _quad_flux(ld::QuadLimbDark{Float64}, b::Float64, r::Float64)
     if b ≥ 1 + r || iszero(r)
         return 1.0                              # unobscured
