@@ -1493,6 +1493,12 @@ enabled in the parametrization config. Returns 0 if no astrometry
 data is present.
 """
 function astrom_log_likelihood(theta::Theta{T}, data) where {T<:Real}
+    # An unbounded M_pri prior lets a sampler propose a primary mass ≤ 0 (or
+    # NaN). There is no orbit there: reject it, rather than let the total mass
+    # go negative and PlanetOrbits throw on the square root of -Inf. Only with
+    # astrometry: an RV-only fit may have no stellar mass at all.
+    data isa Data && has_astrometry(data) && !(astrom_M_pri(theta) > 0) &&
+        return T(-Inf)
     ll = relastrom_log_likelihood(theta, data) +
          hgca_log_likelihood(theta, data) +
          iad_log_likelihood(theta, data) +

@@ -88,4 +88,24 @@
         # M_sec must change with M_pri (nonzero derivative)
         @test m2 > m1   # heavier host → heavier companion at same K (since K ∝ M_sec/M_total^(2/3))
     end
+
+    @testset "a primary mass ≤ 0 is rejected, not thrown" begin
+        # An unbounded M_pri prior lets a sampler propose M_pri ≤ 0. The total
+        # mass then goes negative, a = cbrt(M_total P²) with it, and PlanetOrbits
+        # took the square root of -Inf: one proposal killed the whole run.
+        data, params = _make_setup(sample_M_pri = true)
+        theta = Theta(params)
+        for (k, v) in ("n_p" => 1, "P_k1" => 4332.0, "K_k1" => 12.7,
+                       "sesinw_k1" => 0.0, "secosw_k1" => 0.0, "Mo_k1" => 0.0,
+                       "inc_k1" => π / 3, "Omega_k1" => 0.0, "plx" => 10.0,
+                       "gamma_X" => 0.0, "sigma_X" => 1.0)
+            set_param!(theta, k, v)
+        end
+        set_param!(theta, "M_pri", 1.0)
+        @test isfinite(astrom_log_likelihood(theta, data))
+        for m in (0.0, -0.5, NaN)
+            set_param!(theta, "M_pri", m)
+            @test astrom_log_likelihood(theta, data) == -Inf
+        end
+    end
 end
