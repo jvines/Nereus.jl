@@ -97,6 +97,36 @@ function local_gravity(θ::Real, ω_frac::Real)
     return sqrt(g_r^2 + g_θ^2)
 end
 
+# `local_gravity(θ, ω_frac)^2` from c2 = cos²θ and s2 = sin²θ, for the per-cadence
+# brightness and the disc-average nodes, which know cos θ and not θ: no acos, and
+# no sin and cos after it.
+#
+# The Roche radius solves 1/r + k r² = 1 with k = (Ω²/2) sin²θ. While
+# w = ω_frac sinθ <= 0.7 it is taken by four Newton steps from r = 1 (the left
+# side is convex, so they climb monotonically to the root): at round-off there
+# (5e-16 at w = 0.7), and more accurate than `roche_radius`'s closed form at
+# small w, where (3/w) cos[(π + acos w)/3] cancels (3e-10 relative at
+# w = 1e-6). Above 0.7 Newton slows as the two roots of the cubic merge at
+# break-up (an error of 1e-2 at w = 0.999), so the closed form is used.
+@inline function _gd_gravity2(c2, s2, ω_frac)
+    ωf = clamp(float(ω_frac), 0.0, 1.0)
+    Ω2 = (clamp(ωf, 0.0, 0.9999) * _OMEGA_CRIT_INTERNAL)^2   # Ω², as in local_gravity
+    w2 = ωf^2 * s2
+    if w2 <= 0.49
+        k = Ω2 * s2 / 2
+        r = one(k)
+        for _ in 1:4                     # r -= f/f', f = 1/r + k r² - 1, times r²
+            r2 = r * r
+            r -= (r + k * r2 * r2 - r2) / (2k * r2 * r - 1)
+        end
+    else
+        w = sqrt(w2)
+        r = (3 / w) * cos((π + acos(min(w, one(w)))) / 3)
+    end
+    g_r = Ω2 * r * s2 - 1 / r^2
+    return g_r^2 + Ω2^2 * r^2 * s2 * c2
+end
+
 """
     gd_brightness(x_sky, y_sky, i_star, λ, ω_frac, β) -> I
 
@@ -149,8 +179,8 @@ end
         return (sλ = sλ, cλ = cλ, si = si, ci = ci, ω = 0.0,
                 p = 4 * float(β), scale = 0.0)
     end
-    # `local_gravity` is normalised to the pole (g = 1 there exactly), so the scale
-    # is the inverse disc average alone.
+    # The gravity is normalised to the pole (g = 1 there exactly), so the scale is
+    # the inverse disc average alone.
     return (sλ = sλ, cλ = cλ, si = si, ci = ci, ω = ω, p = 4 * float(β), scale = 1 / mean)
 end
 
@@ -178,9 +208,11 @@ disc centre, normalised so the disc average is 1. Returns 1.0 off the disc, and
     # spin axis = (0, sin i★, cos i★): +y' is its sky projection, +z is toward us.
     # i★ = 0 (pole-on) must put the DISC CENTRE at the pole (θ = 0).
     z_star = yr * ctx.si + zr * ctx.ci
-    θ = acos(clamp(abs(z_star), -one(z_star), one(z_star)))   # N/S symmetric
-
-    return local_gravity(θ, ctx.ω)^ctx.p * ctx.scale
+    # cos²θ and sin²θ of the colatitude θ: the map depends on nothing else, and
+    # is N/S symmetric. g^p = exp((p/2) log g²).
+    c2 = min(z_star^2, one(z_star))
+    g2 = _gd_gravity2(c2, 1 - c2, ctx.ω)
+    return exp(ctx.p / 2 * log(g2)) * ctx.scale
 end
 
 # Disc-averaged brightness: the normalisation depends only on (i★, ω, β), not on
@@ -252,13 +284,14 @@ function _gauss_legendre_01(n::Int)
 end
 
 const _GD_NQ = 32
-# cos θ, colatitude θ, and the weights of M₀ and M₂ at the nodes
-const _GD_U, _GD_θ, _GD_W0, _GD_W2 = let (u, w) = _gauss_legendre_01(_GD_NQ)
-    (Tuple(u), Tuple(acos.(u)), Tuple(w), Tuple(w .* u .^ 2))
+# cos²θ and sin²θ at the nodes, and the weights of M₀ and M₂
+const _GD_C2, _GD_S2, _GD_W0, _GD_W2 = let (u, w) = _gauss_legendre_01(_GD_NQ)
+    (Tuple(u .^ 2), Tuple(1 .- u .^ 2), Tuple(w), Tuple(w .* u .^ 2))
 end
 
 # log g (pole-normalised) at the quadrature nodes: the β-independent part of <I>.
-@inline _gd_node_logs(ω_frac) = ntuple(k -> log(local_gravity(_GD_θ[k], ω_frac)), Val(_GD_NQ))
+@inline _gd_node_logs(ω_frac) =
+    ntuple(k -> log(_gd_gravity2(_GD_C2[k], _GD_S2[k], ω_frac)) / 2, Val(_GD_NQ))
 
 # <I> for one β from the node logs.
 @inline function _gd_disc_mean_nodes(lg::NTuple{N}, i_star, β) where {N}

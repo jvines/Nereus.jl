@@ -217,6 +217,49 @@ using ForwardDiff
               gd_context(1.1, 0.3, 0.6, 0.2)
     end
 
+    @testset "brightness from cos²θ, without acos" begin
+        # `gd_brightness` takes cos²θ = z★² and sin²θ = 1 − cos²θ instead of θ =
+        # acos|z★|, the Roche radius by Newton from r = 1 below w = ω sinθ = 0.7
+        # (closed form above), and g^p as exp((p/2) log g²). Against a BigFloat
+        # reference, and against the acos route (`local_gravity`) to that
+        # route's own accuracy: its closed-form radius cancels at small w, to
+        # ~1e-16 / w relative.
+        setprecision(BigFloat, 256) do
+            for ωf in (1e-4, 0.01, 0.1, 0.3, 0.6, 0.7, 0.75, 0.9, 0.99, 0.999),
+                c in range(0, 1; length = 101)
+                c2 = c^2; s2 = 1 - c2
+                Ω2 = (big(min(ωf, 0.9999)) * Nereus._OMEGA_CRIT_INTERNAL)^2
+                w = big(ωf) * sqrt(big(s2))
+                r = w < 1e-40 ? big(1.0) : (3 / w) * cos((big(π) + acos(w)) / 3)
+                ref = (Ω2 * r * s2 - 1 / r^2)^2 + Ω2^2 * r^2 * s2 * c2
+                g2 = Nereus._gd_gravity2(c2, s2, ωf)
+                @test g2 ≈ ref rtol = 2e-13
+                @test g2 ≈ local_gravity(acos(c), ωf)^2 rtol = 1e-12 + 1e-13 / Float64(w)
+            end
+        end
+        for ωf in (1e-4, 0.01, 0.1, 0.5, 0.9, 0.999), (i, λ) in ((1.1, 0.4), (0.2, -2.0))
+            ctx = gd_context(i, λ, ωf, 0.25)
+            for x in -0.95:0.1:0.95, y in -0.95:0.1:0.95
+                x^2 + y^2 < 1 || continue
+                yr = -(x * ctx.sλ + y * ctx.cλ)
+                zs = yr * ctx.si + sqrt(1 - x^2 - y^2) * ctx.ci
+                old = local_gravity(acos(min(abs(zs), 1.0)), ctx.ω)^ctx.p * ctx.scale
+                s = sqrt(max(1 - zs^2, 0.0))
+                @test gd_brightness(ctx, x, y) ≈ old rtol = 1e-12 + 1e-13 / max(ωf * s, 1e-300)
+            end
+        end
+        # ForwardDiff through it, in (x, y, ω, i★, λ, β), against central differences
+        for (ωf, x, y) in ((0.1, 0.3, 0.5), (0.6, -0.2, 0.7), (0.95, 0.5, -0.4),
+                           (0.998, 0.1, 0.2))
+            f(v) = gd_brightness(gd_context(v[4], v[5], v[3], v[6]), v[1], v[2])
+            v0 = [x, y, ωf, 1.1, 0.4, 0.25]
+            g = ForwardDiff.gradient(f, v0)
+            h = 1e-6
+            fd = [(f(v0 .+ h .* (1:6 .== k)) - f(v0 .- h .* (1:6 .== k))) / 2h for k in 1:6]
+            @test g ≈ fd rtol = 1e-7
+        end
+    end
+
     # ================================================================
     # 2b. λ and i_star mean what they mean everywhere else
     # ================================================================
@@ -433,7 +476,7 @@ using ForwardDiff
 
         fx(v) = Dict("type" => "FixedPrior", "args" => [v])
 
-        function build(mode; extra = Dict{String, Any}())
+        function build(mode; extra = Dict{String, Any}(), exposure = 120.0)
             priors = Dict{String, Any}(
                 "P_k1"      => fx(P),
                 "Tc_k1"     => fx(Tc),
@@ -459,7 +502,7 @@ using ForwardDiff
                                  "parametrization" => Dict("time" => "Tc",
                                                            "use_rho_s" => true)),
                 "data"   => Dict("transit_photometry" => [Dict(
-                    "instrument" => "TESS", "exposure_time" => 120.0,
+                    "instrument" => "TESS", "exposure_time" => exposure,
                     "values" => Dict("bjd" => t, "flux" => flux,
                                      "flux_err" => err))]),
             )
@@ -555,6 +598,34 @@ using ForwardDiff
         #     The ends stay closed: sin(i★) = 0 has no finite equatorial velocity.
         @test ll_and_pred(0.0, -60.0)[1] == -Inf
         @test ll_and_pred(180.0, -60.0)[1] == -Inf
+
+        # (e) ForwardDiff through the whole gravity-darkened photometric
+        #     likelihood -- disc average, brightness, sky position, transit
+        #     window and sub-sample gate -- against central differences, on the
+        #     2-min cadences (one evaluation each) and on 10-min ones (ten
+        #     sub-samples each). Geometry, limb darkening, i★, λ and v sin i★.
+        gnames = ["i_star", "lambda_k1", "v_sin_i_star", "b_k1", "rr_k1", "rho_s",
+                  "Tc_k1", "q1_TESS"]
+        for exposure in (120.0, 600.0)
+            pg, dg = build("PM_GD"; extra = gd_extra, exposure)
+            @test Nereus._phot_n_super(dg) == (exposure > 180 ? 10 : 1)
+            idx = [pg.layout.name_to_idx[nm] for nm in gnames]
+            v0 = Nereus.Theta{Float64}(pg).values[idx]
+            v0[1] = deg2rad(50.0)
+            function ll_of(v)
+                θ = Nereus.Theta{eltype(v)}(pg)
+                θ.values[idx] .= v
+                return Nereus.transit_log_likelihood(θ, dg)
+            end
+            g = ForwardDiff.gradient(ll_of, v0)
+            fd = map(eachindex(v0)) do k
+                h = 1e-6 * max(abs(v0[k]), 1e-3)
+                e = (1:length(v0)) .== k
+                (ll_of(v0 .+ h .* e) - ll_of(v0 .- h .* e)) / 2h
+            end
+            @test all(isfinite, g)
+            @test g ≈ fd rtol = 1e-5
+        end
     end
 
     # ================================================================
