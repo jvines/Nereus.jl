@@ -630,7 +630,14 @@ end
 function _as_prior(d::AbstractDict)
     t = lowercase(String(get(d, "type", "")))
     g(k, dflt=nothing) = get(d, k, dflt)
-    t == "normal"      && return NormalPrior(float(g("mu")), float(g("sigma")))
+    # `lo`/`hi`, either or both, truncate a normal: a bounded quantity such as an
+    # inclination is refused a prior that reaches past its physical range.
+    if t == "normal"
+        (haskey(d, "lo") || haskey(d, "hi")) ||
+            return NormalPrior(float(g("mu")), float(g("sigma")))
+        return NormalPrior(float(g("mu")), float(g("sigma")),
+                           float(g("lo", -Inf)), float(g("hi", Inf)))
+    end
     t == "uniform"     && return UniformPrior(float(g("lo")), float(g("hi")))
     t == "loguniform"  && return LogUniformPrior(float(g("lo")), float(g("hi")))
     t == "fixed"       && return FixedPrior(float(g("value")))
