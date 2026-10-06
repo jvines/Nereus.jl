@@ -27,7 +27,7 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
 function tw_zsep(t, P, e, ω, Tp, b, aR)
     ome2 = 1 - e * e; s1 = sqrt(ome2); sω, cω = sincos(ω)
     cos_i = b * ((1 + e * sω) / ome2) / aR; si2 = 1 - cos_i * cos_i
-    M = 2π / P * (t - Tp); E = kepler_solve(M, e); sE, cE = sincos(E)
+    M = 2π * (t - Tp) / P; E = iszero(e) ? M : kepler_solve(M, e); sE, cE = sincos(E)
     d = 1 - e * cE; cf = (cE - e) / d; sf = s1 * sE / d
     roa = ome2 / (1 + e * cf); swf = sω * cf + cω * sf
     return aR * roa * sqrt(max(1 - si2 * swf * swf, 0.0)), swf
@@ -144,7 +144,6 @@ end
             th = Nereus.Theta{Float64}(tg.params)
             sys = tg.params.layout.systemic
             n_super = Nereus._phot_n_super(data)
-            pad = n_super > 1 ? Nereus._phot_max_exposure(data) / 2 : 0.0
             @test (n_super > 1) == exposure
             n_cmp = 0; n_narrow = 0
             for v in transit_gate_points(tg, 60; seed = 41)
@@ -159,8 +158,10 @@ end
                 _, ttv_state = Nereus._decode_ttv_state(th, Nereus.planet_indices(th))
                 r_for_j = [ttv ? 1 : 0]
                 old = [tw_old(P, rr, aR)]
+                # the likelihood's window: pad 0 (each cadence adds its own
+                # reach) and the cos i term
                 tight = _set_transit_windows!([Inf], 1, [true], r_for_j, ttv_state, [P], [e], [ω],
-                                              [rr], [aR], [Tc], [Tp], pad)
+                                              [rr], [aR], [Tc], [Tp], 0.0, [b])
                 tight[1] < old[1] && (n_narrow += 1)
                 lds = [QuadLimbDark(collect(kipping_q_to_u(th.values[sys.ld_q1[ix]],
                                                            th.values[sys.ld_q2[ix]]))) for ix in 1:2]

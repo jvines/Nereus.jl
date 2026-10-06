@@ -5,10 +5,9 @@
 # The two are the same function up to rounding, not to the bit. On a fit with
 # no noise models at all (on any channel) the workspace RV method caches each
 # planet's velocity curve and computes cos(f+ω) by the angle-sum identity; the
-# workspace photometry computes each cadence's sky separation by the same route
-# and sums every cadence in one pass, where `_logdensity_parts` sums fixed
-# 4096-point chunks and then the chunk totals. Near the posterior of a 20k-point
-# light curve they differ by a few 1e-9 nats. Relative to |log prior| +
+# workspace photometry sums every cadence in one pass, where `_logdensity_parts`
+# sums fixed 4096-point chunks and then the chunk totals. Near the posterior of a
+# 20k-point light curve they differ by a few 1e-9 nats. Relative to |log prior| +
 # |log L_RV| + |log L_phot| the largest difference measured is 2.9e-11 (a
 # sample maximum); a difference much larger than that, on that scale, is a bug
 # in one of the two, not rounding. Relative to max(1, |log p|), the scale the
@@ -115,11 +114,11 @@ end
 
 # Gravity darkening. The workspace transit method had no gravity-darkened model
 # when the evaluator was written; it handed over to the allocating method only
-# for TTVs, for exposures longer than 2 min and for photometric noise models.
-# So on a fit with a :GD planet and every cadence at 2 min or shorter, an
-# evaluator that called it integrated a posterior with no gravity darkening:
-# flat in i_star and lambda, and thousands of nats away from
-# `_logdensity_parts`. The workspace method now has gravity darkening
+# for TTVs, for supersampled exposures (then longer than 2 min, now longer than
+# 3 min) and for photometric noise models. So on a fit with a :GD planet and no
+# supersampled cadence, an evaluator that called it integrated a posterior with
+# no gravity darkening: flat in i_star and lambda, and thousands of nats away
+# from `_logdensity_parts`. The workspace method now has gravity darkening
 # (test_gd_workspace_likelihood.jl); the evaluator still takes the allocating
 # photometry for these fits, and must see i_star and lambda.
 const _BW_GD_P, _BW_GD_ARS = 2.827969, 6.815

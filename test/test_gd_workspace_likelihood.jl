@@ -3,19 +3,18 @@
 # Every sampler that keeps a PTWorkspace per walker -- pt_emcee, ESS, rjmcmc,
 # transdim_pt_emcee, nested -- calls `transit_log_likelihood(theta, data, ws)`.
 # That method had no gravity darkening at all: at a fixed :GD point it returned
-# the same value for every i_star, λ and β, so a GD fit whose cadences are all
-# <= 2 min (no supersampling, so the cached path is taken) sampled i_star from
-# its prior. The non-workspace method had it right and is the reference here.
+# the same value for every i_star, λ and β, so a GD fit whose cadences were all
+# <= 2 min (then the supersampling limit, now 3 min; no supersampling, so the
+# cached path is taken) sampled i_star from its prior. The non-workspace method had it right and is the reference here.
 #
 # Per cadence the two methods now compute a :GD planet's flux with the same
 # calls on the same arguments, so they agree bit for bit wherever they also sum
 # in the same order: up to `_PHOT_REDUCE_CHUNK` cadences, where both are one
 # sequential pass. Above it the non-workspace method sums fixed chunks and the
 # workspace one a single pass (an order every non-GD fit shares, so it is left
-# as it was), and they agree to rounding. A non-GD planet's row in the
-# workspace uses its own closed form for z, which differs from `sky_separation`
-# in the last bits, so a fit that mixes :GD and ordinary planets also agrees to
-# rounding only.
+# as it was), and they agree to rounding. An ordinary planet's row takes z from
+# the same per-call orbit constants (`_sky_orbit`) in both methods, so a fit that
+# mixes :GD and ordinary planets agrees bit for bit too.
 using Test
 using Nereus
 using Random
@@ -142,7 +141,7 @@ ll_direct(th, tg) = Nereus.transit_log_likelihood(th, tg.data)
     # previous one; each draw is evaluated twice (the second a cache hit) and
     # every fifth also on a fresh workspace.
     configs = [
-        # 2-min and 1-min cadences, both exposures at or under 2 min: cached path.
+        # 2-min and 1-min cadences, both exposures at or under 3 min: cached path.
         ("PM_GD 2-min + 1-min", [Nereus.PM_GD], gdw_data()),
         ("PM_GD, no exposure times", [Nereus.PM_GD], gdw_data(; exp1 = nothing)),
         ("PM_GD, 20-s cadence", [Nereus.PM_GD],
@@ -153,6 +152,7 @@ ll_direct(th, tg) = Nereus.transit_log_likelihood(th, tg.data)
         ("RVPM_GD with RVs", [Nereus.RVPM_GD], gdw_with_rv(gdw_data())),
         ("RVPM_RM_GD with RVs", [Nereus.RVPM_RM_GD], gdw_with_rv(gdw_data())),
         ("two :GD planets", [Nereus.PM_GD, Nereus.PM_GD], gdw_data(; seed = 8)),
+        ("a :GD and an ordinary planet", [Nereus.PM_GD, PM_ONLY], gdw_data(; seed = 8)),
         ("β fixed at von Zeipel", [Nereus.PM_GD], gdw_data(; seed = 9)),
     ]
     @testset "=== the non-workspace likelihood: $name" for (ci, (name, modes, data)) in
@@ -230,17 +230,14 @@ ll_direct(th, tg) = Nereus.transit_log_likelihood(th, tg.data)
     # More cadences than one reduction chunk: the two methods sum in different
     # orders and agree to rounding, 1e-12 relative. The 20-s band also puts
     # more than 2000 cadences in the window, the size at which the refresh of a
-    # row is split across threads; the value must not depend on that. The
-    # mixed fit is held to 1e-10 instead: its ordinary planet's row is the
-    # workspace's own z, which already differed from the non-workspace one by
-    # up to ~1e-11 relative for an ordinary fit, before gravity darkening.
+    # row is split across threads; the value must not depend on that.
     @testset "agrees to rounding above one reduction chunk" begin
         for (modes, data, rtol) in (([Nereus.PM_GD], gdw_data(; t2 = 9.0), 1e-12),
                                     ([Nereus.PM_GD], gdw_data(; t1 = 0.4, t2 = 2.2,
                                          step1 = 20.0, exp1 = 20.0, nights = ()), 1e-12),
-                                    ([Nereus.PM_GD, PM_ONLY], gdw_data(; seed = 8), 1e-10))
+                                    ([Nereus.PM_GD, PM_ONLY], gdw_data(; t2 = 9.0), 1e-12))
             tg = gdw_target(modes; data)
-            @test length(modes) == 2 || length(data.t_phot) > Nereus._PHOT_REDUCE_CHUNK
+            @test length(data.t_phot) > Nereus._PHOT_REDUCE_CHUNK
             th = Nereus.Theta{Float64}(tg.params)
             ws = gdw_ws(tg)
             worst = 0.0

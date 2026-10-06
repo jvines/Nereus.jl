@@ -21,6 +21,7 @@ using Nereus: roche_flattening, roche_radius, local_gravity, gd_brightness,
                QuadLimbDark, _gd_disc_mean, gd_beta_band, gd_context,
                rm_signal, planet_sky_position
 using LinearAlgebra: norm, normalize, cross
+using ForwardDiff
 
 @testset "Gravity darkening" begin
 
@@ -138,6 +139,124 @@ using LinearAlgebra: norm, normalize, cross
             s, c = sincos(λ)
             @test gd_brightness(x, y, i, λ, wf) ≈
                   gd_brightness(x * c - y * s, x * s + y * c, i, 0.0, wf) rtol = 1e-10
+        end
+    end
+
+    @testset "disc average: the 1-D form is the disc integral" begin
+        # `_gd_disc_mean` reduces the projected-area-weighted disc average to two
+        # 1-D moments in colatitude (gravity_darkening.jl). Two references that
+        # share none of that reduction:
+        #
+        #   (a) the integral over the visible hemisphere, ∫ f μ² dΩ / (2π/3), by
+        #       Gauss-Legendre in the angle from the line of sight and the midpoint
+        #       rule in azimuth: spectrally convergent, so it pins the reduction
+        #       to ~1e-11 across the whole range of ω and i★;
+        #   (b) the definition itself, a midpoint grid over the disc weighted by
+        #       μ, as the library computed it before (96 x 96); at 1000 x 1000 its
+        #       own error is ~1e-6 at break-up and ~5e-8 below ω = 0.9.
+        f(ns, ω, β) = local_gravity(acos(min(abs(ns), 1.0)), ω)^(4β)
+        function sphere_mean(i, ω, β; nα = 240, nφ = 480)
+            u, w = Nereus._gauss_legendre_01(nα)
+            si, ci = sincos(i)
+            tot = 0.0
+            for a in 1:nα
+                sα, cα = sincos(u[a] * π / 2)
+                acc = 0.0
+                for b in 1:nφ
+                    acc += f(sα * sin(2π * (b - 0.5) / nφ) * si + cα * ci, ω, β)
+                end
+                tot += w[a] * (π / 2) * sα * cα^2 * acc * (2π / nφ)
+            end
+            return tot / (2π / 3)
+        end
+        function grid_mean(i, ω, β; n = 1000)
+            si, ci = sincos(i)
+            tot = 0.0; wsum = 0.0
+            for ix in 1:n, iy in 1:n
+                x = -1 + 2 * (ix - 0.5) / n
+                y = -1 + 2 * (iy - 0.5) / n
+                ρ2 = x^2 + y^2
+                ρ2 >= 1 && continue
+                μ = sqrt(1 - ρ2)
+                tot += f(y * si + μ * ci, ω, β) * μ
+                wsum += μ
+            end
+            return tot / wsum
+        end
+        worst = 0.0
+        for ω in (0.0, 0.01, 0.1, 0.3, 0.6, 0.9, 0.99, 0.999),
+            i in range(0, π; length = 7), β in (0.08, 0.25, 0.35)
+            worst = max(worst, abs(_gd_disc_mean(i, ω, β) / sphere_mean(i, ω, β) - 1))
+        end
+        @test worst < 1e-10
+        for (ω, i, β) in ((0.3, 0.0, 0.25), (0.6, 2.5, 0.08), (0.9, π / 3, 0.25),
+                          (0.999, π / 2, 0.35), (0.999, π, 0.2))
+            @test _gd_disc_mean(i, ω, β) ≈ grid_mean(i, ω, β) rtol = (ω > 0.99 ? 3e-6 : 2e-7)
+        end
+        # No rotation: uniform, <I> = 1 for every i★.
+        for i in (0.0, 0.7, π / 2, 2.9)
+            @test _gd_disc_mean(i, 0.0, 0.25) ≈ 1.0 atol = 1e-15
+        end
+        # i★ and π − i★ see the same disc (N/S symmetry).
+        @test _gd_disc_mean(0.4, 0.8, 0.25) ≈ _gd_disc_mean(π - 0.4, 0.8, 0.25) rtol = 1e-14
+
+        # Derivatives in i★, ω and β through ForwardDiff, against central differences.
+        for (i, ω, β) in ((1.501, 0.1042, 0.185), (0.4, 0.6, 0.25), (2.6, 0.9, 0.08),
+                          (0.05, 0.99, 0.3))
+            x = [i, ω, β]
+            g = ForwardDiff.gradient(v -> _gd_disc_mean(v[1], v[2], v[3]), x)
+            h = 1e-6
+            fd = [(_gd_disc_mean((x .+ h .* (1:3 .== k))...) -
+                   _gd_disc_mean((x .- h .* (1:3 .== k))...)) / 2h for k in 1:3]
+            @test g ≈ fd rtol = 1e-6
+        end
+
+        # The likelihood's contexts share one average per β: each equals the
+        # context built on its own.
+        @test Nereus._gd_context(1.1, 0.3, 0.6, 0.2, _gd_disc_mean(1.1, 0.6, 0.2)) ===
+              gd_context(1.1, 0.3, 0.6, 0.2)
+    end
+
+    @testset "brightness from cos²θ, without acos" begin
+        # `gd_brightness` takes cos²θ = z★² and sin²θ = 1 − cos²θ instead of θ =
+        # acos|z★|, the Roche radius by Newton from r = 1 below w = ω sinθ = 0.7
+        # (closed form above), and g^p as exp((p/2) log g²). Against a BigFloat
+        # reference, and against the acos route (`local_gravity`) to that
+        # route's own accuracy: its closed-form radius cancels at small w, to
+        # ~1e-16 / w relative.
+        setprecision(BigFloat, 256) do
+            for ωf in (1e-4, 0.01, 0.1, 0.3, 0.6, 0.7, 0.75, 0.9, 0.99, 0.999),
+                c in range(0, 1; length = 101)
+                c2 = c^2; s2 = 1 - c2
+                Ω2 = (big(min(ωf, 0.9999)) * Nereus._OMEGA_CRIT_INTERNAL)^2
+                w = big(ωf) * sqrt(big(s2))
+                r = w < 1e-40 ? big(1.0) : (3 / w) * cos((big(π) + acos(w)) / 3)
+                ref = (Ω2 * r * s2 - 1 / r^2)^2 + Ω2^2 * r^2 * s2 * c2
+                g2 = Nereus._gd_gravity2(c2, s2, ωf)
+                @test g2 ≈ ref rtol = 2e-13
+                @test g2 ≈ local_gravity(acos(c), ωf)^2 rtol = 1e-12 + 1e-13 / Float64(w)
+            end
+        end
+        for ωf in (1e-4, 0.01, 0.1, 0.5, 0.9, 0.999), (i, λ) in ((1.1, 0.4), (0.2, -2.0))
+            ctx = gd_context(i, λ, ωf, 0.25)
+            for x in -0.95:0.1:0.95, y in -0.95:0.1:0.95
+                x^2 + y^2 < 1 || continue
+                yr = -(x * ctx.sλ + y * ctx.cλ)
+                zs = yr * ctx.si + sqrt(1 - x^2 - y^2) * ctx.ci
+                old = local_gravity(acos(min(abs(zs), 1.0)), ctx.ω)^ctx.p * ctx.scale
+                s = sqrt(max(1 - zs^2, 0.0))
+                @test gd_brightness(ctx, x, y) ≈ old rtol = 1e-12 + 1e-13 / max(ωf * s, 1e-300)
+            end
+        end
+        # ForwardDiff through it, in (x, y, ω, i★, λ, β), against central differences
+        for (ωf, x, y) in ((0.1, 0.3, 0.5), (0.6, -0.2, 0.7), (0.95, 0.5, -0.4),
+                           (0.998, 0.1, 0.2))
+            f(v) = gd_brightness(gd_context(v[4], v[5], v[3], v[6]), v[1], v[2])
+            v0 = [x, y, ωf, 1.1, 0.4, 0.25]
+            g = ForwardDiff.gradient(f, v0)
+            h = 1e-6
+            fd = [(f(v0 .+ h .* (1:6 .== k)) - f(v0 .- h .* (1:6 .== k))) / 2h for k in 1:6]
+            @test g ≈ fd rtol = 1e-7
         end
     end
 
@@ -357,7 +476,7 @@ using LinearAlgebra: norm, normalize, cross
 
         fx(v) = Dict("type" => "FixedPrior", "args" => [v])
 
-        function build(mode; extra = Dict{String, Any}())
+        function build(mode; extra = Dict{String, Any}(), exposure = 120.0)
             priors = Dict{String, Any}(
                 "P_k1"      => fx(P),
                 "Tc_k1"     => fx(Tc),
@@ -383,7 +502,7 @@ using LinearAlgebra: norm, normalize, cross
                                  "parametrization" => Dict("time" => "Tc",
                                                            "use_rho_s" => true)),
                 "data"   => Dict("transit_photometry" => [Dict(
-                    "instrument" => "TESS", "exposure_time" => 120.0,
+                    "instrument" => "TESS", "exposure_time" => exposure,
                     "values" => Dict("bjd" => t, "flux" => flux,
                                      "flux_err" => err))]),
             )
@@ -479,6 +598,34 @@ using LinearAlgebra: norm, normalize, cross
         #     The ends stay closed: sin(i★) = 0 has no finite equatorial velocity.
         @test ll_and_pred(0.0, -60.0)[1] == -Inf
         @test ll_and_pred(180.0, -60.0)[1] == -Inf
+
+        # (e) ForwardDiff through the whole gravity-darkened photometric
+        #     likelihood -- disc average, brightness, sky position, transit
+        #     window and sub-sample gate -- against central differences, on the
+        #     2-min cadences (one evaluation each) and on 10-min ones (ten
+        #     sub-samples each). Geometry, limb darkening, i★, λ and v sin i★.
+        gnames = ["i_star", "lambda_k1", "v_sin_i_star", "b_k1", "rr_k1", "rho_s",
+                  "Tc_k1", "q1_TESS"]
+        for exposure in (120.0, 600.0)
+            pg, dg = build("PM_GD"; extra = gd_extra, exposure)
+            @test Nereus._phot_n_super(dg) == (exposure > 180 ? 10 : 1)
+            idx = [pg.layout.name_to_idx[nm] for nm in gnames]
+            v0 = Nereus.Theta{Float64}(pg).values[idx]
+            v0[1] = deg2rad(50.0)
+            function ll_of(v)
+                θ = Nereus.Theta{eltype(v)}(pg)
+                θ.values[idx] .= v
+                return Nereus.transit_log_likelihood(θ, dg)
+            end
+            g = ForwardDiff.gradient(ll_of, v0)
+            fd = map(eachindex(v0)) do k
+                h = 1e-6 * max(abs(v0[k]), 1e-3)
+                e = (1:length(v0)) .== k
+                (ll_of(v0 .+ h .* e) - ll_of(v0 .- h .* e)) / 2h
+            end
+            @test all(isfinite, g)
+            @test g ≈ fd rtol = 1e-5
+        end
     end
 
     # ================================================================

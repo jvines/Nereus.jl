@@ -26,7 +26,7 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
 function occ_zsep(t, P, e, ω, Tp, b, aR)    # as `_phot_sparse_refresh`
     ome2 = 1 - e * e; s1 = sqrt(ome2); sω, cω = sincos(ω)
     cos_i = b * ((1 + e * sω) / ome2) / aR; si2 = 1 - cos_i * cos_i
-    M = 2π / P * (t - Tp); E = kepler_solve(M, e); sE, cE = sincos(E)
+    M = 2π * (t - Tp) / P; E = iszero(e) ? M : kepler_solve(M, e); sE, cE = sincos(E)
     d = 1 - e * cE; cf = (cE - e) / d; sf = s1 * sE / d
     roa = ome2 / (1 + e * cf); swf = sω * cf + cω * sf
     return aR * roa * sqrt(max(1 - si2 * swf * swf, 0.0)), swf
@@ -76,6 +76,8 @@ occ_fold(t, Tc, P) = (Δ = t - Tc; Δ - P * round(Δ / P))
                                            [aR], [k], [Tc], [Inf], [0], nothing, 1)
             z, sw = _sky_separation_signed(ti, P, e, ω, Tp, b, aR)
             @test z === sky_separation(ti, P, e, ω, Tp, b, aR)
+            # The product takes z from per-call orbit constants, as the refresh does.
+            z, sw = occ_zsep(ti, P, e, ω, Tp, b, aR)
             ok_i &= prod_i === (sw > 0 ? transit_flux(ld, z, k) : 1.0)
             n_behind += (sw <= 0 && z < 1 + k)
             # supersampled: 30 sub-samples, each with the same rule
@@ -83,7 +85,7 @@ occ_fold(t, Tc, P) = (Δ = t - Tc; Δ - P * round(Δ / P))
                                            [aR], [k], [Tc], [Inf], [0], nothing, 30)
             fsum = 0.0
             for s in 1:30
-                zs, sws = _sky_separation_signed(ti + ((2s - 31) / 60) * texp, P, e, ω, Tp, b, aR)
+                zs, sws = occ_zsep(ti + ((2s - 31) / 60) * texp, P, e, ω, Tp, b, aR)
                 fsum += sws > 0 ? transit_flux(ld, zs, k) : 1.0
             end
             ok_s &= prod_s === 1.0 * (fsum / 30)
