@@ -161,13 +161,16 @@ end
 
 # ------------------------------------------------------------------
 # Periodic convergence diagnostic on the β=1 ensemble (walkers = chains).
-# Returns (mean_rhat, max_rhat, mean_bulk_ess, min_tail_ess) over the
-# `science_cols` columns of the flat `samples` buffer, or `nothing` when
-# there are too few post-burnin steps. Steps are thinned to ≤ `cap` so the
-# cost stays flat as the chain grows. The gate (convergence_stop) is on the
-# WORST science param (max R-hat, min tail-ESS); nuisances are excluded so a
-# poorly-constrained jitter/GP hyperparameter can never stall the run — and a
-# nuisance that's coupled to a science param surfaces in that param's R-hat.
+# Returns, over the `science_cols` columns of the flat `samples` buffer, the
+# per-parameter split R-hat, bulk ESS and tail ESS (NaN where undefined) and
+# their summaries: mean/max R-hat, mean bulk ESS and min tail ESS over the
+# finite values, with the position in `science_cols` of the worst R-hat and of
+# the worst tail ESS (0 when none is finite). `nothing` when there are too few
+# post-burnin steps. Steps are thinned to ≤ `cap` so the cost stays flat as the
+# chain grows. The gate (convergence_stop) is on the WORST science param (max
+# R-hat, min tail-ESS); nuisances are excluded so a poorly-constrained
+# jitter/GP hyperparameter can never stall the run — and a nuisance that's
+# coupled to a science param surfaces in that param's R-hat.
 # ------------------------------------------------------------------
 function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
                           n_walkers::Int, science_cols::Vector{Int};
@@ -190,6 +193,11 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
             end
         end
     end
+    return _pt_cube_diag(cube)
+end
+
+# The diagnostics of a (step, parameter, walker) cube; see `_pt_convergence`.
+function _pt_cube_diag(cube::Array{Float64,3})
     local rh, bess, tess
     try
         ch = MCMCChains.Chains(cube)
@@ -202,14 +210,29 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
     # MCMCChains returns a SCALAR (not a 1-element vector) when there is exactly
     # one science column — which happens whenever most parameters are held at
     # FixedPrior (e.g. an RM-only fit). Normalise to a vector before filtering.
-    _asvec(x) = x isa AbstractArray ? vec(x) : [x]
-    rhf = filter(isfinite, _asvec(rh))
-    bf  = filter(isfinite, _asvec(bess))
-    tf  = filter(isfinite, _asvec(tess))
-    isempty(rhf) && return nothing
-    (mean(rhf), maximum(rhf),
-     isempty(bf) ? 0.0 : mean(bf),
-     isempty(tf) ? 0.0 : minimum(tf))
+    _asvec(x) = Float64[isfinite(v) ? v : NaN for v in (x isa AbstractArray ? vec(x) : [x])]
+    rh, bess, tess = _asvec(rh), _asvec(bess), _asvec(tess)
+    # Worst = max R-hat / min tail ESS over the finite values; NaN never wins.
+    i_r = 0; i_t = 0
+    for i in eachindex(rh)
+        isfinite(rh[i]) && (i_r == 0 || rh[i] > rh[i_r]) && (i_r = i)
+        isfinite(tess[i]) && (i_t == 0 || tess[i] < tess[i_t]) && (i_t = i)
+    end
+    i_r == 0 && return nothing
+    bf = filter(isfinite, bess)
+    return (; rhat = rh, bulk_ess = bess, tail_ess = tess,
+              mean_rhat = mean(filter(isfinite, rh)), max_rhat = rh[i_r], worst_rhat = i_r,
+              mean_bulk = isempty(bf) ? 0.0 : mean(bf),
+              min_tail = i_t == 0 ? 0.0 : tess[i_t], worst_tail = i_t)
+end
+
+# The readout of a diagnostic: "mean/worst(name)" for R-hat and
+# "mean bulk/worst tail(name)" for ESS, e.g. 1.004/1.031(K_k2) and 8100/950(P_k1).
+function _pt_diag_strings(diag, names::AbstractVector{<:AbstractString})
+    rn = diag.worst_rhat > 0 ? "(" * names[diag.worst_rhat] * ")" : ""
+    tn = diag.worst_tail > 0 ? "(" * names[diag.worst_tail] * ")" : ""
+    return (@sprintf("%.3f/%.3f%s", diag.mean_rhat, diag.max_rhat, rn),
+            string(round(Int, diag.mean_bulk), "/", round(Int, diag.min_tail), tn))
 end
 
 # ------------------------------------------------------------------
@@ -513,6 +536,7 @@ function sample_pt_emcee(
         science_params
     science_cols = Int[i for (i, nm) in enumerate(layout.unfrozen_names) if nm in _sci_names]
     isempty(science_cols) && (science_cols = collect(1:n_dim))   # fallback: gate on all
+    sci_names = layout.unfrozen_names[science_cols]   # for the readout
     diag_cadence = diag_every > 0 ? diag_every : max(200, n_steps ÷ 40)
     # Walkers live in BOUNDED space — no transform used in the move
     # loop. The transform is irrelevant for pt_emcee: M-H acceptance
@@ -1071,12 +1095,10 @@ function sample_pt_emcee(
         if step > n_burnin && (step - n_burnin) % diag_cadence == 0
             diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols)
             if diag !== nothing
-                meanr, maxr, meanb, mte = diag
-                rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))
-                ess_str  = string(round(Int, meanb), "/", round(Int, mte))
+                rhat_str, ess_str = _pt_diag_strings(diag, sci_names)
                 if convergence_stop
-                    pass = step >= min_steps && maxr < rhat_threshold &&
-                           mte > tail_ess_threshold
+                    pass = step >= min_steps && diag.max_rhat < rhat_threshold &&
+                           diag.min_tail > tail_ess_threshold
                     conv_run = pass ? conv_run + 1 : 0
                     conv_run >= n_converged_checks && (converged_at = step)
                 end
