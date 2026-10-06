@@ -85,6 +85,13 @@ end
     @test Nereus._pt_ring_diag(ring, 11, 10).rhat ==
           Nereus._pt_cube_diag(ring[1:10, :, :]).rhat
     @test Nereus._pt_ring_diag(ring, 4, 3) === nothing
+
+    # The steps a window spans, as the log reports it. Thinned by 2 (a cadence
+    # of 937, as at 37,500 steps): rows at the even steps, the last at 936.
+    @test Nereus._pt_burn_window(937, 2, 468) == [2, 936]
+    @test Nereus._pt_burn_window(1300, 3, 366) == [204, 1299]
+    @test Nereus._pt_burn_window(20, 1, 20) == [1, 20]
+    @test Nereus._pt_burn_window(5, 1, 0) === nothing
 end
 
 # The RV target of test_pt_emcee_resume.jl: one planet with a circular Mo, so
