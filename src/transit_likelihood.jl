@@ -383,21 +383,30 @@ end
 # path with no extra work at all.
 function _gd_contexts(theta, gd, n_transit::Int, n_pm::Int)
     gd === nothing && return nothing
-    ctx1 = gd_context(gd.i_star, gd.λs[1], gd.ω_frac, system_gd_beta(theta, 1))
+    # The disc average depends on i★, ω and β, not on λ, and its β-free part (log g
+    # at the quadrature nodes) on ω alone: that is computed once here, and the
+    # average once per distinct β, shared by every planet's context in the band.
+    ω = _gd_omega(gd.ω_frac)
+    lg = ω < 1e-6 ? nothing : _gd_node_logs(ω)        # nothing: no rotation, flat map
+    β1 = system_gd_beta(theta, 1)
+    mean1 = lg === nothing ? nothing : _gd_disc_mean_nodes(lg, gd.i_star, β1)
+    ctx1 = _gd_context(gd.i_star, gd.λs[1], ω, β1, mean1)
     out = Matrix{typeof(ctx1)}(undef, n_transit, n_pm)
     @inbounds for ix in 1:n_pm
         β = system_gd_beta(theta, ix)
         # Bands that share β (several cadences of one survey, say) share the
-        # context: building one is a 96 x 96 disc integral, so do it once per β.
+        # contexts.
         prev = 0
         for jx in 1:(ix - 1)
             system_gd_beta(theta, jx) == β && (prev = jx; break)
         end
+        mean = (prev > 0 || ix == 1 || lg === nothing) ? mean1 :
+               _gd_disc_mean_nodes(lg, gd.i_star, β)
         for j in 1:n_transit
             out[j, ix] = !gd.on[j] ? ctx1 :
                 prev > 0 ? out[j, prev] :
                 (j == 1 && ix == 1) ? ctx1 :
-                gd_context(gd.i_star, gd.λs[j], gd.ω_frac, β)
+                _gd_context(gd.i_star, gd.λs[j], ω, β, mean)
         end
     end
     return out

@@ -21,6 +21,7 @@ using Nereus: roche_flattening, roche_radius, local_gravity, gd_brightness,
                QuadLimbDark, _gd_disc_mean, gd_beta_band, gd_context,
                rm_signal, planet_sky_position
 using LinearAlgebra: norm, normalize, cross
+using ForwardDiff
 
 @testset "Gravity darkening" begin
 
@@ -139,6 +140,81 @@ using LinearAlgebra: norm, normalize, cross
             @test gd_brightness(x, y, i, λ, wf) ≈
                   gd_brightness(x * c - y * s, x * s + y * c, i, 0.0, wf) rtol = 1e-10
         end
+    end
+
+    @testset "disc average: the 1-D form is the disc integral" begin
+        # `_gd_disc_mean` reduces the projected-area-weighted disc average to two
+        # 1-D moments in colatitude (gravity_darkening.jl). Two references that
+        # share none of that reduction:
+        #
+        #   (a) the integral over the visible hemisphere, ∫ f μ² dΩ / (2π/3), by
+        #       Gauss-Legendre in the angle from the line of sight and the midpoint
+        #       rule in azimuth: spectrally convergent, so it pins the reduction
+        #       to ~1e-11 across the whole range of ω and i★;
+        #   (b) the definition itself, a midpoint grid over the disc weighted by
+        #       μ, as the library computed it before (96 x 96); at 1000 x 1000 its
+        #       own error is ~1e-6 at break-up and ~5e-8 below ω = 0.9.
+        f(ns, ω, β) = local_gravity(acos(min(abs(ns), 1.0)), ω)^(4β)
+        function sphere_mean(i, ω, β; nα = 240, nφ = 480)
+            u, w = Nereus._gauss_legendre_01(nα)
+            si, ci = sincos(i)
+            tot = 0.0
+            for a in 1:nα
+                sα, cα = sincos(u[a] * π / 2)
+                acc = 0.0
+                for b in 1:nφ
+                    acc += f(sα * sin(2π * (b - 0.5) / nφ) * si + cα * ci, ω, β)
+                end
+                tot += w[a] * (π / 2) * sα * cα^2 * acc * (2π / nφ)
+            end
+            return tot / (2π / 3)
+        end
+        function grid_mean(i, ω, β; n = 1000)
+            si, ci = sincos(i)
+            tot = 0.0; wsum = 0.0
+            for ix in 1:n, iy in 1:n
+                x = -1 + 2 * (ix - 0.5) / n
+                y = -1 + 2 * (iy - 0.5) / n
+                ρ2 = x^2 + y^2
+                ρ2 >= 1 && continue
+                μ = sqrt(1 - ρ2)
+                tot += f(y * si + μ * ci, ω, β) * μ
+                wsum += μ
+            end
+            return tot / wsum
+        end
+        worst = 0.0
+        for ω in (0.0, 0.01, 0.1, 0.3, 0.6, 0.9, 0.99, 0.999),
+            i in range(0, π; length = 7), β in (0.08, 0.25, 0.35)
+            worst = max(worst, abs(_gd_disc_mean(i, ω, β) / sphere_mean(i, ω, β) - 1))
+        end
+        @test worst < 1e-10
+        for (ω, i, β) in ((0.3, 0.0, 0.25), (0.6, 2.5, 0.08), (0.9, π / 3, 0.25),
+                          (0.999, π / 2, 0.35), (0.999, π, 0.2))
+            @test _gd_disc_mean(i, ω, β) ≈ grid_mean(i, ω, β) rtol = (ω > 0.99 ? 3e-6 : 2e-7)
+        end
+        # No rotation: uniform, <I> = 1 for every i★.
+        for i in (0.0, 0.7, π / 2, 2.9)
+            @test _gd_disc_mean(i, 0.0, 0.25) ≈ 1.0 atol = 1e-15
+        end
+        # i★ and π − i★ see the same disc (N/S symmetry).
+        @test _gd_disc_mean(0.4, 0.8, 0.25) ≈ _gd_disc_mean(π - 0.4, 0.8, 0.25) rtol = 1e-14
+
+        # Derivatives in i★, ω and β through ForwardDiff, against central differences.
+        for (i, ω, β) in ((1.501, 0.1042, 0.185), (0.4, 0.6, 0.25), (2.6, 0.9, 0.08),
+                          (0.05, 0.99, 0.3))
+            x = [i, ω, β]
+            g = ForwardDiff.gradient(v -> _gd_disc_mean(v[1], v[2], v[3]), x)
+            h = 1e-6
+            fd = [(_gd_disc_mean((x .+ h .* (1:3 .== k))...) -
+                   _gd_disc_mean((x .- h .* (1:3 .== k))...)) / 2h for k in 1:3]
+            @test g ≈ fd rtol = 1e-6
+        end
+
+        # The likelihood's contexts share one average per β: each equals the
+        # context built on its own.
+        @test Nereus._gd_context(1.1, 0.3, 0.6, 0.2, _gd_disc_mean(1.1, 0.6, 0.2)) ===
+              gd_context(1.1, 0.3, 0.6, 0.2)
     end
 
     # ================================================================

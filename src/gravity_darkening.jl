@@ -122,13 +122,25 @@ polar-gravity normalisation and the disc average.
 
 This exists for speed. The photometric likelihood evaluates the brightness once
 per cadence -- 61 000 times per call for a representative A-star transit -- and
-the disc average is a 96 x 96 integral, so it belongs here, once per call, and
-never in the per-cadence path. It is not cached across calls (see
+the disc average is an integral over the disc, so it belongs here, once per
+call, and never in the per-cadence path. It is not cached across calls (see
 `_gd_disc_mean`): a shared cache needs a lock, and parallel walkers then queue on
 it for values none of them reuse.
 """
 @inline function gd_context(i_star::Real, λ::Real, ω_frac::Real, β::Real = 0.25)
-    ω = clamp(float(ω_frac), 0.0, 0.999)
+    ω = _gd_omega(ω_frac)
+    ω < 1e-6 && return _gd_context(i_star, λ, ω, β, nothing)
+    return _gd_context(i_star, λ, ω, β, _gd_disc_mean(i_star, ω, β))
+end
+
+# The rotation rate the brightness map uses: Ω/Ω_crit, kept below break-up.
+@inline _gd_omega(ω_frac) = clamp(float(ω_frac), 0.0, 0.999)
+
+# `gd_context` with the disc average `mean` already computed, for ω from
+# `_gd_omega`. The likelihood builds one context per (planet, band) and the
+# average depends on neither λ nor the planet, so `_gd_contexts` computes it once
+# per distinct β and passes it here.
+@inline function _gd_context(i_star::Real, λ::Real, ω::Real, β::Real, mean)
     sλ, cλ = sincos(λ)
     si, ci = sincos(i_star)
     if ω < 1e-6
@@ -137,10 +149,9 @@ it for values none of them reuse.
         return (sλ = sλ, cλ = cλ, si = si, ci = ci, ω = 0.0,
                 p = 4 * float(β), scale = 0.0)
     end
-    p = 4 * float(β)
-    g_pole = local_gravity(0.0, ω)
-    scale = 1 / (g_pole^p * _gd_disc_mean(i_star, ω, β))
-    return (sλ = sλ, cλ = cλ, si = si, ci = ci, ω = ω, p = p, scale = scale)
+    # `local_gravity` is normalised to the pole (g = 1 there exactly), so the scale
+    # is the inverse disc average alone.
+    return (sλ = sλ, cλ = cλ, si = si, ci = ci, ω = ω, p = 4 * float(β), scale = 1 / mean)
 end
 
 """
@@ -183,27 +194,86 @@ end
 # near-miss returned the value computed at whichever nearby point got there first,
 # which made the likelihood depend on thread scheduling. Computing it directly
 # also keeps d<I>/di★ in any AD gradient.
+#
+# The average is the projected-area-weighted mean over the visible disc,
+#
+#     <I> = ∫ f μ dx dy / ∫ μ dx dy,   f = (g(θ)/g_pole)^{4β},  μ = √(1 − x² − y²),
+#
+# with cos θ = |n·s| for the surface normal n and the spin axis s. It reduces to
+# 1-D integrals in colatitude, exactly:
+#
+#   * on the sphere dx dy = μ dΩ, so the numerator is ∫_visible f μ² dΩ and the
+#     denominator is 2π/3;
+#   * f(n) = f(−n) (the map is N/S symmetric) and μ² is even, so the integral
+#     over the visible hemisphere is half the one over the whole sphere: the
+#     terminator drops out;
+#   * over the whole sphere, with u = cos θ and φ the azimuth about s,
+#     μ = u cos i★ + √(1−u²) sin i★ cos φ and ∫₀^{2π} μ² dφ = 2π [u² cos² i★ +
+#     (1−u²) sin² i★ / 2].
+#
+# Hence
+#
+#     <I> = 3 [cos² i★ M₂ + sin² i★ (M₀ − M₂)/2],     M_k = ∫₀¹ f(u) u^k du,
+#
+# and i★ enters in closed form. f is analytic in u on [0, 1] (r and g depend on
+# sin² θ = 1 − u²), so Gauss–Legendre converges geometrically: 32 nodes are at
+# round-off for ω ≤ 0.99 and within 5e-12 at the 0.999 clamp. The 96 x 96
+# midpoint grid this replaced was off by 1e-7 at ω = 0.1 and 8e-5 near
+# break-up, and cost 7 200 `local_gravity` calls per band instead of 32.
+#
+# f depends on β only through the power, so log g at the nodes is computed once
+# per ω (`_gd_node_logs`) and each band's average from it (`_gd_disc_mean_nodes`).
+# The nodes are tuples of Float64 constants: AD sees only the arithmetic in
+# (i★, ω, β).
 
-function _gd_disc_mean_raw(i_star, ω_frac, β)
-    n = 96
-    tot = zero(promote_type(typeof(i_star), typeof(ω_frac), typeof(β)))
-    wsum = 0.0
-    si, ci = sincos(i_star)
-    g_pole = local_gravity(0.0, ω_frac)
-    for ix in 1:n, iy in 1:n
-        x = -1.0 + 2.0 * (ix - 0.5) / n
-        y = -1.0 + 2.0 * (iy - 0.5) / n
-        ρ2 = x^2 + y^2
-        ρ2 >= 1.0 && continue
-        zr = sqrt(1.0 - ρ2)
-        z_star = y * si + zr * ci
-        θ = acos(clamp(abs(z_star), -1.0, 1.0))
-        g = local_gravity(θ, ω_frac)
-        tot += (g / g_pole)^(4β) * zr          # projected-area weighting
-        wsum += zr
+# Gauss–Legendre nodes and weights on [0, 1] (Newton on the three-term recurrence).
+function _gauss_legendre_01(n::Int)
+    u = zeros(n); w = zeros(n)
+    for i in 1:n
+        z = cos(π * (i - 0.25) / (n + 0.5))
+        for _ in 1:100
+            p0, p1 = 1.0, z
+            for k in 2:n
+                p0, p1 = p1, ((2k - 1) * z * p1 - (k - 1) * p0) / k
+            end
+            dz = p1 / (n * (z * p1 - p0) / (z^2 - 1))
+            z -= dz
+            abs(dz) <= 4eps() && break
+        end
+        p0, p1 = 1.0, z
+        for k in 2:n
+            p0, p1 = p1, ((2k - 1) * z * p1 - (k - 1) * p0) / k
+        end
+        dp = n * (z * p1 - p0) / (z^2 - 1)
+        u[i] = (1 + z) / 2                       # node on [0, 1]
+        w[i] = 1 / ((1 - z^2) * dp^2)            # weight on [0, 1]
     end
-    return wsum > 0 ? tot / wsum : one(tot)
+    return u, w
 end
+
+const _GD_NQ = 32
+# cos θ, colatitude θ, and the weights of M₀ and M₂ at the nodes
+const _GD_U, _GD_θ, _GD_W0, _GD_W2 = let (u, w) = _gauss_legendre_01(_GD_NQ)
+    (Tuple(u), Tuple(acos.(u)), Tuple(w), Tuple(w .* u .^ 2))
+end
+
+# log g (pole-normalised) at the quadrature nodes: the β-independent part of <I>.
+@inline _gd_node_logs(ω_frac) = ntuple(k -> log(local_gravity(_GD_θ[k], ω_frac)), Val(_GD_NQ))
+
+# <I> for one β from the node logs.
+@inline function _gd_disc_mean_nodes(lg::NTuple{N}, i_star, β) where {N}
+    si, ci = sincos(i_star)
+    p = 4β
+    m0 = m2 = zero(promote_type(eltype(lg), typeof(p)))
+    @inbounds for k in 1:N
+        f = exp(p * lg[k])
+        m0 += _GD_W0[k] * f
+        m2 += _GD_W2[k] * f
+    end
+    return 3 * (ci^2 * m2 + si^2 * (m0 - m2) / 2)
+end
+
+_gd_disc_mean_raw(i_star, ω_frac, β) = _gd_disc_mean_nodes(_gd_node_logs(ω_frac), i_star, β)
 
 _gd_disc_mean(i_star, ω_frac, β) = _gd_disc_mean_raw(i_star, ω_frac, β)
 
