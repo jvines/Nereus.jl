@@ -48,3 +48,22 @@ end
     @test d2.worst_rhat == 2 && d2.rhat ≈ d.rhat
     @test Nereus._pt_convergence(flat, 3 * n_w, n_w, [2, 3, 4, 5]) === nothing
 end
+
+@testset "pt_emcee readout: ladder and cold log-posterior" begin
+    s = Nereus._pt_swap_summary([40.0, 9.0, 30.0], [100, 100, 100])
+    @test s.rates == [0.4, 0.09, 0.3] && s.worst == 2
+    @test s.mean ≈ 0.79 / 3 && s.min == 0.09
+    @test Nereus._pt_swap_str(s) == "0.263/0.090(2-3)"
+    @test Nereus._pt_swap_str(Nereus._pt_swap_summary(Float64[], Int[])) == "—"
+
+    # Walkers move on log(x + s) for a log-uniform prior; the readout is the
+    # :lp of the recorded draws, so that Jacobian comes back off.
+    state = reshape([log(2.0), log(4.0), 0.5, 0.7], 1, 2, 2)   # (rung, walker, dim)
+    logπ = [-1.0 -2.0]; logL = [10.0 20.0]
+    med, mx = Nereus._pt_cold_lp(state, logπ, logL,
+                                 Union{Nothing,Float64}[0.0, nothing])
+    @test mx ≈ -2.0 - log(4.0) + 20.0
+    @test med ≈ ((-1.0 - log(2.0) + 10.0) + mx) / 2
+    @test Nereus._pt_lp_str(74390.4) == "74390" && Nereus._pt_lp_str(-152.34) == "-152.3"
+    @test Nereus._pt_count_str(950) == "950" && Nereus._pt_count_str(1_234_567) == "1.2M"
+end

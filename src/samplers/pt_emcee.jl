@@ -235,6 +235,42 @@ function _pt_diag_strings(diag, names::AbstractVector{<:AbstractString})
             string(round(Int, diag.mean_bulk), "/", round(Int, diag.min_tail), tn))
 end
 
+# The ladder's swap acceptance so far: per adjacent pair, mean and min over the
+# pairs, and the colder rung of the worst pair (0 with one rung, which has no
+# swaps).
+function _pt_swap_summary(accept_swap::Vector{Float64}, propose_swap::Vector{Int})
+    rates = accept_swap ./ max.(propose_swap, 1)
+    isempty(rates) && return (; rates, mean = NaN, min = NaN, worst = 0)
+    k = argmin(rates)
+    return (; rates, mean = mean(rates), min = rates[k], worst = k)
+end
+
+# Median and max over the walkers of the cold (β = 1) log-posterior, on the
+# scale the draws are recorded on (the :lp column).
+function _pt_cold_lp(state::Array{Float64,3}, logπ_arr::Matrix{Float64},
+                     logL_arr::Matrix{Float64},
+                     flat_shift::Vector{Union{Nothing,Float64}})
+    n_w = size(state, 2)
+    lp = Vector{Float64}(undef, n_w)
+    @inbounds for w in 1:n_w
+        log_jac = 0.0
+        for d in eachindex(flat_shift)
+            flat_shift[d] === nothing || (log_jac += state[1, w, d])
+        end
+        lp[w] = logπ_arr[1, w] - log_jac + logL_arr[1, w]
+    end
+    return (median(lp), maximum(lp))
+end
+
+# Compact readouts for the progress line.
+_pt_lp_str(x::Real) = !isfinite(x) ? string(x) :
+                      abs(x) >= 1e4 ? @sprintf("%.0f", x) : @sprintf("%.1f", x)
+_pt_count_str(n::Integer) = n < 10_000 ? string(n) :
+                            n < 10^6 ? @sprintf("%.1fk", n / 1e3) :
+                            n < 10^9 ? @sprintf("%.1fM", n / 1e6) : @sprintf("%.2fG", n / 1e9)
+_pt_swap_str(s) = s.worst == 0 ? "—" :
+                  @sprintf("%.3f/%.3f(%d-%d)", s.mean, s.min, s.worst, s.worst + 1)
+
 # ------------------------------------------------------------------
 # Circular re-cut of a tempered ensemble (see src/circular.jl).
 #
@@ -912,8 +948,10 @@ function sample_pt_emcee(
     end
 
     # --- Progress bar (per-step accept rate + ETA) --------------------
+    # A short bar: the readout after it is long, and a line wider than the
+    # terminal wraps and defeats the in-place refresh.
     pb = ProgressBar("pt_emcee"; total = n_steps, enabled = show_progress,
-                     start = step0)
+                     start = step0, width = 12)
 
     # --- Live convergence readout + optional run-until-converged ------
     rhat_str = "—"; ess_str = "—"      # cached "mean/worst" displays
@@ -1110,6 +1148,7 @@ function sample_pt_emcee(
             total_props = sum(propose_within)
             total_acc = sum(accept_within)
             acc_rate = total_props > 0 ? total_acc / total_props : 0.0
+            lp_med, lp_max = _pt_cold_lp(state, logπ_arr, logL_arr, flat_shift)
             update!(pb; n_done = step,
                     fields = (:acc => round(acc_rate, digits = 3),
                               :β1_acc => round(accept_within[1] / max(propose_within[1], 1), digits = 3),
@@ -1117,18 +1156,15 @@ function sample_pt_emcee(
                               # half that fails silently: once the rungs stop
                               # exchanging, the cold chain is stuck in one mode
                               # and R-hat happily certifies convergence to it.
-                              # The docstring has warned about a tiny
-                              # minimum(acceptance_swap) since the sampler was
-                              # written; the counters were right here and the
-                              # readout never showed them.
-                              # One rung (n_temps = 1) has no swaps: NaN, not
-                              # `minimum` of an empty vector, which threw.
-                              :min_swap => isempty(accept_swap) ? NaN :
-                                  round(minimum(accept_swap ./ max.(propose_swap, 1)),
-                                        digits = 3),
+                              # mean/min over the adjacent pairs, and which pair
+                              # is the min. One rung (n_temps = 1) has no swaps.
+                              :swap => _pt_swap_str(_pt_swap_summary(accept_swap,
+                                                                     propose_swap)),
+                              # Cold-rung log-posterior, median/max over walkers.
+                              :lp => string(_pt_lp_str(lp_med), "/", _pt_lp_str(lp_max)),
                               :Rhat => rhat_str,    # mean/worst over science params
                               :ESS => ess_str,      # mean(bulk)/worst(tail)
-                              :nevals => n_evals_atomic[]))
+                              :nevals => _pt_count_str(n_evals_atomic[])))
         end
 
         # ---- Checkpoint: every `checkpoint_interval` s, on the last step, and
