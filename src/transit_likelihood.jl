@@ -232,15 +232,6 @@ end
     return n
 end
 
-# Longest finite positive exposure in the data (days); 0 when there is none.
-function _phot_max_exposure(data::Data)
-    mx = 0.0
-    @inbounds for e in data.exposure_times
-        (isfinite(e) && e > mx) && (mx = e)
-    end
-    return mx
-end
-
 # =====================================================================
 # Transit window: which cadences get a flux evaluation
 # =====================================================================
@@ -256,25 +247,46 @@ end
 # short (P = 4.137 d, k = 0.031, a_R = 12.7, b = 0.3, ω = -π/2 lost 4.4 % of
 # the in-transit cadences at e = 0.90 and 21 % at e = 0.93; at a_R = 3 the
 # loss starts near e = 0.8). The window is now `_transit_window_halfwidth`, a
-# bound from the orbit itself:
+# bound from the orbit itself. With u = ω + f,
 #
-#     z = (r/R*) sqrt(1 - sin²i sin²(ω+f)) >= (r/R*)|cos(ω+f)| >= a_R (1-e)|cos(ω+f)|
+#     z² = (r/R*)² (1 - sin²i sin²u) = (r/R*)² (cos²i + sin²i cos²u)
 #
-# so z < 1 + k needs |cos(ω+f)| < s = (1+k)/(a_R(1-e)), i.e. f within asin(s)
-# of a conjunction. Around the transit conjunction f_c = π/2 - ω the half-width
-# is the longer of the two mean-anomaly spans f_c -> f_c ± asin(s), through
-# Kepler's equation, in time. Both formulas for z (`sky_separation`, the
-# refresh in `_phot_sparse_refresh`, and `planet_sky_position` for gravity
-# darkening) satisfy the inequality.
+# and r >= r_min, so z < 1 + k needs
 #
-# Margins: ×(1 + 1e-9) and +1e-8 rad of mean anomaly, which covers the Kepler
-# solver's 1e-10 tolerance and the rounding of M = 2π(t - Tp)/P for |t - Tp| up
-# to ~10⁶ periods; plus 8 ulp of the epoch for the rounding of Tc itself.
+#     |cos u| < sqrt((s² - cos²i) / sin²i),     s = (1 + k) / r_min,
 #
-# Inf (no bound: every cadence is evaluated) when s >= 1 (periastron within
-# 1 + k stellar radii), when e is outside [0, 0.9999) (above that
-# `true_anomaly` clamps e, so sky_separation's f is not the f of this map), or
-# when an input is not a finite positive number.
+# i.e. f within an angle Δf of the transit conjunction f_c = π/2 - ω (only there
+# is the planet in front; behind the star the flux is 1). r_min starts at
+# a_R(1-e); for e > 0 it is then raised to the smallest r inside the f-window
+# just found (at its end nearer periastron, or a_R(1-e) when periastron is
+# inside), and Δf recomputed, three times. The transit lies inside each window,
+# and r there is at least that window's r_min, so every step keeps every
+# in-contact cadence. For a circular orbit the result is the transit itself,
+# T14/2 plus the margins below. The bound used to drop the cos i term and keep
+# r_min = a_R(1-e), which at b = 0.75 made the window 1.35 x T14/2 for a
+# circular orbit, and wider at high e.
+#
+# The half-width is the longer of the two mean-anomaly spans f_c -> f_c ± Δf,
+# through Kepler's equation, in time. The spans are taken on an unwrapped M(f)
+# (`_mean_anomaly_unwrapped`): the abs(rem2pi(span)) used before folded a span
+# above π back below it, and a span of π or more means the window is the whole
+# orbit, so the bound is Inf. cos i is built from b as the z kernels build it:
+# `planet_sky_position` and `sky_separation`, and `_sky_orbit` for the
+# likelihood, all satisfy the identity above.
+#
+# Margins. s is inflated and cos i shrunk by 1e-12 relative (a larger s and a
+# smaller cos i only widen the window), far above the rounding of z, r and cos i
+# in the kernels, also at a grazing b, where the window shrinks towards nothing,
+# and in a nearly face-on orbit, where 1/sin²i amplifies that rounding. In mean
+# anomaly, ×(1 + 1e-9) and +1e-8 rad, which covers the Kepler solver's 1e-10
+# tolerance and the rounding of M = 2π(t - Tp)/P for |t - Tp| up to ~10⁶
+# periods; plus 8 ulp of the epoch for the rounding of Tc itself.
+#
+# Inf (no bound: every cadence is evaluated) when s >= 1 at r_min = a_R(1-e)
+# (periastron within 1 + k stellar radii), when e is outside [0, 0.9999) (above
+# that `true_anomaly` clamps e, so the kernels' f is not the f of this map), or
+# when an input is not a finite positive number. A b that is not finite is
+# taken as 0, the bound without the cos i term.
 
 # Plain Float64 of a likelihood input (strips ForwardDiff duals). A type it
 # cannot strip gives NaN, and with it no bound: every cadence is evaluated.
@@ -282,41 +294,61 @@ end
 @inline _gate_float(x::ForwardDiff.Dual) = _gate_float(ForwardDiff.value(x))
 @inline _gate_float(x::Real) = x isa AbstractFloat ? Float64(x) : NaN
 
-@inline function _mean_anomaly_from_true(f::Float64, e::Float64, q::Float64)
-    E = 2 * atan(tan(f / 2) * q)          # q = sqrt((1-e)/(1+e))
+# M(f), continuous and increasing in f, with no branch cut: E/2 lies in f/2's
+# quadrant and |E - f| < π, so E is put on f's turn. q = sqrt((1-e)/(1+e)).
+@inline function _mean_anomaly_unwrapped(f::Float64, e::Float64, q::Float64)
+    sh, ch = sincos(f / 2)
+    E = 2 * atan(q * sh, ch)
+    E += 2π * round((f - E) / (2π))
     return E - e * sin(E)
 end
 
 function _transit_window_halfwidth(P::Float64, e::Float64, ω::Float64, k::Float64,
-                                   aR::Float64, tscale::Float64)
+                                   aR::Float64, tscale::Float64, b::Float64 = 0.0)
     (0.0 <= e < 0.9999) || return Inf
     (P > 0 && aR > 0 && k >= 0 && isfinite(P) && isfinite(aR) && isfinite(k) &&
      isfinite(ω) && isfinite(tscale)) || return Inf
-    s = (1 + k) / (aR * (1 - e))
-    s < 1 || return Inf
-    Δf = asin(s)
-    q  = sqrt((1 - e) / (1 + e))
+    rmin = aR * (1 - e)
+    (1 + k) / rmin < 1 || return Inf
+    # cos i as the kernels build it, shrunk; without the term if it is not below 1
+    # (b >= 1 + k then, and the planet does not transit)
+    ci = isfinite(b) ? abs(b) * (1 + e * sin(ω)) / (aR * (1 - e * e)) * (1 - 1e-12) : 0.0
+    ci2 = ci * ci < 1 ? ci * ci : 0.0
     fc = π / 2 - ω
-    Mc = _mean_anomaly_from_true(fc, e, q)
-    d1 = abs(rem2pi(_mean_anomaly_from_true(fc + Δf, e, q) - Mc, RoundNearest))
-    d2 = abs(rem2pi(Mc - _mean_anomaly_from_true(fc - Δf, e, q), RoundNearest))
+    Δf = π / 2
+    for pass in 1:4
+        s = (1 + k) * (1 + 1e-12) / rmin
+        Δf = min(Δf, asin(sqrt(clamp((s * s - ci2) / (1 - ci2), 0.0, 1.0))))
+        (pass == 4 || e == 0) && break
+        abs(rem2pi(fc, RoundNearest)) <= Δf && break        # periastron inside
+        rmin = aR * (1 - e * e) / (1 + e * max(cos(fc - Δf), cos(fc + Δf)))
+    end
+    q  = sqrt((1 - e) / (1 + e))
+    Mc = _mean_anomaly_unwrapped(fc, e, q)
+    d1 = _mean_anomaly_unwrapped(fc + Δf, e, q) - Mc
+    d2 = Mc - _mean_anomaly_unwrapped(fc - Δf, e, q)
     hw_M = max(d1, d2) * (1 + 1e-9) + 1e-8
+    (d1 >= 0 && d2 >= 0 && hw_M < π) || return Inf
     return hw_M * P / (2π) + 8 * eps(tscale)
 end
 
-# Every transiting planet's window (non-workspace paths): the bound plus `pad`,
-# the furthest a supersampling sub-sample lies from its cadence (half the
-# longest exposure; 0 without supersampling), plus, for a TTV planet, the
-# largest |δt| of its transits, since its flux is evaluated at t - δt. A NaN
-# anywhere gives a NaN window, which skips no cadence.
+# Every transiting planet's window (non-workspace paths): the bound, with its cos i
+# term from `bs` (the looser b = 0 bound without it), plus `pad`, plus, for a TTV
+# planet, the largest |δt| of its transits, since its flux is evaluated at
+# t - δt. The likelihood and prediction paths pass pad = 0: how far a supersampled
+# cadence's sub-samples reach, half its own exposure, is added per cadence in
+# `_phot_transit_product`, so a 2-min cadence is no longer widened by the longest
+# exposure in the fit. A NaN anywhere gives a NaN window, which skips no cadence.
 function _set_transit_windows!(T_dur_safe, n_transit::Int, transits, r_for_j, ttv_state,
-                               Ps, es, ws, rrs, a_Rs, Tc_centers, Tps, pad::Float64)
+                               Ps, es, ws, rrs, a_Rs, Tc_centers, Tps, pad::Float64,
+                               bs = nothing)
     @inbounds for j in 1:n_transit
         transits[j] || continue
         tscale = max(abs(_gate_float(Tc_centers[j])), abs(_gate_float(Tps[j])))
+        bj = bs === nothing ? 0.0 : _gate_float(bs[j])
         hw = _transit_window_halfwidth(_gate_float(Ps[j]), _gate_float(es[j]),
                                        _gate_float(ws[j]), _gate_float(rrs[j]),
-                                       _gate_float(a_Rs[j]), tscale) + pad
+                                       _gate_float(a_Rs[j]), tscale, bj) + pad
         if r_for_j[j] > 0
             shift = 0.0
             for δ in ttv_state.δts[r_for_j[j]]
@@ -405,11 +437,15 @@ end
     # `n_super` (dataset maximum) only switches integration on; the number of
     # sub-samples is this cadence's own, so short cadences stay instantaneous.
     ns = n_super > 1 ? _phot_n_super_point(texp) : 1
+    integ = ns > 1 && texp > 0
+    # The window T_dur_safe holds the transit; a supersampled cadence reaches
+    # half its own exposure beyond it, and only that far.
+    reach = integ ? texp / 2 : 0.0
     @inbounds for j in 1:n_transit
         transits[j] || continue
         Δt = t - Tc_centers[j]
         Δt -= Ps[j] * round(Δt / Ps[j])
-        abs(Δt) > T_dur_safe[j] && continue
+        abs(Δt) > T_dur_safe[j] + reach && continue
         t_eff = r_for_j[j] > 0 ?
             ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tps) : t
         use_gd = gd !== nothing && gd.on[j]
@@ -417,10 +453,21 @@ end
         # here when they do not.
         orb = sky === nothing ? _sky_orbit(Ps[j], es[j], ws[j], Tps[j], bs[j], a_Rs[j]) :
                                 sky[j]
-        if ns > 1 && texp > 0
+        if integ
             fsum = zero(T)
             for s in 1:ns
-                tsub = t_eff + ((2s - ns - 1) / (2 * ns)) * texp
+                off = ((2s - ns - 1) / (2 * ns)) * texp
+                # A sub-sample outside the window has flux exactly 1: add it
+                # without computing it. The cadence's own test, at the
+                # sub-sample's time (TTV shift included in T_dur_safe), so the
+                # sum is the one computing every sub-sample gives.
+                d = Δt + off
+                d -= Ps[j] * round(d / Ps[j])
+                if abs(d) > T_dur_safe[j]
+                    fsum += one(T)
+                    continue
+                end
+                tsub = t_eff + off
                 if use_gd
                     x, y, zl = _sky_position(orb, tsub)
                     fsum += transit_flux_gd(ld, gd_ctxs[j, ins_idx], x, y, zl, rrs[j])
@@ -532,9 +579,10 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     # (tp_to_tc); T_dur_safe[j] = the window half-width from
     # `_set_transit_windows!`, a bound from the orbit that holds every
     # cadence with the planet in front of the star and z < 1 + rr. A point
-    # with mod(|t - Tc|, P) > T_dur_safe has flux exactly 1 without solving
-    # Kepler. Cadences inside it with the planet behind the star are
-    # occultations, given no dip by the sign of sin(ω + f).
+    # with mod(|t - Tc|, P) > T_dur_safe (plus half its exposure when it is
+    # supersampled) has flux exactly 1 without solving Kepler, and so does a
+    # sub-sample that far out. Cadences inside it with the planet behind the
+    # star are occultations, given no dip by the sign of sin(ω + f).
     Tc_centers = Vector{T}(undef, n_transit)
     T_dur_safe = Vector{T}(undef, n_transit)
 
@@ -677,8 +725,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         end
     end
     _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
-                          rrs, a_Rs, Tc_centers, Tps,
-                          n_super_data > 1 ? _phot_max_exposure(data) / 2 : 0.0)
+                          rrs, a_Rs, Tc_centers, Tps, 0.0, bs)
 
     # --- Limb darkening per instrument (via precomputed indices) ------
     systemic = theta.params.layout.systemic
@@ -1109,8 +1156,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         end
     end
     _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
-                          rrs, a_Rs, Tc_centers, Tps,
-                          n_super_p > 1 ? _phot_max_exposure(data) / 2 : 0.0)
+                          rrs, a_Rs, Tc_centers, Tps, 0.0, bs)
     sky_p = _sky_orbits(n_transit, Ps, es, ws, Tps, bs, a_Rs)
 
     # Threaded for Float64 (no Duals = no GC thrashing), serial otherwise.
@@ -1556,7 +1602,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
                 # Every cadence with the planet in front and z < 1 + rr (Inf,
                 # i.e. all cadences, where the orbit gives no bound).
                 T_dur_safe = _transit_window_halfwidth(Pj, ej, wj, rrj, aj,
-                                                       max(abs(Tc_center), abs(Tpj)))
+                                                       max(abs(Tc_center), abs(Tpj)), bj)
                 _phot_window_indices!(old_idx, data, ws.phot_data, Tc_center, Pj,
                                       T_dur_safe)
 

@@ -144,7 +144,6 @@ end
             th = Nereus.Theta{Float64}(tg.params)
             sys = tg.params.layout.systemic
             n_super = Nereus._phot_n_super(data)
-            pad = n_super > 1 ? Nereus._phot_max_exposure(data) / 2 : 0.0
             @test (n_super > 1) == exposure
             n_cmp = 0; n_narrow = 0
             for v in transit_gate_points(tg, 60; seed = 41)
@@ -159,8 +158,10 @@ end
                 _, ttv_state = Nereus._decode_ttv_state(th, Nereus.planet_indices(th))
                 r_for_j = [ttv ? 1 : 0]
                 old = [tw_old(P, rr, aR)]
+                # the likelihood's window: pad 0 (each cadence adds its own
+                # reach) and the cos i term
                 tight = _set_transit_windows!([Inf], 1, [true], r_for_j, ttv_state, [P], [e], [ω],
-                                              [rr], [aR], [Tc], [Tp], pad)
+                                              [rr], [aR], [Tc], [Tp], 0.0, [b])
                 tight[1] < old[1] && (n_narrow += 1)
                 lds = [QuadLimbDark(collect(kipping_q_to_u(th.values[sys.ld_q1[ix]],
                                                            th.values[sys.ld_q2[ix]]))) for ix in 1:2]

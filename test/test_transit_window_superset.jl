@@ -4,8 +4,8 @@
 # ω = -π/2 it dropped 4.4 % of the in-transit cadences at e = 0.90 and 21 % at
 # e = 0.93; at a_R = 3 the loss starts near e = 0.8. The window is now the
 # bound from the orbit alone (`_transit_window_halfwidth`; every cadence where
-# the orbit gives no bound), plus half the longest exposure when supersampling
-# and the largest |δt| of a TTV planet.
+# the orbit gives no bound), plus the largest |δt| of a TTV planet; a
+# supersampled cadence reaches half its own exposure beyond it.
 #
 #   1. superset, data-free: for random orbits and times, a cadence outside the
 #      window has flux exactly 1 (z >= 1 + k, or the planet behind the star);
@@ -140,7 +140,7 @@ end
         Tp = TG_BJD0; Tc = tp_to_tc(Tp, P, e, ω)
         for (texp, ns) in ((0.0, 1), (1800 / 86_400, 30))
             win = _set_transit_windows!([Inf], 1, [true], [0], nothing, [P], [e], [ω], [k], [aR],
-                                        [Tc], [Tp], texp / 2)
+                                        [Tc], [Tp], 0.0, [b])
             old = [sup_old(P, k, aR)]
             n_fixed = 0; same = true
             for t in range(Tc - 0.5, Tc + 0.5; length = 4001)
@@ -177,8 +177,7 @@ end
                 _, ttv_state = Nereus._decode_ttv_state(th, Nereus.planet_indices(th))
                 rj = [ttv ? 1 : 0]
                 win = _set_transit_windows!([Inf], 1, [true], rj, ttv_state, [P], [e], [ω], [k],
-                                            [aR], [Tc], [Tp],
-                                            n_super > 1 ? Nereus._phot_max_exposure(data) / 2 : 0.0)
+                                            [aR], [Tc], [Tp], 0.0, [b])
                 old = [sup_old(P, k, aR)]
                 A = false; same = true
                 for i in 1:nd

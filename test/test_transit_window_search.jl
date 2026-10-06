@@ -79,7 +79,7 @@ tws_data(t) = Data(; t_phot = t, flux = ones(length(t)), flux_err = fill(1e-3, l
             rr, aR, b = ws.transit_rrs[1], ws.transit_a_Rs[1], ws.transit_bs[1]
             b < 1 + rr || continue
             Tc = tp_to_tc(Tp, P, e, ω)
-            hw = _transit_window_halfwidth(P, e, ω, rr, aR, max(abs(Tc), abs(Tp)))
+            hw = _transit_window_halfwidth(P, e, ω, rr, aR, max(abs(Tc), abs(Tp)), b)
             @test sort(ws.transit_in_idx[1]) == tws_scan(data.t_phot, Tc, P, hw)
             n_cmp += 1
         end
