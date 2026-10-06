@@ -12,7 +12,11 @@
 #      than the period): the transit product with the likelihood's windows is
 #      === the product with no window, ordinary and gravity-darkened, and no
 #      cadence or sub-sample the gates skip is in contact;
-#   4. the same on the fixture target with 30-min exposures and with TTVs.
+#   4. the same on the fixture target with 30-min exposures and with TTVs;
+#   5. grazing b (1e-16 to 1e-9 of 1 + k, either side) at a_R from 100 to 10⁵,
+#      where cos²i is small and the window's absolute margin for the rounding
+#      of 1 - sin²i sin²u is the one that counts: no contact outside the bound,
+#      and the per-cadence product === the product with no window.
 using Test
 using Nereus
 using Random
@@ -185,5 +189,61 @@ end
             end
             @test n_cmp > 20
         end
+    end
+
+    @testset "grazing b at large a_R" begin
+        # Without the absolute margin the bound skipped this cadence: z is 7 ulp
+        # below 1 + k there, so the flux is 0.9999999999999999, not 1.
+        o = (P = 42.748196300151626, e = 0.0, ω = -0.719265217294002,
+             k = 0.0012089749251361131, aR = 267.15881285318676, b = 1.0012089749251305,
+             Tp = 2.4600481528523937e6, Tc = 2.4600637334847706e6)
+        t = 2.4724607104119374e6
+        ld = QuadLimbDark([0.4, 0.25])
+        win = _set_transit_windows!([Inf], 1, [true], [0], nothing, [o.P], [o.e], [o.ω],
+                                    [o.k], [o.aR], [o.Tc], [o.Tp], 0.0, [o.b])
+        pr(w) = _phot_transit_product(t, 0.0, ld, 1, [true], [o.P], [o.e], [o.ω], [o.Tp],
+                                      [o.b], [o.aR], [o.k], [o.Tc], w, [0], nothing, 1)
+        @test isfinite(win[1])
+        @test pr([Inf]) < 1
+        @test pr(win) === pr([Inf])
+
+        rng = MersenneTwister(2027)
+        lu(lo, hi) = exp(log(lo) + rand(rng) * (log(hi) - log(lo)))
+        n_orb = 0; n_out = 0; bad = 0; same = true
+        for it in 1:6_000
+            k = lu(1e-3, 0.5)
+            u = rand(rng)
+            e, ω, aR = u < 0.4 ? (0.0, 2π * rand(rng) - π, lu(100, 3000)) :
+                       u < 0.7 ? (0.9 * rand(rng), 2π * rand(rng) - π, lu(100, 5000)) :
+                       u < 0.85 ? (0.0, 2π * rand(rng) - π, lu(3000, 1e5)) :
+                       # apoastron transits at e near the 0.9999 limit
+                       (e_ = 1 - lu(1.1e-4, 1e-3);
+                        (e_, -π / 2 + 0.05 * (rand(rng) - 0.5), (1 + k) / (1 - e_) * (1 + 3 * rand(rng)^2)))
+            b  = (1 + k) * (1 + (rand(rng) < 0.5 ? -1 : 1) * 10.0^(-16 + 7 * rand(rng)))
+            P  = lu(1, 1000)
+            Tp = 2_460_000.0 + 50 * rand(rng)
+            o  = (; P, e, ω, k, aR, b, Tp, Tc = tp_to_tc(Tp, P, e, ω))
+            win = _set_transit_windows!([Inf], 1, [true], [0], nothing, [P], [e], [ω], [k],
+                                        [aR], [o.Tc], [Tp], 0.0, [b])
+            hw = win[1]
+            isfinite(hw) || continue
+            n_orb += 1
+            for _ in 1:40
+                # just outside the bound: 1e-14 to 1e-2 of it, or 1e-12 to 1e-6 of P
+                Δ = hw + (rand(rng) < 0.5 ? hw * 10.0^(-14 + 12 * rand(rng)) :
+                                            P * 10.0^(-12 + 6 * rand(rng)))
+                t = o.Tc + (rand(rng) < 0.5 ? -Δ : Δ) + P * rand(rng, -300:300)
+                abs(twc_fold(t, o.Tc, P)) > hw || continue
+                n_out += 1
+                twc_contact(t, o) && (bad += 1)
+                q(w) = _phot_transit_product(t, 0.0, ld, 1, [true], [P], [e], [ω], [Tp], [b],
+                                             [aR], [k], [o.Tc], w, [0], nothing, 1)
+                same &= q(win) === q([Inf])
+            end
+        end
+        @info "window at grazing b, large a_R" n_orb n_out
+        @test n_orb > 5_000 && n_out > 150_000
+        @test bad == 0
+        @test same
     end
 end

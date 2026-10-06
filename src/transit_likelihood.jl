@@ -275,12 +275,17 @@ end
 # likelihood, all satisfy the identity above.
 #
 # Margins. s is inflated and cos i shrunk by 1e-12 relative (a larger s and a
-# smaller cos i only widen the window), far above the rounding of z, r and cos i
-# in the kernels, also at a grazing b, where the window shrinks towards nothing,
-# and in a nearly face-on orbit, where 1/sin²i amplifies that rounding. In mean
-# anomaly, ×(1 + 1e-9) and +1e-8 rad, which covers the Kepler solver's 1e-10
-# tolerance and the rounding of M = 2π(t - Tp)/P for |t - Tp| up to ~10⁶
-# periods; plus 8 ulp of the epoch for the rounding of Tc itself.
+# smaller cos i only widen the window), far above the relative rounding of r and
+# cos i in the kernels, also in a nearly face-on orbit, where 1/sin²i amplifies
+# it. δ = 32 eps max(1, a_R/r_min) is added to s² - cos²i for the cancellation
+# in the ordinary kernels' 1 - sin²i sin²u near conjunction, an absolute error
+# measured at up to 15 eps for r >= a and 15 eps a/r below (sin(ω+f) from the
+# half-angle identity divides by 1 - e cos E = r/a). At a grazing b, where the
+# window shrinks towards nothing, δ is the larger margin once cos²i is small
+# (a_R above ~100); without it a few cadences with z a few ulp below 1 + k were
+# skipped. In mean anomaly, ×(1 + 1e-9) and +1e-8 rad, which covers the Kepler
+# solver's 1e-10 tolerance and the rounding of M = 2π(t - Tp)/P for |t - Tp| up
+# to ~10⁶ periods; plus 8 ulp of the epoch for the rounding of Tc itself.
 #
 # Inf (no bound: every cadence is evaluated) when s >= 1 at r_min = a_R(1-e)
 # (periastron within 1 + k stellar radii), when e is outside [0, 0.9999) (above
@@ -318,7 +323,8 @@ function _transit_window_halfwidth(P::Float64, e::Float64, ω::Float64, k::Float
     Δf = π / 2
     for pass in 1:4
         s = (1 + k) * (1 + 1e-12) / rmin
-        Δf = min(Δf, asin(sqrt(clamp((s * s - ci2) / (1 - ci2), 0.0, 1.0))))
+        δ = 32 * eps() * max(1.0, aR / rmin)
+        Δf = min(Δf, asin(sqrt(clamp((s * s - ci2 + δ) / (1 - ci2), 0.0, 1.0))))
         (pass == 4 || e == 0) && break
         abs(rem2pi(fc, RoundNearest)) <= Δf && break        # periastron inside
         rmin = aR * (1 - e * e) / (1 + e * max(cos(fc - Δf), cos(fc + Δf)))
