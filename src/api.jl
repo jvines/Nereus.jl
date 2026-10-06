@@ -735,6 +735,7 @@ function _finish(target, engine, stopping, output_dir; op::String,
         summary["diagnostics"] = Dict{String,Any}("error" => sprint(showerror, err))
     end
     summary["params"] = _summarise_params(chains, target.params)
+    _n_planets_posterior!(summary, chains)
     try
         # compute_derived(chains, params; M_s, R_s, ...) — stellar quantities
         # are keywords, not positional. Only pass what we actually know; the

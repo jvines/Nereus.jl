@@ -2438,6 +2438,28 @@ function _augment_evidence!(summary, params, data, chains)
     return
 end
 
+"""
+    _n_planets_posterior!(summary, chains)
+
+The fraction of draws at each planet count, as `summary["n_planets_posterior"]`
+(`"1" => 0.71, "2" => 0.29`). Only a trans-dim chain has `:n_planets`; any other
+leaves the summary as it was. Shared by run_job and the fit_* route.
+"""
+function _n_planets_posterior!(summary, chains)
+    chains isa MCMCChains.Chains || return summary
+    :n_planets in names(chains, :parameters) || return summary
+    np = Int.(vec(Array(chains[:n_planets])))
+    counts = Dict{String, Float64}()
+    for v in np
+        counts[string(v)] = get(counts, string(v), 0.0) + 1
+    end
+    for k in keys(counts)
+        counts[k] /= length(np)
+    end
+    summary["n_planets_posterior"] = counts
+    return summary
+end
+
 function _populate_summary!(summary, result, params, chains)
     summary["log_z"] = Float64(getfield(result, :log_evidence))
     summary["n_evals"] = Int(getfield(result, :n_evals))
@@ -2490,21 +2512,8 @@ function _populate_summary!(summary, result, params, chains)
         summary["evidence"] = ev
     end
 
-    # n_planets posterior (only when the chain has :n_planets)
+    _n_planets_posterior!(summary, chains)
     chain_names = Set(names(chains, :parameters))
-    if :n_planets in chain_names
-        np = Int.(vec(Array(chains[:n_planets])))
-        counts = Dict{String, Float64}()
-        for v in np
-            k = string(v)
-            counts[k] = get(counts, k, 0.0) + 1
-        end
-        n_total = length(np)
-        for k in keys(counts)
-            counts[k] /= n_total
-        end
-        summary["n_planets_posterior"] = counts
-    end
 
     # Per-parameter median + 1/2/3-σ
     params_summary = Dict{String, Any}()
