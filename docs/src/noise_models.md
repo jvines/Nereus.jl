@@ -498,7 +498,7 @@ falls through the standard white/celerite machinery untouched. In
   [`plot_activity_gp_decomposition`](@ref) draw the paper figures.
   `run_job` emits them automatically as `activity_gp_latent.png` and
   `activity_gp_decomposition.png` whenever an `ActivityGP` is configured
-  (`src/runner.jl:2056,2068`).
+  (`src/runner.jl:2064,2076`).
 
 #### Trans-dim head-to-head with `ActivityDecorrelation`
 
@@ -825,7 +825,7 @@ includes RM, an in-transit RV anomaly is added to the RV prediction.
   — RV model decomposition into its pieces (Keplerian(s), GP/AGP
   activity, total). Distinct from `rv_timeseries`. Auto-emitted when
   there are ≥2 planets or any `CovarianceNoise`/`ActivityGP` is active
-  (`src/runner.jl:1671`).
+  (`src/runner.jl:1679`).
 - `transit_overlay` (`plot_transit_overlay_fit`,
   `src/plotting/ttv_plots.jl:342`) — per-transit QC gallery.
 - `ttv_oc` (`plot_ttv_oc`, `src/plotting/ttv_plots.jl:144`) — O-C

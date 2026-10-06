@@ -34,6 +34,7 @@ Outputs land in `output_dir/`:
 output_dir/
 ├── chains.nc                  # MCMCChains NetCDF (always)
 ├── summary.json               # machine-readable contract (always)
+├── progress.jsonl             # pt_emcee: one JSON line per convergence check, during the run
 ├── ppc.png / ppc.json         # posterior predictive check (default on)
 ├── detection_limits.png       # K_lim(P) curve (PT samplers, default on)
 ├── detection_limits.nc        # per-bin arrays sidecar
@@ -350,7 +351,7 @@ rather than a single number trusted.
     // "include_studentt": false, ...
   },
 
-  // ---- Sampler (src/runner.jl:1355-1509) ----------------------------
+  // ---- Sampler (src/runner.jl:1355-1517) ----------------------------
   // VALID names (src/runner.jl:290-291):
   //   pt_emcee, transdim_pt_emcee, pt, rjmcmc, moms, daedalus,
   //   nested, nested_ins, nested_dynamic, pa, smc, pt_whitening,
@@ -373,10 +374,10 @@ rather than a single number trusted.
   },
 
   // ---- Trans-dim (REQUIRED iff sampler ∈ {transdim_pt_emcee, rjmcmc,
-  //      moms, daedalus}; src/runner.jl:1540-1571) ---------------------
+  //      moms, daedalus}; src/runner.jl:1548-1579) ---------------------
   "transdim": {
     "max_kplanet": 2,                      // REQUIRED
-    // birth_strategies (src/runner.jl:294-296,1511-1517):
+    // birth_strategies (src/runner.jl:294-296,1519-1525):
     //   PriorBirth | InformedBirth | JointInformedBirth | DonorBirth | MoMSBirth
     "birth_strategies": ["PriorBirth"],
     "birth_weights":    [1.0],             // must match birth_strategies length
@@ -384,11 +385,11 @@ rather than a single number trusted.
     "planets": true,                       // toggle planet-count dimension (default true)
     "noise":   false,                      // toggle noise-model dimension (default false)
     "toggleable": [],                      // MUST be empty via run_job (JSON can't encode
-                                           //   NoiseModel objects; src/runner.jl:1526-1533)
+                                           //   NoiseModel objects; src/runner.jl:1534-1541)
     "noise_exclusion_groups": []           // likewise empty via run_job
   },
 
-  // ---- Output (src/runner.jl:1696-2109,2115-2382) -------------------
+  // ---- Output (src/runner.jl:1704-2117,2123-2390) -------------------
   "output": {
     "save_chains":  true,                  // chains.nc
     "save_summary": true,                  // summary.json
@@ -594,7 +595,7 @@ prior when that degeneracy is present.
 ### `sampler`
 - Trans-dim model-selection samplers (`transdim_pt_emcee`, `rjmcmc`, `moms`,
   `daedalus`) require a top-level `transdim` block. `pt` also builds a
-  `transdim` block if present (`src/runner.jl:1399-1400,1415`) but does not require one.
+  `transdim` block if present (`src/runner.jl:1407-1408,1423`) but does not require one.
 - **The Pathfinder warm start is a `pt` kwarg, not a sampler.** There is no
   `pt_warm` name: it was never a sampler, only a Pathfinder draw followed by a
   delegation to `pt` or `pt_emcee`. Its two honest replacements are
@@ -614,14 +615,29 @@ prior when that degeneracy is present.
   family return real `log_evidence`; `rjmcmc`/`moms`/`nuts`/`ofti` write
   `NaN` (no evidence estimator). `nested_ins` reports the INS estimate,
   `nested_dynamic` the dynamic-NS estimate, `daedalus` its nested evidence
-  (`src/runner.jl:1402-1499`).
+  (`src/runner.jl:1410-1507`).
+- **`progress.jsonl`** (`pt_emcee`): `run_job` passes
+  `progress_log = output_dir/progress.jsonl` (`src/runner.jl:1398-1405`), as
+  it passes the checkpoint `<name>_state.jls`. One JSON object per line at
+  every convergence check, burn-in included (every `diag_every` steps, default
+  `max(200, n_steps ÷ 40)`), and one at the end (`"final": true`), so a long
+  run can be followed while it runs: `step`, `phase` (`"burn"`/`"sample"`),
+  `elapsed_s`, `eta_s`, `steps_per_s`, `acc`, `beta1_acc`, `swap_acc` per
+  adjacent pair with `swap_mean`/`swap_min`/`swap_worst_pair`, the cold rung's
+  `lp_median`/`lp_max`, and per science parameter `rhat`, `bulk_ess` and
+  `tail_ess` with `rhat_max`/`rhat_worst` and `tail_ess_min`/`tail_ess_worst`.
+  During burn-in the diagnostics come from a rolling window of recent
+  cold-rung steps, afterwards from every kept draw (`diag_window` says which
+  steps). A resumed job appends to the file. `"progress_log": null` in
+  `sampler.kwargs` turns it off and a path puts it elsewhere; the full list of
+  keys is in the `sample_pt_emcee` docstring.
 - Unknown kwargs are rejected with an actionable error listing the valid set
   (`src/runner.jl:1328-1342`); every JSON-string kwarg value is coerced to a Julia
   `Symbol` so `"multi"`, `"rslice"`, `"stretch"`, etc. work as expected.
 
 ### `output` plots
 - `auto` expands to the applicable set from the data + model present
-  (`src/runner.jl:1663-1694`): always the posterior/trace/corner family; RV →
+  (`src/runner.jl:1671-1702`): always the posterior/trace/corner family; RV →
   `rv_timeseries`+`rv_phasefold` (+`rv_components` when ≥2 planets or a GP/AGP);
   photometry → `pm_*`+`ttv_oc`+`transit_overlay`; astrometry → the astrometry
   plots; any `*_RM` mode → `rm_anomaly`; an ActivityGP → `activity_gp_latent`
@@ -629,11 +645,11 @@ prior when that degeneracy is present.
   an engine that records a ladder history (`pt_emcee`, `transdim_pt_emcee`) →
   `ladder_rates` + `beta_ladder`.
 - Individual plots are fail-soft (a failing plotter logs a warning and is
-  skipped, `src/runner.jl:1757-1759`).
+  skipped, `src/runner.jl:1765-1767`).
 - `ttv_oc` renders for single-planet fits too — it shows the data-only O−C
   (measured per-transit `Tc` vs the linear ephemeris) via `planet_b_k=0`; with
   ≥2 planets it defaults to the perturber-driven envelope (`planet_b_k=2`,
-  `src/runner.jl:1977-2003`).
+  `src/runner.jl:1985-2011`).
 
 ---
 
@@ -764,7 +780,7 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
 A `"failed"` summary additionally carries `"error"` (the message) and
 `"traceback"`; the auxiliary stages instead write a nested
 `{"status":"failed"|"skipped","error":…}` under their own key and the job
-continues (`src/runner.jl:194-201,2142-2146,2209-2213,2256-2260,2377-2381`).
+continues (`src/runner.jl:194-201,2150-2154,2217-2221,2264-2268,2385-2389`).
 
 ---
 

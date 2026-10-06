@@ -97,7 +97,7 @@ Definition: `src/transdim/config.jl:116`.
   rather than within-model. Validated to `[0, 1]` (`config.jl:150`).
   **Default `0.2`** in the constructor; note `run_job`'s
   `_build_transdim` uses a different default of **`0.3`**
-  (`runner.jl:1558`).
+  (`runner.jl:1566`).
 - `noise_exclusion_groups` — user-declared mutually-exclusive noise
   model sets. At most one model per group is active simultaneously.
   See the **`noise_exclusion_groups`** section below.
@@ -105,7 +105,7 @@ Definition: `src/transdim/config.jl:116`.
 ## Birth strategies
 
 Concrete `BirthStrategy` subtypes (`src/transdim/config.jl:8-83`). All
-five are accepted by `run_job` (`runner.jl:1511`, `_BIRTH_TYPES`).
+five are accepted by `run_job` (`runner.jl:1519`, `_BIRTH_TYPES`).
 
 ### `PriorBirth()`
 
@@ -422,15 +422,15 @@ validator enforces it for the four samplers above
 }
 ```
 
-`_build_transdim` (`runner.jl:1540`) parses the block. `auto` plots add
+`_build_transdim` (`runner.jl:1548`) parses the block. `auto` plots add
 `transdim_occupancy` automatically whenever the chain has a
-`:n_planets` column (`runner.jl:1667`).
+`:n_planets` column (`runner.jl:1675`).
 
 !!! note "Toggleable noise models can't come from JSON"
     `transdim.toggleable` and `noise_exclusion_groups` must hold
     `NoiseModel` *objects*, which JSON can't encode. `_coerce_noise_models`
     rejects a non-empty JSON `toggleable`/`noise_exclusion_groups` with an
-    explicit error (`runner.jl:1526`). Noise-only trans-dim therefore needs
+    explicit error (`runner.jl:1534`). Noise-only trans-dim therefore needs
     the Julia API (build the `TransDimConfig` in-process), not a raw JSON job.
     Schema reference: `Nereus.jl/docs/JOB_CONFIG.md`.
 
@@ -468,7 +468,7 @@ residuals, fit-health metrics, and every RV plot is RM-consistent
 (no-op for non-RM fits). Use the dedicated `rm_anomaly` plot
 (`plot_rm`, `src/plotting/rm_plots.jl:51`) to inspect the in-transit
 anomaly; `run_job` emits it automatically for any RM-enabled fit
-(`runner.jl:1688`).
+(`runner.jl:1696`).
 
 ## Newer plots relevant to trans-dim QC
 
@@ -479,15 +479,15 @@ solution (all dispatchable via `output.plots`, `runner.jl:297`):
   (`plot_rm`); only for `*_RM` fits.
 - `transit_overlay` — per-transit QC gallery, the median transit model
   overlaid on each individual transit window
-  (`plot_transit_overlay_fit`, `runner.jl:2004`).
+  (`plot_transit_overlay_fit`, `runner.jl:2012`).
 - `rv_components` — RV model decomposition (Keplerian / activity /
   trend pieces), distinct from `rv_timeseries`
-  (`plot_rv_components`, `runner.jl:1870`); auto-emitted when there are
+  (`plot_rv_components`, `runner.jl:1878`); auto-emitted when there are
   ≥ 2 planets or a smooth (GP/AGP) activity component.
 - `ttv_oc` — O−C transit-timing diagram. Now renders for
   **single-planet** fits too: with no perturber it shows the data-only
   O−C (measured per-transit T\_c vs the linear ephemeris) by passing
-  `planet_b_k = 0` (`runner.jl:1993-1998`).
+  `planet_b_k = 0` (`runner.jl:2001-2006`).
 
 ## ActivityGP from `run_job`
 

@@ -53,7 +53,7 @@ Every parallel-tempering sampler feeds the same
 | Sampler | Trans-dim? | log Z field | Full stack field | log Z headline |
 |---|---|---|---|---|
 | `sample_pt` | both | 2nd tuple element | — | TI+ (`pt.jl:790`) |
-| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:1158`) |
+| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:1443`) |
 | `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:2165`) |
 | `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_whitening.jl:731`) |
 | `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | TI+ (`pt_hmc.jl:447`) |
@@ -274,9 +274,9 @@ When you drive Nereus via `Nereus.run_job` (the JSON/Dict
 dispatcher — see [JOB_CONFIG.md](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md)),
 every sampler result is normalised so `log_evidence` is always present,
 and the run summary surfaces it as the JSON key **`log_z`**
-(`src/runner.jl:2442`). Samplers with no evidence at all (e.g.
+(`src/runner.jl:2450`). Samplers with no evidence at all (e.g.
 `map`, `nuts`, `rjmcmc`, `moms`) return `log_evidence = NaN`
-(`runner.jl:1431`, `1437`, `1482`) and the value is written only when
+(`runner.jl:1439`, `1445`, `1490`) and the value is written only when
 finite (the JSON contract forbids raw `NaN`). Note that `pa`/`smc`
 (population annealing) and the nested family (`nested`, `nested_ins`,
 `nested_dynamic`, `daedalus`) carry their own `log_evidence` that is
@@ -285,7 +285,7 @@ population-annealing free-energy estimate, the NS family report
 Skilling/Feroz `log Z`. The
 sampler names that route through the PT evidence stack are
 `"pt"`, `"pt_emcee"`, `"transdim_pt_emcee"`,
-`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1402`–`1461`).
+`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1410`–`1469`).
 
 **`summary.json` carries an `evidence` block**, not just `log_z`: every
 estimator the run produced with its standard error, plus `reported` naming
@@ -311,7 +311,7 @@ the one badly mixed run (worst R-hat 3.91). If you have results from a
 `run_job` fit predating this, re-run or recompute the evidence.
 
 The same `log_z` is fed into the LOO/log-Z model-comparison summary
-(`loo_compare_log_z`, `runner.jl:2254`) so cross-run Bayes factors are
+(`loo_compare_log_z`, `runner.jl:2262`) so cross-run Bayes factors are
 consistent.
 
 ## Validation status
@@ -644,7 +644,7 @@ until it is resolved.
   `sample_pt_hmc` and `sample_pt_emcee`/`sample_pt_whitening` support
   `adapt_ladder` to re-grid β by thermodynamic length (√Var log L),
   which minimises discretisation error (`pt_hmc.jl:99`,
-  `pt_emcee.jl:987`).
+  `pt_emcee.jl:1209`).
 - **Bayes factors across runs**: compute as `Δ log Z`, with σ combined
   in quadrature. Use the **same estimator** for both runs (e.g. both
   SS+). Through `run_job`, compare the `log_z` summary keys. **If either
