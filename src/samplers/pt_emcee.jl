@@ -1353,8 +1353,9 @@ function sample_pt_emcee(
             # marked as such: they describe the last window, not the posterior.
             burn_shown = rhat_str == "—" && burn_rhat_str != "—"
             update!(pb; n_done = step,
-                    fields = (:acc => round(acc_rate, digits = 3),
-                              :β1_acc => round(accept_within[1] / max(propose_within[1], 1), digits = 3),
+                    fields = (:acc => @sprintf("%.3f", acc_rate),
+                              :β1_acc => @sprintf("%.3f", accept_within[1] /
+                                                          max(propose_within[1], 1)),
                               # The LADDER's health, not the move's. This is the
                               # half that fails silently: once the rungs stop
                               # exchanging, the cold chain is stuck in one mode
