@@ -6,17 +6,31 @@
 # file; files where a later one uses an earlier one's helpers; or the inline
 # testsets of runtests.jl, where "foundation" and "trans-dim likelihood" draw
 # from the same `_rng` stream and so stay together. `seconds` is its measured
-# cost on the x86_64 CI runner -- all the assignment needs. A unit missing a
-# measurement counts as DEFAULT_SECONDS; a test file missing from this list is
-# an error, so a new file cannot be skipped silently. The entries for the files
-# added by the perf tracks (transit window, floor and celerite workspace, AGP
-# low-rank solver, noise models, bridge workspace) are the unit times of a
-# four-shard run on the arm64 builder instead (-t 3 per shard).
+# cost -- all the assignment needs: for the test files, the `unit time` lines of
+# a five-shard run on the x86_64 CI runner (2026-10-06, release PR #18); the
+# inline units keep older estimates, as they print no unit time. A unit missing
+# a measurement counts as DEFAULT_SECONDS; a test file missing from this list is
+# an error, so a new file cannot be skipped silently.
 #
 # Units are dealt longest-first to the least-loaded shard (LPT): deterministic,
 # so a unit runs in the same shard on every run and every machine.
+#
+# SLOW_UNITS are full default-settings fits, each minutes on its own and 38% of
+# the suite together. NEREUS_TEST_TIER=fast leaves them out (pull requests into
+# develop); unset or "full" runs everything (release PRs, manual runs, local).
 
 const DEFAULT_SECONDS = 5
+
+const SLOW_UNITS = ("test_transdim_pt_emcee_defaults.jl", "test_activity_gp_lowrank.jl",
+                    "test_obliquity_runjob.jl")
+
+const _FAST_TIER = let t = get(ENV, "NEREUS_TEST_TIER", "full")
+    t in ("fast", "full") || error("NEREUS_TEST_TIER must be \"fast\" or \"full\", got \"$t\"")
+    t == "fast"
+end
+
+"""Whether unit `name` belongs to the tier being run."""
+_in_tier(name) = !(_FAST_TIER && name in SLOW_UNITS)
 
 const TEST_UNITS = [
     (name = "inline: foundation + trans-dim state/config/likelihood", seconds = 141, files = String[]),
@@ -158,15 +172,17 @@ const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")
     end
 end
 
-"""Shard (1-based) each unit runs in, for `n` shards: longest-first to the least loaded."""
+"""Shard (1-based) each unit of the tier runs in, for `n` shards: longest-first to
+the least loaded. Units outside the tier get no shard."""
 function _assign_shards(n::Int)
     load = zeros(n)
     shard_of = Dict{String, Int}()
-    order = sortperm([u.seconds for u in TEST_UNITS]; rev = true, alg = MergeSort)  # stable
+    units = [u for u in TEST_UNITS if _in_tier(u.name)]
+    order = sortperm([u.seconds for u in units]; rev = true, alg = MergeSort)  # stable
     for j in order
         k = argmin(load)
-        shard_of[TEST_UNITS[j].name] = k
-        load[k] += TEST_UNITS[j].seconds
+        shard_of[units[j].name] = k
+        load[k] += units[j].seconds
     end
     return shard_of, load
 end
@@ -174,7 +190,7 @@ end
 const _SHARD_OF = _SHARD === nothing ? nothing : first(_assign_shards(_SHARD[2]))
 
 """Whether unit `name` runs in this process."""
-_in_shard(name) = _SHARD === nothing || _SHARD_OF[name] == _SHARD[1]
+_in_shard(name) = _in_tier(name) && (_SHARD === nothing || _SHARD_OF[name] == _SHARD[1])
 
 # Every test file must belong to a unit: a file added to test/ and not to this
 # list would otherwise never run.
@@ -189,7 +205,8 @@ end
 
 if _SHARD !== nothing
     let (shard_of, load) = _assign_shards(_SHARD[2])
-        names_ = sort!([u.name for u in TEST_UNITS if shard_of[u.name] == _SHARD[1]])
-        @info "test shard $(_SHARD[1])/$(_SHARD[2]): $(length(names_)) units, ~$(round(Int, load[_SHARD[1]])) s measured" units = names_
+        names_ = sort!([u.name for u in TEST_UNITS if get(shard_of, u.name, 0) == _SHARD[1]])
+        tier = _FAST_TIER ? "fast tier, $(length(SLOW_UNITS)) slow units left out" : "full suite"
+        @info "test shard $(_SHARD[1])/$(_SHARD[2]) ($tier): $(length(names_)) units, ~$(round(Int, load[_SHARD[1]])) s measured" units = names_
     end
 end

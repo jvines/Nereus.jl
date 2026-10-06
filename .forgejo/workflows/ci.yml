@@ -148,6 +148,12 @@ jobs:
       CI_CPUS: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].cpus }}
       CI_MEMORY: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].memory }}
       CONTAINER: nereus-ci-${{ github.run_id }}-${{ matrix.idx }}
+      # Pull requests into develop run the fast tier, without test/shards.jl's
+      # SLOW_UNITS; release PRs (into main) and manual runs run everything.
+      NEREUS_TEST_TIER: ${{ github.base_ref == 'develop' && 'fast' || 'full' }}
+      # A release PR runs the full suite on arm64 inside Prepare release, which
+      # builds nothing from a red tree, so the arm64 job here would only repeat it.
+      SKIP_SUITE: ${{ github.base_ref == 'main' && fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].arch == 'arm64' && 'yes' || 'no' }}
 
     steps:
       - name: Fetch the commit under test
@@ -200,12 +206,15 @@ jobs:
 
       - name: Build the CI image
         working-directory: ${{ env.CI_WORKSPACE }}
-        run: docker build -q -t "$CI_IMAGE" ci/
+        run: |
+          [ "$SKIP_SUITE" = yes ] && { echo "release PR: the arm64 suite runs in Prepare release"; exit 0; }
+          docker build -q -t "$CI_IMAGE" ci/
 
       - name: Instantiate and precompile
         working-directory: ${{ env.CI_WORKSPACE }}
         run: |
           set -euo pipefail
+          [ "$SKIP_SUITE" = yes ] && exit 0
           # The depot persists in $CI_ROOT/depot between runs, which is what
           # makes a warm run minutes instead of an hour. The lock serialises two
           # PRs that would otherwise instantiate into it at the same moment
@@ -225,15 +234,17 @@ jobs:
         working-directory: ${{ env.CI_WORKSPACE }}
         run: |
           set -euo pipefail
+          [ "$SKIP_SUITE" = yes ] && exit 0
           # Five shards in parallel (ci/run_tests.sh, split by test/shards.jl):
           # one process ran the suite in 15-33 min. The shards are balanced on
-          # measured cost; shard 1 holds the heaviest unit alone (the trans-dim
-          # default-settings fit) and gets 6 threads, the rest 3 -- the PT /
-          # nested / OFTI tests parallelise over Threads.nthreads().
+          # measured cost; shard 1 holds the heaviest unit of the tier and gets
+          # 6 threads, the rest 3 -- the PT / nested / OFTI tests parallelise
+          # over Threads.nthreads().
           # --cpus/--memory: the matrix ceiling, fitted to this host above.
+          echo "test tier: $NEREUS_TEST_TIER"
           docker run --rm --name "$CONTAINER" \
             --label cl.jvines.owner=nereus-ci \
-            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp -e NEREUS_TEST_TIER \
             -e JULIA_DEPOT_PATH=/depot -v "$CI_ROOT/depot":/depot \
             -v "$CI_WORKSPACE":/repo -w /repo \
             --cpus "$CI_CPUS_HOST" --memory "$CI_MEMORY_HOST" \
