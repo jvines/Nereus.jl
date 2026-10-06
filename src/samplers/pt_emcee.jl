@@ -226,6 +226,16 @@ function _pt_cube_diag(cube::Array{Float64,3})
               min_tail = i_t == 0 ? 0.0 : tess[i_t], worst_tail = i_t)
 end
 
+# The same over the burn-in window (see sample_pt_emcee), a ring of
+# (row, parameter, walker) with `count` rows filled and, once it is full, the
+# oldest at `next`; in time order, as split R-hat compares the two halves.
+function _pt_ring_diag(ring::Array{Float64,3}, next::Int, count::Int)
+    count < 4 && return nothing
+    n = size(ring, 1)
+    order = count < n ? (1:count) : vcat(next:n, 1:(next - 1))
+    return _pt_cube_diag(ring[order, :, :])
+end
+
 # The readout of a diagnostic: "mean/worst(name)" for R-hat and
 # "mean bulk/worst tail(name)" for ESS, e.g. 1.004/1.031(K_k2) and 8100/950(P_k1).
 function _pt_diag_strings(diag, names::AbstractVector{<:AbstractString})
@@ -566,7 +576,8 @@ function sample_pt_emcee(
     # Convergence-diagnostic setup. Science params (the gating set) default to
     # the planet block (`*_k<n>`) plus rho_s; everything else (jitter, gammas,
     # offsets, GP/AD noise params, LD) is monitored but non-gating. Live
-    # readout cadence: post-burnin, every `diag_cadence` steps.
+    # readout cadence: every `diag_cadence` steps (during burn-in, over a
+    # rolling window; see `burn_ring` below).
     _sci_names = science_params === nothing ?
         String[nm for nm in layout.unfrozen_names if occursin(r"_k\d+$", nm) || nm == "rho_s"] :
         science_params
@@ -957,6 +968,22 @@ function sample_pt_emcee(
     rhat_str = "—"; ess_str = "—"      # cached "mean/worst" displays
     conv_run = 0; converged_at = 0     # consecutive passing checks; stop step
 
+    # Burn-in diagnostics, for the readout only. The post-burn-in R-hat needs
+    # kept draws, so for the whole burn-in -- an hour of a long fit -- nothing
+    # said whether the cold rung was settling. During burn-in the same split
+    # R-hat and ESS are taken every `diag_cadence` steps (and at its last step)
+    # over a rolling window: the cold rung's science parameters at the last
+    # `diag_cadence` steps, every `burn_stride`-th one so the window holds at
+    # most 500 rows. Memory and cost are flat in the run length. A window says
+    # whether the walkers agree NOW; it is not the gate, which reads only the
+    # kept draws. Not checkpointed: after a resume the window refills.
+    burn_on     = n_burnin > 0 && show_progress
+    burn_stride = max(1, cld(diag_cadence, 500))
+    burn_ring   = Array{Float64,3}(undef, burn_on ? max(4, diag_cadence ÷ burn_stride) : 0,
+                                   length(science_cols), n_walkers_eff)
+    burn_next   = 1; burn_count = 0   # slot written next; slots filled
+    burn_rhat_str = "—"; burn_ess_str = "—"
+
     # --- Resume: put the saved run back exactly as it stopped ----------
     # In place throughout: the closures above captured these arrays, and
     # rebinding a captured variable would box it. A checkpoint that stopped on
@@ -981,6 +1008,8 @@ function sample_pt_emcee(
         end
         conv_run = ck.conv_run::Int; rhat_str = ck.rhat_str::String
         ess_str = ck.ess_str::String
+        burn_rhat_str = get(ck, :burn_rhat_str, "—")::String
+        burn_ess_str  = get(ck, :burn_ess_str, "—")::String
         # Windows the saved walkers live in (moved by the burn-in re-cut).
         for (nm, (lo, _)) in ck.windows
             set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
@@ -1092,10 +1121,36 @@ function sample_pt_emcee(
         # burn-in, which fixes the chart for every recorded step (usually a
         # no-op by then: circular_cut keeps the current seam unless another
         # arc is clearly emptier). Relabels `state` at every rung; logπ_arr
-        # and logL_arr stay valid, see `_pt_ensemble_recut!`.
+        # and logL_arr stay valid, see `_pt_ensemble_recut!`. The burn-in
+        # window holds earlier cold-rung positions, so it is relabelled too.
         if !isempty(circ) && (step == n_burnin ÷ 2 || step == n_burnin)
-            _pt_ensemble_recut!(state, params, circ, (target.transform,),
-                                recut_moved)
+            for d in _pt_ensemble_recut!(state, params, circ, (target.transform,),
+                                         recut_moved)
+                j = findfirst(==(d), science_cols)
+                j === nothing && continue
+                lo, hi = bounds(layout.unfrozen_priors[d])
+                @inbounds for w in 1:n_walkers_eff, r in 1:burn_count
+                    burn_ring[r, j, w] = circular_relabel(burn_ring[r, j, w], lo, hi)
+                end
+            end
+        end
+
+        # ---- Burn-in window: the cold rung's science parameters ------
+        # Back from the flat scale to x, like the kept draws. Read-only.
+        if burn_on && step <= n_burnin && step % burn_stride == 0
+            @inbounds for w in 1:n_walkers_eff, (j, c) in enumerate(science_cols)
+                s = flat_shift[c]
+                burn_ring[burn_next, j, w] = s === nothing ? state[1, w, c] :
+                                             exp(state[1, w, c]) - s
+            end
+            burn_next  = burn_next % size(burn_ring, 1) + 1
+            burn_count = min(burn_count + 1, size(burn_ring, 1))
+        end
+        if burn_on && step <= n_burnin && (step % diag_cadence == 0 || step == n_burnin)
+            bdiag = _pt_ring_diag(burn_ring, burn_next, burn_count)
+            if bdiag !== nothing
+                burn_rhat_str, burn_ess_str = _pt_diag_strings(bdiag, sci_names)
+            end
         end
 
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
@@ -1149,6 +1204,9 @@ function sample_pt_emcee(
             total_acc = sum(accept_within)
             acc_rate = total_props > 0 ? total_acc / total_props : 0.0
             lp_med, lp_max = _pt_cold_lp(state, logπ_arr, logL_arr, flat_shift)
+            # The burn-in window's figures until the kept draws have their own,
+            # marked as such: they describe the last window, not the posterior.
+            burn_shown = rhat_str == "—" && burn_rhat_str != "—"
             update!(pb; n_done = step,
                     fields = (:acc => round(acc_rate, digits = 3),
                               :β1_acc => round(accept_within[1] / max(propose_within[1], 1), digits = 3),
@@ -1162,8 +1220,12 @@ function sample_pt_emcee(
                                                                      propose_swap)),
                               # Cold-rung log-posterior, median/max over walkers.
                               :lp => string(_pt_lp_str(lp_med), "/", _pt_lp_str(lp_max)),
-                              :Rhat => rhat_str,    # mean/worst over science params
-                              :ESS => ess_str,      # mean(bulk)/worst(tail)
+                              # mean/worst over science params; ESS is
+                              # mean(bulk)/worst(tail)
+                              burn_shown ? (Symbol("Rhat(burn)") => burn_rhat_str) :
+                                           (:Rhat => rhat_str),
+                              burn_shown ? (Symbol("ESS(burn)") => burn_ess_str) :
+                                           (:ESS => ess_str),
                               :nevals => _pt_count_str(n_evals_atomic[])))
         end
 
@@ -1179,8 +1241,8 @@ function sample_pt_emcee(
                 swap_hist = swap_hist[1:step, :], smd_hist = smd_hist[1:step, :],
                 keep_idx, samples = samples[1:keep_idx, :],
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
-                conv_run, rhat_str, ess_str, windows = circular_windows(params),
-                recut_moved))
+                conv_run, rhat_str, ess_str, burn_rhat_str, burn_ess_str,
+                windows = circular_windows(params), recut_moved))
             last_ck = time()
         end
 

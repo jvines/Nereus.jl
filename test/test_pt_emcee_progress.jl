@@ -67,3 +67,21 @@ end
     @test Nereus._pt_lp_str(74390.4) == "74390" && Nereus._pt_lp_str(-152.34) == "-152.3"
     @test Nereus._pt_count_str(950) == "950" && Nereus._pt_count_str(1_234_567) == "1.2M"
 end
+
+@testset "pt_emcee readout: burn-in window in time order" begin
+    # A ring that has wrapped: the diagnostic must see the rows oldest first,
+    # since split R-hat compares the first half of each walker with the second.
+    cube = _slow_cube(n_step = 40)
+    n = size(cube, 1)
+    ring = similar(cube)
+    for s in 1:n, w in 1:size(cube, 3)
+        ring[mod1(s + 13, n), :, w] .= cube[s, :, w]     # row s lands in slot s + 13
+    end
+    d_ring = Nereus._pt_ring_diag(ring, mod1(14, n), n)
+    d_cube = Nereus._pt_cube_diag(cube)
+    @test d_ring.rhat == d_cube.rhat && d_ring.tail_ess == d_cube.tail_ess
+    # Not yet wrapped: only the filled rows, from the first.
+    @test Nereus._pt_ring_diag(ring, 11, 10).rhat ==
+          Nereus._pt_cube_diag(ring[1:10, :, :]).rhat
+    @test Nereus._pt_ring_diag(ring, 4, 3) === nothing
+end
