@@ -86,6 +86,7 @@ const TEST_UNITS = [
     (name = "test_detection_limits.jl", seconds = 37, files = ["test_detection_limits.jl"]),
     (name = "test_loo.jl", seconds = 10, files = ["test_loo.jl"]),
     (name = "test_fit_health.jl", seconds = 14, files = ["test_fit_health.jl"]),
+    (name = "test_prior_dicts.jl", seconds = 2, files = ["test_prior_dicts.jl"]),
     (name = "test_fit_summary_transdim.jl", seconds = 47, files = ["test_fit_summary_transdim.jl"]),
     # The two full default-settings fits, split so they run in different
     # shards. The trans-dim one is the single heaviest unit of the suite: LPT
