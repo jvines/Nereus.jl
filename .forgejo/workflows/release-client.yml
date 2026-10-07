@@ -1,0 +1,67 @@
+# A release of astronereus alone, against Nereus runtime bundles that are
+# already published -- for client fixes that change nothing in Nereus. See
+# tools/release/publish-client.sh. Manual and irreversible, like the publish
+# job in release.yml; a release that does change Nereus goes through that.
+#
+# NO MACHINE NAMES OR PATHS IN THIS FILE -- the repository is mirrored publicly
+# on every push, on every branch. Runner labels come from RUNNER_MATRIX and
+# everything else from the RELEASE_CONFIG secret.
+
+name: Release astronereus
+
+on:
+  workflow_dispatch:
+    inputs:
+      astronereus_version:
+        description: "astronereus version to publish (e.g. 0.4.34)"
+        required: true
+        type: string
+      confirm:
+        description: "Type PUBLISH to publish, CHECK to stop before anything is published."
+        required: true
+        type: string
+
+concurrency:
+  group: nereus-release-client
+  cancel-in-progress: false
+
+jobs:
+  publish_client:
+    name: Publish astronereus
+    runs-on: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].runner }}
+    timeout-minutes: 30
+    env:
+      FORGEJO_TOKEN: ${{ github.token }}
+      LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
+      RELEASE_CONFIG: ${{ secrets.RELEASE_CONFIG }}
+      TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+      CI_WORKSPACE: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].ci_root }}/release-client/${{ github.run_id }}
+    steps:
+      - name: Fetch the dispatched commit
+        run: |
+          set -euo pipefail
+          rm -rf "$CI_WORKSPACE"; mkdir -p "$CI_WORKSPACE"; cd "$CI_WORKSPACE"
+          git init -q .
+          git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
+          git -c credential.helper= \
+              -c credential.helper='!f() { echo "username=x-access-token"; echo "password=${FORGEJO_TOKEN}"; }; f' \
+              fetch -q origin "${{ github.sha }}"
+          git checkout -q FETCH_HEAD
+
+      - name: Publish
+        working-directory: ${{ env.CI_WORKSPACE }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.confirm }}" in
+            PUBLISH) mode=--confirm ;;
+            CHECK)   mode=--check ;;
+            *) echo "confirm was neither PUBLISH nor CHECK; refusing" >&2; exit 1 ;;
+          esac
+          # A secret stored with a trailing newline breaks the upload; no token
+          # contains whitespace, so strip all of it (see release.yml).
+          TWINE_PASSWORD=$(printf '%s' "$TWINE_PASSWORD" | tr -d '[:space:]'); export TWINE_PASSWORD
+          tools/release/publish-client.sh "${{ inputs.astronereus_version }}" "$mode"
+
+      - name: Clean up
+        if: always()
+        run: rm -rf "$CI_WORKSPACE"
