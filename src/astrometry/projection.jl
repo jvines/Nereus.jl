@@ -618,10 +618,12 @@ function _planet_orbit(theta::Theta, k::Int, M_pri::Real, plx::Real,
     t_anc = planet_time_anchor(theta, k)
     # Clamp e to physical range. The (sesinw, secosw) parametrization
     # has unconstrained Cartesian priors that can produce e > 1; the RV
-    # path absorbs this in `true_anomaly` via the same min/max clamp.
+    # path absorbs this in `true_anomaly` via the same clamp (`_anomaly_e`).
     # PlanetOrbits' KepOrbit needs e ∈ [0, 1) so we apply the clamp here
     # too. No-op for valid samples; protects autodiff during line search.
-    e_safe = min(max(e, zero(e)), oftype(e, 0.9999))
+    # `clamp` keeps e itself, partials included, at e = 0, where
+    # `max(e, zero(e))` returned the constant and lost ∂/∂e.
+    e_safe = _anomaly_e(e)
     time_kind = theta.params.config.parametrization.time
     Tp = _t_anchor_to_tp(time_kind, t_anc, P, e_safe, ω, t_ref)
     # Get M_sec via the parametrization-aware accessor: in :K_driven

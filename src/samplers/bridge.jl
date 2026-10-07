@@ -332,9 +332,8 @@ and the assertion boxes the tuple for the other 32.
         # The planet blocks are abstractly typed, so `planet_e_w` is not
         # inferred; the assertion keeps that from spreading to the test below.
         e, _ = planet_e_w(theta, k)::Tuple{T, T}
-        # `true_anomaly`'s own clamp, spelled the same way: true exactly when it
-        # changes e, and for NaN.
-        min(max(e, zero(e)), oftype(e, 0.9999)) == e || return true
+        # `true_anomaly`'s own clamp: true exactly when it changes e, and for NaN.
+        _anomaly_e(e) == e || return true
     end
     return false
 end

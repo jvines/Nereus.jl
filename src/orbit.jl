@@ -27,21 +27,29 @@ Compute the true anomaly `f` from eccentric anomaly `E` and eccentricity
 
 For `e = 0`, `f = E` (modulo branch). For `e → 1`, behaves correctly as
 long as `E ≠ π`.
+
+`e` is clamped to `[0, 0.9999]` (`_anomaly_e`), so the square roots exist
+for any input.
 """
 @inline function true_anomaly(E::Real, e::Real)
-    # Guard against unphysical e (sampler can transiently propose e > 1
-    # or e < 0 via sesinw/secosw, even in unconstrained space where
-    # the bijector maps each component independently but doesn't enforce
-    # the joint constraint s²+c² < 1).
-    # Use max/min instead of clamp for better autodiff trace (no branch).
-    e_safe = min(max(e, zero(e)), oftype(e, 0.9999))
-    arg_plus  = 1 + e_safe
-    arg_minus = max(1 - e_safe, oftype(e, 1e-10))  # prevent sqrt(negative)
-    sqrt_one_plus  = sqrt(arg_plus)
-    sqrt_one_minus = sqrt(arg_minus)
+    e_safe = _anomaly_e(e)
+    sqrt_one_plus  = sqrt(1 + e_safe)
+    sqrt_one_minus = sqrt(1 - e_safe)
     sinE2, cosE2 = sincos(E / 2)
     return 2 * atan(sqrt_one_plus * sinE2, sqrt_one_minus * cosE2)
 end
+
+# The eccentricity `true_anomaly` uses: e clamped to [0, 0.9999]. A sampler can
+# transiently propose e < 0 or e > 1 (sesinw and secosw are mapped
+# independently, and nothing enforces s² + c² < 1), and post-fit consumers
+# iterate stale trans-dim slots; this keeps the square roots real for them.
+#
+# `clamp`, not `min(max(e, 0), 0.9999)`: Base's `max` returns its second
+# argument on a tie, so at e = 0 `max(e, zero(e))` was the constant zero and a
+# ForwardDiff (or traced) ∂/∂e was lost there. `clamp` returns e itself
+# whenever it lies inside the interval or on its ends, partials included.
+# NaN stays NaN.
+@inline _anomaly_e(e::Real) = clamp(e, zero(e), oftype(e, 0.9999))
 
 # ---------------------------------------------------------------------
 # RV Keplerian model (Mo parametrization)

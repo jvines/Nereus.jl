@@ -356,7 +356,7 @@ end
 @inline _is_const_zero(x::Real) = false
 
 @inline function _sky_orbit(P::Real, e::Real, ω::Real, Tp::Real, b::Real, a_Rs::Real,
-                            ef::Real = min(max(e, zero(e)), oftype(e, 0.9999)))
+                            ef::Real = _anomaly_e(e))
     T = promote_type(typeof(P), typeof(e), typeof(ω), typeof(Tp), typeof(b),
                      typeof(a_Rs), typeof(ef))
     sω, cω = sincos(ω)
