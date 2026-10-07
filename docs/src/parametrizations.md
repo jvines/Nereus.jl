@@ -270,7 +270,9 @@ evidence) and the RV likelihood uses the γ-marginalised path
 (`_rv_ll_gamma_marginalized`).
 
 - White-noise RV only — it does **not** compose with a covariance
-  (GP/celerite) RV model.
+  (GP/celerite) RV model, and any RV-channel noise model is rejected at
+  construction. Photometry-channel noise models (a GP on the light curve,
+  say) are fine: the RV likelihood stays γ-marginalised alongside them.
 - `γ` is integrated against a **flat, unnormalised measure**, not against the
   `gamma_<INST>` prior. The marginal likelihood therefore carries an arbitrary
   constant per instrument. It is the same constant for every model fitted to the

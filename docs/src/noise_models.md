@@ -144,7 +144,10 @@ exponential decay ([Tuomi+ 2013](https://ui.adsabs.harvard.edu/abs/2013A&A...551
 residual** (the deterministic-model residual), snapshotting it before
 the loop so the lag reads the pre-correction value — matching the
 astroEMPEROR `moav`/`ar` convention (`src/noise/arma.jl:39,113`).
-Evaluation is sequential O(n), no matrix inversion. Orders are fixed at
+Evaluation is sequential O(n), no matrix inversion. A lag is the
+previous observation **in time**: data stored in another order (RVs
+concatenated instrument by instrument) are run through in a stable time
+order and written back in their own. Orders are fixed at
 construction (not trans-dimensional — trans-dim toggles the whole
 component on/off, not its order).
 
@@ -221,6 +224,10 @@ the same channel, because it only covers a subset of observations.
 GP kernels via the celerite ([Foreman-Mackey+ 2017](https://ui.adsabs.harvard.edu/abs/2017AJ....154..220F/abstract), 2018)
 semi-separable formulation — O(n) likelihood evaluation regardless of
 data length (`celerite_loglike` in `src/noise/gp.jl:122`). The
+recursion runs over time-ordered points; data need not be stored in
+time order (RVs concatenated instrument by instrument are fine): the
+points are scored in a stable time order, which leaves the likelihood
+unchanged, and sampler workspaces sort them once. The
 multivariate `ActivityGP` is also a `CovarianceNoise` but is built
 dense (O(n³)); it is documented separately below.
 
