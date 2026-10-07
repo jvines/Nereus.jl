@@ -363,3 +363,101 @@ end
         end
     end
 end
+
+# The N-body TTV backends predict the transits of the light curve's own orbits.
+# Their linear ephemeris used to start at Tp + P/4 (the time of mid-transit
+# only for a circular orbit with ω = 0), and both were handed (e cos ω, e sin ω)
+# although TTVFaster measures ϖ from the line of sight (ϖ = ω - π/2) and
+# NbodyGradient has its observer on -z (ω' = ω + π): every eccentric orbit was
+# turned by 90 or 180 degrees, and the two backends' TTVs anticorrelated.
+using TTVFaster: Planet_plane_hk, compute_ttv!
+import NbodyGradient
+using Statistics: cor, std
+using MCMCChains: Chains
+
+function _nb_fixture(; backend = :ttvfaster)
+    t_phot = collect(range(0.0, 400.0; length = 400)) .+ 2_450_000.0
+    data = Data(; t_rv = t_phot[1:10], rv = zeros(10), rv_err = ones(10),
+                  rv_inst = ones(Int, 10), t_phot, flux = ones(400),
+                  flux_err = fill(1e-3, 400), phot_inst = ones(Int, 400))
+    params = Params(; max_kplanet = 2, planet_modes = [RVPM_TTV_NB, RVPM_TTV_NB],
+                      instruments = InstrumentConfig(rv = ["HARPS"], pm = ["TESS"]),
+                      data, parametrization = ParametrizationConfig(time = :Tc),
+                      M_s = 1.0, R_s = 1.0, stability = :none, ttv_backend = backend)
+    th = Theta{Float64}(params)
+    ix = params.layout.name_to_idx
+    # An eccentric pair of ~10 Earth masses just wide of 2:1 (TTVFaster is
+    # first order in the masses too), periastra well away from ω = 0.
+    orb = ((P = 4.0, K = 4.0, e = 0.05, ω = 0.7, Tc = 2_450_001.3, b = 0.2, rr = 0.1),
+           (P = 8.1, K = 3.0, e = 0.04, ω = -1.2, Tc = 2_450_002.9, b = 0.0, rr = 0.08))
+    for (k, o) in enumerate(orb)
+        for (nm, v) in ("P" => o.P, "K" => o.K, "Tc" => o.Tc, "b" => o.b, "rr" => o.rr,
+                        "sesinw" => sqrt(o.e) * sin(o.ω), "secosw" => sqrt(o.e) * cos(o.ω))
+            th.values[ix["$(nm)_k$k"]] = v
+        end
+    end
+    th.values[ix["sigma_HARPS"]] = 1.0
+    th.values[ix["q1_TESS"]] = 0.3; th.values[ix["q2_TESS"]] = 0.2
+    Ps = [o.P for o in orb]; es = [o.e for o in orb]; ws = [o.ω for o in orb]
+    Tps = [tc_to_tp(o.Tc, o.P, o.e, o.ω) for o in orb]
+    bs = [o.b for o in orb]
+    a_Rs = [cbrt(Nereus.GM_SUN_CGS * (P * 86400)^2 / (4π^2)) / Nereus.R_SUN_CM for P in Ps]
+    return (; params, data, th, orb, Ps, es, ws, Tps, bs, a_Rs, t_max = maximum(t_phot))
+end
+
+function _nb_predict(fx)
+    p_idx = planet_indices(fx.th)
+    _, st = Nereus._decode_ttv_state(fx.th, p_idx)
+    Nereus._apply_ttv_nb!(st, fx.th, p_idx, fx.Ps, fx.es, fx.ws, fx.Tps, fx.bs,
+                          fx.a_Rs, fx.t_max)
+    return st
+end
+
+_detrend(n, y) = (A = [ones(length(n)) n]; y .- A * (A \ y))
+
+@testset "TTV-NB: the backends predict the light curve's orbits" begin
+    # TTVFaster: the planets at their transit times Tc, the eccentricity vector
+    # with ϖ = ω - π/2.
+    fx = _nb_fixture()
+    st = _nb_predict(fx)
+    pl = [Planet_plane_hk(Nereus.msini(1.0, o.K, o.P, o.e) /
+                              sind(acosd(fx.bs[k] / fx.a_Rs[k])) * Nereus._MJ_PER_MS,
+                          o.P, o.Tc, o.e * sin(o.ω), -o.e * cos(o.ω))
+          for (k, o) in enumerate(fx.orb)]
+    ts = [[o.Tc + n * o.P for n in 0:(length(st.δts[k]) - 1)] for (k, o) in enumerate(fx.orb)]
+    ttv = [zeros(length(t)) for t in ts]
+    compute_ttv!(5, pl[1], pl[2], ts[1], ts[2], ttv[1], ttv[2])
+    @test st.δts[1] ≈ ttv[1] rtol = 1e-10
+    @test st.δts[2] ≈ ttv[2] rtol = 1e-10
+    @test maximum(abs, st.δts[1]) > 1e-3                 # minutes: a real signal
+
+    # NbodyGradient: the orbit it is given has its periastron at Nereus's Tp.
+    for (k, o) in enumerate(fx.orb)
+        el = [o.P, o.Tc, Nereus._nbodygradient_hk(o.e, o.ω)..., π / 2 - 0.01, 0.0]
+        tg = range(fx.Tps[k] - o.P / 2, fx.Tps[k] + o.P / 2; length = 20_001)
+        r = [sqrt(sum(abs2, NbodyGradient.kepler_init(t, 1.0, el)[1])) for t in tg]
+        @test abs(tg[argmin(r)] - fx.Tps[k]) <= 2 * step(tg)
+    end
+
+    # The full N-body integration and TTVFaster's first-order series agree on
+    # this pair (both minus their own best linear ephemeris): r = 0.99, the
+    # difference ~15% of the signal.
+    nb = _nb_predict(_nb_fixture(; backend = :nbody))
+    for k in 1:2
+        n = min(length(st.δts[k]), length(nb.δts[k]))
+        @test n >= 40 ÷ k
+        a = _detrend(0:(n - 1), st.δts[k][1:n]); b = _detrend(0:(n - 1), nb.δts[k][1:n])
+        @test cor(a, b) > 0.95
+        @test std(a .- b) < 0.3 * std(b)
+    end
+
+    # The O−C plot's envelope is the likelihood's prediction.
+    ix = fx.params.layout.name_to_idx
+    nms = sort!(collect(keys(ix)))
+    vals = [fx.th.values[ix[nm]] for nm in nms]
+    ch = Chains(repeat(reshape(vals, 1, :, 1), 4, 1, 1), Symbol.(nms))
+    o = fx.orb[1]
+    tcs = [o.Tc + n * o.P for n in 0:(length(st.δts[1]) - 1)]
+    env = ttvc_envelope(ch, fx.params; tcs_observed = tcs, n_draws = 4)
+    @test env.med ≈ st.δts[1] rtol = 2e-3
+end

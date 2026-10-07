@@ -86,7 +86,9 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
         e  = Float64(ForwardDiff_value(es[j]))
         w  = Float64(ForwardDiff_value(ws[j]))
         Tp = Float64(ForwardDiff_value(Tps[j]))
-        Tc1 = Tp + P / 4
+        # The time of mid-transit (it was Tp + P/4, right only for a circular
+        # orbit with ω = 0; see `_apply_ttv_nb!`).
+        Tc1 = tp_to_tc(Tp, P, e, w)
         # Mass ratio from K, inc.
         K = Float64(ForwardDiff_value(planet_K(theta, k)))
         b = Float64(ForwardDiff_value(bs[j]))
@@ -98,8 +100,8 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
         elems[q+1, 1] = mp_msun
         elems[q+1, 2] = P
         elems[q+1, 3] = Tc1
-        elems[q+1, 4] = e * cos(w)
-        elems[q+1, 5] = e * sin(w)
+        # NbodyGradient's ω is Nereus's + π (`_nbodygradient_hk`).
+        elems[q+1, 4], elems[q+1, 5] = _nbodygradient_hk(e, w)
         elems[q+1, 6] = inc_rad
         elems[q+1, 7] = 0.0   # Ω = 0 — coplanar assumption
         Tc1s[q] = Tc1
