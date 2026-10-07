@@ -1521,28 +1521,14 @@ function _activity_gp_joint_ll_scoped(theta::Theta{T}, data::Data,
     @inbounds for i in 1:n_obs_total
         Σ[i, i] += σ²_flat[i]
     end
+    # Solved through the triangular factors (`_agp_conditional_logpdf`,
+    # `_agp_chol_logpdf`): `F \ y` lost the Hessian at couplings that are 0.
     if agp.marginalize_indicators && n_obs_total > n_rv_obs
-        Σ_RR = view(Σ, 1:n_rv_obs, 1:n_rv_obs)
-        Σ_RI = view(Σ, 1:n_rv_obs, (n_rv_obs + 1):n_obs_total)
-        Σ_II = view(Σ, (n_rv_obs + 1):n_obs_total, (n_rv_obs + 1):n_obs_total)
-        y_R  = view(y_flat, 1:n_rv_obs)
-        y_I  = view(y_flat, (n_rv_obs + 1):n_obs_total)
-        F_II = cholesky(Symmetric(Matrix(Σ_II)); check = false)
-        issuccess(F_II) || return convert(T, -Inf)
-        μ_cond = Σ_RI * (F_II \ y_I)
-        Σ_cond = Symmetric(Matrix(Σ_RR) .- Σ_RI * (F_II \ Matrix(transpose(Σ_RI))))
-        F_R = cholesky(Σ_cond; check = false)
-        issuccess(F_R) || return convert(T, -Inf)
-        r = y_R .- μ_cond
-        return convert(T,
-            -0.5 * (dot(r, F_R \ r) + logdet(F_R) +
-                     n_rv_obs * log(2π)))
+        return convert(T, _agp_conditional_logpdf(Σ, y_flat, n_rv_obs))
     end
     F = cholesky(Symmetric(Σ); check = false)
     issuccess(F) || return convert(T, -Inf)
-    α = F \ y_flat
-    return convert(T,
-        -0.5 * (dot(y_flat, α) + logdet(F) + n_obs_total * log(2π)))
+    return convert(T, _agp_chol_logpdf(F, y_flat))
 end
 
 # Joint Rajpaul-GP log-likelihood across RV and the indicator channels
@@ -1629,9 +1615,9 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         end
         F_I = cholesky(Symmetric(Σ_I); check = false)
         issuccess(F_I) || return convert(T, -Inf)
-        αI = F_I \ y_I
-        return convert(T, -0.5 * (dot(y_I, αI) + logdet(F_I) +
-                                   n_ind_total * log(2π)))
+        # Not `F_I \ y_I`, which lost the Hessian where every coupling is 0
+        # (see `_agp_chol_logpdf`).
+        return convert(T, _agp_chol_logpdf(F_I, y_I))
     end
 
     # Channel-stacked residuals and variances: RV block, then each indicator.
@@ -1728,37 +1714,18 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         #   Σ_R|I = Σ_RR − Σ_RI · Σ_II⁻¹ · Σ_IR
         # and the log-density of (y_R − μ_R|I) under N(0, Σ_R|I)
         # gives `log p(RV | I, θ)` directly comparable to AD's log L.
-        Σ_RR = view(Σ, 1:n_rv_obs, 1:n_rv_obs)
-        Σ_RI = view(Σ, 1:n_rv_obs, (n_rv_obs + 1):n_total)
-        Σ_II = view(Σ, (n_rv_obs + 1):n_total, (n_rv_obs + 1):n_total)
-        y_R  = view(y_flat, 1:n_rv_obs)
-        y_I  = view(y_flat, (n_rv_obs + 1):n_total)
-        F_II = cholesky(Symmetric(Matrix(Σ_II)); check = false)
-        issuccess(F_II) || return convert(T, -Inf)
-        rhs = F_II \ Matrix(Σ_IR_view(Σ_RI))   # n_ind × n_rv
-        μ_cond = Σ_RI * (F_II \ y_I)
-        Σ_cond = Symmetric(Matrix(Σ_RR) .- Σ_RI * rhs)
-        F_R = cholesky(Σ_cond; check = false)
-        issuccess(F_R) || return convert(T, -Inf)
-        r = y_R .- μ_cond
-        return convert(T,
-            -0.5 * (dot(r, F_R \ r) + logdet(F_R) +
-                     n_rv_obs * log(2π)))
+        #
+        # Formed through the triangular factor of Σ_II, not `F_II \ ...`,
+        # which lost the Hessian where every coupling is 0 (see
+        # `_agp_conditional_logpdf`).
+        return convert(T, _agp_conditional_logpdf(Σ, y_flat, n_rv_obs))
     end
 
     # Joint Gaussian log p(RV, indicators).
     F = cholesky(Symmetric(Σ); check = false)
     issuccess(F) || return convert(T, -Inf)
-    α = F \ y_flat
-    return convert(T,
-        -0.5 * (dot(y_flat, α) + logdet(F) + n_total * log(2π)))
+    return convert(T, _agp_chol_logpdf(F, y_flat))
 end
-
-# Helper to transpose a SubArray-aware view (Σ_IR is the transpose
-# of Σ_RI by symmetry; rebuilding via `Σ_RI'` keeps the Symmetric
-# block PD).
-@inline _Σ_IR_view(Σ_RI) = transpose(Matrix(Σ_RI))
-const Σ_IR_view = _Σ_IR_view
 
 
 """

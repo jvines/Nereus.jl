@@ -1314,14 +1314,44 @@ function _agp_nan_seen(yDy, logdetD, vs::AbstractVector...)
     return false
 end
 
+# log N(y; 0, Σ) from the Cholesky factorization F of Σ = UᵀU:
+# −(‖U⁻ᵀy‖² + log det Σ + n·log 2π)/2. Every dense ActivityGP likelihood
+# solves through here or `_agp_conditional_logpdf`. The solve is
+# `F.U' \ y`, not `F \ y`: the latter goes through LinearAlgebra's 2-argument
+# ldiv!, which asks `istriu` of the transposed factor, and ForwardDiff's
+# `iszero` reads only a dual's value. Where every coupling is 0, Σ and its
+# factor are diagonal in value while their off-diagonal second derivatives
+# are not, and `F \ y` dropped those, so Hessians with respect to the
+# couplings came out wrong (test/test_activity_gp.jl and
+# test/test_activity_gp_lowrank.jl check this point). `F.U'` is a
+# LowerTriangular, solved as one whatever its values.
+function _agp_chol_logpdf(F::Cholesky, y::AbstractVector)
+    z = F.U' \ y
+    return -(dot(z, z) + logdet(F) + length(y) * log(2π)) / 2
+end
+
+# log p(y_R | y_I) for y = (y_R, y_I) ~ N(0, Σ), y_R its first `n_R` entries:
+# the Gaussian conditional, with mean Σ_RI Σ_II⁻¹ y_I and covariance
+# Σ_RR − Σ_RI Σ_II⁻¹ Σ_IR, both formed from W = U_II⁻ᵀ Σ_IR (Σ_II = U_IIᵀU_II)
+# so that no solve goes through `F \ ...` (see `_agp_chol_logpdf`). `-Inf`
+# where Σ_II or the conditional covariance is not positive definite.
+function _agp_conditional_logpdf(Σ::AbstractMatrix, y::AbstractVector, n_R::Int)
+    iR = 1:n_R
+    iI = (n_R + 1):length(y)
+    TS = promote_type(eltype(Σ), eltype(y))
+    F_II = cholesky(Symmetric(Matrix(view(Σ, iI, iI))); check = false)
+    issuccess(F_II) || return convert(TS, -Inf)
+    Ut = F_II.U'
+    W  = Ut \ Matrix(transpose(view(Σ, iR, iI)))       # n_I × n_R
+    zI = Ut \ y[iI]
+    F_R = cholesky(Symmetric(Matrix(view(Σ, iR, iR)) .- transpose(W) * W); check = false)
+    issuccess(F_R) || return convert(TS, -Inf)
+    return _agp_chol_logpdf(F_R, y[iR] .- transpose(W) * zI)
+end
+
 # The dense (C·N)² Gaussian log-density of the same Σ = M·K_g·Mᵀ + D,
 # generic in the element type: the fallback for numbers that carry
-# derivatives at near-singular blocks with two or three channels. The solve
-# is `F.U' \ y`, not `F \ y`: the latter goes through LinearAlgebra's ldiv!,
-# which asks `istriu` of the transposed factor, and ForwardDiff's `iszero`
-# reads only a dual's value, so where the factor is diagonal in value (every
-# coupling 0) its off-diagonal partials would be dropped and Hessians come out
-# wrong (test/test_activity_gp_lowrank.jl checks this point).
+# derivatives at near-singular blocks with two or three channels.
 function _agp_dense_logpdf(epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ²_flat)
     Σ0 = activity_gp_covariance_blocked(epochs, chan_a, chan_b, amp, P, λe, λp)
     TS = promote_type(eltype(Σ0), eltype(y_flat), eltype(σ²_flat))
@@ -1329,8 +1359,7 @@ function _agp_dense_logpdf(epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ�
     @inbounds for i in eachindex(σ²_flat); Σ[i, i] += σ²_flat[i]; end
     F = cholesky!(Symmetric(Σ, :U); check = false)
     issuccess(F) || return convert(TS, -Inf)
-    z = F.U' \ y_flat
-    return -(dot(z, z) + logdet(F) + length(y_flat) * log(2π)) / 2
+    return _agp_chol_logpdf(F, y_flat)
 end
 
 # The same Gaussian log-density, for numbers that carry derivatives where R is

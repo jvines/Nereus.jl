@@ -553,10 +553,14 @@ side of those thresholds. The
 dense covariance with the block-factored builder
 (`activity_gp_covariance_blocked`, `src/noise/activity_gp.jl:424`), an
 `O(n_total³)` Cholesky per likelihood call, tractable up to ~500 total
-observations. The celerite-block O(n) route is a dead-end for the QP joint
-covariance (its kernel is not a finite sum of damped exponentials, and the
-FM17 celerite form carries a `|τ|` kink that makes `Var(dG/dt)` formally
-infinite — see the warning at `src/noise/activity_gp.jl:75`).
+observations. They solve with the triangular factor itself
+(`_agp_chol_logpdf`, `_agp_conditional_logpdf`), so Hessians are right at
+couplings that are exactly 0, where the covariance is diagonal in value but
+not in its second derivatives. The celerite-block O(n) route is a dead-end
+for the QP joint covariance (its kernel is not a finite sum of damped
+exponentials, and the FM17 celerite form carries a `|τ|` kink that makes
+`Var(dG/dt)` formally infinite — see the warning at
+`src/noise/activity_gp.jl:75`).
 
 ### `IndicatorFloor`
 
