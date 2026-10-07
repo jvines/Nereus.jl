@@ -709,27 +709,42 @@ function plot_rv_phasefold(chains, params, data;
         # disable). This is the LAST limits-setting call on these axes —
         # an earlier version set limits mid-function and was silently
         # overwritten by a second mechanism down here.
+        # Both panels are framed on the points they draw (`keep`): the
+        # in-transit RM points are not drawn and must not set the scale.
         if robust_ylim
             _fmin(v) = (f = filter(isfinite, v); isempty(f) ? Inf  : minimum(f))
             _fmax(v) = (f = filter(isfinite, v); isempty(f) ? -Inf : maximum(f))
-            fold_fin = filter(isfinite, rv_folded[keep])
-            isempty(fold_fin) && (fold_fin = [0.0])
-            zlo = min(quantile(fold_fin, 0.10), _fmin(ci.median))
-            zhi = max(quantile(fold_fin, 0.90), _fmax(ci.median))
-            if !isempty(yb)
-                zlo = min(zlo, _fmin(yb .- eb))
-                zhi = max(zhi, _fmax(yb .+ eb))
+            fold_k = rv_folded[keep]
+            res_k  = residuals[keep]
+            if isempty(yb)
+                # Sparse fold, no binned overlay: the points ARE the signal,
+                # so frame all of them except true outliers (residual beyond
+                # 5 robust sigma). The 10-90% quantile zoom below put a fifth
+                # of the points out of view whatever their scatter -- seven
+                # of 33 on a jitter-dominated hot-Jupiter fold.
+                inl = _fold_inliers(res_k)
+                zlo = min(_fmin(fold_k[inl]), _fmin(ci.median))
+                zhi = max(_fmax(fold_k[inl]), _fmax(ci.median))
+                rmax = _fmax(abs.(res_k[inl]))
+                rpad = 1.4      # the extreme marker clears the frame
+            else
+                fold_fin = filter(isfinite, fold_k)
+                isempty(fold_fin) && (fold_fin = [0.0])
+                zlo = min(quantile(fold_fin, 0.10), _fmin(ci.median),
+                          _fmin(yb .- eb))
+                zhi = max(quantile(fold_fin, 0.90), _fmax(ci.median),
+                          _fmax(yb .+ eb))
+                res_fin = filter(isfinite, res_k)
+                rmax = isempty(res_fin) ? 0.0 :
+                       max(abs(quantile(res_fin, 0.10)),
+                           abs(quantile(res_fin, 0.90)))
+                rpad = 1.3
             end
             if isfinite(zlo) && isfinite(zhi) && zhi > zlo
                 zpad = 0.15 * (zhi - zlo)
                 ylims!(ax, zlo - zpad, zhi + zpad)
             end
-            res_fin = filter(isfinite, residuals)
-            if !isempty(res_fin)
-                rmax = max(abs(quantile(res_fin, 0.10)),
-                            abs(quantile(res_fin, 0.90)))
-                rmax > 0 && ylims!(ax_r, -1.3 * rmax, 1.3 * rmax)
-            end
+            isfinite(rmax) && rmax > 0 && ylims!(ax_r, -rpad * rmax, rpad * rmax)
         else
             _tight_ylims!(ax,   rv_folded; pad_frac=0.10)
             _tight_ylims!(ax_r, residuals; pad_frac=0.30, symmetric=true)
