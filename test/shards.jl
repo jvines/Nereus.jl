@@ -168,6 +168,7 @@ const TEST_UNITS = [
     (name = "verify_rajpaul_kernel_fd.jl", seconds = 1, files = ["verify_rajpaul_kernel_fd.jl"]),
     (name = "test_plot_corner_thinning.jl", seconds = 8, files = ["test_plot_corner_thinning.jl"]),
     (name = "test_rv_fold_ylims.jl", seconds = 30, files = ["test_rv_fold_ylims.jl"]),
+    (name = "test_periodogram_plot_limits.jl", seconds = 20, files = ["test_periodogram_plot_limits.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 3, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_labels.jl", seconds = 2, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 15, files = ["test_science_table_labels.jl"]),

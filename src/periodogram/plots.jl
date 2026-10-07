@@ -162,20 +162,28 @@ function _periodogram_plot_to_axis!(ax::Axis, pgram::Periodogram;
     # and cap the peak labels below it so the two never collide.
     is_long_label = channel_label !== nothing && length(channel_label) > 12
 
+    # Height everything is placed against: the spectrum OR the highest FAP
+    # line drawn, whichever is higher. Scaling on the spectrum alone left the
+    # FAP lines in view only by chance (with no significant peak the top ones
+    # fell off the axis) and put the peak-label band right on top of them.
+    y_max_data = maximum(pwr)
+    ref = y_max_data
+    if show_faps && pgram isa GLSPgram
+        ref = max(ref, maximum(filter(isfinite, pgram.fap_thresholds); init = 0.0))
+    end
+
     if npk > 0
-        # Generous headroom — peak labels need breathing room AND we
-        # need the top y-tick to stay below the label band.
-        y_max_data = maximum(pwr)
-        y_top = y_max_data * (is_long_label ? 1.80 : 1.55)
-        ylims!(ax, 0.0, y_top)
-        # Keep peak labels (which grow upward from their baseline) well below
-        # the reserved long-label strip.
-        peak_cap = y_max_data * (is_long_label ? 1.28 : Inf)
+        # Labels sit above both the data and the FAP lines; nearby peaks
+        # stagger upward and the axis top follows the highest label, so none
+        # is clipped. A long channel label keeps its reserved top strip and
+        # caps the peak labels below it.
+        peak_cap = is_long_label ? ref * 1.28 : Inf
         ordered = sort(view(labelable, 1:npk);
                         by = p -> log10(p.frequency))
         x_min_sep = 0.06 * (log_f[end] - log_f[1])
         last_x = -Inf
-        last_y = y_max_data * 1.26    # label baseline above data
+        last_y = ref * 1.08           # label baseline above data and FAPs
+        y_hi = last_y
         span = log_f[end] - log_f[1]
         for pk in ordered
             x  = log10(pk.frequency)
@@ -187,22 +195,26 @@ function _periodogram_plot_to_axis!(ax::Axis, pgram::Periodogram;
                 (rel < skip_label_edge_frac || rel > 1 - skip_label_edge_frac) && continue
             end
             y_lbl = if x - last_x < x_min_sep
-                last_y + y_max_data * 0.12
+                last_y + ref * 0.12
             else
-                y_max_data * 1.26
+                ref * 1.08
             end
             y_lbl = min(y_lbl, peak_cap)
-            lines!(ax, [x, x], [pk.power, y_lbl];
-                    color = (:black, 0.6), linewidth = 0.6)
+            # Grey dotted leader with a gap above the peak: a solid dark
+            # leader from the peak itself read as the spike continuing up
+            # through the FAP lines.
+            lines!(ax, [x, x], [pk.power + 0.03 * ref, y_lbl];
+                    color = (:gray, 0.7), linewidth = 0.6, linestyle = :dot)
             text!(ax, x, y_lbl;
                    text = @sprintf("%.2f", pk.period),
                    align = (:center, :bottom),
                    fontsize = _PERIODOGRAM_PEAK_FONTSIZE)
             last_x = x; last_y = y_lbl
+            y_hi = max(y_hi, y_lbl)
         end
+        ylims!(ax, 0.0, is_long_label ? ref * 1.80 : max(ref * 1.30, y_hi + ref * 0.22))
     else
-        y_max_data = maximum(pwr)
-        ylims!(ax, 0.0, y_max_data * (is_long_label ? 1.40 : 1.08))
+        ylims!(ax, 0.0, ref * (is_long_label ? 1.40 : 1.08))
     end
 
     # Channel-name annotation (upper-left, in-axis text). Long labels park in
