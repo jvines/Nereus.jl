@@ -16,7 +16,8 @@ using NbodyGradient: ElementsIC, Integrator, TransitTiming, State
 const _MJ_PER_MS_NBG = _MJ_PER_MS
 
 """
-    _apply_ttv_nb_full!(state, theta, p_idx, Ps, es, ws, Tps, bs, a_Rs, t_phot_max)
+    _apply_ttv_nb_full!(state, theta, p_idx, Ps, es, ws, Tps, bs, a_Rs, t_phot_max;
+                        t_phot_min = nothing)
 
 `:nbody` backend for TTV-NB: integrates the full N-body system via
 NbodyGradient.jl and writes per-transit time offsets (relative to the
@@ -24,7 +25,11 @@ linear ephemeris) into `state.δts[r]` for every `:TTV_NB` row.
 
 Drops in for `_apply_ttv_nb!` (TTVFaster) when
 `theta.params.config.ttv_backend === :nbody`. Same input/output
-contract.
+contract: `δts[r][i]` is transit `state.n0s[r] + i - 1`, counted from the
+time of mid-transit. The elements are osculating at the start of the
+integration, a quarter of the shortest period before the first transit
+needed (the transit Tc, or the first one of the photometry if that is
+earlier).
 """
 function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
                               Ps::AbstractVector{T},
@@ -33,7 +38,8 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
                               Tps::AbstractVector{T},
                               bs::AbstractVector{T},
                               a_Rs::AbstractVector{T},
-                              t_phot_max::T) where {T<:Real}
+                              t_phot_max::T;
+                              t_phot_min::Union{Nothing, Real} = nothing) where {T<:Real}
     M_s = theta.params.config.M_s
     isnan(M_s) && return
     n = length(state.j_active)
@@ -78,6 +84,8 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
     elems[1, 1] = M_s_f
     Tc1s = zeros(Float64, n_nb)
     Ps_f = zeros(Float64, n_nb)
+    n0s  = zeros(Int, n_nb)
+    t_min_f = t_phot_min === nothing ? nothing : Float64(ForwardDiff_value(t_phot_min))
     for q in 1:n_nb
         r = nb_rows[q]
         j = state.j_active[r]
@@ -106,10 +114,14 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
         elems[q+1, 7] = 0.0   # Ω = 0 — coplanar assumption
         Tc1s[q] = Tc1
         Ps_f[q] = P
+        # The first transit to predict: Tc, or the one nearest the first
+        # cadence when the photometry starts earlier (see `_apply_ttv_nb!`).
+        n0s[q] = t_min_f === nothing ? 0 : min(0, floor(Int, (t_min_f - Tc1) / P))
     end
 
-    t_start = minimum(Tc1s) - minimum(Ps_f) / 4
-    duration = t_max_f - t_start
+    t_start = minimum(Tc1s[q] + n0s[q] * Ps_f[q] for q in 1:n_nb) - minimum(Ps_f) / 4
+    # On to the transit nearest the last cadence, which may come after it.
+    duration = t_max_f + maximum(Ps_f) / 2 - t_start
     duration > 0 || return
 
     # Choose integration step: 1/40 of the shortest period, clamped to
@@ -135,17 +147,22 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
     # Body index in tt is 1-based with star = row 1; planet q = row q+1.
     for q in 1:n_nb
         r = nb_rows[q]
-        n_tr = Int(tt.count[q + 1])
+        n_tr = min(Int(tt.count[q + 1]), size(tt.tt, 2))
         n_tr == 0 && continue
         raw = tt.tt[q + 1, 1:n_tr]
-        # Linear ephemeris extends t_start + (i-1) * P. Match against
-        # the actual transit count returned by the integrator.
-        δts = Vector{T}(undef, n_tr)
+        # Each time goes to the slot of the transit it is, the nearest
+        # Tc1 + n·P, not to its rank among the transits found: the first one
+        # after t_start need not be transit n0 (a planet whose Tc is more
+        # than a period after the earliest one's has transits before it).
+        n0 = n0s[q]
+        ns = [round(Int, (raw[i] - Tc1s[q]) / Ps_f[q]) for i in 1:n_tr]
+        δts = zeros(T, max(0, maximum(ns) - n0 + 1))
         @inbounds for i in 1:n_tr
-            t_lin = Tc1s[q] + (i - 1) * Ps_f[q]
-            δts[i] = convert(T, raw[i] - t_lin)
+            ns[i] < n0 && continue
+            δts[ns[i] - n0 + 1] = convert(T, raw[i] - (Tc1s[q] + ns[i] * Ps_f[q]))
         end
         state.δts[r] = δts
+        state.n0s[r] = n0
     end
     return
 end

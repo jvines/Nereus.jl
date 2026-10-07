@@ -58,6 +58,10 @@ Pre-decode TTV state for each TTV-enabled active planet. Returns
   layout name lookup)
 - `state.δts::Vector{Vector{T}}` — per-planet δt values, length =
   `config.ttv_n_transits[k]`
+- `state.n0s::Vector{Int}` — the transit number (from Tc) of `δts[r][1]`:
+  0 for a `:TTV` row, whose slot I is transit I − 1; for a `:TTV_NB` row,
+  set by `_apply_ttv_nb!`, the first transit of the predicted grid, which
+  reaches back before Tc when the photometry does
 """
 function _decode_ttv_state(theta::Theta{T}, p_idx) where {T}
     config = theta.params.config
@@ -81,6 +85,7 @@ function _decode_ttv_state(theta::Theta{T}, p_idx) where {T}
     k_planet = Vector{Int}(undef, n_ttv)
     δts      = Vector{Vector{T}}(undef, n_ttv)
     is_nb    = Vector{Bool}(undef, n_ttv)
+    n0s      = zeros(Int, n_ttv)
 
     r = 0
     j = 0
@@ -107,23 +112,24 @@ function _decode_ttv_state(theta::Theta{T}, p_idx) where {T}
             δts[r] = T[]
         end
     end
-    return (n_ttv, (; j_active, k_planet, δts, is_nb))
+    return (n_ttv, (; j_active, k_planet, δts, is_nb, n0s))
 end
 
 """
-    ttv_effective_time(t, P, Tc, δts) -> t_eff
+    ttv_effective_time(t, P, Tc, δts, n0 = 0) -> t_eff
 
 Return the TTV-corrected time at which to evaluate `sky_separation`.
 `i = round((t − Tc) / P)` is the integer transit number relative to
 the first transit at `Tc`, the time of mid-transit (not of periastron).
-If `i+1` is within `[1, length(δts)]`, returns `t − δts[i+1]`; otherwise
-returns `t` unchanged.
+`δts[1]` is the offset of transit `n0` (0, transit Tc itself, for the free
+offsets). If `i − n0 + 1` is within `[1, length(δts)]`, returns
+`t − δts[i − n0 + 1]`; otherwise returns `t` unchanged.
 """
 @inline function ttv_effective_time(t::Real, P::Real, Tc::Real,
-                                      δts::AbstractVector{<:Real})
+                                      δts::AbstractVector{<:Real}, n0::Int = 0)
     isempty(δts) && return t
     i = Int(round((t - Tc) / P))     # transit number (can be negative)
-    slot = i + 1                      # 1-based slot
+    slot = i - n0 + 1                 # 1-based slot
     1 <= slot <= length(δts) || return t
     return t - δts[slot]
 end
@@ -145,5 +151,5 @@ extract `j_active[r]` instead of doing the `findfirst` per obs.
                                          Ps::AbstractVector,
                                          Tcs::AbstractVector)
     j = ttv_state.j_active[r]
-    return ttv_effective_time(t, Ps[j], Tcs[j], ttv_state.δts[r])
+    return ttv_effective_time(t, Ps[j], Tcs[j], ttv_state.δts[r], ttv_state.n0s[r])
 end

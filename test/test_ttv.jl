@@ -375,11 +375,12 @@ import NbodyGradient
 using Statistics: cor, std
 using MCMCChains: Chains
 
-function _nb_fixture(; backend = :ttvfaster)
-    t_phot = collect(range(0.0, 400.0; length = 400)) .+ 2_450_000.0
+function _nb_fixture(; backend = :ttvfaster, Tcs = (2_450_001.3, 2_450_002.9),
+                     t_phot = collect(range(0.0, 400.0; length = 400)) .+ 2_450_000.0)
+    n = length(t_phot)
     data = Data(; t_rv = t_phot[1:10], rv = zeros(10), rv_err = ones(10),
-                  rv_inst = ones(Int, 10), t_phot, flux = ones(400),
-                  flux_err = fill(1e-3, 400), phot_inst = ones(Int, 400))
+                  rv_inst = ones(Int, 10), t_phot, flux = ones(n),
+                  flux_err = fill(1e-3, n), phot_inst = ones(Int, n))
     params = Params(; max_kplanet = 2, planet_modes = [RVPM_TTV_NB, RVPM_TTV_NB],
                       instruments = InstrumentConfig(rv = ["HARPS"], pm = ["TESS"]),
                       data, parametrization = ParametrizationConfig(time = :Tc),
@@ -388,8 +389,8 @@ function _nb_fixture(; backend = :ttvfaster)
     ix = params.layout.name_to_idx
     # An eccentric pair of ~10 Earth masses just wide of 2:1 (TTVFaster is
     # first order in the masses too), periastra well away from ω = 0.
-    orb = ((P = 4.0, K = 4.0, e = 0.05, ω = 0.7, Tc = 2_450_001.3, b = 0.2, rr = 0.1),
-           (P = 8.1, K = 3.0, e = 0.04, ω = -1.2, Tc = 2_450_002.9, b = 0.0, rr = 0.08))
+    orb = ((P = 4.0, K = 4.0, e = 0.05, ω = 0.7, Tc = Tcs[1], b = 0.2, rr = 0.1),
+           (P = 8.1, K = 3.0, e = 0.04, ω = -1.2, Tc = Tcs[2], b = 0.0, rr = 0.08))
     for (k, o) in enumerate(orb)
         for (nm, v) in ("P" => o.P, "K" => o.K, "Tc" => o.Tc, "b" => o.b, "rr" => o.rr,
                         "sesinw" => sqrt(o.e) * sin(o.ω), "secosw" => sqrt(o.e) * cos(o.ω))
@@ -405,12 +406,26 @@ function _nb_fixture(; backend = :ttvfaster)
     return (; params, data, th, orb, Ps, es, ws, Tps, bs, a_Rs, t_max = maximum(t_phot))
 end
 
-function _nb_predict(fx)
+function _nb_predict(fx; t_min = nothing)
     p_idx = planet_indices(fx.th)
     _, st = Nereus._decode_ttv_state(fx.th, p_idx)
     Nereus._apply_ttv_nb!(st, fx.th, p_idx, fx.Ps, fx.es, fx.ws, fx.Tps, fx.bs,
-                          fx.a_Rs, fx.t_max)
+                          fx.a_Rs, fx.t_max; t_phot_min = t_min)
     return st
+end
+
+# TTVFaster called directly on transits n0 .. n0 + length - 1 of each planet,
+# the planets at their transit times with ϖ = ω - π/2.
+function _nb_direct(fx, st)
+    pl = [Planet_plane_hk(Nereus.msini(1.0, o.K, o.P, o.e) /
+                              sind(acosd(fx.bs[k] / fx.a_Rs[k])) * Nereus._MJ_PER_MS,
+                          o.P, o.Tc, o.e * sin(o.ω), -o.e * cos(o.ω))
+          for (k, o) in enumerate(fx.orb)]
+    ts = [[o.Tc + n * o.P for n in st.n0s[k] .+ (0:(length(st.δts[k]) - 1))]
+          for (k, o) in enumerate(fx.orb)]
+    ttv = [zeros(length(t)) for t in ts]
+    compute_ttv!(5, pl[1], pl[2], ts[1], ts[2], ttv[1], ttv[2])
+    return ttv
 end
 
 _detrend(n, y) = (A = [ones(length(n)) n]; y .- A * (A \ y))
@@ -420,13 +435,8 @@ _detrend(n, y) = (A = [ones(length(n)) n]; y .- A * (A \ y))
     # with ϖ = ω - π/2.
     fx = _nb_fixture()
     st = _nb_predict(fx)
-    pl = [Planet_plane_hk(Nereus.msini(1.0, o.K, o.P, o.e) /
-                              sind(acosd(fx.bs[k] / fx.a_Rs[k])) * Nereus._MJ_PER_MS,
-                          o.P, o.Tc, o.e * sin(o.ω), -o.e * cos(o.ω))
-          for (k, o) in enumerate(fx.orb)]
-    ts = [[o.Tc + n * o.P for n in 0:(length(st.δts[k]) - 1)] for (k, o) in enumerate(fx.orb)]
-    ttv = [zeros(length(t)) for t in ts]
-    compute_ttv!(5, pl[1], pl[2], ts[1], ts[2], ttv[1], ttv[2])
+    @test st.n0s == [0, 0]
+    ttv = _nb_direct(fx, st)
     @test st.δts[1] ≈ ttv[1] rtol = 1e-10
     @test st.δts[2] ≈ ttv[2] rtol = 1e-10
     @test maximum(abs, st.δts[1]) > 1e-3                 # minutes: a real signal
@@ -460,4 +470,60 @@ _detrend(n, y) = (A = [ones(length(n)) n]; y .- A * (A \ y))
     tcs = [o.Tc + n * o.P for n in 0:(length(st.δts[1]) - 1)]
     env = ttvc_envelope(ch, fx.params; tcs_observed = tcs, n_draws = 4)
     @test env.med ≈ st.δts[1] rtol = 2e-3
+end
+
+# Transits before Tc. The predicted grid used to start at Tc whatever the data,
+# so with Tc in the middle of the photometry (where the Mo anchor and t_ref put
+# it) the transits before it had no TTV at all. And the full N-body backend put
+# its transit times in the order it found them, so a planet whose Tc came more
+# than a period after the start of the integration had every offset one or more
+# periods off.
+@testset "TTV-NB: transits before Tc, and each time in its own transit's slot" begin
+    Tc0 = 2_450_151.3
+    o = (P = 4.0,)
+    n_e = -20                                       # a transit 80 d before Tc
+    t_coarse = collect(range(Tc0 - 150.0, Tc0 + 250.0; step = 0.5))
+    t_dense = collect(range(-0.15, 0.15; step = 5 / 86_400)) .+ (Tc0 + n_e * o.P)
+    t_phot = sort!(vcat(t_coarse, t_dense))
+    fx = _nb_fixture(; Tcs = (Tc0, Tc0 + 1.6), t_phot)
+    t_min = minimum(t_phot)
+    st = _nb_predict(fx; t_min)
+    @test st.n0s[1] == floor(Int, (t_min - Tc0) / fx.orb[1].P) < n_e
+    @test st.n0s[2] == floor(Int, (t_min - fx.orb[2].Tc) / fx.orb[2].P) < 0
+    ttv = _nb_direct(fx, st)
+    @test st.δts[1] ≈ ttv[1] rtol = 1e-10
+    @test st.δts[2] ≈ ttv[2] rtol = 1e-10
+    δ = st.δts[1][n_e - st.n0s[1] + 1]
+    @test abs(δ) > 5e-4
+    @test Nereus.ttv_effective_time(Tc0 + n_e * 4.0 + 0.01, 4.0, Tc0, st.δts[1], st.n0s[1]) ==
+          Tc0 + n_e * 4.0 + 0.01 - δ
+
+    # Through the likelihood's model: that transit's centre is Tc + nP + δ.
+    pred = phot_predictions(fx.th, fx.data)[1]
+    w = abs.(t_phot .- (Tc0 + n_e * 4.0)) .<= 0.15
+    dip = 1 .- pred[w]
+    @test sum(dip) > 0
+    centre = sum(t_phot[w] .* dip) / sum(dip)
+    @info "transit $n_e: predicted offset $(δ * 1440) min, model centre off by $((centre - (Tc0 + n_e * 4.0 + δ)) * 1440) min"
+    @test abs(centre - (Tc0 + n_e * 4.0 + δ)) < 0.02 * abs(δ)
+
+    # NbodyGradient: the same transit numbers, and offsets that follow
+    # TTVFaster's on both sides of Tc.
+    nb = _nb_predict(_nb_fixture(; backend = :nbody, Tcs = (Tc0, Tc0 + 1.6), t_phot); t_min)
+    @test nb.n0s == st.n0s
+    for k in 1:2
+        n = min(length(st.δts[k]), length(nb.δts[k]))
+        a = _detrend(0:(n - 1), st.δts[k][1:n]); b = _detrend(0:(n - 1), nb.δts[k][1:n])
+        @test cor(a, b) > 0.95
+    end
+
+    # Planet 2's Tc three periods after the start of the integration: its first
+    # transit found is transit -3, not transit 0.
+    fx2 = _nb_fixture(; backend = :nbody, Tcs = (2_450_001.3, 2_450_002.9 + 3 * 8.1))
+    nb2 = _nb_predict(fx2)
+    @test nb2.n0s == [0, 0]
+    @test maximum(abs, nb2.δts[2]) < 0.05           # offsets, not whole periods
+    st2 = _nb_predict(_nb_fixture(; Tcs = (2_450_001.3, 2_450_002.9 + 3 * 8.1)))
+    n = min(length(st2.δts[2]), length(nb2.δts[2]))
+    @test cor(_detrend(0:(n - 1), st2.δts[2][1:n]), _detrend(0:(n - 1), nb2.δts[2][1:n])) > 0.95
 end

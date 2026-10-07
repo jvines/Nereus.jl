@@ -734,8 +734,9 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         # planets, which keep their layout-decoded δts.
         if any(ttv_state.is_nb)
             t_max = isempty(data.t_phot) ? zero(T) : T(maximum(data.t_phot))
+            t_min = isempty(data.t_phot) ? zero(T) : T(minimum(data.t_phot))
             _apply_ttv_nb!(ttv_state, theta, p_idx,
-                            Ps, es, ws, Tps, bs, a_Rs, t_max)
+                            Ps, es, ws, Tps, bs, a_Rs, t_max; t_phot_min = t_min)
         end
     end
     _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
@@ -1160,8 +1161,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         end
         if any(ttv_state.is_nb)
             t_max = isempty(data.t_phot) ? zero(T) : T(maximum(data.t_phot))
+            t_min = isempty(data.t_phot) ? zero(T) : T(minimum(data.t_phot))
             _apply_ttv_nb!(ttv_state, theta, p_idx,
-                            Ps, es, ws, Tps, bs, a_Rs, t_max)
+                            Ps, es, ws, Tps, bs, a_Rs, t_max; t_phot_min = t_min)
         end
     end
     _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
