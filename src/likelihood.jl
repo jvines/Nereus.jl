@@ -138,9 +138,15 @@ Core RV log-likelihood (Enzyme-safe). No stability check, no external priors.
 Called directly by `_logdensity_for_enzyme`.
 """
 # Enzyme-safe entry: checks for noise models, dispatches accordingly.
+#
+# The γ marginalization lives only in the no-noise path. Params refuses it
+# with any RV-channel noise model, so under it every noise model there is is a
+# photometry one, which the RV likelihood does not read: such a fit takes the
+# no-noise path too, or γ would be held at its frozen slot instead of
+# marginalized.
 function _rv_log_likelihood_core(theta::Theta{T}, data::Data) where {T}
     nm = theta.params.config.noise_models
-    if isempty(nm)
+    if isempty(nm) || theta.params.config.parametrization.marginalize_gamma
         return _rv_ll_no_noise(theta, data)
     else
         return _rv_ll_with_noise(theta, data, nm)
@@ -564,7 +570,8 @@ Workspace-aware core RV log-likelihood dispatcher.
 """
 function _rv_log_likelihood_core(theta::Theta{T}, data::Data, ws) where {T}
     nm = theta.params.config.noise_models
-    if isempty(nm)
+    # γ marginalization: the no-noise path, as in the method above.
+    if isempty(nm) || theta.params.config.parametrization.marginalize_gamma
         return _rv_ll_no_noise(theta, data, ws)
     else
         return _rv_ll_with_noise(theta, data, nm, ws)
