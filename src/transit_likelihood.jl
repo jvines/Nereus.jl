@@ -741,24 +741,15 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     # --- Limb darkening per instrument (via precomputed indices) ------
     systemic = theta.params.layout.systemic
 
-    # Detect active photometry-channel noise models (CovarianceNoise GP
-    # OR SequentialNoise AR/MA). With any of these the path is serial:
-    # AR is applied to model flux before residual computation, MA after,
-    # and GP routing is handled by `_eval_channel_likelihood`. With no
-    # phot noise models we keep the thread-parallel white-noise sum.
+    # Detect active photometry-channel noise models: AR/MA, a GP, an
+    # additive covariance (HarmonicBlock / NightlyOffset), Student-t --
+    # anything on :phot. With any of these the path is serial: AR is
+    # applied to model flux before residual computation, MA after, and the
+    # covariance / likelihood family is handled by `_eval_channel_likelihood`.
+    # With no phot noise models we keep the thread-parallel white-noise sum,
+    # which knows nothing else.
     noise_models = theta.params.config.noise_models
-    has_phot_seq = false
-    has_phot_gp  = false
-    for (nm_idx, nm) in enumerate(noise_models)
-        is_noise_model_active(theta, nm_idx) || continue
-        noise_channel(nm) === :phot || continue
-        if nm isa SequentialNoise
-            has_phot_seq = true
-        elseif nm isa CovarianceNoise
-            has_phot_gp = true
-        end
-    end
-    needs_serial = has_phot_seq || has_phot_gp
+    needs_serial = _phot_noise_active(theta, noise_models)
 
     if !needs_serial
         # White-noise path — thread-parallel Gaussian sum. Per-instrument
@@ -1212,6 +1203,19 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     return predictions, variances
 end
 
+# Whether any noise model on the :phot channel is active. The white-noise
+# sums of the transit likelihood score independent Gaussians and nothing
+# else, so any of them -- not only AR/MA and GPs, but an additive covariance
+# or a Student-t likelihood too -- has to take the serial path through
+# `_eval_channel_likelihood`, or it is silently dropped.
+function _phot_noise_active(theta::Theta, noise_models)
+    for (nm_idx, nm) in enumerate(noise_models)
+        noise_channel(nm) === :phot || continue
+        is_noise_model_active(theta, nm_idx) && return true
+    end
+    return false
+end
+
 """
     _phot_ll_no_transit(theta, data) -> T
 
@@ -1469,18 +1473,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
 
     systemic = theta.params.layout.systemic
     noise_models = theta.params.config.noise_models
-    has_phot_seq = false
-    has_phot_gp  = false
-    for (nm_idx, nm) in enumerate(noise_models)
-        is_noise_model_active(theta, nm_idx) || continue
-        noise_channel(nm) === :phot || continue
-        if nm isa SequentialNoise
-            has_phot_seq = true
-        elseif nm isa CovarianceNoise
-            has_phot_gp = true
-        end
-    end
-    needs_serial = has_phot_seq || has_phot_gp
+    needs_serial = _phot_noise_active(theta, noise_models)   # see the non-ws method
 
     if !needs_serial
         # Same per-instrument LD/offset/jitter caching as the non-ws
