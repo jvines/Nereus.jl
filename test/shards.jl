@@ -172,6 +172,7 @@ const TEST_UNITS = [
     (name = "test_rv_timeseries_plot.jl", seconds = 20, files = ["test_rv_timeseries_plot.jl"]),
     (name = "test_progress_time_fmt.jl", seconds = 2, files = ["test_progress_time_fmt.jl"]),
     (name = "test_ppc_residual_acf.jl", seconds = 2, files = ["test_ppc_residual_acf.jl"]),
+    (name = "test_pm_fold_rv_only_slot.jl", seconds = 30, files = ["test_pm_fold_rv_only_slot.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 3, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_posteriors_thinning.jl", seconds = 5, files = ["test_plot_posteriors_thinning.jl"]),
     (name = "test_plot_labels.jl", seconds = 2, files = ["test_plot_labels.jl"]),

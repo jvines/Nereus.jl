@@ -140,6 +140,14 @@ function plot_pm_phasefold(chains, params, data;
                             phase_window::Tuple{<:Real, <:Real}=(-0.025, 0.025))
     n_phot = length(data.t_phot)
     n_phot > 0 || return nothing
+    # A slot without a photometric mode (RV_ONLY, …) has no transit: folding
+    # the light curves on its period drew a flat "transit model" over data
+    # that happened to contain another planet's transits.
+    if !has_pm(params.config.planet_modes[planet])
+        @warn "Planet K=$planet has no transit (mode $(params.config.planet_modes[planet])); " *
+              "skipping the transit fold"
+        return nothing
+    end
 
     with_theme(nereus_theme()) do
         chain_names = Set(names(chains, :parameters))

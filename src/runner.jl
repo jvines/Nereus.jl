@@ -1921,6 +1921,8 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         n_phot(data) > 0 || return nothing
         return _per_planet("pm_phasefold", "models/Transit_phasefold_K*_*.png", out_dir,
                            params.config.max_kplanet) do k
+            # transiting slots only: an RV-only slot has no transit to fold
+            has_pm(params.config.planet_modes[k]) || return nothing
             plot_pm_phasefold(chains, params, data; planet = k, output = out_dir,
                 _kw_for(plot_pm_phasefold, kw; except = (:output, :filename, :planet))...)
         end
