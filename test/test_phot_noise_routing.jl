@@ -73,3 +73,28 @@ end
                             n_obs = length(d.t_rv), n_phot = length(d.t_phot))
     @test Nereus.transit_log_likelihood(th, d, ws) ≈ exp_ll rtol = 1e-10
 end
+
+# A light curve fitted with no transiting planet (a noise-only fit, as
+# detrend_gp builds) has no limb-darkening or dilution slots. phot_predictions
+# read them before its no-transit fast path and crashed with a BoundsError, so
+# every consumer of the photometric model -- LOO, PPC, residual plots -- failed
+# on such a fit although its likelihood was fine.
+@testset "phot_predictions with no transiting planet" begin
+    rng = MersenneTwister(5)
+    n = 60
+    t = sort!(10 .* rand(rng, n))
+    flux = 1 .+ 5e-4 .* randn(rng, n)
+    d = Nereus.Data(; t_phot = t, flux = flux, flux_err = fill(5e-4, n),
+                    phot_inst = ones(Int, n))
+    p = Nereus.Params(; max_kplanet = 0, planet_modes = Nereus.PlanetDataSources[],
+                      instruments = Nereus.InstrumentConfig(String[], ["TESS"]), data = d,
+                      M_s = 1.0, R_s = 1.0)
+    th = Nereus.Theta{Float64}(p)
+    Nereus.set_param!(th, "offset_TESS", 2e-4); Nereus.set_param!(th, "jitter_TESS", 1e-4)
+    preds, vars = Nereus.phot_predictions(th, d)
+    @test length(preds) == n
+    @test all(==(vars[1]), vars)
+    # The model the likelihood scores.
+    @test sum(@. -0.5 * (log(2π * vars) + (flux - preds)^2 / vars)) ≈
+          Nereus.transit_log_likelihood(th, d) rtol = 1e-12
+end

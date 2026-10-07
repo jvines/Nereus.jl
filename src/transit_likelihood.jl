@@ -1007,30 +1007,13 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     systemic = theta.params.layout.systemic
     n_pm     = length(theta.params.config.instruments.pm_names)
 
-    # Build per-instrument LD / offset / jitter
-    q1_1 = theta.values[systemic.ld_q1[1]]
-    q2_1 = theta.values[systemic.ld_q2[1]]
-    u1_1, u2_1 = kipping_q_to_u(q1_1, q2_1)
-    ld1 = QuadLimbDark([u1_1, u2_1])
-    lds      = Vector{typeof(ld1)}(undef, n_pm)
+    # Per-instrument offset / jitter
     offsets  = Vector{T}(undef, n_pm)
     jitters  = Vector{T}(undef, n_pm)
-    dilutions = Vector{T}(undef, n_pm)
-    lds[1]     = ld1
-    offsets[1] = pm_offset(theta, 1)
-    jitters[1] = pm_jitter(theta, 1)
-    dilutions[1] = pm_dilution(theta, 1)
-    for ix in 2:n_pm
-        q1 = theta.values[systemic.ld_q1[ix]]
-        q2 = theta.values[systemic.ld_q2[ix]]
-        u1, u2 = kipping_q_to_u(q1, q2)
-        lds[ix]     = QuadLimbDark([u1, u2])
+    for ix in 1:n_pm
         offsets[ix] = pm_offset(theta, ix)
         jitters[ix] = pm_jitter(theta, ix)
-        dilutions[ix] = pm_dilution(theta, ix)
     end
-    n_super_p = _phot_n_super(data)
-    has_exp_p = !isempty(data.exposure_times)
     trends_cp = _phot_trend_cache(theta, n_pm)
     inv_th_p = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
     t_ref_p  = data.t_ref
@@ -1039,7 +1022,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     variances   = Vector{T}(undef, n_obs)
 
     # Fast path: no active transiting planets — model is just the
-    # per-instrument offset.
+    # per-instrument offset. It reads neither limb darkening nor dilution:
+    # a fit with no transiting planet (a noise-only light curve) has no
+    # slots for them, as `_phot_ll_no_transit` knows.
     if n_transit == 0
         @inbounds for i in 1:n_obs
             ins_idx = data.phot_inst[i]
@@ -1050,6 +1035,25 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         end
         return predictions, variances
     end
+
+    # Per-instrument LD / dilution
+    q1_1 = theta.values[systemic.ld_q1[1]]
+    q2_1 = theta.values[systemic.ld_q2[1]]
+    u1_1, u2_1 = kipping_q_to_u(q1_1, q2_1)
+    ld1 = QuadLimbDark([u1_1, u2_1])
+    lds      = Vector{typeof(ld1)}(undef, n_pm)
+    dilutions = Vector{T}(undef, n_pm)
+    lds[1]     = ld1
+    dilutions[1] = pm_dilution(theta, 1)
+    for ix in 2:n_pm
+        q1 = theta.values[systemic.ld_q1[ix]]
+        q2 = theta.values[systemic.ld_q2[ix]]
+        u1, u2 = kipping_q_to_u(q1, q2)
+        lds[ix]     = QuadLimbDark([u1, u2])
+        dilutions[ix] = pm_dilution(theta, ix)
+    end
+    n_super_p = _phot_n_super(data)
+    has_exp_p = !isempty(data.exposure_times)
 
     # Decode orbit parameters per active transiting planet
     Ps   = Vector{T}(undef, n_transit)
