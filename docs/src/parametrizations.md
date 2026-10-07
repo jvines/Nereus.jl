@@ -146,9 +146,10 @@ according to this choice (`src/model.jl:1460`–`1470`, decoded in
   Poorly conditioned at low `e` (ω unconstrained), so prefer `:sesinw`
   unless you specifically need a named `e` prior.
 
-`true_anomaly` (`src/orbit.jl:31`) and the conversions clamp `e` into
-`[0, 0.9999]` defensively because the unconstrained sampler can
-transiently propose `s²+c² > 1`.
+`true_anomaly` (`src/orbit.jl`) and the astrometric orbit clamp `e` into
+`[0, 1)` defensively because the unconstrained sampler can transiently
+propose `s²+c² > 1`. Every likelihood rejects `e ∉ [0, 1)` first, so the
+clamp never changes the `e` a likelihood evaluates.
 
 !!! note "External `e` prior"
     You don't have to switch to `:ew` to impose an `e` prior. The
@@ -270,7 +271,9 @@ evidence) and the RV likelihood uses the γ-marginalised path
 (`_rv_ll_gamma_marginalized`).
 
 - White-noise RV only — it does **not** compose with a covariance
-  (GP/celerite) RV model.
+  (GP/celerite) RV model, and any RV-channel noise model is rejected at
+  construction. Photometry-channel noise models (a GP on the light curve,
+  say) are fine: the RV likelihood stays γ-marginalised alongside them.
 - `γ` is integrated against a **flat, unnormalised measure**, not against the
   `gamma_<INST>` prior. The marginal likelihood therefore carries an arbitrary
   constant per instrument. It is the same constant for every model fitted to the

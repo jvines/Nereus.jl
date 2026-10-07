@@ -19,11 +19,15 @@
 # This replaces ~60% of the AD tape with two trig evaluations per
 # observation. The forward pass still uses the Newton solver at full
 # Float64 speed; only the backward pass uses the analytic derivatives.
+# ForwardDiff gets the same derivatives from a `Dual` method (below).
+# Backends that trace the iteration itself (ReverseDiff, Enzyme) get them
+# from the Newton step taken on the iteration that converges.
 
 using ChainRulesCore
+import ForwardDiff
 
 """
-    kepler_solve(M, e; tol=1e-12, max_iter=30, strict=false) -> E
+    kepler_solve(M, e; tol=1e-10, max_iter=30, strict=false) -> E
 
 Solve Kepler's equation `M = E - e sin(E)` for `E`, the eccentric anomaly.
 
@@ -40,7 +44,7 @@ Generic over `M, e` element type so the routine works with `Float64`,
 - `e`: Eccentricity. Expected in `[0, 1)`.
 
 # Keywords
-- `tol`: Residual tolerance on `|M - E + e sin(E)|`. Default `1e-12`.
+- `tol`: Residual tolerance on `|M - E + e sin(E)|`. Default `1e-10`.
 - `max_iter`: Safety cap on Newton iterations. Default `30`.
 - `strict`: If `true`, throw an `ErrorException` on non-convergence
   instead of warning. Useful for debugging and validation runs.
@@ -49,6 +53,17 @@ Generic over `M, e` element type so the routine works with `Float64`,
 # Returns
 - `E`: Eccentric anomaly (radians). Not wrapped to any canonical range —
   subsequent `sin(E)`, `cos(E)` handle periodicity naturally.
+
+# Derivatives
+`∂E/∂M = 1 / (1 - e cos E)` and `∂E/∂e = sin E / (1 - e cos E)`, the
+derivatives of the solution (implicit function theorem), for every
+backend: ForwardDiff through a `Dual` method that solves on the values,
+ChainRules through an `rrule`, and a backend that traces the iteration
+through the Newton step taken on the iteration that meets `tol`. Without
+that step a traced derivative was the derivative of the last iterate, not
+of the solution: at `e = 0` the initial guess `M + 0.85 sign(sin M) e`
+already meets `tol`, and `∂E/∂e` came back `0.85 sign(sin M)` instead of
+`sin M`.
 
 # Convergence handling
 If the iteration exhausts `max_iter` without reaching `tol`, emits a
@@ -101,6 +116,15 @@ fits.
         f   = E - e * sinE - M
         f_last = f
         if abs(f) < tol
+            # One Newton step more, which moves E by less than tol / f'(E).
+            # It is what makes an AD backend that traces this loop carry
+            # the derivatives of the solution: with f(E) ≈ 0 the step's
+            # derivative is ∂E = (∂M + sin E ∂e) / (1 - e cos E), whatever
+            # the iterate's own was. Taken also when f is exactly 0, as at
+            # e = 0, where the iterate is the initial guess and its ∂E/∂e is
+            # 0.85 sign(sin M). Skipped only where f'(E) = 0 (e = 1, E = 0).
+            fp = 1 - e * cosE
+            iszero(fp) || (E -= f / fp)
             converged = true
             break
         end
@@ -131,6 +155,28 @@ fits.
     # holds for callers that check it. Doesn't affect sin(E)/cos(E).
     return E + M_offset
 end
+
+# ForwardDiff: E from the solver on the values, its partials from the implicit
+# function theorem. Differentiating the iteration instead gave the derivative
+# of whichever iterate met the tolerance (see the docstring), and costs a Dual
+# operation per step. The value is the one the Float64 method returns, to the
+# bit. Nested Duals (Hessians) recurse through `ForwardDiff.value`.
+@inline function kepler_solve(M::ForwardDiff.Dual{Tg}, e::ForwardDiff.Dual{Tg};
+                              kwargs...) where {Tg}
+    ev = ForwardDiff.value(e)
+    E = kepler_solve(ForwardDiff.value(M), ev; kwargs...)
+    sinE, cosE = sincos(E)
+    ∂E = (ForwardDiff.partials(M) + sinE * ForwardDiff.partials(e)) / (1 - ev * cosE)
+    return ForwardDiff.Dual{Tg}(E, ∂E)
+end
+# A Dual with a plain number, or Duals of two tags (nested differentiation):
+# promoted to one Dual type, then the method above.
+@inline kepler_solve(M::ForwardDiff.Dual, e::ForwardDiff.Dual; kwargs...) =
+    kepler_solve(promote(M, e)...; kwargs...)
+@inline kepler_solve(M::ForwardDiff.Dual, e::Real; kwargs...) =
+    kepler_solve(promote(M, e)...; kwargs...)
+@inline kepler_solve(M::Real, e::ForwardDiff.Dual; kwargs...) =
+    kepler_solve(promote(M, e)...; kwargs...)
 
 """
     kepler_solve!(E, M, e; kwargs...)

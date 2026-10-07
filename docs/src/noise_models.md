@@ -144,7 +144,10 @@ exponential decay ([Tuomi+ 2013](https://ui.adsabs.harvard.edu/abs/2013A&A...551
 residual** (the deterministic-model residual), snapshotting it before
 the loop so the lag reads the pre-correction value — matching the
 astroEMPEROR `moav`/`ar` convention (`src/noise/arma.jl:39,113`).
-Evaluation is sequential O(n), no matrix inversion. Orders are fixed at
+Evaluation is sequential O(n), no matrix inversion. A lag is the
+previous observation **in time**: data stored in another order (RVs
+concatenated instrument by instrument) are run through in a stable time
+order and written back in their own. Orders are fixed at
 construction (not trans-dimensional — trans-dim toggles the whole
 component on/off, not its order).
 
@@ -221,6 +224,10 @@ the same channel, because it only covers a subset of observations.
 GP kernels via the celerite ([Foreman-Mackey+ 2017](https://ui.adsabs.harvard.edu/abs/2017AJ....154..220F/abstract), 2018)
 semi-separable formulation — O(n) likelihood evaluation regardless of
 data length (`celerite_loglike` in `src/noise/gp.jl:122`). The
+recursion runs over time-ordered points; data need not be stored in
+time order (RVs concatenated instrument by instrument are fine): the
+points are scored in a stable time order, which leaves the likelihood
+unchanged, and sampler workspaces sort them once. The
 multivariate `ActivityGP` is also a `CovarianceNoise` but is built
 dense (O(n³)); it is documented separately below.
 
@@ -527,7 +534,7 @@ The HD 18599 K-gap scenario is the canonical use case.
 
 With every indicator at the RV epochs (`N` epochs, `C` channels including
 RV, `n_total = C·N`), the joint likelihood goes through
-`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1161`): it
+`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1163`): it
 whitens each epoch's 2×2 information block and factors one `(2N)²` matrix
 instead of the dense `(C·N)²`, and is exact up to rounding. Gradients
 (ForwardDiff, or ReverseDiff under `sample_nuts(ad_backend = :ReverseDiff)`)
@@ -546,10 +553,14 @@ side of those thresholds. The
 dense covariance with the block-factored builder
 (`activity_gp_covariance_blocked`, `src/noise/activity_gp.jl:424`), an
 `O(n_total³)` Cholesky per likelihood call, tractable up to ~500 total
-observations. The celerite-block O(n) route is a dead-end for the QP joint
-covariance (its kernel is not a finite sum of damped exponentials, and the
-FM17 celerite form carries a `|τ|` kink that makes `Var(dG/dt)` formally
-infinite — see the warning at `src/noise/activity_gp.jl:75`).
+observations. They solve with the triangular factor itself
+(`_agp_chol_logpdf`, `_agp_conditional_logpdf`), so Hessians are right at
+couplings that are exactly 0, where the covariance is diagonal in value but
+not in its second derivatives. The celerite-block O(n) route is a dead-end
+for the QP joint covariance (its kernel is not a finite sum of damped
+exponentials, and the FM17 celerite form carries a `|τ|` kink that makes
+`Var(dG/dt)` formally infinite — see the warning at
+`src/noise/activity_gp.jl:75`).
 
 ### `IndicatorFloor`
 

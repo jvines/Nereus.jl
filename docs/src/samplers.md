@@ -711,7 +711,6 @@ chains = sample_nuts(target;
     n_chains      = 4,                 # ≥2 needed for meaningful R̂
     target_accept = 0.8,
     ad_backend    = :ForwardDiff,      # :ForwardDiff | :Enzyme | :ReverseDiff
-    compile_tape  = true,              # :ReverseDiff only
     warm_start    = true,              # pt_emcee pre-search (disjoint-mode fix)
     warm_temps    = 6, warm_walkers = 40, warm_steps = 400, warm_burnin = 200,
     init          = nothing,           # bounded-space point; overrides warm_start
@@ -721,10 +720,14 @@ chains = sample_nuts(target;
 
 `ad_backend`: `:ForwardDiff` (fastest ≤ 15 params), `:Enzyme` (reverse-mode,
 better for many params / GP models), `:ReverseDiff` (needs `import
-ReverseDiff`; `compile_tape=true` for ~2–3× speedup). Per-chain divergences /
-step size / tree depth attach to `chains.info`. `run_job` surfaces
-`log_evidence = NaN`. **Target must be `unconstrained = true`** (auto-rebuilt
-internally if needed).
+ReverseDiff`; the tape is recorded afresh at every point). `compile_tape =
+true` is refused with `:ReverseDiff`: a compiled tape replays the branches
+taken where it was recorded, and every Nereus log density branches on the
+parameter values (Kepler's solver stops once converged, out-of-support points
+return -Inf, transit windows), so its gradients were wrong everywhere else.
+Per-chain divergences / step size / tree depth attach to `chains.info`.
+`run_job` surfaces `log_evidence = NaN`. **Target must be `unconstrained =
+true`** (auto-rebuilt internally if needed).
 
 ### `sample_ensemble` *(library-only)*
 

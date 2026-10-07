@@ -5,7 +5,7 @@
 # integration with `rv_log_likelihood` / `Params` auto-priors is a
 # follow-up commit.
 
-using Nereus, Random, Statistics, LinearAlgebra, Test, MCMCChains
+using Nereus, Random, Statistics, LinearAlgebra, Test, MCMCChains, ForwardDiff
 using Random: MersenneTwister
 
 # ---------------------------------------------------------------------
@@ -800,6 +800,62 @@ end
     # Both joint and marginal should drop by the same amount when RV
     # shifts (their difference is RV-independent).
     @test isapprox(ll_joint - ll_joint2, ll_marg - ll_marg2; atol = 1e-8)
+end
+
+@testset "ActivityGP — Hessians at couplings 0 (indicators_only, marginalize, scoped)" begin
+    # These likelihoods solved with `F \ y`, which goes through LinearAlgebra's
+    # 2-argument ldiv!: it asks `istriu` of the transposed factor, and
+    # ForwardDiff's `iszero` reads only a dual's value. Where every coupling is
+    # 0 the covariance is diagonal in value but not in its second derivatives,
+    # those were dropped, and the coupling block of the Hessian came out wrong:
+    # by 79 in 271 for indicators_only and the scoped joint likelihood here, by
+    # 1e-4 in 6.9 for marginalize_indicators (global or scoped). The reference
+    # is central differences of the gradient, which is right at and near 0 (the
+    # off-diagonal entries' first derivatives vanish there), at couplings 0,
+    # 1e-3 and 0.3, with everything else at the centre of its prior box.
+    rng = MersenneTwister(5)
+    n = 12
+    t = sort!(60 .* rand(rng, n))
+    channels = [:bis, :fwhm]
+    inds = Dict(String(c) => randn(rng, n) for c in channels)
+    errs = Dict(String(c) => fill(0.3, n) for c in channels)
+    data = Data(; t_rv = t, rv = 3 .* randn(rng, n), rv_err = fill(1.0, n),
+                  rv_inst = ones(Int, n), indicators = inds, indicator_errs = errs)
+    for kw in ((; indicators_only = true), (; marginalize_indicators = true),
+               (; instruments = ["SIM"]),
+               (; instruments = ["SIM"], marginalize_indicators = true))
+        params = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+                         instruments = InstrumentConfig(rv = ["SIM"]), data = data,
+                         M_s = 1.0, noise_models = NoiseModel[ActivityGP(; channels, kw...)])
+        tg = NereusTarget(params, data; unconstrained = false)
+        L = params.layout
+        x = map(L.unfrozen_priors) do ps
+            lo, hi = bounds(ps)
+            lo > 0 ? sqrt(lo * hi) : (lo + hi) / 2
+        end
+        cpl = findall(nm -> replace(nm, "_SIM" => "") in ("Vc", "Vr", "Bc", "Br", "Fc", "Fr"),
+                      L.unfrozen_names)
+        @test length(cpl) == (haskey(kw, :indicators_only) ? 4 : 6)
+        f(z) = Nereus.LogDensityProblems.logdensity(tg, z)
+        h = 1e-5
+        # One chunk size for every model and dimension: compiled once (with
+        # the default chunk the four models took three minutes, not twenty
+        # seconds).
+        ck = ForwardDiff.Chunk{2}()
+        for s in (0.0, 1e-3, 0.3)
+            xs = copy(x)
+            xs[cpl] .= s .* (1:length(cpl)) ./ length(cpl)
+            H = ForwardDiff.hessian(f, xs, ForwardDiff.HessianConfig(f, xs, ck))
+            gc = ForwardDiff.GradientConfig(f, xs, ck)
+            Hfd = similar(H)
+            for j in eachindex(xs)
+                e = zeros(length(xs)); e[j] = h
+                Hfd[:, j] = (ForwardDiff.gradient(f, xs .+ e, gc) .-
+                             ForwardDiff.gradient(f, xs .- e, gc)) ./ (2h)
+            end
+            @test maximum(abs.(H .- Hfd)) <= 1e-7 * maximum(abs, Hfd)
+        end
+    end
 end
 
 @testset "indicators / indicator_errs — save_chains ↔ load_chains round-trip" begin

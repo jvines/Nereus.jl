@@ -16,13 +16,35 @@ using ForwardDiff
 # Conversion constant: M_Jup / M_Sun (NIST/CODATA-ish).
 const _MJ_PER_MS = 9.545942339693249e-4
 
+# The eccentricity vector in each backend's own convention. Nereus measures ω
+# from the sky plane, with the transit at f + ω = π/2 (`tc_to_tp`).
+#
+# TTVFaster measures the longitude of periastron ϖ from the line of sight, with
+# the transit at true longitude f + ϖ = 0 (its λ₀ = -n t₀ + 2 e sin ϖ is the
+# mean longitude at a transit, to first order in e): ϖ = ω - π/2, and
+# (e cos ϖ, e sin ϖ) = (e sin ω, -e cos ω).
+#
+# NbodyGradient puts the observer on -z and the transit at f + ω' = 3π/2
+# (`kepler_init`): ω' = ω + π, and (e cos ω', e sin ω') = -(e cos ω, e sin ω).
+#
+# Both used to be handed (e cos ω, e sin ω): orbits turned by 90 and 180
+# degrees, whose periastra were not those of the light curve's orbit, and on
+# an eccentric pair near 2:1 the two backends' TTVs then anticorrelated
+# (r = -0.4) where they agree (r = 0.99) with the right vectors.
+@inline _ttvfaster_hk(e, ω) = (e * sin(ω), -e * cos(ω))
+@inline _nbodygradient_hk(e, ω) = (-e * cos(ω), -e * sin(ω))
+
 """
     _apply_ttv_nb!(state, theta, p_idx, Ps, es, ws, Tps, bs, a_Rs, t_phot_max;
-                   jmax = 5)
+                   jmax = 5, t_phot_min = nothing)
 
 For each row `r` in `state` flagged as TTV-NB (i.e. `state.is_nb[r] ==
 true`), overwrite `state.δts[r]` with the TTVFaster-predicted offsets
-at the linear ephemeris `Tc(r) + (i-1)·P(r)` for `i = 1..n`. Sums
+at the linear ephemeris `Tc(r) + n·P(r)` for `n = n0 .. n1`, where
+`Tc(r) = tp_to_tc(Tp, P, e, ω)` is the time of mid-transit the likelihood
+numbers transits from, and set `state.n0s[r] = n0`. The grid runs from the
+transit nearest `t_phot_min` (`n0 < 0` when the photometry starts before
+Tc; `n0 = 0` without `t_phot_min`) to the one nearest `t_phot_max`. Sums
 pairwise contributions across all NB planets (1st-order valid).
 
 Mass ratios derive from K via `msini` divided by `sin(inc)` where
@@ -37,13 +59,14 @@ function _apply_ttv_nb!(state, theta::Theta{T}, p_idx,
                           bs::AbstractVector{T},
                           a_Rs::AbstractVector{T},
                           t_phot_max::T;
-                          jmax::Int = 5) where {T<:Real}
+                          jmax::Int = 5,
+                          t_phot_min::Union{Nothing, Real} = nothing) where {T<:Real}
     # Dispatch on user-selected TTV backend. Default is the perturbative
     # TTVFaster series (this body); :nbody routes through NbodyGradient.jl
     # for full ODE integration (see ttv_nbody_full.jl).
     if theta.params.config.ttv_backend === :nbody
         return _apply_ttv_nb_full!(state, theta, p_idx, Ps, es, ws,
-                                     Tps, bs, a_Rs, t_phot_max)
+                                     Tps, bs, a_Rs, t_phot_max; t_phot_min)
     end
     M_s = theta.params.config.M_s
     isnan(M_s) && return
@@ -61,20 +84,30 @@ function _apply_ttv_nb!(state, theta::Theta{T}, p_idx,
     planets = Vector{Planet_plane_hk{T}}(undef, n_nb)
     times   = Vector{Vector{T}}(undef, n_nb)
     sums    = Vector{Vector{T}}(undef, n_nb)
+    n0s     = zeros(Int, n_nb)
     @inbounds for q in 1:n_nb
         r = nb_rows[q]
         j = state.j_active[r]
         k = state.k_planet[r]
         P  = Ps[j]; e = es[j]; w = ws[j]
-        Tp = Tps[j]
-        Tc1 = Tp + P / 4
-        # Grid size from data span. The conditional on ntr uses scalar
-        # comparison which works for both Float64 and Dual (Dual <: Real).
-        ntr_raw = max(1, Int(ceil(ForwardDiff_value(t_phot_max - Tc1) /
-                                    ForwardDiff_value(P))) + 1)
-        ntr = min(ntr_raw, 10_000)
-        times[q] = T[Tc1 + (i - 1) * P for i in 1:ntr]
+        # The linear ephemeris starts at the time of mid-transit, the epoch the
+        # likelihood numbers transits from (`ttv_effective_time`). It was
+        # Tp + P/4, which is that only for a circular orbit with ω = 0;
+        # otherwise TTVFaster put the planet at another orbital phase.
+        Tc1 = tp_to_tc(Tps[j], P, e, w)
+        # Grid from the data span: transits n0 .. n1, the ones nearest the
+        # first and the last cadence. It used to start at Tc whatever the
+        # data, so every transit before Tc (half of them, with Tc mid-data, as
+        # the Mo anchor and t_ref put it) had no TTV at all. Sizes are Ints,
+        # from the values of Dual inputs.
+        Pv, Tcv = ForwardDiff_value(P), ForwardDiff_value(Tc1)
+        n0 = t_phot_min === nothing ? 0 :
+             min(0, floor(Int, (ForwardDiff_value(t_phot_min) - Tcv) / Pv))
+        n1 = max(0, Int(ceil(ForwardDiff_value(t_phot_max - Tc1) / Pv)))
+        ntr = min(n1 - n0 + 1, 10_000)
+        times[q] = T[Tc1 + n * P for n in n0:(n0 + ntr - 1)]
         sums[q]  = zeros(T, ntr)
+        n0s[q]   = n0
 
         # Mass ratio = M_p / M_s via Kepler + inclination from b, a/R*.
         K = planet_K(theta, k)
@@ -85,8 +118,8 @@ function _apply_ttv_nb!(state, theta::Theta{T}, p_idx,
         # TTVFaster 1st-order series has a 0/0 at exactly e=0 (formula
         # divides by e at one step). Floor the eccentricity vector at
         # 1e-4 — well below any detectable TTV amplitude at this order.
-        ecosw = e * cos(w)
-        esinw = e * sin(w)
+        # TTVFaster's ϖ is measured from the line of sight (`_ttvfaster_hk`).
+        ecosw, esinw = _ttvfaster_hk(e, w)
         if e < 1e-4
             # Bias the e-vector along ω = 0 with tiny magnitude. Signal
             # contribution is O(e), so ≲1e-4 × max_amp ≪ 1 ms.
@@ -129,6 +162,7 @@ function _apply_ttv_nb!(state, theta::Theta{T}, p_idx,
     @inbounds for q in 1:n_nb
         r = nb_rows[q]
         state.δts[r] = sums[q]
+        state.n0s[r] = n0s[q]
     end
     return
 end

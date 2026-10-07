@@ -118,6 +118,10 @@ end
 O(n) celerite log-likelihood. Generic over element type.
 Algorithm from Foreman-Mackey et al. 2017 (Appendix B) and
 the Celerite2.jl reference implementation.
+
+`times` need not be sorted: the points are scored in time order (see
+`_celerite_loglike!`), and the value does not depend on the order they
+are passed in.
 """
 function celerite_loglike(times::Vector{Float64},
                            residuals::AbstractVector{T},
@@ -175,6 +179,16 @@ _celerite_loglike!(B::CeleriteBuffers{T}, times::Vector{Float64},
 `U`, `W` of J x N, `phi` J x (N-1), `S` J x J, `f` of length J and `cosdt`,
 `sindt` of length (at least) the number of complex terms. Their contents on
 entry do not matter. `celerite_loglike` is this with fresh arrays.
+
+The recursion runs over consecutive differences `times[n] - times[n-1]`,
+which the semiseparable form needs to be ≥ 0. Points passed in any other
+order (RVs concatenated instrument by instrument, say) are scored in time
+order instead: a stable `sortperm` of `times`, applied to the residuals and
+variances too. The log-likelihood of a set of points does not depend on
+their order, so the result is the one for the same points sorted. That
+costs a permutation and three copies per call; the sampler paths that score
+the same unsorted times every call sort them once instead (`ChannelWork`,
+`CeleriteWork`).
 """
 function _celerite_loglike!(A, D, U, W, phi, S, cosdt, sindt, z, f,
                             times::Vector{Float64},
@@ -183,6 +197,12 @@ function _celerite_loglike!(A, D, U, W, phi, S, cosdt, sindt, z, f,
                             ar::Vector{T}, cr::Vector{T},
                             ac::Vector{T}, bc::Vector{T},
                             cc::Vector{T}, dc::Vector{T}) where {T}
+    if !issorted(times)
+        p = sortperm(times)                  # stable: tied times keep their order
+        return _celerite_loglike!(A, D, U, W, phi, S, cosdt, sindt, z, f,
+                                  times[p], residuals[p], variances[p],
+                                  ar, cr, ac, bc, cc, dc)
+    end
     N = length(times)
     Jr = length(ar)
     Jc = length(ac)
@@ -311,6 +331,9 @@ Return α = K_full⁻¹ · residuals using the same O(n) factorization as
 data points is `μ = residuals − variances .* α`, since
 K_full · α = y and K_signal = K_full − diag(variances).
 
+`times` need not be sorted: the solve runs in time order and `α` comes
+back in the order of the points passed in.
+
 (Detrending convention: pass `flux − offset` as residuals, then the
 GP-detrended flux is `flux − μ = offset + variances .* α`.)
 """
@@ -320,6 +343,14 @@ function celerite_solve(times::Vector{Float64},
                          ar::Vector{T}, cr::Vector{T},
                          ac::Vector{T}, bc::Vector{T},
                          cc::Vector{T}, dc::Vector{T}) where {T}
+    # The recursion needs time-ordered points (see `_celerite_loglike!`).
+    if !issorted(times)
+        p = sortperm(times)
+        α = Vector{T}(undef, length(times))
+        α[p] = celerite_solve(times[p], residuals[p], variances[p],
+                              ar, cr, ac, bc, cc, dc)
+        return α
+    end
     N = length(times)
     Jr = length(ar)
     Jc = length(ac)
@@ -530,8 +561,9 @@ end
 
 Scratch for the RV-channel celerite GP on the PTWorkspace path (held by
 `ws.rv_noise`): the kernel coefficient lists, the solver's work arrays and
-the kernel's layout slots, resolved once per (layout, noise model). Nothing
-in it is chain state.
+the kernel's layout slots, resolved once per (layout, noise model), and the
+time order of the points, resolved once per times vector. Nothing in it is
+chain state.
 """
 mutable struct CeleriteWork
     ar::Vector{Float64}
@@ -544,11 +576,35 @@ mutable struct CeleriteWork
     key_idx::Any                    # layout.name_to_idx the slots come from
     key_nm::Any                     # the CeleriteRotation they belong to
     slots::NTuple{5, Int}           # gp_sigma, gp_period, gp_Q0, gp_dQ, gp_f
+    key_t::Any                      # the times vector `ord` belongs to
+    ord::Vector{Int}                # its stable sortperm; empty when already sorted
+    ts::Vector{Float64}             # times[ord]
+    rs::Vector{Float64}             # residuals and variances, permuted by `ord`
+    vs::Vector{Float64}
 end
 
 CeleriteWork() = CeleriteWork(Float64[], Float64[], Float64[], Float64[], Float64[],
                               Float64[], CeleriteBuffers{Float64}(0, 1, 0),
-                              nothing, nothing, (0, 0, 0, 0, 0))
+                              nothing, nothing, (0, 0, 0, 0, 0),
+                              nothing, Int[], Float64[], Float64[], Float64[])
+
+# Time order of `t` for the celerite recursion, kept in `cw` while the same
+# vector comes back: `nothing` when `t` is already sorted, else the stable
+# sortperm the allocating path (`_celerite_loglike!`) would take, with the
+# sorted times and buffers for the permuted residuals and variances.
+function _celerite_order!(cw::CeleriteWork, t::Vector{Float64})
+    if cw.key_t !== t
+        if issorted(t)
+            cw.ord = Int[]
+        else
+            cw.ord = sortperm(t)
+            cw.ts = t[cw.ord]
+            cw.rs = similar(t); cw.vs = similar(t)
+        end
+        cw.key_t = t
+    end
+    return isempty(cw.ord) ? nothing : cw.ord
+end
 
 # `sho_coefficients`, appended to the coefficient lists in `cw`.
 @inline function _sho_push!(cw::CeleriteWork, S0, Q, ω0)
@@ -603,6 +659,16 @@ function gp_log_likelihood(residuals::AbstractVector{Float64},
     v = theta.values
     _rotation_coefficients!(cw, v[i1], v[i2], v[i3], v[i4], v[i5])
     t = _as_t_vec(times)
+    # Unsorted times: score the points in time order, as the allocating
+    # method does, from permutation buffers instead of fresh copies.
+    ord = _celerite_order!(cw, t)
+    if ord !== nothing
+        rs = cw.rs; vs = cw.vs
+        @inbounds for k in eachindex(ord)
+            rs[k] = residuals[ord[k]]; vs[k] = variances[ord[k]]
+        end
+        t = cw.ts; residuals = rs; variances = vs
+    end
     N = length(t)
     Jc = length(cw.ac)
     J = length(cw.ar) + 2Jc
@@ -1020,7 +1086,7 @@ end
 
 """Scratch for one instrument-restricted GP: its points, times and celerite arrays."""
 struct ChannelGPWork
-    sel::Vector{Int}            # the observations it covers, in order
+    sel::Vector{Int}            # the observations it covers, in time order
     t::Vector{Float64}          # their times, as `_as_t_vec(view(times, sel))` builds them
     sho::NTuple{3,Int}          # (log S0, log Q, log omega0) slots; zeros unless CeleriteSHO
     A::Vector{Float64}
@@ -1072,6 +1138,10 @@ function ChannelWork(params, times::Vector{Float64}, inst::Vector{Int}, channel:
         end
         idxs === nothing && continue          # the general path reports it
         sel = Int[q for q in eachindex(inst) if inst[q] in idxs]
+        # In time order -- the celerite recursion needs it, and the general
+        # path's `_celerite_loglike!` would sort these points the same
+        # (stable) way on every call.
+        sel = sel[sortperm(view(times, sel))]
         N = length(sel)
         sho = (0, 0, 0)
         if nm isa CeleriteSHO

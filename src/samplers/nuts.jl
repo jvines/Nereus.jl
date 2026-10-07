@@ -314,9 +314,17 @@ size / tree depth are attached to `chains.info` (see
 - `target_accept::Float64=0.8` : target Metropolis acceptance rate
 - `ad_backend::Symbol=:ForwardDiff` : autodiff backend. `:ForwardDiff`
   (fastest for ≤15 params), `:Enzyme` (reverse-mode, better for many
-  params / GP models), or `:ReverseDiff` (requires `import ReverseDiff`)
-- `compile_tape::Bool=true` : compile ReverseDiff tape for ~2-3x speedup
-  (only applies when `ad_backend=:ReverseDiff`)
+  params / GP models), or `:ReverseDiff` (requires `import ReverseDiff`),
+  which records its tape afresh at every point.
+- `compile_tape::Bool=false` : refused (an `ArgumentError`) with
+  `ad_backend = :ReverseDiff`. A compiled tape replays the operations
+  recorded at one point, the branches taken there included, at every other
+  point, and every Nereus log density branches on the parameter values:
+  Kepler's solver stops once it has converged, a point outside the support
+  returns -Inf, transit windows and clamps choose what is computed. Its
+  values and gradients were wrong away from the point where it was recorded.
+  No effect with the other backends. A checkpoint from a run that left it at
+  its former default, `true`, is resumed by passing `compile_tape = true`.
 - `warm_start::Bool=true`  : warm-start chains from a short pt_emcee
   pre-search. Disable only if you pass `init` or know the target is
   trivially unimodal; with it off, independent prior-draw inits will
@@ -367,7 +375,7 @@ function sample_nuts(
     n_chains::Int = 4,
     target_accept::Real = 0.8,
     ad_backend::Symbol = :ForwardDiff,
-    compile_tape::Bool = true,
+    compile_tape::Bool = false,
     warm_start::Bool = true,
     warm_temps::Int = 6,
     warm_walkers::Int = 40,
@@ -387,6 +395,13 @@ function sample_nuts(
     # Rebound once, here. No closure below captures `rng`, so it is not boxed.
     rng = seed !== nothing ? MersenneTwister(seed) :
           rng === nothing ? Random.default_rng() : rng
+    ad_backend === :ReverseDiff && compile_tape && throw(ArgumentError(
+        "compile_tape = true is refused: a compiled ReverseDiff tape replays the " *
+        "branches the log density took where it was recorded, and Nereus log " *
+        "densities branch on the parameter values (Kepler's solver stops once " *
+        "converged, a point outside the support returns -Inf, transit windows), " *
+        "so its values and gradients are wrong away from that point. Leave it " *
+        "false: ReverseDiff then records the tape afresh at every point."))
     target_accept = Float64(target_accept)   # JSON may deliver an Int
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
@@ -484,7 +499,7 @@ function sample_nuts(
           _NutsCheckpoint(ck_path, ck_fp, Float64(checkpoint_interval), snaps,
                           copy(rng), circular_windows(params), ReentrantLock())
     stops = _NUTS_STOP_AFTER[]
-    chain_kw = (; n_samples, n_warmup, target_accept, ad_backend, compile_tape)
+    chain_kw = (; n_samples, n_warmup, target_accept, ad_backend)
 
     if n_chains == 1
         res = [_nuts_chain(target, 1, snaps[1], ckw, get(stops, 1, 0); chain_kw...,
@@ -602,6 +617,34 @@ function _nuts_snapshot!(ckw::_NutsCheckpoint, c::Int, step::Int, z, metric, ker
 end
 
 """
+    _nuts_logdensity_fns(target, ad_backend) -> (ℓ, ∂ℓ)
+
+The log density `ℓ(y)` and its value-and-gradient `∂ℓ(y)` that a NUTS chain
+integrates, in the target's own space, by `ad_backend`.
+
+A ReverseDiff tape is never compiled: a compiled tape replays the branches
+taken at the point where it was recorded (LogDensityProblemsAD records it at
+zeros(dim)) at every other point, and every Nereus log density branches on
+the parameter values. On an eccentric orbit whose zeros(dim) is e = 0,
+Kepler's solver takes no Newton step there, so the tape took none anywhere;
+its log density was off by hundreds of nats and its gradients by as much as
+the gradients themselves (test/test_nuts_reversediff.jl).
+"""
+function _nuts_logdensity_fns(target::NereusTarget, ad_backend::Symbol)
+    if ad_backend === :Enzyme && target.transform isa PackedTransforms
+        # Custom Enzyme path with explicit Const arguments.
+        enzyme_cfg = EnzymeGradientConfig(target)
+        ℓ_fn = y -> enzyme_logdensity_and_gradient!(enzyme_cfg, target, y)[1]
+        ∂ℓ_fn = y -> enzyme_logdensity_and_gradient!(enzyme_cfg, target, y)
+    else
+        ℓ_ad = LogDensityProblemsAD.ADgradient(ad_backend, target)
+        ℓ_fn = y -> LogDensityProblems.logdensity(ℓ_ad, y)
+        ∂ℓ_fn = y -> LogDensityProblems.logdensity_and_gradient(ℓ_ad, y)
+    end
+    return ℓ_fn, ∂ℓ_fn
+end
+
+"""
     _nuts_chain(target, c, snap, ckw, stop; kwargs...) -> Union{MCMCChains.Chains, Nothing}
 
 Run NUTS chain `c`, on `rng`, from its entry `snap`: from the start point of an
@@ -619,26 +662,11 @@ function _nuts_chain(
     target::NereusTarget, c::Int, snap::NamedTuple, ckw::Union{Nothing,_NutsCheckpoint},
     stop::Int;
     n_samples::Int, n_warmup::Int, target_accept::Float64,
-    ad_backend::Symbol, compile_tape::Bool,
+    ad_backend::Symbol,
     rng::AbstractRNG, progress::Bool
 )
     dim = LogDensityProblems.dimension(target)
-
-    # --- AD gradient wrapper ------------------------------------------
-    if ad_backend === :Enzyme && target.transform isa PackedTransforms
-        # Custom Enzyme path with explicit Const arguments.
-        enzyme_cfg = EnzymeGradientConfig(target)
-        ℓ_fn = y -> enzyme_logdensity_and_gradient!(enzyme_cfg, target, y)[1]
-        ∂ℓ_fn = y -> enzyme_logdensity_and_gradient!(enzyme_cfg, target, y)
-    else
-        ad_kwargs = Dict{Symbol,Any}()
-        if ad_backend === :ReverseDiff && compile_tape
-            ad_kwargs[:compile] = Val(true)
-        end
-        ℓ_ad = LogDensityProblemsAD.ADgradient(ad_backend, target; ad_kwargs...)
-        ℓ_fn = y -> LogDensityProblems.logdensity(ℓ_ad, y)
-        ∂ℓ_fn = y -> LogDensityProblems.logdensity_and_gradient(ℓ_ad, y)
-    end
+    ℓ_fn, ∂ℓ_fn = _nuts_logdensity_fns(target, ad_backend)
     kinetic = AdvancedHMC.GaussianKinetic()
 
     # `rng` already holds the stream of the chain's entry (`sample_nuts` put

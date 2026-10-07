@@ -27,7 +27,8 @@ Core helpers are in `src/circular.jl`.
   seam pass. Engines that could not cross it get "full-circle angle cut by its
   seam".
 - **Not circular**:
-  - Mo under TTVs (epoch numbering uses Tp linearly).
+  - Mo under TTVs (transits are numbered from Tc = tp_to_tc(Tp), and
+    Tp = t_ref − Mo·P/2π moves by a period when Mo does).
   - Mo under `obs_prior` (the Jacobian is linear in M).
   - Non-uniform priors, arcs, and two-period priors.
 - **Tests**: `test/test_circular.jl`. Reproduction: a seam-centred RV planet

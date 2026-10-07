@@ -245,7 +245,9 @@ plots are RM-consistent. Render the in-transit anomaly with the
 
 For a planet with a TTV source and `ttv_n_transits[k] = n`, slots
 `ttv_k<k>_t<i>` (`i = 1..n`) default to `NormalPrior(0.0, 1.0, -10.0, 10.0)`
-(days). Tighten with `NormalPrior(0, minutes_in_days, ±tight)` when you
+(days). Slot `i` is transit `i − 1` counted from the planet's time of
+mid-transit `Tc` (under the `Tp` and `Mo` anchors, the transit within half
+a period of `Tp`). Tighten with `NormalPrior(0, minutes_in_days, ±tight)` when you
 have a-priori TTV-amplitude knowledge. The `ttv_oc` (observed−computed)
 plot also renders for single-planet fits as a data-only O−C diagram
 (`planet_b_k = 0`).

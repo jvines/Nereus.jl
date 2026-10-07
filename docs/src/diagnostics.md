@@ -20,7 +20,8 @@ post-fit stages in this order (`src/runner.jl`, `run_job` body):
    → `detection_limits.png` + `detection_limits.nc`, summary under
    `detection_limits`. Default **on for PT samplers only**.
 4. **PSIS-LOO / WAIC** (`_run_loo!`) — predictive cross-validation,
-   summary under `loo`. Default **on** (skipped for GP models).
+   summary under `loo`. Default **on**; exact under correlated noise
+   (GPs, additive covariances, MA), skipped for the joint ActivityGP.
 5. **Fit health** (`_run_fit_health!`) — silent-wrong structural guard,
    summary under `fit_health`. Default **on**.
 
@@ -272,13 +273,13 @@ The PPC draw RNG is seeded from the top-level job `seed`
 
 ## PSIS-LOO and WAIC
 
-### `compute_loo(chains, params, data; n_draws=500, log_z=nothing)`
+### `compute_loo(chains, params, data; n_draws=500, log_z=nothing, max_dense_obs=2000)`
 
 Computes Bayesian leave-one-out cross-validation (PSIS-LOO) and
 the widely-applicable information criterion (WAIC) for the fitted
 model by replaying `n_draws` posterior samples through the
-per-datapoint log-likelihood and feeding the matrix to
-[ParetoSmooth.jl](https://github.com/TuringLang/ParetoSmooth.jl)
+per-datapoint leave-one-out predictive density and feeding the matrix
+to [ParetoSmooth.jl](https://github.com/TuringLang/ParetoSmooth.jl)
 ([Vehtari, Gelman & Gabry 2017](https://ui.adsabs.harvard.edu/abs/2017S&C....27.1413V/abstract)).
 These are the honest counterweight to the PT-based evidence stack
 (TI+ / SS+ / H+) under model misspecification — log Z compares model
@@ -296,24 +297,42 @@ Pass `log_z` (e.g., from the PT result) to get
 `loo_compare_log_z = elpd_loo - log_z`. Useful when log Z and LOO
 disagree — disagreement is a model-misspecification flag, not a bug.
 
-**Restriction.** Pointwise log-likelihood is well-defined under
-independence after the sequential noise stage: white-noise /
-`ActivityDecorrelation` / `ActivityJitter` / `ARModel` / `MAModel` are
-all supported (AR/MA are applied to the predictions/residuals before
-the per-point Gaussian). General **GP (`CovarianceNoise`) models are
-refused** with a clear `ArgumentError` — the joint Gaussian covariance
-breaks pointwise factorisation, and a naive independence approximation
-would silently mislead.
+**Correlated noise.** The pointwise term is the leave-one-out predictive
+density at fixed θ, `log p(yᵢ | y₋ᵢ, θ)`. For independent points —
+white noise, `StudentT`, `ActivityDecorrelation`, `ActivityJitter`,
+`ErrorScale`, `ARModel` (which acts on the model) — that is the density
+of point i alone. A noise model that couples the points makes the
+residuals a correlated Gaussian `r ~ N(0, C)`, and the density of point i
+alone is then *not* its leave-one-out predictive. That covers the
+celerite GPs (`CeleriteSHO`, `CeleriteRotation`, `CeleriteRotationFM17`,
+global or per-instrument), `MaternGP`, `HarmonicBlock`, `NightlyOffset`,
+`MAModel` (its residual transform `ε = B r` makes `r ~ N(0, B⁻¹CB⁻ᵀ)`),
+the analytic γ marginalization, and an `ActivityGP` with
+`marginalize_indicators = true` (the RV conditioned on the indicators).
+For all of these Nereus computes the exact Gaussian leave-one-out
+(Sundararajan & Keerthi 2001) from the covariance of each draw: with
+`Q = C⁻¹`, the predictive of point i has mean `rᵢ − (Q r)ᵢ / Qᵢᵢ` and
+variance `1 / Qᵢᵢ` (residual units).
 
-**One GP exception:** an `ActivityGP` configured with
-`marginalize_indicators = true` *is* supported. Nereus conditions the
-RV channel on the indicator channels (closed-form RV-conditional
-Gaussian) and uses the Sundararajan & Keerthi (2001) leave-one-out
-formula on that conditional covariance, giving an honest per-point
-`log p(yᵢ | y₋ᵢ, θ)`. Any *other* `CovarianceNoise` (`CeleriteSHO`,
-`CeleriteRotation`, `CeleriteRotationFM17`), or an `ActivityGP` without
-`marginalize_indicators`, throws. For those, use PT log Z
-(TI+ / SS+ / H+) for model comparison, or strip the GP and refit.
+Whether a channel is diagonal is read off the covariance, not off a
+list of noise types, and on every draw the rebuilt covariance must
+reproduce the likelihood the fit scored (its Gaussian log-density is
+compared with it). A noise model LOO does not know therefore makes
+`compute_loo` throw an `ArgumentError` instead of scoring correlated
+points as independent.
+
+Cost: a white base with additive low-rank terms is solved by Woodbury,
+O(n·k²) per draw. A GP or MA takes a dense n×n solve per draw, O(n³)
+(instrument-restricted GPs one block per GP); a solve larger than
+`max_dense_obs` points throws instead of running for hours — raise it
+if that cost is acceptable.
+
+**Refused** (`ArgumentError`): an `ActivityGP` scored jointly with its
+indicators (`marginalize_indicators = false` — use
+`marginalize_indicators = true` or PT log Z), an instrument-restricted
+or more than one active `ActivityGP`, `StudentT` with `MAModel`, a
+γ-marginalized instrument group with a single point (its leave-one-out
+predictive is improper), and a draw whose likelihood is not finite.
 
 When invoked via `run_job` (`_run_loo!`), LOO/WAIC runs after the
 sampler whenever there is RV or photometry, and writes the scalar
@@ -322,13 +341,15 @@ result into `summary.json` under the `loo` key (`elpd_loo`,
 `pareto_k_max`, `pareto_k_warn_count`, `loo_compare_log_z`). If the
 sampler result carries a finite `log_evidence`, it is passed as `log_z`
 so `loo_compare_log_z = elpd_loo − log_z` is populated automatically.
-When `compute_loo` throws (e.g. a GP model), the stage is recorded as
+When `compute_loo` throws (one of the refusals above, or a dense solve
+above `loo_max_dense_obs`), the stage is recorded as
 `{"status": "skipped", "error": …}` and the job continues.
 
 | `output` key | default | effect |
 |---|---|---|
 | `loo`         | `true` | master on/off for the LOO/WAIC stage |
 | `loo_n_draws` | `500`  | posterior draws replayed (capped at chain length) |
+| `loo_max_dense_obs` | `2000` | largest dense covariance solved per draw under correlated noise |
 
 The LOO draw RNG is seeded from the top-level job `seed`.
 

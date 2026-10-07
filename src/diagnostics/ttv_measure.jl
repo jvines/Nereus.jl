@@ -28,7 +28,9 @@ parameters at `theta_ref`. The fit uses only the phot points within
 
 Returns `(cycle_idx, tc_obs, tc_lo, tc_hi, mle_dt, lo_dt, hi_dt)` where
 `*_dt` are the offsets from `tcs_predicted` in days (suitable for an
-O−C plot).
+O−C plot), and `cycle_idx` is each transit's number counted from the
+planet's `Tc` (transit 0 at `Tc`, negative before it): the numbering of
+the free TTV offsets, whose `ttv_k<k>_t<n+1>` is transit `n`.
 
 # Arguments
 - `data::Data` — photometric data
@@ -88,7 +90,9 @@ function measure_per_transit_tcs(data::Data, theta_ref::Theta, params::Params;
     end
 
     n_tr = length(tcs_predicted)
-    cycle_idx = collect(0:(n_tr - 1))
+    # Counted from Tc, as the likelihood numbers the TTV offsets; it was
+    # 0:(n_tr - 1), counted from the first transit of `tcs_predicted`.
+    cycle_idx = [round(Int, (tc - Tc_k) / P_k) for tc in tcs_predicted]
     tc_obs = Vector{Float64}(undef, n_tr)
     tc_lo  = Vector{Float64}(undef, n_tr)
     tc_hi  = Vector{Float64}(undef, n_tr)
@@ -227,8 +231,6 @@ function ttvc_envelope(chains, params::Params;
         b_a  = _get(theta_k.values, "b_k$(planet_a_k)")
         e_a  = hypot(se_a, sc_a)^2
         w_a  = atan(se_a, sc_a)
-        Tp_a = tc_to_tp(Tc_a, P_a, e_a, w_a)
-        Tc1_a = Tp_a + P_a / 4
 
         # a/R* for planet a
         if params.config.parametrization.use_rho_s
@@ -257,10 +259,11 @@ function ttvc_envelope(chains, params::Params;
         # TTVFaster has 0/0 at exactly e=0
         e_a_f = max(e_a, 1e-4)
         e_b_f = max(e_b, 1e-4)
-        pl_a = Planet_plane_hk(mr_a, P_a, Tc1_a,
-                                e_a_f*cos(w_a), e_a_f*sin(w_a))
-        pl_b = Planet_plane_hk(mr_b, P_b, Tc_b,
-                                e_b_f*cos(w_b), e_b_f*sin(w_b))
+        # Both planets at their own transit times (planet a's was
+        # tc_to_tp(Tc_a) + P_a/4, Tc_a only for a circular orbit with ω = 0),
+        # with the eccentricity vector TTVFaster's way (`_ttvfaster_hk`).
+        pl_a = Planet_plane_hk(mr_a, P_a, Tc_a, _ttvfaster_hk(e_a_f, w_a)...)
+        pl_b = Planet_plane_hk(mr_b, P_b, Tc_b, _ttvfaster_hk(e_b_f, w_b)...)
 
         # Pair: inner first
         inner, outer = P_a < P_b ? (pl_a, pl_b) : (pl_b, pl_a)

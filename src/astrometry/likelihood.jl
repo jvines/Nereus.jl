@@ -1568,7 +1568,7 @@ function obs_based_log_prior(theta::Theta{T}, data) where {T<:Real}
         time_kind = theta.params.config.parametrization.time
         Tp = _t_anchor_to_tp(time_kind, t_anc, P_d, e, ω, t_ref)
 
-        e_safe = min(max(e, zero(e)), oftype(e, 0.9999))
+        e_safe = _anomaly_e(e)       # as `_planet_orbit` clamps it
         sqrt_1me2 = sqrt(1 - e_safe * e_safe)
         # Prefactor: ((G M_tot P) / (2π^4))^(1/3) in AU·yr⁻¹·M_sun
         # → simplifies in solar/AU/yr units to (M_tot P_yr / (2π²))^(1/3)

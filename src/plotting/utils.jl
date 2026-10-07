@@ -132,6 +132,23 @@ function _best_legend_corner(xs::AbstractVector, ys::AbstractVector;
 end
 
 """
+    _fold_inliers(res; k=5) -> BitVector
+
+Points whose residual lies within `k` robust sigma (1.4826·MAD) of the
+median residual; non-finite residuals are never inliers. With zero MAD
+(fewer than half the points scatter at all) every finite point counts.
+"""
+function _fold_inliers(res::AbstractVector{<:Real}; k::Real = 5)
+    fin = isfinite.(res)
+    any(fin) || return fin
+    r = res[fin]
+    m = median(r)
+    s = 1.4826 * median(abs.(r .- m))
+    s > 0 || return fin
+    return fin .& (abs.(res .- m) .<= k * s)
+end
+
+"""
     _mode_int_local(vals) -> Int
 
 Mode (most-frequent integer value) of a samples vector. Used to pick

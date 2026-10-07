@@ -753,10 +753,10 @@ end
     # What the fallback costs. With five channels it was the dense (5N)²
     # Cholesky, which on the five-channel HD 18599 job took a ReverseDiff
     # gradient at every Ġ coupling 0 from 4.9 s and 4.0 GB (the solver before
-    # this branch) to 34 s and 16 GB, and the tape sample_nuts compiles at
-    # zeros(dim) to 44 GB. The sequential route records about as many
-    # instructions as the low-rank solve; the dense one records about nine
-    # times as many here (N = 20).
+    # this branch) to 34 s and 16 GB, and a tape compiled at zeros(dim) (then
+    # sample_nuts's default) to 44 GB. The sequential route records about as
+    # many instructions as the low-rank solve; the dense one records about
+    # nine times as many here (N = 20).
     fx(x) = Nereus.activity_gp_joint_logpdf_lowrank(epochs, x[1:C], x[C+1:2C],
                 x[2C+1], x[2C+2], x[2C+3], x[2C+4], y, σ²)
     xg = vcat(a0, b0, hyp...)                  # low-rank route
@@ -767,7 +767,7 @@ end
         @test length(ReverseDiff.GradientTape(fx, x).tape) <= 1.2 * n_generic
     end
     # It has no branch on the values, so a compiled tape recorded where every
-    # coupling is 0 (as sample_nuts records its default compiled tape, at
+    # coupling is 0 (as sample_nuts once recorded its default compiled tape, at
     # zeros(dim)) is the sequential route, exact at any point.
     ct = ReverseDiff.compile(ReverseDiff.GradientTape(fx, x0))
     for x in (xg, xs, vcat(a0, 0.5 .* a0, hyp...))
@@ -781,7 +781,7 @@ end
     end
 
     # Through the model, with the gradient object sample_nuts builds for
-    # ad_backend = :ReverseDiff, compile_tape = false: five channels with
+    # ad_backend = :ReverseDiff (no compiled tape): five channels with
     # every G or every Ġ coupling at 0, three channels with every G coupling
     # at 0, and use_derivative = false with every G coupling at 0. The
     # reference is ForwardDiff on BigFloat, which takes the same fallback at

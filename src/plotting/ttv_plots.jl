@@ -20,7 +20,8 @@ using Statistics: median, quantile
 O − C (observed-minus-computed) diagram.
 
 # Arguments
-- `transit_idx::AbstractVector{<:Integer}` — transit number (1-based)
+- `transit_idx::AbstractVector{<:Integer}` — transit number (`plot_ttv_oc`
+  passes the number counted from `Tc`: 0 at `Tc`, negative before it)
 - `δts_med::AbstractVector{<:Real}` — median TTV offset per transit, days
 - `δts_lo`, `δts_hi` — 16/84 percentile bands, optional (errorbars)
 - `predicted::AbstractVector{<:Real}` — overlay (e.g. TTVFaster), days
@@ -283,8 +284,8 @@ end
                           tcs=nothing) -> Figure
 
 Per-transit panels: data + best-fit model. `t_segments` etc are vectors
-of vectors (one per transit). Per-panel subtitle is "transit N"; no
-overall figure title.
+of vectors (one per transit). Per-panel subtitle is "transit N", N from
+`transit_idx`; no overall figure title.
 """
 function plot_transit_overlay(t_segs::AbstractVector{<:AbstractVector{<:Real}},
                                 flux_segs::AbstractVector{<:AbstractVector{<:Real}},
@@ -337,6 +338,8 @@ Per-transit light-curve gallery from a fit: one panel per transit of the
 transiting planet, each showing that transit's photometry + the best-fit (max-lp)
 transit model (x = hours from Tc). Per-transit QC — catches a single bad transit
 (spot crossing, partial/grazing, systematic) that the stacked phase-fold hides.
+Panel "transit N" is transit N counted from the planet's Tc (0 at Tc, negative
+before it), the numbering of the free TTV offsets (`ttv_k<k>_t<N+1>`).
 Saved as `models/transit_overlay_K<k>.<fmt>`.
 """
 function plot_transit_overlay_fit(chains, params, data;
@@ -372,7 +375,9 @@ function plot_transit_overlay_fit(chains, params, data;
         count(m) >= min_pts || continue
         push!(t_segs, data.t_phot[m]); push!(flux_segs, data.flux[m])
         push!(err_segs, data.flux_err[m]); push!(model_segs, model_all[m])
-        push!(tcs, c); push!(idx, n - n_lo + 1)
+        # Its number from Tc, as the TTV offsets count it (it was counted
+        # from 1 at the first transit in the data).
+        push!(tcs, c); push!(idx, n)
     end
     isempty(t_segs) && return Figure()
 

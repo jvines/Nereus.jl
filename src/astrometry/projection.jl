@@ -296,8 +296,8 @@ has one concrete element type — see `_iad_residuals!`.
 
 False for any orbit that is not a `Visual{KepOrbit}`, and for a hyperbolic one:
 `sqrt(1 - e^2)` does not exist there and PlanetOrbits switches to a different
-anomaly relation. `_planet_orbit` clamps e to 0.9999 before building the orbit,
-so the hyperbolic case is unreachable from the likelihood; this keeps a caller
+anomaly relation. `_planet_orbit` clamps e below 1 (`_anomaly_e`) before building
+the orbit, so the hyperbolic case is unreachable from the likelihood; this keeps a caller
 that does not clamp on the reference path instead of handing it a NaN.
 """
 _reflex_fast_applicable(orb::PlanetOrbits.VisualOrbit{<:Any,<:PlanetOrbits.KepOrbit}) =
@@ -618,10 +618,14 @@ function _planet_orbit(theta::Theta, k::Int, M_pri::Real, plx::Real,
     t_anc = planet_time_anchor(theta, k)
     # Clamp e to physical range. The (sesinw, secosw) parametrization
     # has unconstrained Cartesian priors that can produce e > 1; the RV
-    # path absorbs this in `true_anomaly` via the same min/max clamp.
+    # path absorbs this in `true_anomaly` via the same clamp (`_anomaly_e`).
     # PlanetOrbits' KepOrbit needs e ∈ [0, 1) so we apply the clamp here
-    # too. No-op for valid samples; protects autodiff during line search.
-    e_safe = min(max(e, zero(e)), oftype(e, 0.9999))
+    # too. No-op for every e in [0, 1), so the astrometric orbit is the RV's
+    # (the clamp was to 0.9999, and above it the two were different orbits);
+    # protects autodiff during line search.
+    # `clamp` keeps e itself, partials included, at e = 0, where
+    # `max(e, zero(e))` returned the constant and lost ∂/∂e.
+    e_safe = _anomaly_e(e)
     time_kind = theta.params.config.parametrization.time
     Tp = _t_anchor_to_tp(time_kind, t_anc, P, e_safe, ω, t_ref)
     # Get M_sec via the parametrization-aware accessor: in :K_driven

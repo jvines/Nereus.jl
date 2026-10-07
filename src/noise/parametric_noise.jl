@@ -289,8 +289,16 @@ end
 
 # Base = one celerite GP. celerite_solve/loglike are T-generic, so we recover
 # B⁻¹y, B⁻¹F column-by-column and logdet(B) from the base log-likelihood.
+# The celerite recursion runs in time order; unsorted points are sorted once
+# here (rows of F with them -- Σ's log-density does not depend on the order),
+# rather than in each of the k + 2 celerite calls.
 function _woodbury_celerite_ll(y, variances, times, theta::Theta{T}, nm, F,
                                 two_pi::T) where {T}
+    if !issorted(times)
+        p = sortperm(times)
+        return _woodbury_celerite_ll(y[p], variances[p], times[p], theta, nm,
+                                     F[p, :], two_pi)
+    end
     ar, cr, ac, bc, cc, dc = _celerite_coeffs(theta, nm)
     tv = _as_t_vec(times)
     Biy = celerite_solve(tv, y, variances, ar, cr, ac, bc, cc, dc)

@@ -44,7 +44,12 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "inc" => ("deg", true),       "i" => ("deg", true),
     "plx" => ("mas", false),      # parallax, sampled directly in astrometry
     "M_sec" => ("M_sun", false),  # companion mass, sampled in astrometry
-    "rho_s" => ("g/cm3", false),  # fitted stellar density
+    # The fitted stellar density is SAMPLED IN SOLAR UNITS, ρ★/ρ☉ = (M/M☉)/(R/R☉)³
+    # (`rho_s_to_a_Rs`), and was labelled g/cm3: a 0.532 ρ☉ star (0.750 g/cm³)
+    # was published as 0.532 g/cm³, 29% low. No conversion here, because the
+    # prior-rail check compares the CI with the user's prior in these units;
+    # the g/cm³ value is the derived `rho_star_transit_k<n>`.
+    "rho_s" => ("rho_sun", false),
     "q1" => ("", false),          "q2" => ("", false),  # Kipping LD
     # derived
     "msini" => ("M_earth", false),"mass" => ("M_jup", false),
@@ -475,6 +480,7 @@ const _TEX_UNIT = Dict(
     "m/s"=>"m\\,s\$^{-1}\$", "M_earth"=>"\$M_\\oplus\$", "M_jup"=>"\$M_{\\rm Jup}\$",
     "R_jup"=>"\$R_{\\rm Jup}\$", "R_earth"=>"\$R_\\oplus\$", "S_earth"=>"\$S_\\oplus\$",
     "W/m2"=>"W\\,m\$^{-2}\$", "g/cm3"=>"g\\,cm\$^{-3}\$", "deg"=>"deg",
+    "rho_sun"=>"\$\\rho_\\odot\$", "M_sun"=>"\$M_\\odot\$",
     "AU"=>"AU", "d"=>"d", "yr"=>"yr", "K"=>"K", "BJD"=>"BJD", "mas"=>"mas", ""=>"")
 _texunit(u) = get(_TEX_UNIT, String(u), _texesc(u))
 
@@ -673,7 +679,10 @@ end
     science_summary(out_dir, chains, params, data; n_walkers, result, formats, …) -> Dict
 
 Assemble the full return-JSON contract for a run (the exoautomata API
-deliverable) AND write the science tables to `out_dir/tables/`. Returns a Dict
+deliverable) AND write the science tables to `out_dir/tables/`. The stellar
+keywords (`M_s`, `R_s`, `T_eff`, `J_mag`, `K_mag`, `Ab` and the 1σ's
+`sigma_M_s`, `sigma_R_s`, `sigma_T_eff`) go to `science_derived`, which draws
+M★/R★/T_eff per sample from them; a σ left `nothing` is assumed there. Returns a Dict
 with: `fitted`, `derived`, `model_selection`, `run_info` (convergence R̂/ESS,
 priors, data provenance, git hash, sampler), `tables` (format→path manifest),
 and an empty `figures` manifest for the plotting layer to fill (logical_name →
@@ -683,10 +692,13 @@ function science_summary(out_dir::AbstractString, chains, params::Params, data::
                           n_walkers::Union{Nothing, Int}=nothing,
                           result=nothing, formats=(:json, :csv, :ecsv, :dat, :tex),
                           M_s=nothing, R_s=nothing, T_eff=nothing,
-                          J_mag=nothing, K_mag=nothing)
+                          J_mag=nothing, K_mag=nothing, Ab=0.0,
+                          sigma_M_s=nothing, sigma_R_s=nothing, sigma_T_eff=nothing)
     fit_e, fit_c = science_fitted(chains, params)
     der_e, der_c = science_derived(chains, params; M_s=M_s, R_s=R_s, T_eff=T_eff,
-                                    J_mag=J_mag, K_mag=K_mag)
+                                    J_mag=J_mag, K_mag=K_mag, Ab=Ab,
+                                    sigma_M_s=sigma_M_s, sigma_R_s=sigma_R_s,
+                                    sigma_T_eff=sigma_T_eff)
     modsel = science_model_selection(chains, params)
 
     tdir = joinpath(out_dir, "tables")

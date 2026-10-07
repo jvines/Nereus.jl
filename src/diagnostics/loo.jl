@@ -5,15 +5,36 @@
 # as the honest counterweight under model misspecification —
 # [Vehtari, Gelman & Gabry 2017](https://ui.adsabs.harvard.edu/abs/2017S&C....27.1413V/abstract).
 #
-# Restriction (first cut): the log-likelihood per data point is well
-# defined for white-noise + ActivityDecorrelation + AR/MA models
-# (independence after the sequential noise stage). For CovarianceNoise
-# (GP) models the joint covariance breaks pointwise factorisation; we
-# emit a warning and skip rather than report a misleading number.
+# The pointwise term is the leave-one-out predictive density at fixed θ,
+# log p(y_i | y_{-i}, θ), which PSIS then reweights over the posterior draws.
+# With independent points (white noise, Student-t, mean modifiers, AR on the
+# model) that is the density of point i alone. A noise model that couples the
+# points -- a GP, an additive covariance (HarmonicBlock, NightlyOffset), MA on
+# the residuals, the analytic γ marginalization, the ActivityGP conditional --
+# makes the residuals a correlated Gaussian r ~ N(0, C), and the density of
+# point i alone is then NOT the leave-one-out predictive (it ignores what the
+# other points say about it). For a Gaussian the predictive is closed form
+# (Sundararajan & Keerthi 2001): with Q = C⁻¹, g = Q r and d = diag(Q),
+#
+#     y_i | y_{-i}, θ  ~  N(r_i − g_i/d_i, 1/d_i)        (in residual units)
+#     log p(y_i | y_{-i}, θ) = ½ log d_i − ½ log 2π − ½ g_i²/d_i.
+#
+# C is rebuilt here from the noise models active in each draw, and whether a
+# channel is diagonal is read off that covariance, not off a list of noise
+# types. The rebuilt covariance must also reproduce the likelihood the fit
+# scored: its Gaussian log-density is checked against the likelihood itself on
+# every draw. A noise model this file does not know therefore makes the check
+# fail and LOO refuses, rather than scoring correlated points as independent.
+#
+# The joint (non-marginalized) ActivityGP, which scores the RV together with
+# the activity indicators, is refused: use `marginalize_indicators = true`
+# (the conditional log p(RV | indicators)) or PT log Z.
 
 using ParetoSmooth: psis_loo
 using Statistics: mean, std, var
 using LogExpFunctions: logsumexp
+using LinearAlgebra: cholesky, cholesky!, Symmetric, issuccess, logdet, dot,
+                     Diagonal
 
 # =====================================================================
 # Result struct
@@ -58,6 +79,7 @@ struct LooResult
     loo_compare_log_z::Union{Nothing, Float64}
 end
 
+
 # =====================================================================
 # Top-level API
 # =====================================================================
@@ -65,54 +87,54 @@ end
 """
     compute_loo(chains, params, data;
                 n_draws=500, rng=default_rng(),
-                log_z=nothing) -> LooResult
+                log_z=nothing, max_dense_obs=2000) -> LooResult
 
 Compute PSIS-LOO and WAIC by replaying `n_draws` posterior samples
-through the per-datapoint log-likelihood and feeding the resulting
-matrix to `ParetoSmooth.psis_loo`. If `log_z` (e.g., the PT
-log-evidence) is passed, `loo_compare_log_z = elpd_loo - log_z` is
-also reported.
+through the per-datapoint leave-one-out log predictive density and
+feeding the resulting matrix to `ParetoSmooth.psis_loo`. If `log_z`
+(e.g., the PT log-evidence) is passed, `loo_compare_log_z = elpd_loo -
+log_z` is also reported.
 
-**Restriction.** Pointwise log-likelihood is only well-defined under
-independence after the sequential noise stage. Nereus GP / celerite
-kernels (`CeleriteSHO`, `CeleriteRotation`, `CeleriteRotationFM17`)
-introduce a non-diagonal covariance that breaks pointwise
-factorisation. If any active noise model is a `CovarianceNoise`,
-this function throws an `ArgumentError`. AR/MA / activity-jitter /
-activity-decorrelation are supported.
+**Correlated noise.** The pointwise term is log p(y_i | y_{-i}, θ). For
+independent points (white noise, `StudentT`, `ActivityJitter`,
+`ErrorScale`, `ActivityDecorrelation`, `ARModel`, which acts on the
+model) it is the density of point i alone. Under any noise model that
+couples points -- a celerite or Matérn GP (global or per-instrument),
+`HarmonicBlock`, `NightlyOffset`, `MAModel` (the residual transform
+makes the residuals a correlated Gaussian), the analytic γ
+marginalization, or an `ActivityGP` with `marginalize_indicators = true`
+-- it is the exact Gaussian leave-one-out predictive from the full
+covariance C of that draw (Sundararajan & Keerthi 2001): mean
+`r_i − (C⁻¹r)_i / (C⁻¹)_ii` and variance `1 / (C⁻¹)_ii` in residual
+units. Whether a channel is diagonal is decided from the covariance
+itself, and each draw's covariance is checked against the likelihood
+the fit scored; if it does not reproduce it (a noise model LOO does not
+know), this throws an `ArgumentError` rather than reporting a wrong
+elpd.
+
+A white base with additive low-rank terms is solved by Woodbury in
+O(n·k²). Anything with a GP or MA takes a dense n×n solve per draw
+(instrument-restricted GPs one block per GP), O(n³); a block larger
+than `max_dense_obs` points throws an `ArgumentError` instead of running
+for hours -- raise it if that cost is acceptable.
+
+**Refused.** An `ActivityGP` scored jointly with its indicators
+(`marginalize_indicators = false`), an instrument-restricted or more
+than one active `ActivityGP`, `StudentT` combined with `MAModel`, a
+γ-marginalized instrument group with a single point (its leave-one-out
+predictive is improper), and a draw whose likelihood is not finite
+throw an `ArgumentError`.
 """
 function compute_loo(chains, params::Params, data::Data;
                       n_draws::Int = 500,
                       rng::AbstractRNG = default_rng(),
-                      log_z::Union{Nothing, Real} = nothing)
+                      log_z::Union{Nothing, Real} = nothing,
+                      max_dense_obs::Int = 2000)
     n_rv_obs = n_rv(data)
     n_pm_obs = n_phot(data)
     n_obs_total = n_rv_obs + n_pm_obs
     n_obs_total > 0 ||
         throw(ArgumentError("data has no RV or photometry"))
-
-    # Decide between the diagonal-noise pointwise path and the
-    # ActivityGP-conditional path. Other CovarianceNoise models
-    # (CeleriteRotation / SHO / FM17) need their own per-point LOO
-    # formula (closed-form available, but not implemented) — refused
-    # for now.
-    agp_marg = nothing
-    for nm in params.config.noise_models
-        if nm isa ActivityGP && nm.marginalize_indicators
-            agp_marg = nm
-            continue
-        end
-        if nm isa CovarianceNoise
-            throw(ArgumentError(
-                "compute_loo: model contains a CovarianceNoise " *
-                "(`$(typeof(nm).name.name)`). PSIS-LOO supports the " *
-                "ActivityGP path only when " *
-                "`marginalize_indicators = true` (RV-conditional " *
-                "Gaussian with closed-form Sundararajan-Keerthi LOO). " *
-                "For other GP kernels, use PT log Z (TI+/SS+/H+) or " *
-                "strip the GP and refit."))
-        end
-    end
 
     chains_flat, n_total = _flatten_chains(chains)
     n_draws_eff = min(n_draws, n_total)
@@ -127,16 +149,14 @@ function compute_loo(chains, params::Params, data::Data;
         theta = _theta_from_row(chains_flat, idx, params; tdc = tdc)
         offset = 0
         if n_rv_obs > 0
-            rv_ll = agp_marg === nothing ?
-                _pointwise_loglik_rv(theta, data) :
-                _pointwise_loglik_rv_agp_marg(theta, data, agp_marg)
+            rv_ll = _pointwise_loo_rv(theta, data, max_dense_obs)
             @inbounds for i in 1:n_rv_obs
                 log_L[i, d] = rv_ll[i]
             end
             offset = n_rv_obs
         end
         if n_pm_obs > 0
-            pm_ll = _pointwise_loglik_phot(theta, data)
+            pm_ll = _pointwise_loo_phot(theta, data, max_dense_obs)
             @inbounds for i in 1:n_pm_obs
                 log_L[offset + i, d] = pm_ll[i]
             end
@@ -176,176 +196,438 @@ function compute_loo(chains, params::Params, data::Data;
 end
 
 # =====================================================================
-# Per-point log-likelihood helpers
+# Per-point leave-one-out log predictive density
 # =====================================================================
 
-# RV channel: stage-1 mean (with optional AR on predictions), then
-# stage-2 MA on residuals, then per-point white-noise log L using the
-# variances returned by rv_predictions (which already include σ_inst²
-# and any ActivityJitter contributions).
-function _pointwise_loglik_rv(theta::Theta{Float64}, data::Data)
-    preds, vars = rv_predictions(theta, data)
+# RV channel. The mean is the stage-1 model with AR applied to it, as in the
+# likelihood; `ref` is what the likelihood scores for the RV data, against
+# which every rebuilt covariance is checked.
+function _pointwise_loo_rv(theta::Theta{Float64}, data::Data, max_dense::Int)
     n = length(data.rv)
-    # Apply AR on a writable copy of predictions; result still feeds
-    # into `residuals = data - preds_after_AR`.
-    preds_mut = collect(preds)
     noise_models = theta.params.config.noise_models
+    preds, vars = rv_predictions(theta, data)
+    preds = collect(preds)
     for (nm_idx, nm) in enumerate(noise_models)
         is_noise_model_active(theta, nm_idx) || continue
         if nm isa ARModel && nm.channel === :rv
-            apply_ar!(preds_mut, data.t_rv, data.rv_inst, theta, nm)
+            apply_ar!(preds, data.t_rv, data.rv_inst, theta, nm)
         end
     end
-    residuals = Vector{Float64}(undef, n)
-    @inbounds for i in 1:n
-        residuals[i] = data.rv[i] - preds_mut[i]
-    end
+    # ActivityGP. An indicators-only one adds log p(y_I | θ), a separate
+    # factor, and leaves the RV to the channel below; any other one scores
+    # the RV itself, jointly with the indicators (see `_apply_noise_and_eval`).
+    agp = nothing
     for (nm_idx, nm) in enumerate(noise_models)
-        is_noise_model_active(theta, nm_idx) || continue
-        if nm isa MAModel && nm.channel === :rv
-            apply_ma!(residuals, data.t_rv, data.rv_inst, theta, nm)
-        end
+        (nm isa ActivityGP && is_noise_model_active(theta, nm_idx)) || continue
+        nm.indicators_only && continue
+        agp === nothing || throw(ArgumentError(
+            "compute_loo: more than one active ActivityGP; LOO supports a " *
+            "single global ActivityGP with `marginalize_indicators = true`."))
+        agp = nm
     end
-    return _gaussian_logpdf_per_point(residuals, vars)
+    if agp !== nothing
+        agp.marginalize_indicators || throw(ArgumentError(
+            "compute_loo: the active ActivityGP scores the RV jointly with the " *
+            "activity indicators (`marginalize_indicators = false`), so the " *
+            "data points of that model are not the RV points LOO compares. Use " *
+            "`marginalize_indicators = true` (log p(RV | indicators), scored " *
+            "here by its exact Gaussian leave-one-out) or PT log Z (TI+/SS+/H+)."))
+        isempty(agp.instruments) || throw(ArgumentError(
+            "compute_loo: an instrument-restricted ActivityGP is not supported; " *
+            "use a global one (`instruments = String[]`)."))
+    end
+
+    ref = _rv_log_likelihood_core(theta, data)
+    _finite_draw(ref, :rv)
+    for (nm_idx, nm) in enumerate(noise_models)
+        (nm isa ActivityGP && nm.indicators_only &&
+         is_noise_model_active(theta, nm_idx)) || continue
+        ref -= _activity_gp_joint_ll(theta, data, preds, vars, nm)
+    end
+
+    if agp !== nothing
+        g = _agp_conditional_gaussian(theta, data, preds, vars, agp)
+        g === nothing && _finite_draw(-Inf, :rv)
+        r_c, C_c = g
+        _check_dense_size(n, max_dense, :rv)
+        ll, joint = _dense_gaussian_loo(r_c, C_c, nothing)
+        _loo_check(joint, ref, :rv)
+        return ll
+    end
+
+    if theta.params.config.parametrization.marginalize_gamma
+        # γ is integrated out of the likelihood, not added to the mean.
+        @inbounds for i in 1:n
+            preds[i] -= rv_gamma(theta, data.rv_inst[i])
+        end
+        return _gamma_marginal_loo(theta, data, data.rv .- preds, vars, ref)
+    end
+
+    return _channel_loo(theta, data.rv .- preds, vars, data.t_rv, data.rv_inst,
+                        :rv, ref, max_dense)
 end
 
-# Photometry channel: same skeleton, channel === :phot for AR/MA.
-function _pointwise_loglik_phot(theta::Theta{Float64}, data::Data)
+# Photometry channel: the same, against the transit likelihood.
+function _pointwise_loo_phot(theta::Theta{Float64}, data::Data, max_dense::Int)
     preds, vars = phot_predictions(theta, data)
-    n = length(data.flux)
-    preds_mut = collect(preds)
-    noise_models = theta.params.config.noise_models
-    for (nm_idx, nm) in enumerate(noise_models)
+    preds = collect(preds)
+    for (nm_idx, nm) in enumerate(theta.params.config.noise_models)
         is_noise_model_active(theta, nm_idx) || continue
         if nm isa ARModel && nm.channel === :phot
-            apply_ar!(preds_mut, data.t_phot, data.phot_inst, theta, nm)
+            apply_ar!(preds, data.t_phot, data.phot_inst, theta, nm)
         end
     end
-    residuals = Vector{Float64}(undef, n)
-    @inbounds for i in 1:n
-        residuals[i] = data.flux[i] - preds_mut[i]
-    end
-    for (nm_idx, nm) in enumerate(noise_models)
-        is_noise_model_active(theta, nm_idx) || continue
-        if nm isa MAModel && nm.channel === :phot
-            apply_ma!(residuals, data.t_phot, data.phot_inst, theta, nm)
-        end
-    end
-    return _gaussian_logpdf_per_point(residuals, vars)
+    ref = transit_log_likelihood(theta, data)
+    _finite_draw(ref, :phot)
+    return _channel_loo(theta, data.flux .- preds, vars, data.t_phot, data.phot_inst,
+                        :phot, ref, max_dense)
 end
 
-# Per-RV-point log p(y_i | y_{-i}, θ) for the ActivityGP-conditional
-# Gaussian (marginalize_indicators = true) via the closed-form
-# Sundararajan & Keerthi (2001) leave-one-out formula. For a
-# multivariate Gaussian y ~ N(μ, Σ), the leave-one-out predictive
-# at point i is N(y_i; μ_i − r_i/d_i, 1/d_i) with
-#   r = Σ⁻¹ (y − μ),   d_i = (Σ⁻¹)_{ii}
-# so log p(y_i | y_{-i}, θ) = 0.5 log(d_i) − 0.5 log(2π) − 0.5 r_i² / d_i.
-# Both `r` and `diag(Σ⁻¹)` come straight out of the Cholesky of Σ.
-function _pointwise_loglik_rv_agp_marg(theta::Theta{Float64}, data::Data,
-                                         agp::ActivityGP)
-    layout = theta.params.layout
-    s = _gp_suffix(agp)
-    # Unit-variance G(t) (Rajpaul+ 2015); guarded lookup for legacy chains.
-    amp_idx = get(layout.name_to_idx, "gp_act_amp$s", 0)
-    amp = amp_idx == 0 ? 1.0 : theta.values[amp_idx]
-    P   = theta.values[layout.name_to_idx["gp_act_period$s"]]
-    λe  = theta.values[layout.name_to_idx["gp_act_lambda_e$s"]]
-    λp  = theta.values[layout.name_to_idx["gp_act_lambda_p$s"]]
-    n_rv_obs = length(data.t_rv)
-    if !(amp > 0 && P > 0 && λe > 0 && λp > 0)
-        return fill(-Inf, n_rv_obs)
-    end
-
-    # Derivative couplings sampled as amplitudes — physical Ġ
-    # coefficient = amplitude / std(Ġ) (mirrors _activity_gp_joint_ll).
-    inv_sdG = 1 / sqrt(1 / (λe * λe) + π * π / (P * P * λp * λp))
-    Vc = theta.values[layout.name_to_idx["Vc$s"]]
-    Vr = agp.use_derivative ?
-         theta.values[layout.name_to_idx["Vr$s"]] * inv_sdG : 0.0
-
-    # Build joint Σ at observations (same path as _activity_gp_joint_ll).
-    ind_meta = Tuple{Symbol, Vector{Float64}, Vector{Float64}, Float64, Float64, Float64}[]
-    n_obs_total = n_rv_obs
-    for ch in agp.channels
-        ch === :rv && continue
-        name = String(ch)
-        haskey(data.indicators, name) || return fill(-Inf, n_rv_obs)
-        haskey(data.indicator_errs, name) || return fill(-Inf, n_rv_obs)
-        vals = data.indicators[name]; errs = data.indicator_errs[name]
-        cg, cd = _ACTIVITY_GP_COEFFS[ch]
-        a_coef = theta.values[layout.name_to_idx[string(cg, s)]]
-        b_coef = (cd === nothing || !agp.use_derivative) ? 0.0 :
-                  theta.values[layout.name_to_idx[string(cd, s)]] * inv_sdG
-        jit_idx = get(layout.name_to_idx, "gp_act_jit_$(ch)$s", 0)
-        jit² = jit_idx == 0 ? 0.0 : Float64(theta.values[jit_idx])^2
-        push!(ind_meta, (ch, vals, errs, a_coef, b_coef, jit²))
-        n_obs_total += length(vals)
-    end
-
-    preds, vars = rv_predictions(theta, data)
-    t_obs = Vector{Float64}(undef, n_obs_total)
-    y_obs = Vector{Float64}(undef, n_obs_total)
-    σ²_obs = Vector{Float64}(undef, n_obs_total)
-    a_obs = Vector{Float64}(undef, n_obs_total)
-    b_obs = Vector{Float64}(undef, n_obs_total)
-    @inbounds for i in 1:n_rv_obs
-        t_obs[i]  = data.t_rv[i]; y_obs[i] = data.rv[i] - preds[i]
-        σ²_obs[i] = vars[i]; a_obs[i] = Vc; b_obs[i] = Vr
-    end
-    offset = n_rv_obs
-    for (_, vals, errs, a_coef, b_coef, jit²) in ind_meta
-        n_ch = length(vals)
-        @inbounds for i in 1:n_ch
-            t_obs[offset + i]  = data.t_rv[i]; y_obs[offset + i] = vals[i]
-            σ²_obs[offset + i] = errs[i]^2 + jit²
-            a_obs[offset + i]  = a_coef;  b_obs[offset + i] = b_coef
+# Leave-one-out log predictive density of each residual `r` on `channel`,
+# under the covariance the channel's active noise models give it -- the one
+# `_eval_channel_likelihood` scores, after the MA transform of
+# `_apply_noise_and_eval` / the transit likelihood.
+function _channel_loo(theta::Theta{Float64}, r::Vector{Float64}, vars::Vector{Float64},
+                      t::Vector{Float64}, inst::Vector{Int}, channel::Symbol,
+                      ref::Float64, max_dense::Int)
+    n = length(r)
+    config = theta.params.config
+    inst_names = channel === :rv ? config.instruments.rv_names :
+                                   config.instruments.pm_names
+    ma  = MAModel[]
+    gps = NoiseModel[]
+    add = AdditiveCovariance[]
+    for (nm_idx, nm) in enumerate(config.noise_models)
+        is_noise_model_active(theta, nm_idx) || continue
+        noise_channel(nm) === channel || continue
+        if nm isa MAModel
+            push!(ma, nm)
+        elseif nm isa CovarianceNoise && !(nm isa ActivityGP)
+            push!(gps, nm)
+        elseif nm isa AdditiveCovariance
+            push!(add, nm)
         end
-        offset += n_ch
-    end
-    channel_obs = vcat(fill(:rv, n_rv_obs),
-                        vcat(fill.(getindex.(ind_meta, 1),
-                                     length.(getindex.(ind_meta, 2)))...))
-    Σ = activity_gp_covariance(t_obs, channel_obs, a_obs, b_obs, amp, P, λe, λp)
-    @inbounds for i in 1:n_obs_total
-        Σ[i, i] += σ²_obs[i]
     end
 
-    # Condition: Σ_R|I = Σ_RR − Σ_RI · Σ_II⁻¹ · Σ_IR; μ_R|I from y_I.
-    Σ_RR = Matrix(view(Σ, 1:n_rv_obs, 1:n_rv_obs))
-    Σ_RI = Matrix(view(Σ, 1:n_rv_obs, (n_rv_obs + 1):n_obs_total))
-    Σ_II = Matrix(view(Σ, (n_rv_obs + 1):n_obs_total, (n_rv_obs + 1):n_obs_total))
-    y_R  = view(y_obs, 1:n_rv_obs)
-    y_I  = view(y_obs, (n_rv_obs + 1):n_obs_total)
-
-    F_II = cholesky(Symmetric(Σ_II); check = false)
-    issuccess(F_II) || return fill(-Inf, n_rv_obs)
-    μ_cond = Σ_RI * (F_II \ y_I)
-    Σ_cond = Symmetric(Σ_RR .- Σ_RI * (F_II \ transpose(Σ_RI)))
-
-    F_R = cholesky(Σ_cond; check = false)
-    issuccess(F_R) || return fill(-Inf, n_rv_obs)
-
-    # Sundararajan-Keerthi: need r = Σ_cond⁻¹ (y_R − μ_cond) and
-    # diag(Σ_cond⁻¹). Both come from the Cholesky factor.
-    r_vec = F_R \ (y_R .- μ_cond)
-    # diag of inverse via Σ⁻¹ = L⁻ᵀ L⁻¹, so diag(Σ⁻¹)_i = ||L⁻ᵀ e_i||² = ||L⁻¹ e_i_perm||².
-    # Simpler: invert in-place (n_rv ≲ 1000 makes this fine).
-    Σ_inv = inv(F_R)
-    d_diag = Vector{Float64}(undef, n_rv_obs)
-    @inbounds for i in 1:n_rv_obs
-        d_diag[i] = Σ_inv[i, i]
+    # Student-t: independent points, so the pointwise density is exact. With
+    # a covariance the likelihood is -Inf (caught above); with MA the points
+    # are coupled and not Gaussian.
+    st = _active_studentt(theta, config.noise_models, channel)
+    if st !== nothing
+        isempty(ma) || throw(ArgumentError(
+            "compute_loo: StudentT with MAModel on :$channel couples the points " *
+            "under a non-Gaussian likelihood; its leave-one-out predictive has no " *
+            "closed form."))
+        ν = theta.values[theta.params.layout.name_to_idx["studentt_nu"]]
+        ll = _studentt_logpdf_per_point(r, vars, ν)
+        _loo_check(sum(ll), ref, channel)
+        return ll
     end
 
-    ll = Vector{Float64}(undef, n_rv_obs)
+    F = isempty(add) ? zeros(n, 0) :
+        Matrix(_additive_factor(add, theta, t, inst, inst_names))
+
+    # White base, no MA: C = diag(vars) + F Fᵀ.
+    if isempty(gps) && isempty(ma)
+        if size(F, 2) == 0                       # diagonal: independent points
+            ll = _gaussian_logpdf_per_point(r, vars)
+            _loo_check(sum(ll), ref, channel)
+            return ll
+        end
+        ll, joint = _lowrank_gaussian_loo(r, vars, F)
+        _loo_check(joint, ref, channel)
+        return ll
+    end
+
+    sels = [_gp_points(nm, inst, inst_names) for nm in gps]
+
+    # Instrument-restricted GPs only: C is block diagonal, one block per GP
+    # and the uncovered points alone.
+    if isempty(ma) && size(F, 2) == 0 && all(s -> s !== nothing, sels)
+        ll = _gaussian_logpdf_per_point(r, vars)
+        joint = 0.0
+        covered = falses(n)
+        for (nm, sel) in zip(gps, sels)
+            isempty(sel) && continue
+            any(view(covered, sel)) && throw(ArgumentError(
+                "compute_loo: two active GPs on :$channel cover the same points."))
+            _check_dense_size(length(sel), max_dense, channel)
+            C = Matrix(Diagonal(vars[sel]))
+            _add_gp_cov!(C, theta, nm, t[sel])
+            llb, jb = _dense_gaussian_loo(r[sel], C, nothing)
+            ll[sel] = llb
+            joint += jb
+            covered[sel] .= true
+        end
+        @inbounds for i in 1:n
+            covered[i] || (joint += ll[i])
+        end
+        _loo_check(joint, ref, channel)
+        return ll
+    end
+
+    # General case: one dense covariance over the channel.
+    _check_dense_size(n, max_dense, channel)
+    C = Matrix(Diagonal(vars))
+    for (nm, sel) in zip(gps, sels)
+        if sel === nothing
+            _add_gp_cov!(C, theta, nm, t)
+        else
+            Cs = zeros(length(sel), length(sel))
+            _add_gp_cov!(Cs, theta, nm, t[sel])
+            C[sel, sel] .+= Cs
+        end
+    end
+    size(F, 2) > 0 && (C .+= F * F')
+    B = isempty(ma) ? nothing : _ma_matrix(theta, ma, t, inst)
+    ll, joint = _dense_gaussian_loo(r, C, B)
+    _loo_check(joint, ref, channel)
+    return ll
+end
+
+# Points of the channel a GP covers: `nothing` for a global GP (all of them),
+# else those of its instruments (in data order).
+function _gp_points(nm::NoiseModel, inst::Vector{Int}, inst_names::Vector{String})
+    insts = noise_instruments(nm)
+    isempty(insts) && return nothing
+    idxs = Int[]
+    for name in insts
+        k = findfirst(==(name), inst_names)
+        k === nothing || push!(idxs, k)
+    end
+    return [i for i in eachindex(inst) if inst[i] in idxs]
+end
+
+# Add the GP kernel matrix over times `t` to `C`.
+function _add_gp_cov!(C::Matrix{Float64}, theta::Theta{Float64},
+                      nm::Union{CeleriteSHO, CeleriteRotation, CeleriteRotationFM17},
+                      t::AbstractVector{Float64})
+    ar, cr, ac, bc, cc, dc = _celerite_coeffs(theta, nm)
+    n = length(t)
+    @inbounds for j in 1:n, i in 1:n
+        τ = abs(t[i] - t[j])
+        k = 0.0
+        for q in eachindex(ar)
+            k += ar[q] * exp(-cr[q] * τ)
+        end
+        for q in eachindex(ac)
+            k += exp(-cc[q] * τ) * (ac[q] * cos(dc[q] * τ) + bc[q] * sin(dc[q] * τ))
+        end
+        C[i, j] += k
+    end
+    return C
+end
+
+function _add_gp_cov!(C::Matrix{Float64}, theta::Theta{Float64}, nm::MaternGP,
+                      t::AbstractVector{Float64})
+    σ, ρ = _matern_params(theta, nm)
+    kern = SSMatern32(σ, ρ)
+    n = length(t)
+    @inbounds for j in 1:n, i in 1:n
+        C[i, j] += _kfuncs(kern, abs(t[i] - t[j]))[1]
+    end
+    return C
+end
+
+_add_gp_cov!(C, theta, nm, t) = throw(ArgumentError(
+    "compute_loo: no covariance is known for the noise model $(typeof(nm)), so " *
+    "its exact leave-one-out cannot be computed; refusing rather than scoring " *
+    "its points as independent."))
+
+# The MA transform ε = B r of the active MA models on a channel, as a dense
+# matrix: it is linear in r and unit lower triangular in time order (each
+# point minus damped earlier ones), so det B = 1 and r ~ N(0, B⁻¹ C B⁻ᵀ).
+function _ma_matrix(theta::Theta{Float64}, ma::Vector{MAModel}, t::Vector{Float64},
+                    inst::Vector{Int})
+    n = length(t)
+    B = zeros(n, n)
+    e = zeros(n)
+    for k in 1:n
+        fill!(e, 0.0); e[k] = 1.0
+        for nm in ma
+            apply_ma!(e, t, inst, theta, nm)
+        end
+        B[:, k] .= e
+    end
+    return B
+end
+
+# A posterior draw the likelihood gives zero probability has no leave-one-out
+# predictive; the chain is not a posterior of this model and data.
+_finite_draw(ref::Float64, channel::Symbol) =
+    isfinite(ref) || throw(ArgumentError(
+        "compute_loo: a draw has a non-finite :$channel log-likelihood ($ref); " *
+        "the chain is not a posterior sample of this model and data."))
+
+_check_dense_size(n::Int, max_dense::Int, channel::Symbol) =
+    n <= max_dense || throw(ArgumentError(
+        "compute_loo: the exact leave-one-out under correlated noise on :$channel " *
+        "needs a dense $n × $n solve per draw, more than `max_dense_obs = " *
+        "$max_dense`. Pass a larger `max_dense_obs` if that cost is acceptable."))
+
+# The rebuilt covariance must reproduce what the likelihood scored. A
+# mismatch means a noise model contributes something this file does not
+# rebuild; the pointwise values would then be wrong, so refuse.
+function _loo_check(joint::Float64, ref::Float64, channel::Symbol)
+    abs(joint - ref) <= 1e-6 * max(1.0, abs(ref)) && return nothing
+    throw(ArgumentError(
+        "compute_loo: the covariance rebuilt for the :$channel data has " *
+        "log-density $joint, but the likelihood scores $ref. Some active noise " *
+        "model is scored in a way LOO does not reproduce; refusing rather than " *
+        "reporting a wrong elpd."))
+end
+
+# Exact Gaussian leave-one-out for r ~ N(0, B⁻¹ C B⁻ᵀ) -- the residuals after
+# a unit-triangular transform B (MA; `nothing` = identity) are N(0, C). With
+# C = L Lᵀ and Z = L⁻¹B, the precision is Q = Zᵀ Z, so diag(Q) is the column
+# sums of Z.^2 and Q r = Zᵀ (L⁻¹ B r). Returns the per-point log predictive
+# densities and the joint log-density (for the check).
+function _dense_gaussian_loo(r::AbstractVector{Float64}, C::Matrix{Float64},
+                             B::Union{Nothing, Matrix{Float64}})
+    n = length(r)
+    F = cholesky!(Symmetric(C); check = false)
+    issuccess(F) || throw(ArgumentError(
+        "compute_loo: the rebuilt covariance is not positive definite in double " *
+        "precision, though the likelihood was finite; cannot compute its " *
+        "leave-one-out."))
+    L = F.L
+    w = L \ (B === nothing ? r : B * r)
+    joint = -0.5 * (dot(w, w) + logdet(F) + n * log(2π))
+    Z = B === nothing ? Matrix(inv(L)) : Matrix(L \ B)
+    g = Z' * w
+    ll = Vector{Float64}(undef, n)
     half_log_2π = 0.5 * log(2π)
-    @inbounds for i in 1:n_rv_obs
-        d_i = d_diag[i]
-        d_i > 0 || (ll[i] = -Inf; continue)
-        ll[i] = 0.5 * log(d_i) - half_log_2π -
-                 0.5 * r_vec[i]^2 / d_i
+    @inbounds for i in 1:n
+        d_i = 0.0
+        for k in 1:n
+            d_i += Z[k, i]^2
+        end
+        ll[i] = 0.5 * log(d_i) - half_log_2π - 0.5 * g[i]^2 / d_i
+    end
+    return ll, joint
+end
+
+# The same for C = diag(v) + F Fᵀ, by Woodbury in O(n k²): with D = diag(v),
+# W = D⁻¹F and M = I + Fᵀ D⁻¹ F = L Lᵀ,
+#   C⁻¹ = D⁻¹ − W M⁻¹ Wᵀ,  diag(C⁻¹)_i = 1/v_i − ‖L⁻¹ W[i, :]‖²,
+#   log det C = Σ log v_i + log det M.
+function _lowrank_gaussian_loo(r::Vector{Float64}, v::Vector{Float64},
+                               F::Matrix{Float64})
+    n, k = size(F)
+    W = F ./ v
+    M = F' * W
+    @inbounds for j in 1:k
+        M[j, j] += 1.0
+    end
+    cM = cholesky!(Symmetric(M); check = false)
+    issuccess(cM) || throw(ArgumentError(
+        "compute_loo: I + FᵀD⁻¹F is not positive definite; cannot compute the " *
+        "leave-one-out of the additive covariance."))
+    Dr = r ./ v
+    g = Dr .- W * (cM \ (F' * Dr))
+    X = cM.L \ Matrix(W')                       # k × n
+    joint = -0.5 * (dot(r, g) + sum(log, v) + logdet(cM) + n * log(2π))
+    ll = Vector{Float64}(undef, n)
+    half_log_2π = 0.5 * log(2π)
+    @inbounds for i in 1:n
+        s = 0.0
+        for j in 1:k
+            s += X[j, i]^2
+        end
+        d_i = 1 / v[i] - s
+        ll[i] = 0.5 * log(d_i) - half_log_2π - 0.5 * g[i]^2 / d_i
+    end
+    return ll, joint
+end
+
+# γ marginalized analytically (flat prior, one γ per sharing group): the
+# points of a group share an unknown offset, so they are coupled. With the
+# group's other points, γ | y_{-i} ~ N(B₋ᵢ/A₋ᵢ, 1/A₋ᵢ) (A = Σ 1/v, B = Σ d/v
+# over the group less point i), and the predictive of d_i = y_i − μ_i (μ
+# without γ) is N(B₋ᵢ/A₋ᵢ, v_i + 1/A₋ᵢ) -- the flat-prior limit of the
+# Gaussian formula above, in O(n).
+function _gamma_marginal_loo(theta::Theta{Float64}, data::Data, d::Vector{Float64},
+                             vars::Vector{Float64}, ref::Float64)
+    n = length(d)
+    slot = theta.params.layout.systemic.rv_gamma
+    joint = _rv_ll_gamma_marginalized(d, vars, data.rv_inst, slot, n, 2π)
+    _loo_check(joint, ref, :rv)
+    A = Dict{Int, Float64}(); B = Dict{Int, Float64}()
+    @inbounds for i in 1:n
+        g = slot[data.rv_inst[i]]; w = 1 / vars[i]
+        A[g] = get(A, g, 0.0) + w
+        B[g] = get(B, g, 0.0) + w * d[i]
+    end
+    ll = Vector{Float64}(undef, n)
+    @inbounds for i in 1:n
+        g = slot[data.rv_inst[i]]; w = 1 / vars[i]
+        A_i = A[g] - w
+        A_i > 0 || throw(ArgumentError(
+            "compute_loo: a γ-marginalized instrument group has a single point; " *
+            "with γ integrated out under a flat prior, its leave-one-out " *
+            "predictive is improper."))
+        μ = (B[g] - w * d[i]) / A_i
+        s2 = vars[i] + 1 / A_i
+        ll[i] = -0.5 * (log(2π * s2) + (d[i] - μ)^2 / s2)
     end
     return ll
+end
+
+# Conditional Gaussian of the RV residuals given the activity indicators
+# under a global ActivityGP (`marginalize_indicators = true`): returns
+# (y_R − μ_R|I, Σ_R|I), the residual and covariance whose log-density is the
+# likelihood's log p(RV | indicators, θ) (see the marginalize branch of
+# `_activity_gp_joint_ll`, which this mirrors), or `nothing` where that
+# likelihood is -Inf.
+function _agp_conditional_gaussian(theta::Theta{Float64}, data::Data,
+                                   preds::Vector{Float64}, vars::Vector{Float64},
+                                   agp::ActivityGP)
+    ix = _agp_index(theta.params.layout.name_to_idx, data, agp)
+    v = theta.values
+    amp = ix.amp == 0 ? 1.0 : v[ix.amp]
+    P = v[ix.P]; λe = v[ix.λe]; λp = v[ix.λp]
+    (amp > 0 && P > 0 && λe > 0 && λp > 0) || return nothing
+    inv_sdG = 1 / sqrt(1 / (λe * λe) + π * π / (P * P * λp * λp))
+    n_rv = length(data.rv)
+    n_ind = length(ix.a)
+    C = n_ind + 1
+    chan_a = Vector{Float64}(undef, C); chan_b = Vector{Float64}(undef, C)
+    chan_a[1] = ix.Vc == 0 ? 0.0 : v[ix.Vc]
+    chan_b[1] = ix.Vr == 0 ? 0.0 : v[ix.Vr] * inv_sdG
+    n_total = n_rv
+    for k in 1:n_ind
+        chan_a[k + 1] = v[ix.a[k]]
+        chan_b[k + 1] = ix.b[k] == 0 ? 0.0 : v[ix.b[k]] * inv_sdG
+        n_total += length(ix.vals[k])
+    end
+    y = Vector{Float64}(undef, n_total); σ² = Vector{Float64}(undef, n_total)
+    @inbounds for i in 1:n_rv
+        y[i] = data.rv[i] - preds[i]; σ²[i] = vars[i]
+    end
+    off = n_rv
+    for k in 1:n_ind
+        jit² = ix.jit[k] == 0 ? 0.0 : v[ix.jit[k]]^2
+        vals = ix.vals[k]; errs = ix.errs[k]
+        @inbounds for i in eachindex(vals)
+            y[off + i] = vals[i]; σ²[off + i] = errs[i]^2 + jit²
+        end
+        off += length(vals)
+    end
+    Σ = activity_gp_covariance_blocked(view(data.t_rv, 1:n_rv), chan_a, chan_b,
+                                       amp, P, λe, λp)
+    @inbounds for i in 1:n_total
+        Σ[i, i] += σ²[i]
+    end
+    R = 1:n_rv
+    n_total == n_rv && return (y, Matrix(Σ))
+    Iind = (n_rv + 1):n_total
+    F_II = cholesky(Symmetric(Σ[Iind, Iind]); check = false)
+    issuccess(F_II) || return nothing
+    Σ_RI = Σ[R, Iind]
+    r = y[R] .- Σ_RI * (F_II \ y[Iind])
+    Σ_cond = Σ[R, R] .- Σ_RI * (F_II \ Matrix(Σ_RI'))
+    Σ_cond = (Σ_cond .+ Σ_cond') ./ 2
+    return (r, Σ_cond)
 end
 
 @inline function _gaussian_logpdf_per_point(r::AbstractVector{<:Real},
@@ -355,6 +637,19 @@ end
     two_pi = 2π
     @inbounds for i in 1:n
         out[i] = -0.5 * (log(two_pi * σ²[i]) + r[i]^2 / σ²[i])
+    end
+    return out
+end
+
+# Independent Student-t densities, term by term as `_studentt_diag_ll` sums
+# them.
+function _studentt_logpdf_per_point(r::AbstractVector{<:Real},
+                                    σ²::AbstractVector{<:Real}, ν::Real)
+    half = (ν + 1) / 2
+    c = loggamma(half) - loggamma(ν / 2) - 0.5 * log(ν * π)
+    out = Vector{Float64}(undef, length(r))
+    @inbounds for i in eachindex(r)
+        out[i] = c - 0.5 * log(σ²[i]) - half * log1p(r[i]^2 / (ν * σ²[i]))
     end
     return out
 end

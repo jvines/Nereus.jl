@@ -288,9 +288,10 @@ end
 # to ~10⁶ periods; plus 8 ulp of the epoch for the rounding of Tc itself.
 #
 # Inf (no bound: every cadence is evaluated) when s >= 1 at r_min = a_R(1-e)
-# (periastron within 1 + k stellar radii), when e is outside [0, 0.9999) (above
-# that `true_anomaly` clamps e, so the kernels' f is not the f of this map), or
-# when an input is not a finite positive number. A b that is not finite is
+# (periastron within 1 + k stellar radii), when e is outside [0, 0.9999) (the
+# range the bound is tested over; it used to be where `true_anomaly` clamped e,
+# and above it periastron lies within 1 + k of the star anyway unless
+# a_R > 10⁴), or when an input is not a finite positive number. A b that is not finite is
 # taken as 0, the bound without the cos i term.
 
 # Plain Float64 of a likelihood input (strips ForwardDiff duals). A type it
@@ -457,8 +458,10 @@ end
         Δt = t - Tc_centers[j]
         Δt -= Ps[j] * round(Δt / Ps[j])
         abs(Δt) > T_dur_safe[j] + reach && continue
+        # A TTV planet's transits are numbered from Tc (the transit nearest
+        # the cadence, as the window above folds it), not from Tp.
         t_eff = r_for_j[j] > 0 ?
-            ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tps) : t
+            ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tc_centers) : t
         use_gd = gd !== nothing && gd.on[j]
         # The callers pass this call's orbit constants (`_sky_orbits`); built
         # here when they do not.
@@ -731,8 +734,9 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         # planets, which keep their layout-decoded δts.
         if any(ttv_state.is_nb)
             t_max = isempty(data.t_phot) ? zero(T) : T(maximum(data.t_phot))
+            t_min = isempty(data.t_phot) ? zero(T) : T(minimum(data.t_phot))
             _apply_ttv_nb!(ttv_state, theta, p_idx,
-                            Ps, es, ws, Tps, bs, a_Rs, t_max)
+                            Ps, es, ws, Tps, bs, a_Rs, t_max; t_phot_min = t_min)
         end
     end
     _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
@@ -741,24 +745,15 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     # --- Limb darkening per instrument (via precomputed indices) ------
     systemic = theta.params.layout.systemic
 
-    # Detect active photometry-channel noise models (CovarianceNoise GP
-    # OR SequentialNoise AR/MA). With any of these the path is serial:
-    # AR is applied to model flux before residual computation, MA after,
-    # and GP routing is handled by `_eval_channel_likelihood`. With no
-    # phot noise models we keep the thread-parallel white-noise sum.
+    # Detect active photometry-channel noise models: AR/MA, a GP, an
+    # additive covariance (HarmonicBlock / NightlyOffset), Student-t --
+    # anything on :phot. With any of these the path is serial: AR is
+    # applied to model flux before residual computation, MA after, and the
+    # covariance / likelihood family is handled by `_eval_channel_likelihood`.
+    # With no phot noise models we keep the thread-parallel white-noise sum,
+    # which knows nothing else.
     noise_models = theta.params.config.noise_models
-    has_phot_seq = false
-    has_phot_gp  = false
-    for (nm_idx, nm) in enumerate(noise_models)
-        is_noise_model_active(theta, nm_idx) || continue
-        noise_channel(nm) === :phot || continue
-        if nm isa SequentialNoise
-            has_phot_seq = true
-        elseif nm isa CovarianceNoise
-            has_phot_gp = true
-        end
-    end
-    needs_serial = has_phot_seq || has_phot_gp
+    needs_serial = _phot_noise_active(theta, noise_models)
 
     if !needs_serial
         # White-noise path — thread-parallel Gaussian sum. Per-instrument
@@ -1016,30 +1011,13 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     systemic = theta.params.layout.systemic
     n_pm     = length(theta.params.config.instruments.pm_names)
 
-    # Build per-instrument LD / offset / jitter
-    q1_1 = theta.values[systemic.ld_q1[1]]
-    q2_1 = theta.values[systemic.ld_q2[1]]
-    u1_1, u2_1 = kipping_q_to_u(q1_1, q2_1)
-    ld1 = QuadLimbDark([u1_1, u2_1])
-    lds      = Vector{typeof(ld1)}(undef, n_pm)
+    # Per-instrument offset / jitter
     offsets  = Vector{T}(undef, n_pm)
     jitters  = Vector{T}(undef, n_pm)
-    dilutions = Vector{T}(undef, n_pm)
-    lds[1]     = ld1
-    offsets[1] = pm_offset(theta, 1)
-    jitters[1] = pm_jitter(theta, 1)
-    dilutions[1] = pm_dilution(theta, 1)
-    for ix in 2:n_pm
-        q1 = theta.values[systemic.ld_q1[ix]]
-        q2 = theta.values[systemic.ld_q2[ix]]
-        u1, u2 = kipping_q_to_u(q1, q2)
-        lds[ix]     = QuadLimbDark([u1, u2])
+    for ix in 1:n_pm
         offsets[ix] = pm_offset(theta, ix)
         jitters[ix] = pm_jitter(theta, ix)
-        dilutions[ix] = pm_dilution(theta, ix)
     end
-    n_super_p = _phot_n_super(data)
-    has_exp_p = !isempty(data.exposure_times)
     trends_cp = _phot_trend_cache(theta, n_pm)
     inv_th_p = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
     t_ref_p  = data.t_ref
@@ -1048,7 +1026,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     variances   = Vector{T}(undef, n_obs)
 
     # Fast path: no active transiting planets — model is just the
-    # per-instrument offset.
+    # per-instrument offset. It reads neither limb darkening nor dilution:
+    # a fit with no transiting planet (a noise-only light curve) has no
+    # slots for them, as `_phot_ll_no_transit` knows.
     if n_transit == 0
         @inbounds for i in 1:n_obs
             ins_idx = data.phot_inst[i]
@@ -1059,6 +1039,25 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         end
         return predictions, variances
     end
+
+    # Per-instrument LD / dilution
+    q1_1 = theta.values[systemic.ld_q1[1]]
+    q2_1 = theta.values[systemic.ld_q2[1]]
+    u1_1, u2_1 = kipping_q_to_u(q1_1, q2_1)
+    ld1 = QuadLimbDark([u1_1, u2_1])
+    lds      = Vector{typeof(ld1)}(undef, n_pm)
+    dilutions = Vector{T}(undef, n_pm)
+    lds[1]     = ld1
+    dilutions[1] = pm_dilution(theta, 1)
+    for ix in 2:n_pm
+        q1 = theta.values[systemic.ld_q1[ix]]
+        q2 = theta.values[systemic.ld_q2[ix]]
+        u1, u2 = kipping_q_to_u(q1, q2)
+        lds[ix]     = QuadLimbDark([u1, u2])
+        dilutions[ix] = pm_dilution(theta, ix)
+    end
+    n_super_p = _phot_n_super(data)
+    has_exp_p = !isempty(data.exposure_times)
 
     # Decode orbit parameters per active transiting planet
     Ps   = Vector{T}(undef, n_transit)
@@ -1162,8 +1161,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         end
         if any(ttv_state.is_nb)
             t_max = isempty(data.t_phot) ? zero(T) : T(maximum(data.t_phot))
+            t_min = isempty(data.t_phot) ? zero(T) : T(minimum(data.t_phot))
             _apply_ttv_nb!(ttv_state, theta, p_idx,
-                            Ps, es, ws, Tps, bs, a_Rs, t_max)
+                            Ps, es, ws, Tps, bs, a_Rs, t_max; t_phot_min = t_min)
         end
     end
     _set_transit_windows!(T_dur_safe, n_transit, transits, r_for_j, ttv_state, Ps, es, ws,
@@ -1210,6 +1210,19 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     end
 
     return predictions, variances
+end
+
+# Whether any noise model on the :phot channel is active. The white-noise
+# sums of the transit likelihood score independent Gaussians and nothing
+# else, so any of them -- not only AR/MA and GPs, but an additive covariance
+# or a Student-t likelihood too -- has to take the serial path through
+# `_eval_channel_likelihood`, or it is silently dropped.
+function _phot_noise_active(theta::Theta, noise_models)
+    for (nm_idx, nm) in enumerate(noise_models)
+        noise_channel(nm) === :phot || continue
+        is_noise_model_active(theta, nm_idx) && return true
+    end
+    return false
 end
 
 """
@@ -1469,18 +1482,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
 
     systemic = theta.params.layout.systemic
     noise_models = theta.params.config.noise_models
-    has_phot_seq = false
-    has_phot_gp  = false
-    for (nm_idx, nm) in enumerate(noise_models)
-        is_noise_model_active(theta, nm_idx) || continue
-        noise_channel(nm) === :phot || continue
-        if nm isa SequentialNoise
-            has_phot_seq = true
-        elseif nm isa CovarianceNoise
-            has_phot_gp = true
-        end
-    end
-    needs_serial = has_phot_seq || has_phot_gp
+    needs_serial = _phot_noise_active(theta, noise_models)   # see the non-ws method
 
     if !needs_serial
         # Same per-instrument LD/offset/jitter caching as the non-ws

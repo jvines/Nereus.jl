@@ -480,7 +480,15 @@ Single transiting planet with a non-linear ephemeris: per-transit
 timing offsets are free parameters (`ttv_k1_t<i>`). Declare the
 per-planet transit count with `model.ttv_n_transits` (a map
 `planet → n_transits`). The default per-offset prior is
-`NormalPrior(0, 1 d, ±10 d)`.
+`NormalPrior(0, 1 d, ±10 d)`. Transits are numbered from the time of
+mid-transit `Tc` (the `Tc_k1` parameter under `time = "Tc"`; under `Tp`
+or `Mo`, the transit within half a period of periastron passage):
+`ttv_k1_t<i>` is transit `i − 1`, so put `Tc` at the first transit you
+want an offset for. Transits before `Tc` carry no free offset. The
+`ttv_oc` and `transit_overlay` plots number transits the same way. Use
+`time = "Tc"` with free offsets: under `Tp` or `Mo` the transit numbered
+0 changes, and every offset moves to the next transit, when the sampled
+`ω` carries `Tc` across `Tp ± P/2`.
 
 ```julia
 using Nereus
@@ -594,9 +602,10 @@ and provide matching `<col>_err` columns:
 ```
 
 !!! note "GP and LOO"
-    PSIS-LOO / WAIC are skipped (reported as `"skipped"` in the summary,
-    not failed) when an active noise model is a covariance GP — the
-    pointwise likelihood factorisation `compute_loo` needs doesn't hold.
+    Under a GP, PSIS-LOO / WAIC use the exact Gaussian leave-one-out
+    predictive of each point given the others. The joint ActivityGP
+    (`marginalize_indicators = false`) is the exception: there LOO is
+    skipped (reported as `"skipped"` in the summary, not failed).
 
 ---
 
@@ -757,7 +766,8 @@ the summary, never aborts the run):
 - **Detection limits** (`output.detection_limits`): default on for PT
   samplers (`pt_emcee`, `transdim_pt_emcee`, `pt`) which keep
   the broad prior-seeded period coverage the curve needs; off otherwise.
-- **PSIS-LOO / WAIC** (`output.loo`, default on; skipped under GP noise).
+- **PSIS-LOO / WAIC** (`output.loo`, default on; exact under GP noise,
+  skipped for the joint ActivityGP).
 - **Fit-health guard** (`output.fit_health`, default on): flags
   silently-wrong posteriors (disjoint modes, railed bounds, corrupt
   log-post) without altering the chains.

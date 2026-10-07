@@ -11,7 +11,7 @@
 # of it is catchable by a reader of the table, which is what makes it worth a
 # test rather than a comment.
 
-using Test, Nereus
+using Test, Nereus, Random, MCMCChains
 
 @testset "science table units" begin
     # inc and i are SAMPLED IN RADIANS and reported in degrees, so the
@@ -76,4 +76,46 @@ end
     # interval: 0.484 +0.082 -1.027 became 0.5 +0.1 -1.0.
     v, lo, hi = Nereus._fmt3(0.4836, -1.027, 0.082)
     @test v == "0.484" && lo == "1.027" && hi == "0.082"
+end
+
+# rho_s is SAMPLED IN SOLAR UNITS, ρ★/ρ☉ (`rho_s_to_a_Rs`), and the fitted table
+# labelled it g/cm3: an NGTS-33 summary read 0.532 g/cm³ for a 0.532 ρ☉ star,
+# which is 0.750 g/cm³. The fitted value stays in the units it was sampled and
+# its prior written in, now labelled so; the g/cm³ value is the derived
+# rho_star_transit, ρ☉ × 1.411.
+@testset "fitted stellar density: solar units, and the g/cm3 one derived" begin
+    n = 400
+    data = Data(; t_phot = collect(range(0.0, 20.0; length = n)), flux = ones(n),
+                  flux_err = fill(3e-4, n), phot_inst = ones(Int, n))
+    params = Params(; max_kplanet = 1, planet_modes = [PM_ONLY],
+                      instruments = InstrumentConfig(pm = ["TESS"]), data = data,
+                      parametrization = ParametrizationConfig(time = :Tc,
+                                                              use_rho_s = true),
+                      priors = Dict("P_k1" => UniformPrior(2.9, 3.1),
+                                    "Tc_k1" => UniformPrior(0.9, 1.1)))
+    rng = MersenneTwister(2)
+    m = 2000
+    val = Dict("P_k1" => 3.0, "sesinw_k1" => 0.0, "secosw_k1" => 0.0,
+               "Tc_k1" => 1.0, "b_k1" => 0.3, "rr_k1" => 0.1,
+               "offset_TESS" => 0.0, "jitter_TESS" => 1e-3, "q1_TESS" => 0.4,
+               "q2_TESS" => 0.3, "rho_s" => 0.532)
+    nm = params.layout.unfrozen_names
+    @test Set(nm) == Set(keys(val))
+    chains = Chains(hcat((val[k] .+ 1e-4 .* randn(rng, m) for k in nm)...), Symbol.(nm))
+    out = mktempdir()
+    sci = Nereus.science_summary(out, chains, params, data)
+
+    rho = sci["fitted"]["parameters"]["rho_s"]
+    @test rho["unit"] == "rho_sun"
+    @test rho["value"] ≈ 0.532 rtol = 1e-3
+    der = sci["derived"]["parameters"]["rho_star_transit_k1"]
+    @test der["unit"] == "g/cm3"
+    @test der["value"] ≈ 0.532 * 1.411 rtol = 1e-3        # 0.750 g/cm³
+    # ... and so in every table written
+    dat = read(joinpath(out, "tables", "fitted.dat"), String)
+    @test occursin(r"rho_s\s.*rho_sun", dat)
+    @test !occursin(r"rho_s\s.*g/cm3", dat)
+    tex = read(joinpath(out, "tables", "fitted.tex"), String)
+    @test occursin("\$\\rho_\\odot\$", tex)
+    @test occursin(r"\nrho_s,[^\n]*,rho_sun,", read(joinpath(out, "tables", "fitted.csv"), String))
 end

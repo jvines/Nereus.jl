@@ -95,6 +95,7 @@ function _sci_unit_latex(u)
     m = Dict("m/s"=>"\\mathrm{m\\,s^{-1}}", "d"=>"\\mathrm{d}", "deg"=>"\\mathrm{deg}",
              "BJD"=>"\\mathrm{BJD}", "AU"=>"\\mathrm{AU}", "yr"=>"\\mathrm{yr}",
              "K"=>"\\mathrm{K}", "g/cm3"=>"\\mathrm{g\\,cm^{-3}}",
+             "rho_sun"=>"\\rho_\\odot",
              "M_earth"=>"M_\\oplus", "M_jup"=>"M_{\\mathrm{Jup}}",
              "M_sun"=>"M_\\odot", "mas"=>"\\mathrm{mas}",
              "R_earth"=>"R_\\oplus", "R_jup"=>"R_{\\mathrm{Jup}}",

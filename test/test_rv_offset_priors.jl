@@ -232,4 +232,32 @@ using Random, Statistics
         p = mk(Dict{String, PriorSpec}())
         @test !("gamma_HARPS" in p.layout.unfrozen_names)
     end
+
+    # The marginalisation lived only in the RV likelihood's no-noise path, so a
+    # photometry noise model -- the only kind it allows -- sent the RVs down
+    # the noise path, which reads γ from its frozen slot: the RVs were scored
+    # about a zero point of 0 m/s, not marginalised over it.
+    @testset "marginalize_gamma holds with a photometry noise model" begin
+        t, v, e, inst = pack(["HARPS"])
+        n = length(t)
+        tp = collect(range(0.0, 5.0; length = 40))
+        d = Data(t_rv = t, rv = v, rv_err = e, rv_inst = inst, t_phot = tp,
+                 flux = 1 .+ 1e-3 .* sin.(tp), flux_err = fill(1e-3, 40),
+                 phot_inst = ones(Int, 40))
+        mk(noise) = Params(; max_kplanet = 0, planet_modes = Nereus.PlanetDataSources[],
+                           instruments = InstrumentConfig(rv = ["HARPS"], pm = ["T"]),
+                           data = d, M_s = 1.0, R_s = 1.0,
+                           noise_models = Nereus.NoiseModel[noise...],
+                           parametrization = ParametrizationConfig(marginalize_gamma = true))
+        p0 = mk([]); p1 = mk([Nereus.CeleriteSHO(channel = :phot)])
+        th0 = Nereus.Theta{Float64}(p0); th1 = Nereus.Theta{Float64}(p1)
+        Nereus.set_param!(th0, "sigma_HARPS", 2.0); Nereus.set_param!(th1, "sigma_HARPS", 2.0)
+        preds, vars = Nereus.rv_predictions(th0, d)
+        marg = Nereus._rv_ll_gamma_marginalized(d.rv .- preds, vars, d.rv_inst,
+                                                p0.layout.systemic.rv_gamma, n, 2π)
+        @test Nereus._rv_log_likelihood_core(th0, d) ≈ marg rtol = 1e-12
+        @test Nereus._rv_log_likelihood_core(th1, d) ≈ marg rtol = 1e-12
+        ws = Nereus.PTWorkspace(p1, 0, 1; n_obs = n, n_phot = 40)
+        @test Nereus._rv_log_likelihood_core(th1, d, ws) ≈ marg rtol = 1e-12
+    end
 end
