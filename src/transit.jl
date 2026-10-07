@@ -71,10 +71,16 @@ function transit_flux_uniform(z::Real, p::Real)
     #     0.5 √((1+z+p)(1+z-p)(z+p-1)(1-z+p))
     #
     # (Mandel & Agol 2002, §3, eqs. 1 for the uniform case.)
+    #
+    # Both acos arguments are ±1 at the contacts and round past them within an
+    # ulp or two of z = 1 - p, 1 + p and p - 1, where acos threw a DomainError
+    # (about one input in three at z = 1 - p + 1 ulp). Clamped: an argument in
+    # [-1, 1] is untouched, and a clamped one is the contact's own value, so the
+    # flux is continuous through it.
     z2 = z * z
     p2 = p * p
-    k1 = acos((z2 + 1 - p2) / (2 * z))
-    k2 = acos((z2 + p2 - 1) / (2 * z * p))
+    k1 = acos(clamp((z2 + 1 - p2) / (2 * z), -1, 1))
+    k2 = acos(clamp((z2 + p2 - 1) / (2 * z * p), -1, 1))
     k3 = sqrt(max(zero(z), (1 + z + p) * (1 + z - p) * (z + p - 1) * (1 - z + p)))
     A = k1 + p2 * k2 - k3 / 2
     return 1 - A / π
@@ -122,16 +128,16 @@ end
 """
     transit_flux(z, p, u1, u2) -> F
 
-Quadratic limb-darkened transit flux via Transits.jl (Agol 2020
-formulation). For `u1 = u2 = 0` falls back to the exact uniform-disk
-formula.
+Quadratic limb-darkened transit flux: Transits.jl's `compute` (Agol 2020
+formulation) as restructured in `_quad_flux`, which does not throw at the
+contacts. For `u1 = u2 = 0` falls back to the exact uniform-disk formula.
 """
 function transit_flux(z::Real, p::Real, u1::Real, u2::Real)
     if iszero(u1) && iszero(u2)
         return transit_flux_uniform(z, p)
     end
     ld = QuadLimbDark([u1, u2])
-    return compute(ld, z, p)
+    return _quad_flux(ld, z, p)
 end
 
 """
@@ -154,25 +160,36 @@ function transit_flux(ld::QuadLimbDark, z::Real, p::Real)
     return _quad_flux(ld, z, p)
 end
 
-_quad_flux(ld::QuadLimbDark, b, r) = compute(ld, b, r)
-
 # `Transits.compute(::QuadLimbDark, b, r)` (Transits 0.4.1, src/polynomial/quad.jl
-# and poly.jl) for Float64, restructured: the same formulas, and the same
-# operations in the same order for every value that reaches the result, so the
-# flux is the same to the bit (test_transit_flux.jl checks it). What changes:
-# `compute_uniform`, `compute_linear` and `compute_quadratic` are inlined with no
-# keyword plumbing; the triangle area (`sqarea_triangle`) is computed only on the
-# partial-overlap branch, the one that uses it; atan(kite_area2, r² − 1 − b²) is
-# computed once, where `compute_uniform` and `compute_quadratic` each computed it;
-# and the values nothing uses (k, sqbrinv, sqonembmr2, onemr2mb2, onemr2pb2, kck)
-# are gone. Bulirsch's `cel` is called as before. 12-15 per cent less time per
-# in-contact evaluation (32-34 instead of 37-39 ns across an NGTS-33 b chord);
-# ForwardDiff duals keep `compute`.
-function _quad_flux(ld::QuadLimbDark{Float64}, b::Float64, r::Float64)
+# and poly.jl) restructured: the same formulas, and the same operations in the
+# same order for every value that reaches the result, so the flux -- and, for
+# ForwardDiff duals, its partials -- are the same to the bit (test_transit_flux.jl
+# checks both). What changes: `compute_uniform`, `compute_linear` and
+# `compute_quadratic` are inlined with no keyword plumbing; the triangle area
+# (`sqarea_triangle`) is computed only on the partial-overlap branch, the one
+# that uses it; atan(kite_area2, r² − 1 − b²) is computed once, where
+# `compute_uniform` and `compute_quadratic` each computed it; and the values
+# nothing uses (k, sqbrinv, sqonembmr2, onemr2mb2, onemr2pb2, kck) are gone.
+# Bulirsch's `cel` is called as before. 12-15 per cent less time per in-contact
+# evaluation (32-34 instead of 37-39 ns across an NGTS-33 b chord). The types
+# follow `compute`: T is the float type of `b`, which is what its `one(T)`,
+# `zero(T)` and `convert(T, π)` are.
+#
+# Two departures, both one ulp inside the second and third contacts, b = 1 − r;
+# every other input is bit-identical. (1) There onembpr2/(4br) is below eps/2,
+# k² = 1 + onembpr2/(4br) rounds to exactly 1, and the k² ≤ 1 branch takes kc²
+# from (r − 1 + b), which is −1e-16: `compute` dies in sqrt with a DomainError
+# (134 of ~378 000 random inputs), and a sampler that met that geometry aborted.
+# kc² is clamped at 0, which touches no kc² ≥ 0; and k² == 1 makes `cel` replace
+# kc by eps anyway, so the flux is the tangency's, continuous with its
+# neighbours. (2) At r = 0.5, b = prevfloat(0.5), `compute` returns a flux off
+# by 2π/3 · g₁ · norm (see the b + r == 1 branch).
+function _quad_flux(ld::QuadLimbDark, b::Real, r::Real)
+    T = float(typeof(b))
     if b ≥ 1 + r || iszero(r)
-        return 1.0                              # unobscured
+        return one(T)                           # unobscured
     elseif r ≥ 1 + b
-        return 0.0                              # completely obscured
+        return zero(T)                          # completely obscured
     end
     g_n = ld.g_n
     r2 = r^2
@@ -201,16 +218,17 @@ function _quad_flux(ld::QuadLimbDark{Float64}, b::Float64, r::Float64)
     else
         kc2 = k2 > 0.5 ? (r - 1 + b) * (b + r + 1) * fourbrinv : 1 - k2
     end
+    kc2 < 0 && (kc2 = zero(kc2))                # the tangency (see above)
     kc = sqrt(kc2)
 
     # uniform term (compute_uniform)
     if b ≤ 1 - r
         s0 = π * (1 - r2)
-        kap0 = convert(Float64, π)
-        kite_area2 = 0.0
-        Πmkap1 = NaN                            # not computed on this branch
+        kap0 = convert(T, π)
+        kite_area2 = zero(T)
+        Πmkap1 = kap0                           # not read on this branch
     else
-        kite_area2 = sqrt(Transits.sqarea_triangle(1.0, r, b))
+        kite_area2 = sqrt(Transits.sqarea_triangle(one(T), r, b))
         r2m1 = (r - 1) * (r + 1)
         kap0 = atan(kite_area2, r2m1 + b2)
         Πmkap1 = atan(kite_area2, r2m1 - b2)
@@ -225,34 +243,41 @@ function _quad_flux(ld::QuadLimbDark{Float64}, b::Float64, r::Float64)
             Λ1 = π - 4 / 3
         elseif r < 0.5                                          # case 5
             m = 4 * r2
-            Eofk = Transits.cel(m, 1.0, 1.0, 1 - m)
-            Em1mKdm = Transits.cel(m, 1.0, 1.0, 0.0)
+            Eofk = Transits.cel(m, one(T), one(T), 1 - m)
+            Em1mKdm = Transits.cel(m, one(T), one(T), zero(T))
             Λ1 = π + 2 / 3 * ((2 * m - 3) * Eofk - m * Em1mKdm) +
                  (b - r) * 4 * r * (Eofk - 2 * Em1mKdm)
         else                                                    # case 7
             m = 4 * r2
             minv = inv(m)
-            Eofk = Transits.cel(minv, 1.0, 1.0, 1 - minv)
-            Em1mKdm = Transits.cel(minv, 1.0, 1.0, 0.0)
+            Eofk = Transits.cel(minv, one(T), one(T), 1 - minv)
+            Em1mKdm = Transits.cel(minv, one(T), one(T), zero(T))
             Λ1 = π + 1 / 3 * ((2 * m - 3) * Em1mKdm - m * Eofk) / r -
                  (b - r) * 2 * (2 * Eofk - Em1mKdm)
         end
     elseif b + r > 1                                            # cases 2, 8
-        Πofk, Eofk, Em1mKdm = Transits.cel(k2, kc, (b - r)^2 * kc2, 0.0, 1.0, 1.0,
-                                           3 * kc2 * (b - r) * (b + r), kc2, 0.0)
+        Πofk, Eofk, Em1mKdm = Transits.cel(k2, kc, (b - r)^2 * kc2, zero(T), one(T),
+                                           one(T), 3 * kc2 * (b - r) * (b + r), kc2,
+                                           zero(T))
         Λ1 = onembmr2 * (Πofk + (-3 + 6 * r2 + 2 * br) * Em1mKdm - fourbr * Eofk) /
              (3 * sqbr)
     elseif b + r < 1                                            # cases 3, 9
         bmrdbpr = (b - r) / (b + r)
         μ = 3 * bmrdbpr * onembmr2inv
         p = bmrdbpr^2 * onembpr2 * onembmr2inv
-        Πofk, Eofk, Em1mKdm = Transits.cel(inv(k2), kc, p, 1 + μ, 1.0, 1.0, p + μ, kc2, 0.0)
+        Πofk, Eofk, Em1mKdm = Transits.cel(inv(k2), kc, p, 1 + μ, one(T), one(T),
+                                           p + μ, kc2, zero(T))
         Λ1 = 2 * sqrt(onembmr2) * (onembpr2 * Πofk - (4 - 7 * r2 - b2) * Eofk) / 3
-    else
-        Λ1 = 2 * acos(1 - 2 * r) - 2 * π * (r > 0.5) -
+    else                                                        # b + r == 1
+        # `compute` writes 2π·(r > 0.5) here, which is 2π·(r > b) when b = 1 − r,
+        # and s1 below subtracts 2π·(r > b): the two cancel. At r = 0.5,
+        # b = prevfloat(0.5), the third contact rounded onto this branch, they
+        # disagree, and s1 was off by 2π/3 -- a flux of -0.013 where its
+        # neighbours read 0.732. (r > b) is the same Bool at every other input.
+        Λ1 = 2 * acos(1 - 2 * r) - 2 * π * (r > b) -
              (4 / 3 * (3 + 2 * r - 8 * r2) + 8 * (r + b - 1) * r) * sqrt(r * (1 - r))
     end
-    s1 = ((1 - Float64(r > b)) * 2π - Λ1) / 3
+    s1 = ((1 - T(r > b)) * 2π - Λ1) / 3
     flux += g_n[2] * s1
     ld.n_max == 1 && return flux * ld.norm
 

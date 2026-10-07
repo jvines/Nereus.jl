@@ -414,9 +414,10 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
 end
 
 # `transit_flux(z, p, u1, u2)` with the law `_decode_rm_state` built from
-# (u1, u2), and its test for a uniform disc.
+# (u1, u2), and its test for a uniform disc. `_quad_flux`, not `compute`, which
+# throws a DomainError one ulp inside the second and third contacts.
 _rm_disc_flux(uniform::Bool, ld::QuadLimbDark, z, p) =
-    uniform ? transit_flux_uniform(z, p) : compute(ld, z, p)
+    uniform ? transit_flux_uniform(z, p) : _quad_flux(ld, z, p)
 
 """
     AROME_ROT_SIGMA = 0.5503
