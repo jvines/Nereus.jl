@@ -1130,7 +1130,8 @@ eccentricity derived from √e sin ω / √e cos ω).
 
 # Supported quantities
 - `:ecc`   — eccentricity (per-planet, evaluated for each active planet)
-- `:rho_s` — stellar density (global, evaluated once)
+- `:rho_s` — stellar density in SOLAR units, ρ★/ρ☉ with ρ☉ = 1.411 g/cm³, as
+  `rho_s` is sampled (global, evaluated once)
 
 # Fields
 - `quantity::Symbol`  — which derived quantity
@@ -1140,7 +1141,7 @@ eccentricity derived from √e sin ω / √e cos ω).
 # Examples
 ```julia
 ExternalPrior(:ecc,   BetaPrior(0.867, 3.03), true)   # Kipping 2013
-ExternalPrior(:rho_s, NormalPrior(1.4, 0.1),  false)   # stellar density constraint
+ExternalPrior(:rho_s, NormalPrior(1.4, 0.1),  false)   # ρ★ = 1.4 ± 0.1 ρ☉
 ```
 """
 struct ExternalPrior

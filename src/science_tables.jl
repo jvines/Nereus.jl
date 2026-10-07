@@ -44,7 +44,12 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "inc" => ("deg", true),       "i" => ("deg", true),
     "plx" => ("mas", false),      # parallax, sampled directly in astrometry
     "M_sec" => ("M_sun", false),  # companion mass, sampled in astrometry
-    "rho_s" => ("g/cm3", false),  # fitted stellar density
+    # The fitted stellar density is SAMPLED IN SOLAR UNITS, ρ★/ρ☉ = (M/M☉)/(R/R☉)³
+    # (`rho_s_to_a_Rs`), and was labelled g/cm3: a 0.532 ρ☉ star (0.750 g/cm³)
+    # was published as 0.532 g/cm³, 29% low. No conversion here, because the
+    # prior-rail check compares the CI with the user's prior in these units;
+    # the g/cm³ value is the derived `rho_star_transit_k<n>`.
+    "rho_s" => ("rho_sun", false),
     "q1" => ("", false),          "q2" => ("", false),  # Kipping LD
     # derived
     "msini" => ("M_earth", false),"mass" => ("M_jup", false),
@@ -475,6 +480,7 @@ const _TEX_UNIT = Dict(
     "m/s"=>"m\\,s\$^{-1}\$", "M_earth"=>"\$M_\\oplus\$", "M_jup"=>"\$M_{\\rm Jup}\$",
     "R_jup"=>"\$R_{\\rm Jup}\$", "R_earth"=>"\$R_\\oplus\$", "S_earth"=>"\$S_\\oplus\$",
     "W/m2"=>"W\\,m\$^{-2}\$", "g/cm3"=>"g\\,cm\$^{-3}\$", "deg"=>"deg",
+    "rho_sun"=>"\$\\rho_\\odot\$", "M_sun"=>"\$M_\\odot\$",
     "AU"=>"AU", "d"=>"d", "yr"=>"yr", "K"=>"K", "BJD"=>"BJD", "mas"=>"mas", ""=>"")
 _texunit(u) = get(_TEX_UNIT, String(u), _texesc(u))
 

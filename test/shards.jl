@@ -166,7 +166,7 @@ const TEST_UNITS = [
     (name = "test_plot_corner_thinning.jl", seconds = 8, files = ["test_plot_corner_thinning.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 3, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_labels.jl", seconds = 2, files = ["test_plot_labels.jl"]),
-    (name = "test_science_table_labels.jl", seconds = 1, files = ["test_science_table_labels.jl"]),
+    (name = "test_science_table_labels.jl", seconds = 15, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 1, files = ["test_plot_patterns.jl"]),
     (name = "test_ladder_history.jl", seconds = 80, files = ["test_ladder_history.jl"]),
     (name = "test_thread_slots.jl", seconds = 176, files = ["test_thread_slots.jl"]),

@@ -232,7 +232,11 @@ rather than a single number trusted.
       "use_rho_s": false                   // sample stellar density ρ⋆ instead of deriving
                                            //   a/R★ from M_s×R_s (default false). ρ⋆ is what
                                            //   transits actually constrain — the standard
-                                           //   transit parametrization. Enabling auto-adds a
+                                           //   transit parametrization. ρ⋆ is in SOLAR units
+                                           //   (ρ⋆/ρ☉, ρ☉ = 1.411 g/cm³), as are its prior
+                                           //   and the fitted table's `rho_s` (unit "rho_sun");
+                                           //   the derived `rho_star_transit_k<n>` is g/cm³.
+                                           //   Enabling auto-adds a
                                            //   LogUniform(0.001,100) ρ⋆ prior; override with
                                            //   an informative one via external_priors
                                            //   ExternalPrior(:rho_s, NormalPrior(...), false)
