@@ -31,9 +31,10 @@
 #     truncated Normal on Mo, a two-period U(-2π, 2π): those walls are the
 #     user's, and a density that is not periodic cannot be relabelled exactly.
 #   * inclination-like angles. i ∈ [0, π] is not periodic.
-#   * Mo whenever TTVs are modelled. TTV epoch numbering hangs off
-#     Tp = t_ref − Mo·P/2π, so Mo → Mo + 2π relabels every transit and the
-#     likelihood is not periodic in Mo there.
+#   * Mo whenever TTVs are modelled. TTV epoch numbering hangs off the
+#     transit time Tc = tp_to_tc(Tp) with Tp = t_ref − Mo·P/2π, so
+#     Mo → Mo + 2π relabels every transit and the likelihood is not periodic
+#     in Mo there.
 #   * Mo under the O'Neil observation-based prior (`obs_prior`). Its Jacobian
 #     carries the mean anomaly at each relative-astrometry epoch LINEARLY
 #     (the 3M terms of |2(e²−2)sinE + e(3M + sin2E) + 3M cosE|), so shifting

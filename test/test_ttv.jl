@@ -527,3 +527,39 @@ end
     n = min(length(st2.δts[2]), length(nb2.δts[2]))
     @test cor(_detrend(0:(n - 1), st2.δts[2][1:n]), _detrend(0:(n - 1), nb2.δts[2][1:n])) > 0.95
 end
+
+# The O−C measurements and the per-transit gallery number transits as the
+# offsets do, from Tc. They counted from the first transit in the data
+# (measure_per_transit_tcs from 0, the gallery from 1), so "transit 3" in a
+# plot was not the transit ttv_k1_t4 moves.
+@testset "TTV plots and measurements number transits from Tc" begin
+    P, Tc = 3.5, 2_450_010.0
+    t_phot = collect(range(Tc - 3.3P, Tc + 4.3P; step = 4 / 1440))
+    n = length(t_phot)
+    data = Data(; t_phot, flux = ones(n), flux_err = fill(1e-3, n),
+                  phot_inst = ones(Int, n), t_ref = Tc)
+    params = Params(; max_kplanet = 1, planet_modes = [PM_TTV],
+                      instruments = InstrumentConfig(pm = ["TESS"]), data,
+                      parametrization = ParametrizationConfig(time = :Tc),
+                      M_s = 1.0, R_s = 1.0, stability = :none,
+                      ttv_n_transits = Dict(1 => 5))
+    ix = params.layout.name_to_idx
+    th = Theta{Float64}(params)
+    for (k, v) in ("P_k1" => P, "Tc_k1" => Tc, "sesinw_k1" => 0.1, "secosw_k1" => 0.2,
+                   "b_k1" => 0.3, "rr_k1" => 0.1, "q1_TESS" => 0.3, "q2_TESS" => 0.2)
+        th.values[ix[k]] = v
+    end
+    tcs = [Tc + m * P for m in -3:4]
+    meas = measure_per_transit_tcs(data, th, params; tcs_predicted = tcs, ngrid = 21)
+    @test meas.cycle_idx == collect(-3:4)
+
+    nms = sort!(collect(keys(ix)))
+    ch = Chains(repeat(reshape([th.values[ix[nm]] for nm in nms], 1, :, 1), 4, 1, 1),
+                Symbol.(nms))
+    fig = plot_transit_overlay_fit(ch, params, data; planet = 1)
+    M = Nereus.CairoMakie.Makie
+    txt(x) = x isa AbstractString ? x : only(x)
+    labels = [txt(p.text[]) for ax in fig.content if ax isa M.Axis
+              for p in ax.scene.plots if p isa M.Text]
+    @test sort(labels) == sort(["transit $m" for m in -3:4])
+end

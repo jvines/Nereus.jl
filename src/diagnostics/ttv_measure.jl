@@ -28,7 +28,9 @@ parameters at `theta_ref`. The fit uses only the phot points within
 
 Returns `(cycle_idx, tc_obs, tc_lo, tc_hi, mle_dt, lo_dt, hi_dt)` where
 `*_dt` are the offsets from `tcs_predicted` in days (suitable for an
-O−C plot).
+O−C plot), and `cycle_idx` is each transit's number counted from the
+planet's `Tc` (transit 0 at `Tc`, negative before it): the numbering of
+the free TTV offsets, whose `ttv_k<k>_t<n+1>` is transit `n`.
 
 # Arguments
 - `data::Data` — photometric data
@@ -88,7 +90,9 @@ function measure_per_transit_tcs(data::Data, theta_ref::Theta, params::Params;
     end
 
     n_tr = length(tcs_predicted)
-    cycle_idx = collect(0:(n_tr - 1))
+    # Counted from Tc, as the likelihood numbers the TTV offsets; it was
+    # 0:(n_tr - 1), counted from the first transit of `tcs_predicted`.
+    cycle_idx = [round(Int, (tc - Tc_k) / P_k) for tc in tcs_predicted]
     tc_obs = Vector{Float64}(undef, n_tr)
     tc_lo  = Vector{Float64}(undef, n_tr)
     tc_hi  = Vector{Float64}(undef, n_tr)

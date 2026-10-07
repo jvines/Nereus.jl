@@ -480,7 +480,15 @@ Single transiting planet with a non-linear ephemeris: per-transit
 timing offsets are free parameters (`ttv_k1_t<i>`). Declare the
 per-planet transit count with `model.ttv_n_transits` (a map
 `planet → n_transits`). The default per-offset prior is
-`NormalPrior(0, 1 d, ±10 d)`.
+`NormalPrior(0, 1 d, ±10 d)`. Transits are numbered from the time of
+mid-transit `Tc` (the `Tc_k1` parameter under `time = "Tc"`; under `Tp`
+or `Mo`, the transit within half a period of periastron passage):
+`ttv_k1_t<i>` is transit `i − 1`, so put `Tc` at the first transit you
+want an offset for. Transits before `Tc` carry no free offset. The
+`ttv_oc` and `transit_overlay` plots number transits the same way. Use
+`time = "Tc"` with free offsets: under `Tp` or `Mo` the transit numbered
+0 changes, and every offset moves to the next transit, when the sampled
+`ω` carries `Tc` across `Tp ± P/2`.
 
 ```julia
 using Nereus
