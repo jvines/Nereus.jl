@@ -20,7 +20,8 @@
 # first. Exits non-zero if any shard failed.
 #
 # It must run under macOS's bash 3.2 as well as the image's bash 5;
-# ci/test_run_tests.sh checks it under whichever bash runs that.
+# ci/test_run_tests.sh checks it under whichever bash runs that, and the suite's
+# test/test_ci_run_tests.jl under /bin/bash and the bash on PATH.
 set -uo pipefail
 
 n=${1:-5}
