@@ -114,6 +114,7 @@ const TEST_UNITS = [
     (name = "test_activity_gp_lowrank.jl", seconds = 532, files = ["test_activity_gp_lowrank.jl"]),
     (name = "test_indicator_floor_ws.jl", seconds = 6, files = ["test_indicator_floor_ws.jl"]),
     (name = "test_celerite_ws.jl", seconds = 4, files = ["test_celerite_ws.jl"]),
+    (name = "test_celerite_order.jl", seconds = 15, files = ["test_celerite_order.jl"]),
     (name = "test_rv_modifier_slots.jl", seconds = 4, files = ["test_rv_modifier_slots.jl"]),
     (name = "test_multiseries_gp.jl", seconds = 13, files = ["test_multiseries_gp.jl"]),
     (name = "test_multiseries_layout.jl", seconds = 6, files = ["test_multiseries_layout.jl"]),
