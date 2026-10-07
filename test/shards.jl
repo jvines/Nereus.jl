@@ -102,6 +102,8 @@ const TEST_UNITS = [
     (name = "test_transdim_pt_emcee_resume.jl", seconds = 18, files = ["test_transdim_pt_emcee_resume.jl"]),
     (name = "test_rjmcmc_resume.jl", seconds = 10, files = ["test_rjmcmc_resume.jl"]),
     (name = "test_nuts_resume.jl", seconds = 159, files = ["test_nuts_resume.jl"]),
+    # Measured locally (arm64), not yet on the x86_64 CI runner.
+    (name = "test_nuts_reversediff.jl", seconds = 90, files = ["test_nuts_reversediff.jl"]),
     (name = "test_ensemble_resume.jl", seconds = 7, files = ["test_ensemble_resume.jl"]),
     (name = "test_ess_resume.jl", seconds = 15, files = ["test_ess_resume.jl"]),
     (name = "test_moms_resume.jl", seconds = 16, files = ["test_moms_resume.jl"]),

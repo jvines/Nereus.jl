@@ -1058,13 +1058,15 @@ else. On the five-channel HD 18599 job, a ReverseDiff gradient
 - The prior-box centre: 1.7 s, 0.9 GB and 4.0 GB. The dense fallback took
   50 s, 16 GB and 19 GB; the solver before this branch 7.6 s, 4.0 GB and
   6.5 GB.
-- Building the tape that `sample_nuts(ad_backend = :ReverseDiff)` compiles
-  by default (at zeros(dim), where every coupling is 0): 43 s, 7.1 GB and
-  5.5 GB. The dense fallback took 110 s, 44 GB and 39 GB; the solver before
-  this branch 72 s, 14 GB and 13 GB.
+- Recording and compiling a tape at zeros(dim), where every coupling is 0,
+  as `sample_nuts(ad_backend = :ReverseDiff)` once did by default: 43 s,
+  7.1 GB and 5.5 GB. The dense fallback took 110 s, 44 GB and 39 GB; the
+  solver before this branch 72 s, 14 GB and 13 GB.
 
-That tape records this route, which has no branch on the values, so the
+Such a tape records this route, which has no branch on the values, so the
 AGP part of it gives the right value and gradient wherever it is replayed.
+The rest of a log density does branch on the values, which is why
+`sample_nuts` compiles no tape.
 
 With two or three channels the fallback is the dense (C·N)² Cholesky. Its
 side C·N is at most 1.5 times A's 2N (about 3.4 times the work at C = 3,
@@ -1130,10 +1132,10 @@ kernels unless stated otherwise:
   Float64 dense likelihood), every error was at most 3.1e-6 nats.
 
 These are sample maxima, not bounds. Only AD number types at singular
-blocks take this route (`Float64` evaluations never do), except that the
-compiled ReverseDiff tape above replays it at every point. At non-singular
-points of the same signal-to-noise the sequential route was about as
-accurate as the low-rank one, so the tape is not affected there. On the
+blocks take this route (`Float64` evaluations never do), except that a
+compiled ReverseDiff tape recorded at one (above) replays it at every point.
+At non-singular points of the same signal-to-noise the sequential route was
+about as accurate as the low-rank one, so such a tape is not affected there. On the
 HD 18599 job the route is taken only at couplings that are exactly 0 (see
 above), where the errors are the ones in the previous paragraph.
 
