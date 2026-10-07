@@ -11,6 +11,14 @@
 # to the FIRST transit (Tc). The 1-based slot index is `i+1` (Julia
 # arrays are 1-based; transit 0 → slot 1, transit 1 → slot 2, …).
 #
+# Tc is the time of mid-transit: the `Tc` parameter itself under the :Tc
+# time parametrization, and under :Tp and :Mo the transit within half a
+# period of periastron passage, `tp_to_tc(Tp, P, e, ω)`. The likelihood used
+# to number from Tp. Tp and that Tc are up to half a period apart (e.g. for
+# a transit at apoastron, ω = −π/2), and then a transit sat across the
+# boundary round((t − Tp)/P) = i + 1/2: the cadences before its centre took
+# one offset and those after it the next one's.
+#
 # Slot indices outside [1, N] are treated as δt = 0 (no correction).
 # This lets users specify N at Params construction time without
 # tracking the exact data span; extra slots simply stay at their
@@ -107,8 +115,9 @@ end
 
 Return the TTV-corrected time at which to evaluate `sky_separation`.
 `i = round((t − Tc) / P)` is the integer transit number relative to
-the first transit at `Tc`. If `i+1` is within `[1, length(δts)]`,
-returns `t − δts[i+1]`; otherwise returns `t` unchanged.
+the first transit at `Tc`, the time of mid-transit (not of periastron).
+If `i+1` is within `[1, length(δts)]`, returns `t − δts[i+1]`; otherwise
+returns `t` unchanged.
 """
 @inline function ttv_effective_time(t::Real, P::Real, Tc::Real,
                                       δts::AbstractVector{<:Real})
@@ -125,7 +134,8 @@ end
 Lookup form for the transit-likelihood inner loop. Given that planet
 index `j` (1..n_transit) is a TTV planet at position `r` in
 `ttv_state.j_active`, returns the TTV-corrected time. If planet `j`
-has no TTV, returns `t` unchanged.
+has no TTV, returns `t` unchanged. `Tcs[j]` is planet `j`'s time of
+mid-transit (`tp_to_tc`), the epoch its transits are numbered from.
 
 Caller must pre-find `r` (or pass `r = findfirst(==(j), j_active)`).
 For speed, the inner loop should iterate over `r` in `1:n_ttv` and

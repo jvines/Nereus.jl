@@ -457,8 +457,10 @@ end
         Δt = t - Tc_centers[j]
         Δt -= Ps[j] * round(Δt / Ps[j])
         abs(Δt) > T_dur_safe[j] + reach && continue
+        # A TTV planet's transits are numbered from Tc (the transit nearest
+        # the cadence, as the window above folds it), not from Tp.
         t_eff = r_for_j[j] > 0 ?
-            ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tps) : t
+            ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tc_centers) : t
         use_gd = gd !== nothing && gd.on[j]
         # The callers pass this call's orbit constants (`_sky_orbits`); built
         # here when they do not.

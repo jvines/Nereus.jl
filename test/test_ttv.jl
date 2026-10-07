@@ -308,3 +308,58 @@ end
         st_dual, theta_dual, p_idx_n,
         Ps_d, es_d, ws_d, Tps_d, bs_d, a_Rs_d, DualT(t_max))
 end
+
+# An offset on transit n moves transit n, and nothing else, whichever time
+# anchor the planet is parametrized by. Transits are numbered from the time of
+# mid-transit Tc. They used to be numbered from Tp in the likelihood, and with
+# the transit near apoastron (ω close to -π/2) Tc is almost half a period from
+# Tp: the boundary round((t - Tp)/P) = n + 1/2 then fell inside a transit, so an
+# offset on transit n moved the first half of transit n and the second half of
+# transit n - 1.
+@testset "TTV-A: an offset on transit n moves transit n only" begin
+    P, e, ω, b, rr = 3.5, 0.3, -π / 2 + 0.02, 0.2, 0.1
+    Tc = 2_450_001.3
+    Tp = tc_to_tp(Tc, P, e, ω)
+    @test 0.45 * P < Tc - Tp < 0.5 * P          # the transit is ~P/2 from Tp
+    t_ref = 2_450_005.0
+    t_phot = collect(range(Tc - 0.5 * P, Tc + 4.5 * P; step = 2 / 1440))
+    n_tr = 5                                     # transits 0..4 → slots 1..5
+    data = Data(; t_phot, flux = ones(length(t_phot)),
+                  flux_err = fill(1e-3, length(t_phot)),
+                  phot_inst = ones(Int, length(t_phot)), t_ref)
+    epoch = round.(Int, (t_phot .- Tc) ./ P)
+    sv, cv = sqrt(e) * sin(ω), sqrt(e) * cos(ω)
+    anchor = Dict(:Tc => Tc, :Tp => Tp, :Mo => 2π * (t_ref - Tp) / P)
+    for time in (:Tc, :Tp, :Mo)
+        params = Params(; max_kplanet = 1, planet_modes = [PM_TTV],
+                          instruments = InstrumentConfig(pm = ["TESS"]), data,
+                          parametrization = ParametrizationConfig(; time),
+                          M_s = 1.0, R_s = 1.0, stability = :none,
+                          ttv_n_transits = Dict(1 => n_tr))
+        ix = params.layout.name_to_idx
+        th = Theta{Float64}(params)
+        for (k, v) in ("P_k1" => P, "sesinw_k1" => sv, "secosw_k1" => cv,
+                       "$(time)_k1" => anchor[time], "b_k1" => b, "rr_k1" => rr,
+                       "q1_TESS" => 0.3, "q2_TESS" => 0.2)
+            th.values[ix[k]] = v
+        end
+        for i in 1:n_tr
+            th.values[ix["ttv_k1_t$i"]] = 0.0
+        end
+        pred0 = phot_predictions(th, data)[1]
+        @test count(<(1), pred0) > 100                   # it transits
+        for n in 0:(n_tr - 1), δ in (0.03, -0.02)
+            th.values[ix["ttv_k1_t$(n + 1)"]] = δ
+            pred1 = phot_predictions(th, data)[1]
+            th.values[ix["ttv_k1_t$(n + 1)"]] = 0.0
+            # The model at t - δ with no offsets: transit n moved by δ.
+            shifted = Data(; t_phot = t_phot .- δ, flux = data.flux,
+                             flux_err = data.flux_err, phot_inst = data.phot_inst, t_ref)
+            pred_s = phot_predictions(th, shifted)[1]
+            here = epoch .== n
+            @test all(pred1[.!here] .== pred0[.!here])      # every other transit untouched
+            @test pred1[here] ≈ pred_s[here] atol = 1e-14  # transit n, all of it, moved by δ
+            @test any(pred1[here] .!= pred0[here])
+        end
+    end
+end
