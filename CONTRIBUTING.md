@@ -25,6 +25,10 @@ Run the whole suite locally in one process, or as the CI shards:
     julia --project=. --threads=8 test/runtests.jl
     ci/run_tests.sh 5 3 6
 
+`ci/run_tests.sh` runs under macOS's bash 3.2 as well as the image's bash 5.
+A change to it is checked with `ci/test_run_tests.sh` (seconds, no Julia) run
+under both: `/bin/bash ci/test_run_tests.sh` on a Mac, plain in the image.
+
 `test/shards.jl` lists every test file as a unit with its measured cost, and
 decides which shard runs it. **A new test file goes in that list** (a file
 missing from it is an error). A file must bring its own `using` lines: in a

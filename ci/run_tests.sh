@@ -18,6 +18,9 @@
 # Each shard writes its own log, printed whole once all have finished --
 # interleaved output from several processes is unreadable -- failing shards
 # first. Exits non-zero if any shard failed.
+#
+# It must run under macOS's bash 3.2 as well as the image's bash 5;
+# ci/test_run_tests.sh checks it under whichever bash runs that.
 set -uo pipefail
 
 n=${1:-5}
@@ -43,7 +46,11 @@ for i in $(seq 1 "$n"); do
     if [ "$(cat "$logs/$i.rc" 2>/dev/null)" = 0 ]; then passed+=("$i"); else failed+=("$i"); fi
 done
 
-for i in "${failed[@]}" "${passed[@]}"; do
+# Not "${failed[@]}": bash before 4.4 (macOS ships 3.2) calls an empty array
+# unbound under set -u and aborts -- whenever no shard failed, or none passed --
+# and the EXIT trap then deletes the logs unprinted. ${arr[@]+"${arr[@]}"}
+# expands to nothing for an empty array on every bash.
+for i in ${failed[@]+"${failed[@]}"} ${passed[@]+"${passed[@]}"}; do
     echo
     echo "================================ shard $i/$n ================================"
     cat "$logs/$i.log"
