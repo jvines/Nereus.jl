@@ -157,7 +157,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
             if ch_iad !== nothing
                 iad = iad === nothing ? ch_iad : merge_iad(iad, ch_iad)
             end
-            ch_relast = get(ch, "relast", nothing)
+            ch_relast = _as_relast(get(ch, "relast", nothing))
             if ch_relast !== nothing
                 relast = relast === nothing ? ch_relast :
                          merge_relast(relast, ch_relast)
@@ -397,6 +397,17 @@ function resolve_astrometry(spec)
     error("unknown astrometry catalogue $(repr(cat)). " *
           "Supported: gaia_dr4, hipparcos")
 end
+
+"""
+    _as_relast(x) -> RelAstromData or nothing
+
+A channel's relative astrometry. The Python client sends it as a `values` (or
+`csv`) block, the form a run_job config takes; it used to reach `Data` as a raw
+dict, which rejects it, so relative astrometry could not be fitted from Python.
+"""
+_as_relast(x) = x
+_as_relast(d::AbstractDict) = _parse_relastrom_block(d)
+_as_relast(v::AbstractVector{<:AbstractDict}) = merge_relast([_as_relast(d) for d in v])
 
 """
     fit_astrometry(; iad, hgca, gost, relast, planets, priors, ...)

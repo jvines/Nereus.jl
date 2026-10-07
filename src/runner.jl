@@ -939,6 +939,7 @@ function _parse_relastrom_block(block)
             dec_off     = Float64.(_get(vals, :dec_off; required = true)),
             ra_err      = Float64.(_get(vals, :ra_err;  required = true)),
             dec_err     = Float64.(_get(vals, :dec_err; required = true)),
+            corr        = _has(vals, :corr) ? Float64.(_get(vals, :corr)) : nothing,
             planet_idx  = Int.(_get(vals, :planet_idx; default = ones(Int,
                                                                        length(_get(vals, :t))))),
         )
