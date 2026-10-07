@@ -141,16 +141,24 @@ end
 
 """
     plot_posteriors(chains, params;
-                     output=nothing, fmt=:png, figsize=FIG_POST)
+                     output=nothing, fmt=:png, figsize=FIG_POST, max_points=200_000)
 
 Posterior scatter plots: parameter value vs log-posterior (EMPEROR style).
-Two versions per parameter: full posterior + inference region.
+Two versions per parameter: full posterior + inference region. Returns the
+full-posterior figures by parameter name.
+
+The draws are thinned to at most `max_points`, every k-th draw, the same draws
+for every parameter. Unthinned, 100 walkers x 47000 steps put 4.7M points in
+each of 32 figures and took 25 minutes; at a few hundred thousand points a
+scatter of the posterior looks the same.
 """
 function plot_posteriors(chains, params;
                           output::Union{Nothing, String}=nothing,
                           fmt::Symbol=:png,
                           save_pdf::Bool=false,
-                          figsize=FIG_POST)
+                          figsize=FIG_POST,
+                          max_points::Int=200_000)
+    figs = Dict{String, Any}()
     with_theme(nereus_theme()) do
         chain_names = Set(names(chains, :parameters))
         has_lp = :lp in chain_names
@@ -161,8 +169,10 @@ function plot_posteriors(chains, params;
             return
         end
 
-        lp = vec(Array(chains[:lp]))
-        lp_max = maximum(lp[isfinite.(lp)])
+        lp_all = vec(Array(chains[:lp]))
+        lp_max = maximum(lp_all[isfinite.(lp_all)])
+        keep = 1:cld(length(lp_all), max_points):length(lp_all)
+        lp = lp_all[keep]
 
         # EMPEROR: alpha=0.3, or 0.01 if >10k unique posteriors
         alpha = length(unique(lp)) > 10000 ? 0.01 : 0.3
@@ -170,7 +180,7 @@ function plot_posteriors(chains, params;
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            samp = vec(Array(chains[sym]))
+            samp = vec(Array(chains[sym]))[keep]
 
             # Full posterior
             fig = Figure(; size=figsize)
@@ -178,6 +188,7 @@ function plot_posteriors(chains, params;
             scatter!(ax, samp, lp;
                       color=(NEREUS_COLORS.post, alpha),
                       markersize=4, strokewidth=0)
+            figs[name] = fig
             if output !== nothing
                 mkpath(joinpath(output, "posteriors"))
                 _save_plot(joinpath(output, "posteriors", "$name.$fmt"), fig;
@@ -200,6 +211,7 @@ function plot_posteriors(chains, params;
             end
         end
     end
+    return figs
 end
 
 
