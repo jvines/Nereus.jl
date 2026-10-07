@@ -176,11 +176,13 @@ function run_job(cfg::AbstractDict)
         # the legacy unconditioned `params` block (which is inactive-slot junk in
         # a trans-dim run), so drop it.
         delete!(summary, "params")
-        _teff = (hasproperty(params.config, :T_eff) && !isnan(params.config.T_eff)) ?
-                params.config.T_eff : nothing
+        # The star block, σ's included. This read T_eff off `params.config`,
+        # which has no such field, and passed nothing else: T_eq, insolation,
+        # TSM and ESM were never computed, and every derived error bar carried
+        # the ASSUMED stellar σ's instead of the job's.
         sci = science_summary(out_dir, chains, params, data;
                               n_walkers = _ensemble_n_walkers(cfg, params),
-                              result = result, T_eff = _teff)
+                              result = result, _star_science_kwargs(star)...)
         for (k, v) in sci; k == "status" || (summary[k] = v); end
         summary["figures"] = figs
         isempty(pdfs) || (summary["figures_pdf"] = pdfs)
@@ -960,7 +962,19 @@ end
 # Star + Model + Priors + Noise
 # =====================================================================
 
+# The star block. `sigma_M_s`, `sigma_R_s` and `sigma_T_eff` are the 1σ
+# uncertainties the derived table propagates per draw (`science_derived`); one
+# left out is ASSUMED there (10% on M★, 5% on R★, 150 K on T_eff) and flagged
+# `assumed` in run_info.stellar. They were never read here, so every run_job
+# derived error bar used the assumed values whatever the star block said.
 function _build_star(s)
+    sig(k) = begin
+        v = _get(s, k; default = nothing)
+        v === nothing && return nothing
+        (v isa Real && isfinite(v) && v >= 0) ||
+            error("star.$k must be a finite number >= 0, got $(repr(v))")
+        Float64(v)
+    end
     return (;
         M_s   = _get(s, :M_s;   default = nothing),
         R_s   = _get(s, :R_s;   default = nothing),
@@ -968,7 +982,21 @@ function _build_star(s)
         J_mag = _get(s, :J_mag; default = nothing),
         K_mag = _get(s, :K_mag; default = nothing),
         Ab    = Float64(_get(s, :Ab; default = 0.3)),
+        sigma_M_s   = sig(:sigma_M_s),
+        sigma_R_s   = sig(:sigma_R_s),
+        sigma_T_eff = sig(:sigma_T_eff),
     )
+end
+
+# The star block as `science_summary` takes it: the values AND their σ's. M★
+# and R★ also reach `params.config`, which science_derived falls back on; T_eff,
+# the magnitudes, the albedo and the σ's exist only here.
+function _star_science_kwargs(star)
+    f(x) = x === nothing ? nothing : Float64(x)
+    return (; M_s = f(star.M_s), R_s = f(star.R_s), T_eff = f(star.T_eff),
+              J_mag = f(star.J_mag), K_mag = f(star.K_mag), Ab = star.Ab,
+              sigma_M_s = star.sigma_M_s, sigma_R_s = star.sigma_R_s,
+              sigma_T_eff = star.sigma_T_eff)
 end
 
 const _MASS_MODE = Dict(

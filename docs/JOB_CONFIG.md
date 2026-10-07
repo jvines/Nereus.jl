@@ -141,14 +141,23 @@ rather than a single number trusted.
                                            //   JULIA_NUM_THREADS (src/runner.jl:82-85)
   "timeout_sec": 3600,                     // optional wall-clock watchdog (see below)
 
-  // ---- Star (NamedTuple; src/runner.jl:962-971) ---------------------
+  // ---- Star (NamedTuple; src/runner.jl:964-1000) --------------------
   "star": {
     "M_s": 1.02,                           // M_sun. Needed for stability != none,
                                            //   astrometry, RM modes, and derived masses
     "R_s": null,                           // R_sun. Needed for transit fits + RM modes
-    "T_eff": null,                         // K. Drives T_eq / TSM / ESM in `derived`
-    "J_mag": null, "K_mag": null,          // mags; optional
-    "Ab": 0.3                              // Bond albedo (default 0.3)
+    "T_eff": null,                         // K. Drives T_eq / insolation / TSM / ESM in `derived`
+    "J_mag": null, "K_mag": null,          // mags; J for TSM, K for ESM
+    "Ab": 0.3,                             // Bond albedo (default 0.3), for T_eq
+    // 1σ uncertainties of M_s, R_s, T_eff. The derived table draws the star
+    // per posterior sample from these, so they are IN the derived error bars
+    // (masses, radii, densities, a, T_eq, ...). One left out is ASSUMED --
+    // 10% of M_s, 5% of R_s, 150 K -- and flagged in run_info.stellar:
+    //   "M_s": {"value": 1.02, "sigma": 0.05, "assumed": false}
+    // Must be finite and >= 0; 0 holds that quantity fixed.
+    "sigma_M_s": null,                     // M_sun
+    "sigma_R_s": null,                     // R_sun
+    "sigma_T_eff": null                    // K
   },
 
   // ---- Data (at least ONE of these; src/runner.jl:550-639) ----------
@@ -649,7 +658,7 @@ prior when that degeneracy is present.
 `run_job` always returns / writes a `summary` dict. The legacy unconditioned
 `params` block is **removed** before writing (`src/runner.jl:178`) — the
 authoritative, model-conditioned numbers live under `fitted` / `derived`
-(from `science_summary`, `src/science_tables.jl:682-734`).
+(from `science_summary`, `src/science_tables.jl:672-740`).
 
 ```jsonc
 {
@@ -687,11 +696,13 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
       // … one entry per active parameter
     }
   },
-  "derived": {                              // physical quantities; skipped if stellar params unset
+  "derived": {                              // physical quantities; each needs its stellar inputs
+    // stellar: the star the table was drawn from, per quantity
+    //   { "M_s": {"value": 1.02, "sigma": 0.05, "assumed": false}, "R_s": {…}, "T_eff": {…} }
     "conditioning": { "n_planets": 1, "planet_slots": [1], "stellar": { /*…*/ } },
     "parameters": {
-      "msini_earth_k1": { /*…*/ }, "a_au_k1": { /*…*/ }, "T_eq_k1": { /*…*/ },
-      "rho_p_cgs_k1": { /*…*/ }, "tsm_k1": { /*…*/ }, "esm_k1": { /*…*/ }
+      "msini_earth_k1": { /*…*/ }, "a_au_k1": { /*…*/ }, "Teq_k1": { /*…*/ },
+      "density_gcc_k1": { /*…*/ }, "TSM_k1": { /*…*/ }, "ESM_k1": { /*…*/ }
     }
   },
   "model_selection": {                      // occupancy = P(component | D)
