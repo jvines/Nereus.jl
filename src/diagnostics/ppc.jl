@@ -56,7 +56,7 @@ Fields:
   - `rv_chi2_per_inst`, `rv_dof_per_inst`, `rv_red_chi2_per_inst` — at median model
   - `rv_chi2_per_draw::Vector{Float64}` — total RV χ² for each posterior draw
   - `rv_pgram` — `GLSPgram` of median-model residuals (or `nothing` if too few points)
-  - `rv_acf_lags`, `rv_acf` — autocorrelation of median-model residuals (binned uniformly)
+  - `rv_acf_lags`, `rv_acf` — autocorrelation of median-model residuals (binned uniformly, occupied bins only; NaN at lags no pair reaches)
 - PM block — analogous fields for photometry.
 - `summary::Dict{String, Any}` — flat dictionary of summary stats for `summary.json`.
 """
@@ -331,7 +331,7 @@ function posterior_predictive_check(chains, params::Params, data::Data;
             summary["rv_residual_top_peak_power"]  = top.power
             summary["rv_residual_top_peak_fap"]    = top.fap
         end
-        if !isempty(rv_acf_vals) && length(rv_acf_vals) > 1
+        if length(rv_acf_vals) > 1 && isfinite(rv_acf_vals[2])
             summary["rv_residual_acf_lag1"] = rv_acf_vals[2]
         end
     end
@@ -349,7 +349,7 @@ function posterior_predictive_check(chains, params::Params, data::Data;
         summary["phot_red_chi2_per_draw_p50"] = quantile(red_per_draw, 0.50)
         summary["phot_red_chi2_per_draw_p84"] = quantile(red_per_draw, 0.84)
 
-        if !isempty(phot_acf_vals) && length(phot_acf_vals) > 1
+        if length(phot_acf_vals) > 1 && isfinite(phot_acf_vals[2])
             summary["phot_residual_acf_lag1"] = phot_acf_vals[2]
         end
     end
@@ -429,9 +429,17 @@ function _theta_from_row(chains_flat::Dict{Symbol, Vector{Float64}},
     return theta
 end
 
-# Bin residuals onto a uniform grid and compute the normalised
-# autocorrelation via FFT (Wiener-Khinchin), same pattern as
-# `find_rotation_period`. Returns up to 25% of the binned length.
+# Bin residuals onto a uniform grid at the median cadence and compute the
+# normalised autocorrelation via FFT (Wiener-Khinchin) from OCCUPIED bins
+# only: the zero-filled residual series and the occupancy mask are
+# autocorrelated separately and divided, so each lag is the mean product over
+# pairs of real bins (the gapped-ACF estimator). Lags no pair of occupied bins
+# reaches are NaN. Returns up to 25% of the binned length.
+#
+# Empty bins used to be filled by linear interpolation. On sparse data most
+# bins are empty, the series became straight lines between the real points,
+# and lag 1 came out near 1 whatever the residuals: 0.81 on 36 RVs over 561 d
+# whose time-ordered lag-1 correlation is 0.02, and 0.997 on gapped photometry.
 function _residual_acf(t::Vector{Float64}, r::Vector{Float64};
                         cadence::Union{Nothing, Float64} = nothing,
                         max_lag_fraction::Float64 = 0.25)
@@ -445,30 +453,32 @@ function _residual_acf(t::Vector{Float64}, r::Vector{Float64};
     sums = zeros(Float64, n_bins)
     counts = zeros(Int, n_bins)
     @inbounds for i in eachindex(t)
+        isfinite(r[i]) || continue
         b = clamp(Int(round((t[i] - t0) / dt)) + 1, 1, n_bins)
         sums[b] += r[i]
         counts[b] += 1
     end
-    binned = [counts[i] > 0 ? sums[i] / counts[i] : NaN for i in 1:n_bins]
+    occ = counts .> 0
+    count(occ) >= 2 || return (Float64[], Float64[])
+    μ = sum(sums[occ] ./ counts[occ]) / count(occ)
+    y = [occ[i] ? sums[i] / counts[i] - μ : 0.0 for i in 1:n_bins]
 
-    # Linear-interpolate empty bins.
-    _fill_nans_linear!(binned)
-    μ = mean(binned)
-    y = binned .- μ
-
-    n_pad = nextpow(2, 2 * length(y))
-    pad = zeros(Float64, n_pad)
-    pad[1:length(y)] .= y
-    F = rfft(pad)
-    @inbounds for k in eachindex(F)
-        F[k] = F[k] * conj(F[k])
+    n_pad = nextpow(2, 2 * n_bins)
+    function _autocorr(x)
+        pad = zeros(Float64, n_pad)
+        pad[1:n_bins] .= x
+        F = rfft(pad)
+        @inbounds for k in eachindex(F)
+            F[k] = F[k] * conj(F[k])
+        end
+        return irfft(F, n_pad)[1:n_bins]
     end
-    ac = irfft(F, n_pad)[1:length(y)]
-    ac[1] != 0 || return (Float64[], Float64[])
+    num = _autocorr(y)
+    npair = _autocorr(Float64.(occ))       # pairs of occupied bins per lag
+    ac = [npair[k] > 0.5 ? num[k] / npair[k] : NaN for k in 1:n_bins]
+    ac[1] > 0 || return (Float64[], Float64[])
     ac ./= ac[1]
     max_lag = max(1, Int(floor(length(ac) * max_lag_fraction)))
     lags = collect(0:max_lag) .* dt
     return (lags, ac[1:length(lags)])
 end
-
-# `_fill_nans_linear!` is reused from `preprocessing/rotation_period.jl`.

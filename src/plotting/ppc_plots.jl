@@ -160,6 +160,10 @@ function _ppc_acf_axis!(fig, row::Int,
                yticks = Makie.WilkinsonTicks(3))
     hlines!(ax, [0.0]; color = NEREUS_COLORS.zero_line,
              linestyle = :dash, linewidth = 1.0)
-    lines!(ax, lags, acf; color = NEREUS_COLORS.post, linewidth = 1.4)
+    # Lags no pair of observations reaches are NaN: join the measured lags
+    # only, marked, so sparse sampling reads as sparse.
+    ok = isfinite.(acf)
+    scatterlines!(ax, lags[ok], acf[ok]; color = NEREUS_COLORS.post,
+                  linewidth = 1.4, markersize = 4)
     return ax
 end
