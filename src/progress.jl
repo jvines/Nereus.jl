@@ -158,17 +158,13 @@ function _bar(frac::Float64, width::Int)
     return "▕" * "█"^filled * "░"^(width - filled) * "▏"
 end
 
+# Rounds to whole seconds BEFORE splitting into units: rounding only the
+# remainder printed 1919.6 s as "31m60s" and 59.6 s as "60s".
 function _time_fmt(s::Real)
-    s < 0 && (s = 0)
-    if s < 60
-        return @sprintf("%.0fs", s)
-    elseif s < 3600
-        return @sprintf("%dm%02ds", floor(Int, s / 60),
-                         round(Int, mod(s, 60)))
-    else
-        return @sprintf("%dh%02dm", floor(Int, s / 3600),
-                         floor(Int, mod(s, 3600) / 60))
-    end
+    n = round(Int, max(s, 0))
+    n < 60   && return "$(n)s"
+    n < 3600 && return @sprintf("%dm%02ds", n ÷ 60, n % 60)
+    return @sprintf("%dh%02dm", n ÷ 3600, (n % 3600) ÷ 60)
 end
 
 _fmt(x::Integer) = string(x)
