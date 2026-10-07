@@ -288,9 +288,10 @@ end
 # to ~10⁶ periods; plus 8 ulp of the epoch for the rounding of Tc itself.
 #
 # Inf (no bound: every cadence is evaluated) when s >= 1 at r_min = a_R(1-e)
-# (periastron within 1 + k stellar radii), when e is outside [0, 0.9999) (above
-# that `true_anomaly` clamps e, so the kernels' f is not the f of this map), or
-# when an input is not a finite positive number. A b that is not finite is
+# (periastron within 1 + k stellar radii), when e is outside [0, 0.9999) (the
+# range the bound is tested over; it used to be where `true_anomaly` clamped e,
+# and above it periastron lies within 1 + k of the star anyway unless
+# a_R > 10⁴), or when an input is not a finite positive number. A b that is not finite is
 # taken as 0, the bound without the cos i term.
 
 # Plain Float64 of a likelihood input (strips ForwardDiff duals). A type it

@@ -15,8 +15,8 @@
 # and leave their rounding, up to 3.6e-7 relative in the samples measured.
 #
 # That holds because the evaluator takes the allocating methods at any planet
-# whose e `true_anomaly` clamps (outside [0, 0.9999]), where the workspace
-# methods compute another model, and for the photometry of a fit with a
+# whose e `true_anomaly` clamps (outside [0, 1), or NaN), where the workspace
+# methods would compute another model, and for the photometry of a fit with a
 # gravity-darkened planet. There it gives the same bits as `_logdensity_parts`.
 using Test, Nereus, Random, MCMCChains
 using Nereus: _BridgeEvaluator, _bridge_logdensity!, _logdensity_parts
@@ -355,14 +355,14 @@ end
     @test maximum(abs(got[i] - ref[i]) for i in 61:160 if fin[i]) < 1e-8
 end
 
-# Eccentricities that `true_anomaly` clamps. The allocating RV and transit
-# methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
-# the workspace photometry, and the workspace RV of a fit with no noise models,
-# use the e they are given. Above 0.9999 those are two models, nats apart, not one
-# model rounded two ways. The evaluator takes the allocating methods wherever a
-# planet's e is clamped, so there it must give the same bits as
-# `_logdensity_parts`; just below the clamp it keeps the workspace methods and
-# agrees to rounding.
+# Eccentricities close to 1. The allocating RV and transit methods take the
+# true anomaly from `true_anomaly`; the workspace photometry, and the workspace
+# RV of a fit with no noise models, use the e they are given. `true_anomaly`
+# clamped e to 0.9999, and above that those were two models, nats apart, so the
+# evaluator took the allocating methods there. The clamp now leaves every e < 1
+# alone (it acts only on the e outside [0, 1) that every likelihood rejects):
+# up to e = 0.9999999 the evaluator keeps the workspace methods and agrees with
+# `_logdensity_parts` to rounding.
 #
 # The planet blocks are abstractly typed, so `planet_e_w`'s result is boxed.
 # `_bridge_e_clamped` asserts its type, and must then allocate no more than
@@ -394,7 +394,7 @@ function _bw_ew_target(t, rv)
     return Nereus.NereusTarget(params, d; unconstrained = true)
 end
 
-@testset "bridge evaluator where true_anomaly clamps e" begin
+@testset "bridge evaluator at e close to 1" begin
     rng = MersenneTwister(43)
     t = sort!(500 .* rand(rng, 80))
     rv = 25 .* sin.(2π .* (t .- 1.0) ./ 7.3) .+ 3 .* randn(rng, 80)
@@ -424,22 +424,29 @@ end
         th = Nereus.Theta{Float64}(tg.params)
         clamped(y) = (Nereus.set_unfrozen!(th, Nereus.transform_inverse(y, tg.transform));
                       Nereus._bridge_e_clamped(th))
-        @test all(clamped, hi)
+        @test !any(clamped, hi)
         @test !any(clamped, lo)
+        # NaN still is; so is e >= 1 under :sesinw (the :ew prior stops at 1).
+        xn = copy(best); xn[j1] = NaN
+        Nereus.set_unfrozen!(th, xn)
+        @test Nereus._bridge_e_clamped(th)
+        if ew === :sesinw
+            x1 = copy(best); x1[j1] = 0.8; x1[j2] = 0.8
+            Nereus.set_unfrozen!(th, x1)
+            @test Nereus._bridge_e_clamped(th)
+        end
         # The check costs no more than decoding e with the type asserted: the
         # comparison after it allocates nothing.
         _bw_alloc_ec(th); _bw_alloc_ew(th)
         @test _bw_alloc_ec(th) <= _bw_alloc_ew(th)
         ev = _BridgeEvaluator(tg)
-        ref_hi = [_ref(tg, y) for y in hi]
-        got_hi = [_bridge_logdensity!(ev, y) for y in hi]
-        @test count(isfinite, ref_hi) >= 24
-        @test all(got_hi .=== ref_hi)
-        ref_lo = [_ref(tg, y) for y in lo]
-        got_lo = [_bridge_logdensity!(ev, y) for y in lo]
-        fin = isfinite.(ref_lo)
-        @test isfinite.(got_lo) == fin
-        @test count(fin) >= 12
-        @test maximum(abs.(got_lo[fin] .- ref_lo[fin]) ./ max.(1.0, abs.(ref_lo[fin]))) < 1e-12
+        for ys in (hi, lo)
+            ref = [_ref(tg, y) for y in ys]
+            got = [_bridge_logdensity!(ev, y) for y in ys]
+            fin = isfinite.(ref)
+            @test isfinite.(got) == fin
+            @test count(fin) >= length(ys) ÷ 2
+            @test maximum(abs.(got[fin] .- ref[fin]) ./ max.(1.0, abs.(ref[fin]))) < 1e-12
+        end
     end
 end

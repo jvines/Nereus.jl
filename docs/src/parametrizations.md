@@ -146,9 +146,10 @@ according to this choice (`src/model.jl:1460`–`1470`, decoded in
   Poorly conditioned at low `e` (ω unconstrained), so prefer `:sesinw`
   unless you specifically need a named `e` prior.
 
-`true_anomaly` (`src/orbit.jl:31`) and the conversions clamp `e` into
-`[0, 0.9999]` defensively because the unconstrained sampler can
-transiently propose `s²+c² > 1`.
+`true_anomaly` (`src/orbit.jl`) and the astrometric orbit clamp `e` into
+`[0, 1)` defensively because the unconstrained sampler can transiently
+propose `s²+c² > 1`. Every likelihood rejects `e ∉ [0, 1)` first, so the
+clamp never changes the `e` a likelihood evaluates.
 
 !!! note "External `e` prior"
     You don't have to switch to `:ew` to impose an `e` prior. The

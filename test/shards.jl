@@ -146,6 +146,8 @@ const TEST_UNITS = [
     # The bridge-sampling evaluator through the workspace likelihoods.
     (name = "test_bridge_workspace.jl", seconds = 14, files = ["test_bridge_workspace.jl"]),
     (name = "test_bridge_threading.jl", seconds = 3, files = ["test_bridge_threading.jl"]),
+    # The workspace and allocating likelihoods at e up to 0.99999.
+    (name = "test_high_e_workspace.jl", seconds = 15, files = ["test_high_e_workspace.jl"]),
     # Evidence estimators that do not temper from the prior, and the Rajpaul
     # kernel gradient check: all three carried assertions but were not run
     # until they were listed.

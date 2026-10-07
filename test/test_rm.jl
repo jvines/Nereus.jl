@@ -312,9 +312,12 @@ end
     @test worst["0.95 <= e <= 0.999"] < 1e-10
     @test n_flip == 0
 
-    # The true anomaly's e: clamped to 0.9999 as `true_anomaly` does, unless the
-    # caller passes its own (the workspace refresh of an ordinary planet).
-    @test _sky_orbit(3.0, 0.99995, 0.3, 0.0, 0.2, 400.0).ef == 0.9999
+    # The true anomaly's e: clamped into [0, 1) as `true_anomaly` does, which
+    # leaves every e < 1 alone (it was clamped to 0.9999), unless the caller
+    # passes its own (the workspace refresh of an ordinary planet).
+    @test _sky_orbit(3.0, 0.99995, 0.3, 0.0, 0.2, 400.0).ef == 0.99995
+    @test _sky_orbit(3.0, 1.2, 0.3, 0.0, 0.2, 400.0).ef == prevfloat(1.0)
+    @test _sky_orbit(3.0, -0.1, 0.3, 0.0, 0.2, 400.0).ef == 0.0
     @test _sky_orbit(3.0, 0.99995, 0.3, 0.0, 0.2, 400.0, 0.99995).ef == 0.99995
     # Kepler's equation is skipped only for an e that is zero and fixed.
     @test _sky_orbit(3.0, ForwardDiff.Dual(0.0, 0.0), 0.3, 0.0, 0.2, 8.0).circ

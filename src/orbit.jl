@@ -28,8 +28,10 @@ Compute the true anomaly `f` from eccentric anomaly `E` and eccentricity
 For `e = 0`, `f = E` (modulo branch). For `e → 1`, behaves correctly as
 long as `E ≠ π`.
 
-`e` is clamped to `[0, 0.9999]` (`_anomaly_e`), so the square roots exist
-for any input.
+`e` is taken as given on `[0, 1)` and moved to the nearer end outside it
+(`_anomaly_e`), so the square roots exist for any input. Every likelihood
+rejects `e ∉ [0, 1)` before it computes an orbit, so there the true anomaly
+is always that of the `e` the rest of the model uses.
 """
 @inline function true_anomaly(E::Real, e::Real)
     e_safe = _anomaly_e(e)
@@ -39,17 +41,25 @@ for any input.
     return 2 * atan(sqrt_one_plus * sinE2, sqrt_one_minus * cosE2)
 end
 
-# The eccentricity `true_anomaly` uses: e clamped to [0, 0.9999]. A sampler can
-# transiently propose e < 0 or e > 1 (sesinw and secosw are mapped
-# independently, and nothing enforces s² + c² < 1), and post-fit consumers
-# iterate stale trans-dim slots; this keeps the square roots real for them.
+# The eccentricity `true_anomaly` uses: e itself on [0, 1), the nearer end
+# outside it (the largest Float64 below 1 above it). A sampler can transiently
+# propose e < 0 or e >= 1 (sesinw and secosw are mapped independently, and
+# nothing enforces s² + c² < 1), and post-fit consumers iterate stale trans-dim
+# slots; this keeps the square roots real for them, and finite, so that a
+# constant e there gives zero partials rather than 0 × Inf.
 #
-# `clamp`, not `min(max(e, 0), 0.9999)`: Base's `max` returns its second
-# argument on a tie, so at e = 0 `max(e, zero(e))` was the constant zero and a
+# The upper end was 0.9999. The likelihoods accept any e < 1, so above 0.9999
+# the true anomaly came from another e than Kepler's equation and r/a did, and
+# the methods that compute cos f and sin f from E with the e they are given
+# (the workspace photometry, and the workspace RV of a fit with no noise
+# models) computed a different model from the ones that call `true_anomaly`.
+#
+# `clamp`, not `min(max(e, 0), ...)`: Base's `max` returns its second argument
+# on a tie, so at e = 0 `max(e, zero(e))` was the constant zero and a
 # ForwardDiff (or traced) ∂/∂e was lost there. `clamp` returns e itself
 # whenever it lies inside the interval or on its ends, partials included.
 # NaN stays NaN.
-@inline _anomaly_e(e::Real) = clamp(e, zero(e), oftype(e, 0.9999))
+@inline _anomaly_e(e::Real) = clamp(e, zero(e), oftype(e, prevfloat(1.0)))
 
 # ---------------------------------------------------------------------
 # RV Keplerian model (Mo parametrization)

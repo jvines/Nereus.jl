@@ -315,11 +315,14 @@ _bridge_phot_ws(params) = !any(has_gd, params.config.planet_modes)
     _bridge_e_clamped(theta) -> Bool
 
 Whether `true_anomaly` (orbit.jl) clamps the eccentricity of any active planet,
-that is whether some planet's e lies outside [0, 0.9999] (or is NaN). The
+that is whether some planet's e lies outside [0, 1) (or is NaN). The
 allocating RV and transit methods take the true anomaly from `true_anomaly`;
 the workspace photometry, and the workspace RV of a fit with no noise models,
 compute cos f and sin f from E with the e they are given. Outside that interval
-the two compute different models, not the same model with different rounding.
+the two compute different models, not the same model with different rounding;
+every likelihood rejects such an e, so in practice this sends only a NaN e to
+the allocating methods. (The clamp was to [0, 0.9999] up to Nereus 0.8.3, and
+then this test was what kept the bridge on one model above 0.9999.)
 
 The planet blocks are abstractly typed, so `planet_e_w` is not inferred and its
 result is boxed. A call allocates what `planet_e_w(theta, k)::Tuple{T, T}` does
@@ -356,16 +359,15 @@ different model, and for gravity-darkened photometry:
   fits at the bits of `_logdensity_parts`. TTV fits, exposures longer than
   3 min and photometric noise models are handed over by the workspace method
   itself.
-- Eccentricity outside [0, 0.9999] (`_bridge_e_clamped`): the allocating
-  methods take the true anomaly from `true_anomaly`, which clamps e to 0.9999;
-  the workspace photometry, and the workspace RV of a fit with no noise models,
-  use the given e. Above 0.9999 the two differ by much more than rounding: on an RV +
-  transit fit with a 20k-point light curve, up to 8.6 nats in the RV and
-  8.1e4 nats in the photometry; in the RV, 5.8 nats on an SB2 fit and 2.5 on
-  the HD 18599 white-noise fit without the floor. At those points both the RV
-  and the photometry take the allocating methods. This follows
-  `_logdensity_parts`, as the bridge did before it used the workspace;
-  pt_emcee's own likelihood (`eval_bounded!`) keeps the given e there.
+- Eccentricity outside [0, 1), or NaN (`_bridge_e_clamped`): the allocating
+  methods take the true anomaly from `true_anomaly`, which clamps e into
+  [0, 1); the workspace photometry, and the workspace RV of a fit with no
+  noise models, use the given e. Every likelihood rejects e outside [0, 1),
+  so this matters only for a NaN e. Up to Nereus 0.8.3 `true_anomaly` clamped
+  at 0.9999, and above that the two differed by much more than rounding (on
+  an RV + transit fit with a 20k-point light curve, up to 8.6 nats in the RV
+  and 8.1e4 nats in the photometry); the clamp now leaves every e < 1 alone,
+  and the two methods compute one model there.
 
 With that it is the same function as `_logdensity_parts` up to rounding at
 every point, but not to the bit:

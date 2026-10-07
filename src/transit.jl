@@ -330,10 +330,11 @@ end
 # i.e. a fixed e -- E = M and Kepler's equation is not solved; a free e that
 # happens to be zero keeps the solver, so ∂/∂e still propagates.
 #
-# `ef` is the e of the true anomaly: `true_anomaly`'s clamp to [0, 0.9999] by
+# `ef` is the e of the true anomaly: `true_anomaly`'s clamp (`_anomaly_e`) by
 # default, as `planet_sky_position` and `sky_separation` have it, or e itself for
-# the workspace refresh of an ordinary planet, which never clamped (see
-# `_bridge_e_clamped`). The two agree for every e ≤ 0.9999.
+# the workspace refresh of an ordinary planet, which never clamped. The two agree
+# for every e in [0, 1), every e a likelihood evaluates an orbit at. (The clamp
+# was to [0, 0.9999], and above 0.9999 the two were different models.)
 struct _SkyOrbit{T}
     P::T
     Tp::T
