@@ -7,6 +7,24 @@
 # selects whether one set of coefficients applies to all cadences
 # (global) or each instrument has its own and the sequential
 # correlation only runs within an instrument's cadences.
+#
+# "Previous" means previous IN TIME. Both run over the cadences in time
+# order whatever order they are stored in (RVs concatenated instrument by
+# instrument, say): taken in storage order, an earlier lag would sit later in
+# time, dt would be negative and exp(-dt/β) would blow up. Ties keep their
+# storage order. The result is written back in the caller's order.
+
+# `f!(x, times, inst, theta, model)` run over the cadences in time order:
+# x, times and inst permuted by a stable sortperm, and the result scattered
+# back into `x`.
+function _in_time_order!(f!, x::AbstractVector, times::Vector{Float64},
+                         inst::AbstractVector{Int}, theta, model)
+    p = sortperm(times)
+    xs = x[p]
+    f!(xs, times[p], inst[p], theta, model)
+    x[p] = xs
+    return x
+end
 
 """
     apply_ma!(residuals, times, inst, theta, model)
@@ -16,11 +34,14 @@ Apply MA(p) correction to residuals in-place. Sequential:
 
 `inst` is the per-cadence 1-based instrument index (`data.rv_inst`
 for `:rv` or `data.phot_inst` for `:phot`). The per-instrument path
-restricts the lag chain to within-instrument cadences.
+restricts the lag chain to within-instrument cadences. Lags are taken in
+time order; `times` need not be sorted.
 """
 function apply_ma!(residuals::AbstractVector{T}, times::Vector{Float64},
                     inst::AbstractVector{Int},
                     theta::Theta{T}, model::MAModel) where {T}
+    issorted(times) || return _in_time_order!(apply_ma!, residuals, times, inst,
+                                              theta, model)
     layout = theta.params.layout
     p = model.order
     s = _channel_suffix(model.channel)
@@ -98,11 +119,14 @@ AR on model, not residuals).
 `predictions[i] += sum_j phi_j * exp(-dt/alpha_j) * predictions[i-j]`
 
 `inst` is the per-cadence 1-based instrument index. Per-instrument
-mode restricts the lag chain to within-instrument cadences.
+mode restricts the lag chain to within-instrument cadences. Lags are taken
+in time order; `times` need not be sorted.
 """
 function apply_ar!(predictions::AbstractVector{T}, times::Vector{Float64},
                     inst::AbstractVector{Int},
                     theta::Theta{T}, model::ARModel) where {T}
+    issorted(times) || return _in_time_order!(apply_ar!, predictions, times, inst,
+                                              theta, model)
     layout = theta.params.layout
     q = model.order
     s = _channel_suffix(model.channel)
