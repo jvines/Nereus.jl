@@ -342,9 +342,15 @@ Fit transit photometry alone.
 
     fit_transit(Dict("TESS" => (t = bjd, flux = f, flux_err = ferr)))
 
-`gravity_darkening=true` selects the oblate von Zeipel/Barnes model
-(GD_SOURCE), which constrains stellar inclination i* separately from λ —
-unreachable from a symmetric transit.
+Limb darkening is quadratic, sampled as Kipping's (q1, q2) per instrument
+(`:quadratic` or `:kipping`). Sampling ρ★ and a
+prior on it (`model.parametrization.use_rho_s` with an `external_priors` entry
+on `rho_s`, in solar units) and the gravity-darkened transit (planet mode
+`PM_GD`, GD_SOURCE, which constrains i* separately from λ) are `run_job`
+options; this entry point builds neither. `limb_darkening`, `rho_star` and
+`gravity_darkening` are accepted at their defaults only and throw otherwise:
+they were never read, so `gravity_darkening = true` fitted a symmetric transit
+and said nothing.
 """
 function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
                      rho_star = nothing, gravity_darkening = false,
@@ -353,6 +359,17 @@ function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
                 science::Bool = true, output = nothing, stopping = nothing,
                      output_dir = nothing, kwargs...)
     _require_instrument_map(phot, "transit", (:t, :flux, :flux_err))
+    Symbol(limb_darkening) in (:quadratic, :kipping) || throw(ArgumentError(
+        "fit_transit: limb_darkening = $(repr(limb_darkening)) is not implemented; " *
+        "the transit model is quadratic, sampled in Kipping's (q1, q2)"))
+    rho_star === nothing || throw(ArgumentError(
+        "fit_transit: `rho_star` was never read. A stellar-density prior needs ρ★ " *
+        "sampled (model.parametrization.use_rho_s) and an external_priors entry " *
+        "on rho_s, in solar units -- run_job options"))
+    gravity_darkening == false || throw(ArgumentError(
+        "fit_transit: `gravity_darkening` was never read, and this entry point " *
+        "does not build a gravity-darkened transit; use run_job with " *
+        "planet_modes = [\"PM_GD\"]"))
     star, kwargs = _split_star_kwargs(kwargs)
     tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf, science, output,
