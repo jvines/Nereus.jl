@@ -303,6 +303,14 @@ what the jitter and offset terms are keyed on, so there is no unnamed form:
 
 `planets` is an integer for a fixed-dimension fit or a range for
 trans-dimensional model selection over planet count.
+
+Stellar keywords are those of a `run_job` star block. `M_s` and `R_s` (M☉, R☉)
+are model keywords. `T_eff` (K), `J_mag`, `K_mag`, `Ab` (Bond albedo, default
+0.3) and the 1σ uncertainties `sigma_M_s`, `sigma_R_s` and `sigma_T_eff` feed
+only the derived table, which draws M★, R★ and T_eff per sample from them; a σ
+left out is assumed (10% of M★, 5% of R★, 150 K) and flagged `assumed` in
+`run_info.stellar`. The same keywords apply to `fit_transit`,
+`fit_astrometry` and `fit_joint`.
 """
 function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
@@ -318,9 +326,11 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
         allrv = reduce(vcat, [collect(x.rv) for x in d])
         planets = _planet_spec(planets; block = default_rv_planet(allt, allrv))
     end
+    star, kwargs = _split_star_kwargs(kwargs)
     tgt = _target_from([ch], planets;
                        trend_order, noise_models = noise, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim, plots, plot_kwargs, save_pdf, science, output)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim, plots, plot_kwargs, save_pdf, science, output,
+                   star)
 end
 
 """
@@ -343,8 +353,10 @@ function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
                 science::Bool = true, output = nothing, stopping = nothing,
                      output_dir = nothing, kwargs...)
     _require_instrument_map(phot, "transit", (:t, :flux, :flux_err))
+    star, kwargs = _split_star_kwargs(kwargs)
     tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf, science, output)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf, science, output,
+                   star)
 end
 
 """
@@ -430,8 +442,10 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
               "relast" => relast)
     planets isa NamedTuple ||
         (planets = _planet_spec(planets; block = default_astrom_planet()))
+    star, kwargs = _split_star_kwargs(kwargs)
     tgt = _target_from([ch], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf, science, output)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf, science, output,
+                   star)
 end
 
 
@@ -451,8 +465,10 @@ function fit_joint(channels...; planets = 1, engine = nothing, transdim = nothin
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
+    star, kwargs = _split_star_kwargs(kwargs)
     tgt = _target_from(collect(channels), planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output,
+                   star)
 end
 
 # ---------------------------------------------------------------------------
@@ -662,6 +678,21 @@ function _M_s_of(target)
     (ms === nothing || (ms isa Real && isnan(ms))) ? nothing : ms
 end
 
+# The stellar keywords the derived table needs and the model does not: T_eff,
+# the J/K magnitudes, the Bond albedo and the 1σ's of M★, R★ and T_eff -- the
+# keys of a job's star block other than M_s and R_s, which are model keywords
+# and go to the target. Split off before `_target_from`, which takes none of
+# them, and handed to `_finish`.
+const _STAR_DERIVED_KEYS = (:T_eff, :J_mag, :K_mag, :Ab,
+                            :sigma_M_s, :sigma_R_s, :sigma_T_eff)
+function _split_star_kwargs(kwargs)
+    star = Dict{Symbol,Any}(k => v for (k, v) in pairs(kwargs)
+                            if k in _STAR_DERIVED_KEYS)
+    rest = (; (k => v for (k, v) in pairs(kwargs)
+               if !(k in _STAR_DERIVED_KEYS))...)
+    return star, rest
+end
+
 """Coerce a `transdim=` argument into a `TransDimConfig`.
 
 `max_k` comes from the built target, so `planets` is the single place the
@@ -689,7 +720,7 @@ _as_td(td, max_k) = throw(ArgumentError(
 function _finish(target, engine, stopping, output_dir; op::String,
                 science::Bool = true, output = nothing,
                  transdim = nothing, plots = nothing, plot_kwargs = nothing,
-                 save_pdf::Bool = false)
+                 save_pdf::Bool = false, star = Dict{Symbol,Any}())
     t0 = time()
     # `Stopping` is exported, documented, and plumbed all the way through the
     # Python client -- and NOTHING in the package consumes it. Not _finish, not
@@ -708,6 +739,13 @@ function _finish(target, engine, stopping, output_dir; op::String,
             "There is no wall-clock cap in Nereus -- `max_seconds` has no " *
             "implementation anywhere."))
     end
+    # The star as a job's star block holds it: M★ and R★ from the target, the
+    # rest (T_eff, magnitudes, albedo, σ's) from the entry point's keywords.
+    # Built before the engine runs, so a bad σ fails here and not after it.
+    _cfg = target.params.config
+    _rs = hasproperty(_cfg, :R_s) && !isnan(_cfg.R_s) ? Float64(_cfg.R_s) : nothing
+    st = _build_star(merge(Dict{Symbol,Any}(:M_s => _M_s_of(target), :R_s => _rs),
+                           Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(star))))
     td = _as_td(transdim, target.params.config.max_kplanet)
     # Engine defaults by SHAPE, so the trans-dim and fixed-dim paths are
     # symmetric: you ask for trans-dim by saying `transdim=`, not by also
@@ -763,15 +801,13 @@ function _finish(target, engine, stopping, output_dir; op::String,
         # needs them silently never computed: planet_radius, planet_density,
         # equilibrium_temperature, incident_flux, TSM, ESM. The values are
         # sitting on target.params.config; nothing was reading them.
-        _cfg = target.params.config
-        _fin(x) = (x isa Real && !isnan(float(x))) ? float(x) : nothing
+        # T_eff and the magnitudes were read off the config too, which has no
+        # such fields, so T_eq, insolation, TSM and ESM still never computed.
+        # They arrive as keywords now, as in a job's star block (`star`).
         summary["derived"] = chains === nothing ? Dict() :
             summarize_derived(chains, target.params;
-                              M_s   = _M_s_of(target),
-                              R_s   = hasproperty(_cfg, :R_s)   ? _fin(_cfg.R_s)   : nothing,
-                              T_eff = hasproperty(_cfg, :T_eff) ? _fin(_cfg.T_eff) : nothing,
-                              J_mag = hasproperty(_cfg, :J_mag) ? _fin(_cfg.J_mag) : nothing,
-                              K_mag = hasproperty(_cfg, :K_mag) ? _fin(_cfg.K_mag) : nothing)
+                              M_s   = st.M_s, R_s = st.R_s, T_eff = st.T_eff,
+                              J_mag = st.J_mag, K_mag = st.K_mag, Ab = st.Ab)
     catch err
         summary["derived_error"] = sprint(showerror, err)
     end
@@ -877,12 +913,9 @@ function _finish(target, engine, stopping, output_dir; op::String,
                 # science contract. `_finish` must NOT -- `JobResult.params` is
                 # the documented accessor on this path and dropping it would
                 # break every existing caller. Both blocks coexist.
-                _teff = (hasproperty(target.params.config, :T_eff) &&
-                         !isnan(target.params.config.T_eff)) ?
-                        target.params.config.T_eff : nothing
                 sci = science_summary(output_dir, chains, target.params, target.data;
                                        n_walkers = _ensemble_n_walkers(cfg, target.params),
-                                       result = raw, T_eff = _teff)
+                                       result = raw, _star_science_kwargs(st)...)
                 # NOT `figures`. science_summary returns
                 #   "figures" => Dict{String,Any}()   # filled by the plotting layer
                 # as a placeholder, and copying every key blindly overwrote the

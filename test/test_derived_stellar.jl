@@ -5,7 +5,8 @@
 # run_job never read the σ's -- nor T_eff, the magnitudes or the albedo -- so
 # every derived error bar was built on the ASSUMED σ's (10% of M★, 5% of R★,
 # 150 K), and T_eq, insolation, TSM and ESM were never computed at all. Found by
-# rebuilding an NGTS-33 summary by hand.
+# rebuilding an NGTS-33 summary by hand. The fit_* entry points had the same
+# hole, behind a read of `config.T_eff`, a field the config does not have.
 
 using Test, Nereus, Random, Statistics
 include(joinpath(@__DIR__, "fixtures", "easy_rv_target.jl"))
@@ -56,4 +57,28 @@ end
     # T_eq needs T_eff, which run_job never passed
     @test haskey(d, "Teq_k1")
     @test _rel(d["Teq_k1"]) > 0.09         # T_eff 6.9%, R★^(1/2) 5%, M★^(-1/6) 5%
+end
+
+@testset "fit_rv: the same keywords, the same propagation" begin
+    rng = MersenneTwister(5)
+    t = sort!(200 .* rand(rng, 40))
+    rv = 15 .* sin.(2π .* t ./ 12.3) .+ randn(rng, 40)
+    pri = Dict("P_k1" => UniformPrior(12.29, 12.31), "K_k1" => UniformPrior(14.9, 15.1))
+    r = fit_rv(Dict("SIM" => (t = t, rv = rv, rv_err = fill(1.0, 40)));
+               planets = 1, priors = pri, M_s = 1.0, R_s = 1.0, T_eff = 5800.0,
+               sigma_M_s = _SIG_M, sigma_T_eff = 400.0,
+               engine = Dict("engine" => "pt_emcee",
+                             "options" => Dict("n_temps" => 2, "n_walkers" => 16,
+                                               "n_steps" => 200, "n_burnin" => 50)),
+               output_dir = mktempdir())
+    s = r.summary
+    @test s["run_info"]["stellar"]["M_s"]["sigma"] == _SIG_M
+    @test s["run_info"]["stellar"]["M_s"]["assumed"] == false
+    @test s["run_info"]["stellar"]["R_s"]["assumed"] == true    # not given
+    d = s["derived"]["parameters"]
+    @test 0.15 < _rel(d["msini_earth_k1"]) < 0.3
+    @test haskey(d, "Teq_k1")
+    # a bad σ fails before the engine runs, not after
+    @test_throws ErrorException fit_rv(Dict("SIM" => (t = t, rv = rv, rv_err = fill(1.0, 40)));
+                                       M_s = 1.0, sigma_M_s = -1.0)
 end
