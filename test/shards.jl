@@ -169,6 +169,7 @@ const TEST_UNITS = [
     (name = "test_plot_corner_thinning.jl", seconds = 8, files = ["test_plot_corner_thinning.jl"]),
     (name = "test_rv_fold_ylims.jl", seconds = 30, files = ["test_rv_fold_ylims.jl"]),
     (name = "test_periodogram_plot_limits.jl", seconds = 20, files = ["test_periodogram_plot_limits.jl"]),
+    (name = "test_rv_timeseries_plot.jl", seconds = 20, files = ["test_rv_timeseries_plot.jl"]),
     (name = "test_progress_time_fmt.jl", seconds = 2, files = ["test_progress_time_fmt.jl"]),
     (name = "test_ppc_residual_acf.jl", seconds = 2, files = ["test_ppc_residual_acf.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 3, files = ["test_plot_trace_thinning.jl"]),

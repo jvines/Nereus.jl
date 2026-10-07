@@ -149,6 +149,50 @@ function _fold_inliers(res::AbstractVector{<:Real}; k::Real = 5)
 end
 
 """
+    _tight_ylims_rv!(ax, ax_r, vals, residuals;
+                       pad_frac=0.10, resid_pad_frac=0.30,
+                       sparse_n=50, sparse_pad=0.15, sparse_resid_pad=1.4)
+
+Y-limits for an RV data panel (`ax`) and its aligned residual panel
+(`ax_r`). `vals` and `residuals` must be in the same per-point order (one
+entry per plotted point).
+
+A sparse series (`length(vals) <= sparse_n`, the same point count below
+which [`plot_rv_phasefold`](@ref) draws no binned overlay) has no overlay
+of its own either: the raw points are the only picture of the data, so
+every point whose residual is within 5 robust sigma of the median
+(`_fold_inliers`) is framed, rather than the 2-98% quantile window, which
+can put a real point outside the axes on a thin, jittery series (a
+CORALIE point above the top, a FEROS point below the bottom, on a 36-RV
+fit). Denser series keep the quantile zoom (`_tight_ylims!`).
+"""
+function _tight_ylims_rv!(ax, ax_r,
+                            vals::AbstractVector{<:Real},
+                            residuals::AbstractVector{<:Real};
+                            pad_frac::Float64 = 0.10,
+                            resid_pad_frac::Float64 = 0.30,
+                            sparse_n::Int = 50,
+                            sparse_pad::Float64 = 0.15,
+                            sparse_resid_pad::Float64 = 1.4)
+    if length(vals) <= sparse_n
+        _fmin(v) = (f = filter(isfinite, v); isempty(f) ? Inf : minimum(f))
+        _fmax(v) = (f = filter(isfinite, v); isempty(f) ? -Inf : maximum(f))
+        inl = _fold_inliers(residuals)
+        vlo, vhi = _fmin(vals[inl]), _fmax(vals[inl])
+        if isfinite(vlo) && isfinite(vhi) && vhi > vlo
+            vpad = sparse_pad * (vhi - vlo)
+            ylims!(ax, vlo - vpad, vhi + vpad)
+        end
+        rmax = _fmax(abs.(residuals[inl]))
+        isfinite(rmax) && rmax > 0 &&
+            ylims!(ax_r, -sparse_resid_pad * rmax, sparse_resid_pad * rmax)
+    else
+        _tight_ylims!(ax,   vals;      pad_frac = pad_frac)
+        _tight_ylims!(ax_r, residuals; pad_frac = resid_pad_frac, symmetric = true)
+    end
+end
+
+"""
     _mode_int_local(vals) -> Int
 
 Mode (most-frequent integer value) of a samples vector. Used to pick
