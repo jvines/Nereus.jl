@@ -2227,6 +2227,7 @@ function _run_loo!(cfg, chains, params::Params, data::Data, result,
     (n_rv(data) > 0 || n_phot(data) > 0) || return
 
     n_draws = Int(_get(out_cfg, :loo_n_draws; default = 500))
+    max_dense = Int(_get(out_cfg, :loo_max_dense_obs; default = 2000))
     seed    = Int(_get(cfg, :seed; default = 1))
 
     # If the result carries a log_z, pass it so loo_compare_log_z lands
@@ -2240,7 +2241,8 @@ function _run_loo!(cfg, chains, params::Params, data::Data, result,
         res = compute_loo(chains, params, data;
                            n_draws = n_draws,
                            rng = MersenneTwister(seed),
-                           log_z = log_z_arg)
+                           log_z = log_z_arg,
+                           max_dense_obs = max_dense)
         summary["loo"] = Dict{String, Any}(
             "n_draws"            => res.n_draws,
             "n_obs"              => res.n_obs,

@@ -441,9 +441,12 @@ rather than a single number trusted.
     "detection_limits_planet":     1,
 
     // PSIS-LOO + WAIC via chain replay. Default ON; sampler-agnostic.
-    // Auto-skipped for GP models (joint covariance breaks pointwise factorisation).
+    // Exact Gaussian leave-one-out under correlated noise (GPs, HarmonicBlock,
+    // NightlyOffset, MA); skipped for the joint ActivityGP, or when a dense
+    // covariance solve would exceed loo_max_dense_obs points.
     "loo":          true,
     "loo_n_draws":  500,
+    "loo_max_dense_obs": 2000,
 
     // Post-fit "silently-wrong" guard (disjoint modes / railed bounds /
     // corrupt log-post). Default ON; never aborts the run.
@@ -734,7 +737,7 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
     "rv_residual_acf_lag1":        0.05     // > 0 → correlated unmodelled noise
   },
 
-  // ---- PSIS-LOO + WAIC (output.loo, default on; "skipped" for GP models) ----
+  // ---- PSIS-LOO + WAIC (output.loo, default on; "skipped" for the joint ActivityGP) ----
   "loo": {
     "n_draws": 500, "n_obs": 170,
     "elpd_loo": -245.31, "se_elpd_loo": 12.4, "p_loo": 7.2,

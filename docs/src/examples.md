@@ -594,9 +594,10 @@ and provide matching `<col>_err` columns:
 ```
 
 !!! note "GP and LOO"
-    PSIS-LOO / WAIC are skipped (reported as `"skipped"` in the summary,
-    not failed) when an active noise model is a covariance GP — the
-    pointwise likelihood factorisation `compute_loo` needs doesn't hold.
+    Under a GP, PSIS-LOO / WAIC use the exact Gaussian leave-one-out
+    predictive of each point given the others. The joint ActivityGP
+    (`marginalize_indicators = false`) is the exception: there LOO is
+    skipped (reported as `"skipped"` in the summary, not failed).
 
 ---
 
@@ -757,7 +758,8 @@ the summary, never aborts the run):
 - **Detection limits** (`output.detection_limits`): default on for PT
   samplers (`pt_emcee`, `transdim_pt_emcee`, `pt`) which keep
   the broad prior-seeded period coverage the curve needs; off otherwise.
-- **PSIS-LOO / WAIC** (`output.loo`, default on; skipped under GP noise).
+- **PSIS-LOO / WAIC** (`output.loo`, default on; exact under GP noise,
+  skipped for the joint ActivityGP).
 - **Fit-health guard** (`output.fit_health`, default on): flags
   silently-wrong posteriors (disjoint modes, railed bounds, corrupt
   log-post) without altering the chains.
