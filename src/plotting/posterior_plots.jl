@@ -12,11 +12,11 @@ using Statistics: mean
                         figsize=(900, 420), only::Union{Nothing,Vector{String}}=nothing)
 
 One figure PER SAMPLED PARAMETER (planet, systemic, and noise params alike),
-scattering parameter value against `:lp`. For trans-dim chains, planet-block
-parameters are conditioned on the samples where that planet is ACTIVE
-(`planet_active_k`, falling back to `n_planets ≥ k`); shared params use all
-samples. Samples are stride-thinned to `max_points` for rendering. Files go
-to `output/models/posteriors/lp_<param>.<fmt>`. `only` restricts to a subset
+drawing parameter value against `:lp` as a density (`_lnp_density!`). For
+trans-dim chains, planet-block parameters are conditioned on the samples where
+that planet is ACTIVE (`planet_active_k`, falling back to `n_planets ≥ k`);
+shared params use all samples. Samples are stride-thinned to `max_points` for
+rendering. Files go to `output/models/posteriors/lp_<param>.<fmt>`. `only` restricts to a subset
 of parameter names.
 """
 function plot_posteriors_lp(chains, params;
@@ -89,9 +89,7 @@ function plot_posteriors_lp(chains, params;
 
             fig = Figure(size = figsize)
             ax = Axis(fig[1, 1]; xlabel = nm, ylabel = "log P")
-            scatter!(ax, v, lps;
-                      color = (NEREUS_COLORS.pm_marker, 0.35),
-                      markersize = 3, strokewidth = 0, rasterize = 2)
+            _lnp_density!(ax, v, lps)
             vmax  = v[ibest]
             vmean = mean(v)
             vlines!(ax, [vmax]; color = :black, linewidth = 1.6,
