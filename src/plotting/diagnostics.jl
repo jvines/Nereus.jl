@@ -139,18 +139,36 @@ function plot_histograms(chains, params;
 end
 
 
+# A parameter's draws against log-posterior, as a binned density on a log count
+# scale in `cool` -- the corner's 2-D panels draw theirs the same way. As a
+# scatter they needed an alpha low enough that the core did not saturate, and
+# at that alpha (0.01 above 10k draws) the tails, which are single draws,
+# vanished: a dim core over what looked like empty space. Non-finite
+# log-posteriors are left out; a parameter whose draws do not vary has no width
+# to bin, so it stays a column of points.
+function _lnp_density!(ax, x::AbstractVector, y::AbstractVector)
+    ok = isfinite.(x) .& isfinite.(y)
+    x, y = x[ok], y[ok]
+    isempty(x) && return nothing
+    if minimum(x) == maximum(x) || minimum(y) == maximum(y)
+        return scatter!(ax, x, y; color = NEREUS_COLORS.post, markersize = 4,
+                        strokewidth = 0)
+    end
+    return hexbin!(ax, x, y; bins = (100, 50), colormap = :cool, colorscale = log10)
+end
+
 """
     plot_posteriors(chains, params;
                      output=nothing, fmt=:png, figsize=FIG_POST, max_points=200_000)
 
-Posterior scatter plots: parameter value vs log-posterior (EMPEROR style).
-Two versions per parameter: full posterior + inference region. Returns the
-full-posterior figures by parameter name.
+Parameter value vs log-posterior (EMPEROR style), drawn as a density
+(`_lnp_density!`). Two versions per parameter: full posterior + inference
+region. Returns the full-posterior figures by parameter name.
 
 The draws are thinned to at most `max_points`, every k-th draw, the same draws
 for every parameter. Unthinned, 100 walkers x 47000 steps put 4.7M points in
-each of 32 figures and took 25 minutes; at a few hundred thousand points a
-scatter of the posterior looks the same.
+each of 32 figures and took 25 minutes; at a few hundred thousand draws the
+density looks the same.
 """
 function plot_posteriors(chains, params;
                           output::Union{Nothing, String}=nothing,
@@ -174,9 +192,6 @@ function plot_posteriors(chains, params;
         keep = 1:cld(length(lp_all), max_points):length(lp_all)
         lp = lp_all[keep]
 
-        # EMPEROR: alpha=0.3, or 0.01 if >10k unique posteriors
-        alpha = length(unique(lp)) > 10000 ? 0.01 : 0.3
-
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
@@ -185,9 +200,7 @@ function plot_posteriors(chains, params;
             # Full posterior
             fig = Figure(; size=figsize)
             ax = Axis(fig[1, 1]; xlabel=name, ylabel="Posterior")
-            scatter!(ax, samp, lp;
-                      color=(NEREUS_COLORS.post, alpha),
-                      markersize=4, strokewidth=0)
+            _lnp_density!(ax, samp, lp)
             figs[name] = fig
             if output !== nothing
                 mkpath(joinpath(output, "posteriors"))
@@ -200,9 +213,7 @@ function plot_posteriors(chains, params;
             if count(cherry_mask) > 10
                 fig2 = Figure(; size=figsize)
                 ax2 = Axis(fig2[1, 1]; xlabel=name, ylabel="Posterior")
-                scatter!(ax2, samp[cherry_mask], lp[cherry_mask];
-                          color=(NEREUS_COLORS.post, alpha),
-                          markersize=4, strokewidth=0)
+                _lnp_density!(ax2, samp[cherry_mask], lp[cherry_mask])
                 if output !== nothing
                     _save_plot(joinpath(output, "posteriors",
                                 "inference_$name.$fmt"), fig2;

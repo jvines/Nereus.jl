@@ -100,7 +100,16 @@ function plot_rv_timeseries(chains, params, data;
             catch; nothing end
             gp_at_data !== nothing && (act_at_data .+= gp_at_data)
         end
-        has_activity = any(!iszero, act_at_data)
+        # "Active" here means visible, not merely nonzero: a GP/AD amplitude
+        # that sampled down to the sampler's floor (gp_sigma -> 0, log_amp ->
+        # -Inf) still returns a technically-nonzero act_at_data from the exp()
+        # or celerite solve, many orders of magnitude below anything the data
+        # could resolve. `any(!iszero, ...)` caught that floating-point dust
+        # and labelled every instrument "(decorr.)" with a duplicate "raw RV"
+        # layer under it even when no decorrelation model was actually doing
+        # anything. Require the correction to move a point by more than a
+        # tiny fraction of its own measurement uncertainty instead.
+        has_activity = maximum(abs, act_at_data) > 1e-6 * maximum(abs, data.rv_err)
 
         if decompose
             # === Component decomposition ====================================
@@ -222,13 +231,15 @@ function plot_rv_timeseries(chains, params, data;
                 tellheight=true, tellwidth=false,
                 nbanks=2)
 
-        # Tight y-axes (percentile-based) — keeps single instrument
-        # outliers (e.g. FEROS at the right edge in HD 18599) from
-        # blowing up the data panel.
-        rv_centered = vcat([data.rv[data.rv_inst .== i] .- rv_gamma(theta_med, i)
-                             for i in 1:length(inst_names)]...)
-        _tight_ylims!(ax,   rv_centered; pad_frac=0.10)
-        _tight_ylims!(ax_r, residuals;   pad_frac=0.30, symmetric=true)
+        # Tight y-axes — keeps single-instrument outliers (e.g. FEROS at
+        # the right edge in HD 18599) from blowing up the data panel on
+        # dense data; on a sparse series (see `_tight_ylims_rv!`) frames
+        # every point but true outliers instead, so a lone point from a
+        # thin, multi-instrument fit does not fall outside the axes.
+        # Built point-by-point (not grouped by instrument) so it stays
+        # aligned with `residuals` for the sparse inlier mask.
+        rv_centered = data.rv .- [rv_gamma(theta_med, i) for i in data.rv_inst]
+        _tight_ylims_rv!(ax, ax_r, rv_centered, residuals)
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
@@ -355,8 +366,7 @@ function plot_rv_sb2_timeseries(chains, params, data; output=nothing, fmt::Symbo
         ax_r.xlabel = "Time (BJD - $(round(Int, tmin)))"
         Legend(ga[3, 1], ax; framevisible=false, labelsize=16, orientation=:horizontal,
                tellheight=true, tellwidth=false, nbanks=2)
-        _tight_ylims!(ax,   data.rv .- g_at; pad_frac=0.10)
-        _tight_ylims!(ax_r, residuals;       pad_frac=0.30, symmetric=true)
+        _tight_ylims_rv!(ax, ax_r, data.rv .- g_at, residuals)
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models", "rv_sb2_timeseries.$fmt"), fig;
@@ -420,8 +430,7 @@ function plot_rv_sb2_binary_fold(chains, params, data; binary_k::Int=1, output=n
         hlines!(ax_r, 0; color=NEREUS_COLORS.zero_line, linestyle=:dash, linewidth=MODEL_LW)
         Legend(ga[3, 1], ax; framevisible=false, labelsize=16, orientation=:horizontal,
                tellheight=true, tellwidth=false, nbanks=2)
-        _tight_ylims!(ax,   rv_folded; pad_frac=0.10)
-        _tight_ylims!(ax_r, residuals; pad_frac=0.30, symmetric=true)
+        _tight_ylims_rv!(ax, ax_r, rv_folded, residuals)
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models", "rv_sb2_binary_fold_K$binary_k.$fmt"), fig;

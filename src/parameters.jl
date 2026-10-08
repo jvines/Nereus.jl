@@ -444,14 +444,15 @@ Raises `ArgumentError` for the non-AS block types.
         b_raw
 
     # Eccentricity / argument of periastron.
-    P = theta.values[block.P]
     e = _ecc_from_block(block, theta)
     sinw = _sinw_from_block(block, theta)
 
     # a/R*: prefer rho_s when available; otherwise fall back to
     # M_s, R_s (config) via Kepler's third law. Mirrors the logic in
-    # transit_likelihood.jl.
+    # transit_likelihood.jl. The period slot holds a under :a_driven, so the
+    # period comes from planet_P whenever the block can be located.
     k_blk = findfirst(b -> b === block, theta.params.layout.planet_blocks)
+    P = k_blk === nothing ? theta.values[block.P] : planet_P(theta, k_blk)
     ai = (k_blk === nothing || isempty(theta.params.layout.systemic.a_Rs)) ? 0 :
          theta.params.layout.systemic.a_Rs[k_blk]
     a_Rs = ai > 0 ? theta.values[ai] : _a_Rs_for_inc(theta, P)

@@ -482,6 +482,74 @@ function _informed_log_q(log_P::Float64, peak_log_P::Vector{Float64},
 end
 
 # =====================================================================
+# The period slot in its own units
+# =====================================================================
+# The informed proposals find peaks in PERIOD (days); the slot they fill holds
+# that period, except under the `:a_driven` mass parametrization, where it holds
+# the semi-major axis a (AU) and P follows from Kepler's third law at the total
+# mass, P = KEPLER_YEAR_DAYS·√(a³/M). Reading that slot's bounds as days ran the
+# periodogram over 0.3–3 d for an a ∈ [0.3, 3] AU prior: ~10⁵ frequencies of
+# meaningless short periods, which dominated a trans-dim burn-in, and every
+# "informed" a was a sub-3-day period peak written into an AU slot.
+#
+# At fixed M, log a = (2/3)·log P + (log M − 2 log KEPLER_YEAR_DAYS)/3 is linear
+# in log P, so a period peak maps to an a peak and its log-normal width scales by
+# 2/3: the proposal stays a mixture in the slot's own variable, drawn, clamped
+# and evaluated there by the same `_informed_log_q`. Every other
+# parametrization gets the identity, which leaves its draws bit for bit as they
+# were.
+struct _PeriodSlotMap
+    identity::Bool
+    slope::Float64      # d log(slot) / d log P
+    offset::Float64     # log(slot) at log P = 0
+end
+
+# `values` carries the newborn's M_sec in `block.K` under `:a_driven`.
+function _period_slot_map(theta::Theta, block, values)
+    theta.params.config.parametrization.mass === :a_driven ||
+        return _PeriodSlotMap(true, 1.0, 0.0)
+    M = Float64(astrom_M_pri(theta) + values[block.K])
+    return _PeriodSlotMap(false, 2 / 3, (log(M) - 2 * log(KEPLER_YEAR_DAYS)) / 3)
+end
+
+_slot_log(m::_PeriodSlotMap, log_P) = m.identity ? log_P : m.slope * log_P + m.offset
+_slot_to_period(m::_PeriodSlotMap, x) =
+    m.identity ? x : exp((log(x) - m.offset) / m.slope)
+_slot_sigmas(m::_PeriodSlotMap, sigmas) =
+    m.identity ? sigmas : m.slope .* sigmas
+
+# The slot's log-range for the uniform part of the mixture (periods below 0.1 d
+# excluded), and the periods the periodogram searches. The identity passes the
+# prior's own bounds to the periodogram, as it always did.
+function _slot_period_range(m::_PeriodSlotMap, x_lo, x_hi)
+    log_x_min = max(log(max(x_lo, 0.0)), _slot_log(m, log(0.1)))
+    log_x_max = log(x_hi)
+    P_range = m.identity ? (x_lo, x_hi) :
+        (_slot_to_period(m, exp(log_x_min)), _slot_to_period(m, x_hi))
+    return log_x_min, log_x_max, P_range
+end
+
+# Under `:a_driven` the map needs the newborn's M_sec, which `block.K` holds, so
+# that slot is drawn from its prior BEFORE the period. Returns whether it was,
+# and its log-density for log q_fwd.
+function _predraw_M_sec!(new_values, theta::Theta, block, rng)
+    theta.params.config.parametrization.mass === :a_driven || return (false, 0.0)
+    layout = theta.params.layout
+    uf_pos = findfirst(==(block.K), layout.unfrozen_idx)
+    uf_pos === nothing && return (false, 0.0)
+    prior = layout.unfrozen_priors[uf_pos]
+    lo, hi = bounds(prior)
+    v = clamp(rand(rng, prior.dist), lo, hi)
+    new_values[block.K] = v
+    return (true, eval_packed_logpdf(v,
+        layout.packed_priors.type_ids[uf_pos],
+        layout.packed_priors.params[uf_pos, 1],
+        layout.packed_priors.params[uf_pos, 2],
+        layout.packed_priors.lowers[uf_pos],
+        layout.packed_priors.uppers[uf_pos]))
+end
+
+# =====================================================================
 # InformedBirth proposal
 # =====================================================================
 
@@ -496,6 +564,9 @@ For astrometric block subtypes (`RVASBlock`, `RVPMASBlock`) the
 inclination, longitude-of-node, and (under `:M_sec_driven`/`:a_driven`)
 secondary-mass slots are drawn from their priors. Only the period (and
 under `:K_driven`, the RV semi-amplitude) are informed by RV residuals.
+Under `:a_driven` the period slot holds a: the periodogram runs over the
+periods that slot's bounds span, and the drawn period is placed as a at the
+newborn's total mass (`_PeriodSlotMap`).
 
 # TODO
 Astrometry-informed birth — using relative-astrometry residuals to
@@ -527,13 +598,34 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     layout = theta.params.layout
     block = layout.planet_blocks[k]
 
-    # Get period prior bounds
+    # Get the period slot's prior bounds
     P_pos = findfirst(==(block.P), layout.unfrozen_idx)
     P_pos === nothing && return propose_planet_birth(theta, rng, PriorBirth(); scratch=scratch)
     P_prior = layout.unfrozen_priors[P_pos]
-    P_lo, P_hi = bounds(P_prior)
-    log_P_min = log(max(P_lo, 0.1))
-    log_P_max = log(P_hi)
+    x_lo, x_hi = bounds(P_prior)
+
+    # --- Build new parameter values ---
+    # Use scratch if available, otherwise allocate
+    if scratch !== nothing
+        scratch.values .= theta.values
+        copy_into!(scratch.td, td)
+        new_values = scratch.values
+        new_td = scratch.td
+    else
+        new_values = copy(theta.values)
+        new_td = copy(td)
+    end
+
+    # Accumulate Σ log q_fwd(β_new) over ALL slot params drawn (informed
+    # or prior). The full log_q_ratio = log_combinatorial − log_q_fwd
+    # is what makes the prior cancellation work in the M-H accept (with
+    # log_pi via _log_prior_transdim). See PriorBirth docstring for the
+    # math; informed q just replaces the slab density with the informed
+    # density on a per-slot basis.
+    M_sec_drawn, log_q_fwd = _predraw_M_sec!(new_values, theta, block, rng)
+    log_q_fwd = convert(T, log_q_fwd)
+    m = _period_slot_map(theta, block, new_values)
+    log_x_min, log_x_max, (P_lo, P_hi) = _slot_period_range(m, x_lo, x_hi)
 
     # Cached periodogram — recompute only every INFORMED_CACHE_INTERVAL calls.
     # Keyed by (rng, active-set signature): the peaks are refined against the
@@ -553,18 +645,18 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     peak_w = cache.weights
     peak_K = cache.K_est
     peak_Mo = cache.Mo_est
-    peak_log_P = cache.log_periods
+    peak_log_x = _slot_log.(Ref(m), cache.log_periods)
 
     if isempty(peak_P)
         return propose_planet_birth(theta, rng, PriorBirth(); scratch=scratch)
     end
 
-    # Draw period from mixture: α*informed + (1-α)*uniform in log-space
+    # Draw the slot from mixture: α*informed + (1-α)*uniform in log-space
     α = INFORMED_ALPHA
-    σ_P = INFORMED_SIGMA_P
+    σ_x = m.slope * INFORMED_SIGMA_P
 
     chosen = 0
-    if rand(rng) < α && !isempty(peak_log_P)
+    if rand(rng) < α && !isempty(peak_log_x)
         r = rand(rng)
         cum = 0.0; chosen = 1
         for (i, w) in enumerate(peak_w)
@@ -574,34 +666,15 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
                 break
             end
         end
-        log_P_proposed = peak_log_P[chosen] + σ_P * randn(rng)
+        log_x_proposed = peak_log_x[chosen] + σ_x * randn(rng)
     else
-        log_P_proposed = log_P_min + (log_P_max - log_P_min) * rand(rng)
+        log_x_proposed = log_x_min + (log_x_max - log_x_min) * rand(rng)
     end
 
-    P_proposed = exp(clamp(log_P_proposed, log_P_min, log_P_max))
+    x_proposed = exp(clamp(log_x_proposed, log_x_min, log_x_max))
+    P_proposed = _slot_to_period(m, x_proposed)
 
-    # --- Build new parameter values ---
-    # Use scratch if available, otherwise allocate
-    if scratch !== nothing
-        scratch.values .= theta.values
-        copy_into!(scratch.td, td)
-        new_values = scratch.values
-        new_td = scratch.td
-    else
-        new_values = copy(theta.values)
-        new_td = copy(td)
-    end
-
-    new_values[block.P] = convert(T, P_proposed)
-
-    # Accumulate Σ log q_fwd(β_new) over ALL slot params drawn (informed
-    # or prior). The full log_q_ratio = log_combinatorial − log_q_fwd
-    # is what makes the prior cancellation work in the M-H accept (with
-    # log_pi via _log_prior_transdim). See PriorBirth docstring for the
-    # math; informed q just replaces the slab density with the informed
-    # density on a per-slot basis.
-    log_q_fwd = zero(T)
+    new_values[block.P] = convert(T, x_proposed)
 
     # The `block.K` slot only holds the RV semi-amplitude under the
     # `:K_driven` mass parametrization; under `:M_sec_driven` /
@@ -613,6 +686,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
 
     for slot in planet_slot_indices(block)
         slot == block.P && continue
+        M_sec_drawn && slot == block.K && continue
         uf_pos = findfirst(==(slot), layout.unfrozen_idx)
         uf_pos === nothing && continue
         prior = layout.unfrozen_priors[uf_pos]
@@ -691,15 +765,17 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     log_q_comb = log(p_death_new) - log(n_active + 1) - log(p_birth) +
                  log(G_slot)
 
-    # Period q_fwd: informed mixture density evaluated at log P_proposed.
-    # `_informed_log_q` returns log-density on log-P; eval_packed_logpdf
-    # for LogUniform is on P, so we apply the Jacobian |d log P/d P|=1/P
-    # to convert: log q(P) = log q(log P) − log P. This makes log_q_fwd
-    # match the parametrization used in log_pi for the cancellation in
-    # the M-H accept.
-    log_q_P_logspace = _informed_log_q(log(P_proposed), peak_log_P, peak_w,
-                                         log_P_min, log_P_max)
-    log_q_fwd += log_q_P_logspace - log(P_proposed)
+    # Period q_fwd: informed mixture density evaluated at log x_proposed, in
+    # the slot's own variable (P, or a under :a_driven). `_informed_log_q`
+    # returns log-density on log x; eval_packed_logpdf for LogUniform is on x,
+    # so we apply the Jacobian |d log x/d x| = 1/x to convert:
+    # log q(x) = log q(log x) − log x. This makes log_q_fwd match the
+    # parametrization used in log_pi for the cancellation in the M-H accept.
+    log_q_P_logspace = _informed_log_q(log(x_proposed), peak_log_x, peak_w,
+                                         log_x_min, log_x_max;
+                                         sigmas = m.identity ? nothing :
+                                                  fill(σ_x, length(peak_log_x)))
+    log_q_fwd += log_q_P_logspace - log(x_proposed)
 
     log_q_ratio = log_q_comb - log_q_fwd
 
@@ -1095,9 +1171,22 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     P_pos === nothing &&
         return propose_planet_birth(theta, rng, PriorBirth(); scratch=scratch)
     P_prior = layout.unfrozen_priors[P_pos]
-    P_lo, P_hi = bounds(P_prior)
-    log_P_min = log(max(P_lo, 0.1))
-    log_P_max = log(P_hi)
+    x_lo, x_hi = bounds(P_prior)
+
+    # ---- New theta values; under :a_driven, M_sec first (_PeriodSlotMap) ----
+    if scratch !== nothing
+        scratch.values .= theta.values
+        copy_into!(scratch.td, td)
+        new_values = scratch.values
+        new_td = scratch.td
+    else
+        new_values = copy(theta.values)
+        new_td = copy(td)
+    end
+    M_sec_drawn, log_q_fwd = _predraw_M_sec!(new_values, theta, block, rng)
+    log_q_fwd = convert(T, log_q_fwd)
+    m = _period_slot_map(theta, block, new_values)
+    log_x_min, log_x_max, (P_lo, P_hi) = _slot_period_range(m, x_lo, x_hi)
 
     # ---- LS peaks (same caching pathway as InformedBirth) ----
     state_sig = _active_set_signature(theta, objectid(rng))
@@ -1256,6 +1345,10 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
             clamp(all_dur[i] / (2 * baseline), INFORMED_SIGMA_P_FLOOR, INFORMED_SIGMA_P)
     end
 
+    # The peaks and their widths in the period slot's own variable.
+    all_log_x = _slot_log.(Ref(m), all_log_P)
+    all_sigma_x = _slot_sigmas(m, all_sigma)
+
     # Mixture period draw: α informed + (1-α) uniform-in-log
     α = INFORMED_ALPHA
     chosen = 0
@@ -1267,24 +1360,13 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
                 chosen = i; break
             end
         end
-        log_P_proposed = all_log_P[chosen] + all_sigma[chosen] * randn(rng)
+        log_x_proposed = all_log_x[chosen] + all_sigma_x[chosen] * randn(rng)
     else
-        log_P_proposed = log_P_min + (log_P_max - log_P_min) * rand(rng)
+        log_x_proposed = log_x_min + (log_x_max - log_x_min) * rand(rng)
     end
-    P_proposed = exp(clamp(log_P_proposed, log_P_min, log_P_max))
-
-    # ---- Build new theta values ----
-    if scratch !== nothing
-        scratch.values .= theta.values
-        copy_into!(scratch.td, td)
-        new_values = scratch.values
-        new_td = scratch.td
-    else
-        new_values = copy(theta.values)
-        new_td = copy(td)
-    end
-    new_values[block.P] = convert(T, P_proposed)
-    log_q_fwd = zero(T)
+    x_proposed = exp(clamp(log_x_proposed, log_x_min, log_x_max))
+    P_proposed = _slot_to_period(m, x_proposed)
+    new_values[block.P] = convert(T, x_proposed)
 
     mass_param = theta.params.config.parametrization.mass
     informed_K = mass_param === :K_driven
@@ -1315,6 +1397,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
 
     for slot in planet_slot_indices(block)
         slot == block.P && continue
+        M_sec_drawn && slot == block.K && continue
         uf_pos = findfirst(==(slot), layout.unfrozen_idx)
         uf_pos === nothing && continue
         prior = layout.unfrozen_priors[uf_pos]
@@ -1425,10 +1508,10 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     # +log(G_slot): forward slot choice uniform over mode-group slots.
     log_q_comb = log(p_death_new) - log(n_active + 1) - log(p_birth) +
                  log(G_slot)
-    # Period q in log-P space; Jacobian to P-space matches packed_logpdf.
-    log_q_P = _informed_log_q(log(P_proposed), all_log_P, all_w,
-                                log_P_min, log_P_max; sigmas=all_sigma)
-    log_q_fwd += log_q_P - log(P_proposed)
+    # Period q in the slot's log space; Jacobian to the slot matches packed_logpdf.
+    log_q_P = _informed_log_q(log(x_proposed), all_log_x, all_w,
+                                log_x_min, log_x_max; sigmas=all_sigma_x)
+    log_q_fwd += log_q_P - log(x_proposed)
 
     _sort_group_periods!(new_theta)
     return (new_theta, convert(T, log_q_comb - log_q_fwd))

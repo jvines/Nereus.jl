@@ -53,8 +53,17 @@ function _swap_planet_q(theta::Theta{T}, k::Int, data::Data, rng,
     block  = layout.planet_blocks[k]
     P_pos  = findfirst(==(block.P), layout.unfrozen_idx)
     P_pos === nothing && return (convert(T,-Inf),)
-    P_lo, P_hi = bounds(layout.unfrozen_priors[P_pos])
-    logPmin, logPmax = log(max(P_lo, 0.1)), log(P_hi)
+    x_lo, x_hi = bounds(layout.unfrozen_priors[P_pos])
+    # Under :a_driven the period slot holds a, placed at the planet's total mass
+    # (`_PeriodSlotMap`): drawn, its M_sec comes first; evaluated, it is in vals.
+    log_q = zero(T)
+    M_sec_drawn = false
+    if mode === :draw
+        M_sec_drawn, lq_M = _predraw_M_sec!(vals, theta, block, rng)
+        log_q += lq_M
+    end
+    m = _period_slot_map(theta, block, vals)
+    logPmin, logPmax, (P_lo, P_hi) = _slot_period_range(m, x_lo, x_hi)
     res = _compute_rv_residuals(theta, data)
     # Cap the periodogram grid: the swap fires per trans-dim move, so a full
     # baseline-resolution LS here dominates wall-time on real data (long
@@ -64,15 +73,16 @@ function _swap_planet_q(theta::Theta{T}, k::Int, data::Data, rng,
     pk_P, pk_w, _, _ = _find_peaks(data.t_rv, res, P_lo, P_hi;
                                     t_ref = data.t_ref, σ = data.rv_err,
                                     max_nfreq = _SWAP_NFREQ)
-    pk_logP = isempty(pk_P) ? Float64[] : log.(pk_P)
+    pk_logP = isempty(pk_P) ? Float64[] : _slot_log.(Ref(m), log.(pk_P))
     α = isempty(pk_logP) ? 0.0 : INFORMED_ALPHA
+    σ_x = m.slope * INFORMED_SIGMA_P
 
-    # --- period ---
+    # --- period (in the slot's own variable) ---
     if mode === :draw
         if rand(rng) < α
             r = rand(rng); cum = 0.0; ci = 1
             for (i,wt) in enumerate(pk_w); cum += wt; (r < cum) && (ci = i; break); end
-            logP = pk_logP[ci] + INFORMED_SIGMA_P * randn(rng)
+            logP = pk_logP[ci] + σ_x * randn(rng)
         else
             logP = logPmin + (logPmax - logPmin) * rand(rng)
         end
@@ -81,9 +91,10 @@ function _swap_planet_q(theta::Theta{T}, k::Int, data::Data, rng,
     else
         logP = clamp(log(vals[block.P]), logPmin, logPmax)
     end
-    # Period density over P (Jacobian −logP), to match the LogUniform period
-    # prior counted (over P) in Δlogπ — same convention as InformedBirth.
-    log_q = _informed_log_q(logP, pk_logP, pk_w, logPmin, logPmax) - logP
+    # Period density over the slot (Jacobian −logP), to match the LogUniform
+    # prior counted (over the slot) in Δlogπ — same convention as InformedBirth.
+    log_q += _informed_log_q(logP, pk_logP, pk_w, logPmin, logPmax;
+                             sigmas = m.identity ? nothing : fill(σ_x, length(pk_logP))) - logP
 
     # --- remaining planet slots from prior (K/e1/e2/t/…) ---
     # K/e/Mo are drawn from (and evaluated at) their priors. The informed
@@ -97,6 +108,7 @@ function _swap_planet_q(theta::Theta{T}, k::Int, data::Data, rng,
     # both DB-exact and the better mixer.
     for slot in planet_slot_indices(block)
         slot == block.P && continue
+        M_sec_drawn && slot == block.K && continue
         uf = findfirst(==(slot), layout.unfrozen_idx); uf === nothing && continue
         lo, hi = bounds(layout.unfrozen_priors[uf])
         if mode === :draw

@@ -1,5 +1,6 @@
-# plot_posteriors draws at most `max_points` samples per panel: unthinned, a
-# pt_emcee run of 100 walkers x 47000 steps took 25 minutes on this one figure set.
+# plot_posteriors draws at most `max_points` samples per panel, as a density
+# (_lnp_density!): unthinned, a pt_emcee run of 100 walkers x 47000 steps took
+# 25 minutes on this one figure set.
 using Test
 using Nereus
 using MCMCChains
@@ -18,6 +19,6 @@ using CairoMakie
     ch = Chains(randn(rng, n_iter, length(nm) + 1, n_walk), [Symbol.(nm); :lp])
     figs = plot_posteriors(ch, tg.params; output = mktempdir(), max_points = 1000)
     @test Set(keys(figs)) == Set(nm)
-    sc = only(filter(p -> p isa Scatter, figs[nm[1]].content[1].scene.plots))
-    @test 500 <= length(sc[1][]) <= 1000
+    hb = only(filter(p -> p isa Hexbin, figs[nm[1]].content[1].scene.plots))
+    @test 500 <= length(hb[1][]) <= 1000
 end
