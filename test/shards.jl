@@ -135,6 +135,7 @@ const TEST_UNITS = [
     (name = "test_harmonic_external.jl", seconds = 1, files = ["test_harmonic_external.jl"]),
     (name = "test_transdim_caches.jl", seconds = 1, files = ["test_transdim_caches.jl"]),
     (name = "test_birth_death_reversibility.jl", seconds = 1, files = ["test_birth_death_reversibility.jl"]),
+    (name = "test_informed_birth_a_driven.jl", seconds = 2, files = ["test_informed_birth_a_driven.jl"]),
     (name = "test_alias_jump.jl", seconds = 1, files = ["test_alias_jump.jl"]),
     (name = "test_transdim_death_counters.jl", seconds = 7, files = ["test_transdim_death_counters.jl"]),
     (name = "test_locor.jl", seconds = 14, files = ["test_locor.jl"]),
