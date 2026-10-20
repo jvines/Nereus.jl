@@ -90,6 +90,7 @@ const TEST_UNITS = [
     (name = "test_fit_health.jl", seconds = 14, files = ["test_fit_health.jl"]),
     (name = "test_prior_dicts.jl", seconds = 2, files = ["test_prior_dicts.jl"]),
     (name = "test_relast_channel.jl", seconds = 5, files = ["test_relast_channel.jl"]),
+    (name = "test_hgca_gost_channel.jl", seconds = 5, files = ["test_hgca_gost_channel.jl"]),
     (name = "test_fit_summary_transdim.jl", seconds = 47, files = ["test_fit_summary_transdim.jl"]),
     # Two short fits (run_job, fit_rv); not yet measured on the CI runner.
     (name = "test_derived_stellar.jl", seconds = 60, files = ["test_derived_stellar.jl"]),

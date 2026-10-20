@@ -200,7 +200,7 @@ rather than a single number trusted.
       "from": "2014-07-26T00:00:00",       // default 2014-07-26 (Gaia start)
       "to":   "2025-01-15T00:00:00"
     },
-    "hgca":      { "csv": "/work/in/hgca.csv", "hip_id": 24205 },  // Brandt 2018 HGCA, OR `values`
+    "hgca":      { "fits": "/work/in/HGCA_vEDR3.fits", "hip_id": 24205 },  // Brandt eDR3 HGCA, OR `hip_id` alone, OR `values`
     "relastrom": { "csv": "/work/in/relastrom.csv" },             // direct-imaging, OR `values`
     "gaia_dr3":  { "params": [86.5, 1.2, 35.2, 12.1, -5.4],       // [α, δ, ϖ, μα*, μδ]
                    "cov": [[/* 5×5 */]], "t_ref": 2016.0 }
@@ -516,7 +516,7 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   joint requires `gaia_dr3`) — it is INERT, and the `Data` constructor warns.
 - **`hgca`** — `hip_id` (auto-fetches + caches the Brandt eDR3 `HGCA_vEDR3.fits`
   and pulls the row — the VALIDATED Hipparcos–Gaia path, recovers the orvara
-  orbit on HD 159062), or `{csv, hip_id}` for a local catalog, or `values`
+  orbit on HD 159062), or `{fits, hip_id}` for a local copy of the catalogue, or `values`
   (exactly 3 epochs: `t`, `pmra`, `pmdec`, `cov_ep`, plus `plx`, `plx_err`,
   `hip_id`). Pair with `gost` for the Mode-B Gaia epoch.
 - **`relastrom`** — `{csv}` or `values` (`t`, `ra_off`, `dec_off`, `ra_err`,
