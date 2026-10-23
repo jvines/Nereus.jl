@@ -560,10 +560,12 @@ LCs.
 
 `from`/`to` default to the current GOST window.
 
-### `hgca` — CSV or inline 3-epoch
+### `hgca` — catalogue row or inline 3-epoch
 
 ```jsonc
-"hgca": { "csv": "/path/HGCA.csv", "hip_id": 27321 }
+"hgca": { "hip_id": 27321 }                                   // auto-fetch + cache HGCA_vEDR3.fits
+// OR
+"hgca": { "fits": "/path/HGCA_vEDR3.fits", "hip_id": 27321 }  // a local copy
 // OR
 "hgca": { "values": { "t": [e1,e2,e3], "pmra": [...], "pmdec": [...],
                       "cov_ep": [ [[...],[...]], ... ],  // three 2×2 matrices

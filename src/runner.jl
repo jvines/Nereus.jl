@@ -876,12 +876,16 @@ function _parse_iad_block(block)
 end
 
 function _parse_gost_block(block)
-    if _has(block, :values)
-        vals = _get(block, :values)
+    # Inline arrays: a `values` block, or the struct's own fields at the top
+    # level, which is what the Python client's `load_gost` returns.
+    if _has(block, :values) || _has(block, :t)
+        vals = _has(block, :values) ? _get(block, :values) : block
+        asp  = _get(vals, :along_scan_pos)
         return GOSTData(
             t                = Float64.(_get(vals, :t; required = true)),
             psi              = Float64.(_get(vals, :psi; required = true)),
             parallax_factor  = Float64.(_get(vals, :parallax_factor; required = true)),
+            along_scan_pos   = asp === nothing ? nothing : Float64.(asp),
         )
     elseif _has(block, :ra_deg) && _has(block, :dec_deg)
         ra  = Float64(_get(block, :ra_deg))
@@ -895,36 +899,61 @@ function _parse_gost_block(block)
 end
 
 function _parse_hgca_block(block)
-    # HGCA from CSV file (Brandt 2018 catalog format) or inline values.
-    if _has(block, :csv)
-        return load_hgca(String(_get(block, :csv)); hip_id = _get(block, :hip_id))
+    # Inline values come first: a `values` block, or the struct's own fields at
+    # the top level, which is what the Python client's `load_hgca` returns.
+    # Both can carry `hip_id`, so testing for that first would discard the
+    # values and fetch the row from the catalogue instead.
+    if _has(block, :values)
+        return _hgca_from_values(_get(block, :values))
+    elseif _has(block, :epochs)
+        return _hgca_from_values(block)
+    elseif _has(block, :fits)
+        # A local copy of the catalogue (HGCA_vEDR3.fits) and the row to read.
+        return load_hgca_row(String(_get(block, :fits)),
+                             Int(_get(block, :hip_id; required = true)))
+    elseif _has(block, :csv)
+        # This branch called a `load_hgca` that has never existed. Refused
+        # rather than dropped: with `hip_id` beside it, it would otherwise fall
+        # through to the auto-fetch and silently ignore the file.
+        error("hgca `csv` is not supported: the HGCA is a FITS table, so " *
+              "give its path as `fits`, with `hip_id`")
     elseif _has(block, :hip_id)
         # Auto-fetch the Brandt eDR3 HGCA row for this Hipparcos source.
         return fetch_hgca(Int(_get(block, :hip_id)))
-    elseif _has(block, :values)
-        # Inline three-epoch HGCA arrays. HGCAData stores epochs/pmra/pmdec as
-        # 3-tuples plus per-epoch 2×2 covariance matrices and the parallax —
-        # build it via the positional constructor (the keyword ctor instead
-        # takes σ_pmra/σ_pmdec, not cov_ep).
-        vals = _get(block, :values)
-        ep    = Float64.(_get(vals, :t;      required = true))
-        pmra  = Float64.(_get(vals, :pmra;   required = true))
-        pmdec = Float64.(_get(vals, :pmdec;  required = true))
-        # JSON gives nested arrays (rows), not a Matrix — stack explicitly.
-        _json_mat(c) = permutedims(reduce(hcat, [Float64.(collect(r)) for r in c]))
-        cov   = [_json_mat(c) for c in _get(vals, :cov_ep; required = true)]
-        (length(ep) == 3 && length(pmra) == 3 && length(pmdec) == 3 && length(cov) == 3) ||
-            error("hgca inline values need exactly 3 epochs (Hipparcos, HG, Gaia)")
-        return HGCAData((ep[1], ep[2], ep[3]),
-                        (pmra[1], pmra[2], pmra[3]),
-                        (pmdec[1], pmdec[2], pmdec[3]),
-                        (cov[1], cov[2], cov[3]),
-                        Float64(_get(vals, :plx;     default = NaN)),
-                        Float64(_get(vals, :plx_err; default = NaN)),
-                        Int(_get(vals, :hip_id;      default = 0)))
     else
-        error("hgca block needs `csv` or `values`")
+        error("hgca block needs `hip_id` (auto-fetch), `{fits, hip_id}` or `values`")
     end
+end
+
+# Three-epoch HGCA arrays (Hipparcos, HG, Gaia), built with the positional
+# constructor: the keyword one takes σ_pmra/σ_pmdec, not cov_ep. The epochs are
+# `t` in a config and `epochs` in the struct's field names.
+function _hgca_from_values(vals)
+    ep = _has(vals, :t) ? _get(vals, :t) : _get(vals, :epochs; required = true)
+    ep    = Float64.(collect(ep))
+    pmra  = Float64.(collect(_get(vals, :pmra;  required = true)))
+    pmdec = Float64.(collect(_get(vals, :pmdec; required = true)))
+    cov   = [_hgca_cov(c) for c in _get(vals, :cov_ep; required = true)]
+    (length(ep) == 3 && length(pmra) == 3 && length(pmdec) == 3 && length(cov) == 3) ||
+        error("hgca inline values need exactly 3 epochs (Hipparcos, HG, Gaia)")
+    return HGCAData((ep[1], ep[2], ep[3]),
+                    (pmra[1], pmra[2], pmra[3]),
+                    (pmdec[1], pmdec[2], pmdec[3]),
+                    (cov[1], cov[2], cov[3]),
+                    Float64(_get(vals, :plx;     default = NaN)),
+                    Float64(_get(vals, :plx_err; default = NaN)),
+                    Int(_get(vals, :hip_id;      default = 0)))
+end
+
+# One epoch's 2×2 covariance: nested rows from a config, or the four entries
+# in column order, which is how JSON3 writes a Matrix.
+_hgca_cov(c::AbstractMatrix) = Matrix{Float64}(c)
+function _hgca_cov(c)
+    v = collect(c)
+    m = length(v) == 4 && all(x -> x isa Real, v) ? reshape(Float64.(v), 2, 2) :
+        permutedims(reduce(hcat, [Float64.(collect(r)) for r in v]))
+    size(m) == (2, 2) || error("hgca cov_ep entries must be 2×2, got $(size(m))")
+    return m
 end
 
 function _parse_relastrom_block(block)

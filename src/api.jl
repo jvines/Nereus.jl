@@ -162,14 +162,14 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                 relast = relast === nothing ? ch_relast :
                          merge_relast(relast, ch_relast)
             end
-            ch_hgca = get(ch, "hgca", nothing)
+            ch_hgca = _as_hgca(get(ch, "hgca", nothing))
             if ch_hgca !== nothing
                 hgca === nothing || throw(ArgumentError(
                     "two AS channels both supply `hgca`; HGCA is one " *
                     "catalogue row per system, not a per-instrument product"))
                 hgca = ch_hgca
             end
-            ch_gost = get(ch, "gost", nothing)
+            ch_gost = _as_gost(get(ch, "gost", nothing))
             if ch_gost !== nothing
                 gost === nothing || throw(ArgumentError(
                     "two AS channels both supply `gost`; GOST is one scan " *
@@ -437,6 +437,20 @@ dict, which rejects it, so relative astrometry could not be fitted from Python.
 _as_relast(x) = x
 _as_relast(d::AbstractDict) = _parse_relastrom_block(d)
 _as_relast(v::AbstractVector{<:AbstractDict}) = merge_relast([_as_relast(d) for d in v])
+
+"""
+    _as_hgca(x) -> HGCAData or nothing
+    _as_gost(x) -> GOSTData or nothing
+
+As `_as_relast`: the Python client sends HGCA and GOST as JSON blocks, which
+reached `Data` as raw dicts and were rejected there, so neither could be
+fitted from Python. A block is anything a run_job config takes, or the field
+dict the client's `load_hgca` / `load_gost` returns.
+"""
+_as_hgca(x) = x
+_as_hgca(d::AbstractDict) = _parse_hgca_block(d)
+_as_gost(x) = x
+_as_gost(d::AbstractDict) = _parse_gost_block(d)
 
 """
     fit_astrometry(; iad, hgca, gost, relast, planets, priors, ...)

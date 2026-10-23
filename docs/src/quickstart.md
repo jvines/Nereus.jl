@@ -197,7 +197,7 @@ schema errors and reports them in one message before any heavy work.
 | `transit_photometry` | list of per-instrument LCs, each `values` (`bjd`, `flux`, `flux_err`) **or** `csv`; per-LC `instrument` and `exposure_time` (seconds, default 120) |
 | `iad` | `hip_id` (auto-fetch Hipparcos IAD) **or** inline `values` |
 | `gost` | `{ra_deg, dec_deg}` (auto-fetch) **or** inline `values` |
-| `hgca` | `csv` (Brandt 2018 catalog) **or** inline 3-epoch `values` |
+| `hgca` | `hip_id` (auto-fetch Brandt eDR3) **or** `{fits, hip_id}` (local `HGCA_vEDR3.fits`) **or** inline 3-epoch `values` |
 | `relastrom` | `csv` **or** inline `values` |
 | `gaia_dr3` | `params`, `cov`, `t_ref` |
 
