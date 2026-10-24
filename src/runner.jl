@@ -269,10 +269,10 @@ const _KNOWN_PARAMETRIZATIONS = (
     geom = ("b_rr", "b_r"),
 )
 const _KNOWN_STABILITY      = ("none", "amd", "gladman")
-const _KNOWN_PRIORS         = ("UniformPrior", "LogUniformPrior",
-                                "ModJeffreysPrior", "NormalPrior",
-                                "FixedPrior", "SinePrior", "BetaPrior",
-                                "WrappedUniformPrior")
+# Prior `type` names are checked with `is_prior_name`, against PRIOR_ALIASES
+# (src/priors.jl): "NormalPrior", "normal", "gaussian", "norm" are one prior.
+_unknown_prior_hint() =
+    "known: $(prior_names()), or any spelling in Nereus.PRIOR_ALIASES"
 # Valid `noise_models[].kind` values. Derived from _NOISE_TYPES (defined
 # further down, so this is a function, not a const) because the hand-written
 # tuple this replaced had drifted: it omitted ErrorScale, NightlyOffset,
@@ -424,9 +424,9 @@ function _validate_config(cfg::AbstractDict)
     if _has(cfg, :priors)
         for (name, spec) in _get(cfg, :priors)
             _has(spec, :type) || (push!(errs, "priors[`$name`] missing `type`"); continue)
-            ptype = String(_get(spec, :type))
-            ptype in _KNOWN_PRIORS || push!(errs,
-                "priors[`$name`].type=`$ptype` unknown (known: $(join(_KNOWN_PRIORS, ", ")))")
+            ptype = string(_get(spec, :type))
+            is_prior_name(ptype) || push!(errs,
+                "priors[`$name`].type=`$ptype` unknown ($(_unknown_prior_hint()))")
         end
     end
 
@@ -446,10 +446,10 @@ function _validate_config(cfg::AbstractDict)
             if !_has(pr, :type)
                 push!(errs, "model.external_priors[$i].prior missing `type`")
             else
-                pt = String(_get(pr, :type))
-                pt in _KNOWN_PRIORS || push!(errs,
+                pt = string(_get(pr, :type))
+                is_prior_name(pt) || push!(errs,
                     "model.external_priors[$i].prior.type=`$pt` unknown " *
-                    "(known: $(join(_KNOWN_PRIORS, ", ")))")
+                    "($(_unknown_prior_hint()))")
             end
         end
     end
@@ -1191,21 +1191,35 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
 end
 
 # ---- Priors -----------------------------------------------------------
-const _PRIOR_TYPES = Dict(
-    "UniformPrior"     => UniformPrior,
-    "LogUniformPrior"  => LogUniformPrior,
-    "ModJeffreysPrior" => ModJeffreysPrior,
-    "NormalPrior"      => NormalPrior,
-    "FixedPrior"       => FixedPrior,
-    "SinePrior"        => SinePrior,
-    "BetaPrior"        => BetaPrior,
-    "WrappedUniformPrior" => WrappedUniformPrior,
+# A truncnorm states its bounds: `[mu, sigma]` alone is refused rather than
+# silently left untruncated.
+function _truncnorm_from_args(args...)
+    length(args) == 4 || throw(ArgumentError(
+        "a truncnorm prior takes args [mu, sigma, lo, hi]; got $(length(args)) " *
+        "value(s). Without bounds use \"normal\"."))
+    return NormalPrior(args...)
+end
+
+# Keyed by the canonical names of PRIOR_ALIASES (src/priors.jl); `type` is
+# resolved through `canonical_prior`, so every alias reaches its constructor.
+const _PRIOR_TYPES = Dict{Symbol, Any}(
+    :uniform        => UniformPrior,
+    :normal         => NormalPrior,
+    :truncnorm      => _truncnorm_from_args,
+    :loguniform     => LogUniformPrior,
+    :modjeffreys    => ModJeffreysPrior,
+    :fixed          => FixedPrior,
+    :sine           => SinePrior,
+    :beta           => BetaPrior,
+    :wrappeduniform => WrappedUniformPrior,
 )
+
+_prior_constructor(name) = _PRIOR_TYPES[canonical_prior(name)]
 
 function _build_priors(priors_cfg)
     out = Dict{String, PriorSpec}()
     for (name, spec) in priors_cfg
-        T = _PRIOR_TYPES[String(_get(spec, :type; required = true))]
+        T = _prior_constructor(_get(spec, :type; required = true))
         args = collect(_get(spec, :args; default = Any[]))
         out[String(name)] = T(args...)
     end
@@ -1215,7 +1229,7 @@ end
 function _build_external_prior(spec)
     q = Symbol(_get(spec, :quantity; required = true))
     pr = _get(spec, :prior; required = true)
-    T = _PRIOR_TYPES[String(_get(pr, :type; required = true))]
+    T = _prior_constructor(_get(pr, :type; required = true))
     args = collect(_get(pr, :args; default = Any[]))
     # :ecc is per-planet, :rho_s is global; default from the quantity so a
     # config cannot silently pair the wrong scope with the right prior.
