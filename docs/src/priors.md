@@ -132,6 +132,55 @@ and `lo`/`hi`; `prior_from_dict(d)` reconstructs it. Recognised types:
 `Fixed`, `Uniform`, `LogUniform`, `Normal`, `Beta`, `ModJeffreys`. An
 affine-rescaled `BetaPrior(lo≠0 || hi≠1)` round-trips as `"Unknown"`.
 
+## Prior names
+
+Wherever a prior is named by a string (the `type` of a `run_job` prior, or of
+a prior dict passed to a `fit_*` function or from Python), any spelling below
+is accepted. Matching ignores case, spaces, `_`, `-`, `.` and a trailing
+`Prior`, so `"log_uniform"`, `"Log-Uniform"` and `"LogUniformPrior"` are the
+same name. The table is `Nereus.PRIOR_ALIASES`; an unknown name fails with the
+full list.
+
+| canonical | constructor | accepted names |
+|---|---|---|
+| `uniform` | `UniformPrior` | uniform, unif, flat, box, boxcar, tophat |
+| `normal` | `NormalPrior` | normal, norm, gaussian, gauss |
+| `truncnorm` | `NormalPrior` (bounded) | truncnorm, truncnormal, truncated_normal, truncatednorm, truncgauss, truncgaussian, truncated_gaussian |
+| `loguniform` | `LogUniformPrior` | loguniform, log_uniform, logunif, logflat, jeffreys, jeffrey, reciprocal |
+| `modjeffreys` | `ModJeffreysPrior` | modjeffreys, modjeffrey, modified_jeffreys, modified_jeffrey |
+| `fixed` | `FixedPrior` | fixed, fix, pinned, delta, delta_function, dirac, constant |
+| `sine` | `SinePrior` | sine, sin, sini, isotropic |
+| `beta` | `BetaPrior` | beta |
+| `wrappeduniform` | `WrappedUniformPrior` | wrapped_uniform, wrapped, circular_uniform, periodic_uniform |
+
+A `normal` with `lo` and/or `hi` is truncated; a `truncnorm` must give them
+(it is refused without bounds rather than left untruncated). `jeffreys` is the
+scale-invariant `1/x` prior, i.e. `loguniform`; the modified Jeffreys prior of
+Gregory (2005) is `modjeffreys`.
+
+The two string forms take the hyperparameters differently:
+
+| canonical | `run_job` `args` (positional) | prior dict fields |
+|---|---|---|
+| `uniform` | `[lo, hi]` | `lo`, `hi` |
+| `normal` | `[mu, sigma]` or `[mu, sigma, lo, hi]` | `mu`, `sigma`, optional `lo`/`hi` |
+| `truncnorm` | `[mu, sigma, lo, hi]` | `mu`, `sigma`, `lo` and/or `hi` |
+| `loguniform` | `[lo, hi]` | `lo`, `hi` |
+| `modjeffreys` | `[knee, upper]` | `knee`, `upper` |
+| `fixed` | `[value]` | `value` (or pass the bare number) |
+| `sine` | `[]` | none |
+| `beta` | `[a, b]` | `a`, `b`, optional `lo`/`hi` |
+| `wrappeduniform` | `[lo, hi]` | `lo`, `hi` |
+
+```json
+{ "type": "gaussian",   "args": [35.25, 1.02] }
+{ "type": "Log-Uniform", "args": [1.0, 1000.0] }
+```
+```python
+priors = {"plx": {"type": "gaussian", "mu": 35.25, "sigma": 1.02},
+          "inc_k1": {"type": "truncnorm", "mu": 1.4, "sigma": 0.1, "lo": 0.0, "hi": 3.14159}}
+```
+
 ## Naming convention
 
 Per-parameter prior keys follow a predictable pattern. The names are
@@ -395,10 +444,10 @@ constructor and **splats `args` positionally** into it:
 }
 ```
 
-Recognised `type` values (`_KNOWN_PRIORS`): `UniformPrior`,
-`LogUniformPrior`, `ModJeffreysPrior`, `NormalPrior`, `FixedPrior`,
-`SinePrior`, `BetaPrior`. The config validator rejects any other
-`type` before the run starts; an empty `args` (`SinePrior`) is fine.
+`type` takes the constructor name or any spelling under
+[Prior names](#prior-names) (`"NormalPrior"`, `"normal"` and `"gaussian"`
+build the same prior). The config validator rejects any other `type`
+before the run starts; an empty `args` (`SinePrior`) is fine.
 Because the splat is positional, `BetaPrior`'s `lo`/`hi` keywords are
 not reachable from a config (see the note under
 [`BetaPrior`](#betapriora-b-lo00-hi10)).

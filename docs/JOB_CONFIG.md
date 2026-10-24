@@ -280,7 +280,7 @@ rather than a single number trusted.
     ]
   },
 
-  // ---- Priors — per-parameter overrides (src/runner.jl:1176-1184) ---
+  // ---- Priors — per-parameter overrides (src/runner.jl:1219-1227) ---
   // Keys are Nereus parameter names; anything not listed gets its default prior.
   //   Per-planet:  P_k1, K_k1, sesinw_k1/secosw_k1 (or e_k1/w_k1), Tp_k1/Tc_k1/Mo_k1,
   //                b_k1, rr_k1, inc_k1, Omega_k1, M_sec_k1, a_k1, …
@@ -288,9 +288,12 @@ rather than a single number trusted.
   //                lambda_k1 (rad; default UniformPrior(-π, π))   — src/default_priors.jl:445,485
   //   Systemic:    plx, M_pri, trend_1, trend_2
   //   Per-instrument: gamma_<inst>, jitter_<inst>, offset_<inst>, … (suffix = instrument name)
-  // VALID prior types (src/runner.jl:272-275,1165-1174):
-  //   UniformPrior, LogUniformPrior, ModJeffreysPrior, NormalPrior,
-  //   FixedPrior, SinePrior, BetaPrior
+  // VALID prior types (src/priors.jl:458-474, src/runner.jl:1205-1215): the constructor
+  //   names UniformPrior, LogUniformPrior, ModJeffreysPrior, NormalPrior, FixedPrior,
+  //   SinePrior, BetaPrior, WrappedUniformPrior, or any alias, case- and separator-
+  //   insensitive: "normal" | "gaussian" | "norm", "uniform" | "flat", "log_uniform" |
+  //   "jeffreys", "truncnorm" (args [mu, sigma, lo, hi]), "fixed" | "dirac", ...
+  //   Full table: docs/src/priors.md, "Prior names".
   "priors": {
     "P_k1":         { "type": "LogUniformPrior",  "args": [1.0, 1000.0] },
     "K_k1":         { "type": "ModJeffreysPrior", "args": [1.0, 1000.0] },

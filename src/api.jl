@@ -686,21 +686,32 @@ function _as_external(v::AbstractVector)
 end
 
 function _as_prior(d::AbstractDict)
-    t = lowercase(String(get(d, "type", "")))
+    haskey(d, "type") || throw(ArgumentError(
+        "a prior dict needs a `type` (one of $(prior_names())); " *
+        "got keys $(collect(keys(d)))"))
+    t = canonical_prior(d["type"])   # any spelling in PRIOR_ALIASES
     g(k, dflt=nothing) = get(d, k, dflt)
     # `lo`/`hi`, either or both, truncate a normal: a bounded quantity such as an
-    # inclination is refused a prior that reaches past its physical range.
-    if t == "normal"
-        (haskey(d, "lo") || haskey(d, "hi")) ||
-            return NormalPrior(float(g("mu")), float(g("sigma")))
+    # inclination is refused a prior that reaches past its physical range. A
+    # truncnorm without either is refused rather than left untruncated.
+    if t === :normal || t === :truncnorm
+        bounded = haskey(d, "lo") || haskey(d, "hi")
+        t === :truncnorm && !bounded && throw(ArgumentError(
+            "a truncnorm prior needs `lo` and/or `hi`; without bounds use \"normal\""))
+        bounded || return NormalPrior(float(g("mu")), float(g("sigma")))
         return NormalPrior(float(g("mu")), float(g("sigma")),
                            float(g("lo", -Inf)), float(g("hi", Inf)))
     end
-    t == "uniform"     && return UniformPrior(float(g("lo")), float(g("hi")))
-    t == "loguniform"  && return LogUniformPrior(float(g("lo")), float(g("hi")))
-    t == "fixed"       && return FixedPrior(float(g("value")))
-    t == "sine"        && return SinePrior()
-    error("unknown prior type $(repr(t)); use normal|uniform|loguniform|fixed|sine")
+    t === :uniform        && return UniformPrior(float(g("lo")), float(g("hi")))
+    t === :loguniform     && return LogUniformPrior(float(g("lo")), float(g("hi")))
+    t === :modjeffreys    && return ModJeffreysPrior(float(g("knee")), float(g("upper")))
+    t === :fixed          && return FixedPrior(float(g("value")))
+    t === :sine           && return SinePrior()
+    t === :beta           && return BetaPrior(float(g("a")), float(g("b"));
+                                              lo = float(g("lo", 0.0)),
+                                              hi = float(g("hi", 1.0)))
+    t === :wrappeduniform && return WrappedUniformPrior(float(g("lo")), float(g("hi")))
+    error("canonical prior :$t has no dict form in _as_prior")
 end
 
 "Stellar mass from the target config, or nothing if the fit never needed one."
