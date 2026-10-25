@@ -77,9 +77,21 @@ end
 
 Map from bounded (prior support) space to unconstrained ℝⁿ.
 """
-function transform_forward(x::AbstractVector, type_ids::Vector{Int},
+transform_forward(x::AbstractVector, type_ids::Vector{Int},
+                  lowers::Vector{Float64}, uppers::Vector{Float64}) =
+    transform_forward!(similar(x, Float64), x, type_ids, lowers, uppers)
+
+"""
+    transform_forward!(y, x, pt) -> y
+
+`transform_forward` into `y`, which may be `x` itself: each `y[i]` depends on
+`x[i]` alone. Same arithmetic as the allocating method, which calls this.
+"""
+transform_forward!(y::AbstractVector, x::AbstractVector, pt::PackedTransforms) =
+    transform_forward!(y, x, pt.type_ids, pt.lowers, pt.uppers)
+
+function transform_forward!(y::AbstractVector, x::AbstractVector, type_ids::Vector{Int},
                             lowers::Vector{Float64}, uppers::Vector{Float64})
-    y = similar(x, Float64)
     @inbounds for i in eachindex(x)
         tid = type_ids[i]
         if tid == TRANSFORM_IDENTITY
