@@ -801,6 +801,11 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
 }
 ```
 
+A `"failed"` summary additionally carries `"error"` (the message) and
+`"traceback"`; the auxiliary stages instead write a nested
+`{"status":"failed"|"skipped","error":…}` under their own key and the job
+continues (`src/runner.jl:196-203,2171-2175,2238-2242,2287-2291,2408-2412`).
+
 ### Progress lines (stdout)
 
 Off a TTY every progress bar prints whole lines, `label | ▕bar▏ | k/N (p%) | key=value |
@@ -834,11 +839,6 @@ post-fit | ▕██████████████████████
   `bridge bootstrap` appears only when the fixed point converged.
 - `output.show_progress = false` silences all of these, as it does the plot bar.
   `summary.timing` is written either way.
-
-A `"failed"` summary additionally carries `"error"` (the message) and
-`"traceback"`; the auxiliary stages instead write a nested
-`{"status":"failed"|"skipped","error":…}` under their own key and the job
-continues (`src/runner.jl:196-203,2171-2175,2238-2242,2287-2291,2408-2412`).
 
 ---
 
