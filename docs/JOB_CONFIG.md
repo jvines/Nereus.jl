@@ -778,9 +778,62 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
   "fit_health": {
     "overall": "ok",                        // "ok" | "warn" | "fail"
     "checks": { "disjoint_modes": { "status": "ok", "message": "…" }, /*…*/ }
+  },
+
+  // ---- Where the post-fit time went (seconds; observability, not science) ----
+  "timing": {
+    // every post-fit stage but `write`, which is still running when this is taken
+    "post_fit": { "ppc": 4.1, "detection_limits": 0.9, "loo": 2.2, "fit_health": 6.0,
+                  "diagnostics": 3.1, "summary": 1.4, "evidence": 412.7, "science": 8.8 },
+    // bridge_evidence's record; absent when the bridge did not run (trans-dim chains)
+    "bridge": {
+      "threads": 8, "n_draws": 5800000, "n_post": 5800000, "n_post_finite": 5800000,
+      "n_proposal": 20000, "n_prop_finite": 19998,
+      "iters": 5, "converged": true,
+      "bootstrap_workers": 8, "bootstrap_ok": 200,
+      "bootstrap_iters_max": 6, "bootstrap_iters_total": 1012,
+      // per stage: transform, posterior_evals, proposal_evals, primary_solve,
+      // bootstrap (only when the primary solve converged), ess (the promotion guard)
+      "posterior_evals": { "seconds": 220.4, "alloc_bytes": 1.2e9, "gc_seconds": 0.8,
+                           "maxrss_bytes": 4.1e9 }   // process peak RSS when the stage ended
+    }
   }
 }
 ```
+
+### Progress lines (stdout)
+
+Off a TTY every progress bar prints whole lines, `label | ▕bar▏ | k/N (p%) | key=value |
+… | elapsed …`. After the sampler's bar and the `plots` bar, `run_job` and the
+`fit_*` route print one `post-fit` line as each post-fit stage starts:
+
+```
+post-fit | ▕████████████████░░░░░░░░▏ | 6/9 (66.7%) | stage=evidence | elapsed 41s
+bridge posterior | ▕████████░░░░░░░░░░░░░░░░▏ | 1900000/5800000 (32.8%) | elapsed 1m10s | ETA 2m24s
+bridge proposal | ▕████████████████████████▏ | 20000/20000 (100.0%) | elapsed 1s
+bridge solve | iter 5 | converged=true | elapsed 0s
+bridge bootstrap | ▕██████░░░░░░░░░░░░░░░░░░▏ | 50/200 (25.0%) | workers=8 | elapsed 2m02s | ETA 6m06s
+post-fit | ▕██████████████████░░░░░░▏ | 7/9 (77.8%) | stage=science | elapsed 7m13s
+post-fit | ▕█████████████████████░░░▏ | 8/9 (88.9%) | stage=write | elapsed 7m22s
+post-fit | ▕████████████████████████▏ | 9/9 (100.0%) | stage=done | elapsed 7m24s
+```
+
+- `k/N` counts the stages finished before the named one. The stages are
+  `ppc, detection_limits, loo, fit_health, diagnostics, summary, evidence,
+  science, write` (`run_job`) and `ppc, detection_limits, loo, fit_health,
+  evidence, science, write` (`fit_*`; only `write` with `science = false`).
+- Each `post-fit` line is printed when its stage starts, never throttled: the
+  last line printed while a stage runs names it.
+- `stage=done` is printed only after `summary.json` is written. A `fit_*` call
+  that cannot write it prints `stage=write_failed` instead; a `run_job` failure
+  prints no final `post-fit` line (it logs the error and rethrows).
+- The `bridge …` lines come from `bridge_evidence` during `evidence`; they are
+  throttled to one every 0.5 s and always print their last tick. `bridge solve`
+  counts fixed-point iterations (no total; `delta` is the last change in log Z)
+  and ends with `converged=true|false`.
+  `bridge bootstrap` appears only when the fixed point converged.
+- `output.show_progress = false` silences all of these, as it does the plot bar.
+  `summary.timing` is written either way.
 
 A `"failed"` summary additionally carries `"error"` (the message) and
 `"traceback"`; the auxiliary stages instead write a nested

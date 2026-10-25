@@ -155,6 +155,8 @@ const TEST_UNITS = [
     (name = "test_bridge_threading.jl", seconds = 3, files = ["test_bridge_threading.jl"]),
     # The parallel bootstrap against the serial one it replaced.
     (name = "test_bridge_bootstrap.jl", seconds = 40, files = ["test_bridge_bootstrap.jl"]),
+    # run_job's and fit_*'s post-fit stage lines and timings.
+    (name = "test_postfit_progress.jl", seconds = 120, files = ["test_postfit_progress.jl"]),
     # The workspace and allocating likelihoods at e up to 0.99999.
     (name = "test_high_e_workspace.jl", seconds = 15, files = ["test_high_e_workspace.jl"]),
     # Evidence estimators that do not temper from the prior, and the Rajpaul
