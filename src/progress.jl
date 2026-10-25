@@ -30,10 +30,11 @@ mutable struct ProgressBar
     finished::Bool
     enabled::Bool
     n_start::Int               # iterations already done when the bar started
+    eta::Bool                  # print an ETA (off where steps differ wildly in cost)
 end
 
 """
-    ProgressBar(label; total=0, print_every=0.5, width=24, enabled=true, start=0)
+    ProgressBar(label; total=0, print_every=0.5, width=24, enabled=true, start=0, eta=true)
 
 Construct a single-line progress bar. `total=0` switches to an
 indeterminate format (just iter count + elapsed + extra fields). When
@@ -42,19 +43,21 @@ seconds and emitted as full lines instead of carriage-return refreshes,
 so it survives in log files. Pass `enabled=false` to make all
 `update!` / `finish!` calls no-ops. `start` is the count already done before
 this bar, e.g. by the run a resumed sampler continues: the bar starts there and
-the ETA uses only the rate since.
+the ETA uses only the rate since. `eta = false` leaves the ETA out: it
+assumes every step costs the same, which is false of a bar over unlike stages.
 """
 function ProgressBar(label::AbstractString;
                        total::Integer = 0,
                        print_every::Real = 0.5,
                        width::Integer = 24,
                        enabled::Bool = true,
-                       start::Integer = 0)
+                       start::Integer = 0,
+                       eta::Bool = true)
     use_tty = enabled && _stdout_is_tty()
     now = time()
     return ProgressBar(String(label), Int(total), Int(start), now, 0.0,
                         Float64(print_every), Int(width), use_tty,
-                        false, enabled, Int(start))
+                        false, enabled, Int(start), eta)
 end
 
 # Stdout-is-TTY check that handles both terminal and pipe-to-file.
@@ -68,20 +71,26 @@ catch
 end
 
 """
-    update!(pb; n_done=pb.n_done+1, fields=())
+    update!(pb; n_done=pb.n_done+1, fields=(), force=false)
 
 Advance the bar to `n_done` iters and refresh the display. `fields` is
 an iterable of `Symbol => value` pairs that get formatted into the
 status line (numbers get `%g`-style formatting; strings pass through).
+
+Updates closer together than `print_every` are dropped, except the final tick
+and any with `force = true`. Force the ones a reader must see: a line that
+names the stage now running is the last line printed while that stage runs,
+however long it takes.
 """
 function update!(pb::ProgressBar;
                   n_done::Integer = pb.n_done + 1,
-                  fields = ())
+                  fields = (),
+                  force::Bool = false)
     pb.enabled || return pb
     pb.n_done = Int(n_done)
     now = time()
     # Throttle except on the final tick
-    if (now - pb.t_last_print < pb.print_every) &&
+    if !force && (now - pb.t_last_print < pb.print_every) &&
        !(pb.total > 0 && pb.n_done >= pb.total)
         return pb
     end
@@ -121,6 +130,48 @@ function finish!(pb::ProgressBar; final::AbstractString = "")
     return pb
 end
 
+"""
+    _SharedProgress(pb; fields = () -> ())
+
+A `ProgressBar` that worker threads advance together. `_tick!` adds to an
+atomic count and returns at once; a line is printed by whichever thread finds
+the bar's lock free once `print_every` has passed, so no worker ever waits on
+printing. `fields` is called for the status fields of each line it prints.
+"""
+struct _SharedProgress{F}
+    pb::ProgressBar
+    count::Threads.Atomic{Int}
+    lock::ReentrantLock
+    fields::F
+end
+
+_SharedProgress(pb::ProgressBar; fields = () -> ()) =
+    _SharedProgress(pb, Threads.Atomic{Int}(pb.n_done), ReentrantLock(), fields)
+
+function _tick!(sp::_SharedProgress, n::Integer = 1)
+    done = Threads.atomic_add!(sp.count, Int(n)) + Int(n)
+    pb = sp.pb
+    pb.enabled || return nothing
+    final = pb.total > 0 && done >= pb.total
+    # The final tick must print, so it waits for the lock; any other is dropped
+    # if another thread holds it. `update!` throttles the rest.
+    if final
+        lock(sp.lock)
+    else
+        trylock(sp.lock) || return nothing
+    end
+    try
+        # A tick that lost the race to the final one prints nothing: the bar
+        # has been printed full already.
+        (!final && pb.total > 0 && pb.n_done >= pb.total) && return nothing
+        # `max`: a thread that loses the race must not move the bar backwards.
+        update!(pb; n_done = max(pb.n_done, done), fields = sp.fields(), force = final)
+    finally
+        unlock(sp.lock)
+    end
+    return nothing
+end
+
 # --- internals --------------------------------------------------------
 
 function _render(pb::ProgressBar, fields)
@@ -143,7 +194,7 @@ function _render(pb::ProgressBar, fields)
 
     push!(parts, @sprintf("elapsed %s", _time_fmt(elapsed)))
 
-    if pb.total > 0 && pb.n_done > pb.n_start && pb.n_done < pb.total
+    if pb.eta && pb.total > 0 && pb.n_done > pb.n_start && pb.n_done < pb.total
         rate = (pb.n_done - pb.n_start) / max(elapsed, 1e-9)
         eta = (pb.total - pb.n_done) / rate
         push!(parts, @sprintf("ETA %s", _time_fmt(eta)))
