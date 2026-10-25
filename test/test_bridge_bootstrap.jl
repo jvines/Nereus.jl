@@ -365,6 +365,20 @@ end
                                       n_bootstrap = 12),
                       _ref_bridge_evidence(tg, ch; n_proposal = 2_000, seed = 9,
                                            proposal = :gaussian, n_bootstrap = 12))
+        # Non-finite posterior draws are dropped before anything else, as
+        # before: the one path on which the transformed draws are copied.
+        A = copy(ch.value.data)
+        j = findfirst(==(Symbol(tg.params.layout.unfrozen_names[1])), names(ch))
+        A[3, j, 1] = NaN
+        A[7, j, 2] = NaN                   # (an Inf can map to a finite point)
+        bad = Chains(A, names(ch))
+        tmb = Dict{String, Any}()
+        gb = bridge_evidence(tg, bad; n_proposal = 3_000, seed = 42, n_bootstrap = 30,
+                             timings = tmb)
+        @test isequal(gb, _ref_bridge_evidence(tg, bad; n_proposal = 3_000, seed = 42,
+                                               n_bootstrap = 30))
+        @test tmb["n_post"] == tmb["n_draws"] - 2 == gb.n_post
+        @test gb.converged && isfinite(gb.se)
         few = ch[1:1, :, 1:2]
         @test isequal(bridge_evidence(tg, few), _ref_bridge_evidence(tg, few))
     end
