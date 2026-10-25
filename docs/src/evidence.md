@@ -274,7 +274,7 @@ When you drive Nereus via `Nereus.run_job` (the JSON/Dict
 dispatcher — see [JOB_CONFIG.md](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md)),
 every sampler result is normalised so `log_evidence` is always present,
 and the run summary surfaces it as the JSON key **`log_z`**
-(`src/runner.jl:2442`). Samplers with no evidence at all (e.g.
+(`src/runner.jl:2465`). Samplers with no evidence at all (e.g.
 `map`, `nuts`, `rjmcmc`, `moms`) return `log_evidence = NaN`
 (`runner.jl:1431`, `1437`, `1482`) and the value is written only when
 finite (the JSON contract forbids raw `NaN`). Note that `pa`/`smc`
@@ -285,7 +285,7 @@ population-annealing free-energy estimate, the NS family report
 Skilling/Feroz `log Z`. The
 sampler names that route through the PT evidence stack are
 `"pt"`, `"pt_emcee"`, `"transdim_pt_emcee"`,
-`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1402`–`1461`).
+`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1425`–`1461`).
 
 **`summary.json` carries an `evidence` block**, not just `log_z`: every
 estimator the run produced with its standard error, plus `reported` naming

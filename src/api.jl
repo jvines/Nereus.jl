@@ -928,14 +928,25 @@ function _finish(target, engine, stopping, output_dir; op::String,
         # --- post-fit science, the same sequence run_job runs -------------
         # Every one of these is fail-soft on its own; `science = false` skips
         # the lot, which is what you want while iterating on short chains.
+        # The same `post-fit` progress bar as run_job's (see `_PostFit`).
+        show_pf = Bool(_get(ocfg, :show_progress; default = true))
+        pf = _PostFit(science ? ("ppc", "detection_limits", "loo", "fit_health",
+                                 "evidence", "science", "write") : ("write",);
+                      enabled = show_pf)
+        bridge_t = Dict{String, Any}()
         if science
             try
+                _postfit_stage!(pf, "ppc")
                 _run_ppc!(cfg, chains, target.params, target.data, output_dir, summary)
+                _postfit_stage!(pf, "detection_limits")
                 _run_detection_limits!(cfg, chains, target.params, target.data,
                                         output_dir, summary)
+                _postfit_stage!(pf, "loo")
                 _run_loo!(cfg, chains, target.params, target.data, raw, summary)
+                _postfit_stage!(pf, "fit_health")
                 _run_fit_health!(cfg, chains, target.params, summary;
                                  sampled_windows)
+                _postfit_stage!(pf, "evidence")
                 # The evidence spread, before augmenting it. `_augment_evidence!`
                 # AUGMENTS -- it returns early unless summary["evidence"] is
                 # already a Dict -- and on this route nothing ever built one, so
@@ -948,7 +959,9 @@ function _finish(target, engine, stopping, output_dir; op::String,
                 # The tempered stack sits >100 nats low on a signal-locked
                 # posterior while its four variants agree with each other to a
                 # decimal, so a bridge cross-check is not optional.
-                _augment_evidence!(summary, target.params, target.data, chains)
+                _augment_evidence!(summary, target.params, target.data, chains;
+                                   show_progress = show_pf, timings = bridge_t)
+                _postfit_stage!(pf, "science")
                 # Conditioned, unit-tagged fitted/derived + model_selection +
                 # run_info, and tables/ in json, csv, ecsv, dat and TEX.
                 # NOTE: run_job deletes summary["params"] here in favour of the
@@ -979,13 +992,17 @@ function _finish(target, engine, stopping, output_dir; op::String,
         # "chains_path" and no output_dir; `_finish` reported output_dir and no
         # chains_path. Give both, absolute, on both routes.
         summary["chains_path"] = joinpath(output_dir, "chains.nc")
+        summary["timing"] = _postfit_timing(pf, bridge_t)
         # An on-disk record of the run. Without this a fit_* output_dir held
         # chains.nc and nothing else: restart the kernel and the posterior
         # summary, diagnostics, evidence and derived block were gone.
+        _postfit_stage!(pf, "write")
         try
             _write_summary(output_dir, summary)
+            _postfit_done!(pf)
         catch err
             summary["summary_write_error"] = sprint(showerror, err)
+            _postfit_done!(pf; stage = "write_failed")
         end
     end
     return (; chains, log_z, summary)

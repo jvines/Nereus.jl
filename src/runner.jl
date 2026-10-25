@@ -143,23 +143,38 @@ function run_job(cfg::AbstractDict)
         end
         _warn_unmatched_plot_patterns(plot_paths, figs)
 
+        # Everything from here to summary.json is one `post-fit` progress bar:
+        # a line names each stage as it starts, and `stage=done` comes only
+        # once summary.json is written. The plot bar reaching 100% says the
+        # figures are done, not the job -- after a production fit's last plot
+        # the bridge bootstrap alone ran another hour, with nothing printed.
+        show_pf = Bool(_get(_get(cfg, :output; default = Dict()), :show_progress;
+                            default = true))
+        pf = _PostFit(("ppc", "detection_limits", "loo", "fit_health", "diagnostics",
+                       "summary", "evidence", "science", "write"); enabled = show_pf)
+
         # --- Posterior predictive checks (default on; fail-soft) -------
+        _postfit_stage!(pf, "ppc")
         _run_ppc!(cfg, chains, params, data, out_dir, summary)
 
         # --- Detection limits (PT samplers only; fail-soft) ------------
+        _postfit_stage!(pf, "detection_limits")
         _run_detection_limits!(cfg, chains, params, data, out_dir, summary)
 
         # --- PSIS-LOO / WAIC (sampler-agnostic; fail-soft) -------------
+        _postfit_stage!(pf, "loo")
         _run_loo!(cfg, chains, params, data, result, summary)
 
         # --- Post-fit health guard (sampler-agnostic; fail-soft) -------
         # Flags silently-wrong posteriors (disjoint modes, railed bounds,
         # corrupt log-post) as a logged warning + summary entry. Never
         # alters the chains or the rest of the output.
+        _postfit_stage!(pf, "fit_health")
         _run_fit_health!(cfg, chains, params, summary; sampled_windows)
 
         # --- Build summary ---------------------------------------------
         # Run health, per engine — same harvest fit_* gets.
+        _postfit_stage!(pf, "diagnostics")
         try
             summary["diagnostics"] = sampler_diagnostics(
                 String(_get(_get(cfg, :sampler; default = Dict()), :name;
@@ -167,8 +182,13 @@ function run_job(cfg::AbstractDict)
         catch err
             summary["diagnostics"] = Dict{String,Any}("error" => sprint(showerror, err))
         end
+        _postfit_stage!(pf, "summary")
         _populate_summary!(summary, result, params, chains)
-        _augment_evidence!(summary, params, data, chains)
+        _postfit_stage!(pf, "evidence")
+        bridge_t = Dict{String, Any}()
+        _augment_evidence!(summary, params, data, chains;
+                           show_progress = show_pf, timings = bridge_t)
+        _postfit_stage!(pf, "science")
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
         # Authoritative science contract: conditioned, unit-tagged fitted/derived
@@ -190,8 +210,11 @@ function run_job(cfg::AbstractDict)
 
         summary["elapsed_sec"] = time() - t0
         summary["config_path"] = config_path_of(cfg)
+        summary["timing"] = _postfit_timing(pf, bridge_t)
 
+        _postfit_stage!(pf, "write")
         _write_summary(out_dir, summary)
+        _postfit_done!(pf)
         return summary
     catch err
         @error "Nereus.run_job failed" exception = (err, catch_backtrace())
@@ -2473,7 +2496,12 @@ end
 # from the same params and data. The chains are unchanged; only the evidence
 # block gains `bridge` (and `reference_path`), and `reported` is upgraded to
 # bridge when it is usable.
-function _augment_evidence!(summary, params, data, chains)
+#
+# `show_progress` prints bridge_evidence's progress lines; `timings`, a
+# dictionary, receives its stage record (see `bridge_evidence`) and the time
+# the ESS guard took (`ess`).
+function _augment_evidence!(summary, params, data, chains;
+                            show_progress::Bool = false, timings = nothing)
     try
         ev = get(summary, "evidence", nothing)
         ev isa AbstractDict || return
@@ -2487,7 +2515,8 @@ function _augment_evidence!(summary, params, data, chains)
         end
         tgt = NereusTarget(params, data; unconstrained = true)
         tgt.transform === nothing && return
-        b = bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42)
+        b = bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42,
+                            show_progress = show_progress, timings = timings)
         (b.converged && isfinite(b.log_z)) || return
         ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
                             "overlap" => Float64(b.overlap))
@@ -2497,9 +2526,11 @@ function _augment_evidence!(summary, params, data, chains)
         # when the chain actually supports it.
         d = length(params.layout.unfrozen_names)
         need = d + d * (d + 1) ÷ 2
-        ess = try
-            minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
-        catch; NaN end
+        ess = _bridge_stage!(timings, "ess") do
+            try
+                minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
+            catch; NaN end
+        end
         if isfinite(ess) && ess >= need
             summary["log_z"] = Float64(b.log_z)
             ev["reported"] = "bridge"
@@ -2512,6 +2543,82 @@ function _augment_evidence!(summary, params, data, chains)
         @debug "post-fit evidence augmentation failed" exception = err
     end
     return
+end
+
+# =====================================================================
+# Post-fit progress
+# =====================================================================
+
+"""
+    _PostFit(stages; enabled = true)
+
+The post-fit work of a fit -- everything after the sampler and the plots -- as
+one progress bar, `post-fit`, and the wall time of each stage. Shared by
+run_job and the fit_* route.
+
+`_postfit_stage!(pf, name)` starts stage `name`, `_postfit_done!(pf)` ends the
+last one, and each prints its line at once (`force`; never throttled), so the
+last line printed while a stage runs names that stage, however long it takes.
+Off a TTY that is one line per event:
+
+    post-fit | ▕████████████████░░░░░░░░▏ | 6/9 (66.7%) | stage=evidence | elapsed 41s
+    post-fit | ▕████████████████████████▏ | 9/9 (100.0%) | stage=done | elapsed 3m12s
+
+`k/N` counts the stages FINISHED before the named one starts. `done` is
+printed only after `summary.json` has been written: the fit's outputs are all
+on disk by then, and not before. Where the fit_* route fails to write it (it
+records the error and returns) the last line says `stage=write_failed`
+instead. There is no ETA: the stages differ by orders of magnitude in cost.
+
+Stages that report progress of their own print their lines in between
+(`bridge posterior`, `bridge proposal`, `bridge solve`, `bridge bootstrap`
+during `evidence`).
+"""
+mutable struct _PostFit
+    pb::ProgressBar
+    stages::Vector{String}
+    k::Int
+    t_stage::Float64
+    seconds::Dict{String, Float64}
+end
+
+_PostFit(stages; enabled::Bool = true) =
+    _PostFit(ProgressBar("post-fit"; total = length(stages), enabled = enabled, eta = false),
+             collect(String, stages), 0, time(), Dict{String, Float64}())
+
+function _postfit_close!(pf::_PostFit)
+    pf.k > 0 && (pf.seconds[pf.stages[pf.k]] = time() - pf.t_stage)
+    return pf
+end
+
+function _postfit_stage!(pf::_PostFit, name::AbstractString)
+    _postfit_close!(pf)
+    k = findfirst(==(name), pf.stages)
+    k === nothing && throw(ArgumentError("unknown post-fit stage `$name`"))
+    pf.k = k
+    pf.t_stage = time()
+    update!(pf.pb; n_done = k - 1, fields = (:stage => String(name),), force = true)
+    # On a terminal a bar redraws its line in place, and a stage's own bars
+    # (the bridge's) would draw over this one. Keep each stage's line.
+    (pf.pb.enabled && pf.pb.use_tty) && (println(stdout); flush(stdout))
+    return pf
+end
+
+function _postfit_done!(pf::_PostFit; stage::AbstractString = "done")
+    _postfit_close!(pf)
+    pf.k = 0
+    update!(pf.pb; n_done = length(pf.stages), fields = (:stage => String(stage),), force = true)
+    finish!(pf.pb)
+    return pf
+end
+
+# summary["timing"]: the seconds of each post-fit stage so far, up to the one
+# running now (taken just before `write`, which therefore has no entry), and the
+# bridge's record.
+function _postfit_timing(pf::_PostFit, bridge_timings)
+    t = Dict{String, Any}("post_fit" => copy(_postfit_close!(pf).seconds))
+    isempty(bridge_timings) || (t["bridge"] = bridge_timings)
+    return t
 end
 
 """
