@@ -195,13 +195,8 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
         es[j]  = e
         ws[j]  = w
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tps[j] = t_ref - ta * Ps[j] / two_pi
-        elseif parametrization.time === :Tp
-            Tps[j] = ta
-        else  # :Tc
-            Tps[j] = tc_to_tp(ta, Ps[j], e, w)
-        end
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
     end
 
     # --- Decode trend (once) -----------------------------------------
@@ -334,13 +329,8 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
         es[j]  = e
         ws_buf[j] = w
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tps[j] = t_ref - ta * Ps[j] / two_pi
-        elseif parametrization.time === :Tp
-            Tps[j] = ta
-        else  # :Tc
-            Tps[j] = tc_to_tp(ta, Ps[j], e, w)
-        end
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
     end
 
     # --- Per-planet RV-velocity cache. ------------------------------
@@ -487,13 +477,8 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         (e < 0 || e >= 1) && return convert(T, -Inf)
         es[j] = e; ws_buf[j] = w
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tps[j] = t_ref - ta * Ps[j] / two_pi
-        elseif parametrization.time === :Tp
-            Tps[j] = ta
-        else
-            Tps[j] = tc_to_tp(ta, Ps[j], e, w)
-        end
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
     end
 
     trend_order = theta.params.config.trend_order
@@ -743,13 +728,8 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         (e < 0 || e >= 1) && return convert(T, -Inf)
         es[j] = e; ws[j] = w
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tps[j] = t_ref - ta * Ps[j] / two_pi
-        elseif parametrization.time === :Tp
-            Tps[j] = ta
-        else
-            Tps[j] = tc_to_tp(ta, Ps[j], e, w)
-        end
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
     end
 
     trend_order = theta.params.config.trend_order
@@ -1777,13 +1757,8 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
         es[j]  = e
         ws[j]  = w
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tps[j] = t_ref - ta * Ps[j] / two_pi
-        elseif parametrization.time === :Tp
-            Tps[j] = ta
-        else
-            Tps[j] = tc_to_tp(ta, Ps[j], e, w)
-        end
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
     end
 
     # Decode trend

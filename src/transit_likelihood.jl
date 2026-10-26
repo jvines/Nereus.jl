@@ -622,13 +622,8 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         ws[j] = w
 
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tps[j] = t_ref - ta * Ps[j] / two_pi
-        elseif parametrization.time === :Tp
-            Tps[j] = ta
-        else  # :Tc
-            Tps[j] = tc_to_tp(ta, Ps[j], e, w)
-        end
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
 
         b_raw, rr_raw = planet_b_rr(theta, k)
         # Decode r1r2 if needed
@@ -1087,13 +1082,8 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         e, w  = planet_e_w(theta, k)
         es[j] = e; ws[j] = w
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tps[j] = t_ref - ta * Ps[j] / two_pi
-        elseif parametrization.time === :Tp
-            Tps[j] = ta
-        else
-            Tps[j] = tc_to_tp(ta, Ps[j], e, w)
-        end
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
         b_raw, rr_raw = planet_b_rr(theta, k)
         if parametrization.geom === :r1r2
             rrs[j] = b_raw * (1 + rr_raw) / 2
@@ -1429,13 +1419,8 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
         ws_[j] = w
 
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tps[j] = t_ref - ta * Ps[j] / two_pi
-        elseif parametrization.time === :Tp
-            Tps[j] = ta
-        else
-            Tps[j] = tc_to_tp(ta, Ps[j], e, w)
-        end
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
 
         b_raw, rr_raw = planet_b_rr(theta, k)
         if parametrization.geom === :r1r2

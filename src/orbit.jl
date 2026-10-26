@@ -234,3 +234,63 @@ function tp_to_tc(Tp::Real, P::Real, e::Real, ω::Real)
     E_tr = 2 * atan(tan(f_tr / 2) * sqrt((1 - ec) / (1 + ec)))
     return Tp + P / oftype(Tp, 2π) * (E_tr - ec * sin(E_tr))
 end
+
+# ---------------------------------------------------------------------
+# Transit phase φ_c (time = :phic)
+# ---------------------------------------------------------------------
+#
+# φ_c = 2π (Tc − t_ref_c) / P is the transit time measured in phase from the
+# epoch t_ref_c, the middle of the photometry. It carries Tc's information (no
+# e or ω in it, so the transit pins it directly) on a circle, so the window is
+# one period at every P: Tc ∈ [t_ref_c − P/2, t_ref_c + P/2) for φ_c ∈ [−π, π).
+# A Tc window is fixed in days and holds baseline/P copies of the orbit. A
+# uniform φ_c is uniform transit phase, p(Tc | P) = 1/P.
+
+"""
+    phic_to_tc(phic, P, t_ref_c) -> Tc
+
+Transit time from the transit phase `phic` = 2π (Tc − t_ref_c) / P.
+"""
+function phic_to_tc(phic::Real, P::Real, t_ref_c::Real)
+    return t_ref_c + phic * P / oftype(phic, 2π)
+end
+
+"""
+    tc_to_phic(Tc, P, t_ref_c) -> phic
+
+Inverse of `phic_to_tc`. Not wrapped: the result is `2π (Tc − t_ref_c) / P`.
+"""
+function tc_to_phic(Tc::Real, P::Real, t_ref_c::Real)
+    return oftype(Tc, 2π) * (Tc - t_ref_c) / P
+end
+
+"""
+    anchor_to_tp(time, ta, P, e, ω, t_ref, t_ref_c) -> Tp
+
+Time of periastron passage from the time-anchor value `ta` under the time
+parametrization `time` (`:Mo`, `:Tp`, `:Tc` or `:phic`). `t_ref` is the
+epoch `Mo` is measured at (`data.t_ref`), `t_ref_c` the one `phic` is
+(`parametrization.t_ref_c`); each is read only by its own anchor.
+"""
+@inline function anchor_to_tp(time::Symbol, ta::Real, P::Real, e::Real, ω::Real,
+                              t_ref::Real, t_ref_c::Real)
+    time === :Mo   && return mo_to_tp(ta, P, t_ref)
+    time === :Tp   && return ta
+    time === :Tc   && return tc_to_tp(ta, P, e, ω)
+    time === :phic && return tc_to_tp(phic_to_tc(ta, P, t_ref_c), P, e, ω)
+    throw(ArgumentError("unknown time anchor :$time"))
+end
+
+"""
+    anchor_to_tc(time, ta, P, e, ω, t_ref, t_ref_c) -> Tc
+
+Time of inferior conjunction (transit centre) from the time-anchor value; see
+`anchor_to_tp`. Exact for `:Tc` and `:phic`, through Kepler's equation for the
+others.
+"""
+@inline function anchor_to_tc(time::Symbol, ta::Real, P::Real, e::Real, ω::Real,
+                              t_ref::Real, t_ref_c::Real)
+    time === :Tc   && return ta
+    time === :phic && return phic_to_tc(ta, P, t_ref_c)
+    return tp_to_tc(anchor_to_tp(time, ta, P, e, ω, t_ref, t_ref_c), P, e, ω)
+end

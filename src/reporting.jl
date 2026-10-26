@@ -769,7 +769,7 @@ function _param_planet_index(name::String, max_kp::Int)
             # an inactive trans-dim slot's drifting value was reported with the
             # active draws and voted on where recenter_circular! puts the seam.
             if base in ("P", "K", "sesinw", "secosw", "esinw", "ecosw",
-                        "ecc", "w", "Mo", "Tp", "Tc", "b", "rr", "r1", "r2",
+                        "ecc", "w", "Mo", "phic", "Tp", "Tc", "b", "rr", "r1", "r2",
                         "a", "Omega", "lambda")
                 return k
             end

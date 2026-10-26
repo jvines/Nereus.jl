@@ -336,9 +336,8 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
         if t_ref !== nothing
             e_k, ω_k = planet_e_w(theta, k)
             ta = planet_time_anchor(theta, k)
-            Tc0s[r] = tm_kind === :Tc ? ta :
-                      tp_to_tc(tm_kind === :Mo ? t_ref - ta * Ps[j] / T(2π) : ta,
-                               Ps[j], e_k, ω_k)
+            Tc0s[r] = anchor_to_tc(tm_kind, ta, Ps[j], e_k, ω_k, t_ref,
+                                   config.parametrization.t_ref_c)
             ec = clamp(e_k, zero(e_k), oftype(e_k, 1) - eps(oftype(e_k, 1)))
             E_tr = 2 * atan(tan((T(π) / 2 - ω_k) / 2) * sqrt((1 - ec) / (1 + ec)))
             Mtrs[r] = E_tr - ec * sin(E_tr)

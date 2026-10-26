@@ -48,12 +48,12 @@ params = Params(;
 ]
 ```
 
-`run_job` recognises thirteen `kind`s (`_NOISE_TYPES`, `src/runner.jl:1192`):
+`run_job` recognises thirteen `kind`s (`_NOISE_TYPES`, `src/runner.jl:1195`):
 `CeleriteRotation`, `CeleriteSHO`, `CeleriteRotationFM17`,
 `ActivityDecorrelation`, `ARModel`, `MAModel`, `ActivityJitter`,
 `ActivityGP`, `ErrorScale`, `NightlyOffset`, `HarmonicBlock`, `StudentT`,
 `MaternGP`. The top-level `channel`/`instruments` are injected only into
-constructors that accept them (`src/runner.jl:1265-1268`): the Celerite GPs
+constructors that accept them (`src/runner.jl:1268-1271`): the Celerite GPs
 take both, `ARModel`/`MAModel` take `channel` only, `ActivityGP` takes
 `channels` (note the plural — supply it in `kwargs`), and the
 `MeanModifier`s take neither. `IndicatorFloor` is **not** in `_NOISE_TYPES`
@@ -293,7 +293,7 @@ Five fitted parameters (`src/noise/param_names.jl:188`,
 | `gp_dQ$s`     | `Q1 − Q2`, difference in quality factors | `Uniform(0, 5)` |
 | `gp_f$s`      | fractional amplitude of the secondary mode, `0 ≤ f ≤ 1` | `Uniform(0.01, 0.99)` |
 
-(Priors from `src/default_priors.jl:771`.) Use when the star has clear
+(Priors from `src/default_priors.jl:773`.) Use when the star has clear
 rotation modulation and you want each harmonic's coherence to vary
 independently. Default for active stars.
 
@@ -379,7 +379,7 @@ is always an active channel implicitly and is **not** listed in
 non-identifiability against the channel couplings; it destabilised log Z
 by ~80 nats run-to-run on HD 18599). All scale lives in the couplings.
 Names from `src/noise/param_names.jl:196`, priors from
-`src/default_priors.jl:856`:
+`src/default_priors.jl:858`:
 
 | Parameter | Meaning | Default prior |
 |---|---|---|
@@ -446,8 +446,8 @@ errors** for every non-`:rv` channel. Errors are mandatory (the
 #### run_job form
 
 `ActivityGP` is **run_job-drivable** (`_NOISE_TYPES`,
-`src/runner.jl:1200`). Supply `channels` as a kwarg (strings are
-symbolised, `src/runner.jl:1255`):
+`src/runner.jl:1203`). Supply `channels` as a kwarg (strings are
+symbolised, `src/runner.jl:1258`):
 
 ```json
 { "kind": "ActivityGP", "instruments": [],
@@ -505,7 +505,7 @@ falls through the standard white/celerite machinery untouched. In
   [`plot_activity_gp_decomposition`](@ref) draw the paper figures.
   `run_job` emits them automatically as `activity_gp_latent.png` and
   `activity_gp_decomposition.png` whenever an `ActivityGP` is configured
-  (`src/runner.jl:2079,2091`).
+  (`src/runner.jl:2082,2094`).
 
 #### Trans-dim head-to-head with `ActivityDecorrelation`
 
@@ -819,13 +819,13 @@ includes RM, an in-transit RV anomaly is added to the RV prediction.
   `v_p = V·sin(i_*)·(x_sky cos λ − y_sky sin λ)`
   ([Hirano+ 2011](https://ui.adsabs.harvard.edu/abs/2011ApJ...742...69H/abstract), `src/rm.jl`); the Reloaded variant integrates the
   intensity-weighted line-of-sight velocity over the planet's disk
-  (`rm_reloaded_signal`, `src/rm.jl:611`).
+  (`rm_reloaded_signal`, `src/rm.jl:610`).
 - Parameters: a system-level `v_sin_i_star` (m/s,
   `LogUniform(500, 1e5)`) and a per-planet sky-projected obliquity
   `lambda_k<k>` (rad, `Uniform(−π, π)`); priors at
-  `src/default_priors.jl:445,485`.
+  `src/default_priors.jl:447,487`.
 - The RM contribution is included in `rv_predictions`
-  (`src/likelihood.jl:1859`), so PPC residuals, the RV time-series
+  (`src/likelihood.jl:1834`), so PPC residuals, the RV time-series
   overlay and phase folds are all RM-consistent.
 - Diagnostic plot: `rm_anomaly` (`plot_rm`, `src/plotting/rm_plots.jl`),
   emitted by `run_job` when any planet mode has RM.
@@ -836,7 +836,7 @@ includes RM, an in-transit RV anomaly is added to the RV prediction.
   — RV model decomposition into its pieces (Keplerian(s), GP/AGP
   activity, total). Distinct from `rv_timeseries`. Auto-emitted when
   there are ≥2 planets or any `CovarianceNoise`/`ActivityGP` is active
-  (`src/runner.jl:1694`).
+  (`src/runner.jl:1697`).
 - `transit_overlay` (`plot_transit_overlay_fit`,
   `src/plotting/ttv_plots.jl:342`) — per-transit QC gallery.
 - `ttv_oc` (`plot_ttv_oc`, `src/plotting/ttv_plots.jl:144`) — O-C

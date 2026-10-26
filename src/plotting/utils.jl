@@ -523,13 +523,8 @@ function compute_rv_model_on_grid(theta, data, t_grid;
         e, w = planet_e_w(theta, k)
         (e < 0 || e >= 1) && continue
         ta = planet_time_anchor(theta, k)
-        if parametrization.time === :Mo
-            Tp = t_ref - ta * P / two_pi
-        elseif parametrization.time === :Tp
-            Tp = ta
-        else
-            Tp = tc_to_tp(ta, P, e, w)
-        end
+        Tp = anchor_to_tp(parametrization.time, ta, P, e, w, t_ref,
+                          parametrization.t_ref_c)
         push!(Ps, P); push!(Ks, K); push!(cBs, cB); push!(es, e)
         push!(ws, w); push!(Tps, Tp)
     end
@@ -598,13 +593,8 @@ function compute_rv_model_planet(theta, data, t_grid, planet_k::Int; comp::Int=1
     (e < 0 || e >= 1) && return zeros(length(t_grid))
 
     ta = planet_time_anchor(theta, planet_k)
-    if parametrization.time === :Mo
-        Tp = t_ref - ta * P / two_pi
-    elseif parametrization.time === :Tp
-        Tp = ta
-    else
-        Tp = tc_to_tp(ta, P, e, w)
-    end
+    Tp = anchor_to_tp(parametrization.time, ta, P, e, w, t_ref,
+                      parametrization.t_ref_c)
 
     model = zeros(length(t_grid))
     for (i, t) in enumerate(t_grid)
@@ -631,13 +621,8 @@ function _planet_Tp(theta, data, planet_k::Int)
     P = planet_P(theta, planet_k)
     e, w = planet_e_w(theta, planet_k)
     ta = planet_time_anchor(theta, planet_k)
-    if parametrization.time === :Mo
-        return data.t_ref - ta * P / (2π)
-    elseif parametrization.time === :Tp
-        return ta
-    else
-        return tc_to_tp(ta, P, e, w)
-    end
+    return anchor_to_tp(parametrization.time, ta, P, e, w, data.t_ref,
+                        parametrization.t_ref_c)
 end
 
 """
@@ -652,9 +637,11 @@ pointwise median washes flat and the band frays. Conjunction Tc = tp_to_tc(Tp)
 is fixed by λ, so all draws phase-align and the fold is coherent.
 """
 function _planet_Tc(theta, data, planet_k::Int)
+    pc = theta.params.config.parametrization
     P = planet_P(theta, planet_k)
     e, w = planet_e_w(theta, planet_k)
-    return tp_to_tc(_planet_Tp(theta, data, planet_k), P, e, w)
+    return anchor_to_tc(pc.time, planet_time_anchor(theta, planet_k), P, e, w,
+                        data.t_ref, pc.t_ref_c)
 end
 
 """
@@ -739,10 +726,8 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
         ws[j] = w
 
         ta = planet_time_anchor(theta, k)
-        Tps[j] = parametrization.time === :Mo ?
-                  (t_ref - ta * Ps[j] / two_pi) :
-                  parametrization.time === :Tp ? ta :
-                  tc_to_tp(ta, Ps[j], e, w)
+        Tps[j] = anchor_to_tp(parametrization.time, ta, Ps[j], e, w, t_ref,
+                              parametrization.t_ref_c)
 
         b_raw, rr_raw = planet_b_rr(theta, k)
         if parametrization.geom === :r1r2
@@ -853,7 +838,7 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
     Psym = Symbol("P_k$(planet)")
     Pv = Psym in Symbol.(allnames) ? vec(Array(chains[Psym])) : nothing
     timekind = params.config.parametrization.time
-    anchor = timekind === :Mo ? "Mo" : timekind === :Tp ? "Tp" : ""  # wrapping anchors
+    anchor = timekind in (:Mo, :phic, :Tp) ? String(timekind) : ""  # wrapping anchors
 
     _zsq(c) = begin
         m = median(c); s = 1.4826 * median(abs.(c .- m))
@@ -870,7 +855,7 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
         c = vec(Array(chains[Symbol(nm)]))
         length(c) == n_flat || continue
         if base == anchor                     # wrapping phase anchor → (cos, sin)
-            ang = base == "Mo" ? c : (Pv === nothing ? c : 2π .* (c ./ Pv))
+            ang = base == "Tp" ? (Pv === nothing ? c : 2π .* (c ./ Pv)) : c  # Mo, phic: rad
             for comp in (cos.(ang), sin.(ang))
                 z = _zsq(comp); z === nothing && continue
                 @. dist2 += z;
@@ -1032,7 +1017,10 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
         t_eval = if fold_phase !== nothing && planet !== nothing
             P_d  = planet_P(theta, planet)
             ta_d = planet_time_anchor(theta, planet)
-            t0_d = (time_kind === :Tc || time_kind === :Tp) ? ta_d : data.t_ref
+            t0_d = (time_kind === :Tc || time_kind === :Tp) ? ta_d :
+                   time_kind === :phic ?
+                       phic_to_tc(ta_d, P_d, params.config.parametrization.t_ref_c) :
+                   data.t_ref
             t0_d .+ fold_phase .* P_d
         else
             t_grid

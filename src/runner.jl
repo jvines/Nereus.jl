@@ -287,7 +287,7 @@ const _KNOWN_PLANET_MODES   = ("RV_ONLY", "PM_ONLY", "RVPM", "RVAS",
                                 "PM_DT")                 # Doppler shadow, no velocities
 const _KNOWN_PARAMETRIZATIONS = (
     mass = ("K_driven", "M_sec_driven", "a_driven"),
-    time = ("Tp", "Tc", "Mo"),
+    time = ("Tp", "Tc", "Mo", "phic"),
     ew   = ("sesinw", "ew"),
     geom = ("b_rr", "b_r"),
 )
@@ -1055,7 +1055,7 @@ const _MASS_MODE = Dict(
     "K_driven" => :K_driven, "M_sec_driven" => :M_sec_driven,
     "a_driven" => :a_driven,
 )
-const _TIME_ANCHOR = Dict("Tp" => :Tp, "Tc" => :Tc, "Mo" => :Mo)
+const _TIME_ANCHOR = Dict("Tp" => :Tp, "Tc" => :Tc, "Mo" => :Mo, "phic" => :phic)
 const _EW_PARAM   = Dict("sesinw" => :sesinw, "ew" => :ew)
 const _GEOM_PARAM = Dict("b_rr" => :b_rr, "b_r" => :b_r)
 const _STAB       = Dict("none" => :none, "amd" => :amd, "gladman" => :gladman)
@@ -1108,6 +1108,9 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         # prior (default_priors.jl); an informative override arrives via
         # ExternalPrior(:rho_s, ...).
         use_rho_s = Bool(_get(par, :use_rho_s; default = false)),
+        # Epoch the transit phase is measured from (time = "phic"). Absent:
+        # Params takes the median photometric time.
+        t_ref_c = Float64(_get(par, :t_ref_c; default = NaN)),
     )
 
     ic = InstrumentConfig(rv = inst_names_rv, pm = inst_names_pm,

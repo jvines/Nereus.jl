@@ -194,8 +194,9 @@ function plot_pm_phasefold(chains, params, data;
         P  = planet_P(theta_med, planet)
         ta = planet_time_anchor(theta_med, planet)
         parametrization = params.config.parametrization
-        t0 = parametrization.time === :Tc ? ta :
-             parametrization.time === :Tp ? ta : data.t_ref
+        t0 = parametrization.time === :Tc   ? ta :
+             parametrization.time === :phic ? phic_to_tc(ta, P, parametrization.t_ref_c) :
+             parametrization.time === :Tp   ? ta : data.t_ref
 
         phases = phase_fold(data.t_phot, P, t0)
 

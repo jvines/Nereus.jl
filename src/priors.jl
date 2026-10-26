@@ -735,6 +735,7 @@ const PHYSICAL_BOUNDS = Dict{String, Tuple{Float64, Float64}}(
     "ecc"     => (0.0, 1.0),       # astroEMPEROR alias for e
     "w"       => (-2π, 2π),        # Argument of periastron [rad]; periodic
     "Mo"      => (-2π, 2π),        # Mean anomaly [rad]
+    "phic"    => (-2π, 2π),        # Transit phase 2π(Tc − t_ref_c)/P [rad]
     "sesinw"  => (-1.0, 1.0),      # √e sin ω
     "secosw"  => (-1.0, 1.0),      # √e cos ω
     "esinw"   => (-1.0, 1.0),      # e sin ω

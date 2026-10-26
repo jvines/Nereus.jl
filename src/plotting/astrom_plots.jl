@@ -12,7 +12,7 @@
 #
 # Internal: chain → orbit conversion uses `_planet_orbit(theta, k,
 # M_pri, plx, t_ref)` which is parametrization-aware (handles
-# :K_driven, :M_sec_driven, :a_driven mass modes and :Mo/:Tp/:Tc
+# :K_driven, :M_sec_driven, :a_driven mass modes and :Mo/:Tp/:Tc/:phic
 # time anchors). Building a Theta from a chain row is the same
 # pattern used in `utils.jl::compute_ci_bands`.
 
@@ -371,13 +371,8 @@ function plot_orbit_skyplane(chains, params, data;
                 t_anc = planet_time_anchor(theta_med, planet_idx)
                 time_kind = params.config.parametrization.time
                 e_med, _ = planet_e_w(theta_med, planet_idx)
-                tp_med = if time_kind === :Mo
-                    mo_to_tp(t_anc, P_med, data.t_ref)
-                elseif time_kind === :Tp
-                    t_anc
-                else
-                    tc_to_tp(t_anc, P_med, e_med, ω_med)
-                end
+                tp_med = anchor_to_tp(time_kind, t_anc, P_med, e_med, ω_med, data.t_ref,
+                                      params.config.parametrization.t_ref_c)
                 periastron_pos = relastrom_offset(orb_med, tp_med)
             catch err
                 @warn "Could not trace median orbit" exception=err
@@ -918,13 +913,8 @@ function plot_rv_astrom_phasefold(chains, params, data;
         e_med, ω_med = planet_e_w(theta_med, planet_idx)
         t_anc = planet_time_anchor(theta_med, planet_idx)
         time_kind = params.config.parametrization.time
-        tp_med = if time_kind === :Mo
-            mo_to_tp(t_anc, P_med, data.t_ref)
-        elseif time_kind === :Tp
-            t_anc
-        else
-            tc_to_tp(t_anc, P_med, e_med, ω_med)
-        end
+        tp_med = anchor_to_tp(time_kind, t_anc, P_med, e_med, ω_med, data.t_ref,
+                              params.config.parametrization.t_ref_c)
 
         # ---- TOP: RV phase fold ----------------------------------
         # Data de-trend (other planets + γ + trend) and the black curve
