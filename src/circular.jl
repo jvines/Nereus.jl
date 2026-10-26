@@ -1,12 +1,13 @@
 # Circular parameters — the 0/2π seam is a coordinate choice, not a wall.
 #
-# Mo, Ω, λ and (under the `:ew` parametrization) ω reach every likelihood only
-# through sin/cos or Kepler's equation. With a Uniform prior spanning exactly one
-# period, the prior window [lo, lo + 2π) is a CHART of the circle, and where its
-# seam sits is arbitrary. The samplers nevertheless treat `lo` / `hi` as hard
-# walls: eval_packed_logpdf rejects anything outside, the logit transform sends
-# the seam to y = ±∞, and the nested samplers wall the unit cube. A posterior
-# centred on the seam is then cut in two -- one mode shows up as two lobes at
+# Mo, the transit phase φ_c (`phic`), Ω, λ and (under the `:ew` parametrization)
+# ω reach every likelihood only through sin/cos or Kepler's equation. With a
+# Uniform prior spanning exactly one period, the prior window [lo, lo + 2π) is a
+# CHART of the circle, and where its seam sits is arbitrary. The samplers
+# nevertheless treat `lo` / `hi` as hard walls: eval_packed_logpdf rejects
+# anything outside, the logit transform sends the seam to y = ±∞, and the
+# nested samplers wall the unit cube. A posterior centred on the seam is then
+# cut in two -- one mode shows up as two lobes at
 # opposite ends of the interval with an empty interior between them. Nothing is
 # truncated, since the window covers the circle exactly once, but it becomes a
 # two-mode mixing problem, and every linear summary of that parameter (median,
@@ -31,21 +32,21 @@
 #     truncated Normal on Mo, a two-period U(-2π, 2π): those walls are the
 #     user's, and a density that is not periodic cannot be relabelled exactly.
 #   * inclination-like angles. i ∈ [0, π] is not periodic.
-#   * Mo whenever TTVs are modelled. TTV epoch numbering hangs off the
-#     transit time Tc = tp_to_tc(Tp) with Tp = t_ref − Mo·P/2π, so
-#     Mo → Mo + 2π relabels every transit and the likelihood is not periodic
-#     in Mo there.
-#   * Mo under the O'Neil observation-based prior (`obs_prior`). Its Jacobian
-#     carries the mean anomaly at each relative-astrometry epoch LINEARLY
-#     (the 3M terms of |2(e²−2)sinE + e(3M + sin2E) + 3M cosE|), so shifting
-#     Mo by 2π changes the density.
+#   * Mo and φ_c whenever TTVs are modelled. TTV epoch numbering hangs off the
+#     transit time Tc = tp_to_tc(Tp) with Tp = t_ref − Mo·P/2π (under φ_c,
+#     Tc = t_ref_c + φ_c·P/2π), so a 2π shift relabels every transit and the
+#     likelihood is not periodic in the anchor there.
+#   * Mo and φ_c under the O'Neil observation-based prior (`obs_prior`). Its
+#     Jacobian carries the mean anomaly at each relative-astrometry epoch
+#     LINEARLY (the 3M terms of |2(e²−2)sinE + e(3M + sin2E) + 3M cosE|), so
+#     shifting the anchor by 2π (Tp by P) changes the density.
 
 const CIRCULAR_PERIOD = 2π
 
 # Per-planet angles only. Anchored, so `gp_act_lambda_e` and the ARMA `omega_*`
 # coefficients can never match; `w_k` exists only under the `:ew`
 # parametrization, where it is the argument of periastron.
-const _CIRCULAR_NAME = r"^(Mo|Omega|lambda|w)_k\d+$"
+const _CIRCULAR_NAME = r"^(Mo|phic|Omega|lambda|w)_k\d+$"
 
 # Wide enough for 2π typed to four decimals (6.2832 is off by 2.4e-6
 # relative). The window keeps its own span when it moves, so the prior density
@@ -69,7 +70,7 @@ function is_circular(name::AbstractString, ps::PriorSpec, config)
     (ps.dist isa Distributions.Uniform || ps.dist isa WrappedUniform) || return false
     abs((ps.hi - ps.lo) - CIRCULAR_PERIOD) <=
         _CIRCULAR_SPAN_RTOL * CIRCULAR_PERIOD || return false
-    if m.captures[1] == "Mo"
+    if m.captures[1] == "Mo" || m.captures[1] == "phic"
         _ttv_modelled(config) && return false
         _obs_prior_on(config) && return false
     end

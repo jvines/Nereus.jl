@@ -654,6 +654,19 @@ function compute_derived(chains, params::Params;
         # stays in radians for the transit durations below (sin ω is periodic).
         derived["omega_deg"] = _contiguous_deg(w, active, _deg_lo_ref("w_k$k"))
 
+        # Under :phic the sampled anchor is the transit phase at t_ref_c, and the
+        # transit time is what gets reported. Each draw maps through its own P,
+        # so Tc carries its covariance with P exactly. The phase is made
+        # contiguous first, so every draw lands in the same copy of the orbit.
+        if parametrization.time === :phic
+            nm = "phic_k$k"
+            ph = _col(nm)
+            nm in circ && (ph = circular_contiguous(ph; period = 2π,
+                                                    lo_ref = config.priors[nm].lo,
+                                                    mask = active))
+            derived["Tc"] = phic_to_tc.(ph, P, parametrization.t_ref_c)
+        end
+
         # Semi-amplitude (RV planets). Under :a_driven / :M_sec_driven the RV
         # amplitude is DERIVED from the sampled mass, so there is no K_k slot —
         # guard on the chain actually carrying K_k (else msini-from-K is skipped;

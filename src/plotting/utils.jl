@@ -838,7 +838,7 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
     Psym = Symbol("P_k$(planet)")
     Pv = Psym in Symbol.(allnames) ? vec(Array(chains[Psym])) : nothing
     timekind = params.config.parametrization.time
-    anchor = timekind === :Mo ? "Mo" : timekind === :Tp ? "Tp" : ""  # wrapping anchors
+    anchor = timekind in (:Mo, :phic, :Tp) ? String(timekind) : ""  # wrapping anchors
 
     _zsq(c) = begin
         m = median(c); s = 1.4826 * median(abs.(c .- m))
@@ -855,7 +855,7 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
         c = vec(Array(chains[Symbol(nm)]))
         length(c) == n_flat || continue
         if base == anchor                     # wrapping phase anchor → (cos, sin)
-            ang = base == "Mo" ? c : (Pv === nothing ? c : 2π .* (c ./ Pv))
+            ang = base == "Tp" ? (Pv === nothing ? c : 2π .* (c ./ Pv)) : c  # Mo, phic: rad
             for comp in (cos.(ang), sin.(ang))
                 z = _zsq(comp); z === nothing && continue
                 @. dist2 += z;
@@ -1017,7 +1017,10 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
         t_eval = if fold_phase !== nothing && planet !== nothing
             P_d  = planet_P(theta, planet)
             ta_d = planet_time_anchor(theta, planet)
-            t0_d = (time_kind === :Tc || time_kind === :Tp) ? ta_d : data.t_ref
+            t0_d = (time_kind === :Tc || time_kind === :Tp) ? ta_d :
+                   time_kind === :phic ?
+                       phic_to_tc(ta_d, P_d, params.config.parametrization.t_ref_c) :
+                   data.t_ref
             t0_d .+ fold_phase .* P_d
         else
             t_grid

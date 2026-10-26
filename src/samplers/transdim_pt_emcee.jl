@@ -115,7 +115,9 @@ end
 # Per-parameter RWM step size for post-birth refinement, in NATURAL units.
 # Period is BLS-precise so it gets a tiny step; geometry/eccentricity get
 # fixed moderate steps; K/rr scale with their value. `time_param` distinguishes
-# Tc (days) from Mo (radians) for the time anchor.
+# Tc/Tp (days) from Mo (radians) for the time anchor. The transit phase phic is
+# in radians but pinned like Tc: 0.01 rad is 0.002-0.02 d at P = 1-10 d,
+# Tc's 0.01 d step.
 @inline function _refine_sigma(blk, slot, val::Float64, time_param::Symbol)
     if slot == blk.P
         return max(1e-6, 1e-4 * abs(val))
@@ -124,7 +126,8 @@ end
     elseif has_geometry(blk) && slot == blk.r
         return max(1e-4, 0.1 * abs(val))
     elseif slot == blk.t
-        return (time_param === :Tc || time_param === :Tp) ? 0.01 : 0.05
+        return (time_param === :Tc || time_param === :Tp || time_param === :phic) ?
+               0.01 : 0.05
     elseif slot == blk.e1 || slot == blk.e2
         return 0.05
     elseif has_K(blk) && slot == blk.K

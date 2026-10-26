@@ -576,13 +576,20 @@ combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
 
 """
     ParametrizationConfig(; ew=:sesinw, time=:Mo, geom=:b_rr, use_rho_s=false,
-                            mass=:K_driven)
+                            mass=:K_driven, t_ref_c=NaN)
 
 Choices for how orbital parameters are parametrized in the sampler.
 
 # Fields
 - `ew::Symbol`        : one of `:sesinw`, `:esinw`, `:ew`
-- `time::Symbol`      : one of `:Mo`, `:Tp`, `:Tc`
+- `time::Symbol`      : one of `:Mo`, `:Tp`, `:Tc`, `:phic`. `:phic` samples the
+                         transit phase φ_c = 2π (Tc − t_ref_c) / P, Tc on a
+                         circle: one period wide at every P, and pinned by the
+                         transit like Tc (see `phic_to_tc`).
+- `t_ref_c::Float64`  : the epoch φ_c is measured from. `NaN` (the default)
+                         is filled in by `Params` from the data: the median
+                         photometric time, else `data.t_ref` (see
+                         `phic_reference_epoch`). Read only under `:phic`.
 - `geom::Symbol`      : one of `:b_rr`, `:r1r2`
 - `use_rho_s::Bool`   : if `true`, a shared stellar density parameter
                          replaces per-planet `a_kN`
@@ -646,8 +653,8 @@ function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
                                 t_ref_c::Real=NaN)
     ew in (:sesinw, :esinw, :ew) ||
         throw(ArgumentError("ew must be :sesinw, :esinw, or :ew; got :$ew"))
-    time in (:Mo, :Tp, :Tc) ||
-        throw(ArgumentError("time must be :Mo, :Tp, or :Tc; got :$time"))
+    time in (:Mo, :Tp, :Tc, :phic) ||
+        throw(ArgumentError("time must be :Mo, :Tp, :Tc or :phic; got :$time"))
     (isnan(t_ref_c) || isfinite(t_ref_c)) ||
         throw(ArgumentError("t_ref_c must be finite, or NaN to take it from the data"))
     geom in (:b_rr, :r1r2) ||
@@ -659,6 +666,24 @@ function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
         "from the stellar density or sampled directly, not both"))
     return ParametrizationConfig(ew, time, geom, use_rho_s, mass, obs_prior,
                                  marginalize_gamma, sample_a_Rs, Float64(t_ref_c))
+end
+
+"""
+    phic_reference_epoch(data) -> Float64
+
+The epoch the transit phase φ_c (`time = :phic`) is measured from when
+`t_ref_c` is not given: the median photometric time, so Tc is reported near
+the middle of the transits, where it is least correlated with P. Without
+photometry it is `data.t_ref`.
+"""
+phic_reference_epoch(data) =
+    isempty(data.t_phot) ? Float64(data.t_ref) : Float64(median(data.t_phot))
+
+# The same parametrization with the φ_c epoch filled in.
+function _with_t_ref_c(pc::ParametrizationConfig, t_ref_c::Real)
+    return ParametrizationConfig(pc.ew, pc.time, pc.geom, pc.use_rho_s, pc.mass,
+                                 pc.obs_prior, pc.marginalize_gamma,
+                                 pc.sample_a_Rs, Float64(t_ref_c))
 end
 
 # =====================================================================
@@ -771,6 +796,7 @@ and applying the appropriate conversion (see the hot-path accessors
              - `:Mo` → `M₀`, mean anomaly at the reference epoch (rad)
              - `:Tp` → time of periastron passage (same units as data)
              - `:Tc` → time of transit center
+             - `:phic` → transit phase `2π (Tc − t_ref_c) / P` (rad)
 - **`b`**  — **transit geometry slot 1.** Present on `PMOnlyBlock` and
              `RVPMBlock`; absent on `RVOnlyBlock` (no transit to fit).
              Meaning depends on `parametrization.geom`:

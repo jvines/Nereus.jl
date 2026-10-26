@@ -25,6 +25,7 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "ecc" => ("", false),         "e" => ("", false),
     "w" => ("deg", true),         "omega" => ("deg", true),
     "Mo" => ("deg", true),        "M0" => ("deg", true),
+    "phic" => ("deg", true),      # transit phase 2π(Tc − t_ref_c)/P
     # Ω and λ are sampled in radians like ω and Mo, and were published as raw
     # radians. Only the exact bases match (sci_param_unit takes everything
     # before `_k<n>` as the base), so `gp_act_lambda_e`, `ind_floor_lambda_p`
@@ -269,6 +270,8 @@ const _DERIVED_UNITS = Dict{String, String}(
     "T14" => "hr",          "T23" => "hr",
     "depth_ppm" => "ppm",   "rho_star_transit" => "g/cm3",
     "grazing_frac" => "",
+    # transit time under the :phic parametrization (t_ref_c + φ_c·P/2π)
+    "Tc" => "BJD",
     # per-instrument physical limb-darkening (keys are u1_<label>/u2_<label>;
     # those resolve to "" via the get-default, these bare entries are for
     # completeness/lookup robustness)
@@ -449,7 +452,7 @@ function _texsym(name::AbstractString)
     if m !== nothing
         base, k = m.captures[1], m.captures[2]
         sym = Dict("P"=>"P", "K"=>"K", "ecc"=>"e", "omega_deg"=>"\\omega",
-                   "Mo"=>"M_0", "Tp"=>"T_p", "Tc"=>"T_c", "sesinw"=>"\\sqrt{e}\\sin\\omega",
+                   "Mo"=>"M_0", "phic"=>"\\phi_c", "Tp"=>"T_p", "Tc"=>"T_c", "sesinw"=>"\\sqrt{e}\\sin\\omega",
                    "secosw"=>"\\sqrt{e}\\cos\\omega", "msini_earth"=>"M\\sin i",
                    "msini_jup"=>"M\\sin i", "mass_jup"=>"M_p", "mass_earth"=>"M_p",
                    "a_au"=>"a", "a_Rs"=>"a/R_\\star", "inc_deg"=>"i", "b"=>"b",

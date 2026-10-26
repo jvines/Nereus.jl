@@ -15,6 +15,18 @@ using TTVFaster: Planet_plane_hk, compute_ttv!
 const _MJ_PER_MS_TTV = 9.5458e-4   # M_Jup / M_Sun
 const _MIN_PER_DAY   = 1440.0
 
+# Transit time of planet k from raw parameter values. The TTV diagnostics
+# number transits from Tc, so they take the two anchors that carry it with no
+# reference epoch of the data: Tc itself, and the transit phase phic.
+function _ttv_Tc(values::AbstractVector, params::Params, k::Int)
+    pc = params.config.parametrization
+    pc.time in (:Tc, :phic) || throw(ArgumentError(
+        "the TTV diagnostics need time = :Tc or :phic; this fit uses :$(pc.time)"))
+    ta = values[params.layout.planet_blocks[k].t]
+    P  = values[params.layout.name_to_idx["P_k$k"]]
+    return anchor_to_tc(pc.time, ta, P, NaN, NaN, NaN, pc.t_ref_c)
+end
+
 """
     measure_per_transit_tcs(data, theta_ref, params;
                             tcs_predicted, half_window=0.5,
@@ -54,7 +66,7 @@ function measure_per_transit_tcs(data::Data, theta_ref::Theta, params::Params;
 
     # Decode planet-k's shape params from theta_ref
     P_k  = theta_ref.values[layout.name_to_idx["P_k$(planet_k)"]]
-    Tc_k = theta_ref.values[layout.name_to_idx["Tc_k$(planet_k)"]]
+    Tc_k = _ttv_Tc(theta_ref.values, params, planet_k)
     se_k = theta_ref.values[layout.name_to_idx["sesinw_k$(planet_k)"]]
     sc_k = theta_ref.values[layout.name_to_idx["secosw_k$(planet_k)"]]
     e_k  = hypot(se_k, sc_k)^2
@@ -224,7 +236,7 @@ function ttvc_envelope(chains, params::Params;
         end
 
         P_a  = _get(theta_k.values, "P_k$(planet_a_k)")
-        Tc_a = _get(theta_k.values, "Tc_k$(planet_a_k)")
+        Tc_a = _ttv_Tc(theta_k.values, params, planet_a_k)
         K_a  = _get(theta_k.values, "K_k$(planet_a_k)")
         se_a = _get(theta_k.values, "sesinw_k$(planet_a_k)")
         sc_a = _get(theta_k.values, "secosw_k$(planet_a_k)")
@@ -246,7 +258,7 @@ function ttvc_envelope(chains, params::Params;
         mr_a  = mp_a * M_JUP_G / M_SUN_G / M_s_use
 
         P_b   = _get(theta_k.values, "P_k$(planet_b_k)")
-        Tc_b  = _get(theta_k.values, "Tc_k$(planet_b_k)")
+        Tc_b  = _ttv_Tc(theta_k.values, params, planet_b_k)
         K_b   = _get(theta_k.values, "K_k$(planet_b_k)")
         se_b  = _get(theta_k.values, "sesinw_k$(planet_b_k)")
         sc_b  = _get(theta_k.values, "secosw_k$(planet_b_k)")

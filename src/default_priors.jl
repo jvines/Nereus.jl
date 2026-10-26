@@ -193,8 +193,10 @@ function default_priors(config::ParamsConfig, data::Data)
             dic["Mo_k$k"] = UniformPrior(0.0, 2π)
         elseif parametrization.time === :Tp
             dic["Tp_k$k"] = UniformPrior(t_min, t_max)
-        else  # :Tc
+        elseif parametrization.time === :Tc
             dic["Tc_k$k"] = UniformPrior(t_min, t_max)
+        else  # :phic -- one period centred on t_ref_c, uniform in transit phase
+            dic["phic_k$k"] = UniformPrior(-π, π)
         end
 
         # Transit geometry (PM planets only)

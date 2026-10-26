@@ -717,6 +717,14 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
                 center = Mo_est
                 σ_eff  = σ_Mo
                 period = 2π
+            elseif time_param === :phic
+                # Transit phase at t_ref_c, conjunction a quarter period after
+                # periastron as for :Tc; the width stays in radians.
+                Tc_est = data.t_ref - Mo_est * P_now / (2π) + P_now / 4
+                center = tc_to_phic(Tc_est, P_now,
+                                    theta.params.config.parametrization.t_ref_c)
+                σ_eff  = σ_Mo
+                period = 2π
             else
                 Tp_est = data.t_ref - Mo_est * P_now / (2π)
                 center = time_param === :Tp ? Tp_est :
@@ -1414,7 +1422,15 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
             # → mapped through P/(2π) for :Tp/:Tc.
             σ_Mo = INFORMED_SIGMA_MO
             P_now = P_proposed
+            t_ref_c = theta.params.config.parametrization.t_ref_c
             if (chosen_source === :bls || chosen_source === :both) &&
+                  chosen_t0 > 0 && time_param === :phic
+                # The BLS epoch as a transit phase at t_ref_c, with the width
+                # below converted from days to radians.
+                center = tc_to_phic(chosen_t0, P_now, t_ref_c)
+                σ_eff = clamp(0.3 * chosen_dur, 0.005, 0.1) * 2π / P_now
+                period = 2π
+            elseif (chosen_source === :bls || chosen_source === :both) &&
                   chosen_t0 > 0 && time_param === :Tc
                 # chosen_t0 is an ABSOLUTE transit epoch near the data start
                 # (converted at cache-build time, where the fold period is
@@ -1430,6 +1446,11 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
                 period = P_now
             elseif time_param === :Mo
                 center = chosen_Mo_ls
+                σ_eff = σ_Mo
+                period = 2π
+            elseif time_param === :phic
+                Tc_est = data.t_ref - chosen_Mo_ls * P_now / (2π) + P_now / 4
+                center = tc_to_phic(Tc_est, P_now, t_ref_c)
                 σ_eff = σ_Mo
                 period = 2π
             else

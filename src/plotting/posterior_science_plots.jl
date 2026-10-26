@@ -61,6 +61,7 @@ function _sci_sym(name)
         base == "esinw"  && return "e\\,\\sin\\omega_{$k}"
         base == "ecosw"  && return "e\\,\\cos\\omega_{$k}"
         base == "Mo"     && return "M_{0,$k}"
+        base == "phic"   && return "\\phi_{\\mathrm{c},$k}"
         base in ("ecc","e")               && return "e_{$k}"
         base in ("inc","inc_deg","i")     && return "i_{$k}"
         base in ("omega","omega_deg","w") && return "\\omega_{$k}"
@@ -146,6 +147,7 @@ function _sci_sym_u(name)
         base == "esinw"  && return "e·sinω" * ks
         base == "ecosw"  && return "e·cosω" * ks
         base == "Mo"     && return "M₀," * ks
+        base == "phic"   && return "φc," * ks
         base in ("ecc","e")               && return "e" * ks
         base in ("inc","inc_deg","i")     && return "i" * ks
         base in ("omega","omega_deg","w") && return "ω" * ks
