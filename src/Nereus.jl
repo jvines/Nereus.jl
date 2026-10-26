@@ -172,7 +172,8 @@ export
     rv_keplerian, rv_keplerian_sum,
     sesinw_to_ew, esinw_to_ew,
     ew_to_sesinw, ew_to_esinw,
-    mo_to_tp, tp_to_mo, tc_to_tp, tp_to_tc,
+    mo_to_tp, tp_to_mo, tc_to_tp, tp_to_tc, phic_to_tc, tc_to_phic,
+    anchor_to_tp, anchor_to_tc,
     # Transit
     transit_flux, transit_flux_uniform,
     kipping_q_to_u, kipping_u_to_q,

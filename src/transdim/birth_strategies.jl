@@ -242,13 +242,8 @@ function _compute_rv_residuals(theta::Theta, data::Data)
         e = Float64(e); w = Float64(w)
         ta = Float64(planet_time_anchor(theta, k))
 
-        Tp = if parametrization.time === :Mo
-            t_ref - ta * P / (2π)
-        elseif parametrization.time === :Tp
-            ta
-        else
-            Float64(tc_to_tp(ta, P, e, w))
-        end
+        Tp = Float64(anchor_to_tp(parametrization.time, ta, P, e, w, t_ref,
+                                  parametrization.t_ref_c))
 
         for i in 1:n_obs
             M = 2π * (data.t_rv[i] - Tp) / P
@@ -1008,14 +1003,9 @@ function _bls_peaks_filtered(theta::Theta, data::Data,
             bb = Float64(bb); rr = Float64(rr)
             bb < 1 + rr || continue
             ta = Float64(planet_time_anchor(theta, k))
-            Tc_k = if parametrization.time === :Tc
-                ta
-            elseif parametrization.time === :Tp
-                tp_to_tc(ta, P_a, Float64(e), Float64(w))
-            else
-                Tp = data.t_ref - ta * P_a / (2π)
-                tp_to_tc(Tp, P_a, Float64(e), Float64(w))
-            end
+            Tc_k = Float64(anchor_to_tc(parametrization.time, ta, P_a, Float64(e),
+                                        Float64(w), data.t_ref,
+                                        parametrization.t_ref_c))
             T_dur_frac = 0.08   # 2× the 4% used previously — covers slight
                                 # period drift over multi-year baselines
             @inbounds for i in 1:n_phot

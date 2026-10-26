@@ -632,6 +632,9 @@ struct ParametrizationConfig
     # Sample a/R★ per transiting planet (`a_Rs_k<k>`) instead of deriving it
     # from rho_s or (M_s, R_s). See the docstring.
     sample_a_Rs::Bool
+    # Epoch the transit phase φ_c is measured from (time = :phic). NaN until
+    # `Params` fills it in from the data.
+    t_ref_c::Float64
 end
 
 function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
@@ -639,11 +642,14 @@ function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
                                 mass::Symbol=:K_driven,
                                 obs_prior::Bool=false,
                                 marginalize_gamma::Bool=false,
-                                sample_a_Rs::Bool=false)
+                                sample_a_Rs::Bool=false,
+                                t_ref_c::Real=NaN)
     ew in (:sesinw, :esinw, :ew) ||
         throw(ArgumentError("ew must be :sesinw, :esinw, or :ew; got :$ew"))
     time in (:Mo, :Tp, :Tc) ||
         throw(ArgumentError("time must be :Mo, :Tp, or :Tc; got :$time"))
+    (isnan(t_ref_c) || isfinite(t_ref_c)) ||
+        throw(ArgumentError("t_ref_c must be finite, or NaN to take it from the data"))
     geom in (:b_rr, :r1r2) ||
         throw(ArgumentError("geom must be :b_rr or :r1r2; got :$geom"))
     mass in (:K_driven, :M_sec_driven, :a_driven) ||
@@ -652,7 +658,7 @@ function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
         "use_rho_s and sample_a_Rs are mutually exclusive: a/R★ is either derived " *
         "from the stellar density or sampled directly, not both"))
     return ParametrizationConfig(ew, time, geom, use_rho_s, mass, obs_prior,
-                                 marginalize_gamma, sample_a_Rs)
+                                 marginalize_gamma, sample_a_Rs, Float64(t_ref_c))
 end
 
 # =====================================================================

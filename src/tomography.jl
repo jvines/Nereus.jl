@@ -1304,11 +1304,12 @@ _fd_value(x::ForwardDiff.Dual) = _fd_value(ForwardDiff.value(x))
 # (Tp, Tc) of planet k from its time anchor.
 function _planet_tp_tc(theta::Theta, k::Int, t_ref, P, e, ω)
     ta = planet_time_anchor(theta, k)
-    tm = theta.params.config.parametrization.time
-    if tm === :Tc
-        return tc_to_tp(ta, P, e, ω), ta
+    pc = theta.params.config.parametrization
+    if pc.time === :Tc || pc.time === :phic
+        Tc = anchor_to_tc(pc.time, ta, P, e, ω, t_ref, pc.t_ref_c)
+        return tc_to_tp(Tc, P, e, ω), Tc
     end
-    Tp = tm === :Mo ? t_ref - ta * P / (2π) : ta
+    Tp = anchor_to_tp(pc.time, ta, P, e, ω, t_ref, pc.t_ref_c)
     return Tp, tp_to_tc(Tp, P, e, ω)
 end
 
