@@ -208,6 +208,7 @@ depend on the `parametrization` (see [Parametrizations](parametrizations.md)).
 | `Mo_k1` | Mean anomaly at `t_ref` (`time = :Mo`, default) | `UniformPrior(0, 2π)` |
 | `Tp_k1` | Time of periastron (`time = :Tp`) | `UniformPrior(t_min, t_max)` |
 | `Tc_k1` | Time of transit centre (`time = :Tc`) | `UniformPrior(t_min, t_max)` |
+| `phic_k1` | Transit phase 2π(Tc − t_ref_c)/P (`time = :phic`) | `UniformPrior(-π, π)` |
 | `rr_k1`, `b_k1` | radius ratio, impact param (`geom = :b_rr`) | `UniformPrior(0.001, 1)`, `UniformPrior(0, 1)` |
 | `r1_k1`, `r2_k1` | Espinoza (2018) reparam (`geom = :b_r`) | `UniformPrior(0, 1)` each |
 | `inc_k1` | Inclination — AS planet, not RVPM+AS | `SinePrior()` |

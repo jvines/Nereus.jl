@@ -226,7 +226,7 @@ restores occupancy = evidence. See
 
 ## `sample_transdim_pt_emcee` — the workhorse
 
-`sample_transdim_pt_emcee` (`src/samplers/transdim_pt_emcee.jl:422`)
+`sample_transdim_pt_emcee` (`src/samplers/transdim_pt_emcee.jl:425`)
 extends `sample_pt_emcee` with MoMS variable-selection moves. Each
 walker carries its own `TransDimState` (planet activation bits + the
 toggleable-noise bits). The within-step ordering per (walker, temp)
@@ -463,10 +463,10 @@ Parameters:
   `planet_lambda(theta, k)`.
 
 The RM term is now folded into `rv_predictions`
-(`src/likelihood.jl:1859`), so the predicted RV used by the PPC,
+(`src/likelihood.jl:1834`), so the predicted RV used by the PPC,
 residuals, fit-health metrics, and every RV plot is RM-consistent
 (no-op for non-RM fits). Use the dedicated `rm_anomaly` plot
-(`plot_rm`, `src/plotting/rm_plots.jl:51`) to inspect the in-transit
+(`plot_rm`, `src/plotting/rm_plots.jl:48`) to inspect the in-transit
 anomaly; `run_job` emits it automatically for any RM-enabled fit
 (`runner.jl:1688`).
 
