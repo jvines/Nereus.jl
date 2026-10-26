@@ -54,7 +54,7 @@ Every parallel-tempering sampler feeds the same
 |---|---|---|---|---|
 | `sample_pt` | both | 2nd tuple element | — | TI+ (`pt.jl:790`) |
 | `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:1158`) |
-| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:2165`) |
+| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:2168`) |
 | `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_whitening.jl:731`) |
 | `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | TI+ (`pt_hmc.jl:447`) |
 
@@ -311,7 +311,7 @@ the one badly mixed run (worst R-hat 3.91). If you have results from a
 `run_job` fit predating this, re-run or recompute the evidence.
 
 The same `log_z` is fed into the LOO/log-Z model-comparison summary
-(`loo_compare_log_z`, `runner.jl:2254`) so cross-run Bayes factors are
+(`loo_compare_log_z`, `runner.jl:2356`) so cross-run Bayes factors are
 consistent.
 
 ## Validation status

@@ -331,8 +331,9 @@ maps only these keys, with these accepted string values:
 !!! warning "run_job gaps vs the Julia API"
     Several Julia-API options are **not** reachable through run_job
     today (`src/runner.jl:1090`):
-    - `use_rho_s` and `obs_prior` are never read from the config — set
-      them by constructing `Params`/`ParametrizationConfig` directly.
+    - `obs_prior` is never read from the config — set it by constructing
+      `Params`/`ParametrizationConfig` directly. (`use_rho_s` IS read, from
+      `model.parametrization.use_rho_s`, default `false`.)
     - `ew = :esinw` and `geom = :r1r2` are valid in Julia but **absent
       from the run_job string maps** (`_EW_PARAM`, `_GEOM_PARAM`,
       `src/runner.jl:1059`–`1060`).

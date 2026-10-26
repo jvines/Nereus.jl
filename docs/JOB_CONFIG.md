@@ -616,8 +616,11 @@ prior when that degeneracy is present.
 
 ### `sampler`
 - Trans-dim model-selection samplers (`transdim_pt_emcee`, `rjmcmc`, `moms`,
-  `daedalus`) require a top-level `transdim` block. `pt` also builds a
-  `transdim` block if present (`src/runner.jl:1454-1455,1497-1498`) but does not require one.
+  `daedalus`) require a top-level `transdim` block. `pt` does not require one: if
+  a `transdim` block is present it is built and forwarded as `td` (a trans-dim run),
+  otherwise the run is fixed-dim (`src/runner.jl:1497-1498,1505-1513`). With no
+  `sampler.name` the default is `transdim_pt_emcee` when a `transdim` block is
+  present, else `pt_emcee` (`src/runner.jl:1454-1462`).
 - **The Pathfinder warm start is a `pt` kwarg, not a sampler.** There is no
   `pt_warm` name: it was never a sampler, only a Pathfinder draw followed by a
   delegation to `pt` or `pt_emcee`. Its two honest replacements are
