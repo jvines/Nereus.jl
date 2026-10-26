@@ -763,9 +763,11 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
         tprod = 1.0
         for jj in 1:n_transit
             transits[jj] || continue
-            z = sky_separation(t, Ps[jj], es[jj], ws[jj], Tps[jj],
-                                bs[jj], a_Rs[jj])
-            tprod *= transit_flux(z, rrs[jj], u1, u2)
+            z, sw = _sky_separation_signed(t, Ps[jj], es[jj], ws[jj], Tps[jj],
+                                           bs[jj], a_Rs[jj])
+            # Behind the star (sin(ω+f) <= 0) it is an occultation: no dip,
+            # as in the likelihood. z alone is as small there as at transit.
+            sw > 0 && (tprod *= transit_flux(z, rrs[jj], u1, u2))
         end
         cont = _phot_continuum(Float64(t), t_ref, inv_th, offset, trend)
         model[i] = cont * ((1.0 - dil) * tprod + dil)

@@ -135,10 +135,11 @@ function measure_per_transit_tcs(data::Data, theta_ref::Theta, params::Params;
             ll = 0.0
             @inbounds for j in lo_idx:hi_idx
                 t = data.t_phot[j]
-                z = sky_separation(t, P_k, e_k, w_k, Tp_g, b_k, a_Rs)
+                z, sw = _sky_separation_signed(t, P_k, e_k, w_k, Tp_g, b_k, a_Rs)
                 inst_j = data.phot_inst[j]
                 ld = lds[inst_j]
-                f  = transit_flux(ld, z, rr_k)
+                # No dip behind the star (sin(ω+f) <= 0), as in the likelihood.
+                f  = sw > 0 ? transit_flux(ld, z, rr_k) : 1.0
                 mf = (1.0 + offsets[inst_j]) * f
                 var_j = data.flux_err[j]^2 + jitters[inst_j]^2
                 resid = data.flux[j] - mf

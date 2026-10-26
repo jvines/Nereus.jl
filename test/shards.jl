@@ -147,7 +147,7 @@ const TEST_UNITS = [
     (name = "test_transit_window_search.jl", seconds = 4, files = ["test_transit_window_search.jl"]),
     (name = "test_transit_window_tight.jl", seconds = 17, files = ["test_transit_window_tight.jl"]),
     (name = "test_transit_window_superset.jl", seconds = 38, files = ["test_transit_window_superset.jl"]),
-    (name = "test_transit_occultation.jl", seconds = 22, files = ["test_transit_occultation.jl"]),
+    (name = "test_transit_occultation.jl", seconds = 25, files = ["test_transit_occultation.jl"]),
     (name = "test_transit_window_contact.jl", seconds = 27, files = ["test_transit_window_contact.jl"]),
     (name = "test_transit_flux.jl", seconds = 4, files = ["test_transit_flux.jl"]),
     # The bridge-sampling evaluator through the workspace likelihoods.

@@ -136,3 +136,76 @@ occ_fold(t, Tc, P) = (Δ = t - Tc; Δ - P * round(Δ / P))
         @test n_cmp > 400 && n_B >= 5
     end
 end
+
+# The plotting model (`compute_transit_model_on_grid`) and the per-transit Tc
+# profile (`measure_per_transit_tcs`) took z alone and so drew a transit-shaped
+# dip at the occultation too: on a circular orbit, a second transit at phase
+# 0.5 in every full-orbit plot. Both now apply the likelihood's sign test.
+@testset "plot model and per-transit Tc: no dip behind the star" begin
+    @testset "grid model is the likelihood's model" begin
+        tg = transit_gate_target()
+        data = tg.data
+        th = Nereus.Theta{Float64}(tg.params); ws = transit_gate_ws(tg)
+        i1 = findall(==(1), data.phot_inst); t1 = data.t_phot[i1]   # 9 d sector, every phase
+        n_cmp = 0; n_occ = 0; worst = 0.0
+        for v in transit_gate_points(tg, 300; seed = 62)
+            th.values .= v
+            isfinite(Nereus.transit_log_likelihood(th, data, ws)) || continue
+            Pj, ej, ωj = ws.transit_Ps[1], ws.transit_es[1], ws.transit_ws[1]
+            Tpj, bj, aRj, kj = ws.transit_Tps[1], ws.transit_bs[1], ws.transit_a_Rs[1],
+                               ws.transit_rrs[1]
+            pred = Nereus.phot_predictions(th, data)[1][i1]
+            grid = Nereus.compute_transit_model_on_grid(th, data, t1, 1)
+            worst = max(worst, maximum(abs.(grid .- pred)))
+            # the occultation crosses the disc during the sector: the old grid
+            # model put a dip there that the likelihood never had
+            n_occ += bj < 1 + kj && any(t -> (zs = occ_zsep(t, Pj, ej, ωj, Tpj, bj, aRj);
+                                              zs[1] < 1 + kj && zs[2] <= 0), t1)
+            n_cmp += 1
+        end
+        @info "grid model vs likelihood model" n_cmp n_occ worst
+        @test worst < 1e-12
+        @test n_cmp > 200 && n_occ > 50
+    end
+
+    @testset "per-transit Tc with the occultation inside the fit window" begin
+        # e = 0.8, ω = 0.6: the occultation comes 0.31 d before the transit,
+        # inside the ±0.5 d window. On an orbit that clears the star the stray
+        # dip only shifts the profile by a constant, so the old model measured
+        # this right too; what the test holds is the direction of the sign
+        # test: with it reversed the model dips only at the occultation and
+        # the measured offsets are 0.31 d.
+        P, Tc, e, ω = 4.137, 2_460_001.31, 0.8, 0.6
+        t = collect(range(2_460_000.0, 2_460_013.0; step = 2 / 1440))
+        n = length(t)
+        mk(flux) = (d = Data(; t_phot = t, flux, flux_err = fill(2e-4, n),
+                              phot_inst = ones(Int, n), t_ref = Tc);
+                    (d, Params(; max_kplanet = 1, planet_modes = [PM_ONLY],
+                                instruments = InstrumentConfig(pm = ["TESS"]), data = d,
+                                parametrization = ParametrizationConfig(time = :Tc),
+                                M_s = 1.0, R_s = 1.0, stability = :none)))
+        truth = ("P_k1" => P, "Tc_k1" => Tc, "sesinw_k1" => sqrt(e) * sin(ω),
+                 "secosw_k1" => sqrt(e) * cos(ω), "b_k1" => 0.3, "rr_k1" => 0.1,
+                 "q1_TESS" => 0.3, "q2_TESS" => 0.2)
+        function at_truth(params)
+            th = Theta{Float64}(params); ix = params.layout.name_to_idx
+            for (k, v) in truth; th.values[ix[k]] = v; end
+            return th
+        end
+        d0, p0 = mk(ones(n))
+        flux = Nereus.phot_predictions(at_truth(p0), d0)[1]    # the likelihood's model, noiseless
+        data, params = mk(flux)
+        th = at_truth(params)
+        Tp = tc_to_tp(Tc, P, e, ω)
+        aR = cbrt(Nereus.GM_SUN_CGS * (P * 86400.0)^2 / (4π^2)) / Nereus.R_SUN_CM  # M_s = R_s = 1
+        occ = [abs(occ_fold(ti, Tc, P)) <= 0.5 &&
+               (zs = occ_zsep(ti, P, e, ω, Tp, 0.3, aR); zs[1] < 1.1 && zs[2] <= 0) for ti in t]
+        @test count(occ) > 20                                 # the occultation is in the window
+        tcs = [Tc + m * P for m in 0:2]
+        meas = measure_per_transit_tcs(data, th, params; tcs_predicted = tcs)
+        step = 2 * 0.4 / 800
+        @info "per-transit Tc offsets (d)" meas.mle_dt meas.lo_dt meas.hi_dt
+        @test all(abs.(meas.mle_dt) .<= step)
+        @test all(meas.hi_dt .- meas.lo_dt .< 0.01)
+    end
+end
