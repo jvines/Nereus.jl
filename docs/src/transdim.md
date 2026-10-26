@@ -455,15 +455,15 @@ Parameters:
 
 - `v_sin_i_star` — stellar projected rotation V·sin(i\_⋆) in **m/s**,
   one global slot (`model.jl:1840`); default prior
-  `LogUniformPrior(500, 100_000)` m/s (`default_priors.jl:445`). Read
+  `LogUniformPrior(500, 100_000)` m/s (`default_priors.jl:447`). Read
   with `system_vsini(theta)` (`parameters.jl:582`).
 - `lambda_k<k>` — sky-projected stellar obliquity λ\_k of planet `k` in
   **radians** (`parameters.jl:635`); default prior
-  `UniformPrior(-π, π)` (`default_priors.jl:485`). Read with
+  `UniformPrior(-π, π)` (`default_priors.jl:487`). Read with
   `planet_lambda(theta, k)`.
 
 The RM term is now folded into `rv_predictions`
-(`src/likelihood.jl:1834`), so the predicted RV used by the PPC,
+(`src/likelihood.jl:1771`), so the predicted RV used by the PPC,
 residuals, fit-health metrics, and every RV plot is RM-consistent
 (no-op for non-RM fits). Use the dedicated `rm_anomaly` plot
 (`plot_rm`, `src/plotting/rm_plots.jl:48`) to inspect the in-transit
