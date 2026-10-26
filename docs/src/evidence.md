@@ -318,21 +318,26 @@ consistent.
 
 `test/test_evidence_gaussian.jl` validates all four estimators against
 an analytic log Z (2D Gaussian likelihood × uniform-box prior, `log Z
-= −d · log(2L)`):
+= −d · log(2L)`, L = 10). The draws at each rung are exact and
+independent (the tempered posterior factorizes into one truncated normal
+per coordinate), 20 000 per rung on a 16-rung geometric ladder from
+β = 1 to 1e-4, so the test checks the estimators and not a sampler:
 
 | Estimator | Log Z | Error vs truth |
 |---|---|---|
-| TI  | -6.098 | 0.107 |
-| TI+ | -5.985 | 0.007 |
-| SS+ | -5.994 | 0.002 |
-| H+  | -5.985 | 0.007 |
+| TI  | -6.163 | 0.172 |
+| TI+ | -5.988 | 0.003 |
+| SS+ | -5.996 | 0.004 |
+| H+  | -5.988 | 0.003 |
 
-The test PASS bar (`test_evidence_gaussian.jl:264`, `283`) is each
+The test PASS bar (`test_evidence_gaussian.jl:62`, `64`) is each
 estimator within `TOL = 0.5` nats of the analytic value **and** a
-mutual spread `< 1.0` nat. All four pass; the mutual spread is ~0.11
-in log Z. The estimators are mathematically correct. The file also
-carries a regression guard for the descending-β sign flip
-(`test_evidence_gaussian.jl:288`).
+mutual spread `< 1.0` nat. All four pass; the mutual spread is ~0.18
+in log Z, nearly all of it the trapezoidal TI's discretization. On exact
+draws the estimators are correct. The file also carries a regression
+guard for the descending-β sign flip: the same draws on the ascending
+ladder give the same numbers, and log Z stays negative
+(`test_evidence_gaussian.jl:71-74`).
 
 Independent cross-validation: TI+/SS+/H+ agree with the analytic
 log Z to `< 0.01` nats on the 2D-Gaussian × box, and PT's SS+ agrees
