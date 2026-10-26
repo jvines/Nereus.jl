@@ -171,6 +171,7 @@ const TEST_UNITS = [
     (name = "test_sampler_determinism.jl", seconds = 252, files = ["test_sampler_determinism.jl"]),
     (name = "test_bls_informed_phot.jl", seconds = 2, files = ["test_bls_informed_phot.jl"]),
     (name = "test_evidence_curved.jl", seconds = 6, files = ["test_evidence_curved.jl"]),
+    (name = "test_evidence_gaussian.jl", seconds = 2, files = ["test_evidence_gaussian.jl"]),
     (name = "test_evidence_headline.jl", seconds = 8, files = ["test_evidence_headline.jl"]),
     (name = "test_mode_laplace.jl", seconds = 6, files = ["test_mode_laplace.jl"]),
     (name = "verify_rajpaul_kernel_fd.jl", seconds = 1, files = ["verify_rajpaul_kernel_fd.jl"]),
