@@ -99,7 +99,7 @@ function reference_path_evidence(target::NereusTarget, chains::MCMCChains.Chains
     d >= 1 || return _rp_bad(n_beta, proposal)
 
     # --- posterior draws in the target's own (unconstrained) space -----------
-    cols = [vec(Array(chains[:, Symbol(nm), :])) for nm in names]
+    cols = [_draws(chains, Symbol(nm)) for nm in names]
     N = length(cols[1])
     pt = target.transform
     Y = Matrix{Float64}(undef, d, N)

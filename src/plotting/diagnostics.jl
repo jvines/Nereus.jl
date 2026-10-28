@@ -92,7 +92,7 @@ function plot_histograms(chains, params;
             sym = Symbol(name)
             sym in chain_names || continue
 
-            samp = vec(Array(chains[sym]))
+            samp = _draws(chains, sym)
             # Skip degenerate (all-equal) columns — Makie's hist! can't
             # normalize a single-bin histogram and crashes downstream
             # with "reducing over an empty collection". Common on
@@ -187,7 +187,7 @@ function plot_posteriors(chains, params;
             return
         end
 
-        lp_all = vec(Array(chains[:lp]))
+        lp_all = _draws(chains, :lp)
         lp_max = maximum(lp_all[isfinite.(lp_all)])
         keep = 1:cld(length(lp_all), max_points):length(lp_all)
         lp = lp_all[keep]
@@ -195,7 +195,7 @@ function plot_posteriors(chains, params;
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            samp = vec(Array(chains[sym]))[keep]
+            samp = _draws(chains, sym)[keep]
 
             # Full posterior
             fig = Figure(; size=figsize)
@@ -302,7 +302,7 @@ function plot_corner(chains, params;
         # straight from the column names. (The `labels=Vector{String}`
         # kwarg form was deprecated; current API wants Dict{Symbol,…} —
         # avoid the issue entirely by going through a named column source.)
-        cols = [vec(Array(chains[Symbol(name)])) for name in pnames]
+        cols = [_draws(chains, Symbol(name)) for name in pnames]
         n_draws = isempty(cols) ? 0 : length(first(cols))
         keep = 1:max(1, cld(n_draws, max_draws)):n_draws     # every k-th draw
         data_nt = NamedTuple{Tuple(Symbol.(pnames))}(Tuple(c[keep] for c in cols))

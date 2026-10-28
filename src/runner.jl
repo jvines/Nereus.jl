@@ -151,7 +151,8 @@ function run_job(cfg::AbstractDict)
         show_pf = Bool(_get(_get(cfg, :output; default = Dict()), :show_progress;
                             default = true))
         pf = _PostFit(("ppc", "detection_limits", "loo", "fit_health", "diagnostics",
-                       "summary", "evidence", "science", "write"); enabled = show_pf)
+                       "summary", "evidence", "science", "write"); enabled = show_pf,
+                      release = _large_chain(chains))
 
         # --- Posterior predictive checks (default on; fail-soft) -------
         _postfit_stage!(pf, "ppc")
@@ -192,10 +193,8 @@ function run_job(cfg::AbstractDict)
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
         # Authoritative science contract: conditioned, unit-tagged fitted/derived
-        # + model_selection + run_info, and the multi-format tables. Supersedes
-        # the legacy unconditioned `params` block (which is inactive-slot junk in
-        # a trans-dim run), so drop it.
-        delete!(summary, "params")
+        # + model_selection + run_info, and the multi-format tables. There is no
+        # unconditioned `params` block (inactive-slot junk in a trans-dim run).
         # The star block, σ's included. This read T_eff off `params.config`,
         # which has no such field, and passed nothing else: T_eq, insolation,
         # TSM and ESM were never computed, and every derived error bar carried
@@ -2514,7 +2513,7 @@ function _augment_evidence!(summary, params, data, chains;
         for c in chain_syms
             sc = String(c)
             (sc == "n_planets" || startswith(sc, "noise_active_")) || continue
-            length(unique(vec(Array(chains[c])))) > 1 && return
+            length(unique(_draws(chains, c))) > 1 && return
         end
         tgt = NereusTarget(params, data; unconstrained = true)
         tgt.transform === nothing && return
@@ -2531,7 +2530,7 @@ function _augment_evidence!(summary, params, data, chains;
         need = d + d * (d + 1) ÷ 2
         ess = _bridge_stage!(timings, "ess") do
             try
-                minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
+                minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
             catch; NaN end
         end
         if isfinite(ess) && ess >= need
@@ -2553,7 +2552,7 @@ end
 # =====================================================================
 
 """
-    _PostFit(stages; enabled = true)
+    _PostFit(stages; enabled = true, release = false)
 
 The post-fit work of a fit -- everything after the sampler and the plots -- as
 one progress bar, `post-fit`, and the wall time of each stage. Shared by
@@ -2576,6 +2575,10 @@ instead. There is no ETA: the stages differ by orders of magnitude in cost.
 Stages that report progress of their own print their lines in between
 (`bridge posterior`, `bridge proposal`, `bridge solve`, `bridge bootstrap`
 during `evidence`).
+
+With `release`, each stage starts with `_release_memory()`: what the stages
+before it dropped goes back to the system first. run_job and the fit_* route
+switch it on for a big chain (`_large_chain`).
 """
 mutable struct _PostFit
     pb::ProgressBar
@@ -2583,11 +2586,38 @@ mutable struct _PostFit
     k::Int
     t_stage::Float64
     seconds::Dict{String, Float64}
+    release::Bool
 end
 
-_PostFit(stages; enabled::Bool = true) =
+_PostFit(stages; enabled::Bool = true, release::Bool = false) =
     _PostFit(ProgressBar("post-fit"; total = length(stages), enabled = enabled, eta = false),
-             collect(String, stages), 0, time(), Dict{String, Float64}())
+             collect(String, stages), 0, time(), Dict{String, Float64}(), release)
+
+"""
+    _release_memory()
+
+A full collection, then, on glibc, the freed pages handed back to the system
+(`malloc_trim`). Julia frees a large array to `malloc`, and glibc keeps what it
+is given back for reuse instead of returning it, so a process' resident memory
+stays at its high-water mark -- the sampler's, the plots' -- through every
+stage after it. Elsewhere (macOS, musl) only the collection runs.
+"""
+function _release_memory()
+    GC.gc()
+    if Sys.islinux()
+        h = Base.Libc.Libdl.dlopen_e("libc.so.6")
+        f = h == C_NULL ? C_NULL : Base.Libc.Libdl.dlsym_e(h, :malloc_trim)
+        f == C_NULL || ccall(f, Cint, (Csize_t,), 0)
+    end
+    return nothing
+end
+
+# Post-fit releases memory between its stages (`_PostFit(...; release)`) when
+# the chain is big enough for its garbage to matter: a draw array of 128 MiB or
+# more, about a million draws of a dozen parameters. Below that a collection per
+# stage costs more than it frees.
+_large_chain(chains) = chains isa MCMCChains.Chains &&
+    8 * size(chains, 1) * size(chains, 2) * size(chains, 3) >= 128 * 2^20
 
 function _postfit_close!(pf::_PostFit)
     pf.k > 0 && (pf.seconds[pf.stages[pf.k]] = time() - pf.t_stage)
@@ -2598,6 +2628,9 @@ function _postfit_stage!(pf::_PostFit, name::AbstractString)
     _postfit_close!(pf)
     k = findfirst(==(name), pf.stages)
     k === nothing && throw(ArgumentError("unknown post-fit stage `$name`"))
+    # What the last stage dropped goes back to the system before the next one
+    # allocates: otherwise each stage's garbage stacks on the last's.
+    pf.release && _release_memory()
     pf.k = k
     pf.t_stage = time()
     update!(pf.pb; n_done = k - 1, fields = (:stage => String(name),), force = true)
@@ -2634,7 +2667,7 @@ leaves the summary as it was. Shared by run_job and the fit_* route.
 function _n_planets_posterior!(summary, chains)
     chains isa MCMCChains.Chains || return summary
     :n_planets in names(chains, :parameters) || return summary
-    np = Int.(vec(Array(chains[:n_planets])))
+    np = Int.(_draws(chains, :n_planets))
     counts = Dict{String, Float64}()
     for v in np
         counts[string(v)] = get(counts, string(v), 0.0) + 1
@@ -2699,63 +2732,12 @@ function _populate_summary!(summary, result, params, chains)
     end
 
     _n_planets_posterior!(summary, chains)
-    chain_names = Set(names(chains, :parameters))
-
-    # Per-parameter median + 1/2/3-σ
-    params_summary = Dict{String, Any}()
-    for name in params.layout.unfrozen_names
-        sym = Symbol(name)
-        sym in chain_names || continue
-        v = vec(Array(chains[sym]))
-        params_summary[name] = Dict{String, Float64}(
-            "median" => median(v),
-            "lo16"   => quantile(v, 0.16),
-            "hi84"   => quantile(v, 0.84),
-            "lo2sig" => quantile(v, 0.025),
-            "hi2sig" => quantile(v, 0.975),
-            "lo3sig" => quantile(v, 0.0015),
-            "hi3sig" => quantile(v, 0.9985),
-        )
-    end
-    summary["params"] = params_summary
-
-    # --- Derived parameters: physical quantities (M_p, a, T_eq, ρ_p,
-    # TSM, ESM, …) computed from the posterior. One block per planet
-    # under summary["derived"]["k$k"] with the same median/lo16/hi84/2σ/3σ
-    # schema as `params`. Skipped if stellar params not set in config.
-    M_s = params.config.M_s
-    R_s = params.config.R_s
-    T_eff = hasproperty(params.config, :T_eff) ? params.config.T_eff : NaN
-    if !isnan(M_s) && M_s > 0
-        try
-            derived_per_planet = compute_derived(chains, params;
-                                                  M_s = M_s,
-                                                  R_s = isnan(R_s) ? nothing : R_s,
-                                                  T_eff = (isnan(T_eff) || T_eff <= 0) ?
-                                                            nothing : T_eff)
-            derived_summary = Dict{String, Any}()
-            for (k, dp) in enumerate(derived_per_planet)
-                per_planet = Dict{String, Any}()
-                for (nm, vs) in dp.values
-                    finite = filter(isfinite, vs)
-                    isempty(finite) && continue
-                    per_planet[nm] = Dict{String, Float64}(
-                        "median" => median(finite),
-                        "lo16"   => quantile(finite, 0.16),
-                        "hi84"   => quantile(finite, 0.84),
-                        "lo2sig" => quantile(finite, 0.025),
-                        "hi2sig" => quantile(finite, 0.975),
-                        "lo3sig" => quantile(finite, 0.0015),
-                        "hi3sig" => quantile(finite, 0.9985),
-                    )
-                end
-                isempty(per_planet) || (derived_summary["k$k"] = per_planet)
-            end
-            isempty(derived_summary) || (summary["derived"] = derived_summary)
-        catch err
-            @warn "compute_derived failed; skipping derived block in summary" exception = err
-        end
-    end
+    # No per-parameter or derived quantiles here. This built an unconditioned
+    # `params` block, which run_job deleted, and a `derived` block, which
+    # science_summary's replaced: 7 sorts of every column and a second
+    # compute_derived over every draw, 12 s at 5.8 million draws, none of it
+    # reaching summary.json.
+    return summary
 end
 
 function _write_summary(out_dir, summary)

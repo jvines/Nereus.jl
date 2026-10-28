@@ -48,12 +48,12 @@ params = Params(;
 ]
 ```
 
-`run_job` recognises thirteen `kind`s (`_NOISE_TYPES`, `src/runner.jl:1267`):
+`run_job` recognises thirteen `kind`s (`_NOISE_TYPES`, `src/runner.jl:1266`):
 `CeleriteRotation`, `CeleriteSHO`, `CeleriteRotationFM17`,
 `ActivityDecorrelation`, `ARModel`, `MAModel`, `ActivityJitter`,
 `ActivityGP`, `ErrorScale`, `NightlyOffset`, `HarmonicBlock`, `StudentT`,
 `MaternGP`. The top-level `channel`/`instruments` are injected only into
-constructors that accept them (`src/runner.jl:1340-1343`): the Celerite GPs
+constructors that accept them (`src/runner.jl:1339-1342`): the Celerite GPs
 take both, `ARModel`/`MAModel` take `channel` only, `ActivityGP` takes
 `channels` (note the plural — supply it in `kwargs`), and the
 `MeanModifier`s take neither. `IndicatorFloor` is **not** in `_NOISE_TYPES`
@@ -424,7 +424,7 @@ errors** for every non-`:rv` channel. Errors are mandatory (the
   arrays alongside `bjd`/`rv`/`rv_err`/`instrument`. Any extra key is
   treated as an indicator value; a `<name>_err` key whose base `<name>`
   is also present becomes that indicator's error
-  (`_split_indicator_errs`, `src/runner.jl:726`):
+  (`_split_indicator_errs`, `src/runner.jl:725`):
 
   ```json
   "rv": { "values": {
@@ -436,7 +436,7 @@ errors** for every non-`:rv` channel. Errors are mandatory (the
 
 - **run_job, CSV RV block:** list the indicator columns in
   `indicator_cols`; a matching `<col>_err` column supplies the error
-  (`src/runner.jl:794`):
+  (`src/runner.jl:793`):
 
   ```json
   "rv": { "csv": "rvs.csv", "indicator_cols": ["bis", "fwhm"] }
@@ -446,8 +446,8 @@ errors** for every non-`:rv` channel. Errors are mandatory (the
 #### run_job form
 
 `ActivityGP` is **run_job-drivable** (`_NOISE_TYPES`,
-`src/runner.jl:1275`). Supply `channels` as a kwarg (strings are
-symbolised, `src/runner.jl:1329`):
+`src/runner.jl:1274`). Supply `channels` as a kwarg (strings are
+symbolised, `src/runner.jl:1328`):
 
 ```json
 { "kind": "ActivityGP", "instruments": [],
@@ -505,7 +505,7 @@ falls through the standard white/celerite machinery untouched. In
   [`plot_activity_gp_decomposition`](@ref) draw the paper figures.
   `run_job` emits them automatically as `activity_gp_latent.png` and
   `activity_gp_decomposition.png` whenever an `ActivityGP` is configured
-  (`src/runner.jl:2156,2168`).
+  (`src/runner.jl:2155,2167`).
 
 #### Trans-dim head-to-head with `ActivityDecorrelation`
 
@@ -814,7 +814,7 @@ includes RM, an in-transit RV anomaly is added to the RV prediction.
 
 - Modes: `RVPM_RM`, `RVPMAS_RM` (Hirano leading-order),
   `RVPM_RM_R`, `RVPMAS_RM_R` (Reloaded RM, Cegla+ 2016), plus
-  `RVPM_RM_TTV` (`src/model.jl:376`; run_job map at `src/runner.jl:1067`).
+  `RVPM_RM_TTV` (`src/model.jl:376`; run_job map at `src/runner.jl:1066`).
 - Physics: `ΔRV_RM(t) = −Δflux(t) · v_p(t)` with
   `v_p = V·sin(i_*)·(x_sky cos λ − y_sky sin λ)`
   ([Hirano+ 2011](https://ui.adsabs.harvard.edu/abs/2011ApJ...742...69H/abstract), `src/rm.jl`); the Reloaded variant integrates the
@@ -836,7 +836,7 @@ includes RM, an in-transit RV anomaly is added to the RV prediction.
   — RV model decomposition into its pieces (Keplerian(s), GP/AGP
   activity, total). Distinct from `rv_timeseries`. Auto-emitted when
   there are ≥2 planets or any `CovarianceNoise`/`ActivityGP` is active
-  (`src/runner.jl:1771`).
+  (`src/runner.jl:1770`).
 - `transit_overlay` (`plot_transit_overlay_fit`,
   `src/plotting/ttv_plots.jl:345`) — per-transit QC gallery.
 - `ttv_oc` (`plot_ttv_oc`, `src/plotting/ttv_plots.jl:145`) — O-C

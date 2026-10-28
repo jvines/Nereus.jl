@@ -212,12 +212,12 @@ end
 # Rebuilds a single-chain Chains; the per-param + active-flag columns are kept.
 function _thin_for_plot(chains, max_draws)
     syms = names(chains, :parameters)
-    n = length(vec(Array(chains[syms[1]])))
+    n = size(chains, 1) * size(chains, 3)
     n <= max_draws && return chains
     idx = round.(Int, range(1, n; length = max_draws))
     mat = Matrix{Float64}(undef, length(idx), length(syms))
     for (j, s) in enumerate(syms)
-        mat[:, j] = vec(Array(chains[s]))[idx]
+        mat[:, j] = _draws(chains, s)[idx]
     end
     return MCMCChains.Chains(mat, syms)
 end
@@ -248,7 +248,7 @@ function _hpd_indices(chains, params, name, owner, credmass)
     if k > 0
         return Set(_credible_region_pool(chains, params, k; credmass = credmass))
     end
-    v = vec(Array(chains[Symbol(name)]))
+    v = _draws(chains, Symbol(name))
     m = median(v); s = 1.4826 * median(abs.(v .- m)); s = s > 0 ? s : 1.0
     d2 = ((v .- m) ./ s) .^ 2
     return Set(findall(<=(quantile(d2, credmass)), d2))
@@ -258,7 +258,7 @@ end
 function _sci_post_names(chains, params, owner; planet=nothing)
     cn = Set(names(chains, :parameters))
     nm = [n for n in params.layout.unfrozen_names if Symbol(n) in cn]
-    nm = [n for n in nm if (v = vec(Array(chains[Symbol(n)])); maximum(v) - minimum(v) > 1e-12)]
+    nm = [n for n in nm if (v = _draws(chains, Symbol(n)); maximum(v) - minimum(v) > 1e-12)]
     planet !== nothing && (nm = [n for n in nm if get(owner, n, 0) == planet])
     return nm
 end
@@ -277,7 +277,7 @@ function plot_posteriors_raw(chains, params; credmass::Real=0.85,
     chains = _thin_for_plot(chains, max_draws)
     cn = Set(names(chains, :parameters))
     (:lp in cn) || throw(ArgumentError("plot_posteriors_raw requires an :lp column"))
-    lp = vec(Array(chains[:lp]))
+    lp = _draws(chains, :lp)
     owner = _param_owner(params)
     names_ = _sci_post_names(chains, params, owner; planet=planet)
     noise_set = _noise_param_set(params)
@@ -327,7 +327,7 @@ function plot_posteriors_parameters(chains, params; credmass::Real=0.85,
     chains = _thin_for_plot(chains, max_draws)
     cn = Set(names(chains, :parameters))
     (:lp in cn) || throw(ArgumentError("plot_posteriors_parameters requires an :lp column"))
-    lp = vec(Array(chains[:lp]))
+    lp = _draws(chains, :lp)
     owner = _param_owner(params)
     names_ = _sci_post_names(chains, params, owner; planet=planet)
     noise_set = _noise_param_set(params)

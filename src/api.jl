@@ -620,8 +620,8 @@ end
     _summarise_params(chains, params) -> Dict
 
 Per-parameter posterior summary: median plus asymmetric 1/2/3-sigma bounds.
-Matches what runner.jl writes into summary["params"] so the two agree and a
-client cannot tell which produced a given result.
+The six bounds come from one sorted copy of the draws (the same values as six
+`quantile` calls, which sorted it six times).
 """
 function _summarise_params(chains, params)
     out = Dict{String,Any}()
@@ -630,12 +630,13 @@ function _summarise_params(chains, params)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in names_in || continue
-        v = vec(Array(chains[sym]))
+        v = _draws(chains, sym)
+        q = quantile(v, (0.16, 0.84, 0.025, 0.975, 0.0015, 0.9985))
         out[name] = Dict{String,Float64}(
             "median" => median(v),
-            "lo16"   => quantile(v, 0.16),   "hi84"   => quantile(v, 0.84),
-            "lo2sig" => quantile(v, 0.025),  "hi2sig" => quantile(v, 0.975),
-            "lo3sig" => quantile(v, 0.0015), "hi3sig" => quantile(v, 0.9985))
+            "lo16"   => q[1], "hi84"   => q[2],
+            "lo2sig" => q[3], "hi2sig" => q[4],
+            "lo3sig" => q[5], "hi3sig" => q[6])
     end
     return out
 end
@@ -932,7 +933,7 @@ function _finish(target, engine, stopping, output_dir; op::String,
         show_pf = Bool(_get(ocfg, :show_progress; default = true))
         pf = _PostFit(science ? ("ppc", "detection_limits", "loo", "fit_health",
                                  "evidence", "science", "write") : ("write",);
-                      enabled = show_pf)
+                      enabled = show_pf, release = _large_chain(chains))
         bridge_t = Dict{String, Any}()
         if science
             try

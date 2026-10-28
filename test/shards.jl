@@ -153,8 +153,11 @@ const TEST_UNITS = [
     # The bridge-sampling evaluator through the workspace likelihoods.
     (name = "test_bridge_workspace.jl", seconds = 14, files = ["test_bridge_workspace.jl"]),
     (name = "test_bridge_threading.jl", seconds = 3, files = ["test_bridge_threading.jl"]),
-    # The parallel bootstrap against the serial one it replaced.
+    # The bridge solver and parallel bootstrap against the serial ones they
+    # replaced, and the chain's :lp standing in for evaluations.
     (name = "test_bridge_bootstrap.jl", seconds = 18, files = ["test_bridge_bootstrap.jl"]),
+    # ESS, R-hat and quantiles on long chains, per parameter on threads.
+    (name = "test_postfit_diagnostics.jl", seconds = 10, files = ["test_postfit_diagnostics.jl"]),
     # run_job's and fit_*'s post-fit stage lines and timings.
     (name = "test_postfit_progress.jl", seconds = 83, files = ["test_postfit_progress.jl"]),
     # The transit-phase time anchor (time = :phic) against the Tc one.

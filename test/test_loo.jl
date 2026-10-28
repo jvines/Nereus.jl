@@ -277,8 +277,12 @@ const _LOO_HYP = Dict(
     oracle = _ratio_oracle(th, r, vars, t, inst, :rv)
     @test all(isfinite, oracle)
 
-    chains = _chain_at(params, th, 1e-7, 200, MersenneTwister(1))
-    loo = compute_loo(chains, params, data; n_draws = 100)
+    # 1e-6, not 1e-7: at 1e-7 a point's importance ratios could differ by less
+    # than ParetoSmooth's `≈` (rtol 1.5e-8), and it refused to fit a tail "all the
+    # same" -- on whichever 100 draws the global RNG picked. The draws stay a
+    # point to O(σ²), and the subsample is fixed.
+    chains = _chain_at(params, th, 1e-6, 200, MersenneTwister(1))
+    loo = compute_loo(chains, params, data; n_draws = 100, rng = MersenneTwister(2))
     @test loo.n_obs == n
     @test loo.elpd_loo ≈ sum(oracle) atol = 1e-3
     @test loo.elpd_waic ≈ sum(oracle) atol = 1e-3
@@ -317,7 +321,9 @@ end
     end
     Bi = inv(B)
     oracle = _schur_oracle(r, Bi * Diagonal(vars) * Bi')
-    loo = compute_loo(_chain_at(params, th, 1e-7, 200, rng), params, data; n_draws = 100)
+    # 1e-6 and a fixed subsample, as in the correlated-noise testset above.
+    loo = compute_loo(_chain_at(params, th, 1e-6, 200, rng), params, data;
+                      n_draws = 100, rng = rng)
     @test loo.elpd_loo ≈ sum(oracle) atol = 1e-3
     @test Nereus._pointwise_loo_rv(th, data, 10_000) ≈ oracle rtol = 1e-7
 end

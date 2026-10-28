@@ -57,6 +57,7 @@ include("noise/activity_gp.jl")  # Rajpaul+ 2015 multivariate-GP kernel + LL
 include("noise/multiseries_gp.jl")  # O(N·r²) semiseparable multi-series activity GP (needs sho_coefficients)
 include("noise/parametric_noise.jl")  # ErrorScale / NightlyOffset / HarmonicBlock / MaternGP (needs celerite_solve, _gp_suffix)
 include("noise/noise_menu.jl")        # default_noise_menu (needs all noise structs)
+include("chain_draws.jl")    # _draws: a parameter's draws in one copy
 include("derived.jl")        # stability + derived quantities (needs constants, transit, model)
 include("astrometry/projection.jl")  # PlanetOrbits-backed sky projection (needs Theta + parameters.jl)
 include("astrometry/likelihood.jl")  # rel + HGCA log-likelihoods (needs projection + Theta)
@@ -66,6 +67,7 @@ include("astrometry/gaia_epoch.jl")  # Gaia DR4 epoch-astrometry reader → IADD
 include("astrometry/solution_ladder.jl")  # exact 5/7/9-param evidences (needs IADData)
 include("likelihood.jl")     # calls gp_log_likelihood, check_stability, astrom_log_likelihood
 include("transit_likelihood.jl")
+include("diagnostics/rank_diag.jl")  # rank-normalised ESS / R-hat, once per parameter per run
 include("reporting.jl")
 include("science_tables.jl")  # model-conditioned, unit-tagged science tables (needs reporting.jl)
 include("transforms.jl")

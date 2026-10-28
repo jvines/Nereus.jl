@@ -35,12 +35,11 @@ end
 
 function ParamStats(samples::AbstractVector{<:Real})
     med = median(samples)
-    q16 = quantile(samples, 0.16)
-    q84 = quantile(samples, 0.84)
-    q025 = quantile(samples, 0.025)
-    q975 = quantile(samples, 0.975)
-    q001 = quantile(samples, 0.0015)
-    q999 = quantile(samples, 0.9985)
+    # One sorted copy for all six: each quantile is the same interpolation
+    # between the same two order statistics as its own `quantile` call, which
+    # copied and sorted the draws again (six times per parameter).
+    q16, q84, q025, q975, q001, q999 =
+        quantile(samples, (0.16, 0.84, 0.025, 0.975, 0.0015, 0.9985))
     return ParamStats(
         med,
         med - q16,
@@ -49,6 +48,27 @@ function ParamStats(samples::AbstractVector{<:Real})
         (q025, q975),
         (q001, q999),
     )
+end
+
+"""
+    ParamStats!(s) -> ParamStats
+
+`ParamStats(s)` from `s` itself, which it sorts: for a copy the caller owns
+and drops. The median and the six quantiles are read off the one sorted
+vector -- the same order statistics, combined the same way, as `median` and
+`quantile` on their own copies, so the numbers are identical -- instead of
+two more copies of the draws per parameter. With a NaN, `ParamStats(s)`,
+which is what decides what a NaN does.
+"""
+function ParamStats!(s::Vector{Float64})
+    (isempty(s) || any(isnan, s)) && return ParamStats(s)
+    sort!(s)
+    n = length(s)
+    mid = div(firstindex(s) + lastindex(s), 2)
+    med = isodd(n) ? Statistics.middle(s[mid]) : Statistics.middle(s[mid], s[mid + 1])
+    q16, q84, q025, q975, q001, q999 =
+        quantile(s, (0.16, 0.84, 0.025, 0.975, 0.0015, 0.9985); sorted = true)
+    return ParamStats(med, med - q16, q84 - med, (q16, q84), (q025, q975), (q001, q999))
 end
 
 # =====================================================================
@@ -71,7 +91,7 @@ function summarize_fitted(chains, params::Params)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in chain_names || continue
-        samp = vec(Array(chains[sym]))
+        samp = _draws(chains, sym)
         push!(stats, name => ParamStats(samp))
     end
 
@@ -295,7 +315,7 @@ function print_transdim_summary(chains, params::Params;
         M_s = params.config.M_s
     end
     max_kp = params.config.max_kplanet
-    np = vec(Array(chains[:n_planets]))
+    np = _draws(chains, :n_planets)
     n_total = length(np)
 
     # --- N_p posterior ---
@@ -332,7 +352,7 @@ function print_transdim_summary(chains, params::Params;
         println(io)
         println(io, "  Marginal noise-model probabilities (global):")
         for (col_name, col_label) in noise_cols
-            samp = vec(Array(chains[col_name]))
+            samp = _draws(chains, col_name)
             p = count(samp .== 1.0) / length(samp)
             push!(global_noise_win, p > 0.5)
             push!(global_noise_prob, p)
@@ -378,7 +398,7 @@ function print_transdim_summary(chains, params::Params;
         # losing models are still visible as their P(on) values.
         if has_noise
             for (col_name, col_label) in noise_cols
-                noise_samp = vec(Array(chains[col_name]))[mask]
+                noise_samp = _draws(chains, col_name)[mask]
                 frac = count(noise_samp .== 1.0) / n_np
                 @printf(io, "\n  P(%s = on | N_p = %d) = %.4f\n",
                         col_label, np_val, frac)
@@ -418,7 +438,7 @@ function save_transdim_summary(chains, params::Params, path::String;
         M_s = params.config.M_s
     end
     max_kp = params.config.max_kplanet
-    np = vec(Array(chains[:n_planets]))
+    np = _draws(chains, :n_planets)
     n_total = length(np)
     noise_cols = _detect_noise_columns(chains, td)
     has_noise = !isempty(noise_cols)
@@ -450,7 +470,7 @@ function save_transdim_summary(chains, params::Params, path::String;
     global_noise_win = Bool[]
     if has_noise
         for (col_name, _) in noise_cols
-            samp = vec(Array(chains[col_name]))
+            samp = _draws(chains, col_name)
             push!(global_noise_win,
                    count(samp .== 1.0) / length(samp) > 0.5)
         end
@@ -493,7 +513,7 @@ end
 Print ESS and Rhat diagnostics for all chain parameters.
 """
 function print_ess_rhat(chains; io::IO=stdout)
-    ess_tbl = MCMCChains.ess_rhat(chains)
+    ess_tbl = _diag_by_param(MCMCChains.ess_rhat, chains)
     param_col = ess_tbl[:, :parameters]
     ess_col = ess_tbl[:, :ess]
     rhat_col = ess_tbl[:, :rhat]
@@ -588,7 +608,7 @@ function _print_joint_table(io::IO, np, chains, noise_cols, max_kp, n_total)
     # Collect each sample's noise config as an Int (bitstring)
     noise_mat = falses(n_total, n_noise)
     for (j, (col_name, _)) in enumerate(noise_cols)
-        samp = vec(Array(chains[col_name]))
+        samp = _draws(chains, col_name)
         noise_mat[:, j] .= samp .== 1.0
     end
     config_int = Vector{Int}(undef, n_total)
@@ -654,7 +674,7 @@ function _conditional_fitted_stats(chains, params::Params, mask::BitVector,
         planet_idx = _param_planet_index(name, max_kp)
         if planet_idx !== nothing
             planet_idx in live || continue
-            push!(stats, name => ParamStats(vec(Array(chains[sym]))[slot_mask(planet_idx)]))
+            push!(stats, name => ParamStats(_draws(chains, sym)[slot_mask(planet_idx)]))
             continue
         end
 
@@ -678,7 +698,7 @@ function _conditional_fitted_stats(chains, params::Params, mask::BitVector,
             end
         end
 
-        samp = vec(Array(chains[sym]))[mask]
+        samp = _draws(chains, sym)[mask]
         push!(stats, name => ParamStats(samp))
     end
 
@@ -696,7 +716,7 @@ function _conditional_derived_stats(chains, params::Params, mask::BitVector,
     param_names = names(chains, :parameters)
     mat = Matrix{Float64}(undef, n_masked, length(param_names))
     for (j, sym) in enumerate(param_names)
-        mat[:, j] = vec(Array(chains[sym]))[mask]
+        mat[:, j] = _draws(chains, sym)[mask]
     end
     sub_chains = MCMCChains.Chains(mat, param_names)
 
@@ -805,7 +825,7 @@ end
 function _noise_active_in_mask(chains, noise_cols, mask::BitVector)
     result = Bool[]
     for (col, _) in noise_cols
-        samp = vec(Array(chains[col]))[mask]
+        samp = _draws(chains, col)[mask]
         push!(result, count(samp .== 1.0) / length(samp) > 0.5)
     end
     return result
@@ -836,8 +856,8 @@ function _canonical_slot_columns(chains, allp, model_params, nflat::Int)
     end
     key = "P" in bases ? "P" : (isempty(bases) ? nothing : first(bases))
     key === nothing && return out
-    A = hcat((vec(Array(chains[a])) .> 0.5 for a in acts)...)          # nflat × K
-    X = Dict(b => hcat((vec(Array(chains[Symbol("$(b)_k$k")])) for k in 1:K)...)
+    A = hcat((_draws(chains, a) .> 0.5 for a in acts)...)          # nflat × K
+    X = Dict(b => hcat((_draws(chains, Symbol("$(b)_k$k")) for k in 1:K)...)
              for b in bases)
     Y = Dict(b => copy(X[b]) for b in bases)
     n_on = vec(sum(A; dims = 2))
@@ -880,8 +900,10 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
     # Layout detection: a flat trans-dim chain stores one chain (size(_,3)==1)
     # with WALKER as the FAST index in the per-param vec; a native ensemble chain
     # stores (iter × param × walker) with walker as the SLOW index. Handle both.
-    nflat = length(vec(Array(chains[pnames[1]])))
-    nc = size(Array(chains[pnames[1]]), ndims(Array(chains[pnames[1]])))
+    # Read off the shape (iter × param × chain): a column copy only to measure
+    # it cost a column.
+    nflat = size(chains, 1) * size(chains, 3)
+    nc = size(chains, 3)
     local nsteps::Int, walker_fast::Bool
     if nc == n_walkers && nflat % nc == 0
         nsteps = nflat ÷ nc; walker_fast = false          # native multi-chain
@@ -910,35 +932,36 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
     # are only DEFINED when their component is active — when inactive their slot
     # holds stale unbounded junk (drifts to ~1e6), which poisons an unconditional
     # R̂/ESS. Assess them CONDITIONED on active. Returns nothing for always-defined
-    # params (γ, jitter, planets when the count is fixed).
+    # params (γ, jitter, planets when the count is fixed). One mask per
+    # activity column, however many parameters share it.
+    on_cache = Dict{Symbol, BitVector}()
+    _on(col) = get!(() -> _draws(chains, col) .> 0.5, on_cache, col)
     function _active_mask(p::Symbol)
         s = String(p)
         if model_params !== nothing
             idx = _noise_model_index_for_param(s, model_params)
             if idx !== nothing
                 col = Symbol("noise_active_$idx")
-                col in allp && return vec(Array(chains[col])) .> 0.5
+                col in allp && return _on(col)
             end
         end
         m = match(r"_k(\d+)$", s)
         if m !== nothing
             col = Symbol("planet_active_$(m.captures[1])")
-            col in allp && return vec(Array(chains[col])) .> 0.5
+            col in allp && return _on(col)
         end
         return nothing
     end
-    # per-walker (walker = fast index) split-R̂ + bulk-ESS over an active mask.
-    function _cond_rhat_ess(v::Vector{Float64}, mask)
-        if mask === nothing
-            M = Array{Float64,3}(undef, nsteps, 1, n_walkers)
-            for w in 1:n_walkers; M[:, 1, w] = v[_widx(w)]; end
-            er = MCMCChains.ess_rhat(MCMCChains.Chains(M))
-            return (er[1, :rhat], er[1, :ess], nsteps)
-        end
-        colv = [(idx = _widx(w); v[idx][mask[idx]]) for w in 1:n_walkers]
-        lens = length.(colv)
+    # Per-walker (walker = fast index) split-R̂ + bulk-ESS, over an active mask
+    # for trans-dim components. `_cond_plan` decides from the mask alone which
+    # walkers enter and at what common length; `_cond_matrix` builds the
+    # (steps × walkers) draws then, so a parameter's copy exists only while its
+    # numbers are computed.
+    function _cond_plan(mask)
+        mask === nothing && return (nsteps, collect(1:n_walkers))
+        lens = [count(view(mask, _widx(w))) for w in 1:n_walkers]
         nz = filter(>(0), lens)
-        isempty(nz) && return (NaN, NaN, 0)
+        isempty(nz) && return (0, Int[])
         # Per-walker active counts vary wildly (a walker entrenched in another
         # model has ~0 active draws here). Collapsing to the global min gives a
         # useless L≈0, so instead set the common length to the MEDIAN active
@@ -946,26 +969,70 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
         # actually sample this component. Drops the sparse walkers rather than
         # letting them null the whole statistic.
         L = max(20, round(Int, median(nz)))
-        kept = [c for c in colv if length(c) ≥ L]
-        length(kept) < 4 && return (NaN, NaN, length(kept))
-        M = Array{Float64,3}(undef, L, 1, length(kept))
-        for (j, c) in enumerate(kept); M[:, 1, j] = c[1:L]; end
-        er = MCMCChains.ess_rhat(MCMCChains.Chains(M))
-        return (er[1, :rhat], er[1, :ess], L)
+        return (L, [w for w in 1:n_walkers if lens[w] ≥ L])
+    end
+    function _cond_matrix(v, mask, L, ws)
+        M = Matrix{Float64}(undef, L, length(ws))
+        for (j, w) in enumerate(ws)
+            idx = _widx(w)
+            M[:, j] = mask === nothing ? v[idx] : v[idx][mask[idx]][1:L]
+        end
+        return M
     end
 
     keep=Symbol[]; rh=Float64[]; es=Float64[]; fr=Float64[]; gate_ess=Bool[]
     n_fixed=0; n_inactive=0
-    for p in pnames
-        v, mask = haskey(canon, p) ? canon[p] : (vec(Array(chains[p])), _active_mask(p))
+    # Classify every parameter, then compute R-hat and ESS of the assessed ones
+    # in one batch (`_rank_diag_batch`): each sorted once on a bounded number of
+    # threads, or not at all when an earlier stage already did. With walkers as
+    # the chain axis, an always-defined parameter's draws are read in place.
+    data = chains.value.data
+    pos = Dict(n => i for (i, n) in enumerate(names(chains)))
+    in_place = !walker_fast && eltype(data) === Float64 && size(data, 1) == nsteps &&
+               size(data, 3) == n_walkers
+    pre = Vector{Any}(undef, length(pnames))
+    srcs = Function[]; at = Int[]
+    for (i, p) in enumerate(pnames)
+        cv, mask = haskey(canon, p) ? canon[p] : (nothing, _active_mask(p))
+        getv = cv === nothing ? (() -> _draws(chains, p)) : (() -> cv)
         if mask === nothing
-            (maximum(v) - minimum(v) < 1e-12) && (n_fixed += 1; continue)  # frozen
-            r, e, _ = _cond_rhat_ess(v, nothing)
-            push!(keep,p); push!(rh,r); push!(es,e); push!(fr,1.0); push!(gate_ess,true)
+            lo, hi = cv === nothing ? extrema(view(data, :, pos[p], :)) : extrema(cv)
+            if hi - lo < 1e-12                               # frozen
+                pre[i] = (:fixed,)
+                continue
+            end
+            pre[i] = (:all, 1.0)
+            src = (cv === nothing && in_place) ? (() -> view(data, :, pos[p], :)) :
+                  (() -> _cond_matrix(getv(), nothing, nsteps, 1:n_walkers))
         else
             f = count(mask)/length(mask)
-            if f < 0.01; n_inactive += 1; continue; end       # component ~never on
-            r, e, _ = _cond_rhat_ess(v, mask)
+            if f < 0.01                                      # component ~never on
+                pre[i] = (:inactive,)
+                continue
+            end
+            L, ws = _cond_plan(mask)
+            if length(ws) < 4
+                pre[i] = (:masked, f, (NaN, NaN))
+                continue
+            end
+            pre[i] = (:masked, f)
+            src = () -> _cond_matrix(getv(), mask, L, ws)
+        end
+        push!(srcs, src); push!(at, i)
+    end
+    res = _rank_diag_batch(srcs, :split2; n_max = nflat, src_bytes = 16)
+    for (i, r) in zip(at, res)
+        pre[i] = (pre[i]..., (r.rhat_rank, r.ess_bulk))
+    end
+    for (p, pr) in zip(pnames, pre)
+        kind = pr[1]
+        kind === :fixed && (n_fixed += 1; continue)
+        kind === :inactive && (n_inactive += 1; continue)
+        f = pr[2]
+        r, e = pr[3]
+        if kind === :all
+            push!(keep,p); push!(rh,r); push!(es,e); push!(fr,1.0); push!(gate_ess,true)
+        else
             push!(keep,p); push!(rh,r); push!(es,e); push!(fr,f)
             # ESS-gate only well-sampled components; ESS via active-masking is
             # unreliable for sporadically-active (disfavoured) models, and a
