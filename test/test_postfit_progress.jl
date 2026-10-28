@@ -104,3 +104,21 @@ _pf_stage(l) = (m = match(r"^post-fit .*\| stage=([a-z_]+)", l); m === nothing ?
         @test filter(!isnothing, _pf_stage.(lines)) == ["write", "done"]
     end
 end
+
+@testset "post-fit hands memory back between stages of a big chain" begin
+    using MCMCChains
+    # 128 MiB of draws is the line: about a million draws of a dozen parameters.
+    big = 128 * 2^20 ÷ 8
+    small_ch = Chains(zeros(10, 2, 3), [:a, :b])
+    @test !Nereus._large_chain(small_ch)
+    @test !Nereus._large_chain(nothing)
+    @test Nereus._large_chain(Chains(zeros(big ÷ 4, 4, 1), [:a, :b, :c, :d]))
+    @test !Nereus._large_chain(Chains(zeros(big ÷ 4 - 1, 4, 1), [:a, :b, :c, :d]))
+    @test Nereus._release_memory() === nothing
+    # The stages run and print as before with the release switched on.
+    pf = Nereus._PostFit(("a", "b"); enabled = false, release = true)
+    @test pf.release && !Nereus._PostFit(("a",)).release
+    Nereus._postfit_stage!(pf, "a"); Nereus._postfit_stage!(pf, "b")
+    Nereus._postfit_done!(pf)
+    @test sort!(collect(keys(pf.seconds))) == ["a", "b"]
+end

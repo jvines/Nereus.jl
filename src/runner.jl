@@ -151,7 +151,8 @@ function run_job(cfg::AbstractDict)
         show_pf = Bool(_get(_get(cfg, :output; default = Dict()), :show_progress;
                             default = true))
         pf = _PostFit(("ppc", "detection_limits", "loo", "fit_health", "diagnostics",
-                       "summary", "evidence", "science", "write"); enabled = show_pf)
+                       "summary", "evidence", "science", "write"); enabled = show_pf,
+                      release = _large_chain(chains))
 
         # --- Posterior predictive checks (default on; fail-soft) -------
         _postfit_stage!(pf, "ppc")
@@ -2551,7 +2552,7 @@ end
 # =====================================================================
 
 """
-    _PostFit(stages; enabled = true)
+    _PostFit(stages; enabled = true, release = false)
 
 The post-fit work of a fit -- everything after the sampler and the plots -- as
 one progress bar, `post-fit`, and the wall time of each stage. Shared by
@@ -2574,6 +2575,10 @@ instead. There is no ETA: the stages differ by orders of magnitude in cost.
 Stages that report progress of their own print their lines in between
 (`bridge posterior`, `bridge proposal`, `bridge solve`, `bridge bootstrap`
 during `evidence`).
+
+With `release`, each stage starts with `_release_memory()`: what the stages
+before it dropped goes back to the system first. run_job and the fit_* route
+switch it on for a big chain (`_large_chain`).
 """
 mutable struct _PostFit
     pb::ProgressBar
@@ -2581,11 +2586,38 @@ mutable struct _PostFit
     k::Int
     t_stage::Float64
     seconds::Dict{String, Float64}
+    release::Bool
 end
 
-_PostFit(stages; enabled::Bool = true) =
+_PostFit(stages; enabled::Bool = true, release::Bool = false) =
     _PostFit(ProgressBar("post-fit"; total = length(stages), enabled = enabled, eta = false),
-             collect(String, stages), 0, time(), Dict{String, Float64}())
+             collect(String, stages), 0, time(), Dict{String, Float64}(), release)
+
+"""
+    _release_memory()
+
+A full collection, then, on glibc, the freed pages handed back to the system
+(`malloc_trim`). Julia frees a large array to `malloc`, and glibc keeps what it
+is given back for reuse instead of returning it, so a process' resident memory
+stays at its high-water mark -- the sampler's, the plots' -- through every
+stage after it. Elsewhere (macOS, musl) only the collection runs.
+"""
+function _release_memory()
+    GC.gc()
+    if Sys.islinux()
+        h = Base.Libc.Libdl.dlopen_e("libc.so.6")
+        f = h == C_NULL ? C_NULL : Base.Libc.Libdl.dlsym_e(h, :malloc_trim)
+        f == C_NULL || ccall(f, Cint, (Csize_t,), 0)
+    end
+    return nothing
+end
+
+# Post-fit releases memory between its stages (`_PostFit(...; release)`) when
+# the chain is big enough for its garbage to matter: a draw array of 128 MiB or
+# more, about a million draws of a dozen parameters. Below that a collection per
+# stage costs more than it frees.
+_large_chain(chains) = chains isa MCMCChains.Chains &&
+    8 * size(chains, 1) * size(chains, 2) * size(chains, 3) >= 128 * 2^20
 
 function _postfit_close!(pf::_PostFit)
     pf.k > 0 && (pf.seconds[pf.stages[pf.k]] = time() - pf.t_stage)
@@ -2596,6 +2628,9 @@ function _postfit_stage!(pf::_PostFit, name::AbstractString)
     _postfit_close!(pf)
     k = findfirst(==(name), pf.stages)
     k === nothing && throw(ArgumentError("unknown post-fit stage `$name`"))
+    # What the last stage dropped goes back to the system before the next one
+    # allocates: otherwise each stage's garbage stacks on the last's.
+    pf.release && _release_memory()
     pf.k = k
     pf.t_stage = time()
     update!(pf.pb; n_done = k - 1, fields = (:stage => String(name),), force = true)

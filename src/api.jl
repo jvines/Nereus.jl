@@ -933,7 +933,7 @@ function _finish(target, engine, stopping, output_dir; op::String,
         show_pf = Bool(_get(ocfg, :show_progress; default = true))
         pf = _PostFit(science ? ("ppc", "detection_limits", "loo", "fit_health",
                                  "evidence", "science", "write") : ("write",);
-                      enabled = show_pf)
+                      enabled = show_pf, release = _large_chain(chains))
         bridge_t = Dict{String, Any}()
         if science
             try
