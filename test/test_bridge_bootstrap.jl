@@ -440,7 +440,18 @@ end
         calls = Threads.Atomic{Int}(0)
         steps_after = Threads.Atomic{Int}(0)
         function bad(l1, l2, c1, c2, mi, tol; start, stop)
-            Threads.atomic_add!(calls, 1) + 1 == 5 && error("replicate failed")
+            k = Threads.atomic_add!(calls, 1) + 1
+            k == 5 && error("replicate failed")
+            # A solve after the fifth waits for the flag. A warm Newton solve is
+            # quicker than an exception unwinds, so without this the other
+            # workers could run any number of solves before the flag went up;
+            # with it, each holds at most one, whatever a solve costs.
+            if k > 5
+                t0 = time()
+                while !stop[] && time() - t0 < 60
+                    yield()
+                end
+            end
             # Steps taken once the flag is up: at most the one in progress.
             on = (it, δ) -> (stop[] && Threads.atomic_add!(steps_after, 1))
             return _bridge_iterate(l1, l2, mi, tol; w1 = c1, w2 = c2, start, stop,
@@ -451,9 +462,9 @@ end
             @test_throws Exception _bridge_bootstrap(l1, l2, MersenneTwister(1), 200, 1_000,
                                                      1e-10; workers = w, solve = bad)
             n_calls = calls[]
-            # Four solves were under way, or done, when the fifth threw; at most
-            # one more per worker can start before the flag is up. Not 200.
-            @test 5 <= n_calls <= 4 + 2w
+            # Four solves were under way, or done, when the fifth threw; each
+            # other worker can hold one more, waiting for the flag. Not 200.
+            @test 5 <= n_calls <= 4 + w
             @test steps_after[] <= w - 1
             # Every worker has returned: nothing solves after the call is over.
             sleep(0.2)
