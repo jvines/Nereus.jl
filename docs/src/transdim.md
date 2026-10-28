@@ -23,7 +23,7 @@ the posterior model probability P(M | D) — see the
 ### The four trans-dim samplers
 
 `run_job` requires a top-level `transdim` block for exactly four
-sampler names (`runner.jl:315`, `_SAMPLERS_REQUIRE_TD`):
+sampler names (`runner.jl:316`, `_SAMPLERS_REQUIRE_TD`):
 
 | Sampler | `run_job` name | Engine | Evidence | Notes |
 |---|---|---|---|---|
@@ -97,7 +97,7 @@ Definition: `src/transdim/config.jl:116`.
   rather than within-model. Validated to `[0, 1]` (`config.jl:150`).
   **Default `0.2`** in the constructor; note `run_job`'s
   `_build_transdim` uses a different default of **`0.3`**
-  (`runner.jl:1654`).
+  (`runner.jl:1655`).
 - `noise_exclusion_groups` — user-declared mutually-exclusive noise
   model sets. At most one model per group is active simultaneously.
   See the **`noise_exclusion_groups`** section below.
@@ -105,7 +105,7 @@ Definition: `src/transdim/config.jl:116`.
 ## Birth strategies
 
 Concrete `BirthStrategy` subtypes (`src/transdim/config.jl:8-83`). All
-five are accepted by `run_job` (`runner.jl:1607`, `_BIRTH_TYPES`).
+five are accepted by `run_job` (`runner.jl:1608`, `_BIRTH_TYPES`).
 
 ### `PriorBirth()`
 
@@ -335,8 +335,8 @@ save_transdim_summary(chains, params, "results/transdim_summary.txt";
 ```
 
 Note the argument order: `print_transdim_summary(chains, params; …)`
-(`reporting.jl:286`) and `save_transdim_summary(chains, params, path;
-starname, …)` (`reporting.jl:408`) — the path is positional, and
+(`reporting.jl:307`) and `save_transdim_summary(chains, params, path;
+starname, …)` (`reporting.jl:429`) — the path is positional, and
 `starname` is required.
 
 `print_transdim_summary` reports:
@@ -397,8 +397,8 @@ params/td.
 The standard production entry point is the JSON/Dict-driven
 `run_job`. A trans-dim job needs a top-level `transdim` block; the
 validator enforces it for the four samplers above
-(`runner.jl:525`). Birth strategies are named by string
-(`runner.jl:317`).
+(`runner.jl:526`). Birth strategies are named by string
+(`runner.jl:318`).
 
 ```json
 {
@@ -422,15 +422,15 @@ validator enforces it for the four samplers above
 }
 ```
 
-`_build_transdim` (`runner.jl:1636`) parses the block. `auto` plots add
+`_build_transdim` (`runner.jl:1637`) parses the block. `auto` plots add
 `transdim_occupancy` automatically whenever the chain has a
-`:n_planets` column (`runner.jl:1763`).
+`:n_planets` column (`runner.jl:1764`).
 
 !!! note "Toggleable noise models can't come from JSON"
     `transdim.toggleable` and `noise_exclusion_groups` must hold
     `NoiseModel` *objects*, which JSON can't encode. `_coerce_noise_models`
     rejects a non-empty JSON `toggleable`/`noise_exclusion_groups` with an
-    explicit error (`runner.jl:1625`). Noise-only trans-dim therefore needs
+    explicit error (`runner.jl:1626`). Noise-only trans-dim therefore needs
     the Julia API (build the `TransDimConfig` in-process), not a raw JSON job.
     Schema reference: `Nereus.jl/docs/JOB_CONFIG.md`.
 
@@ -468,26 +468,26 @@ residuals, fit-health metrics, and every RV plot is RM-consistent
 (no-op for non-RM fits). Use the dedicated `rm_anomaly` plot
 (`plot_rm`, `src/plotting/rm_plots.jl:48`) to inspect the in-transit
 anomaly; `run_job` emits it automatically for any RM-enabled fit
-(`runner.jl:1784`).
+(`runner.jl:1785`).
 
 ## Newer plots relevant to trans-dim QC
 
 Beyond `transdim_occupancy`, three plots help vet a trans-dim
-solution (all dispatchable via `output.plots`, `runner.jl:320`):
+solution (all dispatchable via `output.plots`, `runner.jl:321`):
 
 - `rm_anomaly` — per-planet RM anomaly with predictive band
   (`plot_rm`); only for `*_RM` fits.
 - `transit_overlay` — per-transit QC gallery, the median transit model
   overlaid on each individual transit window
-  (`plot_transit_overlay_fit`, `runner.jl:2102`).
+  (`plot_transit_overlay_fit`, `runner.jl:2103`).
 - `rv_components` — RV model decomposition (Keplerian / activity /
   trend pieces), distinct from `rv_timeseries`
-  (`plot_rv_components`, `runner.jl:1966`); auto-emitted when there are
+  (`plot_rv_components`, `runner.jl:1967`); auto-emitted when there are
   ≥ 2 planets or a smooth (GP/AGP) activity component.
 - `ttv_oc` — O−C transit-timing diagram. Now renders for
   **single-planet** fits too: with no perturber it shows the data-only
   O−C (measured per-transit T\_c vs the linear ephemeris) by passing
-  `planet_b_k = 0` (`runner.jl:2091-2096`).
+  `planet_b_k = 0` (`runner.jl:2092-2097`).
 
 ## ActivityGP from `run_job`
 
@@ -505,7 +505,7 @@ channels) is now run_job-drivable as a `noise_models` entry:
 `channels` (default `[:bis, :fwhm]`) and `use_derivative` (default
 `true`, the Aigrain+ 2012 FF′-style dG/dt coupling) map onto the
 `ActivityGP` constructor (`src/noise/types.jl:475`). JSON strings are
-symbolised before construction (`runner.jl:1327`).
+symbolised before construction (`runner.jl:1328`).
 
 **ActivityGP needs the indicator errors.** Provide them via the data
 block:
@@ -513,9 +513,9 @@ block:
 - In an `rv` `values` block, add `<name>` and `<name>_err` arrays
   (e.g. `bis`/`bis_err`, `fwhm`/`fwhm_err`). The
   `<name>_err`-paired-with-`<name>` convention splits values from
-  errors (`runner.jl:724`, `_split_indicator_errs`).
+  errors (`runner.jl:725`, `_split_indicator_errs`).
 - In a CSV `rv` block, set `indicator_cols` and provide a matching
-  `<col>_err` column per indicator (`runner.jl:717,792`).
+  `<col>_err` column per indicator (`runner.jl:718,793`).
 
 A lone `<name>_err` with no matching `<name>` is treated as an
 indicator *value*, not an error.

@@ -94,9 +94,9 @@ for the per-mode parameter list, and the `PlanetBlock` subtypes
 
 ### run_job equivalent
 
-In the `model.planet_modes` array (`src/runner.jl:1083`), pass the
+In the `model.planet_modes` array (`src/runner.jl:1084`), pass the
 constant **names** as strings. The schema validator
-(`src/runner.jl:275`) recognises exactly:
+(`src/runner.jl:276`) recognises exactly:
 
 ```
 RV_ONLY, PM_ONLY, RVPM, RVAS, RVPMAS,
@@ -305,7 +305,7 @@ evidence) and the RV likelihood uses the γ-marginalised path
 
 ### run_job coverage of `ParametrizationConfig`
 
-The `model.parametrization` block in run_job (`src/runner.jl:1088`–`1114`)
+The `model.parametrization` block in run_job (`src/runner.jl:1089`–`1115`)
 maps only these keys, with these accepted string values:
 
 | run_job key | accepted strings | maps to | default |
@@ -330,15 +330,15 @@ maps only these keys, with these accepted string values:
 
 !!! warning "run_job gaps vs the Julia API"
     Several Julia-API options are **not** reachable through run_job
-    today (`src/runner.jl:1088`):
+    today (`src/runner.jl:1089`):
     - `obs_prior` is never read from the config — set it by constructing
       `Params`/`ParametrizationConfig` directly. (`use_rho_s` IS read, from
       `model.parametrization.use_rho_s`, default `false`.)
     - `ew = :esinw` and `geom = :r1r2` are valid in Julia but **absent
       from the run_job string maps** (`_EW_PARAM`, `_GEOM_PARAM`,
-      `src/runner.jl:1057`–`1060`).
+      `src/runner.jl:1058`–`1061`).
     - The schema validator advertises `geom = "b_r"`
-      (`src/runner.jl:290`) and the map yields `:b_r`, but
+      (`src/runner.jl:291`) and the map yields `:b_r`, but
       `ParametrizationConfig` only accepts `:b_rr`/`:r1r2` — passing
       `geom: "b_r"` therefore throws at model construction. Use
       `b_rr`.
@@ -404,7 +404,7 @@ fit run, so it is documented here; the noise model itself lives in
 [Noise models → `ActivityGP`](noise_models.md).
 
 In run_job, declare the noise model in `noise_models`
-(`src/runner.jl:1118`, `_build_noise_models` `src/runner.jl:1298`):
+(`src/runner.jl:1119`, `_build_noise_models` `src/runner.jl:1299`):
 
 ```json
 "noise_models": [
@@ -414,7 +414,7 @@ In run_job, declare the noise model in `noise_models`
 ]
 ```
 
-`channels` is symbolised for you (`src/runner.jl:1327`); valid channels
+`channels` is symbolised for you (`src/runner.jl:1328`); valid channels
 are `bis`, `fwhm`, `logrhk` (no derivative term), `halpha`
 (`src/noise/types.jl:386`–`398`). `ActivityGP` deliberately has **no**
 kernel-amplitude parameter (unit-variance latent `G(t)`); all scale
@@ -423,7 +423,7 @@ lives in the per-channel couplings (`Vc/Vr`, `Bc/Br`, …).
 Supply the indicator data alongside the RV data:
 
 - **`values` RV block** — add `<name>` and `<name>_err` arrays next to
-  `bjd`/`rv`/`rv_err`/`instrument` (`src/runner.jl:693`–`721`). A
+  `bjd`/`rv`/`rv_err`/`instrument` (`src/runner.jl:694`–`722`). A
   `<name>_err` key is treated as the error for `<name>` **only when
   `<name>` is also present**; a lone `<name>_err` is itself an
   indicator value:
@@ -438,7 +438,7 @@ Supply the indicator data alongside the RV data:
 
 - **`csv` RV block** — list the indicator columns in `indicator_cols`
   and provide a matching `<col>_err` column for each
-  (`src/runner.jl:739`–`809`):
+  (`src/runner.jl:740`–`810`):
 
   ```json
   "rv": { "csv": "rvs.csv",
@@ -535,7 +535,7 @@ A hard prior rejecting dynamically unstable multi-planet configs.
 One of `:none`, `:amd` (AMD criterion), or `:gladman` (Gladman 1993
 Hill-stability), validated in `src/params_constructor.jl:100`. The
 Julia `Params` default is `:amd` (`src/params_constructor.jl:85`); the
-run_job default is `none` (`src/runner.jl:1168`). A non-`:none` choice
+run_job default is `none` (`src/runner.jl:1169`). A non-`:none` choice
 requires a finite `M_s` for `max_kplanet ≥ 2`
 (`src/params_constructor.jl:102`).
 

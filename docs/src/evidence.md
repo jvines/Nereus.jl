@@ -274,9 +274,9 @@ When you drive Nereus via `Nereus.run_job` (the JSON/Dict
 dispatcher — see [JOB_CONFIG.md](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md)),
 every sampler result is normalised so `log_evidence` is always present,
 and the run summary surfaces it as the JSON key **`log_z`**
-(`src/runner.jl:2648`). Samplers with no evidence at all (e.g.
+(`src/runner.jl:2683`). Samplers with no evidence at all (e.g.
 `map`, `nuts`, `rjmcmc`, `moms`) return `log_evidence = NaN`
-(`runner.jl:1524`, `1532`, `1578`) and the value is written only when
+(`runner.jl:1525`, `1533`, `1579`) and the value is written only when
 finite (the JSON contract forbids raw `NaN`). Note that `pa`/`smc`
 (population annealing) and the nested family (`nested`, `nested_ins`,
 `nested_dynamic`, `daedalus`) carry their own `log_evidence` that is
@@ -285,7 +285,7 @@ population-annealing free-energy estimate, the NS family report
 Skilling/Feroz `log Z`. The
 sampler names that route through the PT evidence stack are
 `"pt"`, `"pt_emcee"`, `"transdim_pt_emcee"`,
-`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1498`–`1559`).
+`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1499`–`1560`).
 
 **`summary.json` carries an `evidence` block**, not just `log_z`: every
 estimator the run produced with its standard error, plus `reported` naming
@@ -311,7 +311,7 @@ the one badly mixed run (worst R-hat 3.91). If you have results from a
 `run_job` fit predating this, re-run or recompute the evidence.
 
 The same `log_z` is fed into the LOO/log-Z model-comparison summary
-(`loo_compare_log_z`, `runner.jl:2354`) so cross-run Bayes factors are
+(`loo_compare_log_z`, `runner.jl:2355`) so cross-run Bayes factors are
 consistent.
 
 ## Validation status
