@@ -1,16 +1,19 @@
-# The bridge fixed point and its bootstrap (src/samplers/bridge.jl), against a
-# verbatim copy of the serial algorithm they replaced (Nereus 0.8.8).
+# The bridge equation's solver and its bootstrap (src/samplers/bridge.jl),
+# against a verbatim copy of the serial fixed-point iteration they replaced
+# (Nereus 0.8.8).
 #
-# The bootstrap now solves its replicates in parallel, with buffers reused
-# across fixed-point steps and replicates. Neither may change a bit of what
-# bridge_evidence returns: the resamples come off the same MersenneTwister in
-# the same order, every term is the same expression, and every reduction runs
-# over the same vector. So the comparisons here are `===` / `isequal`, not
-# tolerances, at every worker count.
+# The solver is now safeguarded Newton on the same equation, so it agrees with
+# the old iteration to within the old iteration's own stopping error, not to
+# the bit: those comparisons are on the residual of the equation and on a
+# tolerance a few orders below any reported standard error. What must still be
+# exact is everything about scheduling: the bootstrap's resamples come off the
+# same MersenneTwister in the same order, so its replicates are the same bits
+# at any worker count, and `===` is used there.
 using Test, Nereus, Random, Statistics, LinearAlgebra, MCMCChains, SpecialFunctions
-using Nereus: _bridge_iterate, _bridge_iterate!, _bridge_bootstrap, _bridge_draw_indices!,
-              _bridge_boot_workers, _bridge_boot_bytes, _BridgeBootBuffers, _logaddexp,
-              _logsumexp, _SharedProgress, _tick!, ProgressBar, update!
+using Nereus: _bridge_iterate, _bridge_iterate!, _bridge_g!, _bridge_bootstrap,
+              _bridge_draw_indices!, _bridge_boot_workers, _bridge_boot_bytes,
+              _BridgeBootBuffers, _logaddexp, _logsumexp, _SharedProgress, _tick!,
+              ProgressBar, update!
 
 # ---- the 0.8.8 code, verbatim -------------------------------------------------
 
@@ -177,36 +180,81 @@ end
     end
     unequal = _bb_ratios(20_000, 50; seed = 4)      # N2 << N1, as in production
 
-    @testset "fixed point: the 0.8.8 bits, no allocation per step" begin
+    # F(x) = g(x) - x, the residual of the bridge equation at x = log r.
+    function _residual(l1, l2, x)
+        n1, n2 = length(l1), length(l2)
+        g, _ = _bridge_g!(similar(l1), similar(l2), l1, l2,
+                          log(n1 / (n1 + n2)), log(n2 / (n1 + n2)), x)
+        return g - x
+    end
+
+    @testset "solver: the old iteration's root, in a few passes" begin
         for (l1, l2) in (fast, slow, ext, unequal, reverse(unequal))
-            for (mi, tol) in ((1_000, 1e-10), (3, 1e-10), (1_000, 1e-300))
-                @test _bridge_iterate(l1, l2, mi, tol) === _ref_bridge_iterate(l1, l2, mi, tol)
-            end
+            x, it, ok = _bridge_iterate(l1, l2, 1_000, 1e-10)
+            xr, itr, okr = _ref_bridge_iterate(l1, l2, 1_000, 1e-10)
+            @test ok && okr
+            @test it <= 10
+            @test abs(_residual(l1, l2, x)) < 1e-9
+            # The old iteration stopped within about its last step / (1 - |g'|)
+            # of the root.
+            @test abs(x - xr) < 1e-8
         end
-        @test _bridge_iterate(slow..., 1_000, 1e-10)[2] > 100     # the slow case is slow
-        @test _bridge_iterate(fast..., 1_000, 1e-10)[2] < 20
+        @test _ref_bridge_iterate(slow..., 1_000, 1e-10)[2] > 100   # the old way crawled
+        @test _bridge_iterate(slow..., 1_000, 1e-10)[2] <= 10
+
+        # g' as computed in the pass is the derivative of g.
+        for (l1, l2) in (fast, slow, ext), x in (-330.0, -321.0, -300.0)
+            n1, n2 = length(l1), length(l2)
+            ls1, ls2 = log(n1 / (n1 + n2)), log(n2 / (n1 + n2))
+            t1, t2 = similar(l1), similar(l2)
+            _, dg = _bridge_g!(t1, t2, l1, l2, ls1, ls2, x)
+            h = 1e-5
+            fd = (_bridge_g!(t1, t2, l1, l2, ls1, ls2, x + h)[1] -
+                  _bridge_g!(t1, t2, l1, l2, ls1, ls2, x - h)[1]) / 2h
+            @test -1 < dg < 1
+            @test abs(dg - fd) < 1e-6
+        end
+
+        # Many posteriors, clean and with stuck walkers of every size: the
+        # safeguard keeps Newton converging, always in a handful of passes.
+        worst = 0
+        for seed in 1:40, stuck in (0.0, 0.002, 0.02, 0.1), shift in (4.0, 10.0)
+            l1, l2 = _bb_ratios(4_000, 200; d = 3 + seed % 5, stuck = stuck, shift = shift,
+                                seed = 100 + seed)
+            x, it, ok = _bridge_iterate(l1, l2, 1_000, 1e-10)
+            worst = max(worst, it)
+            @test ok
+            @test abs(_residual(l1, l2, x)) < 1e-9
+        end
+        @test worst <= 12
+
+        # Capped: unconverged at max_iter.
+        @test _bridge_iterate(slow..., 1, 1e-10)[2:3] == (1, false)
         # Empty sides return a non-answer, as before.
         @test isequal(_bridge_iterate(Float64[], [1.0], 10, 1e-8), (NaN, 0, false))
         @test isequal(_bridge_iterate([1.0], Float64[], 10, 1e-8), (NaN, 0, false))
-        # Non-finite step: stops, unconverged, exactly as the reference does.
+        # Non-finite ratios: a NaN start, stopped unconverged, as the old
+        # iteration did.
         nf = ([0.0, 1.0, Inf], [0.5, -Inf])
         @test isequal(_bridge_iterate(nf..., 50, 1e-10), _ref_bridge_iterate(nf..., 50, 1e-10))
+        # A NaN ratio stops it, unconverged.
+        @test _bridge_iterate([0.0, NaN], [0.5, 1.0], 50, 1e-10)[3] == false
 
         l1, l2 = slow
         t1 = similar(l1); t2 = similar(l2)
-        _bridge_iterate!(t1, t2, l1, l2, 5, 1e-10)
-        a5 = @allocated _bridge_iterate!(t1, t2, l1, l2, 5, 1e-10)
-        a500 = @allocated _bridge_iterate!(t1, t2, l1, l2, 500, 1e-10)
-        @test a500 == a5                    # nothing per step
+        _bridge_iterate!(t1, t2, l1, l2, 5, 1e-300)
+        a5 = @allocated _bridge_iterate!(t1, t2, l1, l2, 5, 1e-300)
+        a500 = @allocated _bridge_iterate!(t1, t2, l1, l2, 500, 1e-300)
+        @test a500 == a5                    # nothing per pass
         @test a5 < 1_000
         @test_throws DimensionMismatch _bridge_iterate!(t1[1:end-1], t2, l1, l2, 5, 1e-10)
 
-        # `stop` ends it at the next step, unconverged.
+        # `stop` ends it at the next pass, unconverged.
         stop = Threads.Atomic{Bool}(true)
         @test _bridge_iterate!(t1, t2, l1, l2, 500, 1e-10; stop = stop)[2:3] == (0, false)
         seen = Int[]
-        _bridge_iterate!(t1, t2, l1, l2, 4, 1e-300; on_iter = (it, δ) -> push!(seen, it))
-        @test seen == 1:4
+        _bridge_iterate!(t1, t2, l1, l2, 2, 1e-300; on_iter = (it, δ) -> push!(seen, it))
+        @test seen == 1:2
     end
 
     @testset "indices drawn in chunks are the bulk draw" begin
@@ -223,27 +271,32 @@ end
         end
     end
 
-    @testset "replicates: the serial loop's, at every worker count" begin
-        for (name, (l1, l2), nb, mi) in (("fast", fast, 24, 1_000), ("slow", slow, 9, 1_000),
-                                         ("extreme", ext, 16, 1_000), ("unequal", unequal, 12, 1_000),
-                                         ("capped", slow, 8, 20))
-            ref = _ref_bootstrap(l1, l2, 41, nb, mi, 1e-10)
-            for w in unique((1, 2, 3, 8, nt, nt + 3, nb + 5))
-                res, ok, its = _bridge_bootstrap(l1, l2, MersenneTwister(42), nb, mi, 1e-10;
+    @testset "replicates: the same bits at every worker count, the old resamples" begin
+        for (name, (l1, l2), nb) in (("fast", fast, 24), ("slow", slow, 9),
+                                     ("extreme", ext, 16), ("unequal", unequal, 12))
+            # The serial loop's resamples, solved the old way: the same roots.
+            ref = _ref_bootstrap(l1, l2, 41, nb, 1_000, 1e-10)
+            r1, o1, i1 = _bridge_bootstrap(l1, l2, MersenneTwister(42), nb, 1_000, 1e-10;
+                                           workers = 1)
+            @test all(i -> o1[i] == ref[i][3] && abs(r1[i] - ref[i][1]) < 1e-8, 1:nb)
+            @test all(<=(10), i1)
+            for w in unique((2, 3, 8, nt, nt + 3, nb + 5))
+                res, ok, its = _bridge_bootstrap(l1, l2, MersenneTwister(42), nb, 1_000, 1e-10;
                                                  workers = w)
-                @test all(i -> (res[i], its[i], ok[i]) === ref[i], 1:nb)
+                @test all(i -> (res[i], its[i], ok[i]) === (r1[i], i1[i], o1[i]), 1:nb)
             end
         end
-        # The capped case hits max_iter: replicates come back unconverged and
-        # are kept in their slots, not dropped or reordered.
-        _, okc, itc = _bridge_bootstrap(slow..., MersenneTwister(42), 8, 20, 1e-10; workers = 4)
-        @test !any(okc) && all(==(20), itc)
+        # Capped at max_iter: replicates come back unconverged and are kept in
+        # their slots, not dropped or reordered.
+        _, okc, itc = _bridge_bootstrap(slow..., MersenneTwister(42), 8, 2, 1e-10; workers = 4)
+        @test !any(okc) && all(==(2), itc)
         # Zero replicates: nothing drawn, nothing solved.
         rng = MersenneTwister(5)
         r0 = _bridge_bootstrap(fast..., rng, 0, 100, 1e-10; workers = 4)
         @test isempty(r0[1]) && rand(rng) == rand(MersenneTwister(5))
         r1, o1, _ = _bridge_bootstrap(fast..., MersenneTwister(42), 1, 100, 1e-10; workers = 4)
-        @test (r1[1], o1[1]) == _ref_bootstrap(fast..., 41, 1, 100, 1e-10)[1][[1, 3]]
+        rr = _ref_bootstrap(fast..., 41, 1, 100, 1e-10)[1]
+        @test o1[1] == rr[3] && abs(r1[1] - rr[1]) < 1e-8
     end
 
     @testset "memory: one set of buffers per worker, not per replicate" begin
@@ -264,7 +317,7 @@ end
     end
 
     @testset "a failing worker stops the rest and propagates" begin
-        l1, l2 = slow                       # each solve is hundreds of steps
+        l1, l2 = slow
         calls = Threads.Atomic{Int}(0)
         steps_after = Threads.Atomic{Int}(0)
         function bad!(t1, t2, b1, b2, mi, tol; stop)
@@ -322,17 +375,38 @@ end
                           show_progress = false)
     ch = res.chains
 
-    @testset "bridge_evidence: the 0.8.8 numbers" begin
+    # The same estimate as 0.8.8: every count and the overlap exactly, log Z
+    # and its standard error to far below that error. Only the solver (and,
+    # with the chain's :lp, the rounding of each log p*) differs.
+    function same_estimate(b, r)
+        (b.converged == r.converged && b.n_post == r.n_post && b.n_prop == r.n_prop &&
+         isequal(b.overlap, r.overlap) && b.proposal === r.proposal) || return false
+        lz_ok = isnan(r.log_z) ? isnan(b.log_z) : abs(b.log_z - r.log_z) < 1e-8
+        se_ok = isnan(r.se) ? isnan(b.se) : abs(b.se - r.se) < 1e-7
+        return lz_ok && se_ok
+    end
+
+    @testset "bridge_evidence: the 0.8.8 estimate" begin
         ref = _ref_bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = 30)
         @test ref.converged && isfinite(ref.se)
         tm = Dict{String, Any}()
         got = bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = 30,
                               timings = tm)
-        @test isequal(got, ref)
-        # One worker or many, a budget that fits one or all: the same answer.
+        @test same_estimate(got, ref)
+        @test got.iters <= 10
+        # pt_emcee's :lp is log prior + log L in the bounded space: it matched
+        # a full evaluation and stood in for one at every draw.
+        @test tm["lp_reused"] === true
+        @test tm["lp_check_max_abs"] < 1e-6
+        # Evaluating every draw instead: the same terms as 0.8.8, to the bit.
+        full = bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = 30,
+                               use_lp = false)
+        @test same_estimate(full, ref)
+        @test abs(full.log_z - got.log_z) < 1e-9
+        # One worker or many, a budget that fits one or all: the same bits.
         for mem in (0, 10^12)
             @test isequal(bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42,
-                                          n_bootstrap = 30, bootstrap_memory = mem), ref)
+                                          n_bootstrap = 30, bootstrap_memory = mem), got)
         end
         # The stage record.
         for k in ("transform", "posterior_evals", "proposal_evals", "primary_solve", "bootstrap")
@@ -343,12 +417,29 @@ end
         @test tm["iters"] == got.iters && tm["converged"] === true
         @test tm["bootstrap_ok"] == 30 && 1 <= tm["bootstrap_workers"] <= nt
 
+        # An :lp that is not this target's log posterior is not used. Off by a
+        # constant (a log joint on another scale, a tempered density) or
+        # missing: every draw is evaluated, and the answer is the full one.
+        A = copy(ch.value.data)
+        jlp = findfirst(==(:lp), names(ch))
+        A[:, jlp, :] .+= 0.5
+        shifted = Chains(A, names(ch))
+        tms = Dict{String, Any}()
+        @test isequal(bridge_evidence(tg, shifted; n_proposal = 3_000, seed = 42,
+                                      n_bootstrap = 30, timings = tms), full)
+        @test tms["lp_reused"] === false && tms["lp_check_max_abs"] ≈ 0.5
+        nolp = ch[:, filter(!=(:lp), names(ch)), :]
+        tmn = Dict{String, Any}()
+        @test isequal(bridge_evidence(tg, nolp; n_proposal = 3_000, seed = 42,
+                                      n_bootstrap = 30, timings = tmn), full)
+        @test tmn["lp_reused"] === false
+
         # Zero and one replicate: no standard error, the same estimate.
         for nb in (0, 1)
             b = bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = nb)
-            @test isnan(b.se) && b.log_z === ref.log_z
-            @test isequal(b, _ref_bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42,
-                                                  n_bootstrap = nb))
+            @test isnan(b.se) && b.log_z === got.log_z
+            @test same_estimate(b, _ref_bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42,
+                                                        n_bootstrap = nb))
         end
 
         # A non-converged primary skips the bootstrap entirely.
@@ -356,17 +447,15 @@ end
         b = bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, max_iter = 1,
                             timings = tm2)
         @test !b.converged && isnan(b.se) && !haskey(tm2, "bootstrap")
-        @test isequal(b, _ref_bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42,
-                                              max_iter = 1))
 
         # Proposal draws outside the support (a Gaussian proposal on a skewed
         # posterior loses some), and too few draws: the old early returns.
-        @test isequal(bridge_evidence(tg, ch; n_proposal = 2_000, seed = 9, proposal = :gaussian,
-                                      n_bootstrap = 12),
-                      _ref_bridge_evidence(tg, ch; n_proposal = 2_000, seed = 9,
-                                           proposal = :gaussian, n_bootstrap = 12))
+        @test same_estimate(bridge_evidence(tg, ch; n_proposal = 2_000, seed = 9,
+                                            proposal = :gaussian, n_bootstrap = 12),
+                            _ref_bridge_evidence(tg, ch; n_proposal = 2_000, seed = 9,
+                                                 proposal = :gaussian, n_bootstrap = 12))
         # Non-finite posterior draws are dropped before anything else, as
-        # before: the one path on which the transformed draws are copied.
+        # before, and the :lp of the others still lines up with them.
         A = copy(ch.value.data)
         j = findfirst(==(Symbol(tg.params.layout.unfrozen_names[1])), names(ch))
         A[3, j, 1] = NaN
@@ -375,8 +464,9 @@ end
         tmb = Dict{String, Any}()
         gb = bridge_evidence(tg, bad; n_proposal = 3_000, seed = 42, n_bootstrap = 30,
                              timings = tmb)
-        @test isequal(gb, _ref_bridge_evidence(tg, bad; n_proposal = 3_000, seed = 42,
-                                               n_bootstrap = 30))
+        @test same_estimate(gb, _ref_bridge_evidence(tg, bad; n_proposal = 3_000, seed = 42,
+                                                     n_bootstrap = 30))
+        @test tmb["lp_reused"] === true
         @test tmb["n_post"] == tmb["n_draws"] - 2 == gb.n_post
         @test gb.converged && isfinite(gb.se)
         few = ch[1:1, :, 1:2]

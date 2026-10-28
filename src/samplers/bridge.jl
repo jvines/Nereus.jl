@@ -18,14 +18,17 @@
 #
 # Bridge sampling never touches the prior end. It needs only samples already
 # drawn from the posterior plus a proposal we can both sample and evaluate,
-# and it costs `N1 + n_proposal` likelihood evaluations rather than the ~1.3e7 a
-# nested-sampling run spends on the same model -- where N1 is the number of
-# posterior draws handed in, NOT just `n_proposal`. The estimator re-evaluates
-# the posterior at every draw of the chain, so its cost grows with the chain:
-# 170_000 evaluations for a 100-walker × 1500-step pt_emcee run. Both evaluation
-# loops are threaded (see below), which is what keeps that affordable. The
-# bootstrap error then solves the fixed point 200 more times on resamples of
-# all of those draws; those solves run in parallel too (`_bridge_bootstrap`).
+# and it costs `n_proposal` likelihood evaluations rather than the ~1.3e7 a
+# nested-sampling run spends on the same model, plus log p* at each of the N1
+# posterior draws handed in. That comes from the chain's own `:lp` where it is
+# this target's log posterior (pt_emcee's is), checked against a full
+# evaluation at a few draws (`_bridge_stored_lp`); otherwise the posterior is
+# evaluated at every draw, N1 + `n_proposal` evaluations, which grows with the
+# chain (5.8 million for a production transit fit). Both evaluation loops are
+# threaded (see below). The bootstrap error then solves the bridge equation
+# 200 more times on resamples of all of those draws; those solves run in
+# parallel (`_bridge_bootstrap`), each in a few Newton passes
+# (`_bridge_iterate!`).
 #
 # METHOD. With p*(θ) the unnormalised posterior, q(θ) a normalised proposal,
 # {θ_i} ~ p (N1 of them) and {φ_j} ~ q (N2), the optimal bridge (Meng & Wong
@@ -35,7 +38,7 @@
 #     r  =   ───────────────────────────────────  ,   l = p*/q,  s = N/(N1+N2)
 #            (1/N1) Σ_i    1   / (s1·l1_i + s2·r)
 #
-# and r → Z. Iterated in logs so nothing overflows. Unlike the harmonic-mean
+# and r → Z. Solved in logs so nothing overflows. Unlike the harmonic-mean
 # estimator it has finite variance, and unlike Laplace it makes no Gaussianity
 # assumption about the posterior — q only has to overlap it.
 
@@ -80,16 +83,25 @@ estimate should not be trusted, however tight `se` looks.
 error, not a placeholder — but it says nothing about proposal mismatch, which is
 what `overlap` is for.
 
+`use_lp`: when the chain has an `:lp` column holding this target's log
+posterior in the bounded space (what `pt_emcee` stores), log p* at each draw is
+that value plus the transform's log Jacobian, instead of a fresh evaluation of
+the posterior at every draw. It is used only if 64 draws spread over the chain
+agree with a full evaluation (`_bridge_stored_lp`); otherwise, or with
+`use_lp = false`, every draw is evaluated.
+
+The equation is solved by safeguarded Newton (`_bridge_iterate!`), 4 to 8
+passes over the draws.
+
 The `n_bootstrap` resamples are solved in parallel, by as many workers as there
 are threads and `bootstrap_memory` bytes allow (16 bytes per posterior draw
 each, at least one worker; the budget is also capped at a quarter of
 `Sys.total_memory()`). They draw from one `MersenneTwister(seed + 1)` in
 replicate order, exactly as the serial loop did, so every number returned is
-the same at any thread count and any worker count -- bit for bit, the same as
-Nereus 0.8.8's serial bootstrap. See `_bridge_bootstrap`.
+the same at any thread count and any worker count. See `_bridge_bootstrap`.
 
 `show_progress = true` prints a progress line for each stage that can run long
-on a large chain: the posterior and proposal evaluations, the fixed-point
+on a large chain: the posterior and proposal evaluations, the Newton
 solve and the bootstrap.
 
 `timings`, if a dictionary, receives each stage's wall time, allocation and
@@ -104,6 +116,7 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
                          tol::Real = 1e-10,
                          n_bootstrap::Int = 200,
                          bootstrap_memory::Integer = _BRIDGE_BOOT_MEMORY,
+                         use_lp::Bool = true,
                          show_progress::Bool = false,
                          timings::Union{Nothing, AbstractDict} = nothing)
     d = length(target.params.layout.unfrozen_names)
@@ -117,7 +130,7 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     # parameters) lives in `_bridge_ratios` and is garbage once it returns,
     # before the bootstrap allocates.
     rs = _bridge_ratios(target, chains, n_proposal, seed, proposal,
-                        show_progress, timings)
+                        show_progress, timings; use_lp = use_lp)
     rs.status === :too_few &&
         return (; log_z = NaN, se = NaN, n_post = rs.n_post, n_prop = 0,
                   iters = 0, converged = false, overlap = NaN,
@@ -153,14 +166,15 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     # Measured on the HD 114762 joint fit (525k posterior draws, no fixed point):
     # 885 s of the 1064 s the sampler took, all of it thrown away.
     #
-    # A fixed point that IS there can still take hundreds of iterations: when
-    # a few walkers sit far from the rest, their draws dominate the
-    # denominator and each step moves log r by nearly the same amount as the
+    # A root that IS there took the old fixed-point iteration hundreds of
+    # steps when a few walkers sit far from the rest: their draws dominate the
+    # denominator and each step moved log r by nearly the same amount as the
     # last. With 2% of 1M draws (18 parameters, 20k proposal draws) stuck 10σ
-    # out, a solve took ~700 iterations, against 5 without them. A step over
-    # 5.8M draws costs ~40 ms, so 200 solves of 400 steps are an hour on one
-    # core -- about what a production fit spent after its last plot, at one
-    # core, with nothing printed. Hence the parallel bootstrap.
+    # out, a solve took ~700 steps, against 5 without them. A step over 5.8M
+    # draws costs ~40 ms, so 200 solves of 400 steps are an hour on one core
+    # -- about what a production fit spent after its last plot, at one core,
+    # with nothing printed. Hence the parallel bootstrap, and Newton's method
+    # (`_bridge_iterate!`), which takes 4 to 8 passes in both regimes.
     ses = Float64[]
     if n_bootstrap > 0 && converged && isfinite(log_r)
         n_workers = _bridge_boot_workers(length(l1), length(l2), n_bootstrap,
@@ -221,7 +235,7 @@ finite in the target's space, and then nothing else is computed.
 """
 function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
                         n_proposal::Int, seed::Int, proposal::Symbol,
-                        show_progress::Bool, timings)
+                        show_progress::Bool, timings; use_lp::Bool = true)
     names = target.params.layout.unfrozen_names
     d = length(names)
 
@@ -278,14 +292,13 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
              μ .+ Lc * (randn(rng, d) / sqrt(sum(abs2, randn(rng, nu_i)) / ν))
 
     # --- log ratios l = log p* - log q on both sample sets --------------------
-    # Each term is the full posterior, so this costs N1 + `n_proposal` LIKELIHOOD
-    # EVALUATIONS -- not `n_proposal`, which is what this function's docstring
-    # and pt_emcee's call site both used to claim. N1 is the ENTIRE kept chain:
-    # 150_000 draws for a 100-walker × 1500-post-burnin-step run, 525_000 for a
-    # 150-walker × 3500-step one. That made this the most expensive single thing
-    # in a fit -- 170_000 evals, 42 s measured on a Gaia DR4 IAD posterior,
-    # against 89 s for the whole 3.3M-evaluation MCMC that produced it, because
-    # the MCMC has 12 threads and this loop had one.
+    # Each term is the full posterior. Evaluated at every posterior draw that
+    # is N1 + `n_proposal` LIKELIHOOD EVALUATIONS, and N1 is the ENTIRE kept
+    # chain: 150_000 draws for a 100-walker × 1500-post-burnin-step run,
+    # 5.8 million for a production transit fit (89 s on 8 threads with 31,918
+    # photometric points). So where the chain carries this target's log
+    # posterior (`_bridge_stored_lp`), the posterior side reads it instead and
+    # only the proposal draws are evaluated.
     #
     # Each task evaluates with its own Theta and workspace and touches no shared
     # state, so the evaluations thread. The PROPOSAL DRAWS do not: they come off
@@ -297,11 +310,28 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
     # the serial version's, at any thread count. See `_bridge_eval!` for how
     # the threads are used.
     v1 = Vector{Float64}(undef, N1)
+    # The chain's own log posterior, where it has one that is this target's:
+    # then log p* at a draw is that value plus the transform's log Jacobian,
+    # and the posterior is not evaluated again at millions of draws.
+    lp_kept = use_lp ? _bridge_stored_lp(target, chains, Y, keep, evs[1], timings) :
+                       nothing
+    if timings !== nothing
+        timings["lp_reused"] = lp_kept !== nothing
+    end
     ppb = ProgressBar("bridge posterior"; total = N1, enabled = show_progress)
     _bridge_stage!(timings, "posterior_evals") do
-        _bridge_eval!(v1; progress = _SharedProgress(ppb)) do c, i
-            y = @view Y[:, i]
-            _bridge_logdensity!(evs[c], y) - logq(y)
+        if lp_kept === nothing
+            _bridge_eval!(v1; progress = _SharedProgress(ppb)) do c, i
+                y = @view Y[:, i]
+                _bridge_logdensity!(evs[c], y) - logq(y)
+            end
+        else
+            pt = target.transform
+            _bridge_eval!(v1; progress = _SharedProgress(ppb)) do c, i
+                y = @view Y[:, i]
+                lj = pt === nothing ? 0.0 : Float64(transform_logabsdetjac_inv(y, pt))
+                lp_kept[i] + lj - logq(y)
+            end
         end
     end
     finish!(ppb)
@@ -364,6 +394,59 @@ function _bridge_draws(chains::MCMCChains.Chains, names, pt)
         end
     end
     return Y
+end
+
+# Draws at which `_bridge_stored_lp` compares the chain's `:lp` with a full
+# evaluation, and how close the two must be: `atol + rtol * |log p*|` nats.
+const _BRIDGE_LP_CHECK = 64
+const _BRIDGE_LP_ATOL = 1e-6
+const _BRIDGE_LP_RTOL = 1e-12
+
+"""
+    _bridge_stored_lp(target, chains, Y, keep, ev, timings) -> Vector{Float64} or nothing
+
+The chain's `:lp` at the draws `bridge_evidence` keeps (the columns of `Y`;
+`keep` marks them among all the chain's draws), when that column is this
+target's log posterior in the bounded space. Then `lp + log|J|` at a draw is
+log p* there, which is what `_bridge_logdensity!` computes. `nothing` when the
+chain has no `:lp` or it is something else.
+
+Checked, not assumed. At `_BRIDGE_LP_CHECK` draws spread evenly over the kept
+ones, `lp + log|J|` must match `_bridge_logdensity!` within `_BRIDGE_LP_ATOL`
+nats plus `_BRIDGE_LP_RTOL` of its size, and must be finite exactly where it
+is. pt_emcee's `:lp` is the log prior plus the log likelihood at β = 1, mapped
+back from its flat scale to the bounded one, so it passes. A column that is a
+log joint on another scale, a tempered density or a sum without the prior
+misses by far more. The check draws no random numbers, so no stream changes.
+The largest difference goes to `timings["lp_check_max_abs"]`.
+"""
+function _bridge_stored_lp(target::NereusTarget, chains::MCMCChains.Chains,
+                           Y::AbstractMatrix{Float64}, keep::AbstractVector{Bool},
+                           ev, timings)
+    :lp in names(chains) || return nothing
+    lp = vec(Array(chains[:, :lp, :]))
+    length(lp) == length(keep) || return nothing
+    lpk = all(keep) ? lp : lp[keep]
+    N1 = size(Y, 2)
+    N1 == 0 && return nothing
+    pt = target.transform
+    worst = 0.0
+    ok = true
+    for i in unique(round.(Int, range(1, N1; length = min(N1, _BRIDGE_LP_CHECK))))
+        y = view(Y, :, i)
+        full = _bridge_logdensity!(ev, y)
+        lj = pt === nothing ? 0.0 : Float64(transform_logabsdetjac_inv(y, pt))
+        stored = lpk[i] + lj
+        if isfinite(full) != isfinite(stored)
+            ok = false; worst = Inf; break
+        end
+        isfinite(full) || continue
+        δ = abs(stored - full)
+        worst = max(worst, δ)
+        δ <= _BRIDGE_LP_ATOL + _BRIDGE_LP_RTOL * abs(full) || (ok = false; break)
+    end
+    timings === nothing || (timings["lp_check_max_abs"] = worst)
+    return ok ? lpk : nothing
 end
 
 # Block of indices a thread takes from the shared counter in `_bridge_eval!`.
@@ -655,15 +738,33 @@ _bridge_iterate(l1::Vector{Float64}, l2::Vector{Float64}, max_iter::Int, tol::Fl
     _bridge_iterate!(t1, t2, l1, l2, max_iter, tol; stop, on_iter)
         -> (log_r, iters, converged)
 
-`_bridge_iterate`, with the terms of each step written into `t1` and `t2`
-(lengths of `l1` and `l2`) instead of a fresh pair of vectors: the version
-before this allocated both on every step, 78 MB a step at 9.8 million
-posterior draws. Each term is the same expression and `_logsumexp` reduces the
-same vector, so the result is the old one to the bit.
+The root of the optimal-bridge equation, `x = g(x)` with `x = log r` and
 
-`stop`, a `Threads.Atomic{Bool}`, ends the iteration early (unconverged) once
-set: the bootstrap sets it when a worker fails. `on_iter(it, |Δ log r|)` is
-called after each step.
+    g(x) = log[(1/N2) Σ_j l2_j / (s1 l2_j + s2 e^x)] - log[(1/N1) Σ_i 1 / (s1 l1_i + s2 e^x)]
+
+(the ratios in logs, as everywhere here). `t1` and `t2`, of the lengths of
+`l1` and `l2`, hold the terms of each pass, so a pass allocates nothing.
+
+Solved by Newton's method on F(x) = g(x) - x, safeguarded by bisection. Each
+pass computes g and g' together. g' is a difference of two weighted means of
+logistic weights in (0, 1), so it lies in (-1, 1): F is strictly decreasing,
+has one root, and the Newton step F / (1 - g') is always defined. Every pass
+narrows a bracket on that root, and a Newton step that leaves the bracket is
+replaced by its midpoint. Converged when a step, or the bracket, is below
+`tol`.
+
+This used to iterate x ← g(x) itself. That converges linearly at rate |g'|
+near the root, and g' approaches 1 when a few draws sit far out in the tails:
+5 passes on a well-mixed posterior, about 40 on a production-like transit fit,
+and ~700 with 2% of the draws stuck 10σ out. Every pass is a sweep over all
+the posterior draws, and the bootstrap repeats the solve 200 times. Newton
+takes 4 to 8 passes in all of these cases. It finds the same root; the old
+iteration stopped within its last step of the root, so the two agree to
+about `tol / (1 - |g'|)`.
+
+`stop`, a `Threads.Atomic{Bool}`, ends the solve early (unconverged) once set:
+the bootstrap sets it when a worker fails. `on_iter(it, |Δ log r|)` is called
+after each pass.
 """
 function _bridge_iterate!(t1::Vector{Float64}, t2::Vector{Float64},
                           l1::Vector{Float64}, l2::Vector{Float64},
@@ -679,29 +780,82 @@ function _bridge_iterate!(t1::Vector{Float64}, t2::Vector{Float64},
     ls1 = log(n1 / (n1 + n2))
     ls2 = log(n2 / (n1 + n2))
     log_r = 0.5 * (mean(l1) + mean(l2))          # sane start, in the right decade
+    lo, hi = -Inf, Inf                           # F(lo) > 0 > F(hi)
     iters = 0
     converged = false
     for it in 1:max_iter
         stop !== nothing && stop[] && break
         iters = it
-        c = ls2 + log_r
-        @inbounds for j in 1:n2
-            t2[j] = l2[j] - _logaddexp(ls1 + l2[j], c)
+        g, dg = _bridge_g!(t1, t2, l1, l2, ls1, ls2, log_r)
+        (isfinite(g) && isfinite(dg)) || break
+        F = g - log_r
+        if F == 0
+            converged = true; break
         end
-        num = _logsumexp(t2) - log(n2)
-        @inbounds for i in 1:n1
-            t1[i] = -_logaddexp(ls1 + l1[i], c)
+        F > 0 ? (lo = log_r) : (hi = log_r)
+        new = log_r + F / (1 - dg)
+        # Newton moves toward the side F points to, so it leaves the bracket
+        # only through a bound already found, and then bisects. The one other
+        # way out is an infinite step (g' rounding to 1) toward an open side:
+        # then the plain fixed-point step g, which is finite.
+        if !(lo < new < hi)
+            new = isfinite(lo) && isfinite(hi) ? 0.5 * (lo + hi) : g
         end
-        den = _logsumexp(t1) - log(n1)
-        new = num - den
-        isfinite(new) || break
-        on_iter === nothing || on_iter(it, abs(new - log_r))
-        if abs(new - log_r) < tol
+        step = abs(new - log_r)
+        on_iter === nothing || on_iter(it, step)
+        if step < tol || hi - lo < tol
             log_r = new; converged = true; break
         end
         log_r = new
     end
     return log_r, iters, converged
+end
+
+"""
+    _bridge_g!(t1, t2, l1, l2, ls1, ls2, x) -> (g, g′)
+
+One pass of `_bridge_iterate!`: g(x) and its derivative. With c = ls2 + x, the
+log terms are t2_j = l2_j - log(e^{ls1 + l2_j} + e^c) and
+t1_i = -log(e^{ls1 + l1_i} + e^c), and g = logmeanexp(t2) - logmeanexp(t1).
+d t/dx is minus the logistic weight w = e^c / (e^{ls1 + l} + e^c), which is
+e^{c + t2 - l2} and e^{c + t1}, so g′ = Σ p1 w1 - Σ p2 w2 with p the softmax
+weights of each logsumexp.
+"""
+function _bridge_g!(t1::Vector{Float64}, t2::Vector{Float64},
+                    l1::Vector{Float64}, l2::Vector{Float64},
+                    ls1::Float64, ls2::Float64, x::Float64)
+    c = ls2 + x
+    m2 = -Inf
+    @inbounds for j in eachindex(l2)
+        t = l2[j] - _logaddexp(ls1 + l2[j], c)
+        t2[j] = t
+        m2 = max(m2, t)
+    end
+    m1 = -Inf
+    @inbounds for i in eachindex(l1)
+        t = -_logaddexp(ls1 + l1[i], c)
+        t1[i] = t
+        m1 = max(m1, t)
+    end
+    (isfinite(m1) && isfinite(m2)) || return (NaN, NaN)
+    s2 = 0.0; w2 = 0.0
+    @inbounds for j in eachindex(l2)
+        t = t2[j]
+        t == -Inf && continue            # no weight (an l2 of -Inf)
+        e = exp(t - m2)
+        s2 += e
+        w2 += e * exp(c + t - l2[j])
+    end
+    s1 = 0.0; w1 = 0.0
+    @inbounds for i in eachindex(l1)
+        t = t1[i]
+        t == -Inf && continue            # no weight (an l1 of +Inf)
+        e = exp(t - m1)
+        s1 += e
+        w1 += e * exp(c + t)
+    end
+    g = (m2 + log(s2) - log(length(l2))) - (m1 + log(s1) - log(length(l1)))
+    return g, w1 / s1 - w2 / s2
 end
 
 function _logsumexp(v::AbstractVector{<:Real})
@@ -719,7 +873,7 @@ const _BRIDGE_IDX_CHUNK = 16_384
     _BridgeBootBuffers(n1, n2)
 
 One bootstrap worker's scratch: the resampled ratios (`b1`, `b2`), the terms of
-a fixed-point step (`t1`, `t2`), which first carry the resample's indices, and
+a solver pass (`t1`, `t2`), which first carry the resample's indices, and
 a chunk of `Int` indices for `rand!`. 16 bytes per posterior and per proposal
 draw, reused for every replicate the worker solves.
 """
@@ -786,7 +940,7 @@ end
 
 The `n_bootstrap` bootstrap solves of `bridge_evidence`, by `workers` threads
 at once. Replicate `k` resamples `l1` and `l2` with replacement and solves the
-fixed point on the resample; `res[k]`, `ok[k]` and `iters[k]` are what
+bridge equation on the resample; `res[k]`, `ok[k]` and `iters[k]` are what
 `solve!` returned for it.
 
 The resamples are the serial loop's, exactly: replicate `k` takes the `k`-th
@@ -803,7 +957,7 @@ themselves are serial: the parallelism is across replicates, one per thread,
 so no thread is asked to split its own work.
 
 If a worker throws, it sets a flag that ends every other worker's solve at its
-next fixed-point step and stops them taking replicates; the exception then
+next solver pass and stops them taking replicates; the exception then
 propagates, after all workers have returned (`Threads.@threads` waits for
 them), so none is left running. An interrupt in the calling task sets the
 same flag.

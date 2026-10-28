@@ -82,10 +82,9 @@ Container for a `sample_pt_emcee` run.
 - `log_evidence_bridge::Float64` — bridge-sampling evidence from the same cold
   chain (Meng & Wong optimal bridge). This is the HEADLINE when it is usable:
   it never touches the prior end and makes no Gaussianity assumption. It costs
-  `n_kept + bridge_n` likelihood evaluations, NOT `bridge_n` — it re-evaluates
-  the posterior at every kept draw, so the price scales with the chain
-  (170k evaluations at the default 100 walkers × 1500 post-burnin steps).
-  Threaded, so it is seconds rather than a minute. NaN if not computable.
+  `bridge_n` likelihood evaluations: the posterior at the kept draws is read
+  off their `:lp`, after a check against a full evaluation at a few of them
+  (`bridge_evidence`). NaN if not computable.
 - `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ tempered stack (raw).
 - `acceptance_within::Vector{Float64}` — within-temp stretch acceptance per temp.
 - `acceptance_swap::Vector{Float64}` — swap acceptance between (k, k+1). A tiny
@@ -1215,12 +1214,12 @@ function sample_pt_emcee(
     # that the posterior is Gaussian about its mode. Requires an unconstrained
     # target, as the proposal is Gaussian on R^n.
     #
-    # Costs `n_kept + bridge_n` likelihood evaluations, not `bridge_n`: it
-    # re-evaluates the posterior at EVERY kept draw. At the defaults that is
-    # 170k evaluations, which single-threaded was 42 s against 89 s for the
-    # entire MCMC on a Gaia DR4 IAD fit. `bridge_evidence` threads both
-    # evaluation loops now, bit-identically; mind the scaling anyway, because
-    # n_kept grows with n_walkers × (n_steps - n_burnin).
+    # Costs `bridge_n` likelihood evaluations: the posterior at every kept
+    # draw is its `:lp` (log prior + log L in the bounded space) plus the
+    # transform's log Jacobian, checked against a full evaluation at a few
+    # draws. Without that it would be `n_kept + bridge_n` evaluations, which
+    # single-threaded was 42 s against 89 s for the entire MCMC on a Gaia DR4
+    # IAD fit.
     #
     # NOTE: on the fit_* entry points this is computed AGAIN, post-fit, by
     # `_augment_evidence!` (src/runner.jl) -- which exists because run_job's
