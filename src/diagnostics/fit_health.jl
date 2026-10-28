@@ -330,33 +330,40 @@ function _check_convergence(chains, names_to_check;
             # misleadingly low R-hat. Instead split each walker's own trace in
             # half and stack the halves as the "chains" axis (rank-split-R-hat
             # applied within-walker). With multiple genuine chains this is still
-            # valid and only sharpens the diagnostic.
-            sub = chains[:, plain, :]
-            diag_chains = ensemble ? _ensemble_split(sub) : sub
-            tbl = _diag_by_param(MCMCChains.ess_rhat, diag_chains; kind = :rank)
-            # ChainDataFrame indexing returns a scalar when there is a single
-            # parameter; coerce every column to a Vector so the loop below is
-            # uniform.
-            append!(pnames, _asvec(tbl[:, :parameters]))
-            append!(ess_col, _asvec(tbl[:, :ess]))
-            append!(rhat_col, _asvec(tbl[:, :rhat]))
+            # valid and only sharpens the diagnostic. The `:ensemble` layout of
+            # `_rank_diag_batch` is that split, read in place from the chain.
+            inpar = haskey(chains.name_map, :parameters) &&
+                    all(p -> p in chains.name_map[:parameters], plain)
+            r = inpar ? _rank_diag_chain(chains, plain, ensemble ? :ensemble : :split2) :
+                        nothing
+            if r === nothing
+                sub = chains[:, plain, :]
+                diag_chains = ensemble ? _ensemble_split(sub) : sub
+                tbl = MCMCChains.ess_rhat(diag_chains; kind = :rank)
+                # ChainDataFrame indexing returns a scalar when there is a single
+                # parameter; coerce every column to a Vector so the loop below is
+                # uniform.
+                append!(pnames, _asvec(tbl[:, :parameters]))
+                append!(ess_col, _asvec(tbl[:, :ess]))
+                append!(rhat_col, _asvec(tbl[:, :rhat]))
+            else
+                append!(pnames, plain)
+                append!(ess_col, [x.ess_bulk for x in r])
+                append!(rhat_col, [x.rhat_rank for x in r])
+            end
         end
-        # One parameter per thread, as `_diag_by_param` does for the rest;
-        # gathered in order.
-        mres = Vector{Any}(nothing, length(masked))
-        Threads.@threads :dynamic for i in eachindex(masked)
-            p = masked[i]
-            v = vec(Array(chains[p]))[active[p]]
-            length(v) >= 4 || continue
-            one = MCMCChains.Chains(reshape(v, :, 1, 1), [p])
-            tbl = MCMCChains.ess_rhat(_ensemble_split(one); kind = :rank)
-            mres[i] = (only(_asvec(tbl[:, :ess])), only(_asvec(tbl[:, :rhat])))
-        end
-        for (p, r) in zip(masked, mres)
-            r === nothing && continue
-            push!(pnames, p)
-            push!(ess_col, r[1])
-            push!(rhat_col, r[2])
+        # Masked parameters: each one's active draws, built when its turn comes.
+        mp = [p for p in masked if count(active[p]) >= 4]
+        if !isempty(mp)
+            ntot = size(chains, 1) * size(chains, 3)
+            rm = _rank_diag_batch(
+                [() -> reshape(Vector{Float64}(_draws(chains, p)[active[p]]), :, 1)
+                 for p in mp], :ensemble; n_max = ntot, src_bytes = 16)
+            for (p, x) in zip(mp, rm)
+                push!(pnames, p)
+                push!(ess_col, x.ess_bulk)
+                push!(rhat_col, x.rhat_rank)
+            end
         end
     catch err
         return FitHealthCheck(:convergence, :warn,

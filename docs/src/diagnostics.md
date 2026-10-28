@@ -497,6 +497,11 @@ The checks (`src/diagnostics/fit_health.jl`):
    single ensemble of correlated walkers (pt_emcee, PA, SMC, …) is still
    diagnosable instead of being treated as N independent chains (which
    gives a misleadingly low R̂).
+   The numbers are MCMCDiagnosticTools' to the bit, from Nereus' own copy
+   of its algorithm (`src/diagnostics/rank_diag.jl`). That copy holds about
+   20 bytes per draw instead of copies of the whole chain, and it computes
+   each parameter once per run: `sampler_diagnostics` and
+   `convergence_report` reuse fit_health's numbers.
 2. **Multimodality / non-mixing** — for every parameter, compares the
    spread (std) of the per-chain medians against the mean within-chain
    std. A ratio above `mode_ratio_max` (default `3.0`) means the chains

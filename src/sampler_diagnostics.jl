@@ -57,33 +57,42 @@ const _DIAG_FIELDS = (
 """
     _diag_by_param(f, chains; kwargs...) -> ChainDataFrame
 
-`f(chains; kwargs...)`, for `f` one of MCMCChains' `ess`, `rhat` and
-`ess_rhat`, with the parameters computed on separate threads.
-
-MCMCChains computes them one after another on one thread, and on a long chain
-each costs a rank normalisation (a sort of every draw) and an autocovariance
-per parameter: 41 s for bulk ESS, tail ESS and R-hat of 14 parameters at 5.8
-million draws. Each parameter's numbers depend only on its own draws, so `f`
-on a one-parameter sub-chain gives the same bits as its row in the full call;
-the rows come back in the order `f` reports them, with `f`'s table name.
-Calls `f` directly with one thread, one parameter, no `:parameters` section,
-or a `sections` keyword.
+`f(chains; kwargs...)` for `f` one of MCMCChains' `ess` (`kind` `:bulk` or
+`:tail`), `rhat` and `ess_rhat` (`kind` `:rank`, their default): the same
+table, from `_rank_diag_batch` (src/diagnostics/rank_diag.jl). Each
+parameter's draws are read in place and sorted once per run however many
+stages ask; the numbers are MCMCDiagnosticTools' to the bit. Anything else
+(other kinds or keywords, no `:parameters` section, values that are not plain
+Float64, a tail ESS the library would refuse) is `f(chains; kwargs...)`.
 """
 function _diag_by_param(f, chains::MCMCChains.Chains; kwargs...)
-    (haskey(chains.name_map, :parameters) && !haskey(kwargs, :sections) &&
-     Threads.nthreads() > 1) || return f(chains; kwargs...)
-    sub = MCMCChains.Chains(chains, (:parameters,))
-    ps = names(sub)                   # the rows `f(chains)` reports, in its order
-    length(ps) > 1 || return f(chains; kwargs...)
-    parts = Vector{Any}(undef, length(ps))
-    Threads.@threads :dynamic for i in eachindex(ps)
-        parts[i] = f(sub[:, [ps[i]], :]; kwargs...)
+    is_ess = f === _MCDT.ess
+    is_ess || f === _MCDT.rhat || f === _MCDT.ess_rhat || return f(chains; kwargs...)
+    all(==(:kind), keys(kwargs)) || return f(chains; kwargs...)
+    kind = get(kwargs, :kind, is_ess ? :bulk : :rank)
+    (is_ess ? kind in (:bulk, :tail) : kind === :rank) || return f(chains; kwargs...)
+    pc = _chain_param_cols(chains)
+    pc === nothing && return f(chains; kwargs...)
+    ps, cols = pc
+    data = chains.value.data
+    r = _rank_diag_batch([() -> view(data, :, j, :) for j in cols], :split2;
+                         n_max = size(data, 1) * size(data, 3))
+    if f === _MCDT.rhat
+        return MCMCChains.ChainDataFrame("R-hat", (parameters = ps,
+                                                   rhat = [x.rhat_rank for x in r]))
     end
-    cols = keys(parts[1].nt)
-    nt = NamedTuple{cols}(Tuple(c === :parameters ? collect(ps) :
-                                reduce(vcat, [collect(p.nt[c]) for p in parts])
-                                for c in cols))
-    return MCMCChains.ChainDataFrame(parts[1].name, nt)
+    if kind === :tail
+        all(x -> x.tail_ok, r) || return f(chains; kwargs...)
+        ess = [x.ess_tail for x in r]
+    else
+        ess = [x.ess_bulk for x in r]
+    end
+    ess_per_sec = ess ./ MCMCChains.compute_duration(chains)
+    is_ess && return MCMCChains.ChainDataFrame("ESS", (parameters = ps, ess = ess,
+                                                       ess_per_sec = ess_per_sec))
+    return MCMCChains.ChainDataFrame("ESS/R-hat", (parameters = ps, ess = ess,
+                                                   rhat = [x.rhat_rank for x in r],
+                                                   ess_per_sec = ess_per_sec))
 end
 
 """Per-parameter ESS and, when there is more than one chain, R-hat.

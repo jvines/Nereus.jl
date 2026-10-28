@@ -911,35 +911,36 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
     # are only DEFINED when their component is active — when inactive their slot
     # holds stale unbounded junk (drifts to ~1e6), which poisons an unconditional
     # R̂/ESS. Assess them CONDITIONED on active. Returns nothing for always-defined
-    # params (γ, jitter, planets when the count is fixed).
+    # params (γ, jitter, planets when the count is fixed). One mask per
+    # activity column, however many parameters share it.
+    on_cache = Dict{Symbol, BitVector}()
+    _on(col) = get!(() -> _draws(chains, col) .> 0.5, on_cache, col)
     function _active_mask(p::Symbol)
         s = String(p)
         if model_params !== nothing
             idx = _noise_model_index_for_param(s, model_params)
             if idx !== nothing
                 col = Symbol("noise_active_$idx")
-                col in allp && return vec(Array(chains[col])) .> 0.5
+                col in allp && return _on(col)
             end
         end
         m = match(r"_k(\d+)$", s)
         if m !== nothing
             col = Symbol("planet_active_$(m.captures[1])")
-            col in allp && return vec(Array(chains[col])) .> 0.5
+            col in allp && return _on(col)
         end
         return nothing
     end
-    # per-walker (walker = fast index) split-R̂ + bulk-ESS over an active mask.
-    function _cond_rhat_ess(v::Vector{Float64}, mask)
-        if mask === nothing
-            M = Array{Float64,3}(undef, nsteps, 1, n_walkers)
-            for w in 1:n_walkers; M[:, 1, w] = v[_widx(w)]; end
-            er = MCMCChains.ess_rhat(MCMCChains.Chains(M))
-            return (er[1, :rhat], er[1, :ess], nsteps)
-        end
-        colv = [(idx = _widx(w); v[idx][mask[idx]]) for w in 1:n_walkers]
-        lens = length.(colv)
+    # Per-walker (walker = fast index) split-R̂ + bulk-ESS, over an active mask
+    # for trans-dim components. `_cond_plan` decides from the mask alone which
+    # walkers enter and at what common length; `_cond_matrix` builds the
+    # (steps × walkers) draws then, so a parameter's copy exists only while its
+    # numbers are computed.
+    function _cond_plan(mask)
+        mask === nothing && return (nsteps, collect(1:n_walkers))
+        lens = [count(view(mask, _widx(w))) for w in 1:n_walkers]
         nz = filter(>(0), lens)
-        isempty(nz) && return (NaN, NaN, 0)
+        isempty(nz) && return (0, Int[])
         # Per-walker active counts vary wildly (a walker entrenched in another
         # model has ~0 active draws here). Collapsing to the global min gives a
         # useless L≈0, so instead set the common length to the MEDIAN active
@@ -947,38 +948,67 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
         # actually sample this component. Drops the sparse walkers rather than
         # letting them null the whole statistic.
         L = max(20, round(Int, median(nz)))
-        kept = [c for c in colv if length(c) ≥ L]
-        length(kept) < 4 && return (NaN, NaN, length(kept))
-        M = Array{Float64,3}(undef, L, 1, length(kept))
-        for (j, c) in enumerate(kept); M[:, 1, j] = c[1:L]; end
-        er = MCMCChains.ess_rhat(MCMCChains.Chains(M))
-        return (er[1, :rhat], er[1, :ess], L)
+        return (L, [w for w in 1:n_walkers if lens[w] ≥ L])
+    end
+    function _cond_matrix(v, mask, L, ws)
+        M = Matrix{Float64}(undef, L, length(ws))
+        for (j, w) in enumerate(ws)
+            idx = _widx(w)
+            M[:, j] = mask === nothing ? v[idx] : v[idx][mask[idx]][1:L]
+        end
+        return M
     end
 
     keep=Symbol[]; rh=Float64[]; es=Float64[]; fr=Float64[]; gate_ess=Bool[]
     n_fixed=0; n_inactive=0
-    # A parameter's R̂ and ESS depend only on its own draws, and each costs a
-    # sort of all of them: the parameters run on separate threads (28 s for 14
-    # parameters at 5.8 million draws on one), and are gathered in order below.
+    # Classify every parameter, then compute R-hat and ESS of the assessed ones
+    # in one batch (`_rank_diag_batch`): each sorted once on a bounded number of
+    # threads, or not at all when an earlier stage already did. With walkers as
+    # the chain axis, an always-defined parameter's draws are read in place.
+    data = chains.value.data
+    pos = Dict(n => i for (i, n) in enumerate(names(chains)))
+    in_place = !walker_fast && eltype(data) === Float64 && size(data, 1) == nsteps &&
+               size(data, 3) == n_walkers
     pre = Vector{Any}(undef, length(pnames))
-    Threads.@threads :dynamic for i in eachindex(pnames)
-        p = pnames[i]
-        v, mask = haskey(canon, p) ? canon[p] : (vec(Array(chains[p])), _active_mask(p))
-        pre[i] = if mask === nothing
-            (maximum(v) - minimum(v) < 1e-12) ? (:fixed,) :            # frozen
-                (:all, 1.0, _cond_rhat_ess(v, nothing))
+    srcs = Function[]; at = Int[]
+    for (i, p) in enumerate(pnames)
+        cv, mask = haskey(canon, p) ? canon[p] : (nothing, _active_mask(p))
+        getv = cv === nothing ? (() -> _draws(chains, p)) : (() -> cv)
+        if mask === nothing
+            lo, hi = cv === nothing ? extrema(view(data, :, pos[p], :)) : extrema(cv)
+            if hi - lo < 1e-12                               # frozen
+                pre[i] = (:fixed,)
+                continue
+            end
+            pre[i] = (:all, 1.0)
+            src = (cv === nothing && in_place) ? (() -> view(data, :, pos[p], :)) :
+                  (() -> _cond_matrix(getv(), nothing, nsteps, 1:n_walkers))
         else
             f = count(mask)/length(mask)
-            f < 0.01 ? (:inactive,) :                         # component ~never on
-                (:masked, f, _cond_rhat_ess(v, mask))
+            if f < 0.01                                      # component ~never on
+                pre[i] = (:inactive,)
+                continue
+            end
+            L, ws = _cond_plan(mask)
+            if length(ws) < 4
+                pre[i] = (:masked, f, (NaN, NaN))
+                continue
+            end
+            pre[i] = (:masked, f)
+            src = () -> _cond_matrix(getv(), mask, L, ws)
         end
+        push!(srcs, src); push!(at, i)
+    end
+    res = _rank_diag_batch(srcs, :split2; n_max = nflat, src_bytes = 16)
+    for (i, r) in zip(at, res)
+        pre[i] = (pre[i]..., (r.rhat_rank, r.ess_bulk))
     end
     for (p, pr) in zip(pnames, pre)
         kind = pr[1]
         kind === :fixed && (n_fixed += 1; continue)
         kind === :inactive && (n_inactive += 1; continue)
         f = pr[2]
-        r, e, _ = pr[3]
+        r, e = pr[3]
         if kind === :all
             push!(keep,p); push!(rh,r); push!(es,e); push!(fr,1.0); push!(gate_ess,true)
         else
