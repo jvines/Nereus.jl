@@ -26,7 +26,7 @@ run_job(config::AbstractDict)      # accepts a pre-built dict, arrays inline
 Both write `summary.json`, `chains.nc`, and the plot tree into `output_dir`
 **and** return the `summary` dict, so `juliacall` callers can skip disk
 entirely. Keys may be JSON strings or Julia `Symbol`s interchangeably
-(`_has`/`_get`, `src/runner.jl:240-251`).
+(`_has`/`_get`, `src/runner.jl:238-249`).
 
 Outputs land in `output_dir/`:
 
@@ -50,7 +50,7 @@ output_dir/
 `run_job` exits 0 on success. Any uncaught exception during the fit writes
 `{"status":"failed","error":…,"traceback":…}` to `summary.json` **and**
 rethrows (non-zero exit) so the dispatcher can pick it up
-(`src/runner.jl:219-226`). The auxiliary stages (PPC, detection limits, LOO,
+(`src/runner.jl:217-224`). The auxiliary stages (PPC, detection limits, LOO,
 fit-health) are **fail-soft**: they record a `"failed"`/`"skipped"` entry in
 the summary and never abort the job.
 
@@ -141,7 +141,7 @@ rather than a single number trusted.
                                            //   JULIA_NUM_THREADS (src/runner.jl:82-85)
   "timeout_sec": 3600,                     // optional wall-clock watchdog (see below)
 
-  // ---- Star (NamedTuple; src/runner.jl:1017-1041) --------------------
+  // ---- Star (NamedTuple; src/runner.jl:1015-1039) --------------------
   "star": {
     "M_s": 1.02,                           // M_sun. Needed for stability != none,
                                            //   astrometry, RM modes, and derived masses
@@ -160,7 +160,7 @@ rather than a single number trusted.
     "sigma_T_eff": null                    // K
   },
 
-  // ---- Data (at least ONE of these; src/runner.jl:575-664) ----------
+  // ---- Data (at least ONE of these; src/runner.jl:573-662) ----------
   "data": {
     "rv": {                                // omit for transit-only / astrometry-only
       // EITHER a CSV file …
@@ -206,11 +206,11 @@ rather than a single number trusted.
                    "cov": [[/* 5×5 */]], "t_ref": 2016.0 }
   },
 
-  // ---- Model (src/runner.jl:1080-1217) -------------------------------
+  // ---- Model (src/runner.jl:1078-1215) -------------------------------
   "model": {
     "max_kplanet": 2,                      // REQUIRED. Max planet slots
     // planet_modes: one entry per slot (default = max_kplanet × "RV_ONLY").
-    // VALID modes (src/runner.jl:277-287,1062-1078):
+    // VALID modes (src/runner.jl:275-285,1060-1076):
     //   RV_ONLY        — RV only
     //   PM_ONLY        — transit photometry only
     //   RVPM           — RV + photometry
@@ -232,7 +232,7 @@ rather than a single number trusted.
     //   See "SB2 double-lined binaries" below for the component RV column + derived masses.
     "planet_modes": ["RV_ONLY", "RVAS"],
 
-    "parametrization": {                   // src/runner.jl:288-293,420-428,1090-1114, _KNOWN_PARAMETRIZATIONS
+    "parametrization": {                   // src/runner.jl:286-291,418-426,1088-1112, _KNOWN_PARAMETRIZATIONS
       "mass": "K_driven",                  // K_driven | M_sec_driven | a_driven
       "time": "Mo",                        // Mo (default) | Tp | Tc | phic. Tp/Tc: keep the prior within one period.
                                            //   phic: transit phase 2π(Tc − t_ref_c)/P, one period at
@@ -255,18 +255,18 @@ rather than a single number trusted.
                                            //   ExternalPrior(:rho_s, NormalPrior(...), false)
     },
 
-    "trend_order": 0,                      // RV systemic γ trend: 0 | 1 | 2 (src/runner.jl:434-438,1168)
+    "trend_order": 0,                      // RV systemic γ trend: 0 | 1 | 2 (src/runner.jl:432-436,1166)
     "phot_trend_order": 0,                 // per-instrument photometric baseline: 0 | 1 | 2
-                                           //   → params phot_c<p>_<inst> (src/runner.jl:439-443,1169)
-    "stability": "none",                   // none | amd | gladman (src/runner.jl:294,1170)
+                                           //   → params phot_c<p>_<inst> (src/runner.jl:437-441,1167)
+    "stability": "none",                   // none | amd | gladman (src/runner.jl:292,1168)
 
-    // ttv_backend: consulted only for *_TTV_NB modes (src/runner.jl:1196-1199)
+    // ttv_backend: consulted only for *_TTV_NB modes (src/runner.jl:1194-1197)
     "ttv_backend": "ttvfaster",            // ttvfaster (default) | nbody
                                            //   ttvfaster: Agol & Deck 2016 1st-order, autodiff-clean
                                            //   nbody:     NbodyGradient.jl (AHL21); strips Duals →
                                            //              use a gradient-free sampler
     // ttv_n_transits: free per-transit offset counts for *_TTV modes.
-    //   Keys are 1-based slot indices as strings (src/runner.jl:1191-1195).
+    //   Keys are 1-based slot indices as strings (src/runner.jl:1189-1193).
     "ttv_n_transits": { "1": 30 },
 
     // ---- external_priors: priors on DERIVED (non-sampled) quantities ----
@@ -284,7 +284,7 @@ rather than a single number trusted.
     ]
   },
 
-  // ---- Priors — per-parameter overrides (src/runner.jl:1245-1253) ---
+  // ---- Priors — per-parameter overrides (src/runner.jl:1243-1251) ---
   // Keys are Nereus parameter names; anything not listed gets its default prior.
   //   Per-planet:  P_k1, K_k1, sesinw_k1/secosw_k1 (or e_k1/w_k1), Tp_k1/Tc_k1/Mo_k1/phic_k1,
   //                b_k1, rr_k1, inc_k1, Omega_k1, M_sec_k1, a_k1, …
@@ -292,7 +292,7 @@ rather than a single number trusted.
   //                lambda_k1 (rad; default UniformPrior(-π, π))   — src/default_priors.jl:447,487
   //   Systemic:    plx, M_pri, trend_1, trend_2
   //   Per-instrument: gamma_<inst>, jitter_<inst>, offset_<inst>, … (suffix = instrument name)
-  // VALID prior types (src/priors.jl:458-474, src/runner.jl:1231-1241): the constructor
+  // VALID prior types (src/priors.jl:458-474, src/runner.jl:1229-1239): the constructor
   //   names UniformPrior, LogUniformPrior, ModJeffreysPrior, NormalPrior, FixedPrior,
   //   SinePrior, BetaPrior, WrappedUniformPrior, or any alias, case- and separator-
   //   insensitive: "normal" | "gaussian" | "norm", "uniform" | "flat", "log_uniform" |
@@ -306,8 +306,8 @@ rather than a single number trusted.
     "M_pri":        { "type": "FixedPrior",       "args": [1.02] }
   },
 
-  // ---- Noise models (src/runner.jl:1266-1352) -----------------------
-  // VALID kinds (src/runner.jl:304,1267-1287):
+  // ---- Noise models (src/runner.jl:1264-1350) -----------------------
+  // VALID kinds (src/runner.jl:302,1265-1285):
   //   CeleriteRotation, CeleriteSHO, CeleriteRotationFM17  — celerite GPs (channel + instruments)
   //   ActivityDecorrelation                                — linear indicator decorrelation (MeanModifier)
   //   ARModel, MAModel                                     — autoregressive / moving-average noise (channel)
@@ -370,16 +370,16 @@ rather than a single number trusted.
     // "include_studentt": false, ...
   },
 
-  // ---- Sampler (src/runner.jl:1453-1607) ----------------------------
-  // VALID names (src/runner.jl:316):
+  // ---- Sampler (src/runner.jl:1451-1605) ----------------------------
+  // VALID names (src/runner.jl:314):
   //   pt_emcee, transdim_pt_emcee, pt, rjmcmc, moms, daedalus,
   //   nested, nested_ins, nested_dynamic, pa, smc, pt_whitening,
   //   nuts, pt_hmc, ofti
   // There is no `pt_warm` and no `backend` kwarg: the Pathfinder warm start
   // is `pt` + `init_strategy: "pathfinder"` (see "sampler" below).
   // Trans-dim model selection (transdim_pt_emcee/rjmcmc/moms/daedalus) REQUIRES
-  // a top-level `transdim` block (src/runner.jl:317-318,527-529).
-  // kwargs that the sampler doesn't declare → hard error (src/runner.jl:1426-1440,1478-1484).
+  // a top-level `transdim` block (src/runner.jl:315-316,525-527).
+  // kwargs that the sampler doesn't declare → hard error (src/runner.jl:1424-1438,1476-1482).
   // String kwarg values are coerced to Julia Symbols (bounds/proposal/… ; 1405-1407).
   "sampler": {
     "name": "transdim_pt_emcee",
@@ -393,10 +393,10 @@ rather than a single number trusted.
   },
 
   // ---- Trans-dim (REQUIRED iff sampler ∈ {transdim_pt_emcee, rjmcmc,
-  //      moms, daedalus}; src/runner.jl:1609-1669) ---------------------
+  //      moms, daedalus}; src/runner.jl:1607-1667) ---------------------
   "transdim": {
     "max_kplanet": 2,                      // REQUIRED
-    // birth_strategies (src/runner.jl:319-321,1609-1615):
+    // birth_strategies (src/runner.jl:317-319,1607-1613):
     //   PriorBirth | InformedBirth | JointInformedBirth | DonorBirth | MoMSBirth
     "birth_strategies": ["PriorBirth"],
     "birth_weights":    [1.0],             // must match birth_strategies length
@@ -404,17 +404,17 @@ rather than a single number trusted.
     "planets": true,                       // toggle planet-count dimension (default true)
     "noise":   false,                      // toggle noise-model dimension (default false)
     "toggleable": [],                      // MUST be empty via run_job (JSON can't encode
-                                           //   NoiseModel objects; src/runner.jl:1617-1631)
+                                           //   NoiseModel objects; src/runner.jl:1615-1629)
     "noise_exclusion_groups": []           // likewise empty via run_job
   },
 
-  // ---- Output (src/runner.jl:1794-2209,2215-2484) -------------------
+  // ---- Output (src/runner.jl:1792-2207,2213-2482) -------------------
   "output": {
     "save_chains":  true,                  // chains.nc
     "save_summary": true,                  // summary.json
     "save_pdf":     false,                 // emit a .pdf next to every .png (global toggle)
 
-    // VALID plot names (src/runner.jl:322-337, _KNOWN_PLOTS). Each no-ops when
+    // VALID plot names (src/runner.jl:320-335, _KNOWN_PLOTS). Each no-ops when
     // its required data/model is absent.
     "plots": [
       // RV
@@ -488,22 +488,22 @@ rather than a single number trusted.
   `JULIA_NUM_THREADS` (`src/runner.jl:82-85`).
 - `timeout_sec` arms a wall-clock watchdog: the sampler runs on a spawned task
   polled every second; on budget overrun a `JobTimeoutError` is thrown and the
-  job ends with `status="failed"` (`src/runner.jl:1372-1419`). **Ignored under
+  job ends with `status="failed"` (`src/runner.jl:1370-1417`). **Ignored under
   `juliacall`** (the GIL deadlocks the watchdog) — enforce the timeout on the
   Python side there.
 
 ### `data`
 The `data` block must contain at least one of `rv`, `transit_photometry`,
 `iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3`, `rm_nights`, `tomography`
-(`src/runner.jl:351-357`). The last two belong to an obliquity fit and need a
+(`src/runner.jl:349-355`). The last two belong to an obliquity fit and need a
 `model.obliquity` block — see [obliquity_jobs.md](src/obliquity_jobs.md).
 
 - **`rv`** — `csv` (column-named) or inline `values`. Inline `values` requires
   `bjd`, `rv`, `rv_err`, `instrument`; any other key is an activity indicator.
   A `<name>_err` key whose base `<name>` is also present is read as that
-  indicator's 1σ (`_split_indicator_errs`, `src/runner.jl:726-739`); a lone
+  indicator's 1σ (`_split_indicator_errs`, `src/runner.jl:724-737`); a lone
   `<name>_err` is itself an indicator value. For the CSV form, indicator errors
-  come from a `<col>_err` column when present (`src/runner.jl:794-799`).
+  come from a `<col>_err` column when present (`src/runner.jl:792-797`).
   **ActivityGP requires these indicator errors.**
   An optional reserved **`component`** (alias **`star`**) column tags each RV by
   stellar component for SB2 double-lined fits — `1`/`A`/`primary` (default) or
@@ -511,7 +511,7 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   all-primary (the normal single-star case). CSV form: `comp_col` (default
   `"component"`). See "SB2 double-lined binaries" below.
 - **`transit_photometry`** — a list; each LC has its own `instrument` and
-  `exposure_time` (seconds; stored per-cadence in days, `src/runner.jl:839-845`).
+  `exposure_time` (seconds; stored per-cadence in days, `src/runner.jl:837-843`).
   Instrument names are sorted-unique → integer indices.
 - **`iad`** — `hip_id` (auto-fetches the Hipparcos IAD bundle) or `values`
   (`t`, `abscissa`, `abscissa_err`, `psi`, `parallax_factor`, `pm_factor`).
@@ -574,7 +574,7 @@ astrometry). A **circumprimary planet** is a SEPARATE slot (e.g. `RV_ONLY` /
   derived from the two amplitudes).
 
 ### `model.stability`
-`none | amd | gladman` (`src/runner.jl:294,1170`). AMD/Gladman both need `M_s`.
+`none | amd | gladman` (`src/runner.jl:292,1168`). AMD/Gladman both need `M_s`.
 
 ### Activity indicators — scaling
 
@@ -607,20 +607,20 @@ prior when that degeneracy is present.
   **only** into constructors that accept them: celerite GPs take both;
   `ARModel`/`MAModel` take `channel`; `ActivityGP` takes `channels`;
   `ActivityDecorrelation`/`ActivityJitter` (mean modifiers) take neither
-  (`src/runner.jl:1290-1298,1340-1343`).
+  (`src/runner.jl:1288-1296,1338-1341`).
 - `kwargs.channels` (for `ActivityGP`) are symbolised, and any vector-valued
-  kwarg is narrowed from a `JSON3.Array` (`src/runner.jl:1311-1333`).
+  kwarg is narrowed from a `JSON3.Array` (`src/runner.jl:1309-1331`).
 - `validate_noise_models` runs a cross-model consistency check (per-instrument
   exclusivity, AR/MA conflicts, channel validity); violations surface as
-  `status="failed"` (`src/runner.jl:1350`).
+  `status="failed"` (`src/runner.jl:1348`).
 
 ### `sampler`
 - Trans-dim model-selection samplers (`transdim_pt_emcee`, `rjmcmc`, `moms`,
   `daedalus`) require a top-level `transdim` block. `pt` does not require one: if
   a `transdim` block is present it is built and forwarded as `td` (a trans-dim run),
-  otherwise the run is fixed-dim (`src/runner.jl:1497-1498,1505-1513`). With no
+  otherwise the run is fixed-dim (`src/runner.jl:1495-1496,1503-1511`). With no
   `sampler.name` the default is `transdim_pt_emcee` when a `transdim` block is
-  present, else `pt_emcee` (`src/runner.jl:1454-1462`).
+  present, else `pt_emcee` (`src/runner.jl:1452-1460`).
 - **The Pathfinder warm start is a `pt` kwarg, not a sampler.** There is no
   `pt_warm` name: it was never a sampler, only a Pathfinder draw followed by a
   delegation to `pt` or `pt_emcee`. Its two honest replacements are
@@ -640,14 +640,14 @@ prior when that degeneracy is present.
   family return real `log_evidence`; `rjmcmc`/`moms`/`nuts`/`ofti` write
   `NaN` (no evidence estimator). `nested_ins` reports the INS estimate,
   `nested_dynamic` the dynamic-NS estimate, `daedalus` its nested evidence
-  (`src/runner.jl:1500-1607`).
+  (`src/runner.jl:1498-1605`).
 - Unknown kwargs are rejected with an actionable error listing the valid set
-  (`src/runner.jl:1426-1440,1467-1476`); every JSON-string kwarg value is coerced to a Julia
+  (`src/runner.jl:1424-1438,1465-1474`); every JSON-string kwarg value is coerced to a Julia
   `Symbol` so `"multi"`, `"rslice"`, `"stretch"`, etc. work as expected.
 
 ### `output` plots
 - `auto` expands to the applicable set from the data + model present
-  (`src/runner.jl:1761-1792`): always the posterior/trace/corner family; RV →
+  (`src/runner.jl:1759-1790`): always the posterior/trace/corner family; RV →
   `rv_timeseries`+`rv_phasefold` (+`rv_components` when ≥2 planets or a GP/AGP);
   photometry → `pm_*`+`ttv_oc`+`transit_overlay`; astrometry → the astrometry
   plots; any `*_RM` mode → `rm_anomaly`; an ActivityGP → `activity_gp_latent`
@@ -655,19 +655,19 @@ prior when that degeneracy is present.
   an engine that records a ladder history (`pt_emcee`, `transdim_pt_emcee`) →
   `ladder_rates` + `beta_ladder`.
 - Individual plots are fail-soft (a failing plotter logs a warning and is
-  skipped, `src/runner.jl:1855-1857`).
+  skipped, `src/runner.jl:1853-1855`).
 - `ttv_oc` renders for single-planet fits too — it shows the data-only O−C
   (measured per-transit `Tc` vs the linear ephemeris) via `planet_b_k=0`; with
   ≥2 planets it defaults to the perturber-driven envelope (`planet_b_k=2`,
-  `src/runner.jl:2077-2103`).
+  `src/runner.jl:2075-2101`).
 
 ---
 
 ## summary.json (output contract)
 
-`run_job` always returns / writes a `summary` dict. The legacy unconditioned
-`params` block is **removed** before writing (`src/runner.jl:198`) — the
-authoritative, model-conditioned numbers live under `fitted` / `derived`
+`run_job` always returns / writes a `summary` dict. There is no unconditioned
+`params` block (`src/runner.jl:2700-2704`) — the authoritative, model-conditioned
+numbers live under `fitted` / `derived`
 (from `science_summary`, `src/science_tables.jl:680-749`).
 
 ```jsonc
@@ -790,19 +790,22 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
   // ---- Where the post-fit time went (seconds; observability, not science) ----
   "timing": {
     // every post-fit stage but `write`, which is still running when this is taken
-    "post_fit": { "ppc": 4.1, "detection_limits": 0.9, "loo": 2.2, "fit_health": 6.0,
-                  "diagnostics": 3.1, "summary": 1.4, "evidence": 412.7, "science": 8.8 },
+    "post_fit": { "ppc": 2.7, "detection_limits": 0.1, "loo": 1.4, "fit_health": 8.1,
+                  "diagnostics": 10.6, "summary": 0.0, "evidence": 28.0, "science": 17.9 },
     // bridge_evidence's record; absent when the bridge did not run (trans-dim chains)
     "bridge": {
       "threads": 8, "n_draws": 5800000, "n_post": 5800000, "n_post_finite": 5800000,
-      "n_proposal": 20000, "n_prop_finite": 19998,
-      "iters": 5, "converged": true,
+      "n_proposal": 20000, "n_prop_finite": 19999,
+      // log p* at the posterior draws read off the chain's :lp (true), after
+      // matching a full evaluation at 64 draws to this many nats; false: evaluated
+      "lp_reused": true, "lp_check_max_abs": 8.7e-10,
+      "iters": 7, "converged": true,              // Newton passes of the primary solve
       "bootstrap_workers": 8, "bootstrap_ok": 200,
-      "bootstrap_iters_max": 6, "bootstrap_iters_total": 1012,
+      "bootstrap_iters_max": 7, "bootstrap_iters_total": 1400,
       // per stage: transform, posterior_evals, proposal_evals, primary_solve,
       // bootstrap (only when the primary solve converged), ess (the promotion guard)
-      "posterior_evals": { "seconds": 220.4, "alloc_bytes": 1.2e9, "gc_seconds": 0.8,
-                           "maxrss_bytes": 4.1e9 }   // process peak RSS when the stage ended
+      "posterior_evals": { "seconds": 3.7, "alloc_bytes": 1.9e9, "gc_seconds": 0.3,
+                           "maxrss_bytes": 8.7e9 }   // process peak RSS when the stage ended
     }
   }
 }
@@ -811,7 +814,7 @@ authoritative, model-conditioned numbers live under `fitted` / `derived`
 A `"failed"` summary additionally carries `"error"` (the message) and
 `"traceback"`; the auxiliary stages instead write a nested
 `{"status":"failed"|"skipped","error":…}` under their own key and the job
-continues (`src/runner.jl:219-226,2242-2246,2309-2313,2358-2362,2479-2483`).
+continues (`src/runner.jl:217-224,2240-2244,2307-2311,2356-2360,2477-2481`).
 
 ### Progress lines (stdout)
 
@@ -820,14 +823,14 @@ Off a TTY every progress bar prints whole lines, `label | ▕bar▏ | k/N (p%) |
 `fit_*` route print one `post-fit` line as each post-fit stage starts:
 
 ```
-post-fit | ▕████████████████░░░░░░░░▏ | 6/9 (66.7%) | stage=evidence | elapsed 41s
-bridge posterior | ▕████████░░░░░░░░░░░░░░░░▏ | 1900000/5800000 (32.8%) | elapsed 1m10s | ETA 2m24s
+post-fit | ▕████████████████░░░░░░░░▏ | 6/9 (66.7%) | stage=evidence | elapsed 23s
+bridge posterior | ▕████████████████████████▏ | 5800000/5800000 (100.0%) | elapsed 3s
 bridge proposal | ▕████████████████████████▏ | 20000/20000 (100.0%) | elapsed 1s
-bridge solve | iter 5 | converged=true | elapsed 0s
-bridge bootstrap | ▕██████░░░░░░░░░░░░░░░░░░▏ | 50/200 (25.0%) | workers=8 | elapsed 2m02s | ETA 6m06s
-post-fit | ▕██████████████████░░░░░░▏ | 7/9 (77.8%) | stage=science | elapsed 7m13s
-post-fit | ▕█████████████████████░░░▏ | 8/9 (88.9%) | stage=write | elapsed 7m22s
-post-fit | ▕████████████████████████▏ | 9/9 (100.0%) | stage=done | elapsed 7m24s
+bridge solve | iter 7 | converged=true | elapsed 1s
+bridge bootstrap | ▕██████░░░░░░░░░░░░░░░░░░▏ | 50/200 (25.0%) | workers=8 | elapsed 5s | ETA 14s
+post-fit | ▕██████████████████░░░░░░▏ | 7/9 (77.8%) | stage=science | elapsed 51s
+post-fit | ▕█████████████████████░░░▏ | 8/9 (88.9%) | stage=write | elapsed 1m09s
+post-fit | ▕████████████████████████▏ | 9/9 (100.0%) | stage=done | elapsed 1m09s
 ```
 
 - `k/N` counts the stages finished before the named one. The stages are
@@ -841,9 +844,9 @@ post-fit | ▕██████████████████████
   prints no final `post-fit` line (it logs the error and rethrows).
 - The `bridge …` lines come from `bridge_evidence` during `evidence`; they are
   throttled to one every 0.5 s and always print their last tick. `bridge solve`
-  counts fixed-point iterations (no total; `delta` is the last change in log Z)
-  and ends with `converged=true|false`.
-  `bridge bootstrap` appears only when the fixed point converged.
+  counts Newton passes (no total; `delta` is the last change in log Z) and ends
+  with `converged=true|false`.
+  `bridge bootstrap` appears only when the primary solve converged.
 - `output.show_progress = false` silences all of these, as it does the plot bar.
   `summary.timing` is written either way.
 
@@ -909,7 +912,7 @@ block:
 
 - **Validation is fail-fast** — `_validate_config` collects *all* schema errors
   and throws one `ArgumentError` listing them, before any heavy allocation
-  (`src/runner.jl:341-569`).
+  (`src/runner.jl:339-567`).
 - **Threading** — `n_threads` is advisory; honour `JULIA_NUM_THREADS`.
 - **Determinism** — `seed` controls every RNG (sampler, PPC, LOO).
 - **Errors** — any uncaught exception writes
