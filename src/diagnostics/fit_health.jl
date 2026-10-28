@@ -731,8 +731,7 @@ function _check_map_consistency(map_point, chains, names_to_check; nsigma::Float
         n_checked += 1
         med = median(samp)
         # Robust σ from the 16/84 quantiles (half the central 68% width).
-        q16 = quantile(samp, 0.16)
-        q84 = quantile(samp, 0.84)
+        q16, q84 = quantile(samp, (0.16, 0.84))     # one sort for both
         rsig = (q84 - q16) / 2
         # A full-circle angle: the MAP may sit in another representative of the
         # same angle (6.26 against a chain charted around 0.0), and the linear

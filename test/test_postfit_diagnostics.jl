@@ -71,6 +71,20 @@ end
         end
     end
 
+    @testset "fit_* params summary: one sort, the same bounds" begin
+        layout_only = (layout = (unfrozen_names = ["a", "c", "missing"],),)
+        s = Nereus._summarise_params(ch, layout_only)
+        @test sort(collect(keys(s))) == ["a", "c"]
+        for nm in ("a", "c")
+            v = vec(Array(ch[Symbol(nm)]))
+            @test s[nm]["median"] === median(v)
+            for (k, p) in (("lo16", 0.16), ("hi84", 0.84), ("lo2sig", 0.025),
+                           ("hi2sig", 0.975), ("lo3sig", 0.0015), ("hi3sig", 0.9985))
+                @test s[nm][k] === quantile(v, p)
+            end
+        end
+    end
+
     @testset "convergence_report: per-parameter threads, the serial verdict" begin
         # Native multi-chain layout, n_walkers = number of chains.
         r = convergence_report(ch, 8; io = devnull, params = [:a, :b, :c, :d])
