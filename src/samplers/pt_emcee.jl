@@ -192,9 +192,9 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
     local rh, bess, tess
     try
         ch = MCMCChains.Chains(cube)
-        er = MCMCChains.ess_rhat(ch)
+        er = _diag_by_param(MCMCChains.ess_rhat, ch)
         rh = er[:, :rhat]; bess = er[:, :ess]
-        tess = try MCMCChains.ess(ch; kind = :tail)[:, :ess] catch; bess end
+        tess = try _diag_by_param(MCMCChains.ess, ch; kind = :tail)[:, :ess] catch; bess end
     catch
         return nothing
     end
@@ -1251,7 +1251,7 @@ function sample_pt_emcee(
     # n_eff ~ 8000 against 135 parameters.
     if isfinite(log_z_bridge)
         n_eff_min = try
-            minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
+            minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
         catch err
             @debug "sample_pt_emcee: ESS unavailable for the bridge guard" exception = err
             NaN

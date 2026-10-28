@@ -333,7 +333,7 @@ function _check_convergence(chains, names_to_check;
             # valid and only sharpens the diagnostic.
             sub = chains[:, plain, :]
             diag_chains = ensemble ? _ensemble_split(sub) : sub
-            tbl = MCMCChains.ess_rhat(diag_chains; kind = :rank)
+            tbl = _diag_by_param(MCMCChains.ess_rhat, diag_chains; kind = :rank)
             # ChainDataFrame indexing returns a scalar when there is a single
             # parameter; coerce every column to a Vector so the loop below is
             # uniform.
@@ -341,14 +341,22 @@ function _check_convergence(chains, names_to_check;
             append!(ess_col, _asvec(tbl[:, :ess]))
             append!(rhat_col, _asvec(tbl[:, :rhat]))
         end
-        for p in masked
+        # One parameter per thread, as `_diag_by_param` does for the rest;
+        # gathered in order.
+        mres = Vector{Any}(nothing, length(masked))
+        Threads.@threads :dynamic for i in eachindex(masked)
+            p = masked[i]
             v = vec(Array(chains[p]))[active[p]]
             length(v) >= 4 || continue
             one = MCMCChains.Chains(reshape(v, :, 1, 1), [p])
             tbl = MCMCChains.ess_rhat(_ensemble_split(one); kind = :rank)
+            mres[i] = (only(_asvec(tbl[:, :ess])), only(_asvec(tbl[:, :rhat])))
+        end
+        for (p, r) in zip(masked, mres)
+            r === nothing && continue
             push!(pnames, p)
-            push!(ess_col, only(_asvec(tbl[:, :ess])))
-            push!(rhat_col, only(_asvec(tbl[:, :rhat])))
+            push!(ess_col, r[1])
+            push!(rhat_col, r[2])
         end
     catch err
         return FitHealthCheck(:convergence, :warn,

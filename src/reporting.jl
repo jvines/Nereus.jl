@@ -35,12 +35,11 @@ end
 
 function ParamStats(samples::AbstractVector{<:Real})
     med = median(samples)
-    q16 = quantile(samples, 0.16)
-    q84 = quantile(samples, 0.84)
-    q025 = quantile(samples, 0.025)
-    q975 = quantile(samples, 0.975)
-    q001 = quantile(samples, 0.0015)
-    q999 = quantile(samples, 0.9985)
+    # One sorted copy for all six: each quantile is the same interpolation
+    # between the same two order statistics as its own `quantile` call, which
+    # copied and sorted the draws again (six times per parameter).
+    q16, q84, q025, q975, q001, q999 =
+        quantile(samples, (0.16, 0.84, 0.025, 0.975, 0.0015, 0.9985))
     return ParamStats(
         med,
         med - q16,
@@ -493,7 +492,7 @@ end
 Print ESS and Rhat diagnostics for all chain parameters.
 """
 function print_ess_rhat(chains; io::IO=stdout)
-    ess_tbl = MCMCChains.ess_rhat(chains)
+    ess_tbl = _diag_by_param(MCMCChains.ess_rhat, chains)
     param_col = ess_tbl[:, :parameters]
     ess_col = ess_tbl[:, :ess]
     rhat_col = ess_tbl[:, :rhat]
@@ -956,16 +955,31 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
 
     keep=Symbol[]; rh=Float64[]; es=Float64[]; fr=Float64[]; gate_ess=Bool[]
     n_fixed=0; n_inactive=0
-    for p in pnames
+    # A parameter's R̂ and ESS depend only on its own draws, and each costs a
+    # sort of all of them: the parameters run on separate threads (28 s for 14
+    # parameters at 5.8 million draws on one), and are gathered in order below.
+    pre = Vector{Any}(undef, length(pnames))
+    Threads.@threads :dynamic for i in eachindex(pnames)
+        p = pnames[i]
         v, mask = haskey(canon, p) ? canon[p] : (vec(Array(chains[p])), _active_mask(p))
-        if mask === nothing
-            (maximum(v) - minimum(v) < 1e-12) && (n_fixed += 1; continue)  # frozen
-            r, e, _ = _cond_rhat_ess(v, nothing)
-            push!(keep,p); push!(rh,r); push!(es,e); push!(fr,1.0); push!(gate_ess,true)
+        pre[i] = if mask === nothing
+            (maximum(v) - minimum(v) < 1e-12) ? (:fixed,) :            # frozen
+                (:all, 1.0, _cond_rhat_ess(v, nothing))
         else
             f = count(mask)/length(mask)
-            if f < 0.01; n_inactive += 1; continue; end       # component ~never on
-            r, e, _ = _cond_rhat_ess(v, mask)
+            f < 0.01 ? (:inactive,) :                         # component ~never on
+                (:masked, f, _cond_rhat_ess(v, mask))
+        end
+    end
+    for (p, pr) in zip(pnames, pre)
+        kind = pr[1]
+        kind === :fixed && (n_fixed += 1; continue)
+        kind === :inactive && (n_inactive += 1; continue)
+        f = pr[2]
+        r, e, _ = pr[3]
+        if kind === :all
+            push!(keep,p); push!(rh,r); push!(es,e); push!(fr,1.0); push!(gate_ess,true)
+        else
             push!(keep,p); push!(rh,r); push!(es,e); push!(fr,f)
             # ESS-gate only well-sampled components; ESS via active-masking is
             # unreliable for sporadically-active (disfavoured) models, and a

@@ -2529,7 +2529,7 @@ function _augment_evidence!(summary, params, data, chains;
         need = d + d * (d + 1) ÷ 2
         ess = _bridge_stage!(timings, "ess") do
             try
-                minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
+                minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
             catch; NaN end
         end
         if isfinite(ess) && ess >= need

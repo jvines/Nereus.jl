@@ -54,6 +54,38 @@ const _DIAG_FIELDS = (
     :target_L_lo, :target_L_hi,
 )
 
+"""
+    _diag_by_param(f, chains; kwargs...) -> ChainDataFrame
+
+`f(chains; kwargs...)`, for `f` one of MCMCChains' `ess`, `rhat` and
+`ess_rhat`, with the parameters computed on separate threads.
+
+MCMCChains computes them one after another on one thread, and on a long chain
+each costs a rank normalisation (a sort of every draw) and an autocovariance
+per parameter: 41 s for bulk ESS, tail ESS and R-hat of 14 parameters at 5.8
+million draws. Each parameter's numbers depend only on its own draws, so `f`
+on a one-parameter sub-chain gives the same bits as its row in the full call;
+the rows come back in the order `f` reports them, with `f`'s table name.
+Calls `f` directly with one thread, one parameter, no `:parameters` section,
+or a `sections` keyword.
+"""
+function _diag_by_param(f, chains::MCMCChains.Chains; kwargs...)
+    (haskey(chains.name_map, :parameters) && !haskey(kwargs, :sections) &&
+     Threads.nthreads() > 1) || return f(chains; kwargs...)
+    sub = MCMCChains.Chains(chains, (:parameters,))
+    ps = names(sub)                   # the rows `f(chains)` reports, in its order
+    length(ps) > 1 || return f(chains; kwargs...)
+    parts = Vector{Any}(undef, length(ps))
+    Threads.@threads :dynamic for i in eachindex(ps)
+        parts[i] = f(sub[:, [ps[i]], :]; kwargs...)
+    end
+    cols = keys(parts[1].nt)
+    nt = NamedTuple{cols}(Tuple(c === :parameters ? collect(ps) :
+                                reduce(vcat, [collect(p.nt[c]) for p in parts])
+                                for c in cols))
+    return MCMCChains.ChainDataFrame(parts[1].name, nt)
+end
+
 """Per-parameter ESS and, when there is more than one chain, R-hat.
 
 R-hat needs at least two chains by construction. An engine that returns one
@@ -64,10 +96,10 @@ function chain_convergence(chains)
     try
         n_chains = size(chains, 3)
         per = Dict{String, Any}()
-        e_bulk = MCMCChains.ess(chains; kind = :bulk)
-        e_tail = MCMCChains.ess(chains; kind = :tail)
+        e_bulk = _diag_by_param(MCMCChains.ess, chains; kind = :bulk)
+        e_tail = _diag_by_param(MCMCChains.ess, chains; kind = :tail)
         names_ = String.(e_bulk.nt.parameters)
-        rh = n_chains >= 2 ? MCMCChains.rhat(chains).nt.rhat : nothing
+        rh = n_chains >= 2 ? _diag_by_param(MCMCChains.rhat, chains).nt.rhat : nothing
         for (i, nm) in enumerate(names_)
             entry = Dict{String, Any}("ess_bulk" => e_bulk.nt.ess[i],
                                        "ess_tail" => e_tail.nt.ess[i])
