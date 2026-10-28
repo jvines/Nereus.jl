@@ -790,8 +790,8 @@ numbers live under `fitted` / `derived`
   // ---- Where the post-fit time went (seconds; observability, not science) ----
   "timing": {
     // every post-fit stage but `write`, which is still running when this is taken
-    "post_fit": { "ppc": 2.7, "detection_limits": 0.1, "loo": 1.4, "fit_health": 8.1,
-                  "diagnostics": 10.6, "summary": 0.0, "evidence": 28.0, "science": 17.9 },
+    "post_fit": { "ppc": 1.9, "detection_limits": 0.1, "loo": 1.0, "fit_health": 8.2,
+                  "diagnostics": 0.9, "summary": 0.0, "evidence": 6.7, "science": 6.0 },
     // bridge_evidence's record; absent when the bridge did not run (trans-dim chains)
     "bridge": {
       "threads": 8, "n_draws": 5800000, "n_post": 5800000, "n_post_finite": 5800000,
