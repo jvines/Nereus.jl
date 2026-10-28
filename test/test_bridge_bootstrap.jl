@@ -5,15 +5,18 @@
 # The solver is now safeguarded Newton on the same equation, so it agrees with
 # the old iteration to within the old iteration's own stopping error, not to
 # the bit: those comparisons are on the residual of the equation and on a
-# tolerance a few orders below any reported standard error. What must still be
-# exact is everything about scheduling: the bootstrap's resamples come off the
-# same MersenneTwister in the same order, so its replicates are the same bits
-# at any worker count, and `===` is used there.
+# tolerance a few orders below any reported standard error. The proposal's
+# moments are now streamed off the chain rather than taken from a matrix of
+# the draws, so they agree with mean/cov to rounding. What must still be exact
+# is everything about scheduling: the bootstrap's resamples come off the same
+# MersenneTwister in the same order, so its replicates are the same bits at
+# any worker count, and `===` is used there.
 using Test, Nereus, Random, Statistics, LinearAlgebra, MCMCChains, SpecialFunctions
 using Nereus: _bridge_iterate, _bridge_iterate!, _bridge_g!, _bridge_bootstrap,
               _bridge_draw_indices!, _bridge_boot_workers, _bridge_boot_bytes,
-              _BridgeBootBuffers, _logaddexp, _logsumexp, _SharedProgress, _tick!,
-              ProgressBar, update!
+              _BridgeBootBuffers, _BridgeDraws, _bridge_draw!, _bridge_moments,
+              _BridgeLogq, _bridge_logq!, _bridge_ratios, _logaddexp, _logsumexp,
+              _SharedProgress, _tick!, ProgressBar, update!
 
 # ---- the 0.8.8 code, verbatim -------------------------------------------------
 
@@ -55,15 +58,10 @@ function _ref_bootstrap(l1, l2, seed, n_bootstrap, max_iter, tol)
     return out
 end
 
-function _ref_bridge_evidence(target, chains::MCMCChains.Chains;
-                              n_proposal::Int = 20_000, seed::Int = 1,
-                              proposal::Symbol = :student, max_iter::Int = 1_000,
-                              tol::Real = 1e-10, n_bootstrap::Int = 200)
+# 0.8.8's matrix of the draws in the target's space, one column a draw.
+function _ref_draws(target, chains::MCMCChains.Chains)
     names = target.params.layout.unfrozen_names
     d = length(names)
-    d >= 1 || return (; log_z = NaN, se = NaN, n_post = 0, n_prop = 0,
-                        iters = 0, converged = false, overlap = NaN,
-                        proposal = proposal)
     cols = [vec(Array(chains[:, Symbol(nm), :])) for nm in names]
     N = length(cols[1])
     pt = target.transform
@@ -72,12 +70,18 @@ function _ref_bridge_evidence(target, chains::MCMCChains.Chains;
         xi = Float64[cols[j][i] for j in 1:d]
         Y_all[:, i] = pt === nothing ? xi : Nereus.transform_forward(xi, pt)
     end
+    return Y_all
+end
+
+# 0.8.8's log ratios; only `N1` when there are too few draws.
+function _ref_ratios(target, chains::MCMCChains.Chains;
+                     n_proposal::Int = 20_000, seed::Int = 1, proposal::Symbol = :student)
+    d = length(target.params.layout.unfrozen_names)
+    Y_all = _ref_draws(target, chains)
     keep = vec(all(isfinite, Y_all; dims = 1))
     Y = Y_all[:, keep]
     N1 = size(Y, 2)
-    N1 >= 2d + 2 || return (; log_z = NaN, se = NaN, n_post = N1, n_prop = 0,
-                              iters = 0, converged = false, overlap = NaN,
-                              proposal = proposal)
+    N1 >= 2d + 2 || return (; N1)
     evs = [Nereus._BridgeEvaluator(target) for _ in 1:Nereus._bridge_ntasks(max(N1, n_proposal))]
     μ = vec(mean(Y; dims = 2))
     Σ = cov(Y; dims = 2) + 1e-10 * I(d)
@@ -122,7 +126,23 @@ function _ref_bridge_evidence(target, chains::MCMCChains.Chains;
             push!(l2, v - logq(y))
         end
     end
-    overlap = n_finite / n_proposal
+    return (; N1, l1, l2, overlap = n_finite / n_proposal)
+end
+
+function _ref_bridge_evidence(target, chains::MCMCChains.Chains;
+                              n_proposal::Int = 20_000, seed::Int = 1,
+                              proposal::Symbol = :student, max_iter::Int = 1_000,
+                              tol::Real = 1e-10, n_bootstrap::Int = 200)
+    d = length(target.params.layout.unfrozen_names)
+    d >= 1 || return (; log_z = NaN, se = NaN, n_post = 0, n_prop = 0,
+                        iters = 0, converged = false, overlap = NaN,
+                        proposal = proposal)
+    rr = _ref_ratios(target, chains; n_proposal, seed, proposal)
+    N1 = rr.N1
+    haskey(rr, :l1) || return (; log_z = NaN, se = NaN, n_post = N1, n_prop = 0,
+                                 iters = 0, converged = false, overlap = NaN,
+                                 proposal = proposal)
+    l1, l2, overlap = rr.l1, rr.l2, rr.overlap
     (isempty(l1) || isempty(l2)) &&
         return (; log_z = NaN, se = NaN, n_post = N1, n_prop = length(l2),
                   iters = 0, converged = false, overlap = overlap,
@@ -375,9 +395,95 @@ end
                           show_progress = false)
     ch = res.chains
 
+    @testset "draws streamed off the chain: no copy, the same numbers" begin
+        # Draw i is column i of 0.8.8's matrix, to the bit.
+        Y = _ref_draws(tg, ch)
+        D = _BridgeDraws(ch, tg.params.layout.unfrozen_names, tg.transform)
+        @test D.N == size(Y, 2) == size(ch, 1) * size(ch, 3)
+        y = Vector{Float64}(undef, size(Y, 1))
+        @test all(i -> _bridge_draw!(y, D, i) == Y[:, i] &&
+                       all(j -> y[j] === Y[j, i], eachindex(y)), 1:D.N)
+        # Moments: mean and cov of that matrix, to rounding.
+        m = _bridge_moments(D)
+        @test m.keep == vec(all(isfinite, Y; dims = 1)) && m.n == D.N
+        @test norm(m.μ - vec(mean(Y; dims = 2))) <= 1e-12 * norm(vec(mean(Y; dims = 2)))
+        @test norm(m.Σ - cov(Y; dims = 2)) <= 1e-12 * norm(cov(Y; dims = 2))
+        @test issymmetric(m.Σ)
+
+        # Many blocks, a ragged last one, non-finite draws in several, more
+        # than one chain: still mean and cov of the finite draws, and the
+        # same at any thread count (blocks are fixed by the draw count).
+        B = Nereus._BRIDGE_MOMENT_BLOCK
+        rng = MersenneTwister(11)
+        A = randn(rng, cld(3B + 123, 3), 5, 3) .* [1e-3 1.0 50.0 1.0 1.0] .+ [7.0 -2.0 1e4 0.0 0.0]
+        A[17, 2, 1] = NaN; A[B + 3, 1, 2] = Inf; A[end, 3, 3] = -Inf; A[5, 5, 2] = NaN
+        cs = Chains(A, [:a, :b, :c, :d, :e])
+        Ds = _BridgeDraws(cs, ["c", "a", "b", "d"], nothing)    # e, with a NaN, unused
+        Ys = permutedims(reduce(hcat, [vec(Array(cs[:, s, :])) for s in (:c, :a, :b, :d)]))
+        @test size(Ys) == (4, Ds.N)
+        ks = vec(all(isfinite, Ys; dims = 1))
+        ms = _bridge_moments(Ds)
+        @test ms.keep == ks && ms.n == count(ks) == Ds.N - 3
+        Yk = Ys[:, ks]
+        @test norm(ms.μ - vec(mean(Yk; dims = 2))) <= 1e-12 * norm(vec(mean(Yk; dims = 2)))
+        @test norm(ms.Σ - cov(Yk; dims = 2)) <= 1e-12 * norm(cov(Yk; dims = 2))
+        @test_throws ArgumentError _BridgeDraws(cs, ["a", "nope"], nothing)
+
+        # log q without allocating and without BLAS: the closure it replaces,
+        # to rounding (its forward substitution is BLAS's, but not its kernel).
+        d = size(Y, 1)
+        μ = vec(mean(Y; dims = 2))
+        Lc = cholesky(Symmetric(cov(Y; dims = 2) + 1e-10 * I(d))).L
+        ν = 4.0
+        for proposal in (:student, :gaussian)
+            function logq(y)
+                z = Lc \ (y .- μ)
+                q = sum(abs2, z)
+                ld = logdet(Lc)
+                if proposal === :gaussian
+                    return -0.5 * q - 0.5 * d * log(2π) - ld
+                else
+                    return loggamma((ν + d) / 2) - loggamma(ν / 2) - 0.5 * d * log(ν * π) -
+                           ld - 0.5 * (ν + d) * log1p(q / ν)
+                end
+            end
+            lq = _BridgeLogq(μ, Lc, proposal, ν)
+            z = Vector{Float64}(undef, d)
+            @test all(i -> isapprox(_bridge_logq!(z, lq, view(Y, :, i)), logq(view(Y, :, i));
+                                    rtol = 1e-14, atol = 1e-12), 1:37:size(Y, 2))
+            # Far out in the tails too, where q is large.
+            @test all(s -> isapprox(_bridge_logq!(z, lq, μ .+ s .* Y[:, 3]),
+                                    logq(μ .+ s .* Y[:, 3]); rtol = 1e-13), (1e2, 1e4, -1e3))
+            # Through a function barrier, so the call is compiled for these
+            # types and the test's own boxing of the result is not counted.
+            alloc(z, lq, y) = @allocated _bridge_logq!(z, lq, y)
+            yy = Y[:, 5]
+            alloc(z, lq, yy)
+            @test alloc(z, lq, yy) == 0
+            v9 = view(Y, :, 9)
+            alloc(z, lq, v9)
+            @test alloc(z, lq, v9) == 0
+        end
+
+        # The log ratios: 0.8.8's, but for the rounding of the moments.
+        for (kw, use_lp) in (((n_proposal = 3_000, seed = 42, proposal = :student), false),
+                             ((n_proposal = 2_000, seed = 9, proposal = :gaussian), false),
+                             ((n_proposal = 3_000, seed = 42, proposal = :student), true))
+            rr = _ref_ratios(tg, ch; kw...)
+            rs = _bridge_ratios(tg, ch, kw.n_proposal, kw.seed, kw.proposal, false, nothing;
+                                use_lp)
+            @test rs.n_post == rr.N1 && length(rs.l1) == length(rr.l1) &&
+                  length(rs.l2) == length(rr.l2) && rs.overlap == rr.overlap
+            tol = use_lp ? 1e-6 : 1e-12              # :lp is log p* to ~1e-9 nats
+            @test maximum(abs.(rs.l1 .- rr.l1) ./ max.(1, abs.(rr.l1))) < tol
+            @test maximum(abs.(rs.l2 .- rr.l2) ./ max.(1, abs.(rr.l2))) < 1e-12
+        end
+    end
+
     # The same estimate as 0.8.8: every count and the overlap exactly, log Z
-    # and its standard error to far below that error. Only the solver (and,
-    # with the chain's :lp, the rounding of each log p*) differs.
+    # and its standard error to far below that error. Only the solver, the
+    # rounding of the proposal's moments (streamed, not from a matrix) and,
+    # with the chain's :lp, the rounding of each log p* differ.
     function same_estimate(b, r)
         (b.converged == r.converged && b.n_post == r.n_post && b.n_prop == r.n_prop &&
          isequal(b.overlap, r.overlap) && b.proposal === r.proposal) || return false
@@ -398,7 +504,7 @@ end
         # a full evaluation and stood in for one at every draw.
         @test tm["lp_reused"] === true
         @test tm["lp_check_max_abs"] < 1e-6
-        # Evaluating every draw instead: the same terms as 0.8.8, to the bit.
+        # Evaluating every draw instead: the same terms as 0.8.8, to rounding.
         full = bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = 30,
                                use_lp = false)
         @test same_estimate(full, ref)
