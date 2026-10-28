@@ -192,10 +192,8 @@ function run_job(cfg::AbstractDict)
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
         # Authoritative science contract: conditioned, unit-tagged fitted/derived
-        # + model_selection + run_info, and the multi-format tables. Supersedes
-        # the legacy unconditioned `params` block (which is inactive-slot junk in
-        # a trans-dim run), so drop it.
-        delete!(summary, "params")
+        # + model_selection + run_info, and the multi-format tables. There is no
+        # unconditioned `params` block (inactive-slot junk in a trans-dim run).
         # The star block, σ's included. This read T_eff off `params.config`,
         # which has no such field, and passed nothing else: T_eq, insolation,
         # TSM and ESM were never computed, and every derived error bar carried
@@ -2699,63 +2697,12 @@ function _populate_summary!(summary, result, params, chains)
     end
 
     _n_planets_posterior!(summary, chains)
-    chain_names = Set(names(chains, :parameters))
-
-    # Per-parameter median + 1/2/3-σ
-    params_summary = Dict{String, Any}()
-    for name in params.layout.unfrozen_names
-        sym = Symbol(name)
-        sym in chain_names || continue
-        v = vec(Array(chains[sym]))
-        params_summary[name] = Dict{String, Float64}(
-            "median" => median(v),
-            "lo16"   => quantile(v, 0.16),
-            "hi84"   => quantile(v, 0.84),
-            "lo2sig" => quantile(v, 0.025),
-            "hi2sig" => quantile(v, 0.975),
-            "lo3sig" => quantile(v, 0.0015),
-            "hi3sig" => quantile(v, 0.9985),
-        )
-    end
-    summary["params"] = params_summary
-
-    # --- Derived parameters: physical quantities (M_p, a, T_eq, ρ_p,
-    # TSM, ESM, …) computed from the posterior. One block per planet
-    # under summary["derived"]["k$k"] with the same median/lo16/hi84/2σ/3σ
-    # schema as `params`. Skipped if stellar params not set in config.
-    M_s = params.config.M_s
-    R_s = params.config.R_s
-    T_eff = hasproperty(params.config, :T_eff) ? params.config.T_eff : NaN
-    if !isnan(M_s) && M_s > 0
-        try
-            derived_per_planet = compute_derived(chains, params;
-                                                  M_s = M_s,
-                                                  R_s = isnan(R_s) ? nothing : R_s,
-                                                  T_eff = (isnan(T_eff) || T_eff <= 0) ?
-                                                            nothing : T_eff)
-            derived_summary = Dict{String, Any}()
-            for (k, dp) in enumerate(derived_per_planet)
-                per_planet = Dict{String, Any}()
-                for (nm, vs) in dp.values
-                    finite = filter(isfinite, vs)
-                    isempty(finite) && continue
-                    per_planet[nm] = Dict{String, Float64}(
-                        "median" => median(finite),
-                        "lo16"   => quantile(finite, 0.16),
-                        "hi84"   => quantile(finite, 0.84),
-                        "lo2sig" => quantile(finite, 0.025),
-                        "hi2sig" => quantile(finite, 0.975),
-                        "lo3sig" => quantile(finite, 0.0015),
-                        "hi3sig" => quantile(finite, 0.9985),
-                    )
-                end
-                isempty(per_planet) || (derived_summary["k$k"] = per_planet)
-            end
-            isempty(derived_summary) || (summary["derived"] = derived_summary)
-        catch err
-            @warn "compute_derived failed; skipping derived block in summary" exception = err
-        end
-    end
+    # No per-parameter or derived quantiles here. This built an unconditioned
+    # `params` block, which run_job deleted, and a `derived` block, which
+    # science_summary's replaced: 7 sorts of every column and a second
+    # compute_derived over every draw, 12 s at 5.8 million draws, none of it
+    # reaching summary.json.
+    return summary
 end
 
 function _write_summary(out_dir, summary)
