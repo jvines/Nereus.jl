@@ -589,15 +589,13 @@ the caller can pass `M_sec` into `raoff(sol, M_sec)` /
 `pmra(sol, M_sec)` for absolute-astrometry queries.
 
 Inclination is read via `planet_inc(theta, k)` (radians) and Ω via
-`planet_Omega(theta, k)`. Time-anchor decoding follows the
-parametrization: `:Mo` and `:Tp` map straight through to a Tp value,
-`:Tc` is converted via the existing `tc_to_tp` helper using the
-already-decoded `(e, ω)`.
+`planet_Omega(theta, k)`. The time anchor is decoded by `anchor_to_tp`
+with the already-decoded `(e, ω)`.
 """
 function _planet_orbit(theta::Theta, k::Int, M_pri::Real, plx::Real)
     # 4-arg form is a thin wrapper over the 5-arg form with t_ref=0.
-    # Only correct when parametrization.time === :Tp (so the time anchor
-    # is already a Tp); other anchors (Mo, Tc) need t_ref to convert.
+    # Wrong under parametrization.time === :Mo, the one anchor measured from
+    # t_ref; Tp, Tc and phic do not read it.
     return _planet_orbit(theta, k, M_pri, plx, 0.0)
 end
 
@@ -605,9 +603,8 @@ end
     _planet_orbit(theta, k, M_pri, plx, t_ref) -> (orbit, M_sec)
 
 Form that takes the data reference epoch explicitly. Preferred over
-the no-`t_ref` form — the no-`t_ref` form assumes `t_ref = 0` and is
-only correct when `parametrization.time = :Tp` (so the time anchor is
-already a Tp).
+the no-`t_ref` form, which assumes `t_ref = 0` and so is wrong under
+`parametrization.time = :Mo`.
 """
 function _planet_orbit(theta::Theta, k::Int, M_pri::Real, plx::Real,
                        t_ref::Real)
@@ -626,8 +623,8 @@ function _planet_orbit(theta::Theta, k::Int, M_pri::Real, plx::Real,
     # `clamp` keeps e itself, partials included, at e = 0, where
     # `max(e, zero(e))` returned the constant and lost ∂/∂e.
     e_safe = _anomaly_e(e)
-    time_kind = theta.params.config.parametrization.time
-    Tp = _t_anchor_to_tp(time_kind, t_anc, P, e_safe, ω, t_ref)
+    pc = theta.params.config.parametrization
+    Tp = anchor_to_tp(pc.time, t_anc, P, e_safe, ω, t_ref, pc.t_ref_c)
     # Get M_sec via the parametrization-aware accessor: in :K_driven
     # this internally inverts the mass function from the sampled K;
     # in :M_sec_driven it reads the directly-sampled value.
@@ -659,15 +656,4 @@ function _planet_orbit(theta::Theta, k::Int, M_pri::Real, plx::Real,
     M_sec = planet_M_sec(theta, k)
     orb = build_orbit(P, e_safe, ω, Ω, inc, M_pri, M_sec, Tp, plx)
     return orb, M_sec
-end
-
-@inline function _t_anchor_to_tp(time_kind::Symbol, t_anc::Real, P::Real,
-                                  e::Real, ω::Real, t_ref::Real)
-    if time_kind === :Mo
-        return mo_to_tp(t_anc, P, t_ref)
-    elseif time_kind === :Tp
-        return t_anc
-    else  # :Tc
-        return tc_to_tp(t_anc, P, e, ω)
-    end
 end

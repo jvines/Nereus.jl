@@ -22,8 +22,8 @@ function _warn_repeating_time_window(priors, max_kplanet::Int, time::Symbol)
               "likelihood repeats every period, so that window holds up to " *
               "$(floor(Int, (hi - lo) / P_min)) identical copies of the orbit; an " *
               "ensemble sampler cannot move between them and will not converge. " *
-              "Use the Mo parametrization (time = \"Mo\", the default), or give " *
-              "$tname a prior no wider than one period."
+              "Use time = \"Mo\" (the default), time = \"phic\" for a transiting " *
+              "planet, or give $tname a prior no wider than one period."
     end
     return nothing
 end
@@ -159,6 +159,16 @@ function Params(;
             "covariance at fixed jitter; GP/AR/MA/activity models violate " *
             "that. Sample γ explicitly (marginalize_gamma=false) when using " *
             "RV-channel noise."))
+    end
+
+    # φ_c is measured from an epoch of the data being fitted. It is fixed here,
+    # with the parametrization, so it travels with every Theta: a likelihood
+    # evaluated on a subset of the data (LOO, PPC) reads φ_c the same way.
+    if parametrization.time === :phic && isnan(parametrization.t_ref_c)
+        data === nothing && throw(ArgumentError(
+            "time = :phic measures the transit phase from an epoch of the data; " *
+            "pass `data`, or set `t_ref_c` in the ParametrizationConfig"))
+        parametrization = _with_t_ref_c(parametrization, phic_reference_epoch(data))
     end
 
     # Build config with placeholder priors for default generation

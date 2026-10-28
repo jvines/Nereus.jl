@@ -160,6 +160,7 @@ function build_target(;
         first_spec = first(values(planets))
         ks = first_spec isa NamedTuple ? keys(first_spec) : ()
         if      :Tc in ks; :Tc
+        elseif  :phic in ks; :phic
         elseif  :Tp in ks; :Tp
         else                :Mo
         end

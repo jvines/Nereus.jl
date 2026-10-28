@@ -19,8 +19,7 @@ function _rm_curve_at(theta, data, t_grid)
         P = Float64(planet_P(theta, k)); e, w = planet_e_w(theta, k)
         e = clamp(Float64(e), 0.0, 0.999); w = Float64(w)
         ta = Float64(planet_time_anchor(theta, k))
-        Tp = param.time === :Mo ? t_ref - ta * P / (2π) :
-             param.time === :Tp ? ta : tc_to_tp(ta, P, e, w)
+        Tp = anchor_to_tp(param.time, ta, P, e, w, t_ref, param.t_ref_c)
         push!(Ps, P); push!(es, e); push!(ws, w); push!(Tps, Tp)
     end
     n_rm, st = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
@@ -34,9 +33,7 @@ function _planet_tc_P(theta, data, k)
     P = Float64(planet_P(theta, k)); e, w = planet_e_w(theta, k)
     e = clamp(Float64(e), 0.0, 0.999); w = Float64(w)
     ta = Float64(planet_time_anchor(theta, k))
-    Tc = param.time === :Tc ? ta :
-         param.time === :Tp ? tp_to_tc(ta, P, e, w) :
-         tp_to_tc(data.t_ref - ta * P / (2π), P, e, w)
+    Tc = anchor_to_tc(param.time, ta, P, e, w, data.t_ref, param.t_ref_c)
     return Tc, P
 end
 
@@ -61,7 +58,7 @@ function plot_rm(chains, params, data;
         # winning-model best-lp reference theta (same selection as rv_timeseries)
         chain_names = Set(names(chains, :parameters))
         if :n_planets in chain_names
-            np_all = vec(Array(chains[:n_planets])); modal_np = _mode_int_local(np_all)
+            np_all = _draws(chains, :n_planets); modal_np = _mode_int_local(np_all)
             active_idx = findall(np_all .== modal_np)
             isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
             td_state = winning_td_state(chains, params, active_idx, modal_np)

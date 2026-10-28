@@ -143,23 +143,39 @@ function run_job(cfg::AbstractDict)
         end
         _warn_unmatched_plot_patterns(plot_paths, figs)
 
+        # Everything from here to summary.json is one `post-fit` progress bar:
+        # a line names each stage as it starts, and `stage=done` comes only
+        # once summary.json is written. The plot bar reaching 100% says the
+        # figures are done, not the job -- after a production fit's last plot
+        # the bridge bootstrap alone ran another hour, with nothing printed.
+        show_pf = Bool(_get(_get(cfg, :output; default = Dict()), :show_progress;
+                            default = true))
+        pf = _PostFit(("ppc", "detection_limits", "loo", "fit_health", "diagnostics",
+                       "summary", "evidence", "science", "write"); enabled = show_pf,
+                      release = _large_chain(chains))
+
         # --- Posterior predictive checks (default on; fail-soft) -------
+        _postfit_stage!(pf, "ppc")
         _run_ppc!(cfg, chains, params, data, out_dir, summary)
 
         # --- Detection limits (PT samplers only; fail-soft) ------------
+        _postfit_stage!(pf, "detection_limits")
         _run_detection_limits!(cfg, chains, params, data, out_dir, summary)
 
         # --- PSIS-LOO / WAIC (sampler-agnostic; fail-soft) -------------
+        _postfit_stage!(pf, "loo")
         _run_loo!(cfg, chains, params, data, result, summary)
 
         # --- Post-fit health guard (sampler-agnostic; fail-soft) -------
         # Flags silently-wrong posteriors (disjoint modes, railed bounds,
         # corrupt log-post) as a logged warning + summary entry. Never
         # alters the chains or the rest of the output.
+        _postfit_stage!(pf, "fit_health")
         _run_fit_health!(cfg, chains, params, summary; sampled_windows)
 
         # --- Build summary ---------------------------------------------
         # Run health, per engine — same harvest fit_* gets.
+        _postfit_stage!(pf, "diagnostics")
         try
             summary["diagnostics"] = sampler_diagnostics(
                 String(_get(_get(cfg, :sampler; default = Dict()), :name;
@@ -167,15 +183,18 @@ function run_job(cfg::AbstractDict)
         catch err
             summary["diagnostics"] = Dict{String,Any}("error" => sprint(showerror, err))
         end
+        _postfit_stage!(pf, "summary")
         _populate_summary!(summary, result, params, chains)
-        _augment_evidence!(summary, params, data, chains)
+        _postfit_stage!(pf, "evidence")
+        bridge_t = Dict{String, Any}()
+        _augment_evidence!(summary, params, data, chains;
+                           show_progress = show_pf, timings = bridge_t)
+        _postfit_stage!(pf, "science")
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
         # Authoritative science contract: conditioned, unit-tagged fitted/derived
-        # + model_selection + run_info, and the multi-format tables. Supersedes
-        # the legacy unconditioned `params` block (which is inactive-slot junk in
-        # a trans-dim run), so drop it.
-        delete!(summary, "params")
+        # + model_selection + run_info, and the multi-format tables. There is no
+        # unconditioned `params` block (inactive-slot junk in a trans-dim run).
         # The star block, σ's included. This read T_eff off `params.config`,
         # which has no such field, and passed nothing else: T_eq, insolation,
         # TSM and ESM were never computed, and every derived error bar carried
@@ -190,8 +209,11 @@ function run_job(cfg::AbstractDict)
 
         summary["elapsed_sec"] = time() - t0
         summary["config_path"] = config_path_of(cfg)
+        summary["timing"] = _postfit_timing(pf, bridge_t)
 
+        _postfit_stage!(pf, "write")
         _write_summary(out_dir, summary)
+        _postfit_done!(pf)
         return summary
     catch err
         @error "Nereus.run_job failed" exception = (err, catch_backtrace())
@@ -264,15 +286,15 @@ const _KNOWN_PLANET_MODES   = ("RV_ONLY", "PM_ONLY", "RVPM", "RVAS",
                                 "PM_DT")                 # Doppler shadow, no velocities
 const _KNOWN_PARAMETRIZATIONS = (
     mass = ("K_driven", "M_sec_driven", "a_driven"),
-    time = ("Tp", "Tc", "Mo"),
+    time = ("Tp", "Tc", "Mo", "phic"),
     ew   = ("sesinw", "ew"),
     geom = ("b_rr", "b_r"),
 )
 const _KNOWN_STABILITY      = ("none", "amd", "gladman")
-const _KNOWN_PRIORS         = ("UniformPrior", "LogUniformPrior",
-                                "ModJeffreysPrior", "NormalPrior",
-                                "FixedPrior", "SinePrior", "BetaPrior",
-                                "WrappedUniformPrior")
+# Prior `type` names are checked with `is_prior_name`, against PRIOR_ALIASES
+# (src/priors.jl): "NormalPrior", "normal", "gaussian", "norm" are one prior.
+_unknown_prior_hint() =
+    "known: $(prior_names()), or any spelling in Nereus.PRIOR_ALIASES"
 # Valid `noise_models[].kind` values. Derived from _NOISE_TYPES (defined
 # further down, so this is a function, not a const) because the hand-written
 # tuple this replaced had drifted: it omitted ErrorScale, NightlyOffset,
@@ -424,9 +446,9 @@ function _validate_config(cfg::AbstractDict)
     if _has(cfg, :priors)
         for (name, spec) in _get(cfg, :priors)
             _has(spec, :type) || (push!(errs, "priors[`$name`] missing `type`"); continue)
-            ptype = String(_get(spec, :type))
-            ptype in _KNOWN_PRIORS || push!(errs,
-                "priors[`$name`].type=`$ptype` unknown (known: $(join(_KNOWN_PRIORS, ", ")))")
+            ptype = string(_get(spec, :type))
+            is_prior_name(ptype) || push!(errs,
+                "priors[`$name`].type=`$ptype` unknown ($(_unknown_prior_hint()))")
         end
     end
 
@@ -446,10 +468,10 @@ function _validate_config(cfg::AbstractDict)
             if !_has(pr, :type)
                 push!(errs, "model.external_priors[$i].prior missing `type`")
             else
-                pt = String(_get(pr, :type))
-                pt in _KNOWN_PRIORS || push!(errs,
+                pt = string(_get(pr, :type))
+                is_prior_name(pt) || push!(errs,
                     "model.external_priors[$i].prior.type=`$pt` unknown " *
-                    "(known: $(join(_KNOWN_PRIORS, ", ")))")
+                    "($(_unknown_prior_hint()))")
             end
         end
     end
@@ -1032,7 +1054,7 @@ const _MASS_MODE = Dict(
     "K_driven" => :K_driven, "M_sec_driven" => :M_sec_driven,
     "a_driven" => :a_driven,
 )
-const _TIME_ANCHOR = Dict("Tp" => :Tp, "Tc" => :Tc, "Mo" => :Mo)
+const _TIME_ANCHOR = Dict("Tp" => :Tp, "Tc" => :Tc, "Mo" => :Mo, "phic" => :phic)
 const _EW_PARAM   = Dict("sesinw" => :sesinw, "ew" => :ew)
 const _GEOM_PARAM = Dict("b_rr" => :b_rr, "b_r" => :b_r)
 const _STAB       = Dict("none" => :none, "amd" => :amd, "gladman" => :gladman)
@@ -1085,6 +1107,9 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         # prior (default_priors.jl); an informative override arrives via
         # ExternalPrior(:rho_s, ...).
         use_rho_s = Bool(_get(par, :use_rho_s; default = false)),
+        # Epoch the transit phase is measured from (time = "phic"). Absent:
+        # Params takes the median photometric time.
+        t_ref_c = Float64(_get(par, :t_ref_c; default = NaN)),
     )
 
     ic = InstrumentConfig(rv = inst_names_rv, pm = inst_names_pm,
@@ -1191,21 +1216,35 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
 end
 
 # ---- Priors -----------------------------------------------------------
-const _PRIOR_TYPES = Dict(
-    "UniformPrior"     => UniformPrior,
-    "LogUniformPrior"  => LogUniformPrior,
-    "ModJeffreysPrior" => ModJeffreysPrior,
-    "NormalPrior"      => NormalPrior,
-    "FixedPrior"       => FixedPrior,
-    "SinePrior"        => SinePrior,
-    "BetaPrior"        => BetaPrior,
-    "WrappedUniformPrior" => WrappedUniformPrior,
+# A truncnorm states its bounds: `[mu, sigma]` alone is refused rather than
+# silently left untruncated.
+function _truncnorm_from_args(args...)
+    length(args) == 4 || throw(ArgumentError(
+        "a truncnorm prior takes args [mu, sigma, lo, hi]; got $(length(args)) " *
+        "value(s). Without bounds use \"normal\"."))
+    return NormalPrior(args...)
+end
+
+# Keyed by the canonical names of PRIOR_ALIASES (src/priors.jl); `type` is
+# resolved through `canonical_prior`, so every alias reaches its constructor.
+const _PRIOR_TYPES = Dict{Symbol, Any}(
+    :uniform        => UniformPrior,
+    :normal         => NormalPrior,
+    :truncnorm      => _truncnorm_from_args,
+    :loguniform     => LogUniformPrior,
+    :modjeffreys    => ModJeffreysPrior,
+    :fixed          => FixedPrior,
+    :sine           => SinePrior,
+    :beta           => BetaPrior,
+    :wrappeduniform => WrappedUniformPrior,
 )
+
+_prior_constructor(name) = _PRIOR_TYPES[canonical_prior(name)]
 
 function _build_priors(priors_cfg)
     out = Dict{String, PriorSpec}()
     for (name, spec) in priors_cfg
-        T = _PRIOR_TYPES[String(_get(spec, :type; required = true))]
+        T = _prior_constructor(_get(spec, :type; required = true))
         args = collect(_get(spec, :args; default = Any[]))
         out[String(name)] = T(args...)
     end
@@ -1215,7 +1254,7 @@ end
 function _build_external_prior(spec)
     q = Symbol(_get(spec, :quantity; required = true))
     pr = _get(spec, :prior; required = true)
-    T = _PRIOR_TYPES[String(_get(pr, :type; required = true))]
+    T = _prior_constructor(_get(pr, :type; required = true))
     args = collect(_get(pr, :args; default = Any[]))
     # :ecc is per-planet, :rho_s is global; default from the quantity so a
     # config cannot silently pair the wrong scope with the right prior.
@@ -2459,7 +2498,12 @@ end
 # from the same params and data. The chains are unchanged; only the evidence
 # block gains `bridge` (and `reference_path`), and `reported` is upgraded to
 # bridge when it is usable.
-function _augment_evidence!(summary, params, data, chains)
+#
+# `show_progress` prints bridge_evidence's progress lines; `timings`, a
+# dictionary, receives its stage record (see `bridge_evidence`) and the time
+# the ESS guard took (`ess`).
+function _augment_evidence!(summary, params, data, chains;
+                            show_progress::Bool = false, timings = nothing)
     try
         ev = get(summary, "evidence", nothing)
         ev isa AbstractDict || return
@@ -2469,11 +2513,12 @@ function _augment_evidence!(summary, params, data, chains)
         for c in chain_syms
             sc = String(c)
             (sc == "n_planets" || startswith(sc, "noise_active_")) || continue
-            length(unique(vec(Array(chains[c])))) > 1 && return
+            length(unique(_draws(chains, c))) > 1 && return
         end
         tgt = NereusTarget(params, data; unconstrained = true)
         tgt.transform === nothing && return
-        b = bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42)
+        b = bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42,
+                            show_progress = show_progress, timings = timings)
         (b.converged && isfinite(b.log_z)) || return
         ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
                             "overlap" => Float64(b.overlap))
@@ -2483,9 +2528,11 @@ function _augment_evidence!(summary, params, data, chains)
         # when the chain actually supports it.
         d = length(params.layout.unfrozen_names)
         need = d + d * (d + 1) ÷ 2
-        ess = try
-            minimum(filter(isfinite, vec(MCMCChains.ess(chains)[:, :ess])))
-        catch; NaN end
+        ess = _bridge_stage!(timings, "ess") do
+            try
+                minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
+            catch; NaN end
+        end
         if isfinite(ess) && ess >= need
             summary["log_z"] = Float64(b.log_z)
             ev["reported"] = "bridge"
@@ -2500,6 +2547,116 @@ function _augment_evidence!(summary, params, data, chains)
     return
 end
 
+# =====================================================================
+# Post-fit progress
+# =====================================================================
+
+"""
+    _PostFit(stages; enabled = true, release = false)
+
+The post-fit work of a fit -- everything after the sampler and the plots -- as
+one progress bar, `post-fit`, and the wall time of each stage. Shared by
+run_job and the fit_* route.
+
+`_postfit_stage!(pf, name)` starts stage `name`, `_postfit_done!(pf)` ends the
+last one, and each prints its line at once (`force`; never throttled), so the
+last line printed while a stage runs names that stage, however long it takes.
+Off a TTY that is one line per event:
+
+    post-fit | ▕████████████████░░░░░░░░▏ | 6/9 (66.7%) | stage=evidence | elapsed 41s
+    post-fit | ▕████████████████████████▏ | 9/9 (100.0%) | stage=done | elapsed 3m12s
+
+`k/N` counts the stages FINISHED before the named one starts. `done` is
+printed only after `summary.json` has been written: the fit's outputs are all
+on disk by then, and not before. Where the fit_* route fails to write it (it
+records the error and returns) the last line says `stage=write_failed`
+instead. There is no ETA: the stages differ by orders of magnitude in cost.
+
+Stages that report progress of their own print their lines in between
+(`bridge posterior`, `bridge proposal`, `bridge solve`, `bridge bootstrap`
+during `evidence`).
+
+With `release`, each stage starts with `_release_memory()`: what the stages
+before it dropped goes back to the system first. run_job and the fit_* route
+switch it on for a big chain (`_large_chain`).
+"""
+mutable struct _PostFit
+    pb::ProgressBar
+    stages::Vector{String}
+    k::Int
+    t_stage::Float64
+    seconds::Dict{String, Float64}
+    release::Bool
+end
+
+_PostFit(stages; enabled::Bool = true, release::Bool = false) =
+    _PostFit(ProgressBar("post-fit"; total = length(stages), enabled = enabled, eta = false),
+             collect(String, stages), 0, time(), Dict{String, Float64}(), release)
+
+"""
+    _release_memory()
+
+A full collection, then, on glibc, the freed pages handed back to the system
+(`malloc_trim`). Julia frees a large array to `malloc`, and glibc keeps what it
+is given back for reuse instead of returning it, so a process' resident memory
+stays at its high-water mark -- the sampler's, the plots' -- through every
+stage after it. Elsewhere (macOS, musl) only the collection runs.
+"""
+function _release_memory()
+    GC.gc()
+    if Sys.islinux()
+        h = Base.Libc.Libdl.dlopen_e("libc.so.6")
+        f = h == C_NULL ? C_NULL : Base.Libc.Libdl.dlsym_e(h, :malloc_trim)
+        f == C_NULL || ccall(f, Cint, (Csize_t,), 0)
+    end
+    return nothing
+end
+
+# Post-fit releases memory between its stages (`_PostFit(...; release)`) when
+# the chain is big enough for its garbage to matter: a draw array of 128 MiB or
+# more, about a million draws of a dozen parameters. Below that a collection per
+# stage costs more than it frees.
+_large_chain(chains) = chains isa MCMCChains.Chains &&
+    8 * size(chains, 1) * size(chains, 2) * size(chains, 3) >= 128 * 2^20
+
+function _postfit_close!(pf::_PostFit)
+    pf.k > 0 && (pf.seconds[pf.stages[pf.k]] = time() - pf.t_stage)
+    return pf
+end
+
+function _postfit_stage!(pf::_PostFit, name::AbstractString)
+    _postfit_close!(pf)
+    k = findfirst(==(name), pf.stages)
+    k === nothing && throw(ArgumentError("unknown post-fit stage `$name`"))
+    # What the last stage dropped goes back to the system before the next one
+    # allocates: otherwise each stage's garbage stacks on the last's.
+    pf.release && _release_memory()
+    pf.k = k
+    pf.t_stage = time()
+    update!(pf.pb; n_done = k - 1, fields = (:stage => String(name),), force = true)
+    # On a terminal a bar redraws its line in place, and a stage's own bars
+    # (the bridge's) would draw over this one. Keep each stage's line.
+    (pf.pb.enabled && pf.pb.use_tty) && (println(stdout); flush(stdout))
+    return pf
+end
+
+function _postfit_done!(pf::_PostFit; stage::AbstractString = "done")
+    _postfit_close!(pf)
+    pf.k = 0
+    update!(pf.pb; n_done = length(pf.stages), fields = (:stage => String(stage),), force = true)
+    finish!(pf.pb)
+    return pf
+end
+
+# summary["timing"]: the seconds of each post-fit stage so far, up to the one
+# running now (taken just before `write`, which therefore has no entry), and the
+# bridge's record.
+function _postfit_timing(pf::_PostFit, bridge_timings)
+    t = Dict{String, Any}("post_fit" => copy(_postfit_close!(pf).seconds))
+    isempty(bridge_timings) || (t["bridge"] = bridge_timings)
+    return t
+end
+
 """
     _n_planets_posterior!(summary, chains)
 
@@ -2510,7 +2667,7 @@ leaves the summary as it was. Shared by run_job and the fit_* route.
 function _n_planets_posterior!(summary, chains)
     chains isa MCMCChains.Chains || return summary
     :n_planets in names(chains, :parameters) || return summary
-    np = Int.(vec(Array(chains[:n_planets])))
+    np = Int.(_draws(chains, :n_planets))
     counts = Dict{String, Float64}()
     for v in np
         counts[string(v)] = get(counts, string(v), 0.0) + 1
@@ -2575,63 +2732,12 @@ function _populate_summary!(summary, result, params, chains)
     end
 
     _n_planets_posterior!(summary, chains)
-    chain_names = Set(names(chains, :parameters))
-
-    # Per-parameter median + 1/2/3-σ
-    params_summary = Dict{String, Any}()
-    for name in params.layout.unfrozen_names
-        sym = Symbol(name)
-        sym in chain_names || continue
-        v = vec(Array(chains[sym]))
-        params_summary[name] = Dict{String, Float64}(
-            "median" => median(v),
-            "lo16"   => quantile(v, 0.16),
-            "hi84"   => quantile(v, 0.84),
-            "lo2sig" => quantile(v, 0.025),
-            "hi2sig" => quantile(v, 0.975),
-            "lo3sig" => quantile(v, 0.0015),
-            "hi3sig" => quantile(v, 0.9985),
-        )
-    end
-    summary["params"] = params_summary
-
-    # --- Derived parameters: physical quantities (M_p, a, T_eq, ρ_p,
-    # TSM, ESM, …) computed from the posterior. One block per planet
-    # under summary["derived"]["k$k"] with the same median/lo16/hi84/2σ/3σ
-    # schema as `params`. Skipped if stellar params not set in config.
-    M_s = params.config.M_s
-    R_s = params.config.R_s
-    T_eff = hasproperty(params.config, :T_eff) ? params.config.T_eff : NaN
-    if !isnan(M_s) && M_s > 0
-        try
-            derived_per_planet = compute_derived(chains, params;
-                                                  M_s = M_s,
-                                                  R_s = isnan(R_s) ? nothing : R_s,
-                                                  T_eff = (isnan(T_eff) || T_eff <= 0) ?
-                                                            nothing : T_eff)
-            derived_summary = Dict{String, Any}()
-            for (k, dp) in enumerate(derived_per_planet)
-                per_planet = Dict{String, Any}()
-                for (nm, vs) in dp.values
-                    finite = filter(isfinite, vs)
-                    isempty(finite) && continue
-                    per_planet[nm] = Dict{String, Float64}(
-                        "median" => median(finite),
-                        "lo16"   => quantile(finite, 0.16),
-                        "hi84"   => quantile(finite, 0.84),
-                        "lo2sig" => quantile(finite, 0.025),
-                        "hi2sig" => quantile(finite, 0.975),
-                        "lo3sig" => quantile(finite, 0.0015),
-                        "hi3sig" => quantile(finite, 0.9985),
-                    )
-                end
-                isempty(per_planet) || (derived_summary["k$k"] = per_planet)
-            end
-            isempty(derived_summary) || (summary["derived"] = derived_summary)
-        catch err
-            @warn "compute_derived failed; skipping derived block in summary" exception = err
-        end
-    end
+    # No per-parameter or derived quantiles here. This built an unconditioned
+    # `params` block, which run_job deleted, and a `derived` block, which
+    # science_summary's replaced: 7 sorts of every column and a second
+    # compute_derived over every draw, 12 s at 5.8 million draws, none of it
+    # reaching summary.json.
+    return summary
 end
 
 function _write_summary(out_dir, summary)

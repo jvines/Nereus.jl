@@ -91,8 +91,8 @@ function detection_limits(chains, params::Params;
     K_name in chain_names ||
         throw(ArgumentError("chain has no column $K_name"))
 
-    P_vals = Float64.(vec(Array(chains[Symbol(P_name)])))
-    K_vals = Float64.(vec(Array(chains[Symbol(K_name)])))
+    P_vals = Float64.(_draws(chains, Symbol(P_name)))
+    K_vals = Float64.(_draws(chains, Symbol(K_name)))
 
     # Trans-dim: keep the draws in which slot `planet` is live -- from
     # `planet_active_<k>`, not `n_planets ≥ k`, which after a death mid-list
@@ -278,7 +278,7 @@ function detectability(chains, params::Params, data;
     for nm in names_
         s = string(nm)
         s in chain_names || continue
-        cols[s] = Float64.(vec(Array(chains[Symbol(s)])))
+        cols[s] = Float64.(_draws(chains, Symbol(s)))
     end
     isempty(cols) && throw(ArgumentError("no fitted parameter of `params` is in the chain"))
     n_draw = length(first(values(cols)))

@@ -180,7 +180,7 @@ function plot_ttv_oc(chains, data::Data, params::Params;
 
     # 2. Predicted Tc grid
     P_a  = theta_med.values[params.layout.name_to_idx["P_k$(planet_a_k)"]]
-    Tc_a = theta_med.values[params.layout.name_to_idx["Tc_k$(planet_a_k)"]]
+    Tc_a = _ttv_Tc(theta_med.values, params, planet_a_k)
     if tcs_predicted === nothing
         n_lo = ceil(Int,  (minimum(data.t_phot) + 0.1 - Tc_a) / P_a)
         n_hi = floor(Int, (maximum(data.t_phot) - 0.1 - Tc_a) / P_a)

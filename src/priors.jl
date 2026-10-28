@@ -440,6 +440,71 @@ function FixedPrior(value::Real)
 end
 
 # ---------------------------------------------------------------------
+# Prior names: the spellings a config or a prior dict may use
+# ---------------------------------------------------------------------
+
+"""
+    PRIOR_ALIASES
+
+Every accepted spelling of a prior's `type`, keyed by canonical name. The
+`run_job` config (`{"type": …, "args": […]}`) and the prior dicts of the
+`fit_*` API and the Python client (`{"type": …, "mu": …, "sigma": …}`) both
+resolve names through it, so `"gaussian"`, `"norm"`, `"Normal"` and
+`"NormalPrior"` are the same prior.
+
+Matching ignores case, spaces, `_`, `-`, `.` and a trailing `prior`:
+`"log_uniform"`, `"Log-Uniform"` and `"LogUniformPrior"` are all `loguniform`.
+"""
+const PRIOR_ALIASES = (
+    uniform        = ("uniform", "unif", "flat", "box", "boxcar", "tophat"),
+    normal         = ("normal", "norm", "gaussian", "gauss"),
+    truncnorm      = ("truncnorm", "truncnormal", "truncatednormal",
+                      "truncatednorm", "truncgauss", "truncgaussian",
+                      "truncatedgaussian"),
+    loguniform     = ("loguniform", "logunif", "logflat", "jeffreys", "jeffrey",
+                      "reciprocal"),
+    modjeffreys    = ("modjeffreys", "modjeffrey", "modifiedjeffreys",
+                      "modifiedjeffrey"),
+    fixed          = ("fixed", "fix", "pinned", "delta", "deltafunction",
+                      "dirac", "constant"),
+    sine           = ("sine", "sin", "sini", "isotropic"),
+    beta           = ("beta",),
+    wrappeduniform = ("wrappeduniform", "wrapped", "circularuniform",
+                      "periodicuniform"),
+)
+
+function _prior_key(name)
+    k = replace(lowercase(strip(string(name))), r"[\s_\-.]" => "")
+    return endswith(k, "prior") ? String(chop(k; tail = 5)) : k
+end
+
+const _PRIOR_BY_ALIAS = Dict{String, Symbol}(
+    a => c for (c, as) in pairs(PRIOR_ALIASES) for a in as)
+
+"`true` when `name` is any spelling in `PRIOR_ALIASES`."
+is_prior_name(name) = haskey(_PRIOR_BY_ALIAS, _prior_key(name))
+
+"The canonical prior names, comma-separated, for error messages."
+prior_names() = join(keys(PRIOR_ALIASES), ", ")
+
+"""
+    canonical_prior(name) -> Symbol
+
+The canonical name (`:uniform`, `:normal`, `:truncnorm`, …) of any spelling in
+`PRIOR_ALIASES`. An unknown name throws an `ArgumentError` that lists every
+accepted spelling.
+"""
+function canonical_prior(name)
+    c = get(_PRIOR_BY_ALIAS, _prior_key(name), nothing)
+    c === nothing || return c
+    table = join(("  $c: " * join(as, ", ") for (c, as) in pairs(PRIOR_ALIASES)),
+                 "\n")
+    throw(ArgumentError(
+        "unknown prior type $(repr(string(name))). Accepted names (case, " *
+        "spaces, `_`, `-` and a trailing `Prior` are ignored):\n" * table))
+end
+
+# ---------------------------------------------------------------------
 # Interface methods
 # ---------------------------------------------------------------------
 
@@ -670,6 +735,7 @@ const PHYSICAL_BOUNDS = Dict{String, Tuple{Float64, Float64}}(
     "ecc"     => (0.0, 1.0),       # astroEMPEROR alias for e
     "w"       => (-2π, 2π),        # Argument of periastron [rad]; periodic
     "Mo"      => (-2π, 2π),        # Mean anomaly [rad]
+    "phic"    => (-2π, 2π),        # Transit phase 2π(Tc − t_ref_c)/P [rad]
     "sesinw"  => (-1.0, 1.0),      # √e sin ω
     "secosw"  => (-1.0, 1.0),      # √e cos ω
     "esinw"   => (-1.0, 1.0),      # e sin ω

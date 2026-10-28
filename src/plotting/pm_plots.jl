@@ -25,7 +25,7 @@ function plot_pm_timeseries(chains, params, data;
         # plus modal noise pattern). See rv_plots.jl for rationale.
         chain_names = Set(names(chains, :parameters))
         if :n_planets in chain_names
-            np_all = vec(Array(chains[:n_planets]))
+            np_all = _draws(chains, :n_planets)
             modal_np = _mode_int_local(np_all)
             active_idx = findall(np_all .== modal_np)
             isempty(active_idx) && (active_idx = 1:_n_flat_draws(chains))
@@ -156,7 +156,7 @@ function plot_pm_phasefold(chains, params, data;
         # modal live slots, modal noise). If slot `planet` is not live in it,
         # the transit is not part of the winning model and we skip (below).
         if :n_planets in chain_names
-            np_all = vec(Array(chains[:n_planets]))
+            np_all = _draws(chains, :n_planets)
             modal_np = _mode_int_local(np_all)
             active_idx = findall(np_all .== modal_np)
             isempty(active_idx) && (active_idx = 1:_n_flat_draws(chains))
@@ -194,8 +194,9 @@ function plot_pm_phasefold(chains, params, data;
         P  = planet_P(theta_med, planet)
         ta = planet_time_anchor(theta_med, planet)
         parametrization = params.config.parametrization
-        t0 = parametrization.time === :Tc ? ta :
-             parametrization.time === :Tp ? ta : data.t_ref
+        t0 = parametrization.time === :Tc   ? ta :
+             parametrization.time === :phic ? phic_to_tc(ta, P, parametrization.t_ref_c) :
+             parametrization.time === :Tp   ? ta : data.t_ref
 
         phases = phase_fold(data.t_phot, P, t0)
 
@@ -261,7 +262,7 @@ function plot_pm_phasefold(chains, params, data;
                 mat = Matrix{Float64}(undef, length(active_idx),
                                               length(param_syms))
                 for (j, sym) in enumerate(param_syms)
-                    mat[:, j] = vec(Array(chains[sym]))[active_idx]
+                    mat[:, j] = _draws(chains, sym)[active_idx]
                 end
                 MCMCChains.Chains(mat, param_syms)
             end

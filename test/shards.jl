@@ -147,12 +147,21 @@ const TEST_UNITS = [
     (name = "test_transit_window_search.jl", seconds = 4, files = ["test_transit_window_search.jl"]),
     (name = "test_transit_window_tight.jl", seconds = 17, files = ["test_transit_window_tight.jl"]),
     (name = "test_transit_window_superset.jl", seconds = 38, files = ["test_transit_window_superset.jl"]),
-    (name = "test_transit_occultation.jl", seconds = 22, files = ["test_transit_occultation.jl"]),
+    (name = "test_transit_occultation.jl", seconds = 27, files = ["test_transit_occultation.jl"]),
     (name = "test_transit_window_contact.jl", seconds = 27, files = ["test_transit_window_contact.jl"]),
     (name = "test_transit_flux.jl", seconds = 4, files = ["test_transit_flux.jl"]),
     # The bridge-sampling evaluator through the workspace likelihoods.
     (name = "test_bridge_workspace.jl", seconds = 14, files = ["test_bridge_workspace.jl"]),
     (name = "test_bridge_threading.jl", seconds = 3, files = ["test_bridge_threading.jl"]),
+    # The bridge solver and parallel bootstrap against the serial ones they
+    # replaced, and the chain's :lp standing in for evaluations.
+    (name = "test_bridge_bootstrap.jl", seconds = 18, files = ["test_bridge_bootstrap.jl"]),
+    # ESS, R-hat and quantiles on long chains, per parameter on threads.
+    (name = "test_postfit_diagnostics.jl", seconds = 10, files = ["test_postfit_diagnostics.jl"]),
+    # run_job's and fit_*'s post-fit stage lines and timings.
+    (name = "test_postfit_progress.jl", seconds = 83, files = ["test_postfit_progress.jl"]),
+    # The transit-phase time anchor (time = :phic) against the Tc one.
+    (name = "test_phic_anchor.jl", seconds = 3, files = ["test_phic_anchor.jl"]),
     # The workspace and allocating likelihoods at e up to 0.99999.
     (name = "test_high_e_workspace.jl", seconds = 15, files = ["test_high_e_workspace.jl"]),
     # Evidence estimators that do not temper from the prior, and the Rajpaul
@@ -165,6 +174,7 @@ const TEST_UNITS = [
     (name = "test_sampler_determinism.jl", seconds = 252, files = ["test_sampler_determinism.jl"]),
     (name = "test_bls_informed_phot.jl", seconds = 2, files = ["test_bls_informed_phot.jl"]),
     (name = "test_evidence_curved.jl", seconds = 6, files = ["test_evidence_curved.jl"]),
+    (name = "test_evidence_gaussian.jl", seconds = 2, files = ["test_evidence_gaussian.jl"]),
     (name = "test_evidence_headline.jl", seconds = 8, files = ["test_evidence_headline.jl"]),
     (name = "test_mode_laplace.jl", seconds = 6, files = ["test_mode_laplace.jl"]),
     (name = "verify_rajpaul_kernel_fd.jl", seconds = 1, files = ["verify_rajpaul_kernel_fd.jl"]),

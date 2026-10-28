@@ -54,6 +54,47 @@ const _DIAG_FIELDS = (
     :target_L_lo, :target_L_hi,
 )
 
+"""
+    _diag_by_param(f, chains; kwargs...) -> ChainDataFrame
+
+`f(chains; kwargs...)` for `f` one of MCMCChains' `ess` (`kind` `:bulk` or
+`:tail`), `rhat` and `ess_rhat` (`kind` `:rank`, their default): the same
+table, from `_rank_diag_batch` (src/diagnostics/rank_diag.jl). Each
+parameter's draws are read in place and sorted once per run however many
+stages ask; the numbers are MCMCDiagnosticTools' to the bit. Anything else
+(other kinds or keywords, no `:parameters` section, values that are not plain
+Float64, a tail ESS the library would refuse) is `f(chains; kwargs...)`.
+"""
+function _diag_by_param(f, chains::MCMCChains.Chains; kwargs...)
+    is_ess = f === _MCDT.ess
+    is_ess || f === _MCDT.rhat || f === _MCDT.ess_rhat || return f(chains; kwargs...)
+    all(==(:kind), keys(kwargs)) || return f(chains; kwargs...)
+    kind = get(kwargs, :kind, is_ess ? :bulk : :rank)
+    (is_ess ? kind in (:bulk, :tail) : kind === :rank) || return f(chains; kwargs...)
+    pc = _chain_param_cols(chains)
+    pc === nothing && return f(chains; kwargs...)
+    ps, cols = pc
+    data = chains.value.data
+    r = _rank_diag_batch([() -> view(data, :, j, :) for j in cols], :split2;
+                         n_max = size(data, 1) * size(data, 3))
+    if f === _MCDT.rhat
+        return MCMCChains.ChainDataFrame("R-hat", (parameters = ps,
+                                                   rhat = [x.rhat_rank for x in r]))
+    end
+    if kind === :tail
+        all(x -> x.tail_ok, r) || return f(chains; kwargs...)
+        ess = [x.ess_tail for x in r]
+    else
+        ess = [x.ess_bulk for x in r]
+    end
+    ess_per_sec = ess ./ MCMCChains.compute_duration(chains)
+    is_ess && return MCMCChains.ChainDataFrame("ESS", (parameters = ps, ess = ess,
+                                                       ess_per_sec = ess_per_sec))
+    return MCMCChains.ChainDataFrame("ESS/R-hat", (parameters = ps, ess = ess,
+                                                   rhat = [x.rhat_rank for x in r],
+                                                   ess_per_sec = ess_per_sec))
+end
+
 """Per-parameter ESS and, when there is more than one chain, R-hat.
 
 R-hat needs at least two chains by construction. An engine that returns one
@@ -64,10 +105,10 @@ function chain_convergence(chains)
     try
         n_chains = size(chains, 3)
         per = Dict{String, Any}()
-        e_bulk = MCMCChains.ess(chains; kind = :bulk)
-        e_tail = MCMCChains.ess(chains; kind = :tail)
+        e_bulk = _diag_by_param(MCMCChains.ess, chains; kind = :bulk)
+        e_tail = _diag_by_param(MCMCChains.ess, chains; kind = :tail)
         names_ = String.(e_bulk.nt.parameters)
-        rh = n_chains >= 2 ? MCMCChains.rhat(chains).nt.rhat : nothing
+        rh = n_chains >= 2 ? _diag_by_param(MCMCChains.rhat, chains).nt.rhat : nothing
         for (i, nm) in enumerate(names_)
             entry = Dict{String, Any}("ess_bulk" => e_bulk.nt.ess[i],
                                        "ess_tail" => e_tail.nt.ess[i])

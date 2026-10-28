@@ -53,8 +53,8 @@ Every parallel-tempering sampler feeds the same
 | Sampler | Trans-dim? | log Z field | Full stack field | log Z headline |
 |---|---|---|---|---|
 | `sample_pt` | both | 2nd tuple element | — | TI+ (`pt.jl:790`) |
-| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:1158`) |
-| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:2165`) |
+| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:1157`) |
+| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:2168`) |
 | `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_whitening.jl:731`) |
 | `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | TI+ (`pt_hmc.jl:447`) |
 
@@ -274,9 +274,9 @@ When you drive Nereus via `Nereus.run_job` (the JSON/Dict
 dispatcher — see [JOB_CONFIG.md](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md)),
 every sampler result is normalised so `log_evidence` is always present,
 and the run summary surfaces it as the JSON key **`log_z`**
-(`src/runner.jl:2442`). Samplers with no evidence at all (e.g.
+(`src/runner.jl:2683`). Samplers with no evidence at all (e.g.
 `map`, `nuts`, `rjmcmc`, `moms`) return `log_evidence = NaN`
-(`runner.jl:1431`, `1437`, `1482`) and the value is written only when
+(`runner.jl:1525`, `1533`, `1579`) and the value is written only when
 finite (the JSON contract forbids raw `NaN`). Note that `pa`/`smc`
 (population annealing) and the nested family (`nested`, `nested_ins`,
 `nested_dynamic`, `daedalus`) carry their own `log_evidence` that is
@@ -285,7 +285,7 @@ population-annealing free-energy estimate, the NS family report
 Skilling/Feroz `log Z`. The
 sampler names that route through the PT evidence stack are
 `"pt"`, `"pt_emcee"`, `"transdim_pt_emcee"`,
-`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1402`–`1461`).
+`"pt_whitening"`, and `"pt_hmc"` (`src/runner.jl:1499`–`1560`).
 
 **`summary.json` carries an `evidence` block**, not just `log_z`: every
 estimator the run produced with its standard error, plus `reported` naming
@@ -311,28 +311,33 @@ the one badly mixed run (worst R-hat 3.91). If you have results from a
 `run_job` fit predating this, re-run or recompute the evidence.
 
 The same `log_z` is fed into the LOO/log-Z model-comparison summary
-(`loo_compare_log_z`, `runner.jl:2254`) so cross-run Bayes factors are
+(`loo_compare_log_z`, `runner.jl:2355`) so cross-run Bayes factors are
 consistent.
 
 ## Validation status
 
 `test/test_evidence_gaussian.jl` validates all four estimators against
 an analytic log Z (2D Gaussian likelihood × uniform-box prior, `log Z
-= −d · log(2L)`):
+= −d · log(2L)`, L = 10). The draws at each rung are exact and
+independent (the tempered posterior factorizes into one truncated normal
+per coordinate), 20 000 per rung on a 16-rung geometric ladder from
+β = 1 to 1e-4, so the test checks the estimators and not a sampler:
 
 | Estimator | Log Z | Error vs truth |
 |---|---|---|
-| TI  | -6.098 | 0.107 |
-| TI+ | -5.985 | 0.007 |
-| SS+ | -5.994 | 0.002 |
-| H+  | -5.985 | 0.007 |
+| TI  | -6.163 | 0.172 |
+| TI+ | -5.988 | 0.003 |
+| SS+ | -5.996 | 0.004 |
+| H+  | -5.988 | 0.003 |
 
-The test PASS bar (`test_evidence_gaussian.jl:264`, `283`) is each
+The test PASS bar (`test_evidence_gaussian.jl:62`, `64`) is each
 estimator within `TOL = 0.5` nats of the analytic value **and** a
-mutual spread `< 1.0` nat. All four pass; the mutual spread is ~0.11
-in log Z. The estimators are mathematically correct. The file also
-carries a regression guard for the descending-β sign flip
-(`test_evidence_gaussian.jl:288`).
+mutual spread `< 1.0` nat. All four pass; the mutual spread is ~0.18
+in log Z, nearly all of it the trapezoidal TI's discretization. On exact
+draws the estimators are correct. The file also carries a regression
+guard for the descending-β sign flip: the same draws on the ascending
+ladder give the same numbers, and log Z stays negative
+(`test_evidence_gaussian.jl:71-74`).
 
 Independent cross-validation: TI+/SS+/H+ agree with the analytic
 log Z to `< 0.01` nats on the 2D-Gaussian × box, and PT's SS+ agrees
@@ -408,11 +413,12 @@ is a bias that does not shrink with computation and cannot be tuned out.
 Bridge sampling never touches the prior end. It needs only draws you already
 have from the posterior plus a proposal you can sample and evaluate, and costs
 `n_proposal` likelihood evaluations rather than the ~1.3e7 a nested run spends
-on the same model.
+on the same model. The posterior at the draws is read off the chain's `:lp`
+(pt_emcee's is log prior + log L), once 64 of them match a full evaluation;
+for a chain without one, every draw is evaluated as well.
 
 With `p*(θ)` the unnormalised posterior, `q(θ)` a normalised proposal,
-`{θ_i} ~ p` and `{φ_j} ~ q`, the optimal bridge (Meng & Wong 1996) solves the
-fixed point
+`{θ_i} ~ p` and `{φ_j} ~ q`, the optimal bridge (Meng & Wong 1996) solves
 
 ```
            (1/N2) Σ_j  l2_j / (s1·l2_j + s2·r)
@@ -420,9 +426,12 @@ fixed point
            (1/N1) Σ_i    1   / (s1·l1_i + s2·r)
 ```
 
-and `r → Z`, iterated in logs. Unlike the harmonic-mean estimator it has finite
-variance; unlike Laplace it assumes nothing about Gaussianity — `q` only has to
-**overlap** the posterior.
+and `r → Z`. Nereus solves it in logs by safeguarded Newton (4 to 8 passes over
+the draws, `_bridge_iterate`; a bootstrap replicate, started at that root, 2 to
+5). No copy of the draws is made: they are read off the chain as each pass
+needs them, and a bootstrap resample is a count per draw. Unlike the
+harmonic-mean estimator it has finite variance; unlike Laplace it assumes
+nothing about Gaussianity — `q` only has to **overlap** the posterior.
 
 **Requirements.**
 
@@ -644,7 +653,7 @@ until it is resolved.
   `sample_pt_hmc` and `sample_pt_emcee`/`sample_pt_whitening` support
   `adapt_ladder` to re-grid β by thermodynamic length (√Var log L),
   which minimises discretisation error (`pt_hmc.jl:99`,
-  `pt_emcee.jl:987`).
+  `pt_emcee.jl:986`).
 - **Bayes factors across runs**: compute as `Δ log Z`, with σ combined
   in quadrature. Use the **same estimator** for both runs (e.g. both
   SS+). Through `run_job`, compare the `log_z` summary keys. **If either

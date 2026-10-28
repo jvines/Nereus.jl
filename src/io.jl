@@ -32,6 +32,15 @@ function save_chains(path::String, chains, params::Params;
     # Flatten only in-memory where a single draw-pool is genuinely wanted.
     n_iter_per_chain = size(chains, 1)
     n_chain_groups   = size(chains, 3)
+    # Each column goes out through one reused (iter × chain) buffer, read in
+    # place from the chain array: `Array(chains[sym])` made two copies of
+    # every column (some 90 MB each at millions of draws).
+    cube = chains.value.data
+    in_place = eltype(cube) === Float64 && ndims(cube) == 3
+    pos = Dict(n => i for (i, n) in enumerate(names(chains)))
+    buf = in_place ? Matrix{Float64}(undef, n_iter_per_chain, n_chain_groups) : nothing
+    _col(sym) = in_place ? copyto!(buf, view(cube, :, pos[sym], :)) : Array(chains[sym])
+    has = Set(chain_names)
 
     NCDatasets.Dataset(path, "c") do ds
         # Dimensions: the cube axes.
@@ -56,21 +65,21 @@ function save_chains(path::String, chains, params::Params;
         # Posterior samples — one variable per parameter
         for name in layout.unfrozen_names
             sym = Symbol(name)
-            sym in Set(chain_names) || continue
+            sym in has || continue
             v = defVar(ds, name, Float64, ("iter", "chain"))
-            v[:, :] = Array(chains[sym])
+            v[:, :] = _col(sym)
         end
 
         # Log-posterior if available
-        if :lp in Set(chain_names)
+        if :lp in has
             v = defVar(ds, "lp", Float64, ("iter", "chain"))
-            v[:, :] = Array(chains[:lp])
+            v[:, :] = _col(:lp)
         end
 
         # n_planets for trans-dim
-        if :n_planets in Set(chain_names)
+        if :n_planets in has
             v = defVar(ds, "n_planets", Float64, ("iter", "chain"))
-            v[:, :] = Array(chains[:n_planets])
+            v[:, :] = _col(:n_planets)
         end
 
         # Activity indicators for trans-dim runs. Both families are added
@@ -84,7 +93,7 @@ function save_chains(path::String, chains, params::Params;
             (startswith(s, "noise_active_") || startswith(s, "planet_active_")) ||
                 continue
             v = defVar(ds, s, Float64, ("iter", "chain"))
-            v[:, :] = Array(chains[sym])
+            v[:, :] = _col(sym)
         end
 
         # Observed data

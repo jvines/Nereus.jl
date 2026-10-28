@@ -375,7 +375,8 @@ end
     planet_time_anchor(theta, k) -> value
 
 The raw time-anchor parameter for planet `k`. Meaning depends on
-`parametrization.time` (`:Mo`, `:Tp`, or `:Tc`).
+`parametrization.time` (`:Mo`, `:Tp`, `:Tc` or `:phic`); `anchor_to_tp` and
+`anchor_to_tc` convert it.
 """
 @inline function planet_time_anchor(theta::Theta, k::Int)
     block = theta.params.layout.planet_blocks[k]

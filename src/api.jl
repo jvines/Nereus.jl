@@ -620,8 +620,8 @@ end
     _summarise_params(chains, params) -> Dict
 
 Per-parameter posterior summary: median plus asymmetric 1/2/3-sigma bounds.
-Matches what runner.jl writes into summary["params"] so the two agree and a
-client cannot tell which produced a given result.
+The six bounds come from one sorted copy of the draws (the same values as six
+`quantile` calls, which sorted it six times).
 """
 function _summarise_params(chains, params)
     out = Dict{String,Any}()
@@ -630,12 +630,13 @@ function _summarise_params(chains, params)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in names_in || continue
-        v = vec(Array(chains[sym]))
+        v = _draws(chains, sym)
+        q = quantile(v, (0.16, 0.84, 0.025, 0.975, 0.0015, 0.9985))
         out[name] = Dict{String,Float64}(
             "median" => median(v),
-            "lo16"   => quantile(v, 0.16),   "hi84"   => quantile(v, 0.84),
-            "lo2sig" => quantile(v, 0.025),  "hi2sig" => quantile(v, 0.975),
-            "lo3sig" => quantile(v, 0.0015), "hi3sig" => quantile(v, 0.9985))
+            "lo16"   => q[1], "hi84"   => q[2],
+            "lo2sig" => q[3], "hi2sig" => q[4],
+            "lo3sig" => q[5], "hi3sig" => q[6])
     end
     return out
 end
@@ -686,21 +687,32 @@ function _as_external(v::AbstractVector)
 end
 
 function _as_prior(d::AbstractDict)
-    t = lowercase(String(get(d, "type", "")))
+    haskey(d, "type") || throw(ArgumentError(
+        "a prior dict needs a `type` (one of $(prior_names())); " *
+        "got keys $(collect(keys(d)))"))
+    t = canonical_prior(d["type"])   # any spelling in PRIOR_ALIASES
     g(k, dflt=nothing) = get(d, k, dflt)
     # `lo`/`hi`, either or both, truncate a normal: a bounded quantity such as an
-    # inclination is refused a prior that reaches past its physical range.
-    if t == "normal"
-        (haskey(d, "lo") || haskey(d, "hi")) ||
-            return NormalPrior(float(g("mu")), float(g("sigma")))
+    # inclination is refused a prior that reaches past its physical range. A
+    # truncnorm without either is refused rather than left untruncated.
+    if t === :normal || t === :truncnorm
+        bounded = haskey(d, "lo") || haskey(d, "hi")
+        t === :truncnorm && !bounded && throw(ArgumentError(
+            "a truncnorm prior needs `lo` and/or `hi`; without bounds use \"normal\""))
+        bounded || return NormalPrior(float(g("mu")), float(g("sigma")))
         return NormalPrior(float(g("mu")), float(g("sigma")),
                            float(g("lo", -Inf)), float(g("hi", Inf)))
     end
-    t == "uniform"     && return UniformPrior(float(g("lo")), float(g("hi")))
-    t == "loguniform"  && return LogUniformPrior(float(g("lo")), float(g("hi")))
-    t == "fixed"       && return FixedPrior(float(g("value")))
-    t == "sine"        && return SinePrior()
-    error("unknown prior type $(repr(t)); use normal|uniform|loguniform|fixed|sine")
+    t === :uniform        && return UniformPrior(float(g("lo")), float(g("hi")))
+    t === :loguniform     && return LogUniformPrior(float(g("lo")), float(g("hi")))
+    t === :modjeffreys    && return ModJeffreysPrior(float(g("knee")), float(g("upper")))
+    t === :fixed          && return FixedPrior(float(g("value")))
+    t === :sine           && return SinePrior()
+    t === :beta           && return BetaPrior(float(g("a")), float(g("b"));
+                                              lo = float(g("lo", 0.0)),
+                                              hi = float(g("hi", 1.0)))
+    t === :wrappeduniform && return WrappedUniformPrior(float(g("lo")), float(g("hi")))
+    error("canonical prior :$t has no dict form in _as_prior")
 end
 
 "Stellar mass from the target config, or nothing if the fit never needed one."
@@ -917,14 +929,25 @@ function _finish(target, engine, stopping, output_dir; op::String,
         # --- post-fit science, the same sequence run_job runs -------------
         # Every one of these is fail-soft on its own; `science = false` skips
         # the lot, which is what you want while iterating on short chains.
+        # The same `post-fit` progress bar as run_job's (see `_PostFit`).
+        show_pf = Bool(_get(ocfg, :show_progress; default = true))
+        pf = _PostFit(science ? ("ppc", "detection_limits", "loo", "fit_health",
+                                 "evidence", "science", "write") : ("write",);
+                      enabled = show_pf, release = _large_chain(chains))
+        bridge_t = Dict{String, Any}()
         if science
             try
+                _postfit_stage!(pf, "ppc")
                 _run_ppc!(cfg, chains, target.params, target.data, output_dir, summary)
+                _postfit_stage!(pf, "detection_limits")
                 _run_detection_limits!(cfg, chains, target.params, target.data,
                                         output_dir, summary)
+                _postfit_stage!(pf, "loo")
                 _run_loo!(cfg, chains, target.params, target.data, raw, summary)
+                _postfit_stage!(pf, "fit_health")
                 _run_fit_health!(cfg, chains, target.params, summary;
                                  sampled_windows)
+                _postfit_stage!(pf, "evidence")
                 # The evidence spread, before augmenting it. `_augment_evidence!`
                 # AUGMENTS -- it returns early unless summary["evidence"] is
                 # already a Dict -- and on this route nothing ever built one, so
@@ -937,7 +960,9 @@ function _finish(target, engine, stopping, output_dir; op::String,
                 # The tempered stack sits >100 nats low on a signal-locked
                 # posterior while its four variants agree with each other to a
                 # decimal, so a bridge cross-check is not optional.
-                _augment_evidence!(summary, target.params, target.data, chains)
+                _augment_evidence!(summary, target.params, target.data, chains;
+                                   show_progress = show_pf, timings = bridge_t)
+                _postfit_stage!(pf, "science")
                 # Conditioned, unit-tagged fitted/derived + model_selection +
                 # run_info, and tables/ in json, csv, ecsv, dat and TEX.
                 # NOTE: run_job deletes summary["params"] here in favour of the
@@ -968,13 +993,17 @@ function _finish(target, engine, stopping, output_dir; op::String,
         # "chains_path" and no output_dir; `_finish` reported output_dir and no
         # chains_path. Give both, absolute, on both routes.
         summary["chains_path"] = joinpath(output_dir, "chains.nc")
+        summary["timing"] = _postfit_timing(pf, bridge_t)
         # An on-disk record of the run. Without this a fit_* output_dir held
         # chains.nc and nothing else: restart the kernel and the posterior
         # summary, diagnostics, evidence and derived block were gone.
+        _postfit_stage!(pf, "write")
         try
             _write_summary(output_dir, summary)
+            _postfit_done!(pf)
         catch err
             summary["summary_write_error"] = sprint(showerror, err)
+            _postfit_done!(pf; stage = "write_failed")
         end
     end
     return (; chains, log_z, summary)
