@@ -42,7 +42,7 @@ function plot_rv_timeseries(chains, params, data;
         # configuration, and it doesn't belong in the headline plot.
         chain_names = Set(names(chains, :parameters))
         if :n_planets in chain_names
-            np_all = vec(Array(chains[:n_planets]))
+            np_all = _draws(chains, :n_planets)
             modal_np = _mode_int_local(np_all)
             active_idx = findall(np_all .== modal_np)
             isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
@@ -296,7 +296,7 @@ _is_sb2_data(data) = any(==(2), data.rv_comp)
 function _sb2_plot_theta(chains, params, bf_cutoff)
     chain_names = Set(names(chains, :parameters))
     if :n_planets in chain_names
-        np_all = vec(Array(chains[:n_planets])); modal_np = _mode_int_local(np_all)
+        np_all = _draws(chains, :n_planets); modal_np = _mode_int_local(np_all)
         active_idx = findall(np_all .== modal_np)
         isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
         td_state = winning_td_state(chains, params, active_idx, modal_np)
@@ -492,7 +492,7 @@ function plot_rv_phasefold(chains, params, data;
         # warning below -- by slot, not by `k > modal_np`.
         chain_names = Set(names(chains, :parameters))
         if :n_planets in chain_names
-            np_all = vec(Array(chains[:n_planets]))
+            np_all = _draws(chains, :n_planets)
             modal_np = _mode_int_local(np_all)
             active_idx = findall(np_all .== modal_np)
             if isempty(active_idx)
@@ -607,7 +607,7 @@ function plot_rv_phasefold(chains, params, data;
             param_syms = names(chains, :parameters)
             mat = Matrix{Float64}(undef, length(active_idx), length(param_syms))
             for (j, sym) in enumerate(param_syms)
-                mat[:, j] = vec(Array(chains[sym]))[active_idx]
+                mat[:, j] = _draws(chains, sym)[active_idx]
             end
             ci_chains = MCMCChains.Chains(mat, param_syms)
         end

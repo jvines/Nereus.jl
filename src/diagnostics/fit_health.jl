@@ -277,7 +277,7 @@ end
 _to_sym(x::Symbol) = x
 _to_sym(x::AbstractString) = Symbol(x)
 
-# `active` (param ⇒ Bool mask over the flattened draws, in `vec(Array(chains[p]))`
+# `active` (param ⇒ Bool mask over the flattened draws, in `_draws(chains, p)`
 # order) as Dict{Symbol,BitVector}. A mask that does not match the chain length
 # is a caller bug: silently ignoring it would assess junk as if it were draws.
 function _active_masks(chains::MCMCChains.Chains, active)
@@ -459,17 +459,34 @@ function _check_multimodality(chains, names_to_check; mode_ratio_max::Float64,
     offenders = Pair{String, Float64}[]
     worst_ratio = 0.0
     worst_name = ""
+    cube = chains.value.data
+    pos = Dict(n => i for (i, n) in enumerate(names(chains)))
     for p in names_to_check
-        mat = Array(chains[p])          # (n_iter, n_chain)
+        # (n_iter, n_chain), read in place: copying it cost three copies of the
+        # column per parameter at millions of draws.
+        mat = eltype(cube) === Float64 && haskey(pos, p) ?
+              view(cube, :, pos[p], :) : Array(chains[p])
         size(mat, 2) < 2 && continue
-        # Each chain's own active draws (all of them for an unmasked param).
-        cols = haskey(active, p) ?
-            [mat[reshape(active[p], size(mat))[:, k], k] for k in 1:size(mat, 2)] :
-            [mat[:, k] for k in 1:size(mat, 2)]
-        cols = filter(c -> length(c) >= 2, cols)
-        length(cols) < 2 && continue
-        chain_medians = [median(c) for c in cols]
-        within_stds = [std(c) for c in cols]
+        n_it = size(mat, 1)
+        msk = get(active, p, nothing)
+        # Each chain's own active draws (all of them for an unmasked param),
+        # one chain at a time through one buffer. The std first, in draw order,
+        # then the median in place: the numbers `std` and `median` give on a
+        # copy of the column.
+        buf = eltype(mat)[]
+        chain_medians = Float64[]
+        within_stds = Float64[]
+        for k in 1:size(mat, 2)
+            empty!(buf)
+            off = (k - 1) * n_it
+            for i in 1:n_it
+                (msk === nothing || msk[off + i]) && push!(buf, mat[i, k])
+            end
+            length(buf) >= 2 || continue
+            push!(within_stds, std(buf))
+            push!(chain_medians, median!(buf))
+        end
+        length(chain_medians) < 2 && continue
         between = std(chain_medians)             # spread of mode centres
         within = mean(within_stds)               # typical chain width
 
@@ -573,7 +590,7 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
         lo0, hi0 = bounds_sym[p]
         (isfinite(lo0) && isfinite(hi0) && hi0 > lo0) || continue
 
-        samp = vec(Array(chains[p]))
+        samp = _draws(chains, p)
         haskey(active, p) && (samp = samp[active[p]])
         isempty(samp) && continue
         is_circ = p in circ
@@ -667,7 +684,7 @@ function _check_logpost(chains; lp_floor::Float64)
             "no :lp / :log_density column — log-posterior sanity not assessed")
     end
 
-    lp = vec(Array(chains[lp_col]))
+    lp = _draws(chains, lp_col)
     isempty(lp) && return FitHealthCheck(:logpost, :ok,
         "log-posterior column empty — not assessed")
 
@@ -726,7 +743,7 @@ function _check_map_consistency(map_point, chains, names_to_check; nsigma::Float
         sym in present || continue
         # Only assess parameters in the requested set (if restricted).
         isempty(names_to_check) || sym in names_to_check || continue
-        samp = vec(Array(chains[sym]))
+        samp = _draws(chains, sym)
         isempty(samp) && continue
         n_checked += 1
         med = median(samp)

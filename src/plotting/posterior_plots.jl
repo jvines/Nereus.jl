@@ -30,7 +30,7 @@ function plot_posteriors_lp(chains, params;
     cn = Set(names(chains, :parameters))
     (:lp in cn) || throw(ArgumentError(
         "plot_posteriors_lp requires an :lp column in the chains"))
-    lp = vec(Array(chains[:lp]))
+    lp = _draws(chains, :lp)
     finite_idx = findall(isfinite, lp)
     isempty(finite_idx) && throw(ArgumentError("no finite-lp samples"))
 
@@ -53,11 +53,11 @@ function plot_posteriors_lp(chains, params;
             idx = finite_idx
             col = Symbol("planet_active_$k")
             if col in cn
-                act = vec(Array(chains[col]))
+                act = _draws(chains, col)
                 sub = [i for i in finite_idx if act[i] > 0.5]
                 !isempty(sub) && (idx = sub)
             elseif :n_planets in cn
-                npv = vec(Array(chains[:n_planets]))
+                npv = _draws(chains, :n_planets)
                 sub = [i for i in finite_idx if npv[i] >= k]
                 !isempty(sub) && (idx = sub)
             end
@@ -83,7 +83,7 @@ function plot_posteriors_lp(chains, params;
             if length(idx) > max_points
                 idx = idx[round.(Int, range(1, length(idx); length = max_points))]
             end
-            v   = vec(Array(chains[Symbol(nm)]))[idx]
+            v   = _draws(chains, Symbol(nm))[idx]
             lps = lp[idx]
             ibest = argmax(lps)
 

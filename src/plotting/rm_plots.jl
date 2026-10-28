@@ -58,7 +58,7 @@ function plot_rm(chains, params, data;
         # winning-model best-lp reference theta (same selection as rv_timeseries)
         chain_names = Set(names(chains, :parameters))
         if :n_planets in chain_names
-            np_all = vec(Array(chains[:n_planets])); modal_np = _mode_int_local(np_all)
+            np_all = _draws(chains, :n_planets); modal_np = _mode_int_local(np_all)
             active_idx = findall(np_all .== modal_np)
             isempty(active_idx) && (active_idx = collect(1:_n_flat_draws(chains)))
             td_state = winning_td_state(chains, params, active_idx, modal_np)

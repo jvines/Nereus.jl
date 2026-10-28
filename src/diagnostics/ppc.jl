@@ -376,13 +376,27 @@ end
 # Helpers
 # =====================================================================
 
+# Each parameter's draws as one vector, iterations fastest then chains (the
+# order of `_draws(chains, nm)`). Plain Float64 chains are read in place,
+# a view per parameter: the copies this made (two per parameter, one kept)
+# were a second chain held through ppc, loo and the activity-GP draws.
 function _flatten_chains(chains)
     chain_names = collect(names(chains, :parameters))
+    data = chains.value.data
+    if eltype(data) === Float64 && ndims(data) == 3
+        pos = Dict(n => i for (i, n) in enumerate(names(chains)))
+        V = typeof(vec(view(data, :, 1, :)))
+        flat = Dict{Symbol, V}()
+        for nm in chain_names
+            flat[Symbol(nm)] = vec(view(data, :, pos[nm], :))
+        end
+        return flat, size(data, 1) * size(data, 3)
+    end
     flat = Dict{Symbol, Vector{Float64}}()
     n_total = 0
     for nm in chain_names
-        v = vec(Array(chains[nm]))
-        flat[Symbol(nm)] = Float64.(v)
+        v = _draws(chains, nm)
+        flat[Symbol(nm)] = v isa Vector{Float64} ? v : Float64.(v)
         n_total = length(v)
     end
     return flat, n_total
@@ -395,7 +409,7 @@ end
 # every planet count, with `set_n_p!(modal)` switching on slots 1:modal,
 # mixed parked slot values into the model -- 34 m/s of spurious residual on a
 # death mid-list.
-function _theta_from_chain_summary(chains_flat::Dict{Symbol, Vector{Float64}},
+function _theta_from_chain_summary(chains_flat::AbstractDict{Symbol, <:AbstractVector{Float64}},
                                     params::Params;
                                     rows = nothing)
     idx = rows === nothing ? Colon() : rows
@@ -417,7 +431,7 @@ end
 # `_row_td_state`). `set_n_p!(n_planets)` meant slots 1:n with every noise
 # model on -- a parked slot in the model after a death mid-list, in every PPC
 # draw and every LOO pointwise likelihood. Pass `tdc` precomputed in a loop.
-function _theta_from_row(chains_flat::Dict{Symbol, Vector{Float64}},
+function _theta_from_row(chains_flat::AbstractDict{Symbol, <:AbstractVector{Float64}},
                           idx::Int, params::Params;
                           tdc = _td_cols(chains_flat, params))
     theta = Theta{Float64}(params; td = _row_td_state(tdc, params, idx))

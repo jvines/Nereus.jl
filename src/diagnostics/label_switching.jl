@@ -199,15 +199,15 @@ function _slot_matrices(chains, prefix::AbstractString)
         "no `$(prefix)<k>` columns in the chain — nothing to measure " *
         "(pass `period_prefix=` if this run names periods differently)"))
     allnames = names(chains, :parameters)
-    P = hcat((vec(Array(chains[Symbol(prefix, k)])) for k in ks)...)
+    P = hcat((_draws(chains, Symbol(prefix, k)) for k in ks)...)
     n = size(P, 1)
 
     have_active = all(Symbol("planet_active_$k") in allnames for k in ks)
     if have_active
-        A = hcat((vec(Array(chains[Symbol("planet_active_$k")])) .> 0.5
+        A = hcat((_draws(chains, Symbol("planet_active_$k")) .> 0.5
                   for k in ks)...)
     elseif :n_planets in allnames
-        np = vec(Array(chains[:n_planets]))
+        np = _draws(chains, :n_planets)
         @warn "no `planet_active_*` columns; falling back to `n_planets ≥ k`. " *
               "This ASSUMES active slots occupy the low indices — if the " *
               "sampler does not pack them, the switch entropy below is an " *

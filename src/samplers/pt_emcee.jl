@@ -133,8 +133,8 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         names = target.params.layout.unfrozen_names
         d = length(names)
         d >= 1 || return NaN
-        lp = vec(Array(chains[:, :lp, :]))
-        cols = [vec(Array(chains[:, Symbol(nm), :])) for nm in names]
+        lp = _draws(chains, :lp)
+        cols = [_draws(chains, Symbol(nm)) for nm in names]
         N = length(lp)
         N >= 2d + 2 || return NaN
         pt = target.transform

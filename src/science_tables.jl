@@ -112,12 +112,12 @@ function sci_active_mask(chains, params::Params, name::AbstractString)
     pidx = _param_planet_index(String(name), length(params.layout.planet_blocks))
     if pidx !== nothing
         col = Symbol("planet_active_$pidx")
-        col in allnames && return vec(Array(chains[col])) .> 0.5
+        col in allnames && return _draws(chains, col) .> 0.5
     end
     nidx = _noise_model_index_for_param(String(name), params)
     if nidx !== nothing
         col = Symbol("noise_active_$nidx")
-        col in allnames && return vec(Array(chains[col])) .> 0.5
+        col in allnames && return _draws(chains, col) .> 0.5
     end
     return nothing
 end
@@ -126,7 +126,7 @@ end
 # converted rad→deg. Returns (stats, unit, occupancy, n_used) or nothing if the
 # component is essentially never active (<1% — not meaningfully constrained).
 function sci_param_entry(chains, params::Params, name::AbstractString)
-    v = vec(Array(chains[Symbol(name)]))
+    v = _draws(chains, Symbol(name))
     mask = sci_active_mask(chains, params, name)
     occ = mask === nothing ? 1.0 : mean(mask)
     samp = mask === nothing ? v : v[mask]
@@ -197,12 +197,12 @@ function science_fitted(chains, params::Params)
     max_kp = length(params.layout.planet_blocks)
 
     # winning model: modal Nₚ + which noise models are active >50%
-    modal_np = :n_planets in allnames ? _mode_int(vec(Array(chains[:n_planets]))) : max_kp
+    modal_np = :n_planets in allnames ? _mode_int(_draws(chains, :n_planets)) : max_kp
     active_noise = String[]
     for (i, nm) in enumerate(params.config.noise_models)
         col = Symbol("noise_active_$i")
         col in allnames || continue
-        mean(vec(Array(chains[col])) .> 0.5) > 0.5 &&
+        mean(_draws(chains, col) .> 0.5) > 0.5 &&
             push!(active_noise, _noise_model_label(nm))
     end
 
@@ -279,7 +279,7 @@ const _DERIVED_UNITS = Dict{String, String}(
 )
 
 _planet_active_mask(chains, k) = (col = Symbol("planet_active_$k");
-    col in names(chains, :parameters) ? vec(Array(chains[col])) .> 0.5 : nothing)
+    col in names(chains, :parameters) ? _draws(chains, col) .> 0.5 : nothing)
 
 """
     science_derived(chains, params; M_s, R_s, T_eff, …) -> (entries, conditioning)
@@ -380,7 +380,7 @@ function science_model_selection(chains, params::Params)
         # occupancy Dict on it would drop all but the last.
         lbl = _noise_model_label(nm)
         haskey(noise, lbl) && (lbl = "$(lbl)#$(i)")
-        noise[lbl] = mean(vec(Array(chains[col])) .> 0.5)
+        noise[lbl] = mean(_draws(chains, col) .> 0.5)
     end
     if !isempty(noise)
         best = maximum(values(noise))
@@ -389,7 +389,7 @@ function science_model_selection(chains, params::Params)
     end
     # planet-count occupancy
     if :n_planets in allnames
-        np = round.(Int, vec(Array(chains[:n_planets])))
+        np = round.(Int, _draws(chains, :n_planets))
         counts = Dict{Int, Float64}()
         for j in np; counts[j] = get(counts, j, 0.0) + 1; end
         n = length(np)

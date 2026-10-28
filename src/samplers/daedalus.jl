@@ -735,7 +735,7 @@ directly via `bayes_factors`.
 """
 function model_probabilities(chains;
                               max_kplanet::Union{Nothing, Int} = nothing)
-    np = vec(Array(chains[:n_planets]))
+    np = _draws(chains, :n_planets)
     n  = length(np)
     kmax = max_kplanet === nothing ? Int(maximum(np)) : max_kplanet
     out = Dict{Int, Float64}()

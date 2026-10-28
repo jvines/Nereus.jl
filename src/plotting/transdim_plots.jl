@@ -53,7 +53,7 @@ function plot_transdim_occupancy(chains, params=nothing;
         # render empty noise panels.
         fig = Figure(; size = has_noise ? figsize :
                             (round(Int, figsize[1] * 0.52), figsize[2]))
-        np = vec(Array(chains[:n_planets]))
+        np = _draws(chains, :n_planets)
         n_total = length(np)
         max_kp = max_kplanet !== nothing ? max_kplanet :
                  params !== nothing ? params.config.max_kplanet : Int(maximum(np))
@@ -71,7 +71,7 @@ function plot_transdim_occupancy(chains, params=nothing;
                 hidedecorations!(ax); return
             end
             labels = [String(p.second) for p in ncols]
-            nprobs = [count(vec(Array(chains[p.first])) .== 1.0) / n_total for p in ncols]
+            nprobs = [count(_draws(chains, p.first) .== 1.0) / n_total for p in ncols]
             barplot!(ax, 1:length(ncols), nprobs; color=nprobs,
                      colormap=NEREUS_CMAP, colorrange=(0, 1),
                      strokecolor=:black, strokewidth=1)
@@ -131,7 +131,7 @@ function plot_transdim_occupancy(chains, params=nothing;
                               ylabel="Noise model")
                     Mr = zeros(length(sidx0), length(ncols))
                     for (i, p) in enumerate(ncols)
-                        Mr[:, i] = (vec(Array(chains[p.first]))[sidx0] .> 0.5)
+                        Mr[:, i] = (_draws(chains, p.first)[sidx0] .> 0.5)
                     end
                     heatmap!(ax, sidx0, 1:length(ncols), Mr;
                              colormap=cgrad([:white, cool_accent]), colorrange=(0,1))
@@ -180,7 +180,7 @@ function plot_transdim_occupancy(chains, params=nothing;
                          ylabel="Noise model")
             Mr = zeros(length(sidx), length(ncols))
             for (i, p) in enumerate(ncols)
-                Mr[:, i] = (vec(Array(chains[p.first]))[sidx] .> 0.5)
+                Mr[:, i] = (_draws(chains, p.first)[sidx] .> 0.5)
             end
             heatmap!(ax_nt, sidx, 1:length(ncols), Mr;
                      colormap=cgrad([:white, cool_accent]), colorrange=(0, 1))

@@ -70,7 +70,7 @@ function summarize_fitted(chains, params::Params)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in chain_names || continue
-        samp = vec(Array(chains[sym]))
+        samp = _draws(chains, sym)
         push!(stats, name => ParamStats(samp))
     end
 
@@ -294,7 +294,7 @@ function print_transdim_summary(chains, params::Params;
         M_s = params.config.M_s
     end
     max_kp = params.config.max_kplanet
-    np = vec(Array(chains[:n_planets]))
+    np = _draws(chains, :n_planets)
     n_total = length(np)
 
     # --- N_p posterior ---
@@ -331,7 +331,7 @@ function print_transdim_summary(chains, params::Params;
         println(io)
         println(io, "  Marginal noise-model probabilities (global):")
         for (col_name, col_label) in noise_cols
-            samp = vec(Array(chains[col_name]))
+            samp = _draws(chains, col_name)
             p = count(samp .== 1.0) / length(samp)
             push!(global_noise_win, p > 0.5)
             push!(global_noise_prob, p)
@@ -377,7 +377,7 @@ function print_transdim_summary(chains, params::Params;
         # losing models are still visible as their P(on) values.
         if has_noise
             for (col_name, col_label) in noise_cols
-                noise_samp = vec(Array(chains[col_name]))[mask]
+                noise_samp = _draws(chains, col_name)[mask]
                 frac = count(noise_samp .== 1.0) / n_np
                 @printf(io, "\n  P(%s = on | N_p = %d) = %.4f\n",
                         col_label, np_val, frac)
@@ -417,7 +417,7 @@ function save_transdim_summary(chains, params::Params, path::String;
         M_s = params.config.M_s
     end
     max_kp = params.config.max_kplanet
-    np = vec(Array(chains[:n_planets]))
+    np = _draws(chains, :n_planets)
     n_total = length(np)
     noise_cols = _detect_noise_columns(chains, td)
     has_noise = !isempty(noise_cols)
@@ -449,7 +449,7 @@ function save_transdim_summary(chains, params::Params, path::String;
     global_noise_win = Bool[]
     if has_noise
         for (col_name, _) in noise_cols
-            samp = vec(Array(chains[col_name]))
+            samp = _draws(chains, col_name)
             push!(global_noise_win,
                    count(samp .== 1.0) / length(samp) > 0.5)
         end
@@ -587,7 +587,7 @@ function _print_joint_table(io::IO, np, chains, noise_cols, max_kp, n_total)
     # Collect each sample's noise config as an Int (bitstring)
     noise_mat = falses(n_total, n_noise)
     for (j, (col_name, _)) in enumerate(noise_cols)
-        samp = vec(Array(chains[col_name]))
+        samp = _draws(chains, col_name)
         noise_mat[:, j] .= samp .== 1.0
     end
     config_int = Vector{Int}(undef, n_total)
@@ -653,7 +653,7 @@ function _conditional_fitted_stats(chains, params::Params, mask::BitVector,
         planet_idx = _param_planet_index(name, max_kp)
         if planet_idx !== nothing
             planet_idx in live || continue
-            push!(stats, name => ParamStats(vec(Array(chains[sym]))[slot_mask(planet_idx)]))
+            push!(stats, name => ParamStats(_draws(chains, sym)[slot_mask(planet_idx)]))
             continue
         end
 
@@ -677,7 +677,7 @@ function _conditional_fitted_stats(chains, params::Params, mask::BitVector,
             end
         end
 
-        samp = vec(Array(chains[sym]))[mask]
+        samp = _draws(chains, sym)[mask]
         push!(stats, name => ParamStats(samp))
     end
 
@@ -695,7 +695,7 @@ function _conditional_derived_stats(chains, params::Params, mask::BitVector,
     param_names = names(chains, :parameters)
     mat = Matrix{Float64}(undef, n_masked, length(param_names))
     for (j, sym) in enumerate(param_names)
-        mat[:, j] = vec(Array(chains[sym]))[mask]
+        mat[:, j] = _draws(chains, sym)[mask]
     end
     sub_chains = MCMCChains.Chains(mat, param_names)
 
@@ -804,7 +804,7 @@ end
 function _noise_active_in_mask(chains, noise_cols, mask::BitVector)
     result = Bool[]
     for (col, _) in noise_cols
-        samp = vec(Array(chains[col]))[mask]
+        samp = _draws(chains, col)[mask]
         push!(result, count(samp .== 1.0) / length(samp) > 0.5)
     end
     return result
@@ -835,8 +835,8 @@ function _canonical_slot_columns(chains, allp, model_params, nflat::Int)
     end
     key = "P" in bases ? "P" : (isempty(bases) ? nothing : first(bases))
     key === nothing && return out
-    A = hcat((vec(Array(chains[a])) .> 0.5 for a in acts)...)          # nflat × K
-    X = Dict(b => hcat((vec(Array(chains[Symbol("$(b)_k$k")])) for k in 1:K)...)
+    A = hcat((_draws(chains, a) .> 0.5 for a in acts)...)          # nflat × K
+    X = Dict(b => hcat((_draws(chains, Symbol("$(b)_k$k")) for k in 1:K)...)
              for b in bases)
     Y = Dict(b => copy(X[b]) for b in bases)
     n_on = vec(sum(A; dims = 2))
@@ -879,8 +879,10 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
     # Layout detection: a flat trans-dim chain stores one chain (size(_,3)==1)
     # with WALKER as the FAST index in the per-param vec; a native ensemble chain
     # stores (iter × param × walker) with walker as the SLOW index. Handle both.
-    nflat = length(vec(Array(chains[pnames[1]])))
-    nc = size(Array(chains[pnames[1]]), ndims(Array(chains[pnames[1]])))
+    # Read off the shape (iter × param × chain): a column copy only to measure
+    # it cost a column.
+    nflat = size(chains, 1) * size(chains, 3)
+    nc = size(chains, 3)
     local nsteps::Int, walker_fast::Bool
     if nc == n_walkers && nflat % nc == 0
         nsteps = nflat ÷ nc; walker_fast = false          # native multi-chain

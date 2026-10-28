@@ -2512,7 +2512,7 @@ function _augment_evidence!(summary, params, data, chains;
         for c in chain_syms
             sc = String(c)
             (sc == "n_planets" || startswith(sc, "noise_active_")) || continue
-            length(unique(vec(Array(chains[c])))) > 1 && return
+            length(unique(_draws(chains, c))) > 1 && return
         end
         tgt = NereusTarget(params, data; unconstrained = true)
         tgt.transform === nothing && return
@@ -2632,7 +2632,7 @@ leaves the summary as it was. Shared by run_job and the fit_* route.
 function _n_planets_posterior!(summary, chains)
     chains isa MCMCChains.Chains || return summary
     :n_planets in names(chains, :parameters) || return summary
-    np = Int.(vec(Array(chains[:n_planets])))
+    np = Int.(_draws(chains, :n_planets))
     counts = Dict{String, Float64}()
     for v in np
         counts[string(v)] = get(counts, string(v), 0.0) + 1

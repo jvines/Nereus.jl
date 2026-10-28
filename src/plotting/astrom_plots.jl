@@ -47,7 +47,7 @@ end
 
 Every unfrozen parameter's flat column, materialised ONCE.
 
-`chains[sym]` is an AxisArray view, so `vec(Array(chains[sym]))` COPIES the whole
+`chains[sym]` is an AxisArray view, so `_draws(chains, sym)` COPIES the whole
 column. Doing that inside `_theta_from_chain_row` — which is called once per
 DRAW — made every band plot O(n_draws × n_samples) instead of O(n_draws): on the
 HD 114762 posterior that is 13 columns × 446,250 Float64 rebuilt per draw, 90.7
@@ -64,7 +64,7 @@ function _chain_cols(chains, params)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in chain_names || continue
-        push!(cols, (name, vec(Array(chains[sym]))))
+        push!(cols, (name, _draws(chains, sym)))
     end
     return cols
 end
@@ -86,7 +86,7 @@ function _theta_median(chains, params; active_idx = nothing)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in chain_names || continue
-        vals = vec(Array(chains[sym]))
+        vals = _draws(chains, sym)
         if active_idx !== nothing
             vals = vals[active_idx]
         end
@@ -103,7 +103,7 @@ The draw with the highest finite `:lp` among `idxs` (all draws when
 """
 function _best_lp_row(chains, idxs = nothing)
     (:lp in Set(names(chains, :parameters))) || return nothing
-    lp = vec(Array(chains[:lp]))
+    lp = _draws(chains, :lp)
     cand = filter(i -> isfinite(lp[i]), idxs === nothing ? (1:length(lp)) : idxs)
     isempty(cand) && return nothing
     return cand[argmax(@view lp[cand])]
@@ -968,7 +968,7 @@ function plot_rv_astrom_phasefold(chains, params, data;
             param_syms = names(chains, :parameters)
             mat = Matrix{Float64}(undef, length(band_idx), length(param_syms))
             for (j, sym) in enumerate(param_syms)
-                mat[:, j] = vec(Array(chains[sym]))[band_idx]
+                mat[:, j] = _draws(chains, sym)[band_idx]
             end
             ci_chains = MCMCChains.Chains(mat, param_syms)
             # PHASE ORIGIN. compute_ci_bands ignores fold_t0 and references

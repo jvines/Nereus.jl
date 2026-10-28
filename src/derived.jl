@@ -532,8 +532,8 @@ function compute_derived(chains, params::Params;
         label = ssym[4:end]                  # strip "q1_"
         q2sym = Symbol("q2_" * label)
         q2sym in chain_param_syms || continue
-        q1v = vec(Array(chains[sym]))
-        q2v = vec(Array(chains[q2sym]))
+        q1v = _draws(chains, sym)
+        q2v = _draws(chains, q2sym)
         uu = kipping_q_to_u.(q1v, q2v)        # Vector of (u1, u2) tuples
         ld_u["u1_" * label] = first.(uu)
         ld_u["u2_" * label] = last.(uu)
@@ -563,7 +563,7 @@ function compute_derived(chains, params::Params;
         # the chains — never sampled.
         if block isa SB2Block
             draws(nm) = Symbol(nm) in chain_syms ?
-                        vec(Array(chains[Symbol(nm)])) :
+                        _draws(chains, Symbol(nm)) :
                         fill(get_param(Theta{Float64}(params), nm), n_samples)
             KA = draws("K_A_k$k"); KB = draws("K_B_k$k"); Pv = draws("P_k$k")
             ev = if parametrization.ew === :sesinw
@@ -583,7 +583,7 @@ function compute_derived(chains, params::Params;
             derived["P_days"]       = Pv
             derived["ecc"]          = ev
             if Symbol("inc_k$k") in chain_syms           # astrometric SB2 → absolute
-                inc = vec(Array(chains[Symbol("inc_k$k")]))
+                inc = _draws(chains, Symbol("inc_k$k"))
                 s3  = max.(sin.(inc), 1e-6).^3
                 derived["M_A"]     = MA_sini3 ./ s3
                 derived["M_B"]     = MB_sini3 ./ s3
@@ -597,16 +597,16 @@ function compute_derived(chains, params::Params;
         # P_yr² = a³ / (M_pri + M_sec).
         # A parameter held FIXED (FixedPrior) is not a chain column: its draws
         # are its value, repeated. An obliquity fit fixes P, b and a/R★ routinely.
-        _col(nm) = Symbol(nm) in chain_syms ? vec(Array(chains[Symbol(nm)])) :
+        _col(nm) = Symbol(nm) in chain_syms ? _draws(chains, Symbol(nm)) :
                    fill(Float64(get_param(Theta{Float64}(params), nm)), n_samples)
         if Symbol("P_k$k") in chain_syms ||
            haskey(params.layout.name_to_idx, "P_k$k")
             P = _col("P_k$k")
         else
-            a_au_s = vec(Array(chains[Symbol("a_k$k")]))
+            a_au_s = _draws(chains, Symbol("a_k$k"))
             msec_s = Symbol("M_sec_k$k") in chain_syms ?
-                     vec(Array(chains[Symbol("M_sec_k$k")])) : zeros(length(a_au_s))
-            mpri_s = :M_pri in chain_syms ? vec(Array(chains[:M_pri])) :
+                     _draws(chains, Symbol("M_sec_k$k")) : zeros(length(a_au_s))
+            mpri_s = :M_pri in chain_syms ? _draws(chains, :M_pri) :
                      fill(isnan(config.M_s) ? 1.0 : Float64(config.M_s), length(a_au_s))
             P = sqrt.(a_au_s .^ 3 ./ max.(mpri_s .+ msec_s, 1e-6)) .* KEPLER_YEAR_DAYS
         end
@@ -614,34 +614,34 @@ function compute_derived(chains, params::Params;
         # Draws where planet k exists. Only these vote on where the seam of a
         # derived angle goes: an inactive slot's ω/λ is stale junk.
         pa_sym = Symbol("planet_active_$k")
-        active = pa_sym in chain_syms ? vec(Array(chains[pa_sym])) .> 0.5 : nothing
+        active = pa_sym in chain_syms ? _draws(chains, pa_sym) .> 0.5 : nothing
 
         # Eccentricity + omega (derived from parametrization)
         # Handle frozen eccentricity params (not in chains)
         if parametrization.ew === :sesinw
             se_sym = Symbol("sesinw_k$k")
             sc_sym = Symbol("secosw_k$k")
-            se = se_sym in chain_syms ? vec(Array(chains[se_sym])) :
+            se = se_sym in chain_syms ? _draws(chains, se_sym) :
                  fill(get_param(Theta{Float64}(params), "sesinw_k$k"), n_samples)
-            sc = sc_sym in chain_syms ? vec(Array(chains[sc_sym])) :
+            sc = sc_sym in chain_syms ? _draws(chains, sc_sym) :
                  fill(get_param(Theta{Float64}(params), "secosw_k$k"), n_samples)
             e = se.^2 .+ sc.^2
             w = atan.(se, sc)
         elseif parametrization.ew === :esinw
             es_sym = Symbol("esinw_k$k")
             ec_sym = Symbol("ecosw_k$k")
-            es = es_sym in chain_syms ? vec(Array(chains[es_sym])) :
+            es = es_sym in chain_syms ? _draws(chains, es_sym) :
                  fill(get_param(Theta{Float64}(params), "esinw_k$k"), n_samples)
-            ec = ec_sym in chain_syms ? vec(Array(chains[ec_sym])) :
+            ec = ec_sym in chain_syms ? _draws(chains, ec_sym) :
                  fill(get_param(Theta{Float64}(params), "ecosw_k$k"), n_samples)
             e = sqrt.(es.^2 .+ ec.^2)
             w = atan.(es, ec)
         else
             e_sym = Symbol("ecc_k$k")
             w_sym = Symbol("w_k$k")
-            e = e_sym in chain_syms ? vec(Array(chains[e_sym])) :
+            e = e_sym in chain_syms ? _draws(chains, e_sym) :
                 fill(get_param(Theta{Float64}(params), "ecc_k$k"), n_samples)
-            w = w_sym in chain_syms ? vec(Array(chains[w_sym])) :
+            w = w_sym in chain_syms ? _draws(chains, w_sym) :
                 fill(get_param(Theta{Float64}(params), "w_k$k"), n_samples)
         end
         derived["ecc"] = e
@@ -673,7 +673,7 @@ function compute_derived(chains, params::Params;
         # the companion mass is the fitted M_sec_k directly).
         has_rv = has_K(block) && Symbol("K_k$k") in chain_syms
         if has_rv
-            K = vec(Array(chains[Symbol("K_k$k")]))
+            K = _draws(chains, Symbol("K_k$k"))
         end
 
         # a/R* and a(AU)
@@ -697,7 +697,7 @@ function compute_derived(chains, params::Params;
             # :a_driven (orvara-style) — the semi-major axis is sampled directly
             # in AU; use it rather than recomputing from P (which uses M_s, not
             # the total mass, and would be biased by the mass ratio).
-            derived["a_au"] = vec(Array(chains[Symbol("a_k$k")]))
+            derived["a_au"] = _draws(chains, Symbol("a_k$k"))
         elseif ms !== nothing
             a_au = semimajor_axis_au.(P, ms)
             derived["a_au"] = a_au
@@ -777,7 +777,7 @@ function compute_derived(chains, params::Params;
             # propagated by quadrature.
             lam_sym = Symbol("lambda_k$k")
             if lam_sym in chain_param_syms
-                lam = vec(Array(chains[lam_sym]))
+                lam = _draws(chains, lam_sym)
                 # One interval, like omega_deg: a retrograde λ ≈ ±180 was split.
                 derived["lambda_deg"] = _contiguous_deg(lam, active,
                                                         _deg_lo_ref("lambda_k$k"))
@@ -788,7 +788,7 @@ function compute_derived(chains, params::Params;
                 # in a moved window where a bare abs() reads 200° for -160°.
                 derived["lambda_abs_deg"] = abs.(rad2deg.(rem2pi.(lam, RoundNearest)))
                 if :i_star in chain_param_syms
-                    ist = vec(Array(chains[:i_star]))
+                    ist = _draws(chains, :i_star)
                     n_psi = min(length(lam), length(ist), length(inc_d))
                     psi = Vector{Float64}(undef, n_psi)
                     @inbounds for j in 1:n_psi

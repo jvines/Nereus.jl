@@ -57,6 +57,7 @@ include("noise/activity_gp.jl")  # Rajpaul+ 2015 multivariate-GP kernel + LL
 include("noise/multiseries_gp.jl")  # O(N·r²) semiseparable multi-series activity GP (needs sho_coefficients)
 include("noise/parametric_noise.jl")  # ErrorScale / NightlyOffset / HarmonicBlock / MaternGP (needs celerite_solve, _gp_suffix)
 include("noise/noise_menu.jl")        # default_noise_menu (needs all noise structs)
+include("chain_draws.jl")    # _draws: a parameter's draws in one copy
 include("derived.jl")        # stability + derived quantities (needs constants, transit, model)
 include("astrometry/projection.jl")  # PlanetOrbits-backed sky projection (needs Theta + parameters.jl)
 include("astrometry/likelihood.jl")  # rel + HGCA log-likelihoods (needs projection + Theta)

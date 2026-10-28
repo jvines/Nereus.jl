@@ -108,3 +108,55 @@ end
         @test !haskey(s, "params") && !haskey(s, "derived")
     end
 end
+
+@testset "_draws: one copy, the same vector" begin
+    for n_chain in (1, 5)
+        ch = _diag_chain(; n_iter = 400, n_chain)
+        for s in names(ch)
+            ref = vec(Array(ch[s]))
+            d = Nereus._draws(ch, s)
+            @test typeof(d) === typeof(ref) && d == ref
+            @test Nereus._draws(ch, String(s)) == ref
+        end
+    end
+    ch = _diag_chain(; n_iter = 50, n_chain = 2)
+    @test_throws Exception Nereus._draws(ch, :no_such_param)
+    @test Nereus._draws(Dict(:a => [1.0 2.0; 3.0 4.0]), :a) == [1.0, 3.0, 2.0, 4.0]
+end
+
+@testset "multimodality check: the copies' numbers, read in place" begin
+    # The check as it was: copies of each column, chain by chain.
+    function ref_ratio(ch, p, active)
+        mat = Array(ch[p])
+        cols = haskey(active, p) ?
+            [mat[reshape(active[p], size(mat))[:, k], k] for k in 1:size(mat, 2)] :
+            [mat[:, k] for k in 1:size(mat, 2)]
+        cols = filter(c -> length(c) >= 2, cols)
+        length(cols) < 2 && return nothing
+        between = std([median(c) for c in cols])
+        within = mean([std(c) for c in cols])
+        (between == 0.0 && within == 0.0) && return nothing
+        return within <= 0.0 ? (between > 0.0 ? Inf : 0.0) : between / within
+    end
+    ch = _diag_chain(; n_iter = 501, n_chain = 6)
+    ps = names(ch, :parameters)
+    rng = MersenneTwister(3)
+    n = size(ch, 1) * size(ch, 3)
+    m = rand(rng, n) .> 0.4
+    m[1:size(ch, 1)] .= false                  # one chain with no active draw
+    m[size(ch, 1) + 1:size(ch, 1) + 1] .= true # and one with a single draw
+    m[size(ch, 1) + 2:2size(ch, 1)] .= false
+    for active in (Dict{Symbol, BitVector}(), Dict(ps[1] => m, ps[3] => m))
+        # Every ratio above 0 is an offender, so `details` lists them all.
+        c = Nereus._check_multimodality(ch, ps; mode_ratio_max = 0.0, active)
+        got = Dict(c.details)
+        for p in ps
+            r = ref_ratio(ch, p, active)
+            if r === nothing || !(r > 0.0)
+                @test !haskey(got, string(p))
+            else
+                @test got[string(p)] === r
+            end
+        end
+    end
+end

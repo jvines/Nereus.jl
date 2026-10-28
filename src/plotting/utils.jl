@@ -247,7 +247,7 @@ flattened `Symbol => Vector` dict the PPC/LOO code works on), or `nothing`
 for a fixed-dimension chain (no `n_planets`, no `planet_active_<k>`).
 """
 _td_cols(chains, params) =
-    _td_cols_from(Set(names(chains, :parameters)), s -> vec(Array(chains[s])), params)
+    _td_cols_from(Set(names(chains, :parameters)), s -> _draws(chains, s), params)
 _td_cols(flat::AbstractDict{Symbol}, params) =
     _td_cols_from(Set(keys(flat)), s -> flat[s], params)
 
@@ -339,7 +339,7 @@ function _winning_draw_idx(chains, params)
     all_idx = collect(1:_n_flat_draws(chains))
     cn = Set(names(chains, :parameters))
     :n_planets in cn || return all_idx
-    np = vec(Array(chains[:n_planets]))
+    np = _draws(chains, :n_planets)
     modal = _mode_int_local(np)
     idx = findall(x -> round(Int, x) == modal, np)
     isempty(idx) && return all_idx
@@ -361,7 +361,7 @@ function _winning_planet_slots(chains, params)
     tdc === nothing && return collect(1:params.config.max_kplanet)
     cn = Set(names(chains, :parameters))
     rows = if :n_planets in cn
-        np = vec(Array(chains[:n_planets]))
+        np = _draws(chains, :n_planets)
         m = _mode_int_local(np)
         findall(x -> round(Int, x) == m, np)
     else
@@ -405,7 +405,7 @@ function winning_td_state(chains, params, active_idx,
     for nm_idx in 1:n_noise
         col = Symbol("noise_active_$nm_idx")
         if col in chain_names
-            noise_samp = vec(Array(chains[col]))[active_idx]
+            noise_samp = _draws(chains, col)[active_idx]
             isempty(noise_samp) && continue
             if count(noise_samp .== 1.0) / length(noise_samp) > 0.5
                 td_state.noise_active[nm_idx] = true
@@ -459,7 +459,7 @@ function winning_config_idx(chains, params, active_idx, td_state)
         col in chain_names || continue          # always-on model → no constraint
         matched_any = true
         want = td_state.noise_active[nm_idx] ? 1.0 : 0.0
-        samp = vec(Array(chains[col]))[active_idx]
+        samp = _draws(chains, col)[active_idx]
         @. keep &= (samp == want)
     end
     matched_any || return active_idx
@@ -802,7 +802,7 @@ function _top_lp_draw_pool(chains; bf_cutoff::Real=10.0)
     n_flat = _n_flat_draws(chains)
     chain_names = Set(names(chains, :parameters))
     (:lp in chain_names) || return collect(1:n_flat)
-    lp = vec(Array(chains[:lp]))
+    lp = _draws(chains, :lp)
     finite_mask = isfinite.(lp)
     any(finite_mask) || return collect(1:n_flat)
     lp_max = maximum(lp[finite_mask])
@@ -838,7 +838,7 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
     n_flat = _n_flat_draws(chains)
     allnames = String.(names(chains, :parameters))
     Psym = Symbol("P_k$(planet)")
-    Pv = Psym in Symbol.(allnames) ? vec(Array(chains[Psym])) : nothing
+    Pv = Psym in Symbol.(allnames) ? _draws(chains, Psym) : nothing
     timekind = params.config.parametrization.time
     anchor = timekind in (:Mo, :phic, :Tp) ? String(timekind) : ""  # wrapping anchors
 
@@ -854,7 +854,7 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
         mch === nothing && continue
         parse(Int, mch.captures[2]) == planet || continue
         base = mch.captures[1]
-        c = vec(Array(chains[Symbol(nm)]))
+        c = _draws(chains, Symbol(nm))
         length(c) == n_flat || continue
         if base == anchor                     # wrapping phase anchor → (cos, sin)
             ang = base == "Tp" ? (Pv === nothing ? c : 2π .* (c ./ Pv)) : c  # Mo, phic: rad
@@ -1081,7 +1081,7 @@ function set_theta_best_lp!(theta, chains, params, active_idx)
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            set_param!(theta, name, vec(Array(chains[sym]))[ibest])
+            set_param!(theta, name, _draws(chains, sym)[ibest])
         end
         tdc = _td_cols(chains, params)
         tdc === nothing || (theta.td = _row_td_state(tdc, params, ibest))
@@ -1089,7 +1089,7 @@ function set_theta_best_lp!(theta, chains, params, active_idx)
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            set_param!(theta, name, median(vec(Array(chains[sym]))[active_idx]))
+            set_param!(theta, name, median(_draws(chains, sym)[active_idx]))
         end
         # No `:lp` (rjmcmc, MoMS, daedalus, trans-dim PT): the medians stand
         # for these draws, and so must their modal live slots -- the caller's

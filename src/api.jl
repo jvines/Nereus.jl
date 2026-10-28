@@ -630,7 +630,7 @@ function _summarise_params(chains, params)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in names_in || continue
-        v = vec(Array(chains[sym]))
+        v = _draws(chains, sym)
         q = quantile(v, (0.16, 0.84, 0.025, 0.975, 0.0015, 0.9985))
         out[name] = Dict{String,Float64}(
             "median" => median(v),
