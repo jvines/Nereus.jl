@@ -801,11 +801,12 @@ numbers live under `fitted` / `derived`
       "lp_reused": true, "lp_check_max_abs": 8.7e-10,
       "iters": 7, "converged": true,              // Newton passes of the primary solve
       "bootstrap_workers": 8, "bootstrap_ok": 200,
-      "bootstrap_iters_max": 7, "bootstrap_iters_total": 1400,
-      // per stage: transform, posterior_evals, proposal_evals, primary_solve,
+      "bootstrap_iters_max": 4, "bootstrap_iters_total": 630,
+      // per stage: transform (one pass over the draws for the proposal's mean
+      // and covariance), posterior_evals, proposal_evals, primary_solve,
       // bootstrap (only when the primary solve converged), ess (the promotion guard)
-      "posterior_evals": { "seconds": 3.7, "alloc_bytes": 1.9e9, "gc_seconds": 0.3,
-                           "maxrss_bytes": 8.7e9 }   // process peak RSS when the stage ended
+      "posterior_evals": { "seconds": 0.52, "alloc_bytes": 9760, "gc_seconds": 0.0,
+                           "maxrss_bytes": 3.4e9 }   // process peak RSS when the stage ended
     }
   }
 }

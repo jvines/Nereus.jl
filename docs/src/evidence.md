@@ -427,9 +427,11 @@ With `p*(θ)` the unnormalised posterior, `q(θ)` a normalised proposal,
 ```
 
 and `r → Z`. Nereus solves it in logs by safeguarded Newton (4 to 8 passes over
-the draws, `_bridge_iterate!`). Unlike the harmonic-mean estimator it has finite
-variance; unlike Laplace it assumes nothing about Gaussianity — `q` only has to
-**overlap** the posterior.
+the draws, `_bridge_iterate`; a bootstrap replicate, started at that root, 2 to
+5). No copy of the draws is made: they are read off the chain as each pass
+needs them, and a bootstrap resample is a count per draw. Unlike the
+harmonic-mean estimator it has finite variance; unlike Laplace it assumes
+nothing about Gaussianity — `q` only has to **overlap** the posterior.
 
 **Requirements.**
 

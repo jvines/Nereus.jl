@@ -1308,10 +1308,15 @@ replicates one after another (`workers = 1`, which runs in the calling task).
 
 A resample is held as counts, not as a copy of the ratios: each worker holds
 one `_BridgeBootBuffers` (2 bytes per draw) for all the replicates it solves,
-and nothing else is allocated per replicate. A solve then evaluates each
-distinct draw once, about 63% of them. The solves themselves are serial: the
-parallelism is across replicates, one per thread, so no thread is asked to
-split its own work.
+and nothing else is allocated per replicate. A pass still runs over every
+draw, the third with count 0 adding nothing: cheaper than branching on them.
+The solves themselves are serial: the parallelism is across replicates, one
+per thread, so no thread is asked to split its own work.
+
+What bounds it on a long chain is the lock. Generating one replicate's
+indices takes about 20 ms at 5.8 million draws, one replicate after another,
+so 200 replicates take 4 to 6 s at any thread count; the solves (3 or 4
+passes of about 13 ms each, from the primary root) run beside that.
 
 If a worker throws, it sets a flag that ends every other worker's solve at its
 next solver pass and stops them taking replicates; the exception then
