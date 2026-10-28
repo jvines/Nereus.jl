@@ -27,9 +27,10 @@
 # chain (5.8 million for a production transit fit). Both evaluation loops are
 # threaded (see below). The bootstrap error then solves the bridge equation
 # 200 more times on resamples of all of those draws; those solves run in
-# parallel (`_bridge_bootstrap`), each in a few Newton passes
-# (`_bridge_iterate!`). No copy of the posterior draws is made: they are read
-# off the chain and transformed as they are needed (`_BridgeDraws`).
+# parallel (`_bridge_bootstrap`), each in a few Newton passes started at the
+# primary root (`_bridge_iterate`). Nothing here holds a copy of the posterior:
+# the draws are read off the chain and transformed as they are needed
+# (`_BridgeDraws`), and a bootstrap resample is a count per draw.
 #
 # METHOD. With p*(θ) the unnormalised posterior, q(θ) a normalised proposal,
 # {θ_i} ~ p (N1 of them) and {φ_j} ~ q (N2), the optimal bridge (Meng & Wong
@@ -52,9 +53,9 @@ using SpecialFunctions: loggamma
 export bridge_evidence
 
 # Memory the bootstrap's concurrent solves may hold, in bytes, unless
-# `bootstrap_memory` says otherwise. Each solve holds 16 bytes per draw (see
-# `_BridgeBootBuffers`): 157 MB at 9.8 million posterior draws, so this runs
-# up to 13 of those at once.
+# `bootstrap_memory` says otherwise. Each solve holds 2 bytes per draw (see
+# `_BridgeBootBuffers`): 20 MB at 9.8 million posterior draws, so this never
+# binds below a hundred threads.
 const _BRIDGE_BOOT_MEMORY = 2^31
 
 """
@@ -91,7 +92,7 @@ the posterior at every draw. It is used only if 64 draws spread over the chain
 agree with a full evaluation (`_bridge_stored_lp`); otherwise, or with
 `use_lp = false`, every draw is evaluated.
 
-The equation is solved by safeguarded Newton (`_bridge_iterate!`), 4 to 8
+The equation is solved by safeguarded Newton (`_bridge_iterate`), 4 to 8
 passes over the draws.
 
 Memory: the draws are not copied. They are read off the chain and mapped to
@@ -100,11 +101,12 @@ mean and covariance come from one streaming pass (`_bridge_moments`), and
 what is kept is one `Float64` per posterior draw (its log ratio).
 
 The `n_bootstrap` resamples are solved in parallel, by as many workers as there
-are threads and `bootstrap_memory` bytes allow (16 bytes per posterior draw
+are threads and `bootstrap_memory` bytes allow (2 bytes per posterior draw
 each, at least one worker; the budget is also capped at a quarter of
 `Sys.total_memory()`). They draw from one `MersenneTwister(seed + 1)` in
 replicate order, exactly as the serial loop did, so every number returned is
-the same at any thread count and any worker count. See `_bridge_bootstrap`.
+the same at any thread count and any worker count. Each starts Newton at the
+primary root, which the resample's root is near. See `_bridge_bootstrap`.
 
 `show_progress = true` prints a progress line for each stage that can run long
 on a large chain: the posterior and proposal evaluations, the Newton
@@ -148,9 +150,7 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     pb = ProgressBar("bridge solve"; enabled = show_progress)
     on_iter = (it, delta) -> update!(pb; n_done = it, fields = (:delta => delta,))
     log_r, iters, converged = _bridge_stage!(timings, "primary_solve") do
-        _bridge_iterate!(Vector{Float64}(undef, length(l1)),
-                         Vector{Float64}(undef, length(l2)), l1, l2,
-                         max_iter, Float64(tol); on_iter = on_iter)
+        _bridge_iterate(l1, l2, max_iter, Float64(tol); on_iter = on_iter)
     end
     update!(pb; n_done = iters, fields = (:converged => string(converged),), force = true)
     finish!(pb)
@@ -178,7 +178,9 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
     # draws costs ~40 ms, so 200 solves of 400 steps are an hour on one core
     # -- about what a production fit spent after its last plot, at one core,
     # with nothing printed. Hence the parallel bootstrap, and Newton's method
-    # (`_bridge_iterate!`), which takes 4 to 8 passes in both regimes.
+    # (`_bridge_iterate`), which takes 4 to 8 passes in both regimes -- and 3
+    # or 4 for a replicate, started at the primary root `log_r`: F is strictly
+    # decreasing, so the start changes only how many passes it takes.
     ses = Float64[]
     if n_bootstrap > 0 && converged && isfinite(log_r)
         n_workers = _bridge_boot_workers(length(l1), length(l2), n_bootstrap,
@@ -189,7 +191,7 @@ function bridge_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         res, ok, its = _bridge_stage!(timings, "bootstrap") do
             _bridge_bootstrap(l1, l2, MersenneTwister(seed + 1), n_bootstrap,
                               max_iter, Float64(tol); workers = n_workers,
-                              progress = bprog)
+                              progress = bprog, start = log_r)
         end
         finish!(bpb)
         # In replicate order, as the serial loop pushed them: `std` sums in
@@ -959,34 +961,35 @@ end
 
 
 """
-    _bridge_iterate(l1, l2, max_iter, tol) -> (log_r, iters, converged)
-
-The optimal-bridge fixed point in log space. `l1` are log(p*/q) at posterior
-draws, `l2` the same at proposal draws. `_bridge_iterate!` with buffers of its
-own.
-"""
-_bridge_iterate(l1::Vector{Float64}, l2::Vector{Float64}, max_iter::Int, tol::Float64) =
-    _bridge_iterate!(Vector{Float64}(undef, length(l1)), Vector{Float64}(undef, length(l2)),
-                     l1, l2, max_iter, tol)
-
-"""
-    _bridge_iterate!(t1, t2, l1, l2, max_iter, tol; stop, on_iter)
+    _bridge_iterate(l1, l2, max_iter, tol; w1, w2, start, stop, on_iter)
         -> (log_r, iters, converged)
 
 The root of the optimal-bridge equation, `x = g(x)` with `x = log r` and
 
     g(x) = log[(1/N2) Σ_j l2_j / (s1 l2_j + s2 e^x)] - log[(1/N1) Σ_i 1 / (s1 l1_i + s2 e^x)]
 
-(the ratios in logs, as everywhere here). `t1` and `t2`, of the lengths of
-`l1` and `l2`, hold the terms of each pass, so a pass allocates nothing.
+(the ratios in logs, as everywhere here). `l1` are log(p*/q) at the posterior
+draws, `l2` the same at the proposal draws.
+
+`w1` and `w2`, when given, are counts per entry (`UInt16`): entry `i` stands
+for `w1[i]` draws, and N1 is their sum. That is a bootstrap resample without
+copying it (`_bridge_bootstrap`). An entry with count 0 adds nothing. A NaN
+entry, counted or not, stops the solve unconverged, as a NaN ratio always
+has.
 
 Solved by Newton's method on F(x) = g(x) - x, safeguarded by bisection. Each
-pass computes g and g' together. g' is a difference of two weighted means of
-logistic weights in (0, 1), so it lies in (-1, 1): F is strictly decreasing,
-has one root, and the Newton step F / (1 - g') is always defined. Every pass
-narrows a bracket on that root, and a Newton step that leaves the bracket is
-replaced by its midpoint. Converged when a step, or the bracket, is below
-`tol`.
+pass computes g and g' together (`_bridge_g`) and allocates nothing. g' is a
+difference of two weighted means of logistic weights in (0, 1), so it lies in
+(-1, 1): F is strictly decreasing, has one root, and the Newton step
+F / (1 - g') is always defined. Every pass narrows a bracket on that root, and
+a Newton step that leaves the bracket is replaced by its midpoint. Converged
+when a step, or the bracket, is below `tol`.
+
+`start` is where Newton starts; NaN (the default) means halfway between the
+means of `l1` and `l2`, a sane start in the right decade. The root does not
+depend on it, only the number of passes does: a bootstrap replicate started
+at the primary root, which its own is close to, takes 2 to 5 (3 or 4 on a
+5.8-million-draw transit fit, against 7 from the default start).
 
 This used to iterate x ← g(x) itself. That converges linearly at rate |g'|
 near the root, and g' approaches 1 when a few draws sit far out in the tails:
@@ -1001,27 +1004,36 @@ about `tol / (1 - |g'|)`.
 the bootstrap sets it when a worker fails. `on_iter(it, |Δ log r|)` is called
 after each pass.
 """
-function _bridge_iterate!(t1::Vector{Float64}, t2::Vector{Float64},
-                          l1::Vector{Float64}, l2::Vector{Float64},
-                          max_iter::Int, tol::Float64;
-                          stop::Union{Nothing, Threads.Atomic{Bool}} = nothing,
-                          on_iter = nothing)
+function _bridge_iterate(l1::Vector{Float64}, l2::Vector{Float64},
+                         max_iter::Int, tol::Float64;
+                         w1::Union{Nothing, Vector{UInt16}} = nothing,
+                         w2::Union{Nothing, Vector{UInt16}} = nothing,
+                         start::Float64 = NaN,
+                         stop::Union{Nothing, Threads.Atomic{Bool}} = nothing,
+                         on_iter = nothing)
     n1, n2 = length(l1), length(l2)
     # Empty input is a caller error upstream (no finite draws on one side); return
     # a non-answer rather than throwing from inside a reduction.
     (n1 == 0 || n2 == 0) && return (NaN, 0, false)
-    (length(t1) == n1 && length(t2) == n2) ||
-        throw(DimensionMismatch("bridge iteration buffers must match the ratio vectors"))
-    ls1 = log(n1 / (n1 + n2))
-    ls2 = log(n2 / (n1 + n2))
-    log_r = 0.5 * (mean(l1) + mean(l2))          # sane start, in the right decade
+    (w1 === nothing || length(w1) == n1) && (w2 === nothing || length(w2) == n2) ||
+        throw(DimensionMismatch("bridge counts must match the ratio vectors"))
+    N1, N2 = _bridge_wsum(w1, n1), _bridge_wsum(w2, n2)
+    (N1 == 0 || N2 == 0) && return (NaN, 0, false)
+    ls1 = log(N1 / (N1 + N2))
+    ls2 = log(N2 / (N1 + N2))
+    logn1, logn2 = log(N1), log(N2)
+    # Where each side's largest term is: t1 falls as l1 rises and t2 rises
+    # with l2 (see `_bridge_g`), so at the smallest l1 and the largest l2.
+    a1 = _bridge_wextreme(min, l1, w1, Inf)
+    a2 = _bridge_wextreme(max, l2, w2, -Inf)
+    log_r = isnan(start) ? 0.5 * (_bridge_wmean(l1, w1) + _bridge_wmean(l2, w2)) : start
     lo, hi = -Inf, Inf                           # F(lo) > 0 > F(hi)
     iters = 0
     converged = false
     for it in 1:max_iter
         stop !== nothing && stop[] && break
         iters = it
-        g, dg = _bridge_g!(t1, t2, l1, l2, ls1, ls2, log_r)
+        g, dg = _bridge_g(l1, l2, w1, w2, ls1, ls2, logn1, logn2, a1, a2, log_r)
         (isfinite(g) && isfinite(dg)) || break
         F = g - log_r
         if F == 0
@@ -1046,51 +1058,133 @@ function _bridge_iterate!(t1::Vector{Float64}, t2::Vector{Float64},
     return log_r, iters, converged
 end
 
-"""
-    _bridge_g!(t1, t2, l1, l2, ls1, ls2, x) -> (g, g′)
+# Counts: 1 per entry when there are none.
+@inline _bridge_w(::Nothing, i::Int) = 1.0
+@inline _bridge_w(w::Vector{UInt16}, i::Int) = @inbounds Float64(w[i])
 
-One pass of `_bridge_iterate!`: g(x) and its derivative. With c = ls2 + x, the
-log terms are t2_j = l2_j - log(e^{ls1 + l2_j} + e^c) and
-t1_i = -log(e^{ls1 + l1_i} + e^c), and g = logmeanexp(t2) - logmeanexp(t1).
-d t/dx is minus the logistic weight w = e^c / (e^{ls1 + l} + e^c), which is
-e^{c + t2 - l2} and e^{c + t1}, so g′ = Σ p1 w1 - Σ p2 w2 with p the softmax
-weights of each logsumexp.
+_bridge_wsum(::Nothing, n::Int) = n
+_bridge_wsum(w::Vector{UInt16}, ::Int) = Int(sum(w))
+
+_bridge_wmean(l::Vector{Float64}, ::Nothing) = mean(l)
+function _bridge_wmean(l::Vector{Float64}, w::Vector{UInt16})
+    s, n = 0.0, 0
+    @inbounds for i in eachindex(l)
+        k = w[i]
+        k == 0 && continue
+        s += k * l[i]
+        n += k
+    end
+    return s / n
+end
+
+# `op` (min or max) of the entries with a count; NaN wins, counted or not.
+# Branch-free: a draw's count is 0 about a third of the time, at random.
+function _bridge_wextreme(op::F, l::Vector{Float64}, w, init::Float64) where {F}
+    a = init
+    @inbounds for i in eachindex(l)
+        v = l[i]
+        a = op(a, ifelse((_bridge_w(w, i) == 0) & !isnan(v), init, v))
+    end
+    return a
+end
+
+# Below this, the l1 term at `a1` and the l2 term at `a2` have u (see
+# `_bridge_g`) small enough that 1 + e^u is finite with room to spare, and
+# `_bridge_g_sums` applies. Its terms that underflow are then below e^-109 of
+# the largest: below the rounding of any sum.
+const _BRIDGE_G_FAST = 600.0
+
 """
-function _bridge_g!(t1::Vector{Float64}, t2::Vector{Float64},
-                    l1::Vector{Float64}, l2::Vector{Float64},
-                    ls1::Float64, ls2::Float64, x::Float64)
+    _bridge_g(l1, l2, w1, w2, ls1, ls2, logn1, logn2, a1, a2, x) -> (g, g′)
+
+One pass of `_bridge_iterate`: g(x) and its derivative. With c = ls2 + x, the
+log terms are t2_j = l2_j - log(e^{ls1 + l2_j} + e^c) and
+t1_i = -log(e^{ls1 + l1_i} + e^c), and g = logmeanexp(t2) - logmeanexp(t1),
+each entry counted `w` times (once with no counts) and the means over
+N = exp(logn). d t/dx is minus the logistic weight w = e^c / (e^{ls1 + l} + e^c),
+which is e^{c + t2 - l2} and e^{c + t1}, so g′ = Σ p1 w1 - Σ p2 w2 with p the
+softmax weights of each logsumexp.
+
+The logsumexps are shifted by each side's largest term, so nothing
+overflows. t1 is decreasing in l1 and t2 increasing in l2, so those are the
+terms at `a1`, the smallest l1, and `a2`, the largest l2, and one pass does it
+all: no second pass over the terms, no buffer to keep them in.
+
+Each term is a logistic function of u = ls1 + l1_i - c (or u = c - ls1 - l2_j):
+e^{t - m} = σ(-u) / σ(-u_max term) and the weight is σ(-u) (or 1 - σ(-u)),
+with σ(-u) = 1 / (1 + e^u). So `_bridge_g_sums` spends one `exp` a draw
+where the log-space form spends three and a `log1p`: 13 ms a pass over 5.8
+million draws against 51 ms, to an ulp of g. Only when the largest terms sit
+more than `_BRIDGE_G_FAST` nats out, far from any root, does
+`_bridge_g_shifted` take the log-space form, where nothing can underflow.
+"""
+function _bridge_g(l1::Vector{Float64}, l2::Vector{Float64}, w1, w2,
+                   ls1::Float64, ls2::Float64, logn1::Float64, logn2::Float64,
+                   a1::Float64, a2::Float64, x::Float64)
     c = ls2 + x
-    m2 = -Inf
-    @inbounds for j in eachindex(l2)
-        t = l2[j] - _logaddexp(ls1 + l2[j], c)
-        t2[j] = t
-        m2 = max(m2, t)
-    end
-    m1 = -Inf
-    @inbounds for i in eachindex(l1)
-        t = -_logaddexp(ls1 + l1[i], c)
-        t1[i] = t
-        m1 = max(m1, t)
-    end
+    m2 = a2 - _logaddexp(ls1 + a2, c)
+    m1 = -_logaddexp(ls1 + a1, c)
     (isfinite(m1) && isfinite(m2)) || return (NaN, NaN)
-    s2 = 0.0; w2 = 0.0
+    u1 = ls1 + a1 - c
+    u2 = c - ls1 - a2
+    s1, v1, s2, v2 = u1 <= _BRIDGE_G_FAST && u2 <= _BRIDGE_G_FAST ?
+        _bridge_g_sums(l1, l2, w1, w2, ls1, c, u1, u2) :
+        _bridge_g_shifted(l1, l2, w1, w2, ls1, c, m1, m2)
+    g = (m2 + log(s2) - logn2) - (m1 + log(s1) - logn1)
+    return g, v1 / s1 - v2 / s2
+end
+
+# The sums of `_bridge_g` through σ(-u) = 1 / (1 + e^u), e^{t - m} = σ(-u)
+# (1 + e^{u at the largest term}). An entry with count 0 is multiplied by 0
+# rather than skipped: no branch to mispredict a third of the time.
+function _bridge_g_sums(l1::Vector{Float64}, l2::Vector{Float64}, w1, w2,
+                        ls1::Float64, c::Float64, u1::Float64, u2::Float64)
+    S2 = 1 + exp(u2)
+    b2 = c - ls1
+    s2 = 0.0; v2 = 0.0
     @inbounds for j in eachindex(l2)
-        t = t2[j]
-        t == -Inf && continue            # no weight (an l2 of -Inf)
-        e = exp(t - m2)
+        σ = 1 / (1 + exp(b2 - l2[j]))
+        e = _bridge_w(w2, j) * σ * S2
         s2 += e
-        w2 += e * exp(c + t - l2[j])
+        v2 += e * (1 - σ)
     end
-    s1 = 0.0; w1 = 0.0
+    S1 = 1 + exp(u1)
+    b1 = ls1 - c
+    s1 = 0.0; v1 = 0.0
     @inbounds for i in eachindex(l1)
-        t = t1[i]
-        t == -Inf && continue            # no weight (an l1 of +Inf)
-        e = exp(t - m1)
+        σ = 1 / (1 + exp(b1 + l1[i]))
+        e = _bridge_w(w1, i) * σ * S1
         s1 += e
-        w1 += e * exp(c + t)
+        v1 += e * σ
     end
-    g = (m2 + log(s2) - log(length(l2))) - (m1 + log(s1) - log(length(l1)))
-    return g, w1 / s1 - w2 / s2
+    return s1, v1, s2, v2
+end
+
+# The sums of `_bridge_g` in log space, shifted by the largest terms m1, m2.
+function _bridge_g_shifted(l1::Vector{Float64}, l2::Vector{Float64}, w1, w2,
+                           ls1::Float64, c::Float64, m1::Float64, m2::Float64)
+    s2 = 0.0; v2 = 0.0
+    @inbounds for j in eachindex(l2)
+        k = _bridge_w(w2, j)
+        k == 0 && continue
+        l = l2[j]
+        t = l - _logaddexp(ls1 + l, c)
+        t == -Inf && continue            # no weight (an l2 of -Inf)
+        e = k * exp(t - m2)
+        s2 += e
+        v2 += e * exp(c + t - l)
+    end
+    s1 = 0.0; v1 = 0.0
+    @inbounds for i in eachindex(l1)
+        k = _bridge_w(w1, i)
+        k == 0 && continue
+        t = -_logaddexp(ls1 + l1[i], c)
+        t == -Inf && continue            # no weight (an l1 of +Inf)
+        e = k * exp(t - m1)
+        s1 += e
+        v1 += e * exp(c + t)
+    end
+    return s1, v1, s2, v2
 end
 
 function _logsumexp(v::AbstractVector{<:Real})
@@ -1100,33 +1194,33 @@ function _logsumexp(v::AbstractVector{<:Real})
     return m + log(sum(x -> exp(x - m), v))
 end
 
-# Indices drawn per `rand!` call by `_bridge_draw_indices!`: 128 KB of scratch
+# Indices drawn per `rand!` call by `_bridge_draw_counts!`: 128 KB of scratch
 # per bootstrap worker.
 const _BRIDGE_IDX_CHUNK = 16_384
 
 """
-    _BridgeBootBuffers(n1, n2)
+    _BridgeBootBuffers(n1, n2, rng)
 
-One bootstrap worker's scratch: the resampled ratios (`b1`, `b2`), the terms of
-a solver pass (`t1`, `t2`), which first carry the resample's indices, and
-a chunk of `Int` indices for `rand!`. 16 bytes per posterior and per proposal
-draw, reused for every replicate the worker solves.
+One bootstrap worker's scratch: a resample's counts per posterior and per
+proposal draw (`c1`, `c2`, `UInt16`), a chunk of `Int` indices for `rand!`,
+and a generator to replay a replicate's draws on (`rng`, a copy of the shared
+one). 2 bytes per posterior and per proposal draw, reused for every replicate
+the worker solves. (Before: 16, a copy of the resampled ratios and a buffer
+for a pass's terms.)
 """
-struct _BridgeBootBuffers
-    b1::Vector{Float64}
-    t1::Vector{Float64}
-    b2::Vector{Float64}
-    t2::Vector{Float64}
+struct _BridgeBootBuffers{R<:AbstractRNG}
+    c1::Vector{UInt16}
+    c2::Vector{UInt16}
     idx::Vector{Int}
+    rng::R
 end
 
-_BridgeBootBuffers(n1::Int, n2::Int) =
-    _BridgeBootBuffers(Vector{Float64}(undef, n1), Vector{Float64}(undef, n1),
-                       Vector{Float64}(undef, n2), Vector{Float64}(undef, n2),
-                       Vector{Int}(undef, min(_BRIDGE_IDX_CHUNK, max(n1, n2))))
+_BridgeBootBuffers(n1::Int, n2::Int, rng::AbstractRNG) =
+    _BridgeBootBuffers(zeros(UInt16, n1), zeros(UInt16, n2),
+                       Vector{Int}(undef, min(_BRIDGE_IDX_CHUNK, max(n1, n2))), copy(rng))
 
 _bridge_boot_bytes(n1::Int, n2::Int) =
-    16 * (n1 + n2) + 8 * min(_BRIDGE_IDX_CHUNK, max(n1, n2))
+    2 * (n1 + n2) + 8 * min(_BRIDGE_IDX_CHUNK, max(n1, n2))
 
 """
     _bridge_boot_workers(n1, n2, n_bootstrap, bootstrap_memory) -> Int
@@ -1142,54 +1236,82 @@ function _bridge_boot_workers(n1::Int, n2::Int, n_bootstrap::Int, bootstrap_memo
 end
 
 """
-    _bridge_draw_indices!(dst, idx, rng, n)
+    _bridge_skip_indices!(idx, rng, m, n)
 
-`dst .= rand(rng, 1:n, length(dst))`, as `Float64`, drawn `length(idx)` at a
-time into `idx`. For a `MersenneTwister` and an `Int` range, `rand!` on an
-array is a loop of one `rand(rng, sampler)` per element (Random has no bulk
-method for ranges), so drawing in chunks takes the same numbers off the
-generator as one `rand(rng, 1:n, length(dst))`. A `Float64` holds every index
-below 2^53 exactly. (test_bridge_bootstrap.jl checks both against the bulk
-call.)
+Take `m` draws of `rand(rng, 1:n)` off `rng`, `length(idx)` at a time into
+`idx`, and discard them: `rng` ends where `_bridge_draw_counts!` with the same
+`m` and `n` leaves it.
 """
-function _bridge_draw_indices!(dst::Vector{Float64}, idx::Vector{Int},
-                               rng::AbstractRNG, n::Int)
-    m = length(dst)
+function _bridge_skip_indices!(idx::Vector{Int}, rng::AbstractRNG, m::Int, n::Int)
+    lo = 1
+    while lo <= m
+        len = min(length(idx), m - lo + 1)
+        rand!(rng, view(idx, 1:len), 1:n)
+        lo += len
+    end
+    return rng
+end
+
+"""
+    _bridge_draw_counts!(cnt, idx, rng, m) -> cnt
+
+`m` draws of `rand(rng, 1:length(cnt))`, counted: `cnt[j]` is how often `j`
+was drawn. They are drawn `length(idx)` at a time into `idx`. For a
+`MersenneTwister` and an `Int` range, `rand!` on an array is a loop of one
+`rand(rng, sampler)` per element (Random has no bulk method for ranges), so
+drawing in chunks takes the same numbers off the generator as one
+`rand(rng, 1:n, m)`. (test_bridge_bootstrap.jl checks it against the bulk
+call.) A count past `typemax(UInt16)` throws; a draw of `n` from `n` reaches
+13 at most in practice.
+"""
+function _bridge_draw_counts!(cnt::Vector{UInt16}, idx::Vector{Int}, rng::AbstractRNG,
+                              m::Int)
+    n = length(cnt)
+    fill!(cnt, 0x0000)
     lo = 1
     while lo <= m
         len = min(length(idx), m - lo + 1)
         chunk = view(idx, 1:len)
         rand!(rng, chunk, 1:n)
         @inbounds for i in 1:len
-            dst[lo + i - 1] = chunk[i]
+            j = chunk[i]
+            c = cnt[j]
+            c == typemax(UInt16) && throw(OverflowError("bootstrap count over $(typemax(UInt16))"))
+            cnt[j] = c + 0x0001
         end
         lo += len
     end
-    return dst
+    return cnt
 end
 
 """
     _bridge_bootstrap(l1, l2, rng, n_bootstrap, max_iter, tol;
-                      workers = 1, progress = nothing, solve! = _bridge_iterate!)
+                      workers = 1, progress = nothing, start = NaN,
+                      solve = _bridge_solve_counts)
         -> (res, ok, iters)
 
 The `n_bootstrap` bootstrap solves of `bridge_evidence`, by `workers` threads
 at once. Replicate `k` resamples `l1` and `l2` with replacement and solves the
-bridge equation on the resample; `res[k]`, `ok[k]` and `iters[k]` are what
-`solve!` returned for it.
+bridge equation on the resample, from `start` (see `_bridge_iterate`);
+`res[k]`, `ok[k]` and `iters[k]` are what `solve` returned for it.
 
 The resamples are the serial loop's, exactly: replicate `k` takes the `k`-th
 pair of draws off `rng` -- `length(l1)` indices into `l1`, then `length(l2)`
-into `l2` -- because a worker takes the next replicate number and draws its
-indices under one lock. Which worker solves a replicate, and when, changes
-nothing, and every result goes to the replicate's own slot. So the output is
-the same at any thread count, and the same as solving the replicates one after
-another (`workers = 1`, which runs in the calling task).
+into `l2`. A worker takes the next replicate number under one lock, copies
+`rng`'s state into its own generator and moves `rng` past the replicate's
+draws; it then draws them again from its copy, outside the lock, as counts per
+entry (`_bridge_draw_counts!`). So the lock is held only to generate the
+numbers, which is what the serial loop did too, and which worker solves a
+replicate, and when, changes nothing; every result goes to the replicate's own
+slot. The output is the same at any thread count, and the same as solving the
+replicates one after another (`workers = 1`, which runs in the calling task).
 
-Each worker holds one `_BridgeBootBuffers` (16 bytes per draw) for all the
-replicates it solves; nothing else is allocated per replicate. The solves
-themselves are serial: the parallelism is across replicates, one per thread,
-so no thread is asked to split its own work.
+A resample is held as counts, not as a copy of the ratios: each worker holds
+one `_BridgeBootBuffers` (2 bytes per draw) for all the replicates it solves,
+and nothing else is allocated per replicate. A solve then evaluates each
+distinct draw once, about 63% of them. The solves themselves are serial: the
+parallelism is across replicates, one per thread, so no thread is asked to
+split its own work.
 
 If a worker throws, it sets a flag that ends every other worker's solve at its
 next solver pass and stops them taking replicates; the exception then
@@ -1198,42 +1320,39 @@ them), so none is left running. An interrupt in the calling task sets the
 same flag.
 
 `progress`, a `_SharedProgress`, is ticked once per finished replicate.
-`solve!` has `_bridge_iterate!`'s signature; it exists for the tests.
+`solve(l1, l2, c1, c2, max_iter, tol; start, stop)` exists for the tests.
 """
 function _bridge_bootstrap(l1::Vector{Float64}, l2::Vector{Float64}, rng::AbstractRNG,
                            n_bootstrap::Int, max_iter::Int, tol::Float64;
-                           workers::Int = 1, progress = nothing,
-                           solve!::F = _bridge_iterate!) where {F}
+                           workers::Int = 1, progress = nothing, start::Float64 = NaN,
+                           solve::F = _bridge_solve_counts) where {F}
     n1, n2 = length(l1), length(l2)
     res = fill(NaN, max(n_bootstrap, 0))
     ok = fill(false, max(n_bootstrap, 0))      # not a BitVector: one Bool per slot
     its = zeros(Int, max(n_bootstrap, 0))
     n_bootstrap <= 0 && return res, ok, its
     (n1 > 0 && n2 > 0) || return res, ok, its
-    max(n1, n2) < 2^53 || throw(ArgumentError("bootstrap indices must fit a Float64"))
 
     next = Ref(0)                    # replicates handed out; guarded by `rng_lock`
     rng_lock = ReentrantLock()
     stop = Threads.Atomic{Bool}(false)
     function work()
         try
-            buf = _BridgeBootBuffers(n1, n2)
+            buf = lock(() -> _BridgeBootBuffers(n1, n2, rng), rng_lock)
             while !stop[]
                 k = lock(rng_lock) do
                     next[] < n_bootstrap || return 0
                     next[] += 1
-                    _bridge_draw_indices!(buf.t1, buf.idx, rng, n1)
-                    _bridge_draw_indices!(buf.t2, buf.idx, rng, n2)
+                    copy!(buf.rng, rng)
+                    _bridge_skip_indices!(buf.idx, rng, n1, n1)
+                    _bridge_skip_indices!(buf.idx, rng, n2, n2)
                     next[]
                 end
                 k == 0 && break
-                @inbounds for i in 1:n1
-                    buf.b1[i] = l1[Int(buf.t1[i])]
-                end
-                @inbounds for j in 1:n2
-                    buf.b2[j] = l2[Int(buf.t2[j])]
-                end
-                r, it, conv = solve!(buf.t1, buf.t2, buf.b1, buf.b2, max_iter, tol; stop = stop)
+                _bridge_draw_counts!(buf.c1, buf.idx, buf.rng, n1)
+                _bridge_draw_counts!(buf.c2, buf.idx, buf.rng, n2)
+                r, it, conv = solve(l1, l2, buf.c1, buf.c2, max_iter, tol;
+                                    start = start, stop = stop)
                 res[k] = r; its[k] = it; ok[k] = conv
                 progress === nothing || _tick!(progress)
             end
@@ -1259,3 +1378,7 @@ function _bridge_bootstrap(l1::Vector{Float64}, l2::Vector{Float64}, rng::Abstra
     end
     return res, ok, its
 end
+
+# The bootstrap's solve: `_bridge_iterate` on the counts of a resample.
+_bridge_solve_counts(l1, l2, c1, c2, max_iter, tol; start = NaN, stop = nothing) =
+    _bridge_iterate(l1, l2, max_iter, tol; w1 = c1, w2 = c2, start = start, stop = stop)

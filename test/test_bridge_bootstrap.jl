@@ -9,14 +9,14 @@
 # moments are now streamed off the chain rather than taken from a matrix of
 # the draws, so they agree with mean/cov to rounding. What must still be exact
 # is everything about scheduling: the bootstrap's resamples come off the same
-# MersenneTwister in the same order, so its replicates are the same bits at
-# any worker count, and `===` is used there.
+# MersenneTwister in the same order (now as counts per draw), so its
+# replicates are the same bits at any worker count, and `===` is used there.
 using Test, Nereus, Random, Statistics, LinearAlgebra, MCMCChains, SpecialFunctions
-using Nereus: _bridge_iterate, _bridge_iterate!, _bridge_g!, _bridge_bootstrap,
-              _bridge_draw_indices!, _bridge_boot_workers, _bridge_boot_bytes,
-              _BridgeBootBuffers, _BridgeDraws, _bridge_draw!, _bridge_moments,
-              _BridgeLogq, _bridge_logq!, _bridge_ratios, _logaddexp, _logsumexp,
-              _SharedProgress, _tick!, ProgressBar, update!
+using Nereus: _bridge_iterate, _bridge_g, _bridge_wextreme, _bridge_bootstrap,
+              _bridge_draw_counts!, _bridge_skip_indices!, _bridge_boot_workers,
+              _bridge_boot_bytes, _BridgeBootBuffers, _BridgeDraws, _bridge_draw!,
+              _bridge_moments, _BridgeLogq, _bridge_logq!, _bridge_ratios,
+              _logaddexp, _logsumexp, _SharedProgress, _tick!, ProgressBar, update!
 
 # ---- the 0.8.8 code, verbatim -------------------------------------------------
 
@@ -200,13 +200,17 @@ end
     end
     unequal = _bb_ratios(20_000, 50; seed = 4)      # N2 << N1, as in production
 
-    # F(x) = g(x) - x, the residual of the bridge equation at x = log r.
-    function _residual(l1, l2, x)
-        n1, n2 = length(l1), length(l2)
-        g, _ = _bridge_g!(similar(l1), similar(l2), l1, l2,
-                          log(n1 / (n1 + n2)), log(n2 / (n1 + n2)), x)
-        return g - x
+    # One solver pass, (g, g'), at x = log r: on the ratios, or on a resample
+    # given as counts.
+    function _gpass(l1, l2, x; w1 = nothing, w2 = nothing)
+        n1 = w1 === nothing ? length(l1) : Int(sum(w1))
+        n2 = w2 === nothing ? length(l2) : Int(sum(w2))
+        return _bridge_g(l1, l2, w1, w2, log(n1 / (n1 + n2)), log(n2 / (n1 + n2)),
+                         log(n1), log(n2), _bridge_wextreme(min, l1, w1, Inf),
+                         _bridge_wextreme(max, l2, w2, -Inf), x)
     end
+    # F(x) = g(x) - x, the residual of the bridge equation at x = log r.
+    _residual(l1, l2, x; kw...) = _gpass(l1, l2, x; kw...)[1] - x
 
     @testset "solver: the old iteration's root, in a few passes" begin
         for (l1, l2) in (fast, slow, ext, unequal, reverse(unequal))
@@ -224,15 +228,72 @@ end
 
         # g' as computed in the pass is the derivative of g.
         for (l1, l2) in (fast, slow, ext), x in (-330.0, -321.0, -300.0)
-            n1, n2 = length(l1), length(l2)
-            ls1, ls2 = log(n1 / (n1 + n2)), log(n2 / (n1 + n2))
-            t1, t2 = similar(l1), similar(l2)
-            _, dg = _bridge_g!(t1, t2, l1, l2, ls1, ls2, x)
+            _, dg = _gpass(l1, l2, x)
             h = 1e-5
-            fd = (_bridge_g!(t1, t2, l1, l2, ls1, ls2, x + h)[1] -
-                  _bridge_g!(t1, t2, l1, l2, ls1, ls2, x - h)[1]) / 2h
+            fd = (_gpass(l1, l2, x + h)[1] - _gpass(l1, l2, x - h)[1]) / 2h
             @test -1 < dg < 1
             @test abs(dg - fd) < 1e-6
+        end
+
+        # The pass shifts each logsumexp by the term at the smallest l1 and the
+        # largest l2, found before the pass, instead of by the largest term
+        # computed in it: the same g and g' as two passes and a buffer.
+        function _gpass_ref(l1, l2, x)
+            n1, n2 = length(l1), length(l2)
+            ls1, ls2 = log(n1 / (n1 + n2)), log(n2 / (n1 + n2))
+            c = ls2 + x
+            t2 = [l2[j] - _logaddexp(ls1 + l2[j], c) for j in 1:n2]
+            t1 = [-_logaddexp(ls1 + l1[i], c) for i in 1:n1]
+            m1, m2 = maximum(t1), maximum(t2)
+            e2 = exp.(t2 .- m2); e1 = exp.(t1 .- m1)
+            g = (m2 + log(sum(e2)) - log(n2)) - (m1 + log(sum(e1)) - log(n1))
+            dg = sum(e1 .* exp.(c .+ t1)) / sum(e1) - sum(e2 .* exp.(c .+ t2 .- l2)) / sum(e2)
+            return g, dg
+        end
+        for (l1, l2) in (fast, slow, ext, unequal), x in (-330.0, -321.0, -300.0)
+            g, dg = _gpass(l1, l2, x)
+            gr, dgr = _gpass_ref(l1, l2, x)
+            @test abs(g - gr) < 1e-12 * max(1, abs(gr)) && abs(dg - dgr) < 1e-12
+        end
+        # Far from the root, on both sides of where the pass leaves its
+        # one-exp form for the log-space one (`_BRIDGE_G_FAST`): the same g.
+        thr = Nereus._BRIDGE_G_FAST
+        for (l1, l2) in (fast, ext, unequal)
+            n1, n2 = length(l1), length(l2)
+            δ = log(n1 / (n1 + n2)) - log(n2 / (n1 + n2))
+            x1 = δ + minimum(l1) - thr      # the l1 term at the edge
+            x2 = δ + maximum(l2) + thr      # the l2 term at the edge
+            for x in (x1 - 1, x1 + 1, x1 - 900, x2 - 1, x2 + 1, x2 + 900)
+                g, dg = _gpass(l1, l2, x)
+                gr, dgr = _gpass_ref(l1, l2, x)
+                @test abs(g - gr) < 1e-12 * max(1, abs(gr)) && abs(dg - dgr) < 1e-12
+            end
+            # Started out there, the same root.
+            x0 = _bridge_iterate(l1, l2, 1_000, 1e-10)[1]
+            for s in (x1 - 2000, x2 + 2000)
+                xs, its, oks = _bridge_iterate(l1, l2, 1_000, 1e-10; start = s)
+                @test oks && abs(xs - x0) < 1e-10
+            end
+        end
+
+        # Counts: entry i standing for w[i] draws is the resample that repeats
+        # it w[i] times.
+        let (l1, l2) = fast, rng = MersenneTwister(7)
+            w1 = UInt16.(rand(rng, 0:3, length(l1))); w2 = UInt16.(rand(rng, 0:2, length(l2)))
+            r1 = reduce(vcat, (fill(l1[i], w1[i]) for i in eachindex(l1)))
+            r2 = reduce(vcat, (fill(l2[j], w2[j]) for j in eachindex(l2)))
+            for x in (-330.0, -321.0, -300.0)
+                g, dg = _gpass(l1, l2, x; w1, w2)
+                gr, dgr = _gpass(r1, r2, x)
+                @test abs(g - gr) < 1e-12 * max(1, abs(gr)) && abs(dg - dgr) < 1e-12
+            end
+            x, it, ok = _bridge_iterate(l1, l2, 1_000, 1e-10; w1, w2)
+            xr, _, okr = _bridge_iterate(r1, r2, 1_000, 1e-10)
+            @test ok && okr && abs(x - xr) < 1e-10
+            # Started at another point: the same root.
+            xs, its, oks = _bridge_iterate(l1, l2, 1_000, 1e-10; w1, w2, start = x + 0.05)
+            @test oks && abs(xs - x) < 1e-10 && its <= 4
+            @test_throws DimensionMismatch _bridge_iterate(l1, l2, 5, 1e-10; w1 = w1[1:end-1])
         end
 
         # Many posteriors, clean and with stuck walkers of every size: the
@@ -257,38 +318,56 @@ end
         # iteration did.
         nf = ([0.0, 1.0, Inf], [0.5, -Inf])
         @test isequal(_bridge_iterate(nf..., 50, 1e-10), _ref_bridge_iterate(nf..., 50, 1e-10))
-        # A NaN ratio stops it, unconverged.
+        # A NaN ratio stops it, unconverged; with counts, counted or not.
         @test _bridge_iterate([0.0, NaN], [0.5, 1.0], 50, 1e-10)[3] == false
+        for w1 in (UInt16[1, 1], UInt16[2, 0]), w2 in (UInt16[1, 1],)
+            @test _bridge_iterate([0.0, NaN], [0.5, 1.0], 50, 1e-10; w1, w2)[3] == false
+            @test _bridge_iterate([0.5, 1.0], [0.0, NaN], 50, 1e-10; w1 = w2, w2 = w1)[3] == false
+        end
 
+        # No buffers, and nothing allocated per pass, with counts or without.
         l1, l2 = slow
-        t1 = similar(l1); t2 = similar(l2)
-        _bridge_iterate!(t1, t2, l1, l2, 5, 1e-300)
-        a5 = @allocated _bridge_iterate!(t1, t2, l1, l2, 5, 1e-300)
-        a500 = @allocated _bridge_iterate!(t1, t2, l1, l2, 500, 1e-300)
+        w1 = ones(UInt16, length(l1)); w2 = ones(UInt16, length(l2))
+        _bridge_iterate(l1, l2, 5, 1e-300); _bridge_iterate(l1, l2, 5, 1e-300; w1, w2)
+        a5 = @allocated _bridge_iterate(l1, l2, 5, 1e-300)
+        a500 = @allocated _bridge_iterate(l1, l2, 500, 1e-300)
         @test a500 == a5                    # nothing per pass
         @test a5 < 1_000
-        @test_throws DimensionMismatch _bridge_iterate!(t1[1:end-1], t2, l1, l2, 5, 1e-10)
+        aw5 = @allocated _bridge_iterate(l1, l2, 5, 1e-300; w1, w2)
+        aw500 = @allocated _bridge_iterate(l1, l2, 500, 1e-300; w1, w2)
+        @test aw500 == aw5 && aw5 < 1_000
+        # Counts of one each are the ratios themselves.
+        @test _bridge_iterate(l1, l2, 1_000, 1e-10; w1, w2)[1] ≈
+              _bridge_iterate(l1, l2, 1_000, 1e-10)[1] atol = 1e-12
 
         # `stop` ends it at the next pass, unconverged.
         stop = Threads.Atomic{Bool}(true)
-        @test _bridge_iterate!(t1, t2, l1, l2, 500, 1e-10; stop = stop)[2:3] == (0, false)
+        @test _bridge_iterate(l1, l2, 500, 1e-10; stop = stop)[2:3] == (0, false)
         seen = Int[]
-        _bridge_iterate!(t1, t2, l1, l2, 2, 1e-300; on_iter = (it, δ) -> push!(seen, it))
+        _bridge_iterate(l1, l2, 2, 1e-300; on_iter = (it, δ) -> push!(seen, it))
         @test seen == 1:2
     end
 
-    @testset "indices drawn in chunks are the bulk draw" begin
+    @testset "indices drawn in chunks, counted, are the bulk draw" begin
         chunk = Nereus._BRIDGE_IDX_CHUNK
         for (m, n) in ((1, 1), (7, 3), (chunk - 1, 10), (chunk, 10^6), (chunk + 1, 17),
                        (3chunk + 5, 3chunk + 5), (40_000, 9_800_000))
-            ra = MersenneTwister(99); rb = MersenneTwister(99)
+            ra = MersenneTwister(99); rb = MersenneTwister(99); rc = MersenneTwister(99)
             bulk = rand(ra, 1:n, m)
-            dst = Vector{Float64}(undef, m)
-            _bridge_draw_indices!(dst, Vector{Int}(undef, min(chunk, m)), rb, n)
-            @test dst == bulk
-            @test all(Float64(bulk[i]) === dst[i] for i in 1:m)
-            @test rand(ra, UInt64) == rand(rb, UInt64)     # same stream position
+            want = zeros(UInt16, n)
+            for j in bulk; want[j] += 1; end
+            cnt = fill(0x0007, n)                          # cleared first
+            idx = Vector{Int}(undef, min(chunk, m))
+            _bridge_draw_counts!(cnt, idx, rb, m)
+            @test cnt == want
+            # Skipping takes the same numbers off the generator.
+            _bridge_skip_indices!(idx, rc, m, n)
+            u = rand(ra, UInt64)
+            @test u == rand(rb, UInt64) == rand(rc, UInt64)   # same stream position
         end
+        # Past what a count holds: an error, not a wrapped count.
+        @test_throws OverflowError _bridge_draw_counts!(zeros(UInt16, 1), Vector{Int}(undef, 16),
+                                                        MersenneTwister(1), 70_000)
     end
 
     @testset "replicates: the same bits at every worker count, the old resamples" begin
@@ -305,6 +384,24 @@ end
                                                  workers = w)
                 @test all(i -> (res[i], its[i], ok[i]) === (r1[i], i1[i], o1[i]), 1:nb)
             end
+            # The counts are the old resamples: replicate k solved on the copy
+            # 0.8.8 made of it, by the same solver, gives the same root.
+            rb = MersenneTwister(42)
+            for k in 1:min(nb, 4)
+                b1 = l1[rand(rb, 1:length(l1), length(l1))]
+                b2 = l2[rand(rb, 1:length(l2), length(l2))]
+                @test abs(_bridge_iterate(b1, b2, 1_000, 1e-10)[1] - r1[k]) < 1e-10
+            end
+            # Started at the primary root, as bridge_evidence does: the same
+            # roots in fewer passes, still the same at every worker count.
+            x0 = _bridge_iterate(l1, l2, 1_000, 1e-10)[1]
+            rw, ow, iw = _bridge_bootstrap(l1, l2, MersenneTwister(42), nb, 1_000, 1e-10;
+                                           workers = 1, start = x0)
+            @test ow == o1 && all(i -> abs(rw[i] - r1[i]) < 1e-10, 1:nb)
+            @test all(i -> iw[i] <= i1[i], 1:nb) && sum(iw) < sum(i1)
+            res, ok, its = _bridge_bootstrap(l1, l2, MersenneTwister(42), nb, 1_000, 1e-10;
+                                             workers = 3, start = x0)
+            @test all(i -> (res[i], its[i], ok[i]) === (rw[i], iw[i], ow[i]), 1:nb)
         end
         # Capped at max_iter: replicates come back unconverged and are kept in
         # their slots, not dropped or reordered.
@@ -321,7 +418,7 @@ end
 
     @testset "memory: one set of buffers per worker, not per replicate" begin
         l1, l2 = fast
-        @test _bridge_boot_bytes(9_800_000, 20_000) == 16 * 9_820_000 + 8 * Nereus._BRIDGE_IDX_CHUNK
+        @test _bridge_boot_bytes(9_800_000, 20_000) == 2 * 9_820_000 + 8 * Nereus._BRIDGE_IDX_CHUNK
         @test _bridge_boot_workers(9_800_000, 20_000, 200, 10^12) ==
               min(nt, 200, Int(Sys.total_memory() ÷ 4) ÷ _bridge_boot_bytes(9_800_000, 20_000))
         @test _bridge_boot_workers(9_800_000, 20_000, 200, 0) == 1      # never zero
@@ -329,8 +426,10 @@ end
         f(nb) = @allocated _bridge_bootstrap(l1, l2, MersenneTwister(1), nb, 1_000, 1e-10; workers = 1)
         f(2)
         a10, a40 = f(10), f(40)
-        buf = sizeof(Float64) * 2 * (length(l1) + length(l2))
-        @test a10 < 2buf                    # the buffers and the result slots
+        # The counts, the index chunk, the generator copy and the result slots:
+        # well under one Float64 per draw.
+        buf = sizeof(Float64) * (length(l1) + length(l2))
+        @test a10 < buf + 8 * Nereus._BRIDGE_IDX_CHUNK + 50_000
         # A replicate allocates a few small objects, not a copy of the draws
         # (the serial loop allocated more than `buf` per replicate and step).
         @test (a40 - a10) / 30 < 2_000
@@ -340,16 +439,17 @@ end
         l1, l2 = slow
         calls = Threads.Atomic{Int}(0)
         steps_after = Threads.Atomic{Int}(0)
-        function bad!(t1, t2, b1, b2, mi, tol; stop)
+        function bad(l1, l2, c1, c2, mi, tol; start, stop)
             Threads.atomic_add!(calls, 1) + 1 == 5 && error("replicate failed")
             # Steps taken once the flag is up: at most the one in progress.
             on = (it, δ) -> (stop[] && Threads.atomic_add!(steps_after, 1))
-            return _bridge_iterate!(t1, t2, b1, b2, mi, tol; stop = stop, on_iter = on)
+            return _bridge_iterate(l1, l2, mi, tol; w1 = c1, w2 = c2, start, stop,
+                                   on_iter = on)
         end
         for w in unique((1, 4, nt))
             calls[] = 0; steps_after[] = 0
             @test_throws Exception _bridge_bootstrap(l1, l2, MersenneTwister(1), 200, 1_000,
-                                                     1e-10; workers = w, solve! = bad!)
+                                                     1e-10; workers = w, solve = bad)
             n_calls = calls[]
             # Four solves were under way, or done, when the fifth threw; at most
             # one more per worker can start before the flag is up. Not 200.
