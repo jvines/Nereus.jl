@@ -488,6 +488,9 @@ Returns a vector of `DerivedParams`, one per planet.
 
 Stellar parameters (M_s, R_s, T_eff) can be scalars or distributions
 (vectors of samples matching the chain length).
+`planets` limits the work to those planet slots (all by default): at millions
+of draws each slot holds some 25 vectors the length of the chain, so a caller
+that only summarises them can take one slot at a time.
 
 The angles `omega_deg` and `lambda_deg` come back as ONE contiguous interval
 per planet (seam in the emptiest arc), so they may run past the ends of their
@@ -499,14 +502,16 @@ user wrote, as the fitted table does.
 function compute_derived(chains, params::Params;
                           M_s = nothing, R_s = nothing,
                           T_eff = nothing, J_mag = nothing,
-                          K_mag = nothing, Ab = 0.0)
+                          K_mag = nothing, Ab = 0.0,
+                          planets = 1:params.config.max_kplanet)
     config = params.config
     parametrization = config.parametrization
     # `chains` may be 2-D (n_iter, n_param) for legacy samplers or 3-D
     # (n_iter, n_param, n_chain) for pt_emcee's per-walker reshape.
-    # `vec(Array(chains[sym]))` always flattens across every chain
-    # dimension, so n_samples must match that length — not size(_, 1).
-    n_samples = length(vec(Array(chains[:, 1, :])))
+    # `_draws(chains, sym)` always flattens across every chain
+    # dimension, so n_samples must match that length — not size(_, 1). (Read
+    # off the shape: copying a column to measure it cost a column.)
+    n_samples = size(chains, 1) * size(chains, 3)
     results = DerivedParams[]
 
     # Broadcast stellar params to sample arrays
@@ -547,8 +552,7 @@ function compute_derived(chains, params::Params;
     _deg_lo_ref(name) = name in circ && Symbol(name) in chain_param_syms ?
                         rad2deg(config.priors[name].lo) : -180.0
 
-    kplanet = config.max_kplanet
-    for k in 1:kplanet
+    for k in planets
         block = params.layout.planet_blocks[k]
         derived = Dict{String, Vector{Float64}}()
 

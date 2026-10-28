@@ -50,6 +50,27 @@ function ParamStats(samples::AbstractVector{<:Real})
     )
 end
 
+"""
+    ParamStats!(s) -> ParamStats
+
+`ParamStats(s)` from `s` itself, which it sorts: for a copy the caller owns
+and drops. The median and the six quantiles are read off the one sorted
+vector -- the same order statistics, combined the same way, as `median` and
+`quantile` on their own copies, so the numbers are identical -- instead of
+two more copies of the draws per parameter. With a NaN, `ParamStats(s)`,
+which is what decides what a NaN does.
+"""
+function ParamStats!(s::Vector{Float64})
+    (isempty(s) || any(isnan, s)) && return ParamStats(s)
+    sort!(s)
+    n = length(s)
+    mid = div(firstindex(s) + lastindex(s), 2)
+    med = isodd(n) ? Statistics.middle(s[mid]) : Statistics.middle(s[mid], s[mid + 1])
+    q16, q84, q025, q975, q001, q999 =
+        quantile(s, (0.16, 0.84, 0.025, 0.975, 0.0015, 0.9985); sorted = true)
+    return ParamStats(med, med - q16, q84 - med, (q16, q84), (q025, q975), (q001, q999))
+end
+
 # =====================================================================
 # summarize_fitted — stats for all unfrozen parameters
 # =====================================================================

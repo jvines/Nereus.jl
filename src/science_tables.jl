@@ -141,8 +141,10 @@ function sci_param_entry(chains, params::Params, name::AbstractString)
     # angle must not be wrapped at all: its walls are real (a non-uniform or
     # multi-period prior) or the likelihood is not periodic in it (Mo under
     # TTVs), so its values are already the right ones.
+    # `samp` is ours (a copy of the column, its masked or converted copy), so
+    # ParamStats! may sort it.
     is_ang && (samp = rad2deg.(samp))
-    return (stats = ParamStats(samp), unit = unit, occupancy = occ,
+    return (stats = ParamStats!(samp), unit = unit, occupancy = occ,
             n_used = length(samp))
 end
 
@@ -303,7 +305,7 @@ function science_derived(chains, params::Params;
     cfg = params.config
     M_s === nothing && !isnan(cfg.M_s) && (M_s = cfg.M_s)
     R_s === nothing && hasproperty(cfg, :R_s) && !isnan(cfg.R_s) && (R_s = cfg.R_s)
-    n = length(vec(Array(chains[:, 1, :])))
+    n = size(chains, 1) * size(chains, 3)
     rng = MersenneTwister(seed)
     stellar = Dict{String, Any}()
     function _draw(val, sig, frac, floor_, key)
@@ -322,32 +324,36 @@ function science_derived(chains, params::Params;
         stellar["T_eff"] = Dict("value" => T_eff, "sigma" => teff_abs, "assumed" => true)
     end
 
-    derived_vec = compute_derived(chains, params;
-                                   M_s=ms_v, R_s=rs_v, T_eff=tf_v,
-                                   J_mag=J_mag, K_mag=K_mag, Ab=Ab)
-
     allnames = names(chains, :parameters)
-    modal_np = :n_planets in allnames ? _mode_int(vec(Array(chains[:n_planets]))) :
+    modal_np = :n_planets in allnames ? _mode_int(_draws(chains, :n_planets)) :
                cfg.max_kplanet
     live = Set(_winning_planet_slots(chains, params))   # not 1:modal_np
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
-    for dp in derived_vec
-        k = parse(Int, split(dp.name, "_")[end])     # "planet_1" → 1
-        k in live || continue
-        mask = _planet_active_mask(chains, k)
-        # add P in years alongside the compute_derived outputs
-        vals = copy(dp.values)
-        Psym = Symbol("P_k$k")
-        Psym in allnames && (vals["P_yr"] = vec(Array(chains[Psym])) ./ 365.25)
-        for (key, samp) in vals
-            m = mask === nothing ? trues(length(samp)) : mask
-            s = samp[m]
-            (isempty(s) || any(!isfinite, extrema(s))) && continue
-            unit = get(_DERIVED_UNITS, key, "")
-            e = (stats=ParamStats(filter(isfinite, s)), unit=unit,
-                 occupancy = mask === nothing ? 1.0 : mean(mask), n_used=count(m))
-            push!(entries, "$(key)_k$k" => sci_entry_dict(e))
+    # One planet slot at a time, in slot order: compute_derived holds some 25
+    # vectors the length of the chain per slot, dropped once summarised.
+    for kk in 1:cfg.max_kplanet
+        kk in live || continue
+        for dp in compute_derived(chains, params;
+                                  M_s=ms_v, R_s=rs_v, T_eff=tf_v,
+                                  J_mag=J_mag, K_mag=K_mag, Ab=Ab, planets = kk:kk)
+            k = parse(Int, split(dp.name, "_")[end])     # "planet_1" → 1
+            k in live || continue
+            mask = _planet_active_mask(chains, k)
+            # add P in years alongside the compute_derived outputs
+            vals = copy(dp.values)
+            Psym = Symbol("P_k$k")
+            Psym in allnames && (vals["P_yr"] = _draws(chains, Psym) ./ 365.25)
+            for (key, samp) in vals
+                s = mask === nothing ? copy(samp) : samp[mask]
+                (isempty(s) || any(!isfinite, extrema(s))) && continue
+                unit = get(_DERIVED_UNITS, key, "")
+                # Every value is finite here, and `s` is our copy: sorted in place.
+                e = (stats=ParamStats!(s), unit=unit,
+                     occupancy = mask === nothing ? 1.0 : mean(mask),
+                     n_used = mask === nothing ? length(samp) : count(mask))
+                push!(entries, "$(key)_k$k" => sci_entry_dict(e))
+            end
         end
     end
     conditioning = Dict{String, Any}("n_planets" => modal_np,

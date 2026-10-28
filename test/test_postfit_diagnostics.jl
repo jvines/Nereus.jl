@@ -68,7 +68,15 @@ end
             @test p.ci2 === (q(0.025), q(0.975))
             @test p.ci3 === (q(0.0015), q(0.9985))
             @test p.unc_lo === median(v) - q(0.16) && p.unc_hi === q(0.84) - median(v)
+            # In place, on a copy: the same numbers.
+            s = copy(v)
+            p2 = Nereus.ParamStats!(s)
+            @test issorted(s)
+            for f in fieldnames(typeof(p))
+                @test getfield(p2, f) === getfield(p, f)
+            end
         end
+        @test isequal(extrema([1.0, NaN, 2.0]), (NaN, NaN))   # science_derived relies on it
     end
 
     @testset "fit_* params summary: one sort, the same bounds" begin
