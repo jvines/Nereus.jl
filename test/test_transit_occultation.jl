@@ -209,3 +209,29 @@ end
         @test all(meas.hi_dt .- meas.lo_dt .< 0.01)
     end
 end
+
+# The plotting model ignored exposure times, so a long-cadence fold drew and
+# subtracted the instantaneous transit: an ingress sharper than the binned
+# cadences, and residuals of a tenth of the depth at every ingress and egress.
+@testset "plot model integrates the exposure like the likelihood" begin
+    tg = transit_gate_target(; exposure = true)
+    data = tg.data
+    th = Nereus.Theta{Float64}(tg.params); ws = transit_gate_ws(tg)
+    i2 = findall(==(2), data.phot_inst)          # ground nights, 30-min exposures
+    t2, e2 = data.t_phot[i2], data.exposure_times[i2]
+    n_cmp = 0; n_smear = 0; worst = 0.0
+    for v in transit_gate_points(tg, 300; seed = 63)
+        th.values .= v
+        isfinite(Nereus.transit_log_likelihood(th, data, ws)) || continue
+        pred = Nereus.phot_predictions(th, data)[1][i2]
+        grid = Nereus.compute_transit_model_on_grid(th, data, t2, 2; exposure = e2)
+        inst = Nereus.compute_transit_model_on_grid(th, data, t2, 2)
+        worst = max(worst, maximum(abs.(grid .- pred)))
+        # draws on which the exposure changes the model at all
+        n_smear += maximum(abs.(inst .- pred)) > 1e-6
+        n_cmp += 1
+    end
+    @info "grid model with exposures vs likelihood model" n_cmp n_smear worst
+    @test worst < 1e-12
+    @test n_cmp > 200 && n_smear > 20
+end
