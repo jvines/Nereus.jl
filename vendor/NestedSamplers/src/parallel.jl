@@ -31,6 +31,11 @@ concurrently (`Threads.@threads :static`) when `parallel = true`. `batch_size =
 
 Keep `batch_size << nactive` (e.g. ≤ nthreads, with nactive ≥ ~20·batch_size)
 to keep the O(K/N) evidence bias well inside `logzerr`.
+
+`callback`, if given, is called as AbstractMCMC calls it in the serial sampler,
+`callback(rng, model, sampler, sample, state, i)`: once after the bootstrap step
+and once after each batch, with `sample` the batch's dead points and
+`i = state.it`.
 """
 function sample_parallel(rng::AbstractRNG, model::AbstractModel, sampler::Nested;
                          batch_size::Int = Threads.nthreads(),
@@ -38,7 +43,7 @@ function sample_parallel(rng::AbstractRNG, model::AbstractModel, sampler::Nested
                          dlogz::Real = 0.5, maxiter = Inf, maxcall = Inf,
                          maxlogl = Inf, add_live::Bool = true,
                          param_names = missing, check_wsum::Bool = true,
-                         progress::Bool = false)
+                         progress::Bool = false, callback = nothing)
     N = sampler.nactive
     K = clamp(batch_size, 1, N - 1)
 
@@ -46,6 +51,7 @@ function sample_parallel(rng::AbstractRNG, model::AbstractModel, sampler::Nested
     # dead sample/state, exactly as the serial path does.
     sample1, state = step(rng, model, sampler)
     samples = [sample1]
+    callback === nothing || callback(rng, model, sampler, sample1, state, state.it)
 
     # Per-thread RNGs for race-free, reproducible parallel walks. Sized by
     # `maxthreadid()`, NOT `nthreads()`: the walks below index by
@@ -71,6 +77,7 @@ function sample_parallel(rng::AbstractRNG, model::AbstractModel, sampler::Nested
 
         batch, state = step_batch(rng, rngs, props, model, sampler, state, K, parallel)
         append!(samples, batch)
+        callback === nothing || callback(rng, model, sampler, batch, state, state.it)
         progress && @printf("\r\33[2Kit=%d ncall=%d Δlogz=%.3g logz=%.4g",
                             state.it, state.ncall, delta_logz, state.logz)
     end

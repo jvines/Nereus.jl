@@ -51,9 +51,11 @@ function plot_pm_timeseries(chains, params, data;
             flux_i = data.flux[mask]
             err_i  = data.flux_err[mask]
 
-            # Real transit model at every cadence (for residuals)
+            # Real transit model at every cadence (for residuals), integrated
+            # over each cadence's exposure as in the likelihood
             model_at_data = compute_transit_model_on_grid(theta_med, data,
-                                                           t_i, ins_idx)
+                                                           t_i, ins_idx;
+                                                           exposure = _cadence_exposures(data, mask))
             res_ppm = (flux_i .- model_at_data) .* 1e6
 
             fig = Figure(; size = figsize)
@@ -123,7 +125,9 @@ end
                        phase_window=(-0.025, 0.025))
 
 Transit data phase-folded on one planet's period, with median-θ
-transit model overlaid and data-minus-model residuals.
+transit model overlaid and data-minus-model residuals. The other planets'
+transits are subtracted from the folded data, and every model is integrated
+over the cadences' exposure times as in the likelihood.
 
 `phase_window` defaults to ±0.025 — appropriate for short-period
 hot-Jupiter / sub-Neptune transits where the dip lives in ≤ 5% of
@@ -211,9 +215,17 @@ function plot_pm_phasefold(chains, params, data;
             err_i  = data.flux_err[mask]
             t_i    = data.t_phot[mask]
 
+            # Models at each cadence's exposure, as in the likelihood. The other
+            # planets' transits come out of the folded data, so only this
+            # planet's dips show; the residuals are against the full model.
+            exp_i = _cadence_exposures(data, mask)
+            model_full = compute_transit_model_on_grid(theta_med, data, t_i, ins_idx;
+                                                       exposure = exp_i)
             model_at_data = compute_transit_model_on_grid(theta_med, data,
                                                            t_i, ins_idx;
-                                                           planet=planet)
+                                                           planet=planet,
+                                                           exposure = exp_i)
+            flux_i = flux_i .- model_full .+ model_at_data
             res_ppm = (flux_i .- model_at_data) .* 1e6
 
             fig = Figure(; size = figsize)
@@ -268,8 +280,11 @@ function plot_pm_phasefold(chains, params, data;
             end
             # ci_chains is already restricted to the credible pool → disable
             # compute_transit_ci_bands' own lp cut so it uses all of it.
+            # The curve is drawn over binned cadences: integrate it over the
+            # instrument's exposure, or long-cadence ingress looks too sharp.
             ci = compute_transit_ci_bands(ci_chains, params, data, t_fine,
                                              ins_idx; planet=planet,
+                                             exposure=_instrument_exposure(data, mask),
                                              bf_cutoff=Inf,
                                              fold_phase=ph_fine,
                                              n_draws=min(2000,

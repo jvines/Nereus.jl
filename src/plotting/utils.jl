@@ -644,8 +644,22 @@ function _planet_Tc(theta, data, planet_k::Int)
                         data.t_ref, pc.t_ref_c)
 end
 
+# Exposure of each cadence in `mask` (days), for models at the data; 0 when the
+# data carry no exposures.
+_cadence_exposures(data, mask) =
+    isempty(data.exposure_times) ? 0.0 : data.exposure_times[mask]
+
+# One exposure for a fine-grid curve over an instrument's cadences: their
+# median finite exposure, 0 when there is none.
+function _instrument_exposure(data, mask)
+    isempty(data.exposure_times) && return 0.0
+    e = filter(x -> isfinite(x) && x > 0, data.exposure_times[mask])
+    return isempty(e) ? 0.0 : median(e)
+end
+
 """
-    compute_transit_model_on_grid(theta, data, t_grid, ins_idx; planet=nothing) -> model
+    compute_transit_model_on_grid(theta, data, t_grid, ins_idx; planet=nothing,
+                                  exposure=0.0) -> model
 
 Evaluate the transit photometric model `f(t)` on `t_grid` for instrument
 `ins_idx`. Returns the multi-planet product of (offset + Π transit_flux).
@@ -654,11 +668,19 @@ If `planet=k` is given, evaluate only planet `k`'s transit (no offset
 contribution from other planets); useful for phase-folded plots that
 isolate one planet.
 
+`exposure` (days; one value, or one per grid point) integrates each transit
+over the exposure as the likelihood does: the same sub-samples, from
+`_phot_n_super_point`, averaged per planet. Pass the cadences'
+`data.exposure_times` for residuals, and the instrument's exposure for a
+fine-grid curve drawn over binned long-cadence data. At the default 0 the
+model is instantaneous.
+
 Returns `1.0 + offset + (transit dips)` per cadence — exactly what the
 photometric likelihood compares against `data.flux`.
 """
 function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
-                                          planet::Union{Nothing, Int}=nothing)
+                                          planet::Union{Nothing, Int}=nothing,
+                                          exposure::Union{Real, AbstractVector{<:Real}}=0.0)
     parametrization = theta.params.config.parametrization
     t_ref = data.t_ref
     two_pi = 2π
@@ -687,8 +709,7 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
     u1, u2 = kipping_q_to_u(q1, q2)
 
     # Baseline continuum (offset + any trend) and third-light dilution — match the
-    # likelihood so a trend/diluted fit plots a consistent model. (Exposure
-    # supersampling is omitted: the overlay is already a fine-grid smooth curve.)
+    # likelihood so a trend/diluted fit plots a consistent model.
     dil = pm_dilution(theta, ins_idx)
     trend = Float64[theta.values[s] for s in systemic.pm_trend[ins_idx]]
     inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
@@ -758,16 +779,25 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
         transits[j] = bs[j] < 1 + rrs[j]
     end
 
+    exposure isa AbstractVector && length(exposure) != n_grid &&
+        throw(ArgumentError("exposure has $(length(exposure)) values for $n_grid grid points"))
     @inbounds for i in 1:n_grid
         t = t_grid[i]
+        texp = Float64(exposure isa AbstractVector ? exposure[i] : exposure)
+        ns = texp > 0 ? _phot_n_super_point(texp) : 1
         tprod = 1.0
         for jj in 1:n_transit
             transits[jj] || continue
-            z, sw = _sky_separation_signed(t, Ps[jj], es[jj], ws[jj], Tps[jj],
-                                           bs[jj], a_Rs[jj])
-            # Behind the star (sin(ω+f) <= 0) it is an occultation: no dip,
-            # as in the likelihood. z alone is as small there as at transit.
-            sw > 0 && (tprod *= transit_flux(z, rrs[jj], u1, u2))
+            fsum = 0.0
+            for s in 1:ns
+                ts = ns > 1 ? t + ((2s - ns - 1) / (2 * ns)) * texp : Float64(t)
+                z, sw = _sky_separation_signed(ts, Ps[jj], es[jj], ws[jj], Tps[jj],
+                                               bs[jj], a_Rs[jj])
+                # Behind the star (sin(ω+f) <= 0) it is an occultation: no dip,
+                # as in the likelihood. z alone is as small there as at transit.
+                fsum += sw > 0 ? transit_flux(z, rrs[jj], u1, u2) : 1.0
+            end
+            tprod *= fsum / ns
         end
         cont = _phot_continuum(Float64(t), t_ref, inv_th, offset, trend)
         model[i] = cont * ((1.0 - dil) * tprod + dil)
@@ -982,15 +1012,18 @@ end
 
 """
     compute_transit_ci_bands(chains, params, data, t_grid, ins_idx;
-                              planet=nothing, n_draws=1000)
+                              planet=nothing, n_draws=1000, exposure=0.0)
 
 Same shape as `compute_ci_bands` but evaluates the transit photometric
 model on `t_grid` for instrument `ins_idx`. If `planet=k`, only that
 planet's transit is computed (no contribution from other planets).
+`exposure` (days) integrates every draw's model over that exposure; see
+`compute_transit_model_on_grid`.
 """
 function compute_transit_ci_bands(chains, params, data, t_grid,
                                      ins_idx::Int;
                                      planet::Union{Nothing, Int}=nothing,
+                                     exposure::Real=0.0,
                                      n_draws::Int=1000,
                                      bf_cutoff::Real=10.0,
                                      fold_phase::Union{Nothing, AbstractVector}=nothing)
@@ -1028,7 +1061,7 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
             t_grid
         end
         m = compute_transit_model_on_grid(theta, data, t_eval, ins_idx;
-                                            planet=planet)
+                                            planet=planet, exposure=exposure)
         if any(!isfinite, m)
             valid[i] = false
             models[i, :] .= 0.0
