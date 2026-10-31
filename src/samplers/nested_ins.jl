@@ -83,6 +83,10 @@ machinery use the same draws.
   the dlogz stop can trigger.
 - `seed::Int=1`
 - `verbose::Bool=false`
+- `show_progress::Bool=true` — a `nested INS` progress line every 10 s, with
+  the fields of `sample_nested`'s: iteration, `logz`, `dlogz`, `stage`, `ncall`.
+  The stage tracks only the dlogz half of the stopping rule, not
+  `min_X_shrinkage`.
 """
 function sample_nested_ins(
     target::NereusTarget,
@@ -99,6 +103,7 @@ function sample_nested_ins(
     min_X_shrinkage::Real = 10.0,
     seed::Int = 1,
     verbose::Bool = false,
+    show_progress::Bool = true,
 )
     proposal in (:rwalk, :slice, :unif) ||
         throw(ArgumentError("proposal must be :rwalk, :slice, or :unif " *
@@ -221,6 +226,8 @@ function sample_nested_ins(
     log_z_ns = -Inf
     log_X = 0.0  # log(prior volume contained)
     iter = 0
+    pb = ProgressBar("nested INS"; total = 0, print_every = 10.0, enabled = show_progress)
+    stage = _NestedStage(dlogz)
 
     while iter < max_iter
         iter += 1
@@ -320,6 +327,8 @@ function sample_nested_ins(
         dlogz_now = log_z_ns > -Inf ?
                     log1p(exp(log_z_remain - log_z_ns)) :
                     Inf
+        pb.enabled && update!(pb; n_done = iter,
+                              fields = _nested_fields(stage, log_z_ns, dlogz_now, n_evals))
         if dlogz_now < dlogz && -log_X > min_X_shrinkage
             break
         end
@@ -328,6 +337,7 @@ function sample_nested_ins(
             "iter %d  log Z_ns=%.3f  Δlog Z=%.4f  log_X=%.2f  n_evals=%d",
             iter, log_z_ns, dlogz_now, log_X, n_evals)
     end
+    finish!(pb)
 
     # Final live-points contribution
     log_X_final = log_X

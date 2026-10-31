@@ -7,6 +7,7 @@
 using NestedSamplers
 using Random
 using MCMCChains
+using LogExpFunctions: logaddexp
 
 """
     sample_nested(target::NereusTarget, data::Data; kwargs...) -> (chains, log_evidence)
@@ -60,6 +61,10 @@ The target must use `unconstrained=false` (bounded space).
   a much lower logZ). 0.1 forces enough extra iterations for the bound to
   re-expand and find the true mode's bulk.
 - `seed::Int=1`
+- `show_progress::Bool=true` — a progress line every 10 s: iteration, `logz`,
+  the remaining evidence `dlogz` the run stops on, `stage` (how far log dlogz
+  has come toward the threshold, in percent) and `ncall`. There is no total, so
+  no ETA, and the stage is not a fraction of the run time.
 """
 function sample_nested(
     target::NereusTarget,
@@ -75,6 +80,7 @@ function sample_nested(
     seed::Int = 1,
     parallel::Bool = !_is_under_juliacall(),
     batch_size::Int = 0,   # 0 → auto (nthreads when parallel, else 1)
+    show_progress::Bool = true,
 )
     bounds in (:multi, :single, :none, :mlfriends) ||
         throw(ArgumentError("bounds must be :multi, :single, :none, or " *
@@ -231,9 +237,9 @@ function sample_nested(
     # does `if progress`, but recent AbstractMCMC versions pass a
     # `CreateNewProgressBar{String}` sentinel struct (not a Bool) by
     # default, blowing up with `non-boolean used in boolean context`.
-    # Disabling the bar sidesteps the API drift entirely — and the
-    # progress output is useless under juliacall on the exoautomata
-    # workers anyway.
+    # The fork's own printouts are `\r` lines in another format, so progress
+    # comes from Nereus's bar instead, advanced by a callback that both the
+    # serial and the batch path call once per iteration.
     # Batch/parallel NS when threading is safe (pure-Julia daemon — NOT
     # juliacall, where Julia threads can deadlock under the Python GIL). K
     # lowest-L points are replaced per iteration via K concurrent constrained
@@ -264,8 +270,10 @@ function sample_nested(
     use_parallel = parallel && K > 1 && !slice_family && bounds !== :mlfriends
     # Run serially by re-seeding so the serial path is reproducible whether
     # we reach it directly or via the parallel-failure fallback below.
-    run_serial() = NestedSamplers.sample(MersenneTwister(seed), model, sampler;
-                                          dlogz=dlogz, progress=false)
+    run_serial(pb) = NestedSamplers.sample(MersenneTwister(seed), model, sampler;
+                                            dlogz=dlogz, progress=false,
+                                            callback=_nested_progress(pb, dlogz))
+    pb = ProgressBar("nested"; total = 0, print_every = 10.0, enabled = show_progress)
     ns_chains, ns_state = if use_parallel
         # Belt-and-suspenders: even the random-walk batch path can throw from
         # inside a worker task (a collapsed-scale "stuck" walk). A failed
@@ -275,16 +283,22 @@ function sample_nested(
         try
             NestedSamplers.sample_parallel(rng, model, sampler;
                                             batch_size=K, parallel=true,
-                                            dlogz=dlogz, progress=false)
+                                            dlogz=dlogz, progress=false,
+                                            callback=_nested_progress(pb, dlogz))
         catch err
+            finish!(pb)
             @warn "Parallel nested sampling failed (likely a stuck proposal " *
                   "inside a worker task); falling back to the SERIAL sampler. " *
                   "This is slower but more robust." exception = (err, catch_backtrace())
-            run_serial()
+            # The serial run starts again from iteration 1: a bar of its own.
+            pb = ProgressBar("nested serial"; total = 0, print_every = 10.0,
+                             enabled = show_progress)
+            run_serial(pb)
         end
     else
-        run_serial()
+        run_serial(pb)
     end
+    finish!(pb)
     log_ev = ns_state.logz
 
     # NestedSamplers returns weighted samples. Resample to an unweighted
@@ -346,6 +360,54 @@ function sample_nested(
 
     chains = MCMCChains.Chains(mat, param_names)
     return chains, log_ev
+end
+
+
+# Remaining evidence Δlog Z = log(Z + L_max·X) − log Z, the quantity the fork's
+# `nested_isdone` and `sample_parallel` stop on.
+_nested_dlogz(state) =
+    logaddexp(state.logz, maximum(state.logl) + state.logvol) - state.logz
+
+# A stage measure for the bar, 0 → 1: how far log Δ has come from its first
+# usable value toward the stopping threshold `target`. Usable means finite, with
+# log Z above the -1e300 a failed likelihood returns: the first dead points are
+# often such failures, and Δ ≈ 1e300 there would put the start where any real Δ
+# reads as nearly done. It is not the fraction of the run's time (Δ falls fast
+# early and slowly late, hence no ETA), and it falls back when the live set
+# reaches a higher-likelihood region, since Δ grows again then.
+mutable struct _NestedStage
+    target::Float64
+    log_start::Float64          # NaN until the first usable Δ
+end
+_NestedStage(target::Real) = _NestedStage(Float64(target), NaN)
+
+function _stage!(s::_NestedStage, logz::Real, dlogz::Real)
+    (isfinite(dlogz) && logz > -1e299) || return 0.0
+    ld = log(max(dlogz, floatmin(Float64)))
+    isnan(s.log_start) && (s.log_start = ld)
+    span = s.log_start - log(s.target)
+    span > 0 || return 1.0      # it started at or below the threshold
+    return clamp((s.log_start - ld) / span, 0.0, 1.0)
+end
+
+# The status fields of every nested sampler's bar, in one order. The stage is
+# floored, so 100% means the dlogz criterion is met.
+_nested_fields(s::_NestedStage, logz, dlogz, ncall) =
+    (:logz => logz, :dlogz => dlogz,
+     :stage => @sprintf("%d%%", floor(Int, 100 * _stage!(s, logz, dlogz))),
+     :ncall => ncall)
+
+# The callback `sample_nested` hands to AbstractMCMC (serial path) and to the
+# fork's `sample_parallel` (batch path): one bar update per iteration. `target`
+# is the run's dlogz threshold.
+function _nested_progress(pb::ProgressBar, target::Real)
+    stage = _NestedStage(target)
+    return function (rng, model, sampler, sample, state, i; kwargs...)
+        pb.enabled || return nothing
+        update!(pb; n_done = state.it,
+                fields = _nested_fields(stage, state.logz, _nested_dlogz(state), state.ncall))
+        return nothing
+    end
 end
 
 
