@@ -15,4 +15,9 @@ replaces the former sibling-clone path dep so the build is self-contained and
 portable. To update: pull the fork, re-copy `src/` + `Project.toml`, bump the
 commit above.
 
+Changed here since the commit above, so carry them over on an update:
+
+- `sample_parallel` takes `callback`, called after the bootstrap step and after
+  each batch; Nereus's `sample_nested` uses it for its progress bar.
+
 License: MIT (see LICENSE) — original authors retained.
