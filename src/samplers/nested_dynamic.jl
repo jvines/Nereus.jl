@@ -95,6 +95,10 @@ importance likelihood window.
   `:unif`); shares Nereus's INS kernels (see `sample_nested_ins`).
 - `seed::Int=1`
 - `verbose::Bool=false`
+- `show_progress::Bool=true` — a progress line every 10 s per pass, labelled
+  `nested baseline` and `nested batch 1`, with the fields of `sample_nested`'s:
+  iteration, `logz`, `dlogz`, `stage` (toward that pass's dlogz threshold; the
+  prior-volume shrinkage the stop also requires is not in it) and `ncall`.
 """
 function sample_nested_dynamic(
     target::NereusTarget,
@@ -115,6 +119,7 @@ function sample_nested_dynamic(
     proposal::Symbol = :rwalk,
     seed::Int = 1,
     verbose::Bool = false,
+    show_progress::Bool = true,
 )
     bounds in (:multi, :single) ||
         throw(ArgumentError("bounds must be :multi or :single (got :$bounds)"))
@@ -149,7 +154,8 @@ function sample_nested_dynamic(
                      L_min = -Inf, L_max = +Inf,
                      n_walks = n_walks, walk_scale = walk_scale,
                      proposal = proposal,
-                     seed = seed, verbose = verbose)
+                     seed = seed, verbose = verbose,
+                     label = "nested baseline", show_progress = show_progress)
 
     # Higson+ 2019 importance allocation (dynesty `weight_function`).
     # Two importance functions over the dead-point sequence, blended by
@@ -226,7 +232,8 @@ function sample_nested_dynamic(
                       init_u = init_u, init_logL = init_logL,
                       n_walks = n_walks, walk_scale = walk_scale,
                       proposal = proposal,
-                      seed = seed + 2, verbose = verbose)
+                      seed = seed + 2, verbose = verbose,
+                      label = "nested batch 1", show_progress = show_progress)
 
     # === Combine: Higson interleaving (simplified) ===
     # Concatenate dead-point streams and recompute log_X with an
@@ -318,7 +325,8 @@ function _ns_inner(target::NereusTarget, data::Data;
                    walk_scale::Float64 = 1.0,
                    proposal::Symbol = :rwalk,
                    min_X_shrinkage::Float64 = 10.0,
-                   seed::Int, verbose::Bool)
+                   seed::Int, verbose::Bool,
+                   label::String, show_progress::Bool)
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -419,6 +427,8 @@ function _ns_inner(target::NereusTarget, data::Data;
     log_z = -Inf
     log_X = 0.0
     iter = 0
+    pb = ProgressBar(label; total = 0, print_every = 10.0, enabled = show_progress)
+    stage = _NestedStage(dlogz)
 
     while iter < max_iter
         iter += 1
@@ -504,10 +514,14 @@ function _ns_inner(target::NereusTarget, data::Data;
         log_z_remain = log_X + maximum(live_logL)
         dlogz_now = log_z > -Inf ?
                     log1p(exp(log_z_remain - log_z)) : Inf
-        if dlogz_now < dlogz && -log_X > min_X_shrinkage
-            break
-        end
+        done = dlogz_now < dlogz && -log_X > min_X_shrinkage
+        # The stopping iteration prints whatever the throttle says, so the
+        # pass's last line is its final state.
+        pb.enabled && update!(pb; n_done = iter, force = done,
+                              fields = _nested_fields(stage, log_z, dlogz_now, n_evals))
+        done && break
     end
+    finish!(pb)
 
     # Add final live points
     for i in 1:n_live
