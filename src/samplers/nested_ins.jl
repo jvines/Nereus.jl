@@ -327,11 +327,12 @@ function sample_nested_ins(
         dlogz_now = log_z_ns > -Inf ?
                     log1p(exp(log_z_remain - log_z_ns)) :
                     Inf
-        pb.enabled && update!(pb; n_done = iter,
+        done = dlogz_now < dlogz && -log_X > min_X_shrinkage
+        # The stopping iteration prints whatever the throttle says, so the
+        # run's last line is its final state.
+        pb.enabled && update!(pb; n_done = iter, force = done,
                               fields = _nested_fields(stage, log_z_ns, dlogz_now, n_evals))
-        if dlogz_now < dlogz && -log_X > min_X_shrinkage
-            break
-        end
+        done && break
 
         verbose && iter % 500 == 0 && @info @sprintf(
             "iter %d  log Z_ns=%.3f  Δlog Z=%.4f  log_X=%.2f  n_evals=%d",

@@ -514,11 +514,12 @@ function _ns_inner(target::NereusTarget, data::Data;
         log_z_remain = log_X + maximum(live_logL)
         dlogz_now = log_z > -Inf ?
                     log1p(exp(log_z_remain - log_z)) : Inf
-        pb.enabled && update!(pb; n_done = iter,
+        done = dlogz_now < dlogz && -log_X > min_X_shrinkage
+        # The stopping iteration prints whatever the throttle says, so the
+        # pass's last line is its final state.
+        pb.enabled && update!(pb; n_done = iter, force = done,
                               fields = _nested_fields(stage, log_z, dlogz_now, n_evals))
-        if dlogz_now < dlogz && -log_X > min_X_shrinkage
-            break
-        end
+        done && break
     end
     finish!(pb)
 

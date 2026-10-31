@@ -30,7 +30,7 @@ end
 
 _np_line(label) = Regex("^" * label * raw" \| iter (\d+) \| logz=\S+ \| dlogz=\S+ \| stage=(\d+)% \| ncall=\d+ \| elapsed ")
 _np_lines(lines, label) = filter(l -> occursin(_np_line(label), l), lines)
-_np_stage(l) = parse(Int, match(_np_line("nested"), l)[2])
+_np_stage(l) = parse(Int, match(r"\| stage=(\d+)% \|", l)[1])
 
 const _NP_MODEL = NestedModel(x -> -0.5 * sum(abs2, (x .- 0.5) ./ 0.1),
                               [Uniform(0, 1), Uniform(0, 1)])
@@ -66,6 +66,16 @@ const _NP_MODEL = NestedModel(x -> -0.5 * sum(abs2, (x .- 0.5) ./ 0.1),
         @test length(stages) > 2
         @test first(stages) == 0 && last(stages) == 100
         @test count(==(100), stages) == 1                # 100% only once the run stops
+
+        # With the throttle shut, the stopping iteration still prints.
+        lines = _np_capture() do
+            pb = ProgressBar("nested"; total = 0, print_every = 3600.0)
+            NestedSamplers.sample_parallel(MersenneTwister(1), _NP_MODEL, Nested(2, 50);
+                                           batch_size = 3, parallel = false, dlogz = 1.0,
+                                           callback = Nereus._nested_progress(pb, 1.0))
+            Nereus.finish!(pb)
+        end
+        @test _np_stage.(_np_lines(lines, "nested")) == [0, 100]
     end
 
     @testset "sample_parallel calls the callback after every batch" begin
@@ -89,6 +99,7 @@ const _NP_MODEL = NestedModel(x -> -0.5 * sum(abs2, (x .- 0.5) ./ 0.1),
         hits = _np_lines(lines, "nested")
         @test !isempty(hits)
         @test match(_np_line("nested"), hits[1])[1] == "1"
+        @test _np_stage(hits[end]) == 100                 # the stopping iteration
     end
 
     @testset "sample_nested, batch path" begin
@@ -96,26 +107,29 @@ const _NP_MODEL = NestedModel(x -> -0.5 * sum(abs2, (x .- 0.5) ./ 0.1),
             sample_nested(target, data; n_live = 40, dlogz = 2.0, proposal = :rwalk,
                           parallel = true, batch_size = 2, seed = 1)
         end
-        @test !isempty(_np_lines(lines, "nested"))
+        hits = _np_lines(lines, "nested")
+        @test !isempty(hits) && _np_stage(hits[end]) == 100
         @test isempty(_np_lines(lines, "nested serial"))   # no fallback
     end
 
     @testset "sample_nested_dynamic labels its two passes" begin
         lines = _np_capture() do
             sample_nested_dynamic(target, data; n_live_init = 80, n_live_batch = 50,
-                                  dlogz_init = 2.0, max_iter = 1200, seed = 1)
+                                  dlogz_init = 2.0, max_iter = 5000, seed = 1)
         end
         base  = findall(l -> occursin(_np_line("nested baseline"), l), lines)
         batch = findall(l -> occursin(_np_line("nested batch 1"), l), lines)
         @test !isempty(base) && !isempty(batch)
         @test maximum(base) < minimum(batch)
+        @test _np_stage(lines[maximum(base)]) == 100      # the baseline stopped on dlogz
     end
 
     @testset "sample_nested_ins" begin
         lines = _np_capture() do
-            sample_nested_ins(target, data; n_live = 30, dlogz = 5.0, max_iter = 150, seed = 1)
+            sample_nested_ins(target, data; n_live = 30, dlogz = 5.0, max_iter = 5000, seed = 1)
         end
-        @test !isempty(_np_lines(lines, "nested INS"))
+        hits = _np_lines(lines, "nested INS")
+        @test !isempty(hits) && _np_stage(hits[end]) == 100
     end
 
     @testset "show_progress = false prints nothing" begin

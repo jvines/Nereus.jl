@@ -399,13 +399,16 @@ _nested_fields(s::_NestedStage, logz, dlogz, ncall) =
 
 # The callback `sample_nested` hands to AbstractMCMC (serial path) and to the
 # fork's `sample_parallel` (batch path): one bar update per iteration. `target`
-# is the run's dlogz threshold.
+# is the run's dlogz threshold. Both paths stop right after the iteration whose
+# Δ ≤ target, so that one prints whatever the throttle says: the last line is
+# the run's final state.
 function _nested_progress(pb::ProgressBar, target::Real)
     stage = _NestedStage(target)
     return function (rng, model, sampler, sample, state, i; kwargs...)
         pb.enabled || return nothing
-        update!(pb; n_done = state.it,
-                fields = _nested_fields(stage, state.logz, _nested_dlogz(state), state.ncall))
+        Δ = _nested_dlogz(state)
+        update!(pb; n_done = state.it, force = Δ <= target,
+                fields = _nested_fields(stage, state.logz, Δ, state.ncall))
         return nothing
     end
 end
