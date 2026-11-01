@@ -44,7 +44,20 @@ info "tree matches: $staged_tree"
 
 say "1/5  tag on Forgejo"
 if git -C "$JL_ROOT" rev-parse "v$JL_VER" >/dev/null 2>&1; then
-  info "tag v$JL_VER already exists locally"
+  # A run that failed after tagging leaves the tag behind. If HEAD has moved
+  # since, reusing it would publish a commit the staged bundles do not match.
+  tagged=$(git -C "$JL_ROOT" rev-parse "v$JL_VER^{commit}")
+  head=$(git -C "$JL_ROOT" rev-parse HEAD)
+  if [ "$tagged" = "$head" ]; then
+    info "tag v$JL_VER already exists locally"
+  else
+    rc=0; git -C "$JL_ROOT" ls-remote --exit-code --tags origin "refs/tags/v$JL_VER" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || die "tag v$JL_VER points at $tagged, not HEAD $head, and is on
+the remote (or the remote could not be checked). A pushed tag is never moved."
+    info "local tag v$JL_VER points at $tagged, left by a failed run; retagging HEAD"
+    git -C "$JL_ROOT" tag -d "v$JL_VER" >/dev/null
+    git -C "$JL_ROOT" tag -a "v$JL_VER" -m "Nereus $JL_VER"
+  fi
 else
   git -C "$JL_ROOT" tag -a "v$JL_VER" -m "Nereus $JL_VER"
 fi

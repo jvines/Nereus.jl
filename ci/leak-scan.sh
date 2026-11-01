@@ -33,6 +33,11 @@
 # exit non-zero. "I could not check" must never read as "there is nothing here".
 set -uo pipefail
 
+# Match bytes, whatever the caller's locale. Under a UTF-8 locale grep and
+# git grep skip bytes that are not valid UTF-8, so the same tree scanned clean
+# from a terminal and failed on a C-locale runner.
+export LC_ALL=C
+
 die() { echo "leak-scan: $*" >&2; exit 2; }
 
 # ---- load patterns from outside the repository ----------------------------
@@ -85,6 +90,24 @@ for s in "${NEG[@]}"; do matches "$s" && { echo "SELF-TEST: fired on known-negat
 echo "leak-scan: self-test ok (${#POS[@]} positives matched, ${#NEG[@]} negatives ignored)"
 
 # ---- scan -----------------------------------------------------------------
+# Compressed pixel data is effectively random bytes, and a short host name turns
+# up in it as a whole word by chance: two README figures did. Raster images are
+# left out of the host-name scan only; the path scan still reads them, metadata
+# chunks included.
+HOST_SCOPE=(':(top)'
+            ':(top,exclude,icase)*.png' ':(top,exclude,icase)*.jpg'
+            ':(top,exclude,icase)*.jpeg' ':(top,exclude,icase)*.gif'
+            ':(top,exclude,icase)*.webp')
+
+# One engine for both modes: git grep on a commit ($1), or on the tracked files
+# of the working tree (no argument). Plain grep differs by platform -- GNU grep
+# reports a binary match on stderr, which this script used to discard. git grep
+# exits 1 for "no match"; anything above that is a failure, never a clean tree.
+scan_files() {
+  git grep -inE  "$PATHS" ${1:+"$1"} -- ':(top)'           || [ $? -eq 1 ] || return 2
+  git grep -inwE "$HOSTS" ${1:+"$1"} -- "${HOST_SCOPE[@]}" || [ $? -eq 1 ] || return 2
+}
+
 hits=0
 if [ "${1:-}" = "--range" ]; then
   range="${2:?usage: ci/leak-scan.sh --range A..B}"
@@ -92,15 +115,16 @@ if [ "${1:-}" = "--range" ]; then
   for c in $(git rev-list "$range"); do
     m=$(scan_text "$(git log -1 --format='%s%n%b' "$c")")
     [ -n "$m" ] && { echo "COMMIT MESSAGE $(git log -1 --format='%h %s' "$c")"; printf '%s\n' "$m" | sed 's/^/    /'; hits=1; }
-    t=$( { git grep -inE "$PATHS" "$c" -- 2>/dev/null; git grep -inwE "$HOSTS" "$c" -- 2>/dev/null; } | drop_allowed )
+    t=$(scan_files "$c") || die "git grep failed on $c; refusing to certify it"
+    t=$(printf '%s\n' "$t" | drop_allowed)
     [ -n "$t" ] && { echo "COMMIT CONTENT $(git log -1 --format='%h %s' "$c")"; printf '%s\n' "$t" | sed 's/^/    /'; hits=1; }
   done
 else
   cd "${1:-.}" || die "no such directory: ${1:-.}"
   echo "leak-scan: scanning tracked files in $(pwd)"
   # Tracked files only: untracked scratch (run logs, figures) is never pushed.
-  out=$( { git ls-files -z | xargs -0 grep -inE  "$PATHS" 2>/dev/null
-           git ls-files -z | xargs -0 grep -inwE "$HOSTS" 2>/dev/null; } | drop_allowed )
+  out=$(scan_files) || die "git grep failed in $(pwd); refusing to certify it"
+  out=$(printf '%s\n' "$out" | drop_allowed)
   [ -n "$out" ] && { printf '%s\n' "$out" | sed 's/^/    /'; hits=1; }
 fi
 
