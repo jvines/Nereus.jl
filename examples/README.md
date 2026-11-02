@@ -75,3 +75,21 @@ straight into two systems:
 
 Runs on a stock Python install: `pip install astronereus numpy`. The runtime is
 fetched on first use.
+
+## 04 — Python tutorial: RVs, transits and astrometry
+
+`04_tutorial_rv_transits_astrometry.ipynb` starts from installation and fits one
+system per combination of channels, every fit with `PTEmcee`:
+
+- **NGTS-6 b**: CORALIE and FEROS velocities alone (Vines et al. 2019), then
+  jointly with five sectors of TESS 2-min photometry.
+- **Gaia-4 b**: Gaia DR4 epoch astrometry alone, then jointly with the HPF, NEID
+  and FIES velocities.
+- **HD 114762 b**: velocities alone, then with DR4. The joint fit puts the orbit
+  at i = 3.5° and the companion at 0.2 M_sun.
+
+Needs `pip install "astronereus[diagnostics,lightcurves]"` (xarray to read the
+chains, lightkurve for TESS) and `unzip` on the PATH for the DR4 download. A full
+run takes about 15 minutes with 16 threads. `NEREUS_TUTORIAL_QUICK=1` cuts every
+chain to 600 steps, to check that the notebook runs end to end; what it prints
+then is not a result.
