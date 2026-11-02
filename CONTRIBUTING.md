@@ -14,7 +14,7 @@
 Every pull request into `develop` or `main` runs the full test suite on
 Forgejo Actions (`.forgejo/workflows/ci.yml`) on two self-hosted runners at
 once, one linux/arm64 (~6 min) and one linux/amd64 (~15 min), inside the
-`ci/Dockerfile` image (Julia 1.11.9, the version `Manifest.toml` was resolved
+`ci/Dockerfile` image (Julia 1.13.3, the version `Manifest.toml` was resolved
 with), as five parallel shards (`ci/run_tests.sh`). Both must pass: the
 samplers are chaotic, so the same seed gives different chains on the two
 architectures, and a fixed-seed test can pass on one and fail on the other.
