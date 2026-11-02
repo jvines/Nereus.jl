@@ -38,6 +38,11 @@ say "gates"
   || die "Nereus.jl tree is dirty. A bundle built from it would match no commit."
 [ -z "$(git -C "$PY_ROOT" status --porcelain --untracked-files=no)" ] \
   || die "nereus-py tree is dirty."
+# The suite runs in ci/Dockerfile's Julia and the bundles ship the config's. Two
+# different versions would certify one Julia and release another.
+ci_julia=$(sed -n 's/^FROM julia:\([0-9.]*\)$/\1/p' "$JL_ROOT/ci/Dockerfile")
+[ "$ci_julia" = "$CFG_JULIA" ] \
+  || die "ci/Dockerfile runs julia '$ci_julia' but the release config ships '$CFG_JULIA'."
 
 have=$(jl_version "$JL_ROOT")
 [ "$have" = "$JL_VER" ] || die "Project.toml says $have, you asked for $JL_VER. Bump it first."
