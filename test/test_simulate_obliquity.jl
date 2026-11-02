@@ -170,13 +170,16 @@ end
     @testset "pooled p-value responds to S/N" begin
         # three nights months apart at different barycentric velocities — the
         # offsets are what make BERV handling load-bearing when pooling.
-        cfg = [("N1", 2459000.5, -8.2, 786.0),
-               ("N2", 2459360.5,  5.2, 627.0),
-               ("N3", 2459411.5, 13.4, 632.0)]
+        # One noise seed per night, written out: they were hash(tag) % 10000,
+        # and Julia 1.13 hashes strings differently from 1.11, which drew other
+        # noise and moved the null p-value.
+        cfg = [("N1", 2459000.5, -8.2, 786.0, 4980),
+               ("N2", 2459360.5,  5.2, 627.0, 7775),
+               ("N3", 2459411.5, 13.4, 632.0, 3663)]
         build(σ, rr) = [simulate_tomogram(; SP..., rr = rr, Tc = tc, berv = bv,
                                           cadence = cad, sigma_pixel = σ, tag = tg,
-                                          rng = MersenneTwister(hash(tg) % 10000))
-                        for (tg, tc, bv, cad) in cfg]
+                                          rng = MersenneTwister(seed))
+                        for (tg, tc, bv, cad, seed) in cfg]
         pooled(ns) = tomogram_pooled(ns; P = SP.P, a_Rs = SP.a_Rs,
                                      inc = acos(SP.b / SP.a_Rs), vsini = SP.vsini,
                                      T14 = SP.T14 / 24, filter_pulsations = false,

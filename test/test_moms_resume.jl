@@ -240,14 +240,15 @@ end
             @test _draws(_mr_run(100; tkw = tkw(:none))) !=
                   _draws(_mr_run(100; tkw = tkw(:gladman)))
         end
-        # Data changed where Base's `hash` does not look: an element in the
-        # middle of an array of 8192 or more, of which it reads a few dozen.
-        # The `data` field of `run_fingerprint` reads every element, so it sees it.
+        # Data changed where Base's `hash` does not look. Through Julia 1.12 it
+        # reads a few dozen elements of an array of 8192 or more, and an element
+        # it skips is the case that matters; from 1.13 it reads them all, and any
+        # middle element will do. The `data` field of `run_fingerprint` reads
+        # every element, so it sees the change either way.
         let n = 9000, t = collect(range(0.0, 300.0; length = n)),
             rv0 = 10.0 .* randn(MersenneTwister(3), n)
             bumped(i) = (r = copy(rv0); r[i] += 1.0; r)
-            i = findfirst(i -> hash(bumped(i)) == hash(rv0), 1:n)
-            @test i !== nothing
+            i = something(findfirst(i -> hash(bumped(i)) == hash(rv0), 1:n), n ÷ 2)
             mk(rv) = build_target(planets = (b = _mr_planet(),),
                 rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(1.5, n)),
                              sigma = LogUniformPrior(0.5, 10.0)),))

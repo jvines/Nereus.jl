@@ -5,7 +5,11 @@
 # the target (briefly -- this is about the plumbing, not convergence).
 using Test
 using Nereus
-using JSON3, NCDatasets
+using JSON3
+# Narrow import: a bare `using NCDatasets` also exports its `bounds`, which from
+# Julia 1.12 makes every later bare `bounds` in Main ambiguous with Nereus's
+# (src/io.jl narrows its import for the same reason).
+using NCDatasets: NCDataset
 using Nereus: Theta
 using Random, Statistics
 
