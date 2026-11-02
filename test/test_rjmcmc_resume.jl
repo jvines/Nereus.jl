@@ -165,9 +165,10 @@ end
     # A target rebuilt from scratch, new vectors and Dicts throughout, matches.
     @test fp(_rj_setup(_RJ_RV)[1:2]...) == fp(_rj_setup(_RJ_RV)[1:2]...)
 
-    # Base.hash reads only a sample of an array of 8192 entries or more. Find a
-    # point of a 20000-point light curve it skips: changing that point must
-    # still change the fingerprint.
+    # Through Julia 1.12, Base.hash reads only a sample of an array of 8192
+    # entries or more. Find a point of a 20000-point light curve it skips:
+    # changing that point must still change the fingerprint. From 1.13 Base
+    # reads every entry, and a middle point stands in.
     n = 20_000
     t = collect(range(0.0, 27.0; length = n))
     f = 1.0 .+ 1e-4 .* sin.(t)
@@ -179,7 +180,7 @@ end
         f[i] = old
         missed
     end
-    @test i !== nothing
+    i = something(i, n ÷ 2)
     g = copy(f)
     g[i] += 1e-6
     phot(flux) = Data(; t_rv = _RJ_T, rv = _RJ_RV, rv_err = fill(1.5, _RJ_N),

@@ -144,7 +144,7 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       CI_ROOT: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].ci_root }}
       CI_WORKSPACE: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].ci_root }}/runs/${{ github.run_id }}
-      CI_IMAGE: nereus-ci:julia-1.11.9
+      CI_IMAGE: nereus-ci:julia-1.13.3
       CI_CPUS: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].cpus }}
       CI_MEMORY: ${{ fromJSON(vars.RUNNER_MATRIX).include[matrix.idx].memory }}
       CONTAINER: nereus-ci-${{ github.run_id }}-${{ matrix.idx }}

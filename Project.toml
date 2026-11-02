@@ -57,6 +57,9 @@ TransitLeastSquares = "5c19cc68-9170-449c-b590-1f8211cd33e4"
 Transits = "2e59a628-7bac-4d38-8059-3a73ba0928ab"
 
 [sources]
+# Not in the General registry. Pkg >= 1.12 records a URL-tracked dependency here
+# as well as in Manifest.toml.
+BayesianGLS = {rev = "main", url = "https://github.com/jvines/BGLS.jl"}
 # VENDORED in-tree at vendor/NestedSamplers — the jvines fork of NestedSamplers.jl
 # @ fix/high-dim-stability (commit 64b0ff7), carrying Bounds.MLFriends +
 # Proposals.HSlice that src/samplers/nested.jl uses (bounds=:mlfriends,
