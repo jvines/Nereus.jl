@@ -228,6 +228,7 @@ export
     RelAstromData, HGCAData, IADData, GOSTData, G23HData, GaiaDR3Data,
     n_relast, n_iad, n_gost, n_g23h,
     n_iad_inst, n_relast_inst, merge_iad, merge_relast, iad_for_inst,
+    clip_transit_outliers,
     jyear_to_mjd, mjd_epochs,
     relastrom_log_likelihood, hgca_log_likelihood,
     iad_log_likelihood, gost_log_likelihood, iad_sigma_eff,
