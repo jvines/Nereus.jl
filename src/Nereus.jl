@@ -230,7 +230,7 @@ export
     n_iad_inst, n_relast_inst, merge_iad, merge_relast, iad_for_inst,
     jyear_to_mjd, mjd_epochs,
     relastrom_log_likelihood, hgca_log_likelihood,
-    iad_log_likelihood, gost_log_likelihood,
+    iad_log_likelihood, gost_log_likelihood, iad_sigma_eff,
     g23h_log_likelihood,
     along_scan_projection, astrom_log_likelihood,
     obs_based_log_prior,
