@@ -55,6 +55,7 @@ TTVFaster = "d84f081e-b698-44a3-a477-911041168508"
 Transducers = "28d57a85-8fef-5791-bfe6-a80928e7c999"
 TransitLeastSquares = "5c19cc68-9170-449c-b590-1f8211cd33e4"
 Transits = "2e59a628-7bac-4d38-8059-3a73ba0928ab"
+p7zip_jll = "3f19e933-33d8-53b3-aaab-bd5110c3b7a0"
 
 [sources]
 # Not in the General registry. Pkg >= 1.12 records a URL-tracked dependency here
