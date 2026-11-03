@@ -230,7 +230,9 @@ end
 # As there, a model a rung has only just found -- fewer than m + 2 walkers in
 # it, or a singular Σ_A -- takes its volume from the axis widths about the best
 # walker (`evalf(x, tds)` returns its (log π, log L)), and the walkers it gains
-# are drawn about that walker, in its model, rather than copied.
+# are drawn about that walker, in its model, rather than copied; and only once
+# the rung has stopped climbing, its median log L risen by less than m/2 since
+# the previous call (`med_logL`, updated in place).
 # ------------------------------------------------------------------
 function _td_prune_stranded!(state::Array{Float64,3},
                              td_states::AbstractMatrix{TransDimState},
@@ -239,9 +241,12 @@ function _td_prune_stranded!(state::Array{Float64,3},
                              flat_shift::Vector{Union{Nothing,Float64}},
                              owner::Vector{Int}, n_noise_toggle::Int, rng;
                              tau::Float64 = 10.0, evalf = nothing,
-                             circ::AbstractVector{Int} = Int[])
+                             circ::AbstractVector{Int} = Int[],
+                             med_logL::Union{Nothing,AbstractVector{Float64}} = nothing)
     n_t, n_w, n_dim = size(state)
     moved = zeros(Int, n_t)
+    rise = med_logL === nothing ? fill(NaN, n_t) :
+           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - med_logL[t]) for t in 1:n_t]
     _active(tds, o) = o == 0 || (o > 0 ? tds.planet_active[o] : tds.noise_active[-o])
     _same(a, b) = a.planet_active == b.planet_active &&
                   a.noise_active == b.noise_active && a.as_active == b.as_active
@@ -289,7 +294,7 @@ function _td_prune_stranded!(state::Array{Float64,3},
         end
         evaly(yd) = evalf(tox!(yd), tb)
         if lv === nothing
-            evalf === nothing && continue
+            (evalf === nothing || !(rise[t] < m / 2)) && continue
             # A cost gate, not a bound (see `_pt_prune_stranded!`).
             gate = _td_half_logdet_cov(Y(findall(isfinite, ℓ)))
             gate === nothing && continue
@@ -340,6 +345,11 @@ function _td_prune_stranded!(state::Array{Float64,3},
             copyto!(dst.as_active, src.as_active)
         end
         moved[t] = length(S)
+    end
+    if med_logL !== nothing
+        for t in 1:n_t
+            med_logL[t] = _pt_finite_median(view(logL_arr, t, :))
+        end
     end
     return moved
 end
@@ -672,6 +682,7 @@ function sample_transdim_pt_emcee(
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
+    prune_med = fill(NaN, n_temps)      # each rung's median log L at the last prune
     # Astrometry-only planets get the node flip (src/samplers/node_flip.jl).
     # Same-mode slots share Ω's window, and the flip reads it from the layout.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
@@ -1940,6 +1951,7 @@ function sample_transdim_pt_emcee(
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
         slide_proposed .= ck.slide_proposed; slide_accepted .= ck.slide_accepted
         pruned .= ck.pruned
+        hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
         n_evals_atomic[] = ck.n_evals::Int
         for (a, v) in zip((pswap_prop, pswap_acc, pn_prop, pn_acc, np_prop, np_acc),
                           ck.swap_diag)
@@ -2119,7 +2131,8 @@ function sample_transdim_pt_emcee(
             pruned .+= _td_prune_stranded!(state, td_states, logπ_arr, logL_arr,
                                            βs, flat_shift, dim_owner,
                                            do_noise ? length(noise_toggle_idx) : 0,
-                                           rng_master; evalf = prune_eval, circ)
+                                           rng_master; evalf = prune_eval, circ,
+                                           med_logL = prune_med)
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
@@ -2189,7 +2202,7 @@ function sample_transdim_pt_emcee(
                 accept_transdim, propose_transdim, accept_noise_transdim,
                 propose_noise_transdim, planet_birth_proposed, planet_birth_accepted,
                 planet_death_proposed, planet_death_accepted, flip_proposed,
-                flip_accepted, slide_proposed, slide_accepted, pruned,
+                flip_accepted, slide_proposed, slide_accepted, pruned, prune_med,
                 n_evals = n_evals_atomic[],
                 swap_diag = Int[a[] for a in (pswap_prop, pswap_acc, pn_prop, pn_acc,
                                                np_prop, np_acc)],

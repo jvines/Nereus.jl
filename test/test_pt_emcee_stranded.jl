@@ -39,6 +39,9 @@ end
 _mode_logL(x, gap, width) = max(-0.5 * sum(abs2, (x .- 0.5) ./ width), -gap)
 _mode_eval(gap; width = 0.01) =
     y -> all(v -> 0 <= v <= 1, y) ? (0.0, _mode_logL(y, gap, width)) : (-Inf, -Inf)
+# A record of each rung's median log L at the previous prune that says the rung
+# has stopped climbing: the same median as now.
+_settled(lL) = [median(filter(isfinite, lL[t, :])) for t in axes(lL, 1)]
 
 @testset "pt_emcee: stranded walkers and default convergence" begin
 
@@ -78,12 +81,23 @@ _mode_eval(gap; width = 0.01) =
         state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 60.0)
         @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2)) == [0]
 
-        # With one: the drops along each axis about the best walker give widths
-        # of at most σ = 0.01, the plateau provably weighs nothing, and all 96
-        # move.
+        # Nor while the rung is still climbing, or with no record of whether it
+        # is: its best walker may be only the fastest climber, and the rest
+        # would be herded onto it.
+        @test _pt_prune_stranded!(copy(state), copy(lπ), copy(lL), [1.0],
+                                  MersenneTwister(2); evalf = _mode_eval(60.0)) == [0]
+        rec = _settled(lL) .- 2.0          # risen 2 nats since: d/2 = 1.5
+        @test _pt_prune_stranded!(copy(state), copy(lπ), copy(lL), [1.0],
+                                  MersenneTwister(2); evalf = _mode_eval(60.0),
+                                  med_logL = rec) == [0]
+        @test rec == _settled(lL)          # the record now holds this call's
+
+        # Settled, with an evaluator: the drops along each axis about the best
+        # walker give widths of at most σ = 0.01, the plateau provably weighs
+        # nothing, and all 96 move.
         before = copy(state)
         moved = _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
-                                    evalf = _mode_eval(60.0))
+                                    evalf = _mode_eval(60.0), med_logL = _settled(lL))
         @test moved == [96]
         @test state[1, 1:4, :] == before[1, 1:4, :]
         # Drawn about the best walker and evaluated, not copied: the ensemble
@@ -99,14 +113,16 @@ _mode_eval(gap; width = 0.01) =
         # carry mass, so it stays.
         state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 18.0)
         @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
-                                  evalf = _mode_eval(18.0)) == [0]
+                                  evalf = _mode_eval(18.0),
+                                  med_logL = _settled(lL)) == [0]
 
         # A spike is not a mode: at σ = 1e-6 the volume is 41 nats smaller and a
         # plateau 40 nats down may outweigh it. At σ = 0.01 it may not.
         for (width, n) in ((1e-6, 0), (0.01, 96))
             state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 40.0, width = width)
             @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
-                                      evalf = _mode_eval(40.0; width)) == [n]
+                                      evalf = _mode_eval(40.0; width),
+                                      med_logL = _settled(lL)) == [n]
         end
     end
 
@@ -156,9 +172,12 @@ _mode_eval(gap; width = 0.01) =
         ev = (x, td) -> td.planet_active[1] ? _mode_eval(60.0)(x) : (0.0, -60.0)
         @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
                                          [1, 1, 1], 0, MersenneTwister(2)) == [0]
+        @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
+                                         [1, 1, 1], 0, MersenneTwister(2);
+                                         evalf = ev) == [0]
         moved = Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
                                            [1, 1, 1], 0, MersenneTwister(2);
-                                           evalf = ev)
+                                           evalf = ev, med_logL = _settled(lL))
         @test moved == [96]
         @test all(w -> tds[1, w].planet_active[1], 1:100)
         @test length(unique(eachrow(state[1, :, :]))) == 100

@@ -301,6 +301,17 @@ end
 # walkers would leave the rung in their affine hull, which no stretch move
 # leaves.
 #
+# That path waits for the rung to stop climbing. Early in burn-in the walkers
+# are still rising from the prior and the best of them is no mode, only the
+# fastest climber; the bound holds there too, but moving the rest onto it
+# herds the ensemble onto one walker. Without a check, HD 114762 with an IAD
+# jitter moved 97 of its 100 cold walkers (791 across the ladder) at step 200
+# of 4000 onto a leader at log p = -2709, and Gaia-4 b 39 at step 50. So it
+# runs only once the rung's median log-likelihood, tempered at the current β,
+# rose by less than d/2 (the depth of its typical set) since the previous
+# prune: Gaia-4 b's stranded group moved by -1.5 to +1.9 nats per 50 steps, a
+# climbing rung by ~50-100. The first prune has no record and never takes it.
+#
 # Bounding the region by one of its walkers instead (sup over the group) does
 # not work: the group below any density cut always holds some tail walker of
 # the mode, 20 nats down, and the bound never clears the 70-nat plateau.
@@ -309,16 +320,23 @@ end
 # walkers moved at each rung. Serial, draws from `rng`. `evalf(y)` returns
 # (log π, log L) on the flat scale, as `logπ_arr`/`logL_arr` hold them; without
 # it a rung with too few walkers in A is left alone. `circ` lists the
-# full-circle angles.
+# full-circle angles. `med_logL` is each rung's median log L after the previous
+# call, NaN before the first; it is updated in place. Without it, or while a
+# rung climbs, that rung's few-walker path is skipped.
 # ------------------------------------------------------------------
 function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64},
                              logL_arr::Matrix{Float64}, βs::Vector{Float64}, rng;
                              tau::Float64 = 10.0, evalf = nothing,
-                             circ::AbstractVector{Int} = Int[])
+                             circ::AbstractVector{Int} = Int[],
+                             med_logL::Union{Nothing,AbstractVector{Float64}} = nothing)
     n_t, n_w, d = size(state)
     moved = zeros(Int, n_t)
     d >= 1 || return moved
     allow = quantile(Chisq(d), 1 - 1e-6) / 2
+    # How far each rung climbed since the last call, at today's β (the ladder
+    # adapts in between); NaN without a record, which compares false.
+    rise = med_logL === nothing ? fill(NaN, n_t) :
+           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - med_logL[t]) for t in 1:n_t]
     ℓ = Vector{Float64}(undef, n_w)
     y = Vector{Float64}(undef, d)
     for t in 1:n_t
@@ -337,7 +355,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
         lv = length(A) >= d + 2 ? _pt_half_logdet_cov(state, t, A, yb, circ) : nothing
         σ = nothing
         if lv === nothing
-            evalf === nothing && continue
+            (evalf === nothing || !(rise[t] < d / 2)) && continue
             # A cost gate, not a bound: the whole rung's spread as the volume. A
             # rung that could not prune even then is not worth 2d+ evaluations.
             gate = _pt_half_logdet_cov(state, t, findall(isfinite, ℓ), yb, circ)
@@ -381,8 +399,15 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
         end
         moved[t] = length(S)
     end
+    if med_logL !== nothing
+        for t in 1:n_t
+            med_logL[t] = _pt_finite_median(view(logL_arr, t, :))
+        end
+    end
     return moved
 end
+
+_pt_finite_median(x) = (v = filter(isfinite, x); isempty(v) ? NaN : median(v))
 
 # ½ log det of the covariance of walkers `ws` at rung `t`; a full-circle angle
 # (`circ`) as its offset from `yb` on the circle. `nothing` if singular.
@@ -543,10 +568,11 @@ in place.
   weighs under e⁻¹⁰ of the mode (bounded by that likelihood times the
   normalised prior) are moved, so a plateau that could carry real mass — a
   weak signal — is left alone. The mode's mass is the Laplace volume of the
-  walkers in it; while fewer than `n_dim + 2` have found it, a smaller volume
-  measured from the density along each axis at its best walker (a few
-  evaluations per dimension), and the walkers moved are then drawn about that
-  walker rather than copied, so the rung keeps its full rank. The stretch move cannot bring
+  walkers in it; while fewer than `n_dim + 2` have found it, and once the rung
+  has stopped climbing, a smaller volume measured from the density along each
+  axis at its best walker (a few evaluations per dimension), and the walkers
+  moved are then drawn about that walker rather than copied, so the rung keeps
+  its full rank. The stretch move cannot bring
   stranded walkers back itself, so without this a narrow mode (any
   well-measured period on a wide prior) fills its cold rung at the rate the
   ladder happens to rediscover it. Burn-in only: the recorded chain is ordinary
@@ -684,6 +710,7 @@ function sample_pt_emcee(
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
+    prune_med = fill(NaN, n_temps)      # each rung's median log L at the last prune
     # Astrometry-only planets get the (Ω, ω) → (Ω + π, ω + π) move
     # (src/samplers/node_flip.jl); empty, and never drawn for, anything else.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
@@ -1054,6 +1081,7 @@ function sample_pt_emcee(
         accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
         pruned .= ck.pruned
+        hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
         n_evals_atomic[] = ck.n_evals::Int
         β_hist[1:step0, :] .= ck.β_hist; swap_hist[1:step0, :] .= ck.swap_hist
         smd_hist[1:step0, :] .= ck.smd_hist
@@ -1167,7 +1195,8 @@ function sample_pt_emcee(
         # Its evaluations run here, between steps, on slot 1's buffers.
         if prune_stranded && step % 50 == 0 && step <= (3 * n_burnin) ÷ 4
             pruned .+= _pt_prune_stranded!(state, logπ_arr, logL_arr, βs,
-                                           rng_master; evalf = prune_eval, circ)
+                                           rng_master; evalf = prune_eval, circ,
+                                           med_logL = prune_med)
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
@@ -1263,6 +1292,7 @@ function sample_pt_emcee(
                 state, logπ = logπ_arr, logL = logL_arr, betas = βs, rng_master,
                 rngs_h1, rngs_h2, rngs_flip, accept_within, propose_within,
                 accept_swap, propose_swap, flip_proposed, flip_accepted, pruned,
+                prune_med,
                 n_evals = n_evals_atomic[], β_hist = β_hist[1:step, :],
                 swap_hist = swap_hist[1:step, :], smd_hist = smd_hist[1:step, :],
                 keep_idx, samples = samples[1:keep_idx, :],
