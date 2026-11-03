@@ -54,7 +54,7 @@ const _SHARED = ["n_p", "rho_s", "dvdt", "d2vdt2", "plx", "M_pri", "i_star",
 # Per-instrument / per-noise columns (src/model.jl:1499-1605, noise models).
 _instrument_names() = [p * "_" * i for i in _INSTR for p in
                        ("gamma", "sigma", "jitter", "offset", "dilution", "q1",
-                        "q2", "u1", "u2", "C", "sigma_as", "gd_beta", "phot_c0",
+                        "q2", "u1", "u2", "C", "sigma_as", "sigma_iad", "gd_beta", "phot_c0",
                         "phot_c1", "tomo_alpha", "tomo_sigma_line", "tomo_ell_v",
                         "gp_log_S0", "gp_sigma", "Cdot_bis")]
 

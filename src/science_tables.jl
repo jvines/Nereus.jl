@@ -86,10 +86,11 @@ function sci_param_unit(name::AbstractString, params::Params)
     haskey(_SCI_UNITS, s) && return _SCI_UNITS[s]
     # γ/jitter on a PHOTOMETRIC instrument live in relative flux (dimensionless),
     # not m/s — disambiguate by which instrument the param belongs to.
-    # Astrometric jitter is in mas, and it is spelled `sigma_as_<imager>` —
-    # so it has to be caught BEFORE the generic `sigma` prefix below, which
-    # would otherwise publish milliarcseconds as m/s in every table.
-    startswith(s, "sigma_as_") && return ("mas", false)
+    # Astrometric jitter is in mas, and it is spelled `sigma_as_<imager>`
+    # (relative) or `sigma_iad_<instrument>` (along-scan) — so it has to be
+    # caught BEFORE the generic `sigma` prefix below, which would otherwise
+    # publish milliarcseconds as m/s in every table.
+    (startswith(s, "sigma_as_") || startswith(s, "sigma_iad_")) && return ("mas", false)
     phot = _is_phot_param(s, params)
     startswith(s, "gamma")  && return (phot ? "" : "m/s", false)   # systemic velocity
     startswith(s, "sigma")  && return (phot ? "" : "m/s", false)   # jitter

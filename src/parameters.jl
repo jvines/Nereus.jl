@@ -821,6 +821,24 @@ round-trip).
     return theta.values[slot]
 end
 
+"""
+    iad_jitter(theta, ins_idx) -> Real
+
+Additive along-scan jitter (mas) for intermediate-astrometry instrument
+`ins_idx` (`IADData.inst`), added in quadrature to that instrument's abscissa
+errors: `σ_i² → σ_i² + s_m²`.
+
+Exactly `0` for an instrument without a `sigma_iad_<name>` slot -- the default
+for every instrument, see `InstrumentConfig`'s `iad`.
+"""
+@inline function iad_jitter(theta::Theta{T}, ins_idx::Int) where {T<:Real}
+    slots = theta.params.layout.systemic.iad_jitter
+    (ins_idx < 1 || ins_idx > length(slots)) && return zero(T)
+    slot = slots[ins_idx]
+    slot == 0 && return zero(T)
+    return theta.values[slot]
+end
+
 # =====================================================================
 # RV trend accessors
 # =====================================================================

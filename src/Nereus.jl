@@ -209,7 +209,7 @@ export
     has_K, has_geometry, has_AS,
     ParamsConfig, ParamsLayout, Params,
     n_total, n_unfrozen, n_frozen, param_index,
-    n_rv_instruments, n_pm_instruments, n_as_instruments,
+    n_rv_instruments, n_pm_instruments, n_as_instruments, n_iad_jitters,
     # Runtime theta state
     Theta,
     set_unfrozen!, unfrozen_values, unfrozen_values!,
@@ -219,7 +219,7 @@ export
     planet_inc, planet_Omega, astrom_plx, astrom_M_pri,
     system_vsini, system_f_light,
     n_p, set_n_p!, planet_indices, is_noise_model_active,
-    rv_gamma, rv_sigma, rv_dvdt, rv_d2vdt2, as_jitter,
+    rv_gamma, rv_sigma, rv_dvdt, rv_d2vdt2, as_jitter, iad_jitter,
     pm_offset, pm_jitter, pm_dilution,
     rho_s,
     log_prior,
