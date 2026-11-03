@@ -137,10 +137,13 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       parametrization = nothing, time_anchor = nothing,
                       R_s = NaN, phot_trend_order = 0, as_names = String[],
                       sharing = nothing, transdim_noise = false,
-                      ttv_n_transits = nothing, ttv_backend = nothing)
+                      ttv_n_transits = nothing, ttv_backend = nothing,
+                      # Collects `clip_transit_outliers` reports, when given.
+                      iad_reports = nothing)
     rv    = NamedTuple()
     phot  = NamedTuple()
     iad = hgca = gost = relast = nothing
+    iad_names = String[]          # per IAD instrument; "" = no jitter
     for ch in channels
         src = String(get(ch, "source", ""))
         if src == "RV"
@@ -153,9 +156,11 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
             # last channel silently won, so `fit_joint` with a Hipparcos
             # channel and a Gaia channel quietly fitted only Gaia — and threw
             # away that channel's parallax and primary mass with it.
-            ch_iad = resolve_astrometry(get(ch, "iad", nothing))
+            ch_iad, ch_names, ch_reps = _resolve_iad(get(ch, "iad", nothing))
             if ch_iad !== nothing
                 iad = iad === nothing ? ch_iad : merge_iad(iad, ch_iad)
+                append!(iad_names, ch_names)
+                iad_reports === nothing || append!(iad_reports, ch_reps)
             end
             ch_relast = _as_relast(get(ch, "relast", nothing))
             if ch_relast !== nothing
@@ -220,7 +225,8 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                           :stability => stability,
                           :external_priors => _as_external(external_priors),
                           :phot_trend_order => phot_trend_order,
-                          :as_names => as_names)
+                          :as_names => as_names,
+                          :iad_names => any(!isempty, iad_names) ? iad_names : String[])
     parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
     time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
     isnan(R_s) || (kw[:R_s] = R_s)
@@ -398,15 +404,52 @@ expressed over the wire:
     [Dict("catalogue" => "hipparcos", "hip" => 27321),
      Dict("catalogue" => "gaia_dr4",  "source_id" => 1457486023639239296)]
 """
-function resolve_astrometry(spec)
-    spec === nothing && return nothing
+resolve_astrometry(spec) = first(_resolve_iad(spec))
+
+"""
+    _resolve_iad(spec) -> (iad, jitter_names, outlier_reports)
+
+`resolve_astrometry`, plus the two per-instrument options a spec may carry:
+
+    Dict("catalogue" => "gaia_dr4", "source_id" => ..., "jitter" => true,
+         "clip_outliers" => true)
+
+- `"jitter" => true` gives this instrument a `sigma_iad_<name>` along-scan
+  jitter (`InstrumentConfig`'s `iad`). `jitter_names` has one entry per
+  instrument of the resolved `iad`, `""` for those without.
+- `"clip_outliers" => true` (or a number of σ, default 5) runs
+  [`clip_transit_outliers`](@ref) on this instrument before it is merged;
+  its report is returned in `outlier_reports`, tagged with the name.
+
+`<name>` is the spec's `"instrument"` if given, else `HIP<hip>` /
+`GaiaDR4_<source_id>` -- the names a run_job `data.iad` block gets.
+"""
+function _resolve_iad(spec)
+    spec === nothing && return (nothing, String[], Any[])
     if spec isa AbstractVector && !isempty(spec) && !(spec isa AbstractVector{<:Real})
-        resolved = [resolve_astrometry(s) for s in spec]
-        filter!(!isnothing, resolved)
-        isempty(resolved) && return nothing
-        return merge_iad(collect(IADData, resolved))
+        parts = [_resolve_iad(s) for s in spec]
+        filter!(p -> p[1] !== nothing, parts)
+        isempty(parts) && return (nothing, String[], Any[])
+        return (merge_iad(collect(IADData, first.(parts))),
+                reduce(vcat, [p[2] for p in parts]),
+                reduce(vcat, [p[3] for p in parts]))
     end
-    spec isa AbstractDict || return spec          # already an IADData
+    if !(spec isa AbstractDict)                    # already an IADData
+        return (spec, spec isa IADData ? fill("", n_iad_inst(spec)) : String[], Any[])
+    end
+    iad = _load_iad_spec(spec)
+    name = _iad_block_name(spec, 1)
+    reports = Any[]
+    nsig = _iad_clip_nsigma(_get(spec, :clip_outliers; default = false))
+    if nsig !== nothing
+        iad, rep = clip_transit_outliers(iad; nsigma = nsig, label = name)
+        push!(reports, merge((instrument = name,), rep))
+    end
+    jit = _iad_jitter_flag(_get(spec, :jitter; default = false))
+    return (iad, fill(jit ? name : "", n_iad_inst(iad)), reports)
+end
+
+function _load_iad_spec(spec::AbstractDict)
     cat = lowercase(String(get(spec, "catalogue", "")))
     if cat in ("gaia_dr4", "gaia_epoch", "dr4")
         sid = get(spec, "source_id", nothing)
@@ -426,6 +469,26 @@ function resolve_astrometry(spec)
     error("unknown astrometry catalogue $(repr(cat)). " *
           "Supported: gaia_dr4, hipparcos")
 end
+
+# `jitter`: a boolean, nothing else. A string "true" or a number is a typo for
+# something, and the safe reading of a typo here is an error, not a model.
+function _iad_jitter_flag(x)
+    x isa Bool && return x
+    throw(ArgumentError("iad `jitter` must be true or false, got $(repr(x))"))
+end
+
+# `clip_outliers`: false/absent = off, true = the default 5σ, a number = that.
+function _iad_clip_nsigma(x)
+    x === false && return nothing
+    x === true && return 5.0
+    (x isa Real && !(x isa Bool) && x > 0) && return Float64(x)
+    throw(ArgumentError("iad `clip_outliers` must be true, false or a positive " *
+                        "number of σ, got $(repr(x))"))
+end
+
+# A clip report as plain JSON-able data for a result summary.
+_iad_outlier_summary(reports) =
+    [Dict{String,Any}(String(k) => v for (k, v) in pairs(r)) for r in reports]
 
 """
     _as_relast(x) -> RelAstromData or nothing
@@ -468,15 +531,17 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                         stopping = nothing, output_dir = nothing, kwargs...)
-    iad = resolve_astrometry(iad)
+    # NOT resolved here: `_target_from` resolves the spec, and has to see it
+    # unresolved to read the per-instrument `jitter` / `clip_outliers` keys.
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
               "relast" => relast)
     planets isa NamedTuple ||
         (planets = _planet_spec(planets; block = default_astrom_planet()))
     star, kwargs = _split_star_kwargs(kwargs)
-    tgt = _target_from([ch], planets; kwargs...)
+    reps = Any[]
+    tgt = _target_from([ch], planets; iad_reports = reps, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star)
+                   star, iad_outliers = reps)
 end
 
 
@@ -497,9 +562,10 @@ function fit_joint(channels...; planets = 1, engine = nothing, transdim = nothin
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
     star, kwargs = _split_star_kwargs(kwargs)
-    tgt = _target_from(collect(channels), planets; kwargs...)
+    reps = Any[]
+    tgt = _target_from(collect(channels), planets; iad_reports = reps, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star)
+                   star, iad_outliers = reps)
 end
 
 # ---------------------------------------------------------------------------
@@ -763,7 +829,8 @@ _as_td(td, max_k) = throw(ArgumentError(
 function _finish(target, engine, stopping, output_dir; op::String,
                 science::Bool = true, output = nothing,
                  transdim = nothing, plots = nothing, plot_kwargs = nothing,
-                 save_pdf::Bool = false, star = Dict{Symbol,Any}())
+                 save_pdf::Bool = false, star = Dict{Symbol,Any}(),
+                 iad_outliers = nothing)
     t0 = time()
     # `Stopping` is exported, documented, and plumbed all the way through the
     # Python client -- and NOTHING in the package consumes it. Not _finish, not
@@ -825,6 +892,10 @@ function _finish(target, engine, stopping, output_dir; op::String,
         "elapsed_sec" => time() - t0,
     )
     merge!(summary, extra)
+    # What `clip_outliers` took out of the data, so a client that never sees
+    # the Julia log still sees how many abscissae went, and which.
+    (iad_outliers === nothing || isempty(iad_outliers)) ||
+        (summary["iad_outliers"] = _iad_outlier_summary(iad_outliers))
     # Run health, per engine. Harvested from whatever the engine actually
     # returned plus, where the chain structure supports it, R-hat and ESS --
     # which pt_emcee has always computed for the progress bar and thrown away.

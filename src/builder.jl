@@ -61,6 +61,10 @@ docstring above for the full block grammar and example.
   order. Supplying them allocates a `sigma_as_<name>` jitter per imager;
   leaving it empty (the default) allocates none, and the reported
   uncertainties are used verbatim as before.
+- `iad_names` — the same for the intermediate-astrometry instruments, one
+  entry per instrument of `iad` in order, `""` for one without a jitter:
+  `["", "GaiaDR4"]` allocates `sigma_iad_GaiaDR4` for the Gaia half of a
+  Hipparcos + Gaia fit only. Empty (the default) allocates none.
 - `M_pri` — primary mass. Pass a `Real` for fixed (becomes
   `FixedPrior`), a `PriorSpec` for sampled (e.g. `NormalPrior(0.856,
   0.014)` for a Crepp+ 2016-style spectroscopic prior). `nothing`
@@ -107,6 +111,7 @@ function build_target(;
     g23h = nothing,
     gaia_dr3 = nothing,
     as_names = String[],
+    iad_names = String[],
     plx = nothing,
     parametrization::Union{Nothing, Symbol} = nothing,
     time_anchor::Union{Nothing, Symbol} = nothing,
@@ -226,7 +231,8 @@ function build_target(;
     )
 
     instruments = InstrumentConfig(rv = rv_names, pm = phot_names,
-                                   as = collect(String, as_names))
+                                   as = collect(String, as_names),
+                                   iad = collect(String, iad_names))
 
     # Priors dict — system, planets, instruments.
     priors_dict = Dict{String, PriorSpec}()
