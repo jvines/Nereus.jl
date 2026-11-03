@@ -11,15 +11,124 @@
 #   ~/.nereus/IAD/ResRec_JavaTool_2014/Hxxx/Hxxxyyy.d — extracted per-HIP file
 #   ~/.nereus/GOST/<query-hash>.csv                   — per-query CSV
 #
-# Both functions use system-level `curl` and `unzip` rather than pulling
-# in `HTTP.jl` and `ZipFile.jl` dependencies; the network handling is
-# robust at the curl layer (retries, timeouts, redirects).
+# The bundle fetchers download through `Downloads` (libcurl) with
+# `_download_resumable` -- a `.part` file, `Range` resume where the server
+# supports it, retries with backoff, and an atomic rename on completion -- and
+# extract zip members in-process with the `p7zip_jll` binary that ships with
+# Julia (no system `unzip`). GOST still replays its web form with system
+# `curl` (session cookies).
 
 using Downloads
+using p7zip_jll
 using SHA
 using Dates
 
 export fetch_hip_iad, fetch_gost, fetch_hgca
+
+
+# =====================================================================
+# Shared download / extraction helpers
+# =====================================================================
+
+_hdr(resp, name) = begin
+    for (k, v) in resp.headers
+        lowercase(k) == name && return String(v)
+    end
+    return nothing
+end
+
+"""Response of a `HEAD` request (optionally with a `Range`), or `nothing` on failure."""
+function _head(url, headers, timeout)
+    r = Downloads.request(url; method = "HEAD", headers = headers,
+                          timeout = timeout, throw = false)
+    return r isa Downloads.Response ? r : nothing
+end
+
+# One attempt: leaves whatever it received in `part` so the next attempt can
+# continue from it.
+function _download_attempt(url::AbstractString, part::AbstractString, timeout::Real)
+    r0 = _head(url, Pair{String,String}[], timeout)
+    total = nothing
+    if r0 !== nothing && 200 <= r0.status < 300
+        cl = _hdr(r0, "content-length")
+        cl === nothing || (total = tryparse(Int, cl))
+    end
+    have = isfile(part) ? Int(filesize(part)) : 0
+    if total !== nothing && have == total
+        return nothing                       # a previous attempt got everything
+    end
+    resume = false
+    if have > 0 && total !== nothing && have < total
+        r = _head(url, ["Range" => "bytes=$have-"], timeout)
+        resume = r !== nothing && r.status == 206 &&
+                 (cr = _hdr(r, "content-range")) !== nothing &&
+                 startswith(cr, "bytes $have-")
+    end
+    resume || (have = 0)                     # server cannot continue: start over
+    headers = resume ? ["Range" => "bytes=$have-"] : Pair{String,String}[]
+    open(part, resume ? "a" : "w") do io
+        resp = Downloads.request(url; output = io, headers = headers,
+                                 timeout = timeout, throw = false)
+        resp isa Downloads.Response || throw(resp)
+        resp.status == (resume ? 206 : 200) || error(
+            "HTTP $(resp.status) from $url" * (resume ? " on a resumed request" : ""))
+    end
+    got = Int(filesize(part))
+    if total !== nothing && got != total
+        error("incomplete download of $url: $got of $total bytes")
+    end
+    return nothing
+end
+
+"""
+    _download_resumable(url, dest; timeout = 600.0, attempts = 4, backoff = 2.0,
+                        verbose = false) -> dest
+
+Download `url` to `dest` through `dest * ".part"`, renamed to `dest` only once
+the size matches the server's `Content-Length`, so `dest` is never a truncated
+file. An interrupted download is continued from the bytes already in the
+`.part` file with a `Range: bytes=N-` request when the server answers `206`;
+otherwise (or if the server reports no length) it restarts from zero. Transient
+failures are retried `attempts` times with exponential `backoff` (seconds).
+"""
+function _download_resumable(url::AbstractString, dest::AbstractString;
+                             timeout::Real = 600.0, attempts::Integer = 4,
+                             backoff::Real = 2.0, verbose::Bool = false)
+    mkpath(dirname(abspath(dest)))
+    part = dest * ".part"
+    err = nothing
+    for attempt in 1:attempts
+        try
+            _download_attempt(url, part, timeout)
+            mv(part, dest; force = true)
+            return dest
+        catch e
+            e isa InterruptException && rethrow()
+            err = e
+            if attempt < attempts
+                delay = backoff * 2.0^(attempt - 1)
+                verbose && @warn "Download of $url failed; retrying in $(delay)s" attempt exception = e
+                sleep(delay)
+            end
+        end
+    end
+    throw(ErrorException("download of $url failed after $attempts attempts: " *
+                         sprint(showerror, err)))
+end
+
+"""
+    _unzip_member(zip_path, member, out_dir) -> Bool
+
+Extract the single archive member `member` from `zip_path` into `out_dir`
+(keeping its internal path), with the `p7zip_jll` binary bundled with Julia,
+so no system `unzip` is needed. Overwrites; returns whether 7z succeeded.
+"""
+function _unzip_member(zip_path::AbstractString, member::AbstractString,
+                       out_dir::AbstractString)
+    mkpath(out_dir)
+    cmd = `$(p7zip_jll.p7zip()) x -y -bso0 -bsp0 -bse0 -o$(out_dir) $zip_path $member`
+    return success(cmd)
+end
 
 const HIP_IAD_BUNDLE_URL =
     "https://www.cosmos.esa.int/documents/532822/6470227/ResRec_JavaTool_2014.zip/" *
@@ -118,12 +227,12 @@ function fetch_hip_iad(hip_id::Integer;
         if !isfile(zip_path) || force_redownload
             verbose && @info "Downloading Hipparcos IAD bundle (~$(HIP_IAD_BUNDLE_SIZE_MB) MB) " *
                               "from ESA CDN to $zip_path"
-            Downloads.download(HIP_IAD_BUNDLE_URL, zip_path;
-                                timeout = 600.0)
+            _download_resumable(HIP_IAD_BUNDLE_URL, zip_path; timeout = 600.0,
+                                verbose = verbose)
         end
         member_path = "ResRec_JavaTool_2014/$subdir/$fname"
         verbose && @info "Extracting $member_path from local bundle"
-        ok = success(`unzip -o -q -d $cache_dir $zip_path $member_path`)
+        ok = _unzip_member(zip_path, member_path, cache_dir)
         ok && isfile(target_path) || throw(ErrorException(
             "Failed to extract $member_path from $zip_path; " *
             "check that hip_id=$hip_id_int is in the catalogue."))
@@ -338,7 +447,7 @@ function fetch_hgca(hip_id::Integer;
     if !isfile(fits_path) || force_redownload
         verbose && @info "Downloading HGCA eDR3 catalog (~$(HGCA_EDR3_SIZE_MB) MB) " *
                           "from $HGCA_EDR3_URL to $fits_path"
-        Downloads.download(HGCA_EDR3_URL, fits_path; timeout = 600.0)
+        _download_resumable(HGCA_EDR3_URL, fits_path; timeout = 600.0, verbose = verbose)
     end
     return load_hgca_row(fits_path, hip_id_int)
 end
