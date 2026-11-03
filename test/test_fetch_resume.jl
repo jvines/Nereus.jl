@@ -6,7 +6,8 @@ using p7zip_jll
 
 # Minimal HTTP/1.1 server. `range` toggles Range support; `cut` is the number of
 # body bytes after which the next GET's connection is dropped (once).
-function _serve(payload::Vector{UInt8}; range::Bool = true, cut::Ref{Int} = Ref(-1))
+function _serve(payload::Vector{UInt8}; range::Bool = true, cut::Ref{Int} = Ref(-1),
+                stall::Ref{Int} = Ref(-1), chunk::Int = 0, pause::Float64 = 0.0)
     server = listen(IPv4(127, 0, 0, 1), 0)
     port = Int(getsockname(server)[2])
     log = Tuple{String,String}[]
@@ -39,7 +40,16 @@ function _serve(payload::Vector{UInt8}; range::Bool = true, cut::Ref{Int} = Ref(
                         "Accept-Ranges: bytes\r\n$extra" *
                         "Connection: close\r\n\r\n")
             if method == "GET"
-                if cut[] >= 0
+                if stall[] >= 0           # send a few bytes, then hang (once)
+                    k = stall[]; stall[] = -1
+                    write(sock, body[1:min(k, length(body))]); flush(sock)
+                    sleep(30)
+                elseif chunk > 0          # slow but steady
+                    for i in 1:chunk:length(body)
+                        write(sock, body[i:min(i + chunk - 1, end)]); flush(sock)
+                        sleep(pause)
+                    end
+                elseif cut[] >= 0
                     k = cut[]; cut[] = -1
                     write(sock, body[1:min(k, length(body))])
                 else
@@ -101,10 +111,31 @@ end
         @test read(dest) == payload
         close(s.server)
 
+        # --- stalled transfer: aborted after the stall window, then resumed
+        stall = Ref(50_000)
+        s = _serve(payload; stall = stall)
+        dest = joinpath(dir, "g.bin")
+        t = @elapsed Nereus._download_resumable(s.url, dest; stall_timeout = 2,
+                                                backoff = 0.01)
+        @test read(dest) == payload
+        @test 1.5 < t < 20
+        @test any(l -> l[1] == "GET" && startswith(l[2], "bytes=50000-"), s.log)
+        close(s.server)
+
+        # --- slow but steady: longer than the stall window, still completes
+        slow = rand(UInt8, 60_000)
+        s = _serve(slow; chunk = 10_000, pause = 0.7)
+        dest = joinpath(dir, "h.bin")
+        t = @elapsed Nereus._download_resumable(s.url, dest; stall_timeout = 2,
+                                                attempts = 1)
+        @test read(dest) == slow
+        @test t > 3                 # exceeded the 2 s window in total
+        close(s.server)
+
         # --- unreachable host: fails after the attempts, no final file
         dest = joinpath(dir, "f.bin")
         @test_throws ErrorException Nereus._download_resumable(
-            "http://127.0.0.1:1/x", dest; attempts = 2, backoff = 0.01, timeout = 5.0)
+            "http://127.0.0.1:1/x", dest; attempts = 2, backoff = 0.01, probe_timeout = 5.0)
         @test !isfile(dest)
 
         # --- zip member extraction keeps the internal path (cache layout)

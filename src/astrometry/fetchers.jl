@@ -44,9 +44,17 @@ function _head(url, headers, timeout)
     return r isa Downloads.Response ? r : nothing
 end
 
+# libcurl option ids (LibCURL is not a dependency): CURLOPT_LOW_SPEED_LIMIT = 19,
+# CURLOPT_LOW_SPEED_TIME = 20.
+const _CURLOPT_LOW_SPEED_LIMIT = 19
+const _CURLOPT_LOW_SPEED_TIME  = 20
+const _STALL_MIN_RATE = 1000   # bytes/s below which a transfer counts as stalled
+
 # One attempt: leaves whatever it received in `part` so the next attempt can
 # continue from it.
-function _download_attempt(url::AbstractString, part::AbstractString, timeout::Real)
+function _download_attempt(url::AbstractString, part::AbstractString,
+                           stall_timeout::Real, probe_timeout::Real)
+    timeout = probe_timeout
     r0 = _head(url, Pair{String,String}[], timeout)
     total = nothing
     if r0 !== nothing && 200 <= r0.status < 300
@@ -66,9 +74,16 @@ function _download_attempt(url::AbstractString, part::AbstractString, timeout::R
     end
     resume || (have = 0)                     # server cannot continue: start over
     headers = resume ? ["Range" => "bytes=$have-"] : Pair{String,String}[]
+    # No cap on total time: curl aborts only when the rate stays under
+    # `_STALL_MIN_RATE` bytes/s for `stall_timeout` seconds.
+    dl = Downloads.Downloader()
+    dl.easy_hook = (easy, info) -> begin
+        Downloads.Curl.setopt(easy, _CURLOPT_LOW_SPEED_LIMIT, _STALL_MIN_RATE)
+        Downloads.Curl.setopt(easy, _CURLOPT_LOW_SPEED_TIME, max(1, ceil(Int, stall_timeout)))
+    end
     open(part, resume ? "a" : "w") do io
         resp = Downloads.request(url; output = io, headers = headers,
-                                 timeout = timeout, throw = false)
+                                 downloader = dl, throw = false)
         resp isa Downloads.Response || throw(resp)
         resp.status == (resume ? 206 : 200) || error(
             "HTTP $(resp.status) from $url" * (resume ? " on a resumed request" : ""))
@@ -81,8 +96,8 @@ function _download_attempt(url::AbstractString, part::AbstractString, timeout::R
 end
 
 """
-    _download_resumable(url, dest; timeout = 600.0, attempts = 4, backoff = 2.0,
-                        verbose = false) -> dest
+    _download_resumable(url, dest; stall_timeout = 60.0, probe_timeout = 30.0,
+                        attempts = 4, backoff = 2.0, verbose = false) -> dest
 
 Download `url` to `dest` through `dest * ".part"`, renamed to `dest` only once
 the size matches the server's `Content-Length`, so `dest` is never a truncated
@@ -90,16 +105,21 @@ file. An interrupted download is continued from the bytes already in the
 `.part` file with a `Range: bytes=N-` request when the server answers `206`;
 otherwise (or if the server reports no length) it restarts from zero. Transient
 failures are retried `attempts` times with exponential `backoff` (seconds).
+
+There is no limit on total transfer time, so a slow link still completes: an
+attempt is aborted only when the transfer runs below 1 kB/s for `stall_timeout`
+seconds. The `HEAD` probes use `probe_timeout`.
 """
 function _download_resumable(url::AbstractString, dest::AbstractString;
-                             timeout::Real = 600.0, attempts::Integer = 4,
-                             backoff::Real = 2.0, verbose::Bool = false)
+                             stall_timeout::Real = 60.0, probe_timeout::Real = 30.0,
+                             attempts::Integer = 4, backoff::Real = 2.0,
+                             verbose::Bool = false)
     mkpath(dirname(abspath(dest)))
     part = dest * ".part"
     err = nothing
     for attempt in 1:attempts
         try
-            _download_attempt(url, part, timeout)
+            _download_attempt(url, part, stall_timeout, probe_timeout)
             mv(part, dest; force = true)
             return dest
         catch e
@@ -227,8 +247,7 @@ function fetch_hip_iad(hip_id::Integer;
         if !isfile(zip_path) || force_redownload
             verbose && @info "Downloading Hipparcos IAD bundle (~$(HIP_IAD_BUNDLE_SIZE_MB) MB) " *
                               "from ESA CDN to $zip_path"
-            _download_resumable(HIP_IAD_BUNDLE_URL, zip_path; timeout = 600.0,
-                                verbose = verbose)
+            _download_resumable(HIP_IAD_BUNDLE_URL, zip_path; verbose = verbose)
         end
         member_path = "ResRec_JavaTool_2014/$subdir/$fname"
         verbose && @info "Extracting $member_path from local bundle"
@@ -447,7 +466,7 @@ function fetch_hgca(hip_id::Integer;
     if !isfile(fits_path) || force_redownload
         verbose && @info "Downloading HGCA eDR3 catalog (~$(HGCA_EDR3_SIZE_MB) MB) " *
                           "from $HGCA_EDR3_URL to $fits_path"
-        _download_resumable(HGCA_EDR3_URL, fits_path; timeout = 600.0, verbose = verbose)
+        _download_resumable(HGCA_EDR3_URL, fits_path; verbose = verbose)
     end
     return load_hgca_row(fits_path, hip_id_int)
 end
