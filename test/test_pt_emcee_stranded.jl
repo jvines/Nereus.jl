@@ -146,6 +146,23 @@ _mode_eval(gap; width = 0.01) =
         @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
                                          [1, 1, 1], 0, MersenneTwister(2)) == [0]
         @test count(w -> tds[1, w].planet_active[1], 1:100) == 70
+
+        # Four walkers have the planet: the volume comes from the density about
+        # the best one, and the 96 without it are drawn there, planet and all.
+        state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 60.0)
+        tds = [Nereus.TransDimState(w <= 4 ? 1 : 0, BitVector([w <= 4]),
+                                    BitVector(), BitVector([true]))
+               for _ in 1:1, w in 1:100]
+        ev = (x, td) -> td.planet_active[1] ? _mode_eval(60.0)(x) : (0.0, -60.0)
+        @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
+                                         [1, 1, 1], 0, MersenneTwister(2)) == [0]
+        moved = Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
+                                           [1, 1, 1], 0, MersenneTwister(2);
+                                           evalf = ev)
+        @test moved == [96]
+        @test all(w -> tds[1, w].planet_active[1], 1:100)
+        @test length(unique(eachrow(state[1, :, :]))) == 100
+        @test all(lL[1, 5:end] .> -30)
     end
 
     @testset "convergence_report: label switching is not non-convergence" begin
