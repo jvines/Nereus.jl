@@ -90,6 +90,26 @@ _dispatch(name, kwargs, target, data) =
         @test isfinite(res.log_evidence)
     end
 
+    @testset "an init_strategy the sampler does not implement is an error" begin
+        # "map" arrived as :map and ran exactly the :prior fit, silently.
+        for (name, bad) in (("pt_emcee", "map"), ("pt_emcee", "ball"),
+                            ("pt_whitening", "pathfinder"), ("pt", "map_scatter"))
+            err = try
+                Nereus._dispatch_sampler(
+                    Dict(:sampler => Dict(:name => name,
+                                          :kwargs => Dict(:init_strategy => bad)),
+                         :output_dir => mktempdir()),
+                    target, data, 1)
+                nothing
+            catch e
+                e
+            end
+            @test err isa ArgumentError
+            @test occursin(":$bad", sprint(showerror, err))
+            @test occursin(":prior", sprint(showerror, err))
+        end
+    end
+
     @testset "unsupported kwarg → clear ArgumentError, not MethodError" begin
         # NOTE: the original example (:enlarge) went stale — sample_nested
         # gained a real `enlarge` kwarg (nested.jl, MLFriends/high-dim work),

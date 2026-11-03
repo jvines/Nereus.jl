@@ -181,6 +181,8 @@ res = sample_pt_emcee(target, data;
 - `:map_scatter` — `sample_map` MAP + small Gaussian scatter. Only safe
   when the posterior is approximately Gaussian around the MAP.
 
+Any other value is an `ArgumentError`.
+
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (best of
 TI/TI⁺/SS⁺/H⁺), `evidence::EvidenceReport`, `acceptance_within`,
 `acceptance_swap`, `n_evals`, and `ladder::LadderHistory` — the ladder, swap

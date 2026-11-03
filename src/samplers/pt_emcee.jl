@@ -397,6 +397,7 @@ in place.
     - `:map_scatter` — `sample_map` MAP point + small Gaussian
       scatter. Even tighter than Pathfinder; only safe when the
       posterior is approximately Gaussian around the MAP.
+  Anything else is an `ArgumentError`. Ignored when `init` is given.
 - `pf_n_runs::Int=2` — Pathfinder L-BFGS basins (only used if
   `:pathfinder`).
 - `seed::Int=1`
@@ -477,6 +478,11 @@ function sample_pt_emcee(
     node_flip       = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
+    # Any other Symbol used to fall through to the prior draw without a word:
+    # `init_strategy = "map"` from Python ran exactly the `:prior` fit.
+    init_strategy in (:prior, :pathfinder, :map_scatter) || throw(ArgumentError(
+        "init_strategy must be :prior (default), :pathfinder or :map_scatter; " *
+        "got :$init_strategy"))
     ladder_adapt_ν0 = Float64(ladder_adapt_ν0)
     ladder_adapt_K  = Float64(ladder_adapt_K)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
@@ -650,7 +656,7 @@ function sample_pt_emcee(
             avail = size(pf.draws, 2)
             avail > 0 ? pf.draws : nothing
         catch e
-            @warn "Pathfinder warm-start failed; falling back to :map_scatter" exception=(e, catch_backtrace())
+            @warn "Pathfinder warm-start failed; falling back to prior draws" exception=(e, catch_backtrace())
             nothing
         end
     elseif ck === nothing && init === nothing && init_strategy === :map_scatter
