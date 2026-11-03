@@ -100,9 +100,9 @@ function _astrometry_model_scene(chains, params, data, planet_idx::Int;
     theta = first(drawn)
     fit = _epoch_astrometry_oc(theta, data, planet_idx)
     fit === nothing && return nothing
-    (; orb, M_sec, oc) = fit
+    (; orb, M_sec, oc, σ) = fit
 
-    np = _iad_normal_points(iad, oc, normal_point_gap; psi_tol = psi_tol)
+    np = _iad_normal_points(iad, oc, normal_point_gap; psi_tol = psi_tol, σ = σ)
     mod_np = [star_reflex_offset(orb, t, M_sec) for t in np.t]
     xm = Float64[p[1] for p in mod_np]
     ym = Float64[p[2] for p in mod_np]
@@ -128,7 +128,7 @@ function _astrometry_model_scene(chains, params, data, planet_idx::Int;
     med_σ = [median(np.σ[np.inst .== m]) for m in 1:n_inst]
     zoom = n_inst >= 2 ? argmin(med_σ) : 0
 
-    return (; iad, oc, np, xm, ym, xn, yn, x_t, y_t, peri, p1, p2, n_inst, zoom,
+    return (; iad, oc, σ, np, xm, ym, xn, yn, x_t, y_t, peri, p1, p2, n_inst, zoom,
               med_σ, tp, P_d, names = _iad_mission_names(iad; names = mission_names),
               cols = cool_pastel(n_inst))
 end
@@ -273,7 +273,8 @@ Draw instrument `m`'s along-scan O−C into `ax`, against epoch in years
 as a grey dot where binning merged any, the binned ones with their error bars
 on top, in the mission's colour and marker. The limits follow the binned
 points, so a handful of CCD outliers do not flatten them onto the zero line;
-`χ²/N` is over the abscissae, which is what the likelihood sees.
+`χ²/N` is over the abscissae, which is what the likelihood sees -- with the
+error it weighted them by, a fitted `sigma_iad_<name>` jitter included.
 """
 function _am_draw_oc!(ax, S, m::Int; x::Symbol = :epoch, tag = nothing)
     iad = S.iad
@@ -295,7 +296,7 @@ function _am_draw_oc!(ax, S, m::Int; x::Symbol = :epoch, tag = nothing)
     half = 1.3 * maximum(abs.(S.np.e[sel]) .+ S.np.σ[sel])
     ylims!(ax, -half, half)
     x === :phase && xlims!(ax, 0, 1)
-    χ2 = sum(abs2, S.oc[raw] ./ iad.abscissa_err[raw]) / length(raw)
+    χ2 = sum(abs2, S.oc[raw] ./ S.σ[raw]) / length(raw)     # σ incl. jitter
     text!(ax, 0.98, 0.04; text = @sprintf("χ²/N = %.2f", χ2), space = :relative,
           align = (:right, :bottom), fontsize = 15)
     tag === nothing || text!(ax, 0.02, 0.96; text = tag, space = :relative,
