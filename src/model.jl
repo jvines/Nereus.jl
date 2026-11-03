@@ -692,7 +692,7 @@ end
 
 """
     InstrumentConfig(rv_names, pm_names)
-    InstrumentConfig(; rv=String[], pm=String[], as=String[])
+    InstrumentConfig(; rv=String[], pm=String[], as=String[], iad=String[])
 
 Names of RV, photometric and astrometric instruments. Instrument indices
 throughout the code refer to positions in these vectors (1-based). The
@@ -708,18 +708,31 @@ existing relative-astrometry fit is untouched.
 Two imagers of the same companion are two `as` names and ONE planet index:
 GPI and SPHERE have different astrometric error budgets, and a shared
 jitter lets whichever is better absorb the other's systematics.
+
+`iad` does the same for the INTERMEDIATE-astrometry instruments (Hipparcos
+IAD, Gaia DR4 epoch astrometry), indexed by `IADData.inst`: entry `m` names
+instrument `m`, and a non-empty name allocates a `sigma_iad_<name>` jitter
+(mas) added in quadrature to that instrument's abscissa errors. It is
+opt-in PER INSTRUMENT, so an empty string leaves instrument `m` on its
+reported errors — `iad = ["", "GaiaDR4"]` jitters the Gaia abscissae of a
+Hipparcos + Gaia fit and not the Hipparcos ones. Empty (the default)
+allocates nothing, and the IAD likelihood is the unjittered one bit for bit.
+When it is non-empty it must have one entry per instrument in `data.iad`.
 """
 struct InstrumentConfig
     rv_names::Vector{String}
     pm_names::Vector{String}
     as_names::Vector{String}
+    iad_names::Vector{String}
 end
 
-InstrumentConfig(; rv=String[], pm=String[], as=String[]) =
-    InstrumentConfig(rv, pm, as)
-# Two-argument positional form kept for callers predating astrometric
-# instruments (e.g. `InstrumentConfig(String[], ["TESS"])`).
+InstrumentConfig(; rv=String[], pm=String[], as=String[], iad=String[]) =
+    InstrumentConfig(rv, pm, as, iad)
+# Positional forms kept for callers predating astrometric instruments
+# (e.g. `InstrumentConfig(String[], ["TESS"])`) and IAD jitter.
 InstrumentConfig(rv_names, pm_names) = InstrumentConfig(rv_names, pm_names, String[])
+InstrumentConfig(rv_names, pm_names, as_names) =
+    InstrumentConfig(rv_names, pm_names, as_names, String[])
 
 """
     n_rv_instruments(ic::InstrumentConfig) -> Int
@@ -742,6 +755,13 @@ Number of distinct relative-astrometry imagers -- the count of
 per-instrument jitter slots the layout allocates.
 """
 n_as_instruments(ic::InstrumentConfig) = length(ic.as_names)
+"""
+    n_iad_jitters(ic::InstrumentConfig) -> Int
+
+Number of intermediate-astrometry instruments that carry a `sigma_iad_<name>`
+jitter -- the non-empty entries of `ic.iad_names`.
+"""
+n_iad_jitters(ic::InstrumentConfig) = count(!isempty, ic.iad_names)
 
 # =====================================================================
 # PlanetBlock — abstract + concrete per-mode subtypes
@@ -1064,6 +1084,9 @@ offset/jitter/dilution/rho_s slots.
 - `pm_dilution::Vector{Int}` : one entry per PM instrument
 - `as_jitter::Vector{Int}` : one entry per astrometric (relative-astrometry)
                              instrument; empty when none are configured
+- `iad_jitter::Vector{Int}` : one entry per intermediate-astrometry
+                             instrument (`IADData.inst`), `0` for one without
+                             a jitter; empty when none are configured
 - `rho_s::Int`             : shared stellar-density slot, or `0` if unused
 
 Future extensions (GP kernels, ARMA, activity, LD groups, acceleration,
@@ -1085,6 +1108,12 @@ struct SystemicIndices
                             # user names astrometric instruments, so astrometry
                             # that does not ask for it keeps using the reported
                             # uncertainties verbatim — and keeps its old numbers.
+    iad_jitter::Vector{Int} # one per intermediate-astrometry instrument
+                            # (`IADData.inst`), 0 where that instrument has no
+                            # jitter. Additive in mas, sigma^2 -> sigma^2 + s_m^2.
+                            # EMPTY unless the user opts an instrument in; while
+                            # it is empty `iad_log_likelihood` takes the cached-
+                            # weight path and its numbers are unchanged.
     rho_s::Int      # 0 if not used
     dvdt::Int       # 0 if not used (linear RV trend)
     d2vdt2::Int     # 0 if not used (quadratic RV trend)
@@ -1407,7 +1436,8 @@ end
 
 Every white-noise jitter term in the layout -- a variance added in quadrature to
 the reported errors, physically ≥ 0: the per-instrument RV `sigma_<inst>`,
-photometric `jitter_<label>` and relative-astrometry `sigma_as_<imager>` slots,
+photometric `jitter_<label>`, relative-astrometry `sigma_as_<imager>` and
+intermediate-astrometry `sigma_iad_<instrument>` slots,
 and the noise models' `jit_base_*`, `gp_act_jit_*` and `IndicatorFloor`'s floor
 (`ind_floor_<ch>` under its default `:white` kernel, `ind_floor_<ch>_jit` under
 `:qp`). Not jitter despite the names: `jit_act_*` (a signed activity slope), the
@@ -1425,7 +1455,8 @@ FAIL -- DO NOT TRUST THIS POSTERIOR" for `sigma_HARPS` sitting at 0.
 function jitter_names(params::Params)
     L = params.layout
     S = L.systemic
-    out = Set{String}(L.names[i] for i in vcat(S.rv_sigma, S.pm_jitter, S.as_jitter)
+    out = Set{String}(L.names[i] for i in vcat(S.rv_sigma, S.pm_jitter, S.as_jitter,
+                                                S.iad_jitter)
                       if i > 0)
     for n in L.names
         (startswith(n, "jit_base_") || startswith(n, "gp_act_jit_") ||
@@ -1749,6 +1780,34 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         end
     end
 
+    # Intermediate-astrometry instruments (Hipparcos IAD, Gaia DR4 epoch
+    # astrometry), opt-in per instrument: `iad_names[m]` names instrument m of
+    # `IADData.inst`, and an empty name means "reported errors, no jitter".
+    # Nothing is pushed unless some name is non-empty, so every existing layout
+    # is unchanged. No sharing category: a jitter is one instrument's error
+    # budget, and Hipparcos and Gaia have nothing in common to share.
+    iad_names = config.instruments.iad_names
+    n_iad_named = length(iad_names)
+    iad_jitter = zeros(Int, n_iad_named)
+    if any(!isempty, iad_names)
+        if data !== nothing
+            data.iad === nothing && throw(ArgumentError(
+                "an intermediate-astrometry jitter is configured " *
+                "($(filter(!isempty, iad_names))) but the data has no IAD"))
+            n_inst = n_iad_inst(data.iad)
+            n_iad_named == n_inst || throw(ArgumentError(
+                "instruments.iad has $n_iad_named entr$(n_iad_named == 1 ? "y" : "ies") " *
+                "($(iad_names)) but the IAD data has $n_inst instrument(s). It is " *
+                "positional -- entry m is IADData instrument m -- so give one per " *
+                "instrument, \"\" for those without a jitter."))
+        end
+        for (m, label) in enumerate(iad_names)
+            isempty(label) && continue
+            push!(names, "sigma_iad_$label")
+            iad_jitter[m] = length(names)
+        end
+    end
+
     pm_names = config.instruments.pm_names
     n_pm = length(pm_names)
 
@@ -1972,7 +2031,7 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
 
     systemic = SystemicIndices(rv_gamma, rv_sigma,
                                pm_offset, pm_jitter, pm_dilution, pm_trend,
-                               ld_q1, ld_q2, as_jitter,
+                               ld_q1, ld_q2, as_jitter, iad_jitter,
                                rho_s_idx, dvdt_idx, d2vdt2_idx,
                                plx_idx, m_pri_idx, v_sin_i_star_idx, i_star_idx,
                                gd_beta_idx,

@@ -744,6 +744,167 @@ function iad_for_inst(d::IADData, m::Integer)
 end
 
 """
+    clip_transit_outliers(iad; nsigma = 5.0, psi_tol = 1e-4, min_ccds = 3,
+                          label = "", verbose = true) -> (iad_clean, report)
+
+Reject along-scan abscissae that disagree with the other CCDs of their own
+field-of-view transit. Opt-in; `iad` itself is never modified.
+
+# Why within a transit, and only there
+
+Gaia epoch astrometry is per CCD: one field-of-view transit is 8-9 abscissae
+read ~5 s apart (`grp_head`), at one scan angle to 3e-5 rad and one parallax
+factor. Across those 40 s nothing the model contains can move -- a 2 mas
+reflex on an 84 d orbit shifts by 1e-4 mas, a 600 mas/yr proper motion by
+1e-3 mas -- so the CCDs of one transit are repeated measurements of a single
+along-scan coordinate, and an outlier among them is identifiable WITHOUT any
+orbit or astrometric model. That makes this safe for exactly the case a model
+clip is not: a few-mas wobble. A clip against a no-orbit five-parameter
+solution flags the wobble itself; this cannot see it.
+
+Measured on the DR4 pre-release: HD 114762's 63 transits have a within-
+transit χ²/dof of 9.8, the same excess its orbit fit shows (χ²/N ≈ 9.6) --
+the excess is CCDs disagreeing with their own transit, not the orbit. One
+transit scatters by ±5 mas across its CCDs and five more have a single CCD
+0.6-5.6 mas off. Gaia-4: 1.38 within transits, one CCD 1.0 mas off.
+
+# The rule
+
+For each transit of at least `min_ccds` abscissae whose scan angles agree to
+`psi_tol` rad (Hipparcos IAD records sharing an epoch are different scans:
+on HIP 64426 their scan angles differ by 1e-4 to 1e-2 rad, so none of its
+records is tested):
+
+1. Take the transit median `c` of the abscissae.
+2. Flag CCD `j` if `|a_j − c| > nsigma · σ_j`, `σ_j` its reported error.
+3. If the flagged CCDs are not a strict minority, there is no consensus on
+   where the star was and the WHOLE transit is rejected.
+
+Before step 1 each abscissa is moved to its transit head's scan angle,
+`a_j − η⊥_j · Δψ_j`, where `η⊥` is the across-scan position from a no-orbit
+five-parameter fit of the instrument. That term is ≤ 0.017 mas on HD 114762
+(582 mas/yr) but reaches several tenths of a mas for a Barnard's-star proper
+motion, which would otherwise read as an outlier. The fit only supplies that
+geometric correction: an orbit it misses by a few mas changes it by 1e-4 mas.
+
+`nsigma = 5`: with ~10³ abscissae per source, Gaussian errors give ~6e-4
+false rejections per source; with the reported errors ~15% low (both DR4
+sources above, outliers removed) it is still 4.3 true σ, ~0.015 per source.
+
+# Report
+
+`report` is a NamedTuple: `n_in`, `n_rejected`, `nsigma`; per rejected
+abscissa (indices into the INPUT `iad`) `index`, `t`, `inst`, `transit` (the
+transit's index, in order, within its instrument), `ccd` (position within the
+transit), `deviation` (mas, from the transit median), `z` (`deviation/σ`) and
+`whole_transit`; and `n_transits_tested`, `n_transits_rejected`. With
+`verbose` the same goes to the log, one line per rejected abscissa.
+
+# Cost of the alternatives
+
+A heavy-tailed likelihood (Student-t) or a good/bad mixture per abscissa would
+not throw anything away, but either breaks the analytic marginalisation of the
+catalogue solution: the integral over `q` is no longer Gaussian, so `q` (4 to
+6 parameters, strongly correlated with the orbit) would have to be sampled or
+Laplace-approximated on every call, plus an outlier fraction and scale per
+instrument. Both also judge outliers against the orbit model rather than
+against the transit's own CCDs.
+"""
+function clip_transit_outliers(iad::IADData; nsigma::Real = 5.0, psi_tol::Real = 1e-4,
+                               min_ccds::Int = 3, label::AbstractString = "",
+                               verbose::Bool = true)
+    nsigma > 0 || throw(ArgumentError("nsigma must be positive, got $nsigma"))
+    min_ccds >= 3 || throw(ArgumentError(
+        "min_ccds must be at least 3: with two CCDs that disagree there is no " *
+        "telling which one is wrong"))
+    n = n_iad(iad)
+
+    # Across-scan position per abscissa, from a no-orbit five-parameter fit of
+    # each instrument. Only ever multiplied by the 3e-5 rad scan-angle drift
+    # inside a transit, so its own error does not matter (see docstring).
+    across = zeros(n)
+    for m in 1:n_iad_inst(iad)
+        idx = findall(==(m), iad.inst)
+        sw  = 1 ./ iad.abscissa_err[idx]
+        pmf = iad.pm_factor[idx]
+        X = hcat(iad.sinpsi[idx], iad.cospsi[idx], iad.parallax_factor[idx],
+                 iad.sinpsi[idx] .* pmf, iad.cospsi[idx] .* pmf)
+        q = (sw .* X) \ (sw .* iad.abscissa[idx])
+        all(isfinite, q) || continue
+        @inbounds for (k, j) in enumerate(idx)
+            Δα = q[1] + q[4] * pmf[k]
+            Δδ = q[2] + q[5] * pmf[k]
+            across[j] = Δα * iad.cospsi[j] - Δδ * iad.sinpsi[j]
+        end
+    end
+
+    rej = Int[]; ccd = Int[]; trn = Int[]; dev = Float64[]; zs = Float64[]
+    whole = Bool[]
+    n_tested = 0; n_whole = 0
+    transit_no = zeros(Int, n_iad_inst(iad))
+    j = 1
+    while j <= n
+        h = iad.grp_head[j]
+        k = j
+        while k < n && iad.grp_head[k + 1] == h
+            k += 1
+        end
+        g = j:k
+        m = iad.inst[j]
+        transit_no[m] += 1
+        j = k + 1
+        length(g) >= min_ccds || continue
+        dψ = [rem2pi(iad.psi[i] - iad.psi[h], RoundNearest) for i in g]
+        maximum(abs, dψ) <= psi_tol || continue
+        n_tested += 1
+        a = [iad.abscissa[i] - across[i] * dψ[ii] for (ii, i) in enumerate(g)]
+        c = median(a)
+        d = a .- c
+        z = d ./ iad.abscissa_err[g]
+        bad = abs.(z) .> nsigma
+        any(bad) || continue
+        all_out = 2 * count(!, bad) <= length(g)       # no strict majority left
+        all_out && (n_whole += 1)
+        for (ii, i) in enumerate(g)
+            (bad[ii] || all_out) || continue
+            push!(rej, i); push!(ccd, ii); push!(trn, transit_no[m])
+            push!(dev, d[ii]); push!(zs, z[ii]); push!(whole, all_out)
+        end
+    end
+
+    report = (n_in = n, n_rejected = length(rej), nsigma = Float64(nsigma),
+              index = rej, t = iad.t[rej], inst = iad.inst[rej], transit = trn,
+              ccd = ccd, deviation = dev, z = zs, whole_transit = whole,
+              n_transits_tested = n_tested, n_transits_rejected = n_whole)
+
+    if verbose
+        tag = isempty(label) ? "" : " ($label)"
+        lines = ["MJD $(round(report.t[r]; digits = 5))  inst $(report.inst[r])  " *
+                 "transit $(report.transit[r]) CCD $(report.ccd[r])  " *
+                 "Δ = $(round(report.deviation[r]; digits = 3)) mas " *
+                 "($(round(report.z[r]; digits = 1))σ)" *
+                 (report.whole_transit[r] ? "  [whole transit]" : "")
+                 for r in eachindex(rej)]
+        @info "clip_transit_outliers$tag: rejected $(length(rej)) of $n abscissae " *
+              "at $(nsigma)σ from their transit median ($n_tested transits tested, " *
+              "$n_whole rejected whole)" * (isempty(lines) ? "" : "\n  " * join(lines, "\n  "))
+    end
+
+    isempty(rej) && return iad, report
+    keep = setdiff(1:n, rej)
+    for m in 1:n_iad_inst(iad)
+        any(i -> iad.inst[i] == m, keep) || throw(ArgumentError(
+            "clip_transit_outliers rejected every abscissa of instrument $m"))
+    end
+    clean = IADData(; t = iad.t[keep], abscissa = iad.abscissa[keep],
+                    abscissa_err = iad.abscissa_err[keep], psi = iad.psi[keep],
+                    parallax_factor = iad.parallax_factor[keep],
+                    pm_factor = iad.pm_factor[keep], inst = iad.inst[keep],
+                    ref_params = iad.ref_params, abscissa_kind = iad.abscissa_kind)
+    return clean, report
+end
+
+"""
     GOSTData
 
 Gaia Generic Object Slope-angle Tracker (GOST) — the Gaia mission

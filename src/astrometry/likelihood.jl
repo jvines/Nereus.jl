@@ -766,6 +766,101 @@ function _iad_normal_equations!(A::AbstractMatrix{T}, v::AbstractVector{T},
 end
 
 """
+    _iad_normal_equations!(A, v, iad, r, pm_fac, pos_col, s2) -> (rWr, Σlog σ_eff)
+
+The same accumulation with a per-instrument along-scan jitter: `s2[m]` is
+`s_m²` (mas²) for instrument `m`, and abscissa `i` of that instrument is
+weighted by `1/(σ_i² + s_m²)`. The second return value is then
+`Σ ½ log(σ_i² + s_m²)`, the jittered `Σ log σ`, which is no longer a constant
+of the data and is accumulated here instead of read off the cache.
+
+`s2 === nothing` (no jitter configured) is the cached-weight method above,
+untouched. An instrument whose `s2[m]` is exactly zero also takes the cached
+weight and `log σ_i`, in the same order, so a jitter sitting at zero
+reproduces the unjittered likelihood bit for bit -- and its derivative there
+is zero either way, since `s2 = s·s`.
+"""
+_iad_normal_equations!(A::AbstractMatrix, v::AbstractVector, iad, r::AbstractVector,
+                       pm_fac::AbstractVector{<:Real}, pos_col::Vector{Int}, ::Nothing) =
+    _iad_normal_equations!(A, v, iad, r, pm_fac, pos_col)
+
+function _iad_normal_equations!(A::AbstractMatrix{T}, v::AbstractVector{T},
+                                iad, r::AbstractVector{T},
+                                pm_fac::AbstractVector{<:Real},
+                                pos_col::Vector{Int},
+                                s2::AbstractVector) where {T<:Real}
+    rWr = zero(T)
+    log_sigma_sum = zero(T)
+    @inbounds for j in eachindex(r)
+        s    = iad.sinpsi[j]
+        c    = iad.cospsi[j]
+        pmf  = pm_fac[j]
+        m    = iad.inst[j]
+        p    = pos_col[m]
+        cols = (p, p + 1, 3, 4)
+        xs   = (s, c, s * pmf, c * pmf)
+        s2m  = s2[m]
+        local w::T
+        if iszero(s2m)
+            w = iad.weight[j]
+            log_sigma_sum += log(iad.abscissa_err[j])
+        else
+            σ   = iad.abscissa_err[j]
+            var = σ * σ + s2m
+            w   = inv(var)
+            log_sigma_sum += log(var) / 2
+        end
+        rj = r[j]
+
+        rWr += w * rj * rj
+
+        for a in 1:4
+            wa = w * xs[a]
+            v[cols[a]] += wa * rj
+            for b in a:4
+                _iad_acc!(A, cols[a], cols[b], wa * xs[b])
+            end
+        end
+    end
+    return rWr, log_sigma_sum
+end
+
+"""
+    _iad_jitter2(theta, n_inst) -> Vector or nothing
+
+`s_m²` for each intermediate-astrometry instrument, zero for one without a
+`sigma_iad_<name>` slot -- or `nothing` when no instrument has one, which is
+what sends the likelihood down the cached-weight path.
+"""
+function _iad_jitter2(theta::Theta{T}, n_inst::Int) where {T<:Real}
+    slots = theta.params.layout.systemic.iad_jitter
+    isempty(slots) && return nothing
+    s2 = zeros(T, n_inst)
+    @inbounds for m in 1:min(n_inst, length(slots))
+        slots[m] == 0 && continue
+        sm = theta.values[slots[m]]
+        s2[m] = sm * sm
+    end
+    return s2
+end
+
+"""
+    iad_sigma_eff(theta, iad) -> Vector{Float64}
+
+Per-abscissa error the IAD likelihood uses at `theta`: `√(σ_i² + s_m²)` with
+the instrument's `sigma_iad_<name>` jitter, or the reported `σ_i` where there
+is none. What residual χ² and error bars downstream must use, so that they
+show the noise model that was fitted -- as the RV ones include `sigma_<inst>`.
+"""
+function iad_sigma_eff(theta, iad)
+    s2 = _iad_jitter2(theta, n_iad_inst(iad))
+    s2 === nothing && return copy(iad.abscissa_err)
+    return [iszero(s2[iad.inst[j]]) ? iad.abscissa_err[j] :
+            sqrt(iad.abscissa_err[j]^2 + Float64(s2[iad.inst[j]]))
+            for j in eachindex(iad.abscissa_err)]
+end
+
+"""
     _iad_marginalised_residuals!(out, iad, r, q_opt, pm_fac, pos_col) -> out
 
 `r` minus the fitted catalogue solution, transit by transit -- what the
@@ -882,6 +977,21 @@ constants to the log-likelihood — fine for orbit-fitting and for log-Z
 estimates, modulo a transit-independent offset shared with any other
 model.
 
+# Per-instrument jitter
+
+An instrument opted in through `InstrumentConfig(iad = ...)` carries a
+`sigma_iad_<name>` parameter `s_m` (mas), and its abscissae enter with
+`σ_i² → σ_i² + s_m²`. The marginalisation stays exact: the model is still
+linear in `q` with Gaussian errors, only `W` now depends on a parameter. So
+`A`, `log det A` and `Σ log σ_eff,i = Σ ½ log(σ_i² + s_m²)` are no longer
+constants -- `log det A` is computed on every call regardless, and the
+jittered `Σ log σ` is accumulated in `_iad_normal_equations!` (its jitter
+method). That is what keeps `s_m` honest: without the `−½ log det A` and
+`−Σ log σ_eff` terms the likelihood would always prefer a larger jitter.
+
+No instrument opted in (the default) and the cached-weight path runs,
+unchanged. A jitter at exactly zero reproduces it bit for bit.
+
 Requires `n ≥ n_q` transits (otherwise the correction is
 underdetermined and the likelihood is undefined) — 4 for one
 instrument, 6 for two. Returns 0 if `data.iad` is `nothing` or empty.
@@ -931,7 +1041,8 @@ function iad_log_likelihood(theta::Theta{T}, data) where {T<:Real}
     A = zeros(T, n_q, n_q)
     v = zeros(T, n_q)
     rWr, log_sigma_sum =
-        _iad_normal_equations!(A, v, iad, r, iad.pm_factor, _iad_pos_cols(n_inst))
+        _iad_normal_equations!(A, v, iad, r, iad.pm_factor, _iad_pos_cols(n_inst),
+                               _iad_jitter2(theta, n_inst))
 
     solved = _iad_solve(A, v, rWr, n_q)
     if solved === nothing
@@ -1033,7 +1144,9 @@ end
 # call (orbit-dependent through Δq_orb on the RHS, but only through v;
 # A's *structure* is data-only, so log_det_A is constant over orbit
 # samples — kept here for log-Z compatibility). The Hipparcos block
-# of A and `Σ log σ` are likewise constant.
+# of A and `Σ log σ` are likewise constant — unless an instrument carries a
+# `sigma_iad_<name>` jitter, when both move with it and are recomputed per
+# call exactly as in `iad_log_likelihood`.
 #
 # The orbit's contribution comes through:
 #   * Δη_orb_h_i  (per-IAD-transit reflex projection)
@@ -1105,7 +1218,8 @@ function _iad_gaia_joint_log_likelihood(theta::Theta{T}, data, iad) where {T<:Re
     _iad_residuals!(r, iad, orbs, M_secs, plx)
     A = zeros(T, n_q, n_q)
     v = zeros(T, n_q)
-    rWr, log_sigma_sum = _iad_normal_equations!(A, v, iad, r, pm_fac, pos_col)
+    rWr, log_sigma_sum = _iad_normal_equations!(A, v, iad, r, pm_fac, pos_col,
+                                                _iad_jitter2(theta, n_inst))
 
     # --- Stage 2: orbit-induced Gaia 5-param shift, summed across planets.
     # gost_5param_fit returns Δq at GOST mean epoch; we re-evaluate it

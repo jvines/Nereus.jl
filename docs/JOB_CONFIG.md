@@ -515,6 +515,19 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   Instrument names are sorted-unique → integer indices.
 - **`iad`** — `hip_id` (auto-fetches the Hipparcos IAD bundle) or `values`
   (`t`, `abscissa`, `abscissa_err`, `psi`, `parallax_factor`, `pm_factor`).
+  Two opt-in keys per block, both off by default:
+  `"jitter": true` adds a `sigma_iad_<name>` along-scan jitter (mas, added in
+  quadrature to that instrument's abscissa errors; default prior
+  ModJeffreys with the knee at the median reported error, capped at 10×);
+  `"clip_outliers": true` (or a number of σ, default 5) drops the CCD abscissae
+  that disagree with the other CCDs of their own field-of-view transit
+  (`clip_transit_outliers`) — model-independent, so it cannot touch an orbit
+  signal. What it dropped is in `summary.json` as `iad_outliers`. `<name>` is
+  the block's `instrument`, else `HIP<hip_id>` / `GaiaDR4_<source_id>`.
+  A jitter as large as the reflex is a second mode, "noise instead of orbit".
+  On HD 114762 (RV + DR4) the default prior-drawn walkers settle there, far
+  below the orbit, and fit health fails the run; start the jittered fit from
+  the unjittered one (`init`).
 - **`gost`** — `{ra_deg, dec_deg, from?, to?}` (auto-fetches the Gaia GOST scan
   plan) or `values` (`t`, `psi`, `parallax_factor`). **GOST is an AUXILIARY,
   not a standalone measurement** — `gost_log_likelihood` returns 0; GOST only

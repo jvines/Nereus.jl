@@ -514,7 +514,9 @@ active set), `Δη_orbit_j` the along-scan reflex of every astrometrically
 active companion, and `q_opt` the catalogue correction the marginalisation
 fits — all through the likelihood's own helpers (`_iad_oc`), so χ²/N is
 `χ²_min / N` of `iad_log_likelihood`. Per-transit `σ_j` is shown as
-errorbars.
+errorbars — the error the likelihood used, i.e. `√(σ_j² + s_m²)` when the
+instrument carries a `sigma_iad_<name>` jitter, as RV error bars include
+`sigma_<inst>`.
 
 Panels:
   top    — residual vs ψ (scan position angle, rad)
@@ -562,8 +564,9 @@ function plot_iad_residuals(chains, params, data;
         # The likelihood's own residuals (`_iad_oc`): every active companion's
         # reflex and the sampled parallax subtracted, the catalogue solution
         # marginalised. So the χ²/N below is χ²_min/N of the fit.
-        resid = _iad_oc(theta, data).oc
-        σs = iad.abscissa_err
+        fit = _iad_oc(theta, data)
+        resid = fit.oc
+        σs = fit.σ          # jitter included: what the likelihood weighted by
 
         # Marker shape carries the instrument; colour is already spent on time.
         _inst_marker = (:circle, :rect, :utriangle, :diamond, :cross, :star5)
@@ -1810,9 +1813,11 @@ different scan directions.
 
 Each normal point is the inverse-variance weighted mean residual with its
 formal error `1/√Σσ⁻²`, at the weighted mean epoch, along the weighted mean
-scan direction `u = (sin ψ, cos ψ)`.
+scan direction `u = (sin ψ, cos ψ)`. `σ` is the per-abscissa error to weight
+by -- the reported one by default, `_iad_oc(...).σ` to include a fitted jitter.
 """
-function _iad_normal_points(iad, e::AbstractVector, gap::Real; psi_tol::Real = 1e-3)
+function _iad_normal_points(iad, e::AbstractVector, gap::Real; psi_tol::Real = 1e-3,
+                            σ::AbstractVector = iad.abscissa_err)
     n = length(e)
     ord = sortperm(collect(zip(iad.inst, iad.t)))
     groups = Vector{Vector{Int}}()
@@ -1831,7 +1836,7 @@ function _iad_normal_points(iad, e::AbstractVector, gap::Real; psi_tol::Real = 1
     t̄, ē, σ̄, ux, uy = zeros(m), zeros(m), zeros(m), zeros(m), zeros(m)
     inst = zeros(Int, m)
     for (g, idx) in enumerate(groups)
-        w  = [1 / iad.abscissa_err[j]^2 for j in idx]
+        w  = [1 / σ[j]^2 for j in idx]
         W  = sum(w)
         t̄[g] = sum(w[i] * iad.t[j] for (i, j) in enumerate(idx)) / W
         ē[g] = sum(w[i] * e[j]     for (i, j) in enumerate(idx)) / W
@@ -1850,7 +1855,10 @@ end
     _iad_oc(theta, data) -> NamedTuple or nothing
 
 The along-scan O−C the IAD likelihood leaves behind at `theta`, with the
-orbits it subtracted: `(oc, active_ks, orbs, M_secs, plx)`.
+orbits it subtracted and the per-abscissa error it weighted by:
+`(oc, σ, active_ks, orbs, M_secs, plx)`. `σ` includes the instruments'
+`sigma_iad_<name>` jitter at `theta` (`iad_sigma_eff`), so `Σ(oc/σ)²` is still
+`χ²_min`, and the catalogue solution removed is the jitter-weighted one.
 
 Built from the likelihood's own helpers, never a copy of them:
 `_iad_active_orbits` picks the companions (astrometric mode, active in
@@ -1881,13 +1889,16 @@ function _iad_oc(theta, data)
     pos_col = Nereus._iad_pos_cols(n_inst)
     A = zeros(n_q, n_q)
     v = zeros(n_q)
-    Nereus._iad_normal_equations!(A, v, iad, r, iad.pm_factor, pos_col)
+    s2 = Nereus._iad_jitter2(theta, n_inst)
+    Nereus._iad_normal_equations!(A, v, iad, r, iad.pm_factor, pos_col,
+                                  s2 === nothing ? nothing : Float64.(s2))
     chol = LinearAlgebra.cholesky(LinearAlgebra.Symmetric(A); check = false)
     # Rank-deficient design: the likelihood falls back to q ≡ 0, and so do we.
     q_opt = LinearAlgebra.issuccess(chol) ? (chol \ v) : zeros(n_q)
     oc = Nereus._iad_marginalised_residuals!(
         Vector{Float64}(undef, n), iad, r, q_opt, iad.pm_factor, pos_col)
-    return (oc = oc, active_ks = active_ks, orbs = orbs, M_secs = M_secs, plx = plx)
+    return (oc = oc, σ = Nereus.iad_sigma_eff(theta, iad), active_ks = active_ks,
+            orbs = orbs, M_secs = M_secs, plx = plx)
 end
 
 """
@@ -1904,7 +1915,8 @@ function _epoch_astrometry_oc(theta, data, planet_idx::Int)
     fit === nothing && return nothing
     ki = findfirst(==(planet_idx), fit.active_ks)
     ki === nothing && return nothing
-    return (orb = fit.orbs[ki], M_sec = fit.M_secs[ki], oc = fit.oc, plx = fit.plx)
+    return (orb = fit.orbs[ki], M_sec = fit.M_secs[ki], oc = fit.oc, σ = fit.σ,
+            plx = fit.plx)
 end
 
 # `plot_epoch_astrometry_orbit` itself is in astrometry_model_plot.jl, beside

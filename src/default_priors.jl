@@ -317,6 +317,30 @@ function default_priors(config::ParamsConfig, data::Data)
         dic["sigma_as_$label"] = ModJeffreysPrior(knee, 10 * knee)
     end
 
+    # --- Intermediate-astrometry jitter (per instrument, opt-in) ---
+    # The same prior as `sigma_as_*` and for the same reason: "mas" is not a
+    # scale. A Gaia DR4 per-CCD abscissa error is ~0.05-0.2 mas and a
+    # Hipparcos one ~1-5 mas, so a fixed prior in mas would be informative for
+    # one mission and vacuous for the other. Knee at the instrument's median
+    # reported error: flat below it, where "the quoted errors are right" lives
+    # (zero included -- a jitter at zero is a result, not a failure), Jeffreys
+    # above it for a genuinely underestimated budget. The cap at 10x the median
+    # error is well above the excess seen in real DR4 data: HD 114762 wants
+    # 2.9x (0.36 mas) with its outlier transits left in, 0.5x once they are
+    # clipped. The cap does NOT stop a jitter from absorbing a reflex: a jitter
+    # of order the reflex amplitude is a second, noise-instead-of-orbit mode,
+    # and on HD 114762 RV + DR4 (1.9 mas reflex) pt_emcee's prior-drawn walkers
+    # settle in it, 500-970 nats below the orbit, with a 5x cap as with 10x.
+    # fit_health fails the run; a start from the unjittered fit finds the
+    # orbit. Override through `priors` like any other.
+    for (m, label) in enumerate(instruments.iad_names)
+        isempty(label) && continue
+        errs = (data.iad !== nothing && m <= n_iad_inst(data.iad)) ?
+               data.iad.abscissa_err[data.iad.inst .== m] : Float64[]
+        knee = isempty(errs) ? 1.0 : max(median(errs), 1e-3)
+        dic["sigma_iad_$label"] = ModJeffreysPrior(knee, 10 * knee)
+    end
+
     # --- PM instrumental (sharing-aware) ---
     for (label, _) in _instrument_groups(instruments.pm_names,
                                           get(sh, :pm_offset, nothing))

@@ -85,12 +85,15 @@ function run_job(cfg::AbstractDict)
                                    "(actual threading honours JULIA_NUM_THREADS)"
 
         # --- Build data + star + params --------------------------------
-        data, inst_names_rv, inst_names_pm, inst_names_as =
-            _build_data(_get(cfg, :data; default = Dict());
-                        obliquity = _obliquity_cfg(cfg))
+        data, inst_names_rv, inst_names_pm, inst_names_as, inst_names_iad,
+            iad_outliers = _build_data(_get(cfg, :data; default = Dict());
+                                       obliquity = _obliquity_cfg(cfg))
+        isempty(iad_outliers) ||
+            (summary["iad_outliers"] = _iad_outlier_summary(iad_outliers))
         star       = _build_star(_get(cfg, :star; default = Dict()))
         params, target, menu = _build_model(cfg, data, star, inst_names_rv,
-                                              inst_names_pm, inst_names_as)
+                                              inst_names_pm, inst_names_as,
+                                              inst_names_iad)
 
         # --- Run sampler (with optional wall-clock watchdog) ----------
         # `timeout_sec` (top-level config) bounds the sampler call so a
@@ -387,6 +390,19 @@ function _validate_config(cfg::AbstractDict)
             length(unique(names_as)) == length(names_as) ||
                 push!(errs, "`data.iad` entries have duplicate instrument names: " *
                             "$(names_as)")
+            for (i, e) in enumerate(iad_entries)
+                at = "`data.iad`" * (iad isa AbstractVector ? "[$i]" : "")
+                try
+                    _iad_jitter_flag(_get(e, :jitter; default = false))
+                catch err
+                    push!(errs, "$at: " * sprint(showerror, err))
+                end
+                try
+                    _iad_clip_nsigma(_get(e, :clip_outliers; default = false))
+                catch err
+                    push!(errs, "$at: " * sprint(showerror, err))
+                end
+            end
         end
         if _has(data_cfg, :gost)
             g = _get(data_cfg, :gost)
@@ -575,13 +591,17 @@ function _build_data(data_cfg; obliquity = nothing)
     inst_names_rv = String[]
     inst_names_pm = String[]
     # Relative-astrometry imager names. Only these get `sigma_as_<name>`
-    # jitter slots; the intermediate-astrometry source names are collected
-    # for reporting but carry no sampled parameters of their own (their
-    # nuisances are marginalised analytically).
+    # jitter slots.
     inst_names_as = String[]
-    inst_names_as_iad = String[]
+    # Intermediate-astrometry instruments carry no sampled parameter of their
+    # own (their nuisances are marginalised analytically) -- except a
+    # `sigma_iad_<name>` jitter, for the blocks that ask for one with
+    # `jitter: true`. One entry per instrument, "" for those without.
+    inst_names_iad = String[]
+    iad_outliers = Any[]
     isempty(data_cfg) &&
-        return Data(), inst_names_rv, inst_names_pm, inst_names_as
+        return Data(), inst_names_rv, inst_names_pm, inst_names_as,
+               inst_names_iad, iad_outliers
 
     kw = Dict{Symbol, Any}()
 
@@ -619,14 +639,29 @@ function _build_data(data_cfg; obliquity = nothing)
     # two missions have different reference epochs and different abscissa
     # conventions, and an order nobody chose is a debugging hazard when
     # reading back the per-instrument zero points.
+    #
+    # Per block, opt-in: `jitter: true` gives that instrument a
+    # `sigma_iad_<name>` along-scan jitter, `clip_outliers: true` (or a number
+    # of σ) drops the CCD abscissae that disagree with their own field-of-view
+    # transit (`clip_transit_outliers`) before anything is fitted.
     if _has(data_cfg, :iad)
         iad_block = _get(data_cfg, :iad)
-        kw[:iad] = iad_block isa AbstractVector ?
-            merge_iad([_parse_iad_block(b) for b in iad_block]) :
-            _parse_iad_block(iad_block)
-        inst_names_as_iad = iad_block isa AbstractVector ?
-            [_iad_block_name(b, i) for (i, b) in enumerate(iad_block)] :
-            [_iad_block_name(iad_block, 1)]
+        blocks = iad_block isa AbstractVector ? iad_block : [iad_block]
+        parsed = IADData[]
+        for (i, b) in enumerate(blocks)
+            d = _parse_iad_block(b)
+            name = _iad_block_name(b, i)
+            nsig = _iad_clip_nsigma(_get(b, :clip_outliers; default = false))
+            if nsig !== nothing
+                d, rep = clip_transit_outliers(d; nsigma = nsig, label = name)
+                push!(iad_outliers, merge((instrument = name,), rep))
+            end
+            jit = _iad_jitter_flag(_get(b, :jitter; default = false))
+            append!(inst_names_iad, fill(jit ? name : "", n_iad_inst(d)))
+            push!(parsed, d)
+        end
+        kw[:iad] = merge_iad(parsed)
+        any(!isempty, inst_names_iad) || empty!(inst_names_iad)
     end
 
     # GOST: ra/dec auto-fetch or inline values
@@ -659,7 +694,8 @@ function _build_data(data_cfg; obliquity = nothing)
         (inst_names_rv = _add_obliquity_data!(kw, inst_names_rv, data_cfg, obliquity))
 
     data = Data(; kw...)
-    return data, inst_names_rv, inst_names_pm, inst_names_as
+    return data, inst_names_rv, inst_names_pm, inst_names_as, inst_names_iad,
+           iad_outliers
 end
 
 # ---- RV block ---------------------------------------------------------
@@ -859,6 +895,7 @@ end
 function _iad_block_name(block, i::Int)
     _has(block, :instrument) && return String(_get(block, :instrument))
     _has(block, :hip_id)     && return "HIP$(Int(_get(block, :hip_id)))"
+    _has(block, :hip)        && return "HIP$(Int(_get(block, :hip)))"    # fit_* spec
     _has(block, :source_id)  && return "GaiaDR4_$(Int(_get(block, :source_id)))"
     return "AS$i"
 end
@@ -1077,7 +1114,7 @@ const _PLANET_MODES = Dict(
 )
 
 function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
-                      inst_names_as = String[])
+                      inst_names_as = String[], inst_names_iad = String[])
     mdl = _get(cfg, :model; required = true)
     _has(mdl, :obliquity) &&
         return _build_obliquity_model(cfg, data, inst_names_rv, inst_names_pm)
@@ -1113,7 +1150,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     )
 
     ic = InstrumentConfig(rv = inst_names_rv, pm = inst_names_pm,
-                          as = inst_names_as)
+                          as = inst_names_as, iad = inst_names_iad)
 
     priors        = _build_priors(_get(cfg, :priors; default = Dict()))
     noise_models  = _build_noise_models(_get(cfg, :noise_models; default = []),
