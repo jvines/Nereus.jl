@@ -325,9 +325,14 @@ function default_priors(config::ParamsConfig, data::Data)
     # reported error: flat below it, where "the quoted errors are right" lives
     # (zero included -- a jitter at zero is a result, not a failure), Jeffreys
     # above it for a genuinely underestimated budget. The cap at 10x the median
-    # error is far above any excess seen in real DR4 data (HD 114762 with its
-    # outlier transits left in wants ~3x) and keeps a jitter from absorbing a
-    # companion's reflex wholesale. Override through `priors` like any other.
+    # error is well above the excess seen in real DR4 data: HD 114762 wants
+    # 2.9x (0.36 mas) with its outlier transits left in, 0.5x once they are
+    # clipped. The cap does NOT stop a jitter from absorbing a reflex: a jitter
+    # of order the reflex amplitude is a second, noise-instead-of-orbit mode,
+    # and on HD 114762 RV + DR4 (1.9 mas reflex) pt_emcee's prior-drawn walkers
+    # settle in it, 500-970 nats below the orbit, with a 5x cap as with 10x.
+    # fit_health fails the run; a start from the unjittered fit finds the
+    # orbit. Override through `priors` like any other.
     for (m, label) in enumerate(instruments.iad_names)
         isempty(label) && continue
         errs = (data.iad !== nothing && m <= n_iad_inst(data.iad)) ?

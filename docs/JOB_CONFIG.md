@@ -524,6 +524,10 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   (`clip_transit_outliers`) — model-independent, so it cannot touch an orbit
   signal. What it dropped is in `summary.json` as `iad_outliers`. `<name>` is
   the block's `instrument`, else `HIP<hip_id>` / `GaiaDR4_<source_id>`.
+  A jitter as large as the reflex is a second mode, "noise instead of orbit".
+  On HD 114762 (RV + DR4) the default prior-drawn walkers settle there, far
+  below the orbit, and fit health fails the run; start the jittered fit from
+  the unjittered one (`init`).
 - **`gost`** — `{ra_deg, dec_deg, from?, to?}` (auto-fetches the Gaia GOST scan
   plan) or `values` (`t`, `psi`, `parallax_factor`). **GOST is an AUXILIARY,
   not a standalone measurement** — `gost_log_likelihood` returns 0; GOST only
