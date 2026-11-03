@@ -10,21 +10,22 @@
 #     so a found mode filled its cold rung at ~5 walkers per 100 steps.
 
 using Test, Nereus, Random, Statistics, MCMCChains
+using LinearAlgebra: svdvals
 using Nereus: _pt_prune_stranded!, _warn_repeating_time_window
 include(joinpath(@__DIR__, "fixtures", "easy_rv_target.jl"))
 
-# One rung of `n_mode` walkers in a Gaussian mode (σ = 0.01, centred on 0.5)
+# One rung of `n_mode` walkers in a Gaussian mode (σ = `width`, centred on 0.5)
 # and `n_flat` spread over the unit box `gap` nats of log-likelihood below it.
 # Uniform prior on [0, 1]^d, so log π = 0 and ∫ π = 1.
-function _rung(; d = 3, n_mode = 70, n_flat = 30, gap = 60.0, seed = 1)
+function _rung(; d = 3, n_mode = 70, n_flat = 30, gap = 60.0, seed = 1, width = 0.01)
     rng = MersenneTwister(seed)
     n = n_mode + n_flat
     state = Array{Float64,3}(undef, 1, n, d)
     logL = Matrix{Float64}(undef, 1, n)
     for w in 1:n_mode
-        x = 0.5 .+ 0.01 .* randn(rng, d)
+        x = 0.5 .+ width .* randn(rng, d)
         state[1, w, :] = x
-        logL[1, w] = -0.5 * sum(abs2, (x .- 0.5) ./ 0.01)
+        logL[1, w] = _mode_logL(x, gap, width)
     end
     for w in (n_mode + 1):n
         state[1, w, :] = rand(rng, d)
@@ -32,6 +33,15 @@ function _rung(; d = 3, n_mode = 70, n_flat = 30, gap = 60.0, seed = 1)
     end
     return state, zeros(1, n), logL
 end
+
+# The density `_rung` samples, for the pruning's own evaluations: the mode on a
+# plateau `gap` nats down, zero outside the unit box.
+_mode_logL(x, gap, width) = max(-0.5 * sum(abs2, (x .- 0.5) ./ width), -gap)
+_mode_eval(gap; width = 0.01) =
+    y -> all(v -> 0 <= v <= 1, y) ? (0.0, _mode_logL(y, gap, width)) : (-Inf, -Inf)
+# A record of each rung's median log L at the previous prune that says the rung
+# has stopped climbing: the same median as now.
+_settled(lL) = [median(filter(isfinite, lL[t, :])) for t in axes(lL, 1)]
 
 @testset "pt_emcee: stranded walkers and default convergence" begin
 
@@ -63,9 +73,71 @@ end
         @test _pt_prune_stranded!(state, lπ, lL, [0.1], MersenneTwister(2)) == [0]
     end
 
-    @testset "no estimate of the mode without enough walkers in it" begin
+    @testset "a mode too new for a covariance: volume from the density" begin
+        # Four walkers have found the mode, fewer than the d + 2 a covariance
+        # needs. Gaia-4 b joint (d = 14) kept 97 of 100 cold walkers 200 nats
+        # down at every prune for this reason. Without an evaluator the rung is
+        # left alone, as before.
         state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 60.0)
         @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2)) == [0]
+
+        # Nor while the rung is still climbing, or with no record of whether it
+        # is: its best walker may be only the fastest climber, and the rest
+        # would be herded onto it.
+        @test _pt_prune_stranded!(copy(state), copy(lπ), copy(lL), [1.0],
+                                  MersenneTwister(2); evalf = _mode_eval(60.0)) == [0]
+        rec = _settled(lL) .- 2.0          # risen 2 nats since: d/2 = 1.5
+        @test _pt_prune_stranded!(copy(state), copy(lπ), copy(lL), [1.0],
+                                  MersenneTwister(2); evalf = _mode_eval(60.0),
+                                  med_logL = rec) == [0]
+        @test rec == _settled(lL)          # the record now holds this call's
+
+        # Settled, with an evaluator: the drops along each axis about the best
+        # walker give widths of at most σ = 0.01, the plateau provably weighs
+        # nothing, and all 96 move.
+        before = copy(state)
+        moved = _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
+                                    evalf = _mode_eval(60.0), med_logL = _settled(lL))
+        @test moved == [96]
+        @test state[1, 1:4, :] == before[1, 1:4, :]
+        # Drawn about the best walker and evaluated, not copied: the ensemble
+        # keeps full rank, which copies of four walkers would not.
+        X = state[1, :, :]
+        @test length(unique(eachrow(X))) == 100
+        @test minimum(svdvals(X .- sum(X; dims = 1) ./ 100)) > 1e-3
+        @test all(abs.(X[5:end, :] .- 0.5) .< 0.1)
+        @test lL[1, 5:end] ≈ [_mode_logL(X[w, :], 60.0, 0.01) for w in 5:100]
+        @test all(lL[1, 5:end] .> -30)
+
+        # The same guarantee as with a covariance: 18 nats down could still
+        # carry mass, so it stays.
+        state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 18.0)
+        @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
+                                  evalf = _mode_eval(18.0),
+                                  med_logL = _settled(lL)) == [0]
+
+        # A spike is not a mode: at σ = 1e-6 the volume is 41 nats smaller and a
+        # plateau 40 nats down may outweigh it. At σ = 0.01 it may not.
+        for (width, n) in ((1e-6, 0), (0.01, 96))
+            state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 40.0, width = width)
+            @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
+                                      evalf = _mode_eval(40.0; width),
+                                      med_logL = _settled(lL)) == [n]
+        end
+    end
+
+    @testset "a mode across the seam of a circle is measured on the circle" begin
+        # Dim 3 is a full-circle angle, U(0, 2π), and the mode sits on its seam:
+        # half the walkers near 0, half near 2π. Read as a line, Σ_A spans the
+        # window and overstates Z_A by ~4 nats; a plateau 19 nats down, which
+        # may carry mass, would move.
+        state, lπ, lL = _rung(gap = 19.0)
+        state[1, :, 3] .= mod.(2π .* (state[1, :, 3] .- 0.5), 2π)
+        lπ .= -log(2π)
+        @test _pt_prune_stranded!(copy(state), copy(lπ), copy(lL), [1.0],
+                                  MersenneTwister(2)) == [30]
+        @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
+                                  circ = [3]) == [0]
     end
 
     @testset "trans-dim prune moves the model too" begin
@@ -90,6 +162,26 @@ end
         @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
                                          [1, 1, 1], 0, MersenneTwister(2)) == [0]
         @test count(w -> tds[1, w].planet_active[1], 1:100) == 70
+
+        # Four walkers have the planet: the volume comes from the density about
+        # the best one, and the 96 without it are drawn there, planet and all.
+        state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 60.0)
+        tds = [Nereus.TransDimState(w <= 4 ? 1 : 0, BitVector([w <= 4]),
+                                    BitVector(), BitVector([true]))
+               for _ in 1:1, w in 1:100]
+        ev = (x, td) -> td.planet_active[1] ? _mode_eval(60.0)(x) : (0.0, -60.0)
+        @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
+                                         [1, 1, 1], 0, MersenneTwister(2)) == [0]
+        @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
+                                         [1, 1, 1], 0, MersenneTwister(2);
+                                         evalf = ev) == [0]
+        moved = Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
+                                           [1, 1, 1], 0, MersenneTwister(2);
+                                           evalf = ev, med_logL = _settled(lL))
+        @test moved == [96]
+        @test all(w -> tds[1, w].planet_active[1], 1:100)
+        @test length(unique(eachrow(state[1, :, :]))) == 100
+        @test all(lL[1, 5:end] .> -30)
     end
 
     @testset "convergence_report: label switching is not non-convergence" begin

@@ -148,8 +148,9 @@ the distinguishing feature of this sampler.
   burned-in run, so a per-step recompute over the whole ring buffer is
   wasted work; refreshing every few steps keeps the flow current while
   cutting the dominant cost of the swap path).
-- `init_strategy::Symbol=:prior` — walker initialization (`:prior` draws
-  each walker from the prior, matching astroEMPEROR / pt_emcee).
+- `init_strategy::Symbol=:prior` — walker initialization. Only `:prior` is
+  implemented (each walker drawn from the prior, matching astroEMPEROR /
+  pt_emcee); anything else is an `ArgumentError`.
 - `seed::Int=1`
 - `thin::Int=1`
 - `show_progress::Bool=true`
@@ -203,6 +204,11 @@ function sample_pt_whitening(
     node_flip      = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
+    # Accepted for symmetry with pt_emcee, but every walker is drawn from the
+    # prior: `:pathfinder` used to be taken and silently ignored.
+    init_strategy === :prior || throw(ArgumentError(
+        "sample_pt_whitening draws every walker from the prior; init_strategy " *
+        "must be :prior, got :$init_strategy"))
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))
@@ -242,8 +248,9 @@ function sample_pt_whitening(
     # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
     # On resume the saved state replaces initialisation below and is put back
     # just before the main loop, which then carries on from step `step0 + 1`.
-    # `proposal_scale` and `init_strategy` are left out: neither is read. Nor is
-    # `node_flip` when no planet can flip, so it enters as the rate in effect.
+    # `proposal_scale` is left out: it is not read. So is `init_strategy`,
+    # which has one legal value. `node_flip` is left out when no planet can
+    # flip, so it enters as the rate in effect.
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
         n_burnin, thin, seed, stretch_a, betas = copy(βs), warmup_swaps,
         whiten_window = max(whiten_window, 1), whiten_refresh,

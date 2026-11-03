@@ -181,6 +181,8 @@ res = sample_pt_emcee(target, data;
 - `:map_scatter` — `sample_map` MAP + small Gaussian scatter. Only safe
   when the posterior is approximately Gaussian around the MAP.
 
+Any other value is an `ArgumentError`.
+
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (best of
 TI/TI⁺/SS⁺/H⁺), `evidence::EvidenceReport`, `acceptance_within`,
 `acceptance_swap`, `n_evals`, and `ladder::LadderHistory` — the ladder, swap
@@ -380,7 +382,7 @@ res = sample_pt_whitening(target, data;
     warmup_swaps   = 200,               # identity swap until whitening kicks in
     whiten_window  = 100,               # sliding window for the per-temp (μ,σ)
     whiten_refresh = 10,                # recompute (μ,σ) every N steps
-    init_strategy  = :prior,
+    init_strategy  = :prior,            # the only one implemented; others throw
     seed           = 1,
     thin           = 1,
     show_progress  = true,

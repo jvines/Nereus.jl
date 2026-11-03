@@ -55,7 +55,7 @@ using Random
     s * 0x9e3779b97f4a7c15 + UInt64(half) * 0x517cc1b727220a95 + UInt64(i)
 end
 using MCMCChains
-using Statistics: cov, quantile, median
+using Statistics: cov, quantile, median, std
 using LinearAlgebra: cholesky, logdet, Symmetric, norm, I, issuccess
 
 export sample_pt_emcee, PTemceeResult, mode_laplace_evidence
@@ -279,53 +279,212 @@ end
 # is most of the posterior -- has a likelihood within the Occam factor of the
 # peak, above c, and is left alone. So are the tails of the mode itself.
 # `state` is on the flat scale (see sample_pt_emcee), so Laplace is too: on
-# raw P a log-uniform prior's tail alone would inflate Σ_A by ~8 nats.
+# raw P a log-uniform prior's tail alone would inflate Σ_A by ~8 nats. A
+# full-circle angle enters Σ_A as its offset from the best walker on the
+# circle: a mode across the seam would otherwise span the whole window and
+# overstate Z_A.
+#
+# Σ_A needs d + 2 walkers in A. The mode a rung has just found has one to
+# three: Gaia-4 b, joint RVs + DR4 (d = 14, 24 rungs), kept 97 of its 100 cold
+# walkers in a local mode ~200 nats below the 1-3 that had found the real one
+# at every prune of burn-in, moved none of them, and recorded 46% of its draws
+# 60+ nats below the mode (R-hat 1.59). With too few walkers in A, or a
+# singular Σ_A (copies left by an earlier prune), the volume comes from the
+# density itself instead: the drop of ℓ along each axis about the best walker
+# gives a width σ_j no larger than the conditional one, 1/√H_jj (see
+# `_pt_axis_widths`). By Hadamard's inequality det H ≤ ∏ H_jj, so
+# ∏ √(2π) σ_j is at most the Gaussian volume √det(2πΣ); and away from the mode
+# the dropped gradient term exp(½ gᵀH⁻¹g) is ≥ 1. The estimate can only
+# understate Z_A, which only lowers the cut: the guarantee above holds as it
+# is. Walkers moved this way are drawn about the best walker
+# with those widths and re-evaluated, not copied: copies of fewer than d + 1
+# walkers would leave the rung in their affine hull, which no stretch move
+# leaves.
+#
+# That path waits for the rung to stop climbing. Early in burn-in the walkers
+# are still rising from the prior and the best of them is no mode, only the
+# fastest climber; the bound holds there too, but moving the rest onto it
+# herds the ensemble onto one walker. Without a check, HD 114762 with an IAD
+# jitter moved 97 of its 100 cold walkers (791 across the ladder) at step 200
+# of 4000 onto a leader at log p = -2709, and Gaia-4 b 39 at step 50. So it
+# runs only once the rung's median log-likelihood, tempered at the current β,
+# rose by less than d/2 (the depth of its typical set) since the previous
+# prune: Gaia-4 b's stranded group moved by -1.5 to +1.9 nats per 50 steps, a
+# climbing rung by ~50-100. The first prune has no record and never takes it.
 #
 # Bounding the region by one of its walkers instead (sup over the group) does
 # not work: the group below any density cut always holds some tail walker of
 # the mode, 20 nats down, and the bound never clears the 70-nat plateau.
 #
 # Burn-in only, so every recorded step is ordinary MCMC. Returns the number of
-# walkers moved at each rung. Serial, draws from `rng`.
+# walkers moved at each rung. Serial, draws from `rng`. `evalf(y)` returns
+# (log π, log L) on the flat scale, as `logπ_arr`/`logL_arr` hold them; without
+# it a rung with too few walkers in A is left alone. `circ` lists the
+# full-circle angles. `med_logL` is each rung's median log L after the previous
+# call, NaN before the first; it is updated in place. Without it, or while a
+# rung climbs, that rung's few-walker path is skipped.
 # ------------------------------------------------------------------
 function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64},
                              logL_arr::Matrix{Float64}, βs::Vector{Float64}, rng;
-                             tau::Float64 = 10.0)
+                             tau::Float64 = 10.0, evalf = nothing,
+                             circ::AbstractVector{Int} = Int[],
+                             med_logL::Union{Nothing,AbstractVector{Float64}} = nothing)
     n_t, n_w, d = size(state)
     moved = zeros(Int, n_t)
     d >= 1 || return moved
     allow = quantile(Chisq(d), 1 - 1e-6) / 2
+    # How far each rung climbed since the last call, at today's β (the ladder
+    # adapts in between); NaN without a record, which compares false.
+    rise = med_logL === nothing ? fill(NaN, n_t) :
+           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - med_logL[t]) for t in 1:n_t]
     ℓ = Vector{Float64}(undef, n_w)
+    y = Vector{Float64}(undef, d)
     for t in 1:n_t
         β = βs[t]
         @inbounds for w in 1:n_w
             v = logπ_arr[t, w] + β * logL_arr[t, w]
             ℓ[w] = isfinite(v) ? v : -Inf
         end
-        best = maximum(ℓ)
+        b = argmax(ℓ)
+        best = ℓ[b]
         isfinite(best) || continue
+        below = [w for w in 1:n_w if ℓ[w] < best - allow]
+        isempty(below) && continue
         A = findall(>=(best - allow), ℓ)
-        length(A) >= d + 2 || continue
-        C = cholesky(Symmetric(cov(view(state, t, A, :); dims = 1)); check = false)
-        issuccess(C) || continue
-        cut = best + 0.5 * d * log(2π) + 0.5 * logdet(C) - tau
-        S = [w for w in 1:n_w if !(β * logL_arr[t, w] >= cut) && ℓ[w] < best - allow]
+        yb = state[t, b, :]
+        lv = length(A) >= d + 2 ? _pt_half_logdet_cov(state, t, A, yb, circ) : nothing
+        σ = nothing
+        if lv === nothing
+            (evalf === nothing || !(rise[t] < d / 2)) && continue
+            # A cost gate, not a bound: the whole rung's spread as the volume. A
+            # rung that could not prune even then is not worth 2d+ evaluations.
+            gate = _pt_half_logdet_cov(state, t, findall(isfinite, ℓ), yb, circ)
+            gate === nothing && continue
+            cg = best + 0.5 * d * log(2π) + gate - tau
+            any(w -> β * logL_arr[t, w] < cg, below) || continue
+            ℓat = x -> (r = evalf(x); v = r[1] + β * r[2]; isfinite(v) ? v : -Inf)
+            h0 = [0.1 * _pt_spread(view(state, t, :, j), yb[j], j in circ) for j in 1:d]
+            σ = _pt_axis_widths(ℓat, yb, best, h0)
+            σ === nothing && continue
+            lv = sum(log, σ)
+        end
+        cut = best + 0.5 * d * log(2π) + lv - tau
+        S = [w for w in below if !(β * logL_arr[t, w] >= cut)]
         isempty(S) && continue
-        # Donors from the upper half of A: its lower edge sits `allow` down
-        # (~20 nats at d = 7), far outside a d-dim typical set (~d/2 down), and
-        # a copy placed there spends the rest of burn-in relaxing back in.
-        donors = A[ℓ[A] .>= median(ℓ[A])]
-        @inbounds for w in S
-            a = donors[rand(rng, 1:length(donors))]
-            for j in 1:d
-                state[t, w, j] = state[t, a, j]
+        if σ === nothing
+            # Donors from the upper half of A: its lower edge sits `allow` down
+            # (~20 nats at d = 7), far outside a d-dim typical set (~d/2 down),
+            # and a copy placed there spends the rest of burn-in relaxing back in.
+            donors = A[ℓ[A] .>= median(ℓ[A])]
+            @inbounds for w in S
+                a = donors[rand(rng, 1:length(donors))]
+                for j in 1:d
+                    state[t, w, j] = state[t, a, j]
+                end
+                logπ_arr[t, w] = logπ_arr[t, a]
+                logL_arr[t, w] = logL_arr[t, a]
             end
-            logπ_arr[t, w] = logπ_arr[t, a]
-            logL_arr[t, w] = logL_arr[t, a]
+        else
+            for w in S
+                lp, ll = _pt_scatter!(y, evalf, yb, σ, rng)
+                if !(isfinite(lp) && isfinite(ll))
+                    y .= yb; lp, ll = logπ_arr[t, b], logL_arr[t, b]
+                end
+                @inbounds for j in 1:d
+                    state[t, w, j] = y[j]
+                end
+                logπ_arr[t, w] = lp
+                logL_arr[t, w] = ll
+            end
         end
         moved[t] = length(S)
     end
+    if med_logL !== nothing
+        for t in 1:n_t
+            med_logL[t] = _pt_finite_median(view(logL_arr, t, :))
+        end
+    end
     return moved
+end
+
+_pt_finite_median(x) = (v = filter(isfinite, x); isempty(v) ? NaN : median(v))
+
+# ½ log det of the covariance of walkers `ws` at rung `t`; a full-circle angle
+# (`circ`) as its offset from `yb` on the circle. `nothing` if singular.
+function _pt_half_logdet_cov(state::Array{Float64,3}, t::Int, ws, yb::AbstractVector,
+                             circ::AbstractVector{Int})
+    d = size(state, 3)
+    Y = Matrix{Float64}(undef, length(ws), d)
+    @inbounds for (i, w) in enumerate(ws), j in 1:d
+        Y[i, j] = j in circ ? rem2pi(state[t, w, j] - yb[j], RoundNearest) :
+                              state[t, w, j]
+    end
+    C = cholesky(Symmetric(cov(Y; dims = 1)); check = false)
+    return issuccess(C) ? 0.5 * logdet(C) : nothing
+end
+
+# Standard deviation of `x` (offsets from `x0` on the circle when `circular`),
+# floored so a collapsed column still gives the width search a start.
+function _pt_spread(x::AbstractVector, x0::Real, circular::Bool)
+    s = circular ? std(rem2pi.(x .- x0, RoundNearest)) : std(x)
+    return max(isfinite(s) ? s : 0.0, 1e-6 * max(1.0, abs(x0)))
+end
+
+# Widths of the tempered density `ℓat` about `y0` (where it is `ℓ0`), one axis
+# at a time, from the drop to the steeper side:
+#     D(h) = ℓ0 - min(ℓ(y0 + h e_j), ℓ(y0 - h e_j)),    σ_j = h / √(2D)
+# with h rescaled by 4 from `h0` until D lies in [1/8, 2] nats, the quadratic
+# core clear of rounding. At the mode of a Gaussian that is the conditional
+# width 1/√H_jj. Away from it the gradient g_j steepens one side,
+# D = |g_j| h + ½ H_jj h², so σ_j only comes out smaller: a walker still
+# climbing (Gaia-4 b's had its jitters 15 nats per m/s uphill) gets a smaller
+# volume, never a larger one. A side outside the support leaves the other, at
+# half the width (half a Gaussian). `nothing` if an axis never settles.
+function _pt_axis_widths(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
+                         h0::AbstractVector{Float64}; max_iter::Int = 16)
+    d = length(y0)
+    σ = Vector{Float64}(undef, d)
+    y = collect(Float64, y0)
+    for j in 1:d
+        h = h0[j]
+        ok = false
+        for _ in 1:max_iter
+            y[j] = y0[j] + h; ℓp = ℓat(y)
+            y[j] = y0[j] - h; ℓm = ℓat(y)
+            y[j] = y0[j]
+            if !isfinite(ℓp) && !isfinite(ℓm)
+                h /= 4
+                continue
+            end
+            half = isfinite(ℓp) && isfinite(ℓm) ? 1.0 : 0.5
+            drop = ℓ0 - min(isfinite(ℓp) ? ℓp : Inf, isfinite(ℓm) ? ℓm : Inf)
+            if drop > 2
+                h /= 4
+            elseif drop >= 0.125
+                σ[j] = half * h / sqrt(2 * drop)
+                ok = true
+                break
+            else
+                h *= 4      # flat at this scale, or uphill both ways: look wider
+            end
+        end
+        ok || return nothing
+    end
+    return σ
+end
+
+# One draw y = yb + σ ⊙ z, z ~ N(0, I), redrawn (up to 20 times) until it is in
+# the support. Returns `evalf(y)`; (-Inf, -Inf) if no draw was.
+function _pt_scatter!(y::Vector{Float64}, evalf, yb::AbstractVector{Float64},
+                      σ::Vector{Float64}, rng)
+    for _ in 1:20
+        @inbounds for j in eachindex(y)
+            y[j] = yb[j] + σ[j] * randn(rng)
+        end
+        lp, ll = evalf(y)
+        isfinite(lp) && isfinite(ll) && return (lp, ll)
+    end
+    return (-Inf, -Inf)
 end
 
 # One line per run, after the progress bar: which angles were re-charted and
@@ -397,6 +556,7 @@ in place.
     - `:map_scatter` — `sample_map` MAP point + small Gaussian
       scatter. Even tighter than Pathfinder; only safe when the
       posterior is approximately Gaussian around the MAP.
+  Anything else is an `ArgumentError`. Ignored when `init` is given.
 - `pf_n_runs::Int=2` — Pathfinder L-BFGS basins (only used if
   `:pathfinder`).
 - `seed::Int=1`
@@ -407,11 +567,16 @@ in place.
   it. Only walkers whose likelihood is so low that the whole region below it
   weighs under e⁻¹⁰ of the mode (bounded by that likelihood times the
   normalised prior) are moved, so a plateau that could carry real mass — a
-  weak signal — is left alone. The stretch move cannot bring stranded walkers
-  back itself, so without this a narrow mode (any well-measured period on a
-  wide prior) fills its cold rung at the rate the ladder happens to rediscover
-  it. Burn-in only: the recorded chain is ordinary MCMC. `false` restores the
-  old behaviour.
+  weak signal — is left alone. The mode's mass is the Laplace volume of the
+  walkers in it; while fewer than `n_dim + 2` have found it, and once the rung
+  has stopped climbing, a smaller volume measured from the density along each
+  axis at its best walker (a few evaluations per dimension), and the walkers
+  moved are then drawn about that walker rather than copied, so the rung keeps
+  its full rank. The stretch move cannot bring
+  stranded walkers back itself, so without this a narrow mode (any
+  well-measured period on a wide prior) fills its cold rung at the rate the
+  ladder happens to rediscover it. Burn-in only: the recorded chain is ordinary
+  MCMC. `false` restores the old behaviour.
 - `node_flip::Real=0.1` — per walker and step, the probability of proposing
   the mirror (Ω, ω) → (Ω + π, ω + π) of each astrometry-only planet, accepted
   with the tempered Metropolis-Hastings ratio (see src/samplers/node_flip.jl).
@@ -477,6 +642,11 @@ function sample_pt_emcee(
     node_flip       = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
+    # Any other Symbol used to fall through to the prior draw without a word:
+    # `init_strategy = "map"` from Python ran exactly the `:prior` fit.
+    init_strategy in (:prior, :pathfinder, :map_scatter) || throw(ArgumentError(
+        "init_strategy must be :prior (default), :pathfinder or :map_scatter; " *
+        "got :$init_strategy"))
     ladder_adapt_ν0 = Float64(ladder_adapt_ν0)
     ladder_adapt_K  = Float64(ladder_adapt_K)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
@@ -540,6 +710,7 @@ function sample_pt_emcee(
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
+    prune_med = fill(NaN, n_temps)      # each rung's median log L at the last prune
     # Astrometry-only planets get the (Ω, ω) → (Ω + π, ω + π) move
     # (src/samplers/node_flip.jl); empty, and never drawn for, anything else.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
@@ -650,7 +821,7 @@ function sample_pt_emcee(
             avail = size(pf.draws, 2)
             avail > 0 ? pf.draws : nothing
         catch e
-            @warn "Pathfinder warm-start failed; falling back to :map_scatter" exception=(e, catch_backtrace())
+            @warn "Pathfinder warm-start failed; falling back to prior draws" exception=(e, catch_backtrace())
             nothing
         end
     elseif ck === nothing && init === nothing && init_strategy === :map_scatter
@@ -832,6 +1003,8 @@ function sample_pt_emcee(
     flip_proposed  = zeros(Int, n_temps)
     flip_accepted  = zeros(Int, n_temps)
     flip_eval(buf, t, w, slot) = eval_bounded!(buf, slot)
+    # The pruning's own evaluations (`_pt_prune_stranded!`), counted.
+    prune_eval(y) = (Threads.atomic_add!(n_evals_atomic, 1); eval_bounded!(y, 1))
 
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
@@ -908,6 +1081,7 @@ function sample_pt_emcee(
         accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
         pruned .= ck.pruned
+        hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
         n_evals_atomic[] = ck.n_evals::Int
         β_hist[1:step0, :] .= ck.β_hist; swap_hist[1:step0, :] .= ck.swap_hist
         smd_hist[1:step0, :] .= ck.smd_hist
@@ -1018,9 +1192,11 @@ function sample_pt_emcee(
         # See `_pt_prune_stranded!`. Stops at 3/4 of burn-in so the moved
         # walkers decorrelate from the ones they were copied onto, and runs
         # before the re-cut so the seam is chosen from the cleaned cold rung.
+        # Its evaluations run here, between steps, on slot 1's buffers.
         if prune_stranded && step % 50 == 0 && step <= (3 * n_burnin) ÷ 4
             pruned .+= _pt_prune_stranded!(state, logπ_arr, logL_arr, βs,
-                                           rng_master)
+                                           rng_master; evalf = prune_eval, circ,
+                                           med_logL = prune_med)
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
@@ -1116,6 +1292,7 @@ function sample_pt_emcee(
                 state, logπ = logπ_arr, logL = logL_arr, betas = βs, rng_master,
                 rngs_h1, rngs_h2, rngs_flip, accept_within, propose_within,
                 accept_swap, propose_swap, flip_proposed, flip_accepted, pruned,
+                prune_med,
                 n_evals = n_evals_atomic[], β_hist = β_hist[1:step, :],
                 swap_hist = swap_hist[1:step, :], smd_hist = smd_hist[1:step, :],
                 keep_idx, samples = samples[1:keep_idx, :],

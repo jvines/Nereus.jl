@@ -27,7 +27,7 @@
 # angle, because births re-sort planets between them (`_td_ensemble_recut!`).
 
 using Random: AbstractRNG, MersenneTwister
-using Statistics: median, quantile
+using Statistics: median, quantile, std
 import MCMCChains
 
 export sample_transdim_pt_emcee, TransDimPTemceeResult
@@ -224,6 +224,15 @@ end
 #    joint prior integrates to at most 2^n_noise_toggle. The cut is lowered by
 #    that factor.
 #  - A walker moved onto a donor takes the donor's whole TransDimState.
+#  - Walkers live in x, not on the flat scale: Laplace, the axis widths and the
+#    draws about the best walker all work on the flat scale of its active
+#    dimensions, mapped back to x.
+# As there, a model a rung has only just found -- fewer than m + 2 walkers in
+# it, or a singular Σ_A -- takes its volume from the axis widths about the best
+# walker (`evalf(x, tds)` returns its (log π, log L)), and the walkers it gains
+# are drawn about that walker, in its model, rather than copied; and only once
+# the rung has stopped climbing, its median log L risen by less than m/2 since
+# the previous call (`med_logL`, updated in place).
 # ------------------------------------------------------------------
 function _td_prune_stranded!(state::Array{Float64,3},
                              td_states::AbstractMatrix{TransDimState},
@@ -231,12 +240,17 @@ function _td_prune_stranded!(state::Array{Float64,3},
                              βs::Vector{Float64},
                              flat_shift::Vector{Union{Nothing,Float64}},
                              owner::Vector{Int}, n_noise_toggle::Int, rng;
-                             tau::Float64 = 10.0)
+                             tau::Float64 = 10.0, evalf = nothing,
+                             circ::AbstractVector{Int} = Int[],
+                             med_logL::Union{Nothing,AbstractVector{Float64}} = nothing)
     n_t, n_w, n_dim = size(state)
     moved = zeros(Int, n_t)
+    rise = med_logL === nothing ? fill(NaN, n_t) :
+           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - med_logL[t]) for t in 1:n_t]
     _active(tds, o) = o == 0 || (o > 0 ? tds.planet_active[o] : tds.noise_active[-o])
     _same(a, b) = a.planet_active == b.planet_active &&
                   a.noise_active == b.noise_active && a.as_active == b.as_active
+    _flat(x, s) = s === nothing ? x : (x + s > 0 ? log(x + s) : -Inf)
     ℓ = Vector{Float64}(undef, n_w)
     for t in 1:n_t
         β = βs[t]
@@ -246,8 +260,7 @@ function _td_prune_stranded!(state::Array{Float64,3},
             for d in 1:n_dim
                 s = flat_shift[d]
                 (s === nothing || !_active(td_states[t, w], owner[d])) && continue
-                x = state[t, w, d]
-                v += x + s > 0 ? log(x + s) : -Inf
+                v += _flat(state[t, w, d], s)
             end
             ℓ[w] = isfinite(v) ? v : -Inf
         end
@@ -259,27 +272,72 @@ function _td_prune_stranded!(state::Array{Float64,3},
         m >= 1 || continue
         allow = quantile(Chisq(m), 1 - 1e-6) / 2
         A = [w for w in 1:n_w if ℓ[w] >= ℓ[b] - allow && _same(td_states[t, w], tb)]
-        length(A) >= m + 2 || continue
-        Y = Matrix{Float64}(undef, length(A), m)
-        @inbounds for (i, w) in enumerate(A), (j, d) in enumerate(dims)
-            s = flat_shift[d]
-            Y[i, j] = s === nothing ? state[t, w, d] : log(state[t, w, d] + s)
-        end
-        C = cholesky(Symmetric(cov(Y; dims = 1)); check = false)
-        issuccess(C) || continue
-        cut = ℓ[b] + 0.5 * m * log(2π) + 0.5 * logdet(C) - tau -
-              n_noise_toggle * log(2)
         inA = falses(n_w); inA[A] .= true
-        S = [w for w in 1:n_w if !inA[w] && !(β * logL_arr[t, w] >= cut)]
+        cand = [w for w in 1:n_w if !inA[w]]
+        isempty(cand) && continue
+        # The best walker's active dims on the flat scale, a circular one as its
+        # offset from the best walker on the circle (see `_pt_half_logdet_cov`).
+        yb = [_flat(state[t, b, d], flat_shift[d]) for d in dims]
+        Y(ws) = [(d in circ ? rem2pi(state[t, w, d] - state[t, b, d], RoundNearest) :
+                  _flat(state[t, w, d], flat_shift[d])) for w in ws, d in dims]
+        lv = length(A) >= m + 2 ? _td_half_logdet_cov(Y(A)) : nothing
+        σ = nothing
+        xb = state[t, b, :]
+        xbuf = similar(xb)
+        function tox!(yd)
+            copyto!(xbuf, xb)
+            @inbounds for (j, d) in enumerate(dims)
+                s = flat_shift[d]
+                xbuf[d] = s === nothing ? yd[j] : exp(yd[j]) - s
+            end
+            return xbuf
+        end
+        evaly(yd) = evalf(tox!(yd), tb)
+        if lv === nothing
+            (evalf === nothing || !(rise[t] < m / 2)) && continue
+            # A cost gate, not a bound (see `_pt_prune_stranded!`).
+            gate = _td_half_logdet_cov(Y(findall(isfinite, ℓ)))
+            gate === nothing && continue
+            cg = ℓ[b] + 0.5 * m * log(2π) + gate - tau - n_noise_toggle * log(2)
+            any(w -> β * logL_arr[t, w] < cg, cand) || continue
+            jac(yd) = sum((yd[j] for (j, d) in enumerate(dims) if flat_shift[d] !== nothing);
+                          init = 0.0)
+            ℓat = yd -> (r = evaly(yd); v = r[1] + β * r[2] + jac(yd);
+                         isfinite(v) ? v : -Inf)
+            Yall = Y(findall(isfinite, ℓ))
+            h0 = [0.1 * max(std(view(Yall, :, j)), 1e-6 * max(1.0, abs(yb[j])))
+                  for j in 1:m]
+            σ = _pt_axis_widths(ℓat, yb, ℓ[b], h0)
+            σ === nothing && continue
+            lv = sum(log, σ)
+        end
+        cut = ℓ[b] + 0.5 * m * log(2π) + lv - tau - n_noise_toggle * log(2)
+        S = [w for w in cand if !(β * logL_arr[t, w] >= cut)]
         isempty(S) && continue
-        donors = A[ℓ[A] .>= median(ℓ[A])]
+        donors = σ === nothing ? A[ℓ[A] .>= median(ℓ[A])] : [b]
+        yd = similar(yb)
         @inbounds for w in S
             a = donors[rand(rng, 1:length(donors))]
-            for d in 1:n_dim
-                state[t, w, d] = state[t, a, d]
+            lp, ll = logπ_arr[t, a], logL_arr[t, a]
+            if σ === nothing
+                for d in 1:n_dim
+                    state[t, w, d] = state[t, a, d]
+                end
+            else
+                lp2, ll2 = _pt_scatter!(yd, evaly, yb, σ, rng)
+                if isfinite(lp2) && isfinite(ll2)
+                    tox!(yd); lp, ll = lp2, ll2
+                    for d in 1:n_dim
+                        state[t, w, d] = xbuf[d]
+                    end
+                else
+                    for d in 1:n_dim
+                        state[t, w, d] = state[t, a, d]
+                    end
+                end
             end
-            logπ_arr[t, w] = logπ_arr[t, a]
-            logL_arr[t, w] = logL_arr[t, a]
+            logπ_arr[t, w] = lp
+            logL_arr[t, w] = ll
             src, dst = td_states[t, a], td_states[t, w]
             dst.n_planets_active = src.n_planets_active
             copyto!(dst.planet_active, src.planet_active)
@@ -288,7 +346,19 @@ function _td_prune_stranded!(state::Array{Float64,3},
         end
         moved[t] = length(S)
     end
+    if med_logL !== nothing
+        for t in 1:n_t
+            med_logL[t] = _pt_finite_median(view(logL_arr, t, :))
+        end
+    end
     return moved
+end
+
+# ½ log det of the covariance of the rows of `Y`; `nothing` if singular.
+function _td_half_logdet_cov(Y::AbstractMatrix{Float64})
+    all(isfinite, Y) || return nothing
+    C = cholesky(Symmetric(cov(Y; dims = 1)); check = false)
+    return issuccess(C) ? 0.5 * logdet(C) : nothing
 end
 
 """
@@ -612,6 +682,7 @@ function sample_transdim_pt_emcee(
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
+    prune_med = fill(NaN, n_temps)      # each rung's median log L at the last prune
     # Astrometry-only planets get the node flip (src/samplers/node_flip.jl).
     # Same-mode slots share Ω's window, and the flip reads it from the layout.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
@@ -1120,6 +1191,11 @@ function sample_transdim_pt_emcee(
     slide_proposed  = zeros(Int, n_temps)
     slide_accepted  = zeros(Int, n_temps)
     flip_eval(buf, t, w, slot) = eval_bounded!(buf, td_states[t, w], slot)
+    # The pruning's own evaluations (`_td_prune_stranded!`), counted, and the
+    # full-circle angles it measures on the circle.
+    prune_eval(x, tds) = (Threads.atomic_add!(n_evals_atomic, 1);
+                          eval_bounded!(x, tds, 1))
+    circ = circular_indices(params)
     # `planet_active` is sized from `td.max_kplanet` while the move builders
     # enumerate `config.max_kplanet`; the two need not agree, so bound-check
     # before indexing. A slot the trans-dim state does not track has no
@@ -1875,6 +1951,7 @@ function sample_transdim_pt_emcee(
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
         slide_proposed .= ck.slide_proposed; slide_accepted .= ck.slide_accepted
         pruned .= ck.pruned
+        hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
         n_evals_atomic[] = ck.n_evals::Int
         for (a, v) in zip((pswap_prop, pswap_acc, pn_prop, pn_acc, np_prop, np_acc),
                           ck.swap_diag)
@@ -2054,7 +2131,8 @@ function sample_transdim_pt_emcee(
             pruned .+= _td_prune_stranded!(state, td_states, logπ_arr, logL_arr,
                                            βs, flat_shift, dim_owner,
                                            do_noise ? length(noise_toggle_idx) : 0,
-                                           rng_master)
+                                           rng_master; evalf = prune_eval, circ,
+                                           med_logL = prune_med)
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
@@ -2124,7 +2202,7 @@ function sample_transdim_pt_emcee(
                 accept_transdim, propose_transdim, accept_noise_transdim,
                 propose_noise_transdim, planet_birth_proposed, planet_birth_accepted,
                 planet_death_proposed, planet_death_accepted, flip_proposed,
-                flip_accepted, slide_proposed, slide_accepted, pruned,
+                flip_accepted, slide_proposed, slide_accepted, pruned, prune_med,
                 n_evals = n_evals_atomic[],
                 swap_diag = Int[a[] for a in (pswap_prop, pswap_acc, pn_prop, pn_acc,
                                                np_prop, np_acc)],

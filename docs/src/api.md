@@ -140,8 +140,11 @@ fit_rv(rv; engine = Dict("engine" => "pt",
                          "options" => Dict("init_strategy" => "pathfinder")))
 ```
 
-`pt_emcee` does not take `init_strategy` and that is deliberate — see
-[Samplers](samplers.md) for the orbit it gets wrong when you seed it that way.
+`pt_emcee` takes `init_strategy` too (`"prior"`, the default, `"pathfinder"`
+or `"map_scatter"`), but seeding an ensemble from one basin is how
+[Samplers](samplers.md) gets a wrong orbit with pristine diagnostics: keep it
+at `"prior"` unless the posterior is known to be unimodal. A value a sampler
+does not implement is an error, not the default.
 
 Two behaviours worth relying on:
 
