@@ -232,7 +232,8 @@ end
 # walker (`evalf(x, tds)` returns its (log π, log L)), and the walkers it gains
 # are drawn about that walker, in its model, rather than copied; and only once
 # the rung has stopped climbing, its median log L risen by less than m/2 since
-# the previous call (`med_logL`, updated in place).
+# the previous call (`med_logL`, updated in place). Coordinates `held` by
+# `burnin_hold` are left out of the active set: every walker shares them.
 # ------------------------------------------------------------------
 function _td_prune_stranded!(state::Array{Float64,3},
                              td_states::AbstractMatrix{TransDimState},
@@ -242,7 +243,8 @@ function _td_prune_stranded!(state::Array{Float64,3},
                              owner::Vector{Int}, n_noise_toggle::Int, rng;
                              tau::Float64 = 10.0, evalf = nothing,
                              circ::AbstractVector{Int} = Int[],
-                             med_logL::Union{Nothing,AbstractVector{Float64}} = nothing)
+                             med_logL::Union{Nothing,AbstractVector{Float64}} = nothing,
+                             held::AbstractVector{Int} = Int[])
     n_t, n_w, n_dim = size(state)
     moved = zeros(Int, n_t)
     rise = med_logL === nothing ? fill(NaN, n_t) :
@@ -267,7 +269,7 @@ function _td_prune_stranded!(state::Array{Float64,3},
         b = argmax(ℓ)
         isfinite(ℓ[b]) || continue
         tb = td_states[t, b]
-        dims = [d for d in 1:n_dim if _active(tb, owner[d])]
+        dims = [d for d in 1:n_dim if _active(tb, owner[d]) && !(d in held)]
         m = length(dims)
         m >= 1 || continue
         allow = quantile(Chisq(m), 1 - 1e-6) / 2
@@ -480,6 +482,11 @@ selection on planet count.
 - `node_flip::Real = 0.1` — as in `sample_pt_emcee`: the tempered
   (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets, proposed only to
   walkers in which the planet is active and astrometrically coupled.
+- `burnin_hold = nothing`, `burnin_hold_frac::Real = 0.5` — as in
+  `sample_pt_emcee`: every IAD jitter `sigma_iad_<instrument>` held at 0 for
+  the first half of burn-in, then drawn from its prior walker by walker. Only a
+  parameter every model has can be held; not a planet or noise-model slot, or
+  one the node flip or the λ slide moves.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (every rung's walkers and their models, the ladder, every RNG
   stream, the MoMS proposal scales and off-values, the counters, the ladder
@@ -546,6 +553,8 @@ function sample_transdim_pt_emcee(
     node_flip::Real = 0.1,
     lambda_slide::Real = 0.0,
     lambda_slide_sigma::Real = 0.6,
+    burnin_hold = nothing,
+    burnin_hold_frac::Real = 0.5,
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
@@ -645,6 +654,8 @@ function sample_transdim_pt_emcee(
     # initialisation below and is put back just before the main loop, which
     # then carries on from step `step0 + 1`.
     menu_pos(nm) = something(findfirst(==(nm), params.config.noise_models), 0)
+    hold = _burnin_hold(params, burnin_hold, burnin_hold_frac, n_burnin;
+                        sampler = "transdim_pt_emcee")
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
         n_burnin, thin, seed, stretch_a, ladder = copy(βs), adapt_ladder,
         ladder_adapt_window, ladder_adapt_ν0, ladder_adapt_K, untemper_transit,
@@ -656,7 +667,8 @@ function sample_transdim_pt_emcee(
               transdim_fraction = td.transdim_fraction),
         inclusion_prior, moms_init_scale, informed_birth_fraction,
         target_birth_accept, n_birth_refine, n_birth_tries, n_noise_bridge,
-        n_noise_relax, noise_swap, noise_swap_rate = Float64(noise_swap_rate))
+        n_noise_relax, noise_swap, noise_swap_rate = Float64(noise_swap_rate),
+        _burnin_hold_fp(hold, params)...)
     ck = resume ? read_checkpoint(ck_path, "transdim_pt_emcee", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -714,6 +726,18 @@ function sample_transdim_pt_emcee(
         j = _noise_model_index_for_param(layout.unfrozen_names[d], params)
         j === nothing || (dim_owner[d] = -j)
     end
+    # Coordinates held early in burn-in (src/samplers/burnin_hold.jl). Walkers
+    # live in x here, so the held value is stored exactly; the stretch parks a
+    # held coordinate (`is_held`, cleared at the release). Only an always-on
+    # coordinate no other move writes can be held.
+    # (`hold` itself is resolved before the checkpoint fingerprint, above.)
+    _burnin_hold_forbid(hold, params,
+        vcat(findall(!=(0), dim_owner), jitter_refine_idx,
+             reduce(vcat, (vcat(f.shift, f.negate) for f in flips); init = Int[]),
+             reduce(vcat, (Int[sl.mo, sl.se, sl.sc] for sl in slides); init = Int[]));
+        sampler = "transdim_pt_emcee")
+    is_held = falses(n_dim)
+    is_held[hold.dims] .= true
 
     # MoMS proposal strategy — shared across threads. Scales are tuned
     # during burn-in (Robbins-Monro); writes are protected by atomic
@@ -1030,6 +1054,10 @@ function sample_transdim_pt_emcee(
                 @inbounds for d in 1:n_dim
                     state[t, w, d] = x_b[d]
                 end
+                # Every walker of every rung starts at the held value.
+                @inbounds for (d, v) in zip(hold.dims, hold.values)
+                    state[t, w, d] = v
+                end
                 lp, ll = eval_bounded!(@view(state[t, w, :]),
                                         td_states[t, w], slot)
                 if isfinite(lp) && isfinite(ll)
@@ -1262,7 +1290,9 @@ function sample_transdim_pt_emcee(
                     s = flat_shift[d]
                     o = dim_owner[d]
                     on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
-                    if !on
+                    # A coordinate `burnin_hold` holds is parked the same way:
+                    # the whole ensemble shares it.
+                    if !on || is_held[d]
                         # A PARKED dimension does not move. MoMS is a spike-slab
                         # over (indicator, parameters): an inactive slot SITS at
                         # `strategy.off_values[k]`, and the birth/death algebra
@@ -1327,6 +1357,43 @@ function sample_transdim_pt_emcee(
             end
         end
         Threads.atomic_add!(n_evals_atomic, length(tasks))
+    end
+
+    # The end of `burnin_hold`, as in sample_pt_emcee: every walker of every
+    # rung draws its held coordinates from their priors and is evaluated there,
+    # in its own model; one none of 100 draws gives a finite density for keeps
+    # the held value. The prune's climbing record restarts.
+    function release_hold!()
+        fill!(is_held, false)
+        n_tot = n_temps * n_walkers_eff
+        rel_seeds = rand(rng_master, UInt64, n_tot)
+        rel_chunks = _chunk_ranges(n_tot, n_slots)
+        Threads.@threads :static for slot in 1:length(rel_chunks)
+            buf = thread_proposal[slot]
+            for task_idx in rel_chunks[slot]
+                t = (task_idx - 1) ÷ n_walkers_eff + 1
+                w = (task_idx - 1) % n_walkers_eff + 1
+                rng = MersenneTwister(rel_seeds[task_idx])
+                for _ in 1:100
+                    @inbounds for d in 1:n_dim
+                        buf[d] = state[t, w, d]
+                    end
+                    _burnin_hold_draw!(buf, hold, layout.unfrozen_priors, rng)
+                    lp, ll = eval_bounded!(buf, td_states[t, w], slot)
+                    Threads.atomic_add!(n_evals_atomic, 1)
+                    if isfinite(lp) && isfinite(ll)
+                        @inbounds for d in hold.dims
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp
+                        logL_arr[t, w] = ll
+                        break
+                    end
+                end
+            end
+        end
+        prune_med .= NaN
+        return nothing
     end
 
     # ---- Trans-dim MoMS step (per walker, tempered M-H) --------------
@@ -1990,8 +2057,12 @@ function sample_transdim_pt_emcee(
         merge!(recut_moved, ck.recut_moved)
         _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
         n_done = step0
+        # Past the release, the saved walkers carry their own values.
+        step0 >= hold.step && fill!(is_held, false)
     end
     last_ck = time()
+    show_progress && step0 < hold.step &&
+        _burnin_hold_info("td-pt_emcee", hold, params, n_burnin)
 
     for step in (step0 + 1):n_steps
         do_half_step!(tasks_h1, :h1); _np_chk("h1", step)
@@ -2150,7 +2221,8 @@ function sample_transdim_pt_emcee(
                                            βs, flat_shift, dim_owner,
                                            do_noise ? length(noise_toggle_idx) : 0,
                                            rng_master; evalf = prune_eval, circ,
-                                           med_logL = prune_med)
+                                           med_logL = prune_med,
+                                           held = any(is_held) ? hold.dims : Int[])
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
@@ -2165,6 +2237,9 @@ function sample_transdim_pt_emcee(
             _td_ensemble_recut!(state, td_states, params, circ_groups, strategy,
                                 (target.transform,), recut_moved)
         end
+
+        # ---- End of `burnin_hold` (threaded; within burn-in) -----------
+        step == hold.step && release_hold!()
 
         if step > n_burnin
             @inbounds for w in 1:n_walkers_eff
