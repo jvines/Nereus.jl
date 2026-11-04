@@ -15,8 +15,10 @@
 # pt_whitening.
 using Test
 using Nereus
-using Nereus: IADData, TransDimConfig, reset_transdim_caches!
+using Nereus: IADData, TransDimConfig, reset_transdim_caches!, _pt_prune_stranded!
+using Distributions: logpdf
 using Random
+using Statistics: median
 using Serialization
 
 # --- An astrometry-only source with a Gaia-like IAD and one jittered instrument.
@@ -96,6 +98,88 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
             td = TransDimConfig(max_kplanet = 1), n_temps = 2, n_walkers = 20,
             n_steps = 2, n_burnin = 2, burnin_hold = Dict("K_k1" => 10.0),
             show_progress = false)
+    end
+
+    @testset "the stranded-walker prune: held coordinates stay, and carry no mass" begin
+        # One walker has found a mode, out on its flank (log L `ll`); 99 sit
+        # on a plateau `gap` nats down. Every walker holds coordinate 3 at 0.52,
+        # 2σ off the mode's centre: the prune's climb, widths and draws run over
+        # coordinates 1-2 only, so it stays there exactly. Over all three the
+        # rung's covariance is singular and the climb would move it to 0.5.
+        width, v = 0.01, 0.52
+        mlogL(x, gap) = max(-0.5 * sum(abs2, (x .- 0.5) ./ width), -gap)
+        xll(ll) = [0.5 + sqrt(-ll - 2) * width, 0.5 + sqrt(-ll - 2) * width, v]
+        x0 = xll(-28.0)
+        function rung(gap; c = 0.0, ll = -28.0)
+            state = rand(MersenneTwister(1), 1, 100, 3)
+            state[1, :, 3] .= v
+            state[1, 1, :] = xll(ll)
+            lL = [w == 1 ? mlogL(xll(ll), gap) : -gap for _ in 1:1, w in 1:100]
+            @assert lL[1, 1] ≈ ll
+            # `c`: the held coordinate's own log prior density, in every walker's
+            # log π and every evaluation of it, as the samplers carry it.
+            return state, fill(c, 1, 100), lL
+        end
+        ev(gap; c = 0.0) = x -> all(u -> 0 <= u <= 1, x) ? (c, mlogL(x, gap)) : (-Inf, -Inf)
+        settled(lL) = [median(lL[1, :])]
+
+        ℓat = x -> (r = ev(50.0)(x); isfinite(r[1]) ? r[1] + r[2] : -Inf)
+        σ = Nereus._pt_axis_widths(ℓat, x0, -28.0, fill(1e-3, 2); dims = [1, 2])
+        yc, ℓc = Nereus._pt_climb(ℓat, x0, -28.0, σ; dims = [1, 2])
+        @test yc[3] === v && ℓc > -2.1 && maximum(abs.(yc[1:2] .- 0.5)) < 0.1 * width
+        @test abs(Nereus._pt_climb(ℓat, x0, -28.0, [σ; σ[1]])[1][3] - 0.5) < 0.1 * width
+
+        state, lπ, lL = rung(50.0)
+        @test _pt_prune_stranded!(copy(state), copy(lπ), copy(lL), [1.0], MersenneTwister(2);
+                                  evalf = ev(50.0), med_logL = settled(lL)) == [0]
+        moved = _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
+                                    evalf = ev(50.0), med_logL = settled(lL), held = [3])
+        @test moved == [100]
+        @test all(==(v), state[1, :, 3])
+        @test all(abs.(state[1, :, 1:2] .- 0.5) .< 5 * width)
+        @test lL[1, :] ≈ [mlogL(state[1, w, :], 50.0) for w in 1:100]
+
+        # The same in the trans-dim prune: the lone walker has planet 1
+        # (coordinates 1-2), the held coordinate 3 belongs to every model.
+        tds() = [Nereus.TransDimState(w == 1 ? 1 : 0, BitVector([w == 1]), BitVector(),
+                                      BitVector([true])) for _ in 1:1, w in 1:100]
+        tev(gap; c = 0.0) = (x, td) -> td.planet_active[1] ? ev(gap; c)(x) : (c, -gap)
+        shift = Union{Nothing,Float64}[nothing, nothing, nothing]
+        state, lπ, lL = rung(50.0)
+        td = tds()
+        moved = Nereus._td_prune_stranded!(state, td, lπ, lL, [1.0], shift, [1, 1, 0], 0,
+                                           MersenneTwister(2); evalf = tev(50.0),
+                                           med_logL = settled(lL), held = [3])
+        @test moved == [100]
+        @test all(w -> td[1, w].planet_active[1], 1:100)
+        @test all(==(v), state[1, :, 3])
+        @test all(abs.(state[1, :, 1:2] .- 0.5) .< 5 * width)
+
+        # 17 nats down could still carry mass, so it stays: the bound is on the
+        # posterior given the held value, and that value's prior density (here
+        # e^30, in every log π) is no evidence for the mode. Left in the best
+        # walker's density, it would raise the cut by 30 nats and move all 99.
+        for (c, hl, n) in ((0.0, 0.0, 0), (30.0, 30.0, 0), (30.0, 0.0, 99))
+            state, lπ, lL = rung(17.0; c, ll = -2.2)
+            @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
+                                      evalf = ev(17.0; c), med_logL = settled(lL),
+                                      held = [3], held_logπ = hl) == [n]
+            state, lπ, lL = rung(17.0; c, ll = -2.2)
+            @test Nereus._td_prune_stranded!(state, tds(), lπ, lL, [1.0], shift, [1, 1, 0],
+                                             0, MersenneTwister(2); evalf = tev(17.0; c),
+                                             med_logL = settled(lL), held = [3],
+                                             held_logπ = hl) == [n]
+        end
+        # What the samplers pass: the held prior density on their own scale.
+        p = _bh_iad_target().params
+        h = Nereus._burnin_hold(p, nothing, 0.5, 100)
+        j = only(h.dims)
+        ps = p.layout.unfrozen_priors[j]
+        knee = Nereus.log_scale_shift(ps)
+        @test Nereus._burnin_hold_logπ(h, p) == logpdf(ps, 0.0)
+        @test Nereus._burnin_hold_logπ(h, p; flat_shift = [Nereus.log_scale_shift(q)
+                                       for q in p.layout.unfrozen_priors]) ==
+              logpdf(ps, 0.0) + log(knee)
     end
 
     @testset "pt_emcee: IAD jitter held at 0, then released" begin
