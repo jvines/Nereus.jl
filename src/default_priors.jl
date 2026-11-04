@@ -330,9 +330,10 @@ function default_priors(config::ParamsConfig, data::Data)
     # clipped. The cap does NOT stop a jitter from absorbing a reflex: a jitter
     # of order the reflex amplitude is a second, noise-instead-of-orbit mode,
     # and on HD 114762 RV + DR4 (1.9 mas reflex) pt_emcee's prior-drawn walkers
-    # settle in it, 500-970 nats below the orbit, with a 5x cap as with 10x.
-    # fit_health fails the run; a start from the unjittered fit finds the
-    # orbit. Override through `priors` like any other.
+    # settled in it, 500-970 nats below the orbit, with a 5x cap as with 10x.
+    # What keeps them out is in the samplers, not here: the PT ensembles hold
+    # every `sigma_iad_*` at 0 for the first half of burn-in (`burnin_hold`,
+    # src/samplers/burnin_hold.jl). Override through `priors` like any other.
     for (m, label) in enumerate(instruments.iad_names)
         isempty(label) && continue
         errs = (data.iad !== nothing && m <= n_iad_inst(data.iad)) ?

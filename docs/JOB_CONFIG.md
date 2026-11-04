@@ -524,10 +524,14 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   (`clip_transit_outliers`) — model-independent, so it cannot touch an orbit
   signal. What it dropped is in `summary.json` as `iad_outliers`. `<name>` is
   the block's `instrument`, else `HIP<hip_id>` / `GaiaDR4_<source_id>`.
-  A jitter as large as the reflex is a second mode, "noise instead of orbit".
-  On HD 114762 (RV + DR4) the default prior-drawn walkers settle there, far
-  below the orbit, and fit health fails the run; start the jittered fit from
-  the unjittered one (`init`).
+  A jitter as large as the reflex is a second mode, "noise instead of orbit",
+  and from the prior it is the cheaper way up: on HD 114762 (RV + DR4) every
+  pt_emcee run drawn from the prior ended there, 470-970 nats below an orbit
+  no walker found. So the PT ensemble samplers (`pt_emcee`,
+  `transdim_pt_emcee`, `pt_whitening`) hold every `sigma_iad_<name>` at 0 for
+  the first half of burn-in, where the likelihood is the unjittered one, then
+  draw it from its prior walker by walker (`sampler.kwargs.burnin_hold`, below).
+  Other samplers do not; start them from the unjittered fit (`init`).
 - **`gost`** — `{ra_deg, dec_deg, from?, to?}` (auto-fetches the Gaia GOST scan
   plan) or `values` (`t`, `psi`, `parallax_factor`). **GOST is an AUXILIARY,
   not a standalone measurement** — `gost_log_likelihood` returns 0; GOST only
@@ -654,6 +658,17 @@ prior when that degeneracy is present.
   `NaN` (no evidence estimator). `nested_ins` reports the INS estimate,
   `nested_dynamic` the dynamic-NS estimate, `daedalus` its nested evidence
   (`src/runner.jl:1499-1606`).
+- **`burnin_hold`** (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`) —
+  parameters held at one value, shared by every walker of every rung, for the
+  first `burnin_hold_frac` (default 0.5) of burn-in, then drawn from their
+  priors walker by walker. Absent (or `true`): every IAD jitter
+  `sigma_iad_<name>` at 0 (see `iad` above), nothing for a model without one,
+  so those runs are unchanged. `false` holds nothing; an object
+  `{"<param>": value}` holds those instead (not a full-circle angle, nor a
+  coordinate the node flip, the λ slide or a trans-dim move changes). The
+  stretch move leaves a coordinate every walker shares where it is, so the
+  held phase is the fit without that parameter. Burn-in only: the recorded
+  chain is ordinary MCMC (`src/samplers/burnin_hold.jl`).
 - Unknown kwargs are rejected with an actionable error listing the valid set
   (`src/runner.jl:1425-1439,1466-1475`); every JSON-string kwarg value is coerced to a Julia
   `Symbol` so `"multi"`, `"rslice"`, `"stretch"`, etc. work as expected.
