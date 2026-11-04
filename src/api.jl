@@ -341,7 +341,7 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
 end
 
 """
-    fit_transit(phot; planets, limb_darkening, rho_star, gravity_darkening, ...)
+    fit_transit(phot; planets, use_rho_s, limb_darkening, rho_star, gravity_darkening, ...)
 
 Fit transit photometry alone.
 
@@ -350,17 +350,23 @@ Fit transit photometry alone.
     fit_transit(Dict("TESS" => (t = bjd, flux = f, flux_err = ferr)))
 
 Limb darkening is quadratic, sampled as Kipping's (q1, q2) per instrument
-(`:quadratic` or `:kipping`). Sampling ρ★ and a
-prior on it (`model.parametrization.use_rho_s` with an `external_priors` entry
-on `rho_s`, in solar units) and the gravity-darkened transit (planet mode
-`PM_GD`, GD_SOURCE, which constrains i* separately from λ) are `run_job`
-options; this entry point builds neither. `limb_darkening`, `rho_star` and
-`gravity_darkening` are accepted at their defaults only and throw otherwise:
-they were never read, so `gravity_darkening = true` fitted a symmetric transit
-and said nothing.
+(`:quadratic` or `:kipping`).
+
+`use_rho_s = true` samples the stellar density ρ★ (`rho_s`, solar units) and
+turns it and the period into a/R★, as `model.parametrization.use_rho_s` does in
+a `run_job` config; the prior on it is `priors["rho_s"]` (default log-uniform on
+[0.001, 100]) or an `external_priors` entry on `rho_s`. The same keyword and
+semantics as [`fit_joint`](@ref).
+
+The gravity-darkened transit (planet mode `PM_GD`, GD_SOURCE, which constrains
+i* separately from λ) is a `run_job` option; this entry point does not build
+it. `limb_darkening`, `rho_star` and `gravity_darkening` are accepted at their
+defaults only and throw otherwise: they were never read, so
+`gravity_darkening = true` fitted a symmetric transit and said nothing.
+`rho_star` is replaced by `use_rho_s` plus `priors["rho_s"]`.
 """
-function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
-                     rho_star = nothing, gravity_darkening = false,
+function fit_transit(phot; planets = 1, use_rho_s::Bool = false,
+                     limb_darkening = :quadratic, rho_star = nothing, gravity_darkening = false,
                      engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, stopping = nothing,
@@ -370,15 +376,15 @@ function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
         "fit_transit: limb_darkening = $(repr(limb_darkening)) is not implemented; " *
         "the transit model is quadratic, sampled in Kipping's (q1, q2)"))
     rho_star === nothing || throw(ArgumentError(
-        "fit_transit: `rho_star` was never read. A stellar-density prior needs ρ★ " *
-        "sampled (model.parametrization.use_rho_s) and an external_priors entry " *
-        "on rho_s, in solar units -- run_job options"))
+        "fit_transit: `rho_star` was never read. Sample the stellar density with " *
+        "`use_rho_s = true` and put its prior (solar units) in " *
+        "`priors = Dict(\"rho_s\" => ...)`"))
     gravity_darkening == false || throw(ArgumentError(
         "fit_transit: `gravity_darkening` was never read, and this entry point " *
         "does not build a gravity-darkened transit; use run_job with " *
         "planet_modes = [\"PM_GD\"]"))
     star, kwargs = _split_star_kwargs(kwargs)
-    tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
+    tgt = _target_from([_as_channel(phot, "PM")], planets; use_rho_s, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf, science, output,
                    star)
 end

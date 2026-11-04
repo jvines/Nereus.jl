@@ -56,3 +56,26 @@ using Statistics: median, mean
         @test !haskey(r.summary["params"], "a_k1")
     end
 end
+
+@testset "fit_transit: use_rho_s" begin
+    P = 3.0
+    tr = collect(range(0.0, 6.0; length = 240))
+    ph = mod.(tr .+ 0.5P, P) .- 0.5P
+    flux = [abs(x) < 0.07 ? 0.99 : 1.0 for x in ph] .+ 2e-4 .* randn(MersenneTwister(1), 240)
+    phot = Dict("T" => (t = tr, flux = flux, flux_err = fill(2e-4, 240)))
+    pri = Dict{String,PriorSpec}("P_k1" => UniformPrior(2.9, 3.1),
+                                 "rho_s" => NormalPrior(1.5, 0.1, 0.5, 5.0))
+    eng = Dict("engine" => "pt_emcee", "options" => Dict(
+        :n_temps => 2, :n_walkers => 16, :n_steps => 120, :n_burnin => 60, :seed => 3))
+    r = fit_transit(phot; use_rho_s = true, time_anchor = :phic, priors = pri,
+                    engine = eng, science = false)
+    ρ = r.summary["params"]["rho_s"]
+    @test 0.5 <= ρ["lo3sig"] && ρ["hi3sig"] <= 5.0
+    r0 = fit_transit(phot; time_anchor = :phic,
+                     priors = Dict{String,PriorSpec}("P_k1" => UniformPrior(2.9, 3.1)),
+                     engine = eng, science = false)
+    @test !haskey(r0.summary["params"], "rho_s")
+    # the old `rho_star` keyword points at the new spelling
+    err = try fit_transit(phot; rho_star = (0.53, 0.05)) catch e; e end
+    @test err isa ArgumentError && occursin("use_rho_s", sprint(showerror, err))
+end
