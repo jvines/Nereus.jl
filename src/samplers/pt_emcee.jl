@@ -320,6 +320,18 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # walkers would leave the rung in their affine hull, which no stretch move
 # leaves.
 #
+# The best walker is measured at the top of its mode, not where it landed. A
+# walker that has just found a mode sits on its flank, where the estimate is
+# weakest twice over: its density is below the peak, and the drops along each
+# axis are steep with the gradient, so the widths come out small. Gaia-4 b's
+# lone cold walkers sat 235-280 nats below the peak with Σ log σ_j ≈ -57 (-30
+# at the top), and the cut stayed below a plateau the mode outweighs by
+# e^200+: seeds 14 and 16 (of 21) recorded it, R-hat 1.65 and 2.10, log Z 198
+# and 191 against 537.6. So the best walker first climbs (`_pt_climb`) and the
+# widths are measured where it stops. Any point of the mode gives an
+# understatement of Z_A by the argument above, so the guarantee is unchanged;
+# the cut only lands where the mode actually is.
+#
 # That path waits for the rung to stop climbing. Early in burn-in the walkers
 # are still rising from the prior and the best of them is no mode, only the
 # fastest climber; the bound holds there too, but moving the rest onto it
@@ -371,6 +383,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
         isempty(below) && continue
         A = findall(>=(best - allow), ℓ)
         yb = state[t, b, :]
+        lpb, llb = logπ_arr[t, b], logL_arr[t, b]
         lv = length(A) >= d + 2 ? _pt_half_logdet_cov(state, t, A, yb, circ) : nothing
         σ = nothing
         if lv === nothing
@@ -385,6 +398,14 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
             h0 = [0.1 * _pt_spread(view(state, t, :, j), yb[j], j in circ) for j in 1:d]
             σ = _pt_axis_widths(ℓat, yb, best, h0)
             σ === nothing && continue
+            # From where the best walker landed to the top of its mode.
+            yc, ℓc = _pt_climb(ℓat, yb, best, σ)
+            σc = ℓc > best ? _pt_axis_widths(ℓat, yc, ℓc, h0) : nothing
+            if σc !== nothing
+                yb, best, σ = yc, ℓc, σc
+                lpb, llb = evalf(yb)
+                below = [w for w in 1:n_w if ℓ[w] < best - allow]
+            end
             lv = sum(log, σ)
         end
         cut = best + 0.5 * d * log(2π) + lv - tau
@@ -407,7 +428,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
             for w in S
                 lp, ll = _pt_scatter!(y, evalf, yb, σ, rng)
                 if !(isfinite(lp) && isfinite(ll))
-                    y .= yb; lp, ll = logπ_arr[t, b], logL_arr[t, b]
+                    y .= yb; lp, ll = lpb, llb
                 end
                 @inbounds for j in 1:d
                     state[t, w, j] = y[j]
@@ -490,6 +511,28 @@ function _pt_axis_widths(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
         ok || return nothing
     end
     return σ
+end
+
+# From the best walker `y0` (tempered density `ℓ0`) to the top of its mode:
+# BFGS in u, y = y0 + σ ⊙ u, so the axis widths `σ` set the scale, with
+# finite-difference gradients. Outside the support counts as a finite cliff,
+# so the line search backs off it instead of failing. A lone walker that has
+# just found a mode sits on its flank, where the bound it feeds is weakest:
+# Gaia-4 b's sat 235-280 nats below the peak (cold rung), still climbing.
+# At most `max_evals` evaluations; stops when an iteration gains less than
+# `f_tol`. Deterministic. Returns (y, ℓ), or (y0, ℓ0) if nothing was better.
+function _pt_climb(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
+                   σ::Vector{Float64}; max_evals::Int = 500 * length(y0),
+                   f_tol::Float64 = 1e-2)
+    n = Ref(0)
+    cliff = 1e8 - ℓ0
+    f = u -> (n[] += 1; v = ℓat(y0 .+ σ .* u); isfinite(v) ? -v : cliff)
+    res = Optim.optimize(f, zeros(length(y0)), Optim.BFGS(),
+                         Optim.Options(iterations = 10_000, f_abstol = f_tol,
+                                       callback = _ -> n[] >= max_evals))
+    yc = y0 .+ σ .* Optim.minimizer(res)
+    ℓc = ℓat(yc)
+    return isfinite(ℓc) && ℓc > ℓ0 ? (yc, ℓc) : (collect(Float64, y0), ℓ0)
 end
 
 # One draw y = yb + σ ⊙ z, z ~ N(0, I), redrawn (up to 20 times) until it is in
@@ -590,12 +633,12 @@ in place.
   weak signal — is left alone. The mode's mass is the Laplace volume of the
   walkers in it; while fewer than `n_dim + 2` have found it, and once the rung
   has stopped climbing, a smaller volume measured from the density along each
-  axis at its best walker (a few evaluations per dimension), and the walkers
-  moved are then drawn about that walker rather than copied, so the rung keeps
-  its full rank. The stretch move cannot bring
-  stranded walkers back itself, so without this a narrow mode (any
-  well-measured period on a wide prior) fills its cold rung at the rate the
-  ladder happens to rediscover it. Burn-in only: the recorded chain is ordinary
+  axis at the top of the mode, which the best walker first climbs to (BFGS, at
+  most 500 evaluations per dimension), and the walkers moved are then drawn
+  about that point rather than copied, so the rung keeps its full rank. The
+  stretch move cannot bring stranded walkers back itself, so without this a
+  narrow mode (any well-measured period on a wide prior) fills its cold rung at
+  the rate the ladder happens to rediscover it. Burn-in only: the recorded chain is ordinary
   MCMC. `false` restores the old behaviour.
 - `node_flip::Real=0.1` — per walker and step, the probability of proposing
   the mirror (Ω, ω) → (Ω + π, ω + π) of each astrometry-only planet, accepted

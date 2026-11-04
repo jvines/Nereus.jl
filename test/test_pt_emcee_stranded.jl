@@ -126,6 +126,60 @@ _settled(lL) = [median(filter(isfinite, lL[t, :])) for t in axes(lL, 1)]
         end
     end
 
+    @testset "a lone walker on the flank of its mode climbs before it is measured" begin
+        # One walker has found the mode, 7.5σ out on its flank (log L -28), and
+        # 99 sit on a plateau 50 nats down. Measured where it landed, the bound
+        # cannot clear the plateau: the drop along each axis is steep with the
+        # gradient, so the widths come out ~0.2σ and the cut sits ~55 nats
+        # down. At the top of the mode it sits 21 nats down. Gaia-4 b's lone
+        # walkers sat 200-280 nats below their peak, and the plateau stayed.
+        d, gap, width = 3, 50.0, 0.01
+        state, lπ, lL = _rung(n_mode = 0, n_flat = 100, gap = gap)
+        x0 = 0.5 .+ (7.5 * width / sqrt(d)) .* ones(d)
+        state[1, 1, :] = x0
+        lL[1, 1] = _mode_logL(x0, gap, width)
+        ev = _mode_eval(gap)
+        ℓat = x -> (r = ev(x); isfinite(r[1]) ? r[1] + r[2] : -Inf)
+        h0 = [0.1 * Nereus._pt_spread(view(state, 1, :, j), x0[j], false) for j in 1:d]
+        σ0 = Nereus._pt_axis_widths(ℓat, x0, lL[1, 1], h0)
+        @test all(σ0 .< 0.3 * width)
+        @test -gap >= lL[1, 1] + 0.5 * d * log(2π) + sum(log, σ0) - 10.0
+
+        # The climb reaches the top, deterministically.
+        yc, ℓc = Nereus._pt_climb(ℓat, x0, lL[1, 1], σ0)
+        @test ℓc > -0.1
+        @test maximum(abs.(yc .- 0.5)) < 0.1 * width
+        @test Nereus._pt_climb(ℓat, x0, lL[1, 1], σ0) == (yc, ℓc)
+        @test Nereus._pt_climb(ℓat, fill(0.5, d), 0.0, σ0) == (fill(0.5, d), 0.0)
+
+        # So the whole rung moves there, the flank walker with it.
+        moved = _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
+                                    evalf = ev, med_logL = _settled(lL))
+        @test moved == [100]
+        X = state[1, :, :]
+        @test all(abs.(X .- 0.5) .< 5 * width)
+        @test lL[1, :] ≈ [_mode_logL(X[w, :], gap, width) for w in 1:100]
+        @test all(lL[1, :] .> -20)
+        @test minimum(svdvals(X .- sum(X; dims = 1) ./ 100)) > 1e-3
+
+        # The trans-dim prune climbs too, and the 99 take the planet along.
+        state, lπ, lL = _rung(n_mode = 0, n_flat = 100, gap = gap)
+        state[1, 1, :] = x0
+        lL[1, 1] = _mode_logL(x0, gap, width)
+        tds = [Nereus.TransDimState(w == 1 ? 1 : 0, BitVector([w == 1]),
+                                    BitVector(), BitVector([true]))
+               for _ in 1:1, w in 1:100]
+        tev = (x, td) -> td.planet_active[1] ? ev(x) : (0.0, -gap)
+        shift = Union{Nothing,Float64}[nothing, nothing, nothing]
+        moved = Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
+                                           [1, 1, 1], 0, MersenneTwister(2);
+                                           evalf = tev, med_logL = _settled(lL))
+        @test moved == [100]
+        @test all(w -> tds[1, w].planet_active[1], 1:100)
+        @test all(abs.(state[1, :, :] .- 0.5) .< 5 * width)
+        @test all(lL[1, :] .> -20)
+    end
+
     @testset "the circular re-cut runs with every pruning pass" begin
         # Halfway, with every prune (every 50 steps through 3/4 of burn-in), and
         # at the end.
