@@ -5,6 +5,7 @@
 
 using CairoMakie
 using Colors: @colorant_str
+using Logging: Logging
 
 # =====================================================================
 # Style constants (ported from emperors_canvas.py __config())
@@ -85,9 +86,14 @@ function _font_available(name::AbstractString)
     # Makie.to_font does NOT throw for a missing family -- it silently substitutes
     # whatever FreeType hands back. So asking "did it succeed?" always says yes,
     # and the bug survives. The only reliable test is to resolve the font and check
-    # that the family we got back is the family we asked for.
+    # that the family we got back is the family we asked for. Makie also logs
+    # "Could not find font ..." for a missing family; this is only a probe, and
+    # `_serif_family` falls back on its own, so that warning is kept out of the
+    # user's log.
     try
-        f = Makie.to_font(String(name))
+        f = Logging.with_logger(Logging.NullLogger()) do
+            Makie.to_font(String(name))
+        end
         got = lowercase(String(Makie.FreeTypeAbstraction.family_name(f)))
         want = lowercase(String(name))
         return got == want || startswith(got, want) || startswith(want, got)
