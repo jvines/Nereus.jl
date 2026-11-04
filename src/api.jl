@@ -135,7 +135,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       # _target_from simply did not forward, so it was
                       # reachable from Julia and not from the fit_* API.
                       parametrization = nothing, time_anchor = nothing,
-                      R_s = NaN, phot_trend_order = 0, as_names = String[],
+                      use_rho_s::Bool = false, R_s = NaN, phot_trend_order = 0, as_names = String[],
                       sharing = nothing, transdim_noise = false,
                       ttv_n_transits = nothing, ttv_backend = nothing,
                       # Collects `clip_transit_outliers` reports, when given.
@@ -204,6 +204,17 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                  Dict{String, PriorSpec}(k => _as_prior(v) for (k, v) in pr)
     end
 
+    # A photometry channel's `dilution` / `jitter` are priors on
+    # `dilution_<inst>` / `jitter_<inst>`; the same parameter in `priors` would
+    # be a second answer to the same question.
+    for (inst, spec) in pairs(phot), key in keys(spec)
+        key in (:data, :exposure_time) && continue
+        nm = "$(key)_$(inst)"
+        priors !== nothing && haskey(priors, nm) && throw(ArgumentError(
+            "`$nm` is set by the transit channel's `$key` and again in `priors`; " *
+            "give it once"))
+    end
+
     # Pick the default planet block from the channels actually present.
     # `_planet_spec(n)` with no block yields planets with NO parameters at all,
     # and build_target then refuses with "planet must declare a mass
@@ -227,6 +238,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                           :phot_trend_order => phot_trend_order,
                           :as_names => as_names,
                           :iad_names => any(!isempty, iad_names) ? iad_names : String[])
+    use_rho_s && (kw[:use_rho_s] = true)
     parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
     time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
     isnan(R_s) || (kw[:R_s] = R_s)
@@ -340,7 +352,7 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
 end
 
 """
-    fit_transit(phot; planets, limb_darkening, rho_star, gravity_darkening, ...)
+    fit_transit(phot; planets, use_rho_s, limb_darkening, rho_star, gravity_darkening, ...)
 
 Fit transit photometry alone.
 
@@ -349,35 +361,45 @@ Fit transit photometry alone.
     fit_transit(Dict("TESS" => (t = bjd, flux = f, flux_err = ferr)))
 
 Limb darkening is quadratic, sampled as Kipping's (q1, q2) per instrument
-(`:quadratic` or `:kipping`). Sampling ρ★ and a
-prior on it (`model.parametrization.use_rho_s` with an `external_priors` entry
-on `rho_s`, in solar units) and the gravity-darkened transit (planet mode
-`PM_GD`, GD_SOURCE, which constrains i* separately from λ) are `run_job`
-options; this entry point builds neither. `limb_darkening`, `rho_star` and
-`gravity_darkening` are accepted at their defaults only and throw otherwise:
-they were never read, so `gravity_darkening = true` fitted a symmetric transit
-and said nothing.
+(`:quadratic` or `:kipping`).
+
+`use_rho_s = true` samples the stellar density ρ★ (`rho_s`, solar units) and
+turns it and the period into a/R★, as `model.parametrization.use_rho_s` does in
+a `run_job` config; the prior on it is `priors["rho_s"]` (default log-uniform on
+[0.001, 100]) or an `external_priors` entry on `rho_s`. The same keyword and
+semantics as [`fit_joint`](@ref).
+
+The gravity-darkened transit (planet mode `PM_GD`, GD_SOURCE, which constrains
+i* separately from λ) is a `run_job` option; this entry point does not build
+it. `limb_darkening`, `rho_star` and `gravity_darkening` are accepted at their
+defaults only and throw otherwise: they were never read, so
+`gravity_darkening = true` fitted a symmetric transit and said nothing.
+`rho_star` is replaced by `use_rho_s` plus `priors["rho_s"]`.
 """
-function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
-                     rho_star = nothing, gravity_darkening = false,
+function fit_transit(phot; planets = 1, use_rho_s::Bool = false,
+                     limb_darkening = :quadratic, rho_star = nothing, gravity_darkening = false,
                      engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, stopping = nothing,
                      output_dir = nothing, kwargs...)
-    _require_instrument_map(phot, "transit", (:t, :flux, :flux_err))
+    # A transit CHANNEL (a dict with "source", as `fit_joint` takes) carries the
+    # photometry options; a bare instrument map has none.
+    phot_ch = phot isa AbstractDict && haskey(phot, "source") ? phot :
+              Dict{String,Any}("source" => "PM", "data" => phot)
+    _require_instrument_map(phot_ch["data"], "transit", (:t, :flux, :flux_err))
     Symbol(limb_darkening) in (:quadratic, :kipping) || throw(ArgumentError(
         "fit_transit: limb_darkening = $(repr(limb_darkening)) is not implemented; " *
         "the transit model is quadratic, sampled in Kipping's (q1, q2)"))
     rho_star === nothing || throw(ArgumentError(
-        "fit_transit: `rho_star` was never read. A stellar-density prior needs ρ★ " *
-        "sampled (model.parametrization.use_rho_s) and an external_priors entry " *
-        "on rho_s, in solar units -- run_job options"))
+        "fit_transit: `rho_star` was never read. Sample the stellar density with " *
+        "`use_rho_s = true` and put its prior (solar units) in " *
+        "`priors = Dict(\"rho_s\" => ...)`"))
     gravity_darkening == false || throw(ArgumentError(
         "fit_transit: `gravity_darkening` was never read, and this entry point " *
         "does not build a gravity-darkened transit; use run_job with " *
         "planet_modes = [\"PM_GD\"]"))
     star, kwargs = _split_star_kwargs(kwargs)
-    tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
+    tgt = _target_from([phot_ch], planets; use_rho_s, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf, science, output,
                    star)
 end
@@ -549,21 +571,39 @@ end
 
 
 """
-    fit_joint(channels...; planets, engine, stopping, ...)
+    fit_joint(channels...; planets, use_rho_s, engine, stopping, ...)
 
 Fit several techniques simultaneously. One operation for "these together",
 rather than a named function per combination.
+
+`use_rho_s = true` samples the stellar density ρ★ (`rho_s`, in solar units) and
+turns it and the period into the transit's a/R★, as a `run_job` config does with
+`model.parametrization.use_rho_s`. It needs a transit channel (`"source" => "PM"`)
+among `channels` and throws otherwise. The prior on ρ★ is `priors["rho_s"]`
+(default: log-uniform on [0.001, 100]), or an `external_priors` entry on
+`rho_s`:
+
+    fit_joint(rv_channel, phot_channel; use_rho_s = true,
+              priors = Dict("rho_s" => NormalPrior(1.79, 0.11, 0.1, 10.0)),
+              time_anchor = :phic, M_s = 0.767, R_s = 0.754)
 """
-function fit_joint(channels...; planets = 1, engine = nothing, transdim = nothing,
+function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
+                engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                    stopping = nothing, output_dir = nothing, kwargs...)
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
+    use_rho_s && !any(c -> String(get(c, "source", "")) == "PM", channels) &&
+        throw(ArgumentError(
+            "fit_joint: `use_rho_s` samples the stellar density through the " *
+            "transit a/R★, so it needs a transit channel (\"source\" => \"PM\") " *
+            "among the channels"))
     star, kwargs = _split_star_kwargs(kwargs)
     reps = Any[]
-    tgt = _target_from(collect(channels), planets; iad_reports = reps, kwargs...)
+    tgt = _target_from(collect(channels), planets; iad_reports = reps,
+                       use_rho_s, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output,
                    star, iad_outliers = reps)
 end
@@ -588,11 +628,54 @@ function _rv_namedtuple(ch::AbstractDict)
     return NamedTuple{names}(vals)
 end
 
-"""Per-instrument photometry -> NamedTuple."""
+"""
+    _phot_namedtuple(ch) -> NamedTuple
+
+A transit channel's per-instrument photometry for `build_target`, with the
+channel's options applied:
+
+- `exposure_time` -- seconds, one value for every instrument or an
+  `instrument => seconds` mapping. It switches on finite-exposure
+  supersampling (the sub-sample count follows from it: none up to 3 minutes,
+  one per minute above, at most 30). Without it the model is instantaneous.
+- `dilution`, `jitter` -- a value (fixed), a prior (`PriorSpec` or the wire's
+  `{"type": ...}` dict), or an `instrument => value` mapping, for
+  `dilution_<instrument>` and `jitter_<instrument>`. `"default"` / absent
+  leaves the default prior. Giving the same parameter here and in `priors`
+  is an error (checked in `_target_from`).
+- `limb_darkening` (`quadratic` / `kipping`: one model, sampled in Kipping's
+  (q1, q2)), `gravity_darkening` (false), `supersample` (absent): the only
+  values the model has. Anything else throws; they used to be ignored.
+"""
 function _phot_namedtuple(ch::AbstractDict)
+    ld = get(ch, "limb_darkening", "quadratic")
+    Symbol(ld) in (:quadratic, :kipping) || throw(ArgumentError(
+        "transit channel: limb_darkening = $(repr(ld)) is not implemented; " *
+        "the transit model is quadratic, sampled in Kipping's (q1, q2)"))
+    get(ch, "gravity_darkening", false) == false || throw(ArgumentError(
+        "transit channel: gravity_darkening was never read, and this entry point " *
+        "does not build a gravity-darkened transit; use run_job with " *
+        "planet_modes = [\"PM_GD\"]"))
+    get(ch, "supersample", nothing) === nothing || throw(ArgumentError(
+        "transit channel: there is no explicit supersampling count. Set " *
+        "`exposure_time` (seconds) and the sub-sample count follows from it " *
+        "(none up to 3 minutes, one per minute above, at most 30)"))
     data = get(ch, "data", Dict())
     names = Tuple(Symbol.(collect(keys(data))))
-    return NamedTuple{names}(Tuple((data = data[String(n)],) for n in names))
+    per(v, nm) = (v isa AbstractDict && !haskey(v, "type")) ?
+                 get(v, String(nm), nothing) : v
+    vals = Tuple(begin
+        pairs_ = Pair{Symbol,Any}[:data => data[String(n)]]
+        ex = per(get(ch, "exposure_time", nothing), n)
+        ex === nothing || push!(pairs_, :exposure_time => ex)
+        for key in ("dilution", "jitter")
+            v = per(get(ch, key, nothing), n)
+            (v === nothing || v == "default") && continue
+            push!(pairs_, Symbol(key) => _as_prior(v))
+        end
+        NamedTuple(pairs_)
+    end for n in names)
+    return NamedTuple{names}(vals)
 end
 
 """
