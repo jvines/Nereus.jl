@@ -243,6 +243,14 @@ fit_astrometry(iad = Dict("catalogue" => "gaia_dr4", "source_id" => 145748602363
                           "clip_outliers" => true))      # → sigma_iad_DR4
 ```
 
+From the prior, a jitter as large as the reflex is the cheaper way up the
+likelihood, and a fit can settle there instead of on the orbit (HD 114762, RV +
+DR4). The PT ensemble engines (`pt_emcee`, `transdim_pt_emcee`,
+`pt_whitening`) therefore hold every `sigma_iad_<name>` at 0 for at least the
+first half of burn-in, which is the unjittered fit, and let it go once that fit
+has stopped climbing; the engine option
+`burnin_hold = false` turns that off (`burnin_hold` in `docs/JOB_CONFIG.md`).
+
 > **Always give `fit_astrometry` an informative parallax.** The abscissae
 > constrain the product a₀ ∝ M_sec·ϖ and are blind to its factorisation, so
 > the parallax prior *is* the mass scale. The default without one is four
