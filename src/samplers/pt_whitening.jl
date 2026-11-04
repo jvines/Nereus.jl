@@ -158,6 +158,11 @@ the distinguishing feature of this sampler.
 - `node_flip::Real=0.1` — as in `sample_pt_emcee`: the tempered
   (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets
   (src/samplers/node_flip.jl). `0` disables it.
+- `burnin_hold = nothing`, `burnin_hold_frac::Real = 0.5` — as in
+  `sample_pt_emcee`: every IAD jitter `sigma_iad_<instrument>` held at 0 for
+  the first half of burn-in, then drawn from its prior walker by walker, so the
+  jitter cannot absorb the reflex before the orbit is found. `false` turns it
+  off. The whitened swap maps a held coordinate to itself.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (every rung's walkers, every RNG stream, the whitening ring
   buffer and its (μ, σ), the step whitening started, the counters, the evidence
@@ -195,6 +200,8 @@ function sample_pt_whitening(
     thin::Int = 1,
     show_progress::Bool = true,
     node_flip::Real = 0.1,
+    burnin_hold = nothing,
+    burnin_hold_frac::Real = 0.5,
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
@@ -245,6 +252,15 @@ function sample_pt_whitening(
     # Node flip for astrometry-only planets (src/samplers/node_flip.jl). Walkers
     # here are plain bounded space, so no log-scale dimension to exclude.
     flips = node_flip > 0 ? node_flips(params, data) : NodeFlip[]
+    # Coordinates held early in burn-in (src/samplers/burnin_hold.jl). Walkers
+    # live in x, so the held value is stored exactly and the stretch leaves it
+    # (every walker shares it); `is_held` is cleared at the release.
+    hold = _burnin_hold(params, burnin_hold, burnin_hold_frac, n_burnin;
+                        forbid = reduce(vcat, (vcat(f.shift, f.negate) for f in flips);
+                                        init = Int[]),
+                        sampler = "pt_whitening")
+    is_held = falses(n_dim)
+    is_held[hold.dims] .= true
 
     # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
     # On resume the saved state replaces initialisation below and is put back
@@ -255,7 +271,7 @@ function sample_pt_whitening(
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
         n_burnin, thin, seed, stretch_a, betas = copy(βs), warmup_swaps,
         whiten_window = max(whiten_window, 1), whiten_refresh,
-        node_flip = isempty(flips) ? 0.0 : node_flip)
+        node_flip = isempty(flips) ? 0.0 : node_flip, _burnin_hold_fp(hold, params)...)
     ck = resume ? read_checkpoint(ck_path, "pt_whitening", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -326,6 +342,10 @@ function sample_pt_whitening(
                 xb = _draw_from_prior(target, rng)
                 @inbounds for d in 1:n_dim
                     state[t, w, d] = xb[d]
+                end
+                # Every walker of every rung starts at the held value.
+                @inbounds for (d, v) in zip(hold.dims, hold.values)
+                    state[t, w, d] = v
                 end
                 lp, ll = eval_bounded!(@view(state[t, w, :]), slot)
                 if isfinite(lp) && isfinite(ll)
@@ -469,6 +489,9 @@ function sample_pt_whitening(
         # `thread_proposal` as a plain loop counter, independent of the
         # thread count and immune to `:static`'s task-migration risk.
         chunks = _chunk_ranges(length(tasks), n_slots)
+        # The dimensions the stretch scales: a held coordinate is shared by the
+        # whole ensemble, so the move leaves it and the Jacobian is z^(m - 1).
+        n_move = n_dim - count(is_held)
         Threads.@threads :static for slot in 1:length(chunks)
             for task_idx in chunks[slot]
                 t, w = tasks[task_idx]
@@ -486,7 +509,7 @@ function sample_pt_whitening(
                 end
 
                 lp_prop, ll_prop = eval_bounded!(buf, slot)
-                log_ratio = (n_dim - 1) * log(z) +
+                log_ratio = (n_move - 1) * log(z) +
                             β * (ll_prop - logL_arr[t, w]) +
                             (lp_prop - logπ_arr[t, w])
                 Threads.atomic_add!(propose_temp[t], 1)
@@ -501,6 +524,49 @@ function sample_pt_whitening(
             end
         end
         Threads.atomic_add!(n_evals_atomic, length(tasks))
+    end
+
+    # The end of `burnin_hold`, as in sample_pt_emcee: every walker of every
+    # rung draws its held coordinates from their priors and is evaluated there;
+    # one none of 100 draws gives a finite density for keeps the held value.
+    # The ring's history of a held coordinate is a single value, so it is
+    # overwritten with the drawn ones and that coordinate's (μ, σ) refreshed.
+    function release_hold!()
+        fill!(is_held, false)
+        n_tot = n_temps * n_walkers_eff
+        rel_seeds = rand(rng_master, UInt64, n_tot)
+        rel_chunks = _chunk_ranges(n_tot, n_slots)
+        Threads.@threads :static for slot in 1:length(rel_chunks)
+            buf = thread_proposal[slot]
+            for task_idx in rel_chunks[slot]
+                t = (task_idx - 1) ÷ n_walkers_eff + 1
+                w = (task_idx - 1) % n_walkers_eff + 1
+                rng = MersenneTwister(rel_seeds[task_idx])
+                for _ in 1:100
+                    @inbounds for d in 1:n_dim
+                        buf[d] = state[t, w, d]
+                    end
+                    _burnin_hold_draw!(buf, hold, layout.unfrozen_priors, rng)
+                    lp, ll = eval_bounded!(buf, slot)
+                    Threads.atomic_add!(n_evals_atomic, 1)
+                    if isfinite(lp) && isfinite(ll)
+                        @inbounds for d in hold.dims
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp
+                        logL_arr[t, w] = ll
+                        break
+                    end
+                end
+            end
+        end
+        for t in 1:n_temps, d in hold.dims
+            @inbounds for s in 1:ring_count[t], w in 1:n_walkers_eff
+                ring[t, s, w, d] = state[t, w, d]
+            end
+            refresh_whiten_dim!(t, d)
+        end
+        return nothing
     end
 
     whitening_active_after = -1
@@ -544,8 +610,12 @@ function sample_pt_whitening(
             end
         end
         merge!(recut_moved, ck.recut_moved)
+        # Past the release, the saved walkers carry their own values.
+        step0 >= hold.step && fill!(is_held, false)
     end
     last_ck = time()
+    show_progress && step0 < hold.step &&
+        _burnin_hold_info("pt_whitening", hold, params, n_burnin)
 
     pb = ProgressBar("pt_whitening"; total = n_steps, enabled = show_progress,
                      start = step0)
@@ -615,6 +685,12 @@ function sample_pt_whitening(
                 buf_k   = swap_buf_k
                 buf_kp1 = swap_buf_kp1
                 @inbounds for d in 1:n_dim
+                    if is_held[d]
+                        # Held (`burnin_hold`): the identity, so it stays put.
+                        buf_k[d]   = state[t,     w,  d]
+                        buf_kp1[d] = state[t + 1, w2, d]
+                        continue
+                    end
                     σk   = σ_w[t,     d]
                     σkp1 = σ_w[t + 1, d]
                     s_fwd = σkp1 / σk
@@ -681,6 +757,9 @@ function sample_pt_whitening(
         if !isempty(circ) && _pt_recut_due(step, n_burnin)
             recut_whitening!()
         end
+
+        # ---- End of `burnin_hold` (threaded; within burn-in) -----------
+        step == hold.step && release_hold!()
 
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
         if step > n_burnin
