@@ -22,7 +22,7 @@
 # accounting in `noise_td_proposed`/`noise_td_accepted`.
 #
 # Full-circle angles (Mo, Ω, λ, ω under `:ew`; src/circular.jl) are re-charted
-# halfway through and at the end of burn-in, as in `sample_pt_emcee`, except
+# during burn-in on `sample_pt_emcee`'s schedule (`_pt_recut_due`), except
 # that only active slots vote and same-mode planet slots share one window per
 # angle, because births re-sort planets between them (`_td_ensemble_recut!`).
 
@@ -293,12 +293,14 @@ function _td_prune_stranded!(state::Array{Float64,3},
             return xbuf
         end
         evaly(yd) = evalf(tox!(yd), tb)
+        ℓb = ℓ[b]
+        xc, lpb, llb = nothing, NaN, NaN     # the climbed point, if any
         if lv === nothing
             (evalf === nothing || !(rise[t] < m / 2)) && continue
             # A cost gate, not a bound (see `_pt_prune_stranded!`).
             gate = _td_half_logdet_cov(Y(findall(isfinite, ℓ)))
             gate === nothing && continue
-            cg = ℓ[b] + 0.5 * m * log(2π) + gate - tau - n_noise_toggle * log(2)
+            cg = ℓb + 0.5 * m * log(2π) + gate - tau - n_noise_toggle * log(2)
             any(w -> β * logL_arr[t, w] < cg, cand) || continue
             jac(yd) = sum((yd[j] for (j, d) in enumerate(dims) if flat_shift[d] !== nothing);
                           init = 0.0)
@@ -307,11 +309,21 @@ function _td_prune_stranded!(state::Array{Float64,3},
             Yall = Y(findall(isfinite, ℓ))
             h0 = [0.1 * max(std(view(Yall, :, j)), 1e-6 * max(1.0, abs(yb[j])))
                   for j in 1:m]
-            σ = _pt_axis_widths(ℓat, yb, ℓ[b], h0)
+            σ = _pt_axis_widths(ℓat, yb, ℓb, h0)
             σ === nothing && continue
+            # From where the best walker landed to the top of its mode
+            # (`_pt_climb`).
+            yc, ℓc = _pt_climb(ℓat, yb, ℓb, σ)
+            σc = ℓc > ℓb ? _pt_axis_widths(ℓat, yc, ℓc, h0) : nothing
+            if σc !== nothing
+                yb, ℓb, σ = yc, ℓc, σc
+                lpb, llb = evaly(yb); xc = copy(xbuf)
+                cand = [w for w in 1:n_w
+                        if !(ℓ[w] >= ℓb - allow && _same(td_states[t, w], tb))]
+            end
             lv = sum(log, σ)
         end
-        cut = ℓ[b] + 0.5 * m * log(2π) + lv - tau - n_noise_toggle * log(2)
+        cut = ℓb + 0.5 * m * log(2π) + lv - tau - n_noise_toggle * log(2)
         S = [w for w in cand if !(β * logL_arr[t, w] >= cut)]
         isempty(S) && continue
         donors = σ === nothing ? A[ℓ[A] .>= median(ℓ[A])] : [b]
@@ -329,6 +341,11 @@ function _td_prune_stranded!(state::Array{Float64,3},
                     tox!(yd); lp, ll = lp2, ll2
                     for d in 1:n_dim
                         state[t, w, d] = xbuf[d]
+                    end
+                elseif xc !== nothing
+                    lp, ll = lpb, llb
+                    for d in 1:n_dim
+                        state[t, w, d] = xc[d]
                     end
                 else
                     for d in 1:n_dim
@@ -486,11 +503,12 @@ selection on planet count.
   per step.
 - Tempered M-H: the MoMS acceptance uses `β · (log_L_new − log_L_old)`
   so hot chains explore more freely between models.
-- Full-circle angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`:
-  the seam moves to the emptiest arc of the cold rung's active-slot draws (see
-  src/circular.jl), which moves `target.params.layout` and `target.transform`
-  in place. Same-mode planet slots share one window per angle, unified at the
-  start when an earlier fit on the same target left them apart.
+- Full-circle angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`,
+  and every 50 steps through 3/4 of burn-in with the pruning: the seam moves to
+  the emptiest arc of the cold rung's active-slot draws (see src/circular.jl),
+  which moves `target.params.layout` and `target.transform` in place.
+  Same-mode planet slots share one window per angle, unified at the start when
+  an earlier fit on the same target left them apart.
 """
 function sample_transdim_pt_emcee(
     target::NereusTarget,
@@ -2137,11 +2155,13 @@ function sample_transdim_pt_emcee(
 
         # ---- Circular re-cut (serial; threads idle) ------------------
         # Halfway through burn-in, while the ensemble can still merge the two
-        # lobes a seam-centred angle burns in as; and at the end, which fixes
-        # the chart for every recorded step. Relabels `state` at every rung.
+        # lobes a seam-centred angle burns in as; with every pruning pass, so a
+        # mode found later is not held behind the seam (`_pt_recut_due`); and
+        # at the end, which fixes the chart for every recorded step. Relabels
+        # `state` at every rung.
         # thread_theta and the proposal buffers are rewritten from `state`
         # before every evaluation, so they hold nothing to relabel.
-        if !isempty(circ_groups) && (step == n_burnin ÷ 2 || step == n_burnin)
+        if !isempty(circ_groups) && _pt_recut_due(step, n_burnin)
             _td_ensemble_recut!(state, td_states, params, circ_groups, strategy,
                                 (target.transform,), recut_moved)
         end

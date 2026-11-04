@@ -29,8 +29,9 @@
 #   The exception is a full-circle angle (Mo, Ω, λ, ω under `:ew`; see
 #   src/circular.jl), whose window is a chart and not a wall: its seam
 #   is moved to the emptiest arc of the cold ensemble halfway through
-#   and at the end of burn-in (`_pt_ensemble_recut!`), so the chart is
-#   fixed for every recorded step.
+#   burn-in, with every pruning pass and at the end of burn-in
+#   (`_pt_ensemble_recut!`, `_pt_recut_due`), so the chart is fixed for
+#   every recorded step.
 # - **Node flip** for astrometry-only planets: a tempered M-H move to the
 #   mirror (Ω + π, ω + π), the exactly degenerate solution the stretch move
 #   cannot reach (src/samplers/node_flip.jl).
@@ -252,6 +253,24 @@ function _pt_ensemble_recut!(state::Array{Float64,3}, params::Params,
     return dims
 end
 
+# When to re-cut: halfway through burn-in, with every pruning pass (every 50
+# steps through 3/4 of it) and at its end. The seam has to follow the mass,
+# and the mass still jumps after the halfway cut: a mode found late (pruning
+# moves a rung onto it, swaps carry it down) lands wherever the old seam
+# happens to be. Gaia-4 b (seed 6 of 21) reached its cold rung at step 910 of
+# 1500 from the far side of the seam, Mo rising through 6.1 towards 0.6 + 2π:
+# the rung piled up against the wall at 2π (median 6.27, max 6.2830) for 550
+# steps, and only the end-of-burn-in cut released it, so it relaxed into the
+# recorded chain (R-hat 1.09, log Z 526.9 against 537.6). On this schedule the
+# seam moves within 50 steps of such a pile-up, and the last cut that answers
+# a jump comes n_burnin/4 before the recording starts: the same time the
+# walkers moved by the last prune get to settle. A cut costs no evaluation
+# and keeps the seam unless it sits in a dense arc, so it is a no-op for an
+# ensemble already clear of it.
+_pt_recut_due(step::Integer, n_burnin::Integer) =
+    step == n_burnin ÷ 2 || step == n_burnin ||
+    (step % 50 == 0 && step <= (3 * n_burnin) ÷ 4)
+
 # ------------------------------------------------------------------
 # Stranded walkers (burn-in only).
 #
@@ -300,6 +319,18 @@ end
 # with those widths and re-evaluated, not copied: copies of fewer than d + 1
 # walkers would leave the rung in their affine hull, which no stretch move
 # leaves.
+#
+# The best walker is measured at the top of its mode, not where it landed. A
+# walker that has just found a mode sits on its flank, where the estimate is
+# weakest twice over: its density is below the peak, and the drops along each
+# axis are steep with the gradient, so the widths come out small. Gaia-4 b's
+# lone cold walkers sat 235-280 nats below the peak with Σ log σ_j ≈ -57 (-30
+# at the top), and the cut stayed below a plateau the mode outweighs by
+# e^200+: seeds 14 and 16 (of 21) recorded it, R-hat 1.65 and 2.10, log Z 198
+# and 191 against 537.6. So the best walker first climbs (`_pt_climb`) and the
+# widths are measured where it stops. Any point of the mode gives an
+# understatement of Z_A by the argument above, so the guarantee is unchanged;
+# the cut only lands where the mode actually is.
 #
 # That path waits for the rung to stop climbing. Early in burn-in the walkers
 # are still rising from the prior and the best of them is no mode, only the
@@ -352,6 +383,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
         isempty(below) && continue
         A = findall(>=(best - allow), ℓ)
         yb = state[t, b, :]
+        lpb, llb = logπ_arr[t, b], logL_arr[t, b]
         lv = length(A) >= d + 2 ? _pt_half_logdet_cov(state, t, A, yb, circ) : nothing
         σ = nothing
         if lv === nothing
@@ -366,6 +398,14 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
             h0 = [0.1 * _pt_spread(view(state, t, :, j), yb[j], j in circ) for j in 1:d]
             σ = _pt_axis_widths(ℓat, yb, best, h0)
             σ === nothing && continue
+            # From where the best walker landed to the top of its mode.
+            yc, ℓc = _pt_climb(ℓat, yb, best, σ)
+            σc = ℓc > best ? _pt_axis_widths(ℓat, yc, ℓc, h0) : nothing
+            if σc !== nothing
+                yb, best, σ = yc, ℓc, σc
+                lpb, llb = evalf(yb)
+                below = [w for w in 1:n_w if ℓ[w] < best - allow]
+            end
             lv = sum(log, σ)
         end
         cut = best + 0.5 * d * log(2π) + lv - tau
@@ -388,7 +428,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
             for w in S
                 lp, ll = _pt_scatter!(y, evalf, yb, σ, rng)
                 if !(isfinite(lp) && isfinite(ll))
-                    y .= yb; lp, ll = logπ_arr[t, b], logL_arr[t, b]
+                    y .= yb; lp, ll = lpb, llb
                 end
                 @inbounds for j in 1:d
                     state[t, w, j] = y[j]
@@ -473,6 +513,28 @@ function _pt_axis_widths(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
     return σ
 end
 
+# From the best walker `y0` (tempered density `ℓ0`) to the top of its mode:
+# BFGS in u, y = y0 + σ ⊙ u, so the axis widths `σ` set the scale, with
+# finite-difference gradients. Outside the support counts as a finite cliff,
+# so the line search backs off it instead of failing. A lone walker that has
+# just found a mode sits on its flank, where the bound it feeds is weakest:
+# Gaia-4 b's sat 235-280 nats below the peak (cold rung), still climbing.
+# At most `max_evals` evaluations; stops when an iteration gains less than
+# `f_tol`. Deterministic. Returns (y, ℓ), or (y0, ℓ0) if nothing was better.
+function _pt_climb(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
+                   σ::Vector{Float64}; max_evals::Int = 500 * length(y0),
+                   f_tol::Float64 = 1e-2)
+    n = Ref(0)
+    cliff = 1e8 - ℓ0
+    f = u -> (n[] += 1; v = ℓat(y0 .+ σ .* u); isfinite(v) ? -v : cliff)
+    res = Optim.optimize(f, zeros(length(y0)), Optim.BFGS(),
+                         Optim.Options(iterations = 10_000, f_abstol = f_tol,
+                                       callback = _ -> n[] >= max_evals))
+    yc = y0 .+ σ .* Optim.minimizer(res)
+    ℓc = ℓat(yc)
+    return isfinite(ℓc) && ℓc > ℓ0 ? (yc, ℓc) : (collect(Float64, y0), ℓ0)
+end
+
 # One draw y = yb + σ ⊙ z, z ~ N(0, I), redrawn (up to 20 times) until it is in
 # the support. Returns `evalf(y)`; (-Inf, -Inf) if no draw was.
 function _pt_scatter!(y::Vector{Float64}, evalf, yb::AbstractVector{Float64},
@@ -530,7 +592,8 @@ in place.
 - `n_walkers::Int=100` — walkers per temperature (≥ `2·n_dim + 2`, even).
 - `n_steps::Int=3000` — steps per walker.
 - `n_burnin::Int=2000` — burn-in discarded from posterior + evidence.
-  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`.
+  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`, and
+  every 50 steps through 3/4 of burn-in with the pruning (`_pt_recut_due`).
   Was 2000/1000, which is too short to find a well-measured period on a
   wide log-uniform prior and settle on it: on an easy 12.3 d RV target over
   LogUniform(0.1, 3000), 1 of 8 seed/data combinations failed R-hat at
@@ -570,12 +633,12 @@ in place.
   weak signal — is left alone. The mode's mass is the Laplace volume of the
   walkers in it; while fewer than `n_dim + 2` have found it, and once the rung
   has stopped climbing, a smaller volume measured from the density along each
-  axis at its best walker (a few evaluations per dimension), and the walkers
-  moved are then drawn about that walker rather than copied, so the rung keeps
-  its full rank. The stretch move cannot bring
-  stranded walkers back itself, so without this a narrow mode (any
-  well-measured period on a wide prior) fills its cold rung at the rate the
-  ladder happens to rediscover it. Burn-in only: the recorded chain is ordinary
+  axis at the top of the mode, which the best walker first climbs to (BFGS, at
+  most 500 evaluations per dimension), and the walkers moved are then drawn
+  about that point rather than copied, so the rung keeps its full rank. The
+  stretch move cannot bring stranded walkers back itself, so without this a
+  narrow mode (any well-measured period on a wide prior) fills its cold rung at
+  the rate the ladder happens to rediscover it. Burn-in only: the recorded chain is ordinary
   MCMC. `false` restores the old behaviour.
 - `node_flip::Real=0.1` — per walker and step, the probability of proposing
   the mirror (Ω, ω) → (Ω + π, ω + π) of each astrometry-only planet, accepted
@@ -702,8 +765,9 @@ function sample_pt_emcee(
     # the log dimensions); draws and :lp are mapped back to x when recorded.
     #
     # Full-circle angles are the exception: re-charted during burn-in by
-    # `_pt_ensemble_recut!`. `circ` is computed once; `recut_moved` collects
-    # the final windows for the single end-of-run report.
+    # `_pt_ensemble_recut!`, on `_pt_recut_due`'s schedule. `circ` is
+    # computed once; `recut_moved` collects the final windows for the single
+    # end-of-run report.
     circ        = circular_indices(params)
     recut_moved = Dict{String,NTuple{2,Float64}}()
     # The move scale per dimension (see above), and the pruning tally per rung.
@@ -1201,12 +1265,14 @@ function sample_pt_emcee(
 
         # ---- Circular re-cut (serial; threads idle) ------------------
         # Halfway through burn-in, while the ensemble can still merge the
-        # two lobes a seam-centred angle burns in as; and at the end of
-        # burn-in, which fixes the chart for every recorded step (usually a
-        # no-op by then: circular_cut keeps the current seam unless another
-        # arc is clearly emptier). Relabels `state` at every rung; logπ_arr
-        # and logL_arr stay valid, see `_pt_ensemble_recut!`.
-        if !isempty(circ) && (step == n_burnin ÷ 2 || step == n_burnin)
+        # two lobes a seam-centred angle burns in as; with every pruning
+        # pass, so a mode found later is not held behind the seam (see
+        # `_pt_recut_due`); and at the end of burn-in, which fixes the chart
+        # for every recorded step (usually a no-op by then: circular_cut
+        # keeps the current seam unless another arc is clearly emptier).
+        # Relabels `state` at every rung; logπ_arr and logL_arr stay valid,
+        # see `_pt_ensemble_recut!`.
+        if !isempty(circ) && _pt_recut_due(step, n_burnin)
             _pt_ensemble_recut!(state, params, circ, (target.transform,),
                                 recut_moved)
         end
