@@ -128,8 +128,9 @@ the distinguishing feature of this sampler.
 - `n_walkers::Int=40` — walkers per temperature (≥ `2·n_dim + 2`, even).
 - `n_steps::Int=2000` — MCMC iterations.
 - `n_burnin::Int=500` — burn-in discarded from posterior + evidence.
-  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`,
-  moving `target.params.layout` and `target.transform` in place.
+  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`, and
+  every 50 steps through 3/4 of burn-in (as in `sample_pt_emcee`), moving
+  `target.params.layout` and `target.transform` in place.
 - `betas::Union{Nothing,Vector{Float64}}=nothing` — explicit β ladder
   (descending β[1]=1). Default: Vines+ 2023's `β_i = (1/√5)^i`, the same
   ladder `sample_pt_emcee` uses (geometric ladders give far more uniform
@@ -672,11 +673,12 @@ function sample_pt_whitening(
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
-        # Same schedule as pt_emcee: halfway through burn-in to merge the
-        # two lobes of a seam-centred angle, and at the end of burn-in to
-        # fix the chart for every recorded step. logπ_arr / logL_arr stay
-        # valid (uniform prior, periodic likelihood).
-        if !isempty(circ) && (step == n_burnin ÷ 2 || step == n_burnin)
+        # Same schedule as pt_emcee (`_pt_recut_due`): halfway through
+        # burn-in to merge the two lobes of a seam-centred angle, every 50
+        # steps through 3/4 of it so a mode found late is not held behind
+        # the seam, and at the end to fix the chart for every recorded step.
+        # logπ_arr / logL_arr stay valid (uniform prior, periodic likelihood).
+        if !isempty(circ) && _pt_recut_due(step, n_burnin)
             recut_whitening!()
         end
 

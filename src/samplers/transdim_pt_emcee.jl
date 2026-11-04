@@ -22,7 +22,7 @@
 # accounting in `noise_td_proposed`/`noise_td_accepted`.
 #
 # Full-circle angles (Mo, Ω, λ, ω under `:ew`; src/circular.jl) are re-charted
-# halfway through and at the end of burn-in, as in `sample_pt_emcee`, except
+# during burn-in on `sample_pt_emcee`'s schedule (`_pt_recut_due`), except
 # that only active slots vote and same-mode planet slots share one window per
 # angle, because births re-sort planets between them (`_td_ensemble_recut!`).
 
@@ -486,11 +486,12 @@ selection on planet count.
   per step.
 - Tempered M-H: the MoMS acceptance uses `β · (log_L_new − log_L_old)`
   so hot chains explore more freely between models.
-- Full-circle angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`:
-  the seam moves to the emptiest arc of the cold rung's active-slot draws (see
-  src/circular.jl), which moves `target.params.layout` and `target.transform`
-  in place. Same-mode planet slots share one window per angle, unified at the
-  start when an earlier fit on the same target left them apart.
+- Full-circle angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`,
+  and every 50 steps through 3/4 of burn-in with the pruning: the seam moves to
+  the emptiest arc of the cold rung's active-slot draws (see src/circular.jl),
+  which moves `target.params.layout` and `target.transform` in place.
+  Same-mode planet slots share one window per angle, unified at the start when
+  an earlier fit on the same target left them apart.
 """
 function sample_transdim_pt_emcee(
     target::NereusTarget,
@@ -2137,11 +2138,13 @@ function sample_transdim_pt_emcee(
 
         # ---- Circular re-cut (serial; threads idle) ------------------
         # Halfway through burn-in, while the ensemble can still merge the two
-        # lobes a seam-centred angle burns in as; and at the end, which fixes
-        # the chart for every recorded step. Relabels `state` at every rung.
+        # lobes a seam-centred angle burns in as; with every pruning pass, so a
+        # mode found later is not held behind the seam (`_pt_recut_due`); and
+        # at the end, which fixes the chart for every recorded step. Relabels
+        # `state` at every rung.
         # thread_theta and the proposal buffers are rewritten from `state`
         # before every evaluation, so they hold nothing to relabel.
-        if !isempty(circ_groups) && (step == n_burnin ÷ 2 || step == n_burnin)
+        if !isempty(circ_groups) && _pt_recut_due(step, n_burnin)
             _td_ensemble_recut!(state, td_states, params, circ_groups, strategy,
                                 (target.transform,), recut_moved)
         end

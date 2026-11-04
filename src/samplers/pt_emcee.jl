@@ -29,8 +29,9 @@
 #   The exception is a full-circle angle (Mo, Ω, λ, ω under `:ew`; see
 #   src/circular.jl), whose window is a chart and not a wall: its seam
 #   is moved to the emptiest arc of the cold ensemble halfway through
-#   and at the end of burn-in (`_pt_ensemble_recut!`), so the chart is
-#   fixed for every recorded step.
+#   burn-in, with every pruning pass and at the end of burn-in
+#   (`_pt_ensemble_recut!`, `_pt_recut_due`), so the chart is fixed for
+#   every recorded step.
 # - **Node flip** for astrometry-only planets: a tempered M-H move to the
 #   mirror (Ω + π, ω + π), the exactly degenerate solution the stretch move
 #   cannot reach (src/samplers/node_flip.jl).
@@ -251,6 +252,24 @@ function _pt_ensemble_recut!(state::Array{Float64,3}, params::Params,
     end
     return dims
 end
+
+# When to re-cut: halfway through burn-in, with every pruning pass (every 50
+# steps through 3/4 of it) and at its end. The seam has to follow the mass,
+# and the mass still jumps after the halfway cut: a mode found late (pruning
+# moves a rung onto it, swaps carry it down) lands wherever the old seam
+# happens to be. Gaia-4 b (seed 6 of 21) reached its cold rung at step 910 of
+# 1500 from the far side of the seam, Mo rising through 6.1 towards 0.6 + 2π:
+# the rung piled up against the wall at 2π (median 6.27, max 6.2830) for 550
+# steps, and only the end-of-burn-in cut released it, so it relaxed into the
+# recorded chain (R-hat 1.09, log Z 526.9 against 537.6). On this schedule the
+# seam moves within 50 steps of such a pile-up, and the last cut that answers
+# a jump comes n_burnin/4 before the recording starts: the same time the
+# walkers moved by the last prune get to settle. A cut costs no evaluation
+# and keeps the seam unless it sits in a dense arc, so it is a no-op for an
+# ensemble already clear of it.
+_pt_recut_due(step::Integer, n_burnin::Integer) =
+    step == n_burnin ÷ 2 || step == n_burnin ||
+    (step % 50 == 0 && step <= (3 * n_burnin) ÷ 4)
 
 # ------------------------------------------------------------------
 # Stranded walkers (burn-in only).
@@ -530,7 +549,8 @@ in place.
 - `n_walkers::Int=100` — walkers per temperature (≥ `2·n_dim + 2`, even).
 - `n_steps::Int=3000` — steps per walker.
 - `n_burnin::Int=2000` — burn-in discarded from posterior + evidence.
-  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`.
+  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`, and
+  every 50 steps through 3/4 of burn-in with the pruning (`_pt_recut_due`).
   Was 2000/1000, which is too short to find a well-measured period on a
   wide log-uniform prior and settle on it: on an easy 12.3 d RV target over
   LogUniform(0.1, 3000), 1 of 8 seed/data combinations failed R-hat at
@@ -702,8 +722,9 @@ function sample_pt_emcee(
     # the log dimensions); draws and :lp are mapped back to x when recorded.
     #
     # Full-circle angles are the exception: re-charted during burn-in by
-    # `_pt_ensemble_recut!`. `circ` is computed once; `recut_moved` collects
-    # the final windows for the single end-of-run report.
+    # `_pt_ensemble_recut!`, on `_pt_recut_due`'s schedule. `circ` is
+    # computed once; `recut_moved` collects the final windows for the single
+    # end-of-run report.
     circ        = circular_indices(params)
     recut_moved = Dict{String,NTuple{2,Float64}}()
     # The move scale per dimension (see above), and the pruning tally per rung.
@@ -1201,12 +1222,14 @@ function sample_pt_emcee(
 
         # ---- Circular re-cut (serial; threads idle) ------------------
         # Halfway through burn-in, while the ensemble can still merge the
-        # two lobes a seam-centred angle burns in as; and at the end of
-        # burn-in, which fixes the chart for every recorded step (usually a
-        # no-op by then: circular_cut keeps the current seam unless another
-        # arc is clearly emptier). Relabels `state` at every rung; logπ_arr
-        # and logL_arr stay valid, see `_pt_ensemble_recut!`.
-        if !isempty(circ) && (step == n_burnin ÷ 2 || step == n_burnin)
+        # two lobes a seam-centred angle burns in as; with every pruning
+        # pass, so a mode found later is not held behind the seam (see
+        # `_pt_recut_due`); and at the end of burn-in, which fixes the chart
+        # for every recorded step (usually a no-op by then: circular_cut
+        # keeps the current seam unless another arc is clearly emptier).
+        # Relabels `state` at every rung; logπ_arr and logL_arr stay valid,
+        # see `_pt_ensemble_recut!`.
+        if !isempty(circ) && _pt_recut_due(step, n_burnin)
             _pt_ensemble_recut!(state, params, circ, (target.transform,),
                                 recut_moved)
         end

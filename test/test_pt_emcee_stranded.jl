@@ -126,6 +126,19 @@ _settled(lL) = [median(filter(isfinite, lL[t, :])) for t in axes(lL, 1)]
         end
     end
 
+    @testset "the circular re-cut runs with every pruning pass" begin
+        # Halfway, with every prune (every 50 steps through 3/4 of burn-in), and
+        # at the end.
+        @test [s for s in 1:1500 if Nereus._pt_recut_due(s, 1500)] == [50:50:1100; 1500]
+        @test [s for s in 1:130 if Nereus._pt_recut_due(s, 130)] == [50, 65, 130]
+        # What it catches: a mode found after the halfway cut, across the seam.
+        # Gaia-4 b (seed 6) found Mo ≈ 0.6 approaching from 6.1, and its cold
+        # rung piled up against the wall at 2π until the end of burn-in. The
+        # next cut puts the seam where the pile and the mode beyond it are not.
+        pile = collect(range(6.1, 2π - 1e-4; length = 100))
+        @test 0.6 < mod(Nereus.circular_cut(pile, 0.0), 2π) < 6.1
+    end
+
     @testset "a mode across the seam of a circle is measured on the circle" begin
         # Dim 3 is a full-circle angle, U(0, 2π), and the mode sits on its seam:
         # half the walkers near 0, half near 2π. Read as a line, Σ_A spans the
