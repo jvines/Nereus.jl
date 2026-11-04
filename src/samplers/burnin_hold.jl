@@ -18,9 +18,9 @@
 # walkers or scatters only the other coordinates; and a held coordinate may not
 # be one the node flip, the λ slide or a trans-dim move acts on. At s = 0 the IAD
 # likelihood is the unjittered one bit for bit (`_iad_normal_equations!`), so
-# the held phase IS the fit without jitter. At the release each walker's value
-# is drawn from its prior and the walker re-evaluated, and the rest of burn-in
-# lets it settle. Burn-in only: the recorded chain is ordinary MCMC on the full
+# the held phase IS the fit without jitter. The release waits for that fit to
+# settle (`_burnin_hold_due!`); then each walker's value is drawn from its prior
+# and the walker re-evaluated, and the rest of burn-in lets it settle. Burn-in only: the recorded chain is ordinary MCMC on the full
 # posterior. The stretch's Jacobian z^(m - 1) counts the coordinates the move
 # scales, so while h coordinates are held it is z^(n_dim - h - 1), as for a
 # parked trans-dim slot.
@@ -130,6 +130,40 @@ function _burnin_hold_logπ(h::BurninHold, params::Params; flat_shift = nothing)
     return lp
 end
 
+# The step by which the hold has ended, whatever the walkers do: three
+# quarters of burn-in, where pruning stops, or `h.step` if that is later.
+_burnin_hold_last(h::BurninHold, n_burnin::Integer) =
+    h.step == 0 ? 0 : max(h.step, (3 * n_burnin) ÷ 4)
+
+"""
+    _burnin_hold_due!(med, h, step, n_burnin, logL_cold, d) -> Bool
+
+Whether the hold ends at `step`: no earlier than `h.step`, at the first pass
+(every 50 steps) at which the β = 1 rung's median log L (`logL_cold`) rose by
+less than d/2 since the previous pass -- the stranded-walker prune's test for a
+rung that has stopped climbing, `d` the free dimensions -- and at
+`_burnin_hold_last` whatever it does. `med` holds the median at the previous
+pass (NaN before the first) and is updated in place; the sampler checkpoints it.
+
+Released while the fit without the jitter is still climbing, the jitter takes
+up the misfit and the orbit is lost again. HD 114762 RV + Hipparcos + DR4,
+seed 3, found the 3.5 deg orbit at step 1800 of a 2000-step hold and at the
+release was 3300 nats below the top it reaches held (seeds 1 and 2 had sat at
+that top since steps 1800 and 1000): 50 steps later 44 of the 100 cold walkers
+had i above 6 deg, by step 2300 all of them, and the run ended with R-hat 1.61
+and log Z 34 nats below the other two seeds.
+"""
+function _burnin_hold_due!(med::Base.RefValue{Float64}, h::BurninHold, step::Integer,
+                           n_burnin::Integer, logL_cold::AbstractVector{Float64},
+                           d::Integer)
+    step == _burnin_hold_last(h, n_burnin) && return true
+    step % 50 == 0 || return false
+    m = _pt_finite_median(logL_cold)
+    due = step >= h.step && m - med[] < d / 2
+    med[] = m
+    return due
+end
+
 # Draw each held coordinate of `buf` from its prior, in the coordinates the
 # sampler's walkers live in: y = log(x + s) where `flat_shift` gives an s.
 function _burnin_hold_draw!(buf::AbstractVector{Float64}, h::BurninHold,
@@ -148,8 +182,10 @@ function _burnin_hold_info(sampler::AbstractString, h::BurninHold,
     h.step == 0 && return nothing
     held = join(("$(params.layout.unfrozen_names[j]) = $(v)"
                  for (j, v) in zip(h.dims, h.values)), ", ")
-    @info "$sampler: holding $held for the first $(h.step) of $n_burnin burn-in " *
-          "steps, then drawing each walker's value from its prior. Until then the " *
+    @info "$sampler: holding $held for at least the first $(h.step) of $n_burnin " *
+          "burn-in steps, until the β = 1 rung stops climbing (step " *
+          "$(_burnin_hold_last(h, n_burnin)) at the latest), then drawing each " *
+          "walker's value from its prior. Until then the " *
           "fit is the one without these parameters, which keeps an IAD jitter from " *
           "absorbing the reflex before the orbit is found. The recorded chain is " *
           "ordinary MCMC; `burnin_hold = false` turns this off."

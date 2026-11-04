@@ -160,7 +160,8 @@ the distinguishing feature of this sampler.
   (src/samplers/node_flip.jl). `0` disables it.
 - `burnin_hold = nothing`, `burnin_hold_frac::Real = 0.5` — as in
   `sample_pt_emcee`: every IAD jitter `sigma_iad_<instrument>` held at 0 for
-  the first half of burn-in, then drawn from its prior walker by walker, so the
+  at least the first half of burn-in, until the β = 1 rung stops climbing, then
+  drawn from its prior walker by walker, so the
   jitter cannot absorb the reflex before the orbit is found. `false` turns it
   off. The whitened swap maps a held coordinate to itself.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
@@ -261,6 +262,7 @@ function sample_pt_whitening(
                         sampler = "pt_whitening")
     is_held = falses(n_dim)
     is_held[hold.dims] .= true
+    hold_med = Ref(NaN)                 # the β = 1 median log L at the last pass
 
     # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
     # On resume the saved state replaces initialisation below and is put back
@@ -611,10 +613,15 @@ function sample_pt_whitening(
         end
         merge!(recut_moved, ck.recut_moved)
         # Past the release, the saved walkers carry their own values.
-        step0 >= hold.step && fill!(is_held, false)
+        if hasproperty(ck, :hold_on)
+            ck.hold_on || fill!(is_held, false)
+            hold_med[] = ck.hold_med
+        else
+            step0 >= hold.step && fill!(is_held, false)
+        end
     end
     last_ck = time()
-    show_progress && step0 < hold.step &&
+    show_progress && any(is_held) &&
         _burnin_hold_info("pt_whitening", hold, params, n_burnin)
 
     pb = ProgressBar("pt_whitening"; total = n_steps, enabled = show_progress,
@@ -759,7 +766,10 @@ function sample_pt_whitening(
         end
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
-        step == hold.step && release_hold!()
+        any(is_held) && _burnin_hold_due!(hold_med, hold, step, n_burnin,
+                                          view(logL_arr, 1, :),
+                                          n_dim - length(hold.dims)) &&
+            release_hold!()
 
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
         if step > n_burnin
@@ -802,7 +812,8 @@ function sample_pt_whitening(
                 flip_proposed, flip_accepted, n_evals = n_evals_atomic[],
                 keep_idx, samples = samples[1:keep_idx, :],
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
-                windows = circular_windows(params), recut_moved))
+                windows = circular_windows(params), recut_moved,
+                hold_on = any(is_held), hold_med = hold_med[]))
             last_ck = time()
         end
     end

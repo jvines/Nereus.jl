@@ -671,8 +671,9 @@ in place.
   50/50, with R-hat 1.003. Costs one likelihood evaluation per proposal; never
   offered to a planet with RV, transit or any other data. `0` disables it.
 - `burnin_hold=nothing` — parameters held at a fixed value, the same for every
-  walker of every rung, for the first `burnin_hold_frac` of burn-in, and then
-  drawn from their priors walker by walker. `nothing` (or `true`) holds every
+  walker of every rung, for at least the first `burnin_hold_frac` of burn-in
+  and until the β = 1 rung stops climbing (3/4 of burn-in at the latest), and
+  then drawn from their priors walker by walker. `nothing` (or `true`) holds every
   IAD jitter `sigma_iad_<instrument>` at 0 (`Nereus.default_burnin_hold`):
   from the prior, inflating the jitter until the reflex stops mattering is the
   cheapest way up the likelihood, and on HD 114762 RV + Gaia DR4 every run
@@ -681,7 +682,12 @@ in place.
   jitter, which finds the orbit. `false` holds nothing; a dictionary
   `name => value` holds those instead. Burn-in only: the recorded chain is
   ordinary MCMC. See src/samplers/burnin_hold.jl.
-- `burnin_hold_frac::Real=0.5` — the fraction of `n_burnin` the hold lasts.
+- `burnin_hold_frac::Real=0.5` — the fraction of `n_burnin` the hold lasts at
+  least. From then on it ends at the first 50-step pass at which the β = 1
+  rung's median log L rose by less than d/2 (the prune's test for a rung that
+  has stopped climbing), and at 3/4 of burn-in whatever it does: released while
+  the fit without the jitter still climbs, the jitter takes up the misfit and
+  the orbit is lost again (`_burnin_hold_due!`).
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (every rung's walkers, the ladder, every RNG stream, the counters,
   the ladder history, the evidence accumulators and the kept draws) at the end
@@ -826,6 +832,7 @@ function sample_pt_emcee(
     held_y = Float64[flat_shift[j] === nothing ? v : log(v + flat_shift[j])
                      for (j, v) in zip(hold.dims, hold.values)]
     held_lp = _burnin_hold_logπ(hold, params; flat_shift)
+    hold_med = Ref(NaN)                 # the β = 1 median log L at the last pass
 
     # Goodman-Weare: each half ≥ n_dim+1 walkers, total even.
     n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
@@ -1261,10 +1268,15 @@ function sample_pt_emcee(
         merge!(recut_moved, ck.recut_moved)
         n_done = step0
         # Past the release, the saved walkers carry their own values.
-        step0 >= hold.step && empty!(held_x)
+        if hasproperty(ck, :hold_on)
+            ck.hold_on || empty!(held_x)
+            hold_med[] = ck.hold_med
+        else
+            step0 >= hold.step && empty!(held_x)
+        end
     end
     last_ck = time()
-    show_progress && step0 < hold.step &&
+    show_progress && !isempty(held_x) &&
         _burnin_hold_info("pt_emcee", hold, params, n_burnin)
 
     # --- Main loop ----------------------------------------------------
@@ -1381,7 +1393,10 @@ function sample_pt_emcee(
         end
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
-        step == hold.step && release_hold!()
+        !isempty(held_x) && _burnin_hold_due!(hold_med, hold, step, n_burnin,
+                                              view(logL_arr, 1, :),
+                                              n_dim - length(hold.dims)) &&
+            release_hold!()
 
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
         if step > n_burnin
@@ -1470,7 +1485,7 @@ function sample_pt_emcee(
                 keep_idx, samples = samples[1:keep_idx, :],
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
                 conv_run, rhat_str, ess_str, windows = circular_windows(params),
-                recut_moved))
+                recut_moved, hold_on = !isempty(held_x), hold_med = hold_med[]))
             last_ck = time()
         end
 

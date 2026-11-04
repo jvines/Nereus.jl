@@ -486,7 +486,8 @@ selection on planet count.
   walkers in which the planet is active and astrometrically coupled.
 - `burnin_hold = nothing`, `burnin_hold_frac::Real = 0.5` — as in
   `sample_pt_emcee`: every IAD jitter `sigma_iad_<instrument>` held at 0 for
-  the first half of burn-in, then drawn from its prior walker by walker. Only a
+  at least the first half of burn-in, until the β = 1 rung stops climbing, then
+  drawn from its prior walker by walker. Only a
   parameter every model has can be held; not a planet or noise-model slot, or
   one the node flip or the λ slide moves.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
@@ -741,6 +742,7 @@ function sample_transdim_pt_emcee(
     is_held = falses(n_dim)
     is_held[hold.dims] .= true
     held_lp = _burnin_hold_logπ(hold, params; flat_shift)
+    hold_med = Ref(NaN)                 # the β = 1 median log L at the last pass
 
     # MoMS proposal strategy — shared across threads. Scales are tuned
     # during burn-in (Robbins-Monro); writes are protected by atomic
@@ -2061,10 +2063,15 @@ function sample_transdim_pt_emcee(
         _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
         n_done = step0
         # Past the release, the saved walkers carry their own values.
-        step0 >= hold.step && fill!(is_held, false)
+        if hasproperty(ck, :hold_on)
+            ck.hold_on || fill!(is_held, false)
+            hold_med[] = ck.hold_med
+        else
+            step0 >= hold.step && fill!(is_held, false)
+        end
     end
     last_ck = time()
-    show_progress && step0 < hold.step &&
+    show_progress && any(is_held) &&
         _burnin_hold_info("td-pt_emcee", hold, params, n_burnin)
 
     for step in (step0 + 1):n_steps
@@ -2243,7 +2250,10 @@ function sample_transdim_pt_emcee(
         end
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
-        step == hold.step && release_hold!()
+        any(is_held) && _burnin_hold_due!(hold_med, hold, step, n_burnin,
+                                          view(logL_arr, 1, :),
+                                          n_dim - length(hold.dims)) &&
+            release_hold!()
 
         if step > n_burnin
             @inbounds for w in 1:n_walkers_eff
@@ -2302,6 +2312,7 @@ function sample_transdim_pt_emcee(
                 propose_noise_transdim, planet_birth_proposed, planet_birth_accepted,
                 planet_death_proposed, planet_death_accepted, flip_proposed,
                 flip_accepted, slide_proposed, slide_accepted, pruned, prune_med,
+                hold_on = any(is_held), hold_med = hold_med[],
                 n_evals = n_evals_atomic[],
                 swap_diag = Int[a[] for a in (pswap_prop, pswap_acc, pn_prop, pn_acc,
                                                np_prop, np_acc)],

@@ -529,8 +529,9 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   pt_emcee run drawn from the prior ended there, 470-970 nats below an orbit
   no walker found. So the PT ensemble samplers (`pt_emcee`,
   `transdim_pt_emcee`, `pt_whitening`) hold every `sigma_iad_<name>` at 0 for
-  the first half of burn-in, where the likelihood is the unjittered one, then
-  draw it from its prior walker by walker (`sampler.kwargs.burnin_hold`, below).
+  at least the first half of burn-in, where the likelihood is the unjittered
+  one, until that fit stops climbing, then draw it from its prior walker by
+  walker (`sampler.kwargs.burnin_hold`, below).
   Other samplers do not; start them from the unjittered fit (`init`).
 - **`gost`** — `{ra_deg, dec_deg, from?, to?}` (auto-fetches the Gaia GOST scan
   plan) or `values` (`t`, `psi`, `parallax_factor`). **GOST is an AUXILIARY,
@@ -659,9 +660,14 @@ prior when that degeneracy is present.
   `nested_dynamic` the dynamic-NS estimate, `daedalus` its nested evidence
   (`src/runner.jl:1499-1606`).
 - **`burnin_hold`** (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`) —
-  parameters held at one value, shared by every walker of every rung, for the
-  first `burnin_hold_frac` (default 0.5) of burn-in, then drawn from their
-  priors walker by walker. Absent (or `true`): every IAD jitter
+  parameters held at one value, shared by every walker of every rung, for at
+  least the first `burnin_hold_frac` (default 0.5) of burn-in, then until the
+  β = 1 rung stops climbing (its median log L rising by less than d/2 over 50
+  steps; three quarters of burn-in at the latest), then drawn from their
+  priors walker by walker. Released while the fit without them still climbs,
+  a jitter takes up the misfit: on HD 114762 RV + Hipparcos + DR4 one seed,
+  released at half of burn-in 3300 nats below the top of the held fit, lost
+  the orbit and did not converge. Absent (or `true`): every IAD jitter
   `sigma_iad_<name>` at 0 (see `iad` above), nothing for a model without one,
   so those runs are unchanged. `false` holds nothing; an object
   `{"<param>": value}` holds those instead (not a full-circle angle, nor a

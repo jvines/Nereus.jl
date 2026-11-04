@@ -332,7 +332,7 @@ function default_priors(config::ParamsConfig, data::Data)
     # and on HD 114762 RV + DR4 (1.9 mas reflex) pt_emcee's prior-drawn walkers
     # settled in it, 500-970 nats below the orbit, with a 5x cap as with 10x.
     # What keeps them out is in the samplers, not here: the PT ensembles hold
-    # every `sigma_iad_*` at 0 for the first half of burn-in (`burnin_hold`,
+    # every `sigma_iad_*` at 0 for at least half of burn-in (`burnin_hold`,
     # src/samplers/burnin_hold.jl). Override through `priors` like any other.
     for (m, label) in enumerate(instruments.iad_names)
         isempty(label) && continue
