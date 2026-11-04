@@ -103,6 +103,7 @@ const TEST_UNITS = [
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.
     (name = "test_pt_emcee_stranded.jl", seconds = 98, files = ["test_pt_emcee_stranded.jl"]),
     (name = "test_pt_emcee_resume.jl", seconds = 19, files = ["test_pt_emcee_resume.jl"]),
+    (name = "test_burnin_hold.jl", seconds = 60, files = ["test_burnin_hold.jl"]),
     (name = "test_pt_resume.jl", seconds = 43, files = ["test_pt_resume.jl"]),
     (name = "test_pt_hmc_resume.jl", seconds = 84, files = ["test_pt_hmc_resume.jl"]),
     (name = "test_pt_whitening_resume.jl", seconds = 9, files = ["test_pt_whitening_resume.jl"]),
