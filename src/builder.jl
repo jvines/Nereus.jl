@@ -83,6 +83,10 @@ docstring above for the full block grammar and example.
 - `parametrization` — `:K_driven`, `:M_sec_driven`, or `:a_driven`.
   When `nothing` (default), auto-detected from which params are
   declared.
+- `use_rho_s` — sample the stellar density `rho_s` (solar units) and derive
+  `a/R★` from it and the period, instead of from `M_s`/`R_s`. Needs transit
+  photometry; an `ArgumentError` otherwise. Put a prior on it with
+  `priors = Dict("rho_s" => ...)`, or `external_priors`.
 - `M_s` — primary mass for transit `a/R*` calculations. Defaults to
   `M_pri` if numeric, else `NaN`.
 - `stability` — `:none`, `:amd`, or `:gladman`. Default `:none`.
@@ -115,6 +119,7 @@ function build_target(;
     plx = nothing,
     parametrization::Union{Nothing, Symbol} = nothing,
     time_anchor::Union{Nothing, Symbol} = nothing,
+    use_rho_s::Bool = false,
     M_s::Real = NaN,
     R_s::Real = NaN,
     stability::Symbol = :none,
@@ -152,6 +157,10 @@ function build_target(;
                   "build_target: at least one observation kind required " *
                   "(rv, phot, relAST, hgca, iad, gost, or g23h)"))
           end
+
+    use_rho_s && !has_phot && throw(ArgumentError(
+        "build_target: use_rho_s samples the stellar density through the transit " *
+        "a/R★, so it needs transit photometry (`phot`)"))
 
     mass_kind = parametrization === nothing ?
                 _detect_mass_parametrization(planets;
@@ -295,7 +304,8 @@ function build_target(;
         stability       = stability,
         M_s             = M_s_val,
         R_s             = R_s_val,
-        parametrization = ParametrizationConfig(mass = mass_kind, time = time_kind),
+        parametrization = ParametrizationConfig(mass = mass_kind, time = time_kind,
+                                              use_rho_s = use_rho_s),
         priors          = priors_dict,
         trend_order     = trend_order,
         phot_trend_order = phot_trend_order,
