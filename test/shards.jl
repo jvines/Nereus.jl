@@ -97,6 +97,7 @@ const TEST_UNITS = [
     # Two short fits (run_job, fit_rv); not yet measured on the CI runner.
     (name = "test_derived_stellar.jl", seconds = 60, files = ["test_derived_stellar.jl"]),
     (name = "test_fit_transit_keywords.jl", seconds = 5, files = ["test_fit_transit_keywords.jl"]),
+    (name = "test_fit_joint_rho_s.jl", seconds = 60, files = ["test_fit_joint_rho_s.jl"]),
     # The two full default-settings fits, split so they run in different
     # shards. The trans-dim one is the single heaviest unit of the suite: LPT
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.

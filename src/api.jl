@@ -135,7 +135,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       # _target_from simply did not forward, so it was
                       # reachable from Julia and not from the fit_* API.
                       parametrization = nothing, time_anchor = nothing,
-                      R_s = NaN, phot_trend_order = 0, as_names = String[],
+                      use_rho_s::Bool = false, R_s = NaN, phot_trend_order = 0, as_names = String[],
                       sharing = nothing, transdim_noise = false,
                       ttv_n_transits = nothing, ttv_backend = nothing,
                       # Collects `clip_transit_outliers` reports, when given.
@@ -227,6 +227,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                           :phot_trend_order => phot_trend_order,
                           :as_names => as_names,
                           :iad_names => any(!isempty, iad_names) ? iad_names : String[])
+    use_rho_s && (kw[:use_rho_s] = true)
     parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
     time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
     isnan(R_s) || (kw[:R_s] = R_s)
@@ -549,21 +550,39 @@ end
 
 
 """
-    fit_joint(channels...; planets, engine, stopping, ...)
+    fit_joint(channels...; planets, use_rho_s, engine, stopping, ...)
 
 Fit several techniques simultaneously. One operation for "these together",
 rather than a named function per combination.
+
+`use_rho_s = true` samples the stellar density ρ★ (`rho_s`, in solar units) and
+turns it and the period into the transit's a/R★, as a `run_job` config does with
+`model.parametrization.use_rho_s`. It needs a transit channel (`"source" => "PM"`)
+among `channels` and throws otherwise. The prior on ρ★ is `priors["rho_s"]`
+(default: log-uniform on [0.001, 100]), or an `external_priors` entry on
+`rho_s`:
+
+    fit_joint(rv_channel, phot_channel; use_rho_s = true,
+              priors = Dict("rho_s" => NormalPrior(1.79, 0.11, 0.1, 10.0)),
+              time_anchor = :phic, M_s = 0.767, R_s = 0.754)
 """
-function fit_joint(channels...; planets = 1, engine = nothing, transdim = nothing,
+function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
+                engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                    stopping = nothing, output_dir = nothing, kwargs...)
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
+    use_rho_s && !any(c -> String(get(c, "source", "")) == "PM", channels) &&
+        throw(ArgumentError(
+            "fit_joint: `use_rho_s` samples the stellar density through the " *
+            "transit a/R★, so it needs a transit channel (\"source\" => \"PM\") " *
+            "among the channels"))
     star, kwargs = _split_star_kwargs(kwargs)
     reps = Any[]
-    tgt = _target_from(collect(channels), planets; iad_reports = reps, kwargs...)
+    tgt = _target_from(collect(channels), planets; iad_reports = reps,
+                       use_rho_s, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output,
                    star, iad_outliers = reps)
 end
