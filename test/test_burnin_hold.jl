@@ -182,6 +182,22 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
               logpdf(ps, 0.0) + log(knee)
     end
 
+    @testset "the hold ends once the held fit stops climbing" begin
+        h = Nereus.BurninHold([1], [0.0], 100)
+        @test Nereus._burnin_hold_last(h, 200) == 150             # 3/4 of burn-in
+        @test Nereus._burnin_hold_last(Nereus.BurninHold([1], [0.0], 180), 200) == 180
+        @test Nereus._burnin_hold_last(Nereus.BurninHold(Int[], Float64[], 0), 200) == 0
+        due(med, step, m) = Nereus._burnin_hold_due!(med, h, step, 200, fill(m, 10), 12)
+        med = Ref(NaN)
+        @test !due(med, 50, -1000.0) && med[] == -1000.0   # a pass before h.step: recorded
+        @test !due(med, 51, 0.0) && med[] == -1000.0       # not a pass
+        @test !due(med, 100, -900.0) && med[] == -900.0    # rose 100 nats: still climbing
+        @test due(med, 150, 0.0)                           # the latest step, whatever it does
+        @test due(Ref(-900.0), 100, -895.0)                # rose 5 < d/2 = 6: settled
+        @test !due(Ref(-900.0), 100, -893.0)
+        @test !due(Ref(NaN), 100, -895.0)                  # no record yet
+    end
+
     @testset "pt_emcee: IAD jitter held at 0, then released" begin
         kw = (n_temps = 3, n_walkers = 30, n_burnin = 60, seed = 3,
               show_progress = false, bridge_headline = false)
@@ -221,6 +237,23 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
         # Off: the jitter moves from the start.
         run(20; checkpoint = path, burnin_hold = false)
         @test length(unique(_ckstate(path).state[:, :, j])) > 1
+
+        # A longer burn-in, where the release comes at a 50-step pass once the
+        # β = 1 rung has stopped climbing: here at step 100, the earliest
+        # (`burnin_hold_frac` 0.5 of 200), not at the 3/4 deadline. A run
+        # stopped between passes resumes with the last pass's record.
+        kw2 = (kw..., n_burnin = 200)
+        run2(n; k...) = (tg = _bh_iad_target(); sample_pt_emcee(tg, tg.data; kw2..., n_steps = n, k...))
+        full = run2(260)
+        run2(99; checkpoint = path)
+        ck = open(deserialize, path).state
+        @test ck.hold_on && all(==(log(knee)), ck.state[:, :, j])
+        run2(100; checkpoint = path)
+        ck = open(deserialize, path).state
+        @test !ck.hold_on && length(unique(ck.state[:, :, j])) > 1
+        run2(75; checkpoint = path)
+        run2(125; checkpoint = path, resume = true)
+        @test _cube(run2(260; checkpoint = path, resume = true)) == _cube(full)
     end
 
     @testset "transdim_pt_emcee: a chosen hold, parked like an inactive slot" begin
