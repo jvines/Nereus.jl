@@ -78,6 +78,12 @@ docstring above for the full block grammar and example.
   entries become per-instrument priors with `_NAME` suffix
   (`sigma_HIRES`, `gamma_HIRES`, …). Multi-instrument: just add more
   named entries.
+- `phot` — `NamedTuple` keyed by photometry-instrument name; each value has
+  `:data` (an object with `.t`, `.flux`, `.flux_err`) and optionally
+  `:exposure_time` (seconds, one value or one per cadence: switches on
+  finite-exposure supersampling; absent means an instantaneous model) and
+  `:dilution` / `:jitter` (a prior, or a `Real` for fixed, on
+  `dilution_<name>` / `jitter_<name>`).
 - `relAST`, `hgca`, `iad`, `gost`, `g23h` — astrometry data objects.
 - `plx` — parallax prior. `Real` for fixed, `PriorSpec` for sampled.
 - `parametrization` — `:K_driven`, `:M_sec_driven`, or `:a_driven`.
@@ -207,6 +213,8 @@ function build_target(;
     flux_err  = Float64[]
     phot_inst = Int[]
     phot_names = String[]
+    exp_phot  = Float64[]          # per cadence, DAYS; 0 = instantaneous
+    any_exp   = false
     for (i, (name, spec)) in enumerate(pairs(phot))
         push!(phot_names, String(name))
         spec isa NamedTuple ||
@@ -220,6 +228,21 @@ function build_target(;
         append!(flux_arr,  src.flux)
         append!(flux_err,  src.flux_err)
         append!(phot_inst, fill(i, n_i))
+        # `exposure_time` (seconds, one value or one per cadence) switches on
+        # finite-exposure supersampling for this instrument, as a run_job
+        # photometry block's `exposure_time` does. Absent: instantaneous.
+        if haskey(spec, :exposure_time)
+            ex = spec.exposure_time
+            ex_s = ex isa AbstractVector ? Float64.(collect(ex)) : fill(Float64(ex), n_i)
+            length(ex_s) == n_i || throw(ArgumentError(
+                "phot.$name: exposure_time has $(length(ex_s)) entries for $n_i cadences"))
+            all(x -> isfinite(x) && x > 0, ex_s) || throw(ArgumentError(
+                "phot.$name: exposure_time must be positive and finite (seconds)"))
+            append!(exp_phot, ex_s ./ 86_400.0)
+            any_exp = true
+        else
+            append!(exp_phot, zeros(n_i))
+        end
     end
 
     data = Data(;
@@ -231,6 +254,7 @@ function build_target(;
         flux      = flux_arr,
         flux_err  = flux_err,
         phot_inst = isempty(t_phot) ? nothing : phot_inst,
+        exposure_times = any_exp ? exp_phot : Float64[],
         relastrom = relAST isa AbstractVector ? merge_relast(collect(RelAstromData, relAST)) : relAST,
         hgca      = hgca,
         iad       = iad isa AbstractVector ? merge_iad(collect(IADData, iad)) : iad,
@@ -273,6 +297,16 @@ function build_target(;
     for (name, spec) in pairs(rv)
         for (key, val) in pairs(spec)
             key === :data && continue
+            priors_dict["$(key)_$(name)"] = _to_prior_spec(val)
+        end
+    end
+
+    # Photometry: the same per-instrument spelling as RV. `dilution` and
+    # `jitter` entries are priors on `dilution_<name>` / `jitter_<name>`;
+    # `exposure_time` is data, not a prior, and was handled above.
+    for (name, spec) in pairs(phot)
+        for (key, val) in pairs(spec)
+            key in (:data, :exposure_time) && continue
             priors_dict["$(key)_$(name)"] = _to_prior_spec(val)
         end
     end
