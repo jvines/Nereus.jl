@@ -115,6 +115,21 @@ end
 _burnin_hold_fp(h::BurninHold, params::Params) = h.step == 0 ? (;) :
     (; burnin_hold = (params.layout.unfrozen_names[h.dims], h.values, h.step))
 
+# The held coordinates' share of every walker's log π while they are held, on
+# the scale the walkers live in: each one's prior density at its value, plus
+# the flat-scale Jacobian log(x + s) where `flat_shift` gives an s. The
+# stranded-walker prune takes it out of its bound, which is on the posterior
+# given the held values.
+function _burnin_hold_logπ(h::BurninHold, params::Params; flat_shift = nothing)
+    lp = 0.0
+    for (j, v) in zip(h.dims, h.values)
+        lp += logpdf(params.layout.unfrozen_priors[j], v)
+        s = flat_shift === nothing ? nothing : flat_shift[j]
+        s === nothing || (lp += log(v + s))
+    end
+    return lp
+end
+
 # Draw each held coordinate of `buf` from its prior, in the coordinates the
 # sampler's walkers live in: y = log(x + s) where `flat_shift` gives an s.
 function _burnin_hold_draw!(buf::AbstractVector{Float64}, h::BurninHold,

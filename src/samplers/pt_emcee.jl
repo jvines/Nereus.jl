@@ -357,14 +357,18 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # every walker shares while `burnin_hold` holds them (src/samplers/burnin_hold.jl):
 # they carry no volume, so the bound runs over the other d - h, the climb
 # leaves them where they are, and a walker drawn about the best one keeps the
-# held value.
+# held value. The bound is then on the posterior given the held values, whose
+# prior mass is 1 over the other coordinates, so the held coordinates' own
+# log prior density on this scale (`held_logπ`, the same in every walker's
+# log π) comes out of the best walker's density: left in, a held value where
+# its prior is dense would raise the cut by as much.
 # ------------------------------------------------------------------
 function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64},
                              logL_arr::Matrix{Float64}, βs::Vector{Float64}, rng;
                              tau::Float64 = 10.0, evalf = nothing,
                              circ::AbstractVector{Int} = Int[],
                              med_logL::Union{Nothing,AbstractVector{Float64}} = nothing,
-                             held::AbstractVector{Int} = Int[])
+                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0)
     n_t, n_w, nd = size(state)
     moved = zeros(Int, n_t)
     free = Int[j for j in 1:nd if !(j in held)]
@@ -399,7 +403,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
             # rung that could not prune even then is not worth 2d+ evaluations.
             gate = _pt_half_logdet_cov(state, t, findall(isfinite, ℓ), yb, circ, free)
             gate === nothing && continue
-            cg = best + 0.5 * d * log(2π) + gate - tau
+            cg = (best - held_logπ) + 0.5 * d * log(2π) + gate - tau
             any(w -> β * logL_arr[t, w] < cg, below) || continue
             ℓat = x -> (r = evalf(x); v = r[1] + β * r[2]; isfinite(v) ? v : -Inf)
             h0 = [0.1 * _pt_spread(view(state, t, :, j), yb[j], j in circ) for j in free]
@@ -415,7 +419,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
             end
             lv = sum(log, σ)
         end
-        cut = best + 0.5 * d * log(2π) + lv - tau
+        cut = (best - held_logπ) + 0.5 * d * log(2π) + lv - tau
         S = [w for w in below if !(β * logL_arr[t, w] >= cut)]
         isempty(S) && continue
         if σ === nothing
@@ -821,6 +825,7 @@ function sample_pt_emcee(
     held_x = Tuple{Int,Float64}[(unfrozen_idx[j], v) for (j, v) in zip(hold.dims, hold.values)]
     held_y = Float64[flat_shift[j] === nothing ? v : log(v + flat_shift[j])
                      for (j, v) in zip(hold.dims, hold.values)]
+    held_lp = _burnin_hold_logπ(hold, params; flat_shift)
 
     # Goodman-Weare: each half ≥ n_dim+1 walkers, total even.
     n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
@@ -1357,7 +1362,8 @@ function sample_pt_emcee(
             pruned .+= _pt_prune_stranded!(state, logπ_arr, logL_arr, βs,
                                            rng_master; evalf = prune_eval, circ,
                                            med_logL = prune_med,
-                                           held = isempty(held_x) ? Int[] : hold.dims)
+                                           held = isempty(held_x) ? Int[] : hold.dims,
+                                           held_logπ = isempty(held_x) ? 0.0 : held_lp)
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------

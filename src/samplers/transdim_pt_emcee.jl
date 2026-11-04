@@ -233,7 +233,9 @@ end
 # are drawn about that walker, in its model, rather than copied; and only once
 # the rung has stopped climbing, its median log L risen by less than m/2 since
 # the previous call (`med_logL`, updated in place). Coordinates `held` by
-# `burnin_hold` are left out of the active set: every walker shares them.
+# `burnin_hold` are left out of the active set: every walker shares them, the
+# climb and the draws leave them, and their share of the density (`held_logπ`)
+# comes out of the bound, as in `_pt_prune_stranded!`.
 # ------------------------------------------------------------------
 function _td_prune_stranded!(state::Array{Float64,3},
                              td_states::AbstractMatrix{TransDimState},
@@ -244,7 +246,7 @@ function _td_prune_stranded!(state::Array{Float64,3},
                              tau::Float64 = 10.0, evalf = nothing,
                              circ::AbstractVector{Int} = Int[],
                              med_logL::Union{Nothing,AbstractVector{Float64}} = nothing,
-                             held::AbstractVector{Int} = Int[])
+                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0)
     n_t, n_w, n_dim = size(state)
     moved = zeros(Int, n_t)
     rise = med_logL === nothing ? fill(NaN, n_t) :
@@ -302,7 +304,7 @@ function _td_prune_stranded!(state::Array{Float64,3},
             # A cost gate, not a bound (see `_pt_prune_stranded!`).
             gate = _td_half_logdet_cov(Y(findall(isfinite, ℓ)))
             gate === nothing && continue
-            cg = ℓb + 0.5 * m * log(2π) + gate - tau - n_noise_toggle * log(2)
+            cg = (ℓb - held_logπ) + 0.5 * m * log(2π) + gate - tau - n_noise_toggle * log(2)
             any(w -> β * logL_arr[t, w] < cg, cand) || continue
             jac(yd) = sum((yd[j] for (j, d) in enumerate(dims) if flat_shift[d] !== nothing);
                           init = 0.0)
@@ -325,7 +327,7 @@ function _td_prune_stranded!(state::Array{Float64,3},
             end
             lv = sum(log, σ)
         end
-        cut = ℓb + 0.5 * m * log(2π) + lv - tau - n_noise_toggle * log(2)
+        cut = (ℓb - held_logπ) + 0.5 * m * log(2π) + lv - tau - n_noise_toggle * log(2)
         S = [w for w in cand if !(β * logL_arr[t, w] >= cut)]
         isempty(S) && continue
         donors = σ === nothing ? A[ℓ[A] .>= median(ℓ[A])] : [b]
@@ -738,6 +740,7 @@ function sample_transdim_pt_emcee(
         sampler = "transdim_pt_emcee")
     is_held = falses(n_dim)
     is_held[hold.dims] .= true
+    held_lp = _burnin_hold_logπ(hold, params; flat_shift)
 
     # MoMS proposal strategy — shared across threads. Scales are tuned
     # during burn-in (Robbins-Monro); writes are protected by atomic
@@ -2222,7 +2225,8 @@ function sample_transdim_pt_emcee(
                                            do_noise ? length(noise_toggle_idx) : 0,
                                            rng_master; evalf = prune_eval, circ,
                                            med_logL = prune_med,
-                                           held = any(is_held) ? hold.dims : Int[])
+                                           held = any(is_held) ? hold.dims : Int[],
+                                           held_logπ = any(is_held) ? held_lp : 0.0)
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
