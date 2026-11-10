@@ -417,7 +417,9 @@ end
 # TTVFaster called directly on transits n0 .. n0 + length - 1 of each planet,
 # the planets at their transit times with ϖ = ω - π/2.
 function _nb_direct(fx, st)
-    pl = [Planet_plane_hk(Nereus.msini(1.0, o.K, o.P, o.e) /
+    # The N-body backends take their masses from the closed form
+    # (`_msini_lowmass`, part of the model); `msini` is the exact one now.
+    pl = [Planet_plane_hk(Nereus._msini_lowmass(1.0, o.K, o.P, o.e) /
                               sind(acosd(fx.bs[k] / fx.a_Rs[k])) * Nereus._MJ_PER_MS,
                           o.P, o.Tc, o.e * sin(o.ω), -o.e * cos(o.ω))
           for (k, o) in enumerate(fx.orb)]
