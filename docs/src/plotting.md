@@ -84,7 +84,8 @@ produced.
 
 `output.plot_kwargs` is a single dict shared by *every* plotter, so any
 keyword a plotter accepts is settable there (`bf_cutoff`,
-`subtract_gp`, `n_draws`, `credmass`, `figsize`, `normal_point_gap`, …).
+`subtract_gp`, `n_draws`, `credmass`, `figsize`, `normal_point_gap`,
+`robust_ylim`, …).
 Each plotter receives only the keys it accepts: `n_draws` reaches
 `orbit_skyplane` and is withheld from `iad_residuals`, which does not
 take it. (It used to be splatted whole, and one key a plotter lacked made
@@ -144,7 +145,17 @@ PPC (`ppc.png`/`ppc.json`), detection limits
 
 ## RV channel
 
-### `plot_rv_timeseries(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity, decompose)`
+Every RV figure — time series, components, phase-fold, and the SB2 time
+series and binary fold — frames every point it draws, with its error
+bar, in both the data and the residual panel. A point the model misses
+stretches the axis rather than leaving the frame. `robust_ylim=true`
+(in a config, `"output": {"plot_kwargs": {"robust_ylim": true}}`) zooms
+instead: quantiles of the data on a dense series, every point but
+5-robust-sigma outliers on a sparse one (≤ 50 points), and on a fold
+the model curve and binned points as well; a point outside the zoom
+falls outside the axes.
+
+### `plot_rv_timeseries(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity, decompose, robust_ylim)`
 
 RV observations over time with the best-fit model overlay and a
 data-minus-model residual panel (3:1 data/residual layout).
@@ -178,7 +189,7 @@ to skip saving.
     secondary −K_B, crossing at γ; `models/rv_sb2_binary_fold_K<k>.png`),
     and on a circumprimary planet slot folds only the primary points.
 
-### `plot_rv_components(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity)`
+### `plot_rv_components(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity, robust_ylim)`
 
 **RV component decomposition** time-series (new). Draws the raw
 (γ-subtracted) RV with each Keplerian, the activity model, and their
@@ -200,7 +211,10 @@ subtracted. Points are colour-coded by observation time (`:cool`
 colormap) with a colorbar; matches EMPEROR's `paint_fold_rv`
 (default `n_draws=60000` model/CI draws). `credmass` (default `0.85`)
 sets the credible-band mass; `subtract_gp=true` removes the GP/activity
-contribution; `robust_ylim` clips outliers from the y-range.
+contribution. The y-range holds every point with its error bar, the
+model median and the binned points, never the CI bands;
+`robust_ylim=true` zooms on the signal instead (see the start of this
+section).
 
 For trans-dim chains a requested `planet > modal_np` is **not** in the
 winning model, so it's skipped with a warning.

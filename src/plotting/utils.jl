@@ -149,13 +149,50 @@ function _fold_inliers(res::AbstractVector{<:Real}; k::Real = 5)
 end
 
 """
+    _frame_all_ylims!(ax, ax_r, vals, residuals, errs;
+                        extra=Float64[], pad_frac=0.10, resid_pad=1.15)
+
+Y-limits for an RV data panel (`ax`) and its residual panel (`ax_r`) that
+contain every plotted point with its error bar. This is how the RV figures
+frame by default: an RV point is a measurement, and the one a model misses
+is the one the figure has to show. The robust zoom (`robust_ylim = true`,
+[`_tight_ylims_rv!`](@ref)) put a lone periastron point that a joint
+RV+astrometry fit did not reach outside both panels of the fold.
+
+`vals`, `residuals` and `errs` hold one entry per plotted point. `extra`
+holds further values the data panel must contain (a fold's model curve and
+binned points). The residual panel is symmetric about zero.
+"""
+function _frame_all_ylims!(ax, ax_r,
+                             vals::AbstractVector{<:Real},
+                             residuals::AbstractVector{<:Real},
+                             errs::AbstractVector{<:Real};
+                             extra::AbstractVector{<:Real} = Float64[],
+                             pad_frac::Float64 = 0.10,
+                             resid_pad::Float64 = 1.15)
+    e  = [isfinite(x) ? abs(Float64(x)) : 0.0 for x in errs]
+    lo = filter(isfinite, vcat(vals .- e, extra))
+    hi = filter(isfinite, vcat(vals .+ e, extra))
+    if !isempty(lo) && !isempty(hi)
+        vlo, vhi = minimum(lo), maximum(hi)
+        vhi > vlo && ylims!(ax, vlo - pad_frac * (vhi - vlo),
+                                vhi + pad_frac * (vhi - vlo))
+    end
+    r = filter(isfinite, abs.(residuals) .+ e)
+    rmax = isempty(r) ? 0.0 : maximum(r)
+    rmax > 0 && ylims!(ax_r, -resid_pad * rmax, resid_pad * rmax)
+    return nothing
+end
+
+"""
     _tight_ylims_rv!(ax, ax_r, vals, residuals;
                        pad_frac=0.10, resid_pad_frac=0.30,
                        sparse_n=50, sparse_pad=0.15, sparse_resid_pad=1.4)
 
 Y-limits for an RV data panel (`ax`) and its aligned residual panel
-(`ax_r`). `vals` and `residuals` must be in the same per-point order (one
-entry per plotted point).
+(`ax_r`), with `robust_ylim = true`; the default frames every point
+([`_frame_all_ylims!`](@ref)). `vals` and `residuals` must be in the same
+per-point order (one entry per plotted point).
 
 A sparse series (`length(vals) <= sparse_n`, the same point count below
 which [`plot_rv_phasefold`](@ref) draws no binned overlay) has no overlay
