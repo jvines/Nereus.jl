@@ -994,6 +994,33 @@ the fit.
 n_gost(d::GOSTData) = length(d.t)
 
 """
+    GAIA_DR2_WINDOW, GAIA_DR3_WINDOW
+
+The spans of Gaia observations each release's astrometry was fitted to, as
+`(start, end)` in MJD: DR2 2014-07-25 10:30 to 2016-05-23 11:35 UTC
+(Lindegren et al. 2018), EDR3/DR3 2014-07-25 10:30 to 2017-05-28 08:44 UTC
+(Lindegren et al. 2021). A GOST scan plan covers the whole mission, so a
+release's five-parameter solution is reproduced from the transits inside its
+window only (`_gost_window`).
+"""
+const GAIA_DR2_WINDOW = (56863.4375, 57531.4826)
+const GAIA_DR3_WINDOW = (56863.4375, 57901.3639)
+
+"""
+    _gost_window(gost, (t0, t1)) -> GOSTData or nothing
+
+The transits of `gost` with `t0 ≤ t ≤ t1`, or `nothing` when fewer than five
+fall inside: a five-parameter fit needs five, and `gost_5param_fit` returns
+zeros below that, which would read as a real projection.
+"""
+function _gost_window(gost::GOSTData, win::Tuple{Real, Real})
+    keep = (gost.t .>= win[1]) .& (gost.t .<= win[2])
+    count(keep) >= 5 || return nothing
+    return GOSTData(gost.t[keep], gost.psi[keep], gost.parallax_factor[keep],
+                    gost.along_scan_pos[keep])
+end
+
+"""
     G23HData
 
 Thompson+ 2026 G23H ("Gaia DR2/DR3 + Hipparcos") joint catalog row,
