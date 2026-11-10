@@ -150,3 +150,75 @@ end
         @test haskey(e, "alpha_star_uas_k1")
     end
 end
+
+# No m << M approximation in the derived masses and semi-major axes.
+@testset "derived masses and a use the exact mass function" begin
+    MS_MJ = Nereus.M_SUN_G / Nereus.M_JUP_G
+    # K that a companion of mass m (M_sun) at sin i = 1 induces on a star M
+    K_of(m, M, P, e) = cbrt(m^3 / (M + m)^2 /
+                            (Nereus._F_M_FACTOR * P * (1 - e^2)^1.5))
+
+    @testset "brown dwarf about an M dwarf: the closed form is ~9% off" begin
+        M, m, P, e = 0.5, 0.08, 400.0, 0.2
+        K = K_of(m, M, P, e)
+        @test msini(M, K, P, e) / MS_MJ ≈ m rtol = 1e-10
+        @test abs(Nereus._msini_lowmass(M, K, P, e) / MS_MJ - m) / m > 0.09
+        # at an inclination the true mass is the same inversion at sin i
+        inc = 40.0
+        @test planet_mass(M, K, P, e, 90.0) ≈ msini(M, K, P, e) rtol = 1e-12
+        @test planet_mass(M, K, P, e, inc) > msini(M, K, P, e)
+        # a: total mass in Kepler III
+        @test semimajor_axis_au(P, M, m) ≈ semimajor_axis_au(P, M) * cbrt((M + m) / M) rtol = 1e-12
+    end
+
+    @testset "a Jupiter about a Sun-like star moves by < 0.1%" begin
+        M, m, P, e = 1.0, 9.5e-4, 4332.0, 0.05
+        K = K_of(m, M, P, e)
+        @test msini(M, K, P, e) / MS_MJ ≈ m rtol = 1e-10
+        @test abs(msini(M, K, P, e) / Nereus._msini_lowmass(M, K, P, e) - 1) < 1e-3
+        @test abs(semimajor_axis_au(P, M, m) / semimajor_axis_au(P, M) - 1) < 1e-3
+    end
+
+    @testset "round trip K -> msini -> K through the model's planet_K" begin
+        params = _da_setup(:M_sec_driven; planet_modes = [RV_ONLY])
+        th = Theta{Float64}(params)
+        for (nm, v) in ("n_p" => 1.0, "P_k1" => 400.0, "M_sec_k1" => 0.08,
+                        "sesinw_k1" => 0.3, "secosw_k1" => 0.2, "Mo_k1" => 1.0)
+            set_param!(th, nm, v)
+        end
+        e = sum(abs2, (0.3, 0.2))
+        K = planet_K(th, 1)
+        M = Nereus.astrom_M_pri(th)
+        @test msini(M, K, 400.0, e) / MS_MJ ≈ 0.08 rtol = 1e-10
+        @test K_of(msini(M, K, 400.0, e) / MS_MJ, M, 400.0, e) ≈ K rtol = 1e-10
+    end
+
+    @testset "compute_derived: RV-only K_driven table" begin
+        params = _da_setup(:K_driven; planet_modes = [RV_ONLY])
+        chains = _da_chains(params, 6, (x, i) -> x == "P_k1" ? 300.0 + 40i :
+                            x == "K_k1" ? 3000.0 + 100i : _da_gen(:K_driven)(x, i))
+        ms = 0.5
+        d = only(compute_derived(chains, params; M_s = ms)).values
+        for i in 1:6
+            P = Nereus._draws(chains, :P_k1)[i]; K = Nereus._draws(chains, :K_k1)[i]
+            e = 0.1^2 + 0.2^2
+            m = msec_from_K(K, P, e, 1.0, ms)
+            @test d["msini_jup"][i] ≈ m * MS_MJ rtol = 1e-12
+            @test d["a_au"][i] ≈ semimajor_axis_au(P, ms, m) rtol = 1e-12
+            @test d["a_au"][i] > semimajor_axis_au(P, ms)
+        end
+    end
+
+    @testset "compute_derived: astrometric K_driven uses the model's mass and a" begin
+        params = _da_setup(:K_driven)
+        chains = _da_chains(params, 6, _da_gen(:K_driven))
+        d = only(compute_derived(chains, params; M_s = 1.0)).values
+        for i in 1:6
+            th = _da_theta(params, chains, i)
+            @test d["mass_jup"][i] ≈ planet_M_sec(th, 1) * MS_MJ rtol = 1e-12
+            @test d["a_au"][i] ≈ planet_a(th, 1) rtol = 1e-12
+            @test d["a_au"][i] * astrom_plx(th) ≈ d["a_mas"][i] rtol = 1e-12
+            @test d["msini_jup"][i] <= d["mass_jup"][i] * (1 + 1e-9)
+        end
+    end
+end
