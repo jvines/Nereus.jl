@@ -268,6 +268,32 @@ Accessors `planet_P`, `planet_K`, `planet_M_sec`, `planet_a` decode
 all three modes and derive missing quantities on the fly. All are
 ForwardDiff-clean.
 
+What is not sampled is still reported, in the **derived** table (never in the
+fitted one, so `K_k1` of the two tables cannot be confused):
+
+| derived key | unit | reported when |
+|---|---|---|
+| `P_days` (and `P_yr` in the science table) | d (yr) | `P` is not a slot: `:a_driven` |
+| `K` | m/s | `K` is not a slot and the planet has RV: `:M_sec_driven`, `:a_driven` |
+| `a_mas` | mas | the planet carries astrometry (`RVAS`, `RVPMAS`): `a·ϖ`, the relative orbit as an angle |
+| `alpha_star_uas` | μas | same: `a·ϖ·M_sec/(M_pri+M_sec)`, the host's reflex orbit (astrometric signature) |
+
+Each is evaluated per draw with `planet_P` / `planet_K` / `planet_a` /
+`planet_M_sec` / `astrom_M_pri` / `astrom_plx`, so all three modes agree with
+the likelihood; under `:K_driven` the companion mass behind `alpha_star_uas`
+comes from the mass function with the sampled inclination.
+
+None of the derived masses or separations uses the `M_p << M_★` approximation:
+
+| derived key | how it is computed |
+|---|---|
+| `msini_*` | companion mass at i = 90° from the exact mass function `(M_p sin i)³/(M_★+M_p)² = f(K,P,e)`, solved with `msec_from_K` and the table's per-draw M_★ |
+| `mass_*` | the same inversion at the draw's `sin i` (transit planets); for astrometric planets with a sampled K, the model's own `planet_M_sec` per draw |
+| `a_au` | Kepler III with the total mass `M_★ + M_p` (M_p the true mass, or the exact minimum mass when no inclination exists); for astrometric planets the model's `planet_a`, so `a_au·ϖ = a_mas`; where a/R★ comes from the transit model, `a_au = (a/R★)·R★` |
+
+A brown dwarf (0.08 M_⊙ about 0.5 M_⊙) was 9 % off in `msini` with the closed
+form; a Jupiter about a Sun-like star moves by 0.07 %.
+
 ### `obs_prior::Bool` — O'Neil 2019 observation-based prior
 
 When `true`, applies the O'Neil 2019 (AJ 158, 4) observation-based

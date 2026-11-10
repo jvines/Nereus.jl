@@ -26,19 +26,39 @@ const _SB  = SIGMA_SB_CGS   # erg cm⁻² s⁻¹ K⁻⁴
 """
     msini(M_s, K, P, e) -> M_p sin(i) [M_Jup]
 
-Minimum mass from RV semi-amplitude. M_s in solar masses, K in m/s,
-P in days.
+Minimum companion mass (i = 90°) from the RV semi-amplitude, from the EXACT
+mass function
+
+    (M_p sin i)^3 / (M_s + M_p)^2 = f(K, P, e)
+
+solved for M_p through [`msec_from_K`](@ref), the same inversion the model uses
+for `planet_M_sec`. There is no `M_p << M_s` approximation: for a brown dwarf
+(0.08 M_sun about 0.5 M_sun) the old closed form was 14 % off. M_s in solar
+masses, K in m/s, P in days. NaN on unphysical input (inactive trans-dim slots).
 """
 function msini(M_s::Real, K::Real, P::Real, e::Real)
     # NaN (not throw) on unphysical inputs: trans-dim chains carry garbage
     # draws in INACTIVE planet slots (P<0 etc.), and compute_derived
-    # broadcasts over the full chain — a negative P here turned into a
-    # DomainError from (P_s/2piG)^(1/3) and killed the whole summary.
+    # broadcasts over the full chain.
+    (e < 0 || e >= 1 || !(P > 0) || !(M_s > 0)) && return NaN
+    return _msec_min(M_s, K, P, e) * (_MS / _MJ)
+end
+
+# Exact minimum companion mass in M_sun (i = 90 deg); NaN on unphysical input.
+@inline function _msec_min(M_s::Real, K::Real, P::Real, e::Real)
+    (e < 0 || e >= 1 || !(P > 0) || !(M_s > 0)) && return NaN
+    return msec_from_K(K, P, e, 1.0, M_s)
+end
+
+# The closed form with M_p << M_s: K√(1-e²)(P/2πG)^(1/3) M_s^(2/3). It is NOT
+# used by the derived table. It stays for code that is part of a MODEL (the
+# stability filter and the TTV N-body masses), where switching to the exact
+# mass would change what is sampled, not just what is reported.
+function _msini_lowmass(M_s::Real, K::Real, P::Real, e::Real)
     (e < 0 || e >= 1 || !(P > 0) || !(M_s > 0)) && return NaN
     P_s = P * _DS
     M_s_g = M_s * _MS
     ee = sqrt(1 - e^2)
-    # M_p sin(i) = K * sqrt(1-e²) * (P/(2πG))^(1/3) * M_s^(2/3)
     mp_sini = K * 100 * ee * (P_s / (2π * G_CGS))^(1/3) * M_s_g^(2/3)
     return mp_sini / _MJ
 end
@@ -46,10 +66,13 @@ end
 """
     planet_mass(M_s, K, P, e, inc_deg) -> M_p [M_Jup]
 
-True mass from RV + inclination. inc_deg in degrees.
+True mass from RV + inclination (degrees): the exact mass function solved at
+`sin i` with [`msec_from_K`](@ref), so `planet_mass(...) ≥ msini(...)` and the
+two agree with the model's `planet_M_sec`. No `M_p << M_s` approximation.
 """
 function planet_mass(M_s::Real, K::Real, P::Real, e::Real, inc_deg::Real)
-    return msini(M_s, K, P, e) / sind(inc_deg)
+    (e < 0 || e >= 1 || !(P > 0) || !(M_s > 0)) && return NaN
+    return msec_from_K(K, P, e, sind(inc_deg), M_s) * (_MS / _MJ)
 end
 
 """
@@ -88,16 +111,20 @@ Orbital inclination from impact parameter and a/R*.
 inclination_deg(b::Real, a_Rs::Real) = acosd(b / a_Rs)
 
 """
-    semimajor_axis_au(P, M_s) -> a [AU]
+    semimajor_axis_au(P, M_s, M_p = 0) -> a [AU]
 
-Semi-major axis from Kepler's third law. P in days, M_s in solar masses.
+Semi-major axis of the relative orbit from Kepler's third law with the TOTAL
+mass, `a³ = G (M_s + M_p) P² / 4π²`. P in days, M_s and M_p in solar masses.
+`M_p` defaults to 0, the test-particle limit; the derived table always passes
+the companion mass (the true mass where an inclination exists, else the exact
+minimum mass), so it carries no `M_p << M_s` approximation.
 """
-function semimajor_axis_au(P::Real, M_s::Real)
+function semimajor_axis_au(P::Real, M_s::Real, M_p::Real = 0.0)
     # Same inactive-slot guard as msini — cbrt would silently return a
     # negative semi-major axis instead of throwing.
-    (!(P > 0) || !(M_s > 0)) && return NaN
+    (!(P > 0) || !(M_s > 0) || isnan(M_p)) && return NaN
     P_s = P * _DS
-    a_cm = cbrt(GM_SUN_CGS * M_s * P_s^2 / (4π^2))
+    a_cm = cbrt(GM_SUN_CGS * (M_s + M_p) * P_s^2 / (4π^2))
     return a_cm / AU_CM
 end
 
@@ -378,7 +405,7 @@ function check_stability(Ps, Ks, es, M_s::Real, mode::Symbol)
     # Sort by period
     order = sortperm(Ps)
     periods_sorted = Ps[order]
-    masses_sorted  = [msini(M_s, Ks[i], Ps[i], es[i]) for i in order]
+    masses_sorted  = [_msini_lowmass(M_s, Ks[i], Ps[i], es[i]) for i in order]
     ecc_sorted     = es[order]
     sma_sorted     = [semimajor_axis_au(periods_sorted[k], M_s) for k in 1:n]
 
@@ -428,7 +455,7 @@ function check_stability(Ps, Ks, es, M_s::Real, mode::Symbol,
     # Fill masses and sma using sorted order
     @inbounds for k in 1:n
         i = order_buf[k]
-        masses_buf[k] = msini(M_s, Ks[i], Ps[i], es[i])
+        masses_buf[k] = _msini_lowmass(M_s, Ks[i], Ps[i], es[i])
         sma_buf[k] = semimajor_axis_au(Ps[i], M_s)
     end
 
@@ -479,12 +506,93 @@ _contiguous_deg(x_rad, active, lo_ref = -180.0) =
     circular_contiguous(rad2deg.(x_rad); period = 360.0, lo_ref = lo_ref,
                         mask = active)
 
+# Per-draw evaluation of the model's own accessors on a chain.
+#
+# Quantities that are not chain columns under some parametrizations (K under
+# :a_driven / :M_sec_driven, the companion mass under :K_driven) are read off
+# the same `planet_*` accessors the likelihood uses, so every parametrization
+# is consistent with the fit. ONE `Theta{Float64}` is reused for the whole walk:
+# fixed parameters already sit at their fixed values in a fresh Theta, and only
+# the unfrozen slots the accessors read are overwritten per draw (planet k's
+# own `*_k<k>` names, plus M_pri and plx). A draw that throws, or whose value
+# is not finite, comes back NaN (an inactive trans-dim slot holds junk).
+# `f(theta)` must return an `NTuple{N, Float64}`; nothing is allocated per draw.
+function _per_draw(f::F, chains, params::Params, k::Int, ::Val{N}) where {F, N}
+    layout = params.layout
+    chain_syms = Set(names(chains, :parameters))
+    suffix = "_k$k"
+    slots = Int[]
+    cols = Vector{Vector{Float64}}()
+    for nm in layout.unfrozen_names
+        (endswith(nm, suffix) || nm == "M_pri" || nm == "plx") || continue
+        Symbol(nm) in chain_syms || continue
+        push!(slots, layout.name_to_idx[nm])
+        push!(cols, _draws(chains, Symbol(nm)))
+    end
+    n = size(chains, 1) * size(chains, 3)
+    out = ntuple(_ -> Vector{Float64}(undef, n), Val(N))
+    nan = ntuple(_ -> NaN, Val(N))
+    theta = Theta{Float64}(params)
+    vals = theta.values
+    @inbounds for i in 1:n
+        for j in eachindex(slots)
+            vals[slots[j]] = cols[j][i]
+        end
+        r = try
+            f(theta)
+        catch
+            nan
+        end
+        for m in 1:N
+            v = r[m]
+            out[m][i] = isfinite(v) ? v : NaN
+        end
+    end
+    return out
+end
+
+# (K [m/s], a_mas, alpha_star_uas, a [AU], M_sec [M_sun]) of planet k for one
+# draw. The caller asks only for what applies to the block; the rest is NaN, so
+# the closure stays type-stable.
+function _k_and_angular(want_K::Bool, want_ang::Bool, k::Int)
+    return function (theta)
+        K = want_K ? Float64(planet_K(theta, k)) : NaN
+        if want_ang
+            a = planet_a(theta, k)
+            ms = planet_M_sec(theta, k)
+            mp = astrom_M_pri(theta)
+            plx = astrom_plx(theta)
+            a_mas = a * plx
+            alpha = a * ms / (mp + ms) * plx * 1000
+            return (K, Float64(a_mas), Float64(alpha), Float64(a), Float64(ms))
+        end
+        return (K, NaN, NaN, NaN, NaN)
+    end
+end
+
 """
     compute_derived(chains, params; M_s=nothing, R_s=nothing,
                      T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0)
 
 Compute all derived parameters from posterior chains.
 Returns a vector of `DerivedParams`, one per planet.
+
+Beyond the physical quantities (`ecc`, `omega_deg`, `a_au`, `msini_*`, `mass_*`,
+radii, temperatures, transit observables) a planet reports:
+
+- `P_days` when its period is not sampled (`:a_driven`, where it follows from
+  Kepler's third law with the per-draw masses). A sampled `P_kN` is a fitted
+  parameter and is not repeated.
+- `K` (m/s) when the RV semi-amplitude is derived from the mass
+  (`:a_driven`, `:M_sec_driven`), through `planet_K`. Under `:K_driven` it is the
+  fitted `K_kN` and is not added. It lives in the derived table only, so the
+  `K_kN` label of the derived and the fitted tables never meet.
+- `a_mas` (mas) and `alpha_star_uas` (μas) for planets whose block carries
+  absolute astrometry: the relative orbit's semi-major axis as an angle,
+  `a·ϖ`, and the host's reflex orbit, `a·ϖ·M_sec/(M_pri+M_sec)`, the
+  astrometric signature. Evaluated per draw with `planet_a`, `planet_M_sec`
+  (which inverts the mass function under `:K_driven`), `astrom_M_pri` and
+  `astrom_plx`, so all parametrizations agree with the likelihood.
 
 Stellar parameters (M_s, R_s, T_eff) can be scalars or distributions
 (vectors of samples matching the chain length).
@@ -613,6 +721,8 @@ function compute_derived(chains, params::Params;
             mpri_s = :M_pri in chain_syms ? _draws(chains, :M_pri) :
                      fill(isnan(config.M_s) ? 1.0 : Float64(config.M_s), length(a_au_s))
             P = sqrt.(a_au_s .^ 3 ./ max.(mpri_s .+ msec_s, 1e-6)) .* KEPLER_YEAR_DAYS
+            # P is derived here, never sampled: report it (days).
+            derived["P_days"] = P
         end
 
         # Draws where planet k exists. Only these vote on where the seam of a
@@ -680,6 +790,28 @@ function compute_derived(chains, params::Params;
             K = _draws(chains, Symbol("K_k$k"))
         end
 
+        # K and the angular size of the orbit, per draw from the model's own
+        # accessors. K is reported only when it is derived (not :K_driven, where
+        # K_k is the fitted column and the key would only repeat it); the
+        # angular quantities need a block that carries astrometry.
+        a_model = msec_model = nothing
+        want_K = has_K(block) && parametrization.mass !== :K_driven
+        want_ang = has_AS(block)
+        if want_K || want_ang
+            Kd, a_mas, alpha_uas, a_model, msec_model =
+                _per_draw(_k_and_angular(want_K, want_ang, k), chains, params, k, Val(5))
+            want_K && (derived["K"] = Kd)
+            if want_ang
+                derived["a_mas"] = a_mas
+                derived["alpha_star_uas"] = alpha_uas
+            end
+        end
+
+        # Exact minimum companion mass (M_sun), i = 90 deg, from the exact mass
+        # function with this table's per-draw stellar mass (no M_p << M_s).
+        msec_min = (has_rv && ms !== nothing) ?
+                   _msec_min.(ms, K, P, e) : nothing
+
         # a/R* and a(AU)
         has_rho = haskey(params.layout.name_to_idx, "rho_s")
         if haskey(params.layout.name_to_idx, "a_Rs_k$k")
@@ -699,11 +831,14 @@ function compute_derived(chains, params::Params;
             end
         elseif Symbol("a_k$k") in chain_syms
             # :a_driven (orvara-style) — the semi-major axis is sampled directly
-            # in AU; use it rather than recomputing from P (which uses M_s, not
-            # the total mass, and would be biased by the mass ratio).
+            # in AU (the relative orbit, total mass already in Kepler III).
             derived["a_au"] = _draws(chains, Symbol("a_k$k"))
         elseif ms !== nothing
-            a_au = semimajor_axis_au.(P, ms)
+            # Kepler III with the total mass: the exact minimum companion mass
+            # when K is known (no inclination in this branch: it comes from
+            # a/R*), else the test-particle limit.
+            a_au = msec_min === nothing ? semimajor_axis_au.(P, ms) :
+                                          semimajor_axis_au.(P, ms, msec_min)
             derived["a_au"] = a_au
             # When `use_rho_s=false`, compute a/R* from a_au and R_s so
             # downstream derived quantities (Teq, S_earth, TSM, ESM)
@@ -713,6 +848,10 @@ function compute_derived(chains, params::Params;
                 derived["a_Rs"] = a_Rs_samples
             end
         end
+
+        # An astrometric planet's a_au is the model's own `planet_a` (total mass,
+        # per draw), so a_au * plx == a_mas exactly.
+        want_ang && (derived["a_au"] = a_model)
 
         # Inclination (transit planets)
         has_geom = has_geometry(block)
@@ -737,7 +876,7 @@ function compute_derived(chains, params::Params;
 
         # Msini (RV planets + stellar mass)
         if has_rv && ms !== nothing
-            msi = msini.(ms, K, P, e)
+            msi = msec_min .* (_MS / _MJ)         # exact mass function
             derived["msini_jup"] = msi
             derived["msini_earth"] = msi .* (_MJ / _ME)
         end
@@ -745,6 +884,14 @@ function compute_derived(chains, params::Params;
         # True mass (RV + transit + stellar mass + inclination)
         if has_rv && has_geom && ms !== nothing && haskey(derived, "inc_deg")
             m_jup = planet_mass.(ms, K, P, e, derived["inc_deg"])
+            derived["mass_jup"] = m_jup
+            derived["mass_earth"] = m_jup .* (_MJ / _ME)
+        end
+        # Astrometric planets with a sampled K (:K_driven): the true mass is the
+        # model's own `planet_M_sec` (mass function inverted at the sampled
+        # inclination), per draw, so it is the likelihood's mass.
+        if has_rv && want_ang
+            m_jup = msec_model .* (_MS / _MJ)
             derived["mass_jup"] = m_jup
             derived["mass_earth"] = m_jup .* (_MJ / _ME)
         end

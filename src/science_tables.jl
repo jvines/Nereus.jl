@@ -269,6 +269,9 @@ const _DERIVED_UNITS = Dict{String, String}(
     "density_gcc" => "g/cm3","Teq" => "K",
     "S_Wm2" => "W/m2",      "S_earth" => "S_earth",
     "TSM" => "",            "ESM" => "",          "P_yr" => "yr",
+    # period when not sampled (:a_driven), derived K, orbit as an angle on the sky
+    "P_days" => "d",        "K" => "m/s",
+    "a_mas" => "mas",       "alpha_star_uas" => "μas",
     # transit-geometry observables (see compute_derived)
     "T14" => "hr",          "T23" => "hr",
     "depth_ppm" => "ppm",   "rho_star_transit" => "g/cm3",
@@ -344,7 +347,11 @@ function science_derived(chains, params::Params;
             # add P in years alongside the compute_derived outputs
             vals = copy(dp.values)
             Psym = Symbol("P_k$k")
-            Psym in allnames && (vals["P_yr"] = _draws(chains, Psym) ./ 365.25)
+            if Psym in allnames
+                vals["P_yr"] = _draws(chains, Psym) ./ 365.25
+            elseif haskey(vals, "P_days")
+                vals["P_yr"] = vals["P_days"] ./ 365.25   # P derived (:a_driven)
+            end
             for (key, samp) in vals
                 s = mask === nothing ? copy(samp) : samp[mask]
                 (isempty(s) || any(!isfinite, extrema(s))) && continue
@@ -471,7 +478,8 @@ function _texsym(name::AbstractString)
                    "K_A"=>"K_{\\rm A}", "K_B"=>"K_{\\rm B}",
                    "rr"=>"R_p/R_\\star", "radius_jup"=>"R_p", "radius_earth"=>"R_p",
                    "density_gcc"=>"\\rho_p", "Teq"=>"T_{\\rm eq}",
-                   "S_earth"=>"S", "S_Wm2"=>"S", "P_yr"=>"P")
+                   "S_earth"=>"S", "S_Wm2"=>"S", "P_yr"=>"P", "P_days"=>"P",
+                   "a_mas"=>"a", "alpha_star_uas"=>"\\alpha_\\star")
         # brace the base so symbols carrying their own subscript (a/R_\star, …)
         # don't make an invalid double subscript when we append _{k}.
         return haskey(sym, base) ? "\${$(sym[base])}_{$k}\$" : _texlabel(s)
@@ -491,7 +499,7 @@ const _TEX_UNIT = Dict(
     "R_jup"=>"\$R_{\\rm Jup}\$", "R_earth"=>"\$R_\\oplus\$", "S_earth"=>"\$S_\\oplus\$",
     "W/m2"=>"W\\,m\$^{-2}\$", "g/cm3"=>"g\\,cm\$^{-3}\$", "deg"=>"deg",
     "rho_sun"=>"\$\\rho_\\odot\$", "M_sun"=>"\$M_\\odot\$",
-    "AU"=>"AU", "d"=>"d", "yr"=>"yr", "K"=>"K", "BJD"=>"BJD", "mas"=>"mas", ""=>"")
+    "AU"=>"AU", "d"=>"d", "yr"=>"yr", "K"=>"K", "BJD"=>"BJD", "mas"=>"mas", "μas"=>"\$\\mu\$as", ""=>"")
 _texunit(u) = get(_TEX_UNIT, String(u), _texesc(u))
 
 function _write_csv(path, entries; delim=",")

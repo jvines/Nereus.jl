@@ -759,6 +759,8 @@ numbers live under `fitted` / `derived`
     "conditioning": { "n_planets": 1, "planet_slots": [1], "stellar": { /*…*/ } },
     "parameters": {
       "msini_earth_k1": { /*…*/ }, "a_au_k1": { /*…*/ }, "Teq_k1": { /*…*/ },
+      // not-sampled quantities: P_days_k1 / P_yr_k1 (:a_driven), K_k1 (m/s; :a_driven and
+      // :M_sec_driven), and for astrometric planets a_mas_k1 (mas) and alpha_star_uas_k1 (μas)
       "density_gcc_k1": { /*…*/ }, "TSM_k1": { /*…*/ }, "ESM_k1": { /*…*/ }
     }
   },
