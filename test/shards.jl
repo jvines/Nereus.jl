@@ -198,6 +198,10 @@ const TEST_UNITS = [
     (name = "test_science_table_labels.jl", seconds = 15, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 1, files = ["test_plot_patterns.jl"]),
     (name = "test_ladder_history.jl", seconds = 80, files = ["test_ladder_history.jl"]),
+    # Stopping a PT run early without losing its draws: interrupt, stop file,
+    # limits, the trans-dim convergence gate, Stopping. Measured locally (arm64,
+    # 4 threads), not yet on the CI runner.
+    (name = "test_graceful_stop.jl", seconds = 135, files = ["test_graceful_stop.jl"]),
     (name = "test_thread_slots.jl", seconds = 176, files = ["test_thread_slots.jl"]),
 ]
 
