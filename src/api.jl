@@ -1027,15 +1027,8 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                  save_pdf::Bool = false, star = Dict{Symbol,Any}(),
                  iad_outliers = nothing, gaia = nothing)
     t0 = time()
-    # `Stopping` is exported, documented, and plumbed all the way through the
-    # Python client -- and NOTHING in the package consumes it. Not _finish, not
-    # run_engine, not run_job. `Stopping(max_seconds=3600)` produced an
-    # unbounded run, silently. Until it is implemented, say so: run_engine
-    # already throws on an unknown engine option because "a typo'd `n_round`
-    # that quietly does nothing is how you lose a day", and this is that same
-    # failure one level up. The convergence half IS reachable today under
-    # engine-specific names, so point at them.
-    # Folded into the engine's options below, once the engine is known.
+    # `Stopping` and `stop_file` are folded into the engine's own options below,
+    # once the engine is known; a field the engine cannot honour throws.
     # The star as a job's star block holds it: M★ and R★ from the target, the
     # rest (T_eff, magnitudes, albedo, σ's) from the entry point's keywords.
     # Built before the engine runs, so a bad σ fails here and not after it.
