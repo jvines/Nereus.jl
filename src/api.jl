@@ -92,20 +92,35 @@ const SYMBOL_OPTIONS = Set{Symbol}([
 
 """
     Stopping(; max_seconds=nothing, max_evals=nothing, ess_min=nothing,
-               rhat_max=nothing, logz_tol=nothing, check_every=500)
+               rhat_max=nothing, logz_tol=nothing, check_every=nothing)
 
-Engine-independent stopping rules, checked every `check_every` iterations.
+Engine-independent stopping rules, handed to the `fit_*` functions as
+`stopping=`. Every field defaults to `nothing`, meaning "do not stop on this
+criterion"; the run then ends on the sampler's own step count. Each field is
+translated into the engine's own option, so the same budget reads the same
+across engines, and a field an engine cannot honour is an `ArgumentError` that
+names the engines that can, never a silent no-op. Giving a field AND the engine
+option it maps to is an error unless they agree.
 
-Every field defaults to `nothing`, meaning "do not stop on this criterion";
-the run then ends on the sampler's own step count. Set any combination:
+| field         | engine option                          | engines                                   |
+|---------------|----------------------------------------|-------------------------------------------|
+| `max_seconds` | `max_seconds`                          | `pt_emcee`, `transdim_pt_emcee`           |
+| `max_evals`   | `max_evals`                            | `pt_emcee`, `transdim_pt_emcee`           |
+| `rhat_max`    | `rhat_threshold` (+ `convergence_stop`) | `pt_emcee`, `transdim_pt_emcee`          |
+| `ess_min`     | `tail_ess_threshold` (+ `convergence_stop`) | `pt_emcee`, `transdim_pt_emcee`      |
+| `check_every` | `diag_every` (steps between diagnostics) | `pt_emcee`, `transdim_pt_emcee`         |
+| `logz_tol`    | `dlogz` (`dlogz_batch` for `nested_dynamic`) | `nested`, `nested_ins`, `daedalus`, `nested_dynamic` |
 
-  - `max_seconds`, `max_evals` — budget caps, honoured by every engine.
-  - `ess_min`, `rhat_max` — convergence gates on the WORST science
-    parameter, so a poorly-constrained nuisance cannot stall the run.
-  - `logz_tol` — for the nested engines, the remaining-evidence tolerance.
+The PT ensembles end production at the last recorded step and finish normally;
+the result and `summary.json` say how (`"stopped"`: `"converged"`,
+`"max_seconds"` or `"max_evals"`, with `"stopped_at_step"` and
+`"n_draws_kept"`). A limit reached during burn-in, when there is nothing to
+keep, is an error. `rhat_max` and `ess_min` gate on the worst gating parameter
+(`sample_pt_emcee`, `sample_transdim_pt_emcee` say which).
 
-Kept separate from the sampler-specific keywords deliberately, so the same
-budget can be handed to any engine in [`ENGINES`](@ref) unchanged.
+To stop a run from outside (a worker, a web front end), `fit_*` and `run_job`
+also take `stop_file`: a path whose appearance ends the run the same way, with
+`"stopped": "requested"`. It defaults to `<output_dir>/STOP`.
 """
 Base.@kwdef struct Stopping
     max_seconds::Union{Nothing,Float64} = nothing
@@ -113,7 +128,75 @@ Base.@kwdef struct Stopping
     ess_min::Union{Nothing,Float64}     = nothing
     rhat_max::Union{Nothing,Float64}    = nothing
     logz_tol::Union{Nothing,Float64}    = nothing
-    check_every::Int                    = 500
+    check_every::Union{Nothing,Int}     = nothing
+end
+
+# What each Stopping field becomes in an engine. A field an engine cannot honour
+# is an ArgumentError naming the engines that can, never a silent no-op.
+# `logz_tol` is the remaining-evidence tolerance of the nested family; the
+# dynamic sampler has two stages and the field is the tolerance of the final one.
+const _STOPPING_KW = (
+    max_seconds = :max_seconds,
+    max_evals   = :max_evals,
+    ess_min     = :tail_ess_threshold,
+    rhat_max    = :rhat_threshold,
+    check_every = :diag_every,
+    logz_tol    = :dlogz,
+)
+
+"""
+    _stopping_options(engine_name, stopping, options) -> Dict{Symbol,Any}
+
+Fold a [`Stopping`](@ref) into an engine's options. `options` are the engine's
+own keywords as the caller gave them; the result is what `run_engine` should
+get. A Stopping field the engine cannot honour, or one that disagrees with an
+engine keyword given as well, is an `ArgumentError`.
+"""
+function _stopping_options(name::AbstractString, stopping, options)
+    opts = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(options))
+    stopping === nothing && return opts
+    st = stopping isa Stopping ? stopping : begin
+        d = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(stopping))
+        bad = setdiff(keys(d), fieldnames(Stopping))
+        isempty(bad) || throw(ArgumentError(
+            "unknown Stopping field(s) $(sort!(collect(bad))); the fields are " *
+            join(fieldnames(Stopping), ", ")))
+        Stopping(; (k => (v === nothing ? nothing : v) for (k, v) in d)...)
+    end
+    fn = get(ENGINES, String(name), nothing)
+    fn === nothing && return opts
+    accepted = _kwarg_names(fn)
+    for f in fieldnames(Stopping)
+        v = getfield(st, f)
+        v === nothing && continue
+        kw = _STOPPING_KW[f]
+        f === :logz_tol && String(name) == "nested_dynamic" && (kw = :dlogz_batch)
+        if !(kw in accepted)
+            throw(ArgumentError(
+                "Stopping($f = $v) cannot be honoured by engine \"$name\": " *
+                "it is supported by " *
+                join(sort!(String[n for (n, g) in ENGINES
+                                  if _STOPPING_KW[f] in _kwarg_names(g) ||
+                                     (f === :logz_tol && :dlogz_batch in _kwarg_names(g))]),
+                     ", ") *
+                ". Drop the field, or pick one of those engines."))
+        end
+        val = f === :check_every ? Int(v) : f === :max_evals ? Float64(v) : Float64(v)
+        if haskey(opts, kw) && !(opts[kw] == val)
+            throw(ArgumentError(
+                "Stopping($f = $v) conflicts with the engine option " *
+                "$kw = $(opts[kw]); give one of them."))
+        end
+        opts[kw] = val
+        if f in (:rhat_max, :ess_min)
+            haskey(opts, :convergence_stop) && opts[:convergence_stop] == false &&
+                throw(ArgumentError(
+                    "Stopping($f = $v) conflicts with the engine option " *
+                    "convergence_stop = false; give one of them."))
+            opts[:convergence_stop] = true
+        end
+    end
+    return opts
 end
 
 # ---------------------------------------------------------------------------
@@ -333,8 +416,8 @@ left out is assumed (10% of M★, 5% of R★, 150 K) and flagged `assumed` in
 function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
-                stopping = nothing, output_dir = nothing, noise = nothing,
-                trend_order = 0, kwargs...)
+                stopping = nothing, stop_file = nothing, output_dir = nothing,
+                noise = nothing, trend_order = 0, kwargs...)
     _require_instrument_map(rv, "RV", (:t, :rv, :rv_err))
     ch = _as_channel(rv, "RV")
     if !(planets isa NamedTuple)
@@ -347,7 +430,7 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
     star, kwargs = _split_star_kwargs(kwargs)
     tgt = _target_from([ch], planets;
                        trend_order, noise_models = noise, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim, plots, plot_kwargs, save_pdf, science, output,
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
                    star)
 end
 
@@ -381,7 +464,7 @@ function fit_transit(phot; planets = 1, use_rho_s::Bool = false,
                      engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, stopping = nothing,
-                     output_dir = nothing, kwargs...)
+                     stop_file = nothing, output_dir = nothing, kwargs...)
     # A transit CHANNEL (a dict with "source", as `fit_joint` takes) carries the
     # photometry options; a bare instrument map has none.
     phot_ch = phot isa AbstractDict && haskey(phot, "source") ? phot :
@@ -400,7 +483,7 @@ function fit_transit(phot; planets = 1, use_rho_s::Bool = false,
         "planet_modes = [\"PM_GD\"]"))
     star, kwargs = _split_star_kwargs(kwargs)
     tgt = _target_from([phot_ch], planets; use_rho_s, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf, science, output,
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
                    star)
 end
 
@@ -552,7 +635,8 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
                         engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
-                        stopping = nothing, output_dir = nothing, kwargs...)
+                        stopping = nothing, stop_file = nothing,
+                        output_dir = nothing, kwargs...)
     # NOT resolved here: `_target_from` resolves the spec, and has to see it
     # unresolved to read the per-instrument `jitter` / `clip_outliers` keys.
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
@@ -562,7 +646,7 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
     star, kwargs = _split_star_kwargs(kwargs)
     reps = Any[]
     tgt = _target_from([ch], planets; iad_reports = reps, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf, science, output,
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
                    star, iad_outliers = reps)
 end
 
@@ -591,7 +675,8 @@ function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
                 engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
-                   stopping = nothing, output_dir = nothing, kwargs...)
+                   stopping = nothing, stop_file = nothing,
+                   output_dir = nothing, kwargs...)
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
@@ -604,7 +689,7 @@ function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
     reps = Any[]
     tgt = _target_from(collect(channels), planets; iad_reports = reps,
                        use_rho_s, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output,
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
                    star, iad_outliers = reps)
 end
 
@@ -761,6 +846,7 @@ function _normalize(raw)
     for f in (:acceptance_within, :acceptance_swap, :betas, :n_evals)
         hasproperty(raw, f) && (extra[String(f)] = getproperty(raw, f))
     end
+    _stop_to_summary!(extra, raw)
     return ch, lz, extra
 end
 
@@ -909,7 +995,7 @@ _as_td(td, max_k) = throw(ArgumentError(
     "got $(typeof(td))"))
 
 """Run the engine, then assemble the standard result."""
-function _finish(target, engine, stopping, output_dir; op::String,
+function _finish(target, engine, stopping, output_dir; op::String, stop_file = nothing,
                 science::Bool = true, output = nothing,
                  transdim = nothing, plots = nothing, plot_kwargs = nothing,
                  save_pdf::Bool = false, star = Dict{Symbol,Any}(),
@@ -923,15 +1009,7 @@ function _finish(target, engine, stopping, output_dir; op::String,
     # that quietly does nothing is how you lose a day", and this is that same
     # failure one level up. The convergence half IS reachable today under
     # engine-specific names, so point at them.
-    if stopping !== nothing
-        throw(ArgumentError(
-            "`stopping` is not implemented and was being ignored silently. " *
-            "For a convergence gate use the engine's own options: " *
-            "pt_emcee takes `convergence_stop=true` with `rhat_threshold` and " *
-            "`tail_ess_threshold`; the nested family takes `dlogz`. " *
-            "There is no wall-clock cap in Nereus -- `max_seconds` has no " *
-            "implementation anywhere."))
-    end
+    # Folded into the engine's options below, once the engine is known.
     # The star as a job's star block holds it: M★ and R★ from the target, the
     # rest (T_eff, magnitudes, albedo, σ's) from the entry point's keywords.
     # Built before the engine runs, so a bad σ fails here and not after it.
@@ -956,6 +1034,22 @@ function _finish(target, engine, stopping, output_dir; op::String,
         spec["options"] = o
     end
     spec_name = String(get(spec, "engine", "pt_emcee"))
+    # `Stopping` and `stop_file` become the engine's own options. A file's
+    # default is `<output_dir>/STOP`; with no output_dir only an explicit one.
+    let o = _stopping_options(spec_name, stopping, get(spec, "options", Dict()))
+        sf = stop_file !== nothing ? String(stop_file) :
+             (output_dir !== nothing ? joinpath(String(output_dir), "STOP") : nothing)
+        if sf !== nothing
+            if haskey(ENGINES, spec_name) && :stop_file in _kwarg_names(ENGINES[spec_name])
+                haskey(o, :stop_file) || (o[:stop_file] = sf)
+            elseif stop_file !== nothing
+                throw(ArgumentError(
+                    "`stop_file` is honoured by $(join(_engines_with(:stop_file), ", ")); " *
+                    "engine \"$spec_name\" cannot be stopped early."))
+            end
+        end
+        isempty(o) || (spec["options"] = o)
+    end
     spec_opts = Dict{String,Any}(String(k) => v
                                  for (k, v) in pairs(get(spec, "options", Dict())))
     raw = run_engine(target, spec)

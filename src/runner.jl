@@ -1530,6 +1530,23 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                                    "$(name)_state.jls")
     end
 
+    # The out-of-band stop (src/graceful_stop.jl): a file whose appearance ends
+    # the run at the last recorded step. `<output_dir>/STOP` unless the job's
+    # top-level `stop_file` says otherwise. Only the samplers that can stop
+    # early declare `stop_file`; naming one for another is an error, not a
+    # silently unwatched path.
+    _stop_file_cfg = _get(cfg, :stop_file; default = nothing)
+    if haskey(_SAMPLER_FNS, name) &&
+       any(m -> :stop_file in Base.kwarg_decl(m), methods(_SAMPLER_FNS[name]))
+        haskey(kw, :stop_file) || (kw[:stop_file] = _stop_file_cfg === nothing ?
+            joinpath(String(_get(cfg, :output_dir; required = true)), "STOP") :
+            String(_stop_file_cfg))
+    elseif _stop_file_cfg !== nothing
+        throw(ArgumentError(
+            "`stop_file` is honoured by $(join(_engines_with(:stop_file), ", ")); " *
+            "sampler \"$name\" cannot be stopped early."))
+    end
+
     td_block = _get(cfg, :transdim; default = nothing)
     td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
 
@@ -2719,6 +2736,9 @@ end
 function _populate_summary!(summary, result, params, chains)
     summary["log_z"] = Float64(getfield(result, :log_evidence))
     summary["n_evals"] = Int(getfield(result, :n_evals))
+    # How the run ended: "steps", "converged", "interrupted", "requested",
+    # "max_seconds" or "max_evals", with the step and the draws kept.
+    _stop_to_summary!(summary, result)
     summary["sampler"] = Dict{String, Any}(
         "acceptance_within" => collect(Float64.(getfield(result,
                                                             :acceptance_within))),
