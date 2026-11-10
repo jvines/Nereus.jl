@@ -479,12 +479,93 @@ _contiguous_deg(x_rad, active, lo_ref = -180.0) =
     circular_contiguous(rad2deg.(x_rad); period = 360.0, lo_ref = lo_ref,
                         mask = active)
 
+# Per-draw evaluation of the model's own accessors on a chain.
+#
+# Quantities that are not chain columns under some parametrizations (K under
+# :a_driven / :M_sec_driven, the companion mass under :K_driven) are read off
+# the same `planet_*` accessors the likelihood uses, so every parametrization
+# is consistent with the fit. ONE `Theta{Float64}` is reused for the whole walk:
+# fixed parameters already sit at their fixed values in a fresh Theta, and only
+# the unfrozen slots the accessors read are overwritten per draw (planet k's
+# own `*_k<k>` names, plus M_pri and plx). A draw that throws, or whose value
+# is not finite, comes back NaN (an inactive trans-dim slot holds junk).
+# `f(theta)` must return an `NTuple{N, Float64}`; nothing is allocated per draw.
+function _per_draw(f::F, chains, params::Params, k::Int, ::Val{N}) where {F, N}
+    layout = params.layout
+    chain_syms = Set(names(chains, :parameters))
+    suffix = "_k$k"
+    slots = Int[]
+    cols = Vector{Vector{Float64}}()
+    for nm in layout.unfrozen_names
+        (endswith(nm, suffix) || nm == "M_pri" || nm == "plx") || continue
+        Symbol(nm) in chain_syms || continue
+        push!(slots, layout.name_to_idx[nm])
+        push!(cols, _draws(chains, Symbol(nm)))
+    end
+    n = size(chains, 1) * size(chains, 3)
+    out = ntuple(_ -> Vector{Float64}(undef, n), Val(N))
+    nan = ntuple(_ -> NaN, Val(N))
+    theta = Theta{Float64}(params)
+    vals = theta.values
+    @inbounds for i in 1:n
+        for j in eachindex(slots)
+            vals[slots[j]] = cols[j][i]
+        end
+        r = try
+            f(theta)
+        catch
+            nan
+        end
+        for m in 1:N
+            v = r[m]
+            out[m][i] = isfinite(v) ? v : NaN
+        end
+    end
+    return out
+end
+
+# (K [m/s], a_mas, alpha_star_uas) of planet k for one draw. The caller asks
+# only for what applies to the block; the rest is computed regardless and
+# ignored, so the closure stays type-stable.
+function _k_and_angular(want_K::Bool, want_ang::Bool, k::Int)
+    return function (theta)
+        K = want_K ? Float64(planet_K(theta, k)) : NaN
+        if want_ang
+            a = planet_a(theta, k)
+            ms = planet_M_sec(theta, k)
+            mp = astrom_M_pri(theta)
+            plx = astrom_plx(theta)
+            a_mas = a * plx
+            alpha = a * ms / (mp + ms) * plx * 1000
+            return (K, Float64(a_mas), Float64(alpha))
+        end
+        return (K, NaN, NaN)
+    end
+end
+
 """
     compute_derived(chains, params; M_s=nothing, R_s=nothing,
                      T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0)
 
 Compute all derived parameters from posterior chains.
 Returns a vector of `DerivedParams`, one per planet.
+
+Beyond the physical quantities (`ecc`, `omega_deg`, `a_au`, `msini_*`, `mass_*`,
+radii, temperatures, transit observables) a planet reports:
+
+- `P_days` when its period is not sampled (`:a_driven`, where it follows from
+  Kepler's third law with the per-draw masses). A sampled `P_kN` is a fitted
+  parameter and is not repeated.
+- `K` (m/s) when the RV semi-amplitude is derived from the mass
+  (`:a_driven`, `:M_sec_driven`), through `planet_K`. Under `:K_driven` it is the
+  fitted `K_kN` and is not added. It lives in the derived table only, so the
+  `K_kN` label of the derived and the fitted tables never meet.
+- `a_mas` (mas) and `alpha_star_uas` (μas) for planets whose block carries
+  absolute astrometry: the relative orbit's semi-major axis as an angle,
+  `a·ϖ`, and the host's reflex orbit, `a·ϖ·M_sec/(M_pri+M_sec)`, the
+  astrometric signature. Evaluated per draw with `planet_a`, `planet_M_sec`
+  (which inverts the mass function under `:K_driven`), `astrom_M_pri` and
+  `astrom_plx`, so all parametrizations agree with the likelihood.
 
 Stellar parameters (M_s, R_s, T_eff) can be scalars or distributions
 (vectors of samples matching the chain length).
@@ -613,6 +694,8 @@ function compute_derived(chains, params::Params;
             mpri_s = :M_pri in chain_syms ? _draws(chains, :M_pri) :
                      fill(isnan(config.M_s) ? 1.0 : Float64(config.M_s), length(a_au_s))
             P = sqrt.(a_au_s .^ 3 ./ max.(mpri_s .+ msec_s, 1e-6)) .* KEPLER_YEAR_DAYS
+            # P is derived here, never sampled: report it (days).
+            derived["P_days"] = P
         end
 
         # Draws where planet k exists. Only these vote on where the seam of a
@@ -678,6 +761,22 @@ function compute_derived(chains, params::Params;
         has_rv = has_K(block) && Symbol("K_k$k") in chain_syms
         if has_rv
             K = _draws(chains, Symbol("K_k$k"))
+        end
+
+        # K and the angular size of the orbit, per draw from the model's own
+        # accessors. K is reported only when it is derived (not :K_driven, where
+        # K_k is the fitted column and the key would only repeat it); the
+        # angular quantities need a block that carries astrometry.
+        want_K = has_K(block) && parametrization.mass !== :K_driven
+        want_ang = has_AS(block)
+        if want_K || want_ang
+            Kd, a_mas, alpha_uas = _per_draw(_k_and_angular(want_K, want_ang, k),
+                                             chains, params, k, Val(3))
+            want_K && (derived["K"] = Kd)
+            if want_ang
+                derived["a_mas"] = a_mas
+                derived["alpha_star_uas"] = alpha_uas
+            end
         end
 
         # a/R* and a(AU)
