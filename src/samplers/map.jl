@@ -88,7 +88,8 @@ from the prior, not the transform's clamp.
 
 Circular angles ([`is_circular`](@ref)) are never flagged: their bounds are
 where the chart of the circle was cut, not an edge of the support. Neither is
-a cyclic inclination ([`is_cyclic_inclination`](@ref)), which has no bound. Nor is a
+a cyclic inclination ([`is_cyclic_inclination`](@ref)): 0 and π are points it
+passes through, and its chart's edges are the mirror image of i = 90°. Nor is a
 jitter ([`jitter_names`](@ref)) at its lower bound, whatever that bound is.
 """
 function _detect_railed(x_bounded::AbstractVector{<:Real},
@@ -121,8 +122,8 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
         ps = priors[i]
         is_fixed(ps) && continue
         i in circ && continue
-        # A cyclic inclination has no bound at all: its chart edges are the
-        # mirror of i = 90°, and 0 and π are points it passes through.
+        # A cyclic inclination has no bound to rail against: 0 and π are
+        # points it passes through, its chart's edges the mirror of i = 90°.
         is_cyclic_inclination(ps) && continue
         lo, hi = bounds(ps)
         (isfinite(lo) && isfinite(hi)) || continue   # only fully-bounded params
