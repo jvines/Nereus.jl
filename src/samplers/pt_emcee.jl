@@ -1378,6 +1378,15 @@ function sample_pt_emcee(
         β_hist[step, :] .= βs
         n_done = step
 
+        # ---- Cyclic inclinations (serial; burn-in only) -------------
+        # No seam to move: the walkers are folded back to [0, π] instead
+        # (src/circular.jl), every walker at every rung, on the re-cut
+        # schedule, so the stretch moves pair walkers in one representative.
+        # Before the pruning, which measures each rung's spread. Exact for the
+        # cached logπ / logL, as the re-cut is.
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
+            fold_cyclic_inclinations!(state, params; idx = cinc)
+
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_pt_prune_stranded!`. Stops at 3/4 of burn-in so the moved
         # walkers decorrelate from the ones they were copied onto, and runs
@@ -1404,12 +1413,6 @@ function sample_pt_emcee(
             _pt_ensemble_recut!(state, params, circ, (target.transform,),
                                 recut_moved)
         end
-        # A cyclic inclination has no seam to move; its walkers are folded
-        # back to [0, π] instead (src/circular.jl), every walker at every rung,
-        # so the stretch moves pair walkers in one representative. Exact for
-        # the cached logπ / logL, as the re-cut is.
-        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
-            fold_cyclic_inclinations!(state, params; idx = cinc)
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
         !isempty(held_x) && _burnin_hold_due!(hold_med, hold, step, n_burnin,

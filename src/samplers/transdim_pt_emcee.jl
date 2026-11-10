@@ -2225,6 +2225,15 @@ function sample_transdim_pt_emcee(
         β_hist[step, :] .= βs
         n_done = step
 
+        # ---- Cyclic inclinations (serial; burn-in only) -------------
+        # Folded back to [0, π], every walker (active or not) at every rung,
+        # on the re-cut schedule and before the pruning: no seam to move, and
+        # the cached log-densities stay valid (src/circular.jl). A MoMS
+        # off-value, the prior sample median (near π/2), is already its own
+        # representative.
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
+            fold_cyclic_inclinations!(state, params; idx = cinc)
+
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_td_prune_stranded!`. Same schedule as pt_emcee: every 50
         # steps through 3/4 of burn-in, before the re-cut.
@@ -2250,12 +2259,6 @@ function sample_transdim_pt_emcee(
             _td_ensemble_recut!(state, td_states, params, circ_groups, strategy,
                                 (target.transform,), recut_moved)
         end
-        # A cyclic inclination is folded back to [0, π] instead, every walker
-        # (active or not) at every rung: no seam to move, and the cached
-        # log-densities stay valid (src/circular.jl). A MoMS off-value, the
-        # prior sample median (near π/2), is already its own representative.
-        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
-            fold_cyclic_inclinations!(state, params; idx = cinc)
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
         any(is_held) && _burnin_hold_due!(hold_med, hold, step, n_burnin,
