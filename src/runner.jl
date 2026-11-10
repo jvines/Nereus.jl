@@ -2423,6 +2423,10 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
         prior_bounds = Dict{Symbol, Tuple{Float64, Float64}}()
         log_scale = Dict{Symbol, Float64}()
         for (nm, ps) in zip(layout.unfrozen_names, layout.unfrozen_priors)
+            # A cyclic inclination has no bound to rail against (src/circular.jl):
+            # it was sampled on a circle with no wall, and i = 0 or π, where a
+            # face-on or retrograde orbit sits, is a value, not an edge.
+            is_cyclic_inclination(ps) && continue
             lo, hi = sampled_windows !== nothing && haskey(sampled_windows, nm) ?
                      sampled_windows[nm] : bounds(ps)
             prior_bounds[Symbol(nm)] = (Float64(lo), Float64(hi))
