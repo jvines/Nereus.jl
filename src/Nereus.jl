@@ -185,6 +185,7 @@ export
     UniformPrior, NormalPrior, LogUniformPrior,
     BetaPrior, ModJeffreysPrior, FixedPrior, SinePrior,
     WrappedUniformPrior, is_wrapped,
+    WrappedSinePrior, is_cyclic_inclination, fold_inclination,
     bounds, is_fixed, fixed_value, in_support,
     prior_transform, prior_transform!,
     logpdf_sum, prior_to_dict, prior_from_dict,

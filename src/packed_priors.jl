@@ -19,6 +19,7 @@ const PACKED_BETA         = 4
 const PACKED_FIXED        = 5
 const PACKED_SINE         = 6  # p(x) = sin(x)/2 on [0, π]
 const PACKED_WRAPPED      = 7  # uniform on a circle, chart [lo, hi): no wall
+const PACKED_WRAPPED_SINE = 8  # |sin x|/4 on the chart [-π/2, 3π/2] (cyclic inclination)
 
 """
     PackedPriors
@@ -71,6 +72,8 @@ function pack_priors(priors::AbstractVector{<:PriorSpec})
             type_ids[i] = PACKED_UNIFORM
         elseif d isa WrappedUniform
             type_ids[i] = PACKED_WRAPPED
+        elseif d isa WrappedSine
+            type_ids[i] = PACKED_WRAPPED_SINE
         elseif d isa Distributions.LogUniform
             type_ids[i] = PACKED_LOGUNIFORM
         elseif d isa Distributions.Truncated{<:Distributions.Normal}
@@ -116,6 +119,13 @@ dispatches on `tid` via if/elseif, no dynamic dispatch, Enzyme-safe.
     # circle, with the uniform density of the chart. Checked BEFORE the bounds.
     if tid == PACKED_WRAPPED
         return isfinite(x) ? -log(hi - lo) : -Inf
+    end
+    # The cyclic inclination: sin(i)/2 on [0, π] lifted to the circle, density
+    # |sin x|/4 on its chart [lo, hi] = [-π/2, 3π/2], where 0 and π are
+    # interior points. Zero outside the chart, which keeps the target proper
+    # (see `WrappedSine`). Same Float64 arithmetic as `logpdf(::WrappedSine)`.
+    if tid == PACKED_WRAPPED_SINE
+        return lo <= x <= hi ? log(abs(sin(x))) - log(4.0) : -Inf
     end
     # Bounds check (always, for all other types)
     if isfinite(lo) && x < lo
