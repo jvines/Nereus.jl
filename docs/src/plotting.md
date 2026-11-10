@@ -297,6 +297,15 @@ Writes `models/rm_anomaly_K<k>.png`.
 
 ## Astrometry channel
 
+Every astrometric angle axis (sky-plane offsets, separations, abscissa
+residuals, O−C, proper-motion panels) is drawn from data in mas (mas/yr) but
+read in the unit its extent calls for: when the largest absolute axis limit of
+a group is under 1 mas the tick labels show μas (μas/yr) and the axis label
+says so. Axes that show one quantity (a sky panel's x and y, the RA and Dec
+proper-motion panels, the panels of the IAD-residual figure) share a unit; the
+O−C strips of different missions each choose their own. Position angles
+(degrees) and time axes are untouched.
+
 ### `plot_orbit_skyplane(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
 Sky-plane `(ΔRA·cos δ, Δδ)` overlay of the relative-astrometry data
@@ -308,7 +317,7 @@ default `5.0`. No-ops if `data.relastrom` is `nothing`.
 
 ### `plot_relastrom_timeseries(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
-Two-panel **separation ρ [mas]** (top) and **PA [deg]** (bottom) vs MJD
+Two-panel **separation ρ [mas or μas]** (top) and **PA [deg]** (bottom) vs MJD
 — the canonical companion to `plot_orbit_skyplane`'s sky map for
 visual-orbit papers. Observed epochs with errorbars from RA/Dec error
 propagation (including correlation); best-fit (max-lp) orbit as a solid
@@ -317,7 +326,7 @@ line plus `n_draws=100` faint posterior-fan draws. No-op if
 
 ### `plot_relastrom_residuals(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
-`(Δρ, ΔPA)` residual diagnostic — `Δρ = ρ_obs − ρ_med` [mas] (top) and
+`(Δρ, ΔPA)` residual diagnostic — `Δρ = ρ_obs − ρ_med` [mas or μas] (top) and
 `ΔPA = PA_obs − PA_med` [deg, wrapped to (−180, 180]] (bottom) vs MJD,
 using the best-fit (max-lp) orbit. Errorbars from per-epoch RA/Dec
 propagation; dashed zero reference per panel.
@@ -419,7 +428,7 @@ written `models/hgca_pm_residuals_K<k>.png`.
 Per-epoch PM residuals for **G23H** ([Thompson+ 2026](https://ui.adsabs.harvard.edu/abs/2026arXiv260200235T/abstract)) catalog data —
 five epochs (Hip, HG long-baseline, Gaia DR2, DR3−DR2, DR3).
 `Δμ_α* = μ_α*_obs − μ_α*_model − μ_b` (top) and `Δμ_δ` (bottom) vs MJD
-(mas/yr). The model PM is the likelihood's own (`_g23h_model_pm`: every
+(mas/yr or μas/yr). The model PM is the likelihood's own (`_g23h_model_pm`: every
 active companion, GOST Mode B at DR3 when scan plans are given) at the
 best-fit (max-lp) draw, and `μ_b` is marginalized under the full 10×10
 covariance as in `g23h_log_likelihood`; errorbars from its diagonal.
@@ -429,7 +438,7 @@ Requires `data.g23h`.
 
 Two-panel reflex proper-motion trajectory across the **GOST** scan
 window: `μ_α*_reflex(t)` (top) and `μ_δ_reflex(t)` (bottom) vs MJD
-(mas/yr). Best-fit (max-lp) curve in black and the 16-84% band of
+(mas/yr or μas/yr). Best-fit (max-lp) curve in black and the 16-84% band of
 `n_draws=80` posterior draws in orchid — both the summed reflex of every
 companion the likelihood couples to the astrometry. HGCA / G23H observed
 points overlaid at their tabulated epochs as `μ_obs − μ_b`, with `μ_b` the

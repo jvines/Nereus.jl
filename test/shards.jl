@@ -53,6 +53,7 @@ const TEST_UNITS = [
     (name = "astrometry/test_iad_marginalised_residuals.jl", seconds = 1, files = ["astrometry/test_iad_marginalised_residuals.jl"]),
     (name = "astrometry/test_iad_jitter.jl", seconds = 25, files = ["astrometry/test_iad_jitter.jl"]),
     (name = "epoch astrometry orbit + trans-dim plot draws (shares a fixture)", seconds = 157, files = ["astrometry/test_epoch_astrometry_orbit.jl", "test_transdim_plot_draws.jl"]),
+    (name = "astrometry/test_angle_axis_units.jl", seconds = 35, files = ["astrometry/test_angle_axis_units.jl"]),
     (name = "astrometry/test_hgca_residual_plot.jl", seconds = 61, files = ["astrometry/test_hgca_residual_plot.jl"]),
     (name = "astrometry/test_pm_anomaly_gaia_releases.jl", seconds = 40, files = ["astrometry/test_pm_anomaly_gaia_releases.jl"]),
     (name = "astrometry/test_astrometry_model_plot.jl", seconds = 90, files = ["astrometry/test_astrometry_model_plot.jl"]),
