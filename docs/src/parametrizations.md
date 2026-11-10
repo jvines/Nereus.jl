@@ -283,6 +283,17 @@ Each is evaluated per draw with `planet_P` / `planet_K` / `planet_a` /
 the likelihood; under `:K_driven` the companion mass behind `alpha_star_uas`
 comes from the mass function with the sampled inclination.
 
+None of the derived masses or separations uses the `M_p << M_★` approximation:
+
+| derived key | how it is computed |
+|---|---|
+| `msini_*` | companion mass at i = 90° from the exact mass function `(M_p sin i)³/(M_★+M_p)² = f(K,P,e)`, solved with `msec_from_K` and the table's per-draw M_★ |
+| `mass_*` | the same inversion at the draw's `sin i` (transit planets); for astrometric planets with a sampled K, the model's own `planet_M_sec` per draw |
+| `a_au` | Kepler III with the total mass `M_★ + M_p` (M_p the true mass, or the exact minimum mass when no inclination exists); for astrometric planets the model's `planet_a`, so `a_au·ϖ = a_mas`; where a/R★ comes from the transit model, `a_au = (a/R★)·R★` |
+
+A brown dwarf (0.08 M_⊙ about 0.5 M_⊙) was 9 % off in `msini` with the closed
+form; a Jupiter about a Sun-like star moves by 0.07 %.
+
 ### `obs_prior::Bool` — O'Neil 2019 observation-based prior
 
 When `true`, applies the O'Neil 2019 (AJ 158, 4) observation-based

@@ -102,7 +102,7 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
         b = Float64(ForwardDiff_value(bs[j]))
         aR = Float64(ForwardDiff_value(a_Rs[j]))
         inc_rad = acos(b / aR)
-        mp_mjup = msini(M_s_f, K, P, e) / sin(inc_rad)
+        mp_mjup = _msini_lowmass(M_s_f, K, P, e) / sin(inc_rad)
         mp_msun = mp_mjup * _MJ_PER_MS_NBG
 
         elems[q+1, 1] = mp_msun

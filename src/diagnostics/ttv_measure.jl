@@ -255,7 +255,7 @@ function ttvc_envelope(chains, params::Params;
             a_Rs_a = cbrt(GM * P_s^2 / (4π^2)) / (params.config.R_s * R_SUN_CM)
         end
         inc_a = acosd(b_a / a_Rs_a)
-        mp_a  = msini(M_s_use, K_a, P_a, e_a) / sind(inc_a)
+        mp_a  = _msini_lowmass(M_s_use, K_a, P_a, e_a) / sind(inc_a)
         mr_a  = mp_a * M_JUP_G / M_SUN_G / M_s_use
 
         P_b   = _get(theta_k.values, "P_k$(planet_b_k)")
@@ -266,7 +266,7 @@ function ttvc_envelope(chains, params::Params;
         e_b   = hypot(se_b, sc_b)^2
         w_b   = atan(se_b, sc_b)
         # Use a's inclination (coplanar assumption) for non-transiting b
-        mp_b  = msini(M_s_use, K_b, P_b, e_b)
+        mp_b  = _msini_lowmass(M_s_use, K_b, P_b, e_b)
         mr_b  = mp_b * M_JUP_G / M_SUN_G / M_s_use
 
         # TTVFaster has 0/0 at exactly e=0
