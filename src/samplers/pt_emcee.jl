@@ -139,9 +139,15 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         N = length(lp)
         N >= 2d + 2 || return NaN
         pt = target.transform
+        # Cyclic inclinations folded to [0, π] (src/circular.jl): one
+        # representative's mode, whose Laplace volume holds half of Z per
+        # cyclic inclination -- the mirror one holds the rest (`fc` below).
+        cinc = cyclic_inclination_indices(target.params)
         Y = Matrix{Float64}(undef, d, N)
         @inbounds for i in 1:N
-            Y[:, i] = transform_forward(Float64[cols[j][i] for j in 1:d], pt)
+            xi = Float64[cols[j][i] for j in 1:d]
+            fold_cyclic_inclinations!(xi, target.params; idx = cinc)
+            Y[:, i] = transform_forward(xi, pt)
         end
         good = isfinite.(lp) .& vec(all(isfinite, Y; dims = 1))
         count(good) >= 2d + 2 || return NaN
@@ -153,7 +159,8 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         sel = md .< quantile(md, mode_frac)
         Yc = count(sel) >= 2d + 2 ? Y[:, sel] : Y
         Sc = cov(Yc; dims = 2) + 1e-8 * I(d)
-        return lp[imax] + 0.5 * d * log(2π) + 0.5 * logdet(Symmetric(Sc))
+        lz = lp[imax] + 0.5 * d * log(2π) + 0.5 * logdet(Symmetric(Sc))
+        return isempty(cinc) ? lz : lz + length(cinc) * log(2.0)
     catch
         return NaN
     end

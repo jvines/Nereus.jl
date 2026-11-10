@@ -676,6 +676,9 @@ function sample_map(
         lp = LogDensityProblems.logdensity(target, x)
         return isfinite(lp) ? -lp : 1e300
     end
+    # A cyclic inclination (src/circular.jl) puts the mode twice on its circle,
+    # at x and at its mirror -x, each holding half of Z: log 2 per one.
+    n_cinc = length(cyclic_inclination_indices(params))
     H, log_ev_laplace = try
         Hloc = ForwardDiff.hessian(neg_logdensity_unc, x_opt)
         if any(!isfinite, Hloc)
@@ -684,7 +687,8 @@ function sample_map(
             eigs = eigvals(Hloc)
             log_dens_unc = -neg_logdensity_unc(x_opt)
             ev = if all(isfinite, eigs) && all(eigs .> 0) && isfinite(log_dens_unc)
-                log_dens_unc + n_dim / 2 * log(2π) - sum(log.(eigs)) / 2
+                lz = log_dens_unc + n_dim / 2 * log(2π) - sum(log.(eigs)) / 2
+                n_cinc == 0 ? lz : lz + n_cinc * log(2.0)
             else
                 NaN
             end

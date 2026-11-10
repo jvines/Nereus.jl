@@ -102,15 +102,28 @@ function reference_path_evidence(target::NereusTarget, chains::MCMCChains.Chains
     cols = [_draws(chains, Symbol(nm)) for nm in names]
     N = length(cols[1])
     pt = target.transform
+    # Cyclic inclinations (src/circular.jl) folded to [0, π], and the FOLDED
+    # posterior as the path's warm end: 2·p* there, nothing outside, as in
+    # `bridge_evidence` (see `_bridge_folded`). p* itself would leave half of Z
+    # per cyclic inclination in the mirror representative the reference never
+    # reaches. The transform is the identity on these coordinates.
+    cinc = cyclic_inclination_indices(target.params)
+    fc = length(cinc) * log(2.0)
     Y = Matrix{Float64}(undef, d, N)
     @inbounds for i in 1:N
         xi = Float64[cols[j][i] for j in 1:d]
+        fold_cyclic_inclinations!(xi, target.params; idx = cinc)
         Y[:, i] = pt === nothing ? xi : transform_forward(xi, pt)
     end
     Y = Y[:, vec(all(isfinite, Y; dims = 1))]
     size(Y, 2) >= 2d + 2 || return _rp_bad(n_beta, proposal)
 
-    logp(y) = (a = _logdensity_parts(target, y); Float64(a[1]) + Float64(a[2]))
+    function logp(y)
+        all(j -> 0 <= y[j] <= π, cinc) || return -Inf
+        a = _logdensity_parts(target, y)
+        v = Float64(a[1]) + Float64(a[2])
+        return isempty(cinc) ? v : v + fc
+    end
     return _reference_path_core(logp, Y; n_particles, n_beta, n_steps,
                                 proposal, seed, step_scale, beta_power,
                                 ess_threshold, ess_target)
