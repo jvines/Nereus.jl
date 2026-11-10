@@ -1545,6 +1545,17 @@ end
 # 8. Proper-motion-anomaly trajectory along GOST scan window
 # =====================================================================
 
+# The summed reflex PM that a Gaia release's five-parameter solution absorbs,
+# fitted through the scans `gw` of its window.
+function _dr_reflex_pm(orbs, Ms, gw)
+    μa = 0.0; μd = 0.0
+    for j in eachindex(orbs)
+        a_j, d_j = gost_window_avg_pm(orbs[j], gw, Ms[j])
+        μa += a_j; μd += d_j
+    end
+    return μa, μd
+end
+
 """
     plot_pm_anomaly(chains, params, data;
                     n_draws=80, planet_idx=1,
@@ -1555,7 +1566,7 @@ Two-panel reflex proper-motion trajectory across the GOST scan window:
   top    — μ_α*_reflex(t) (mas/yr)   vs MJD
   bottom — μ_δ_reflex(t)  (mas/yr)   vs MJD
 
-Best-fit (max-lp) curve in cyan; the 16-84% band of `n_draws` posterior
+Best-fit (max-lp) curve in black; the 16-84% band of `n_draws` posterior
 draws in orchid. Curve and band are the same quantity -- the summed reflex
 of every companion the likelihood couples to the astrometry -- drawn among
 the draws in which companion `planet_idx` exists. HGCA / G23H observed PMs
@@ -1563,6 +1574,13 @@ at their tabulated epochs, less the barycentric PM each likelihood
 marginalizes (`_hgca_mub`, `_g23h_mub`), beside open markers for the
 likelihood's own model at those epochs (baseline-mean at Hipparcos–Gaia,
 GOST window at Gaia -- not points on the instantaneous curve).
+
+Gaia DR2 and DR3 as GOST projects them: the reflex PM each release's
+five-parameter solution absorbs, fitted through the scans inside that
+release's window (`GAIA_DR2_WINDOW`, `GAIA_DR3_WINDOW`) -- a circle at
+J2015.5 and a square at J2016.0, each in its own colour, at the best-fit draw
+with the 16-84% of the posterior draws as its bar. Each window is shaded in
+its release's colour; every planned scan is rugged along the bottom.
 
 Requires `data.gost`.
 """
@@ -1595,6 +1613,19 @@ function plot_pm_anomaly(chains, params, data;
         tdc = _td_cols(chains, params)
         cols = _chain_cols(chains, params)   # ONCE, not once per draw
 
+        # Gaia DR2 and DR3 as GOST projects them, each through the scans of
+        # its own window: GOST plans the whole mission (the fetcher's default
+        # runs to 2025), and neither catalogue was fitted to all of it. A
+        # release with fewer than five scans in its window is left out.
+        pal = cool_pastel(2)
+        dr_proj = [(label = "Gaia DR2 (GOST)", win = GAIA_DR2_WINDOW,
+                    t = jyear_to_mjd(2015.5), color = pal[1], marker = :circle,
+                    gw = _gost_window(gost, GAIA_DR2_WINDOW)),
+                   (label = "Gaia DR3 (GOST)", win = GAIA_DR3_WINDOW,
+                    t = jyear_to_mjd(2016.0), color = pal[2], marker = :rect,
+                    gw = _gost_window(gost, GAIA_DR3_WINDOW))]
+        filter!(d -> d.gw !== nothing, dr_proj)
+
         # Dense time grid spanning all astrometric epochs (Hip + Gaia +
         # GOST + relAST) so the model curve is shown wherever a data
         # point is plotted, not just inside the GOST window.
@@ -1619,6 +1650,8 @@ function plot_pm_anomaly(chains, params, data;
         # draws, then summarize to a band instead of plotting individual
         # noisy lines (was unreadable at low draw count).
         ndraw = min(n_draws, length(active_idx))
+        proj_ra  = fill(NaN, max(ndraw, 0), length(dr_proj))
+        proj_dec = fill(NaN, max(ndraw, 0), length(dr_proj))
         if ndraw > 0
             draw_idx = active_idx[rand(1:length(active_idx), ndraw)]
             ng = length(t_grid)
@@ -1643,6 +1676,9 @@ function plot_pm_anomaly(chains, params, data;
                             μra_mat[q,  k] = μa
                             μdec_mat[q, k] = μd
                         end
+                    end
+                    for (w, d) in enumerate(dr_proj)
+                        proj_ra[q, w], proj_dec[q, w] = _dr_reflex_pm(orbs_i, Ms_i, d.gw)
                     end
                 catch
                 end
@@ -1679,15 +1715,14 @@ function plot_pm_anomaly(chains, params, data;
             end
         end
 
-        # --- GOST scan window + scan epochs ---------------------------
-        # Mode B fits the Gaia PM as the AVERAGE over the forecast scan
-        # epochs; without rendering them the GOST data are invisible in
-        # every plot. Shade the scan window and rug the individual scan
-        # times on both panels.
-        vspan!(ax_ra,  minimum(gost.t), maximum(gost.t);
-                color = (NEREUS_COLORS.pm_marker, 0.10))
-        vspan!(ax_dec, minimum(gost.t), maximum(gost.t);
-                color = (NEREUS_COLORS.pm_marker, 0.10))
+        # --- Release windows + scan epochs ----------------------------
+        # Each Gaia release's window, shaded in its colour: the scans its
+        # projection below is fitted through. The full span of the scan plan
+        # is no catalogue's window, so it is not shaded. Every planned scan is
+        # rugged on both panels.
+        for d in dr_proj, ax in (ax_ra, ax_dec)
+            vspan!(ax, d.win[1], d.win[2]; color = (d.color, 0.22))
+        end
         vlines!(ax_ra, gost.t; ymin = 0.0, ymax = 0.05,
                  color = (NEREUS_COLORS.pm_marker, 0.8), linewidth = 0.8,
                  label = "GOST scans ($(length(gost.t)))")
@@ -1769,6 +1804,29 @@ function plot_pm_anomaly(chains, params, data;
                           [sqrt(g.cov[2k, 2k]) for k in 1:5],
                           μm[1], μm[2], _g23h_mub(g, μm[1], μm[2]),
                           :seagreen, :utriangle, "G23H")
+            end
+        end
+
+        # --- Gaia DR2 / DR3 as GOST projects them ---------------------
+        # The best-fit draw at the release's reference epoch, its bar the
+        # 16-84% of the posterior draws. Drawn last and a size smaller than
+        # the catalogue markers, so a projection that lands on the HGCA Gaia
+        # point leaves both visible.
+        for (w, d) in enumerate(dr_proj)
+            bf = isempty(active_orbs) ? (NaN, NaN) :
+                 _dr_reflex_pm(active_orbs, active_Msec, d.gw)
+            for (ax, v, col) in ((ax_ra,  bf[1], view(proj_ra,  :, w)),
+                                 (ax_dec, bf[2], view(proj_dec, :, w)))
+                isfinite(v) || continue
+                s = filter(isfinite, col)
+                if length(s) >= 4
+                    lo, hi = quantile(s, 0.16), quantile(s, 0.84)
+                    errorbars!(ax, [d.t], [(lo + hi) / 2], [(hi - lo) / 2];
+                               color = d.color, linewidth = 2.5)
+                end
+                scatter!(ax, [d.t], [v]; color = d.color, marker = d.marker,
+                         markersize = 11, strokewidth = 1.0, strokecolor = :black,
+                         label = ax === ax_ra ? d.label : nothing)
             end
         end
 

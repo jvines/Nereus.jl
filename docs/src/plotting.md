@@ -429,7 +429,7 @@ Requires `data.g23h`.
 
 Two-panel reflex proper-motion trajectory across the **GOST** scan
 window: `μ_α*_reflex(t)` (top) and `μ_δ_reflex(t)` (bottom) vs MJD
-(mas/yr). Best-fit (max-lp) curve in cyan and the 16-84% band of
+(mas/yr). Best-fit (max-lp) curve in black and the 16-84% band of
 `n_draws=80` posterior draws in orchid — both the summed reflex of every
 companion the likelihood couples to the astrometry. HGCA / G23H observed
 points overlaid at their tabulated epochs as `μ_obs − μ_b`, with `μ_b` the
@@ -438,6 +438,14 @@ Hipparcos–Gaia PM, which carries the mean reflex over the baseline), next
 to open markers for the likelihood's model at the same epochs — the
 Hipparcos–Gaia epoch is a baseline-mean reflex and the Gaia epoch a
 GOST-window average, neither a point on the instantaneous curve.
+Gaia DR2 and DR3 as GOST projects them: the reflex PM each release's
+five-parameter solution absorbs, fitted through the scans inside that
+release's window only (DR2 2014-07-25 to 2016-05-23, DR3 to 2017-05-28; a
+GOST scan plan runs to the end of the mission). A circle at J2015.5 and a
+square at J2016.0, each in its own colour from `cool_pastel(2)`, at the
+best-fit draw with the 16-84% of the posterior draws as the bar. Each
+release's window is shaded in its colour, and every planned scan is rugged
+along the bottom of both panels.
 Requires `data.gost`.
 
 ### `plot_rv_astrom_phasefold(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, bf_cutoff, subtract_gp, figsize)`

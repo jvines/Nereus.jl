@@ -54,6 +54,7 @@ const TEST_UNITS = [
     (name = "astrometry/test_iad_jitter.jl", seconds = 25, files = ["astrometry/test_iad_jitter.jl"]),
     (name = "epoch astrometry orbit + trans-dim plot draws (shares a fixture)", seconds = 157, files = ["astrometry/test_epoch_astrometry_orbit.jl", "test_transdim_plot_draws.jl"]),
     (name = "astrometry/test_hgca_residual_plot.jl", seconds = 61, files = ["astrometry/test_hgca_residual_plot.jl"]),
+    (name = "astrometry/test_pm_anomaly_gaia_releases.jl", seconds = 40, files = ["astrometry/test_pm_anomaly_gaia_releases.jl"]),
     (name = "astrometry/test_astrometry_model_plot.jl", seconds = 90, files = ["astrometry/test_astrometry_model_plot.jl"]),
     (name = "astrometry/test_iad_multi_instrument_e2e.jl", seconds = 24, files = ["astrometry/test_iad_multi_instrument_e2e.jl"]),
     (name = "astrometry/test_gaia_epoch_guards.jl", seconds = 1, files = ["astrometry/test_gaia_epoch_guards.jl"]),
