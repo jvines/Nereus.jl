@@ -140,6 +140,8 @@ rather than a single number trusted.
   "n_threads": null,                       // logged only; actual threading honours
                                            //   JULIA_NUM_THREADS (src/runner.jl:82-85)
   "timeout_sec": 3600,                     // optional wall-clock watchdog (see below)
+  "stop_file": "/work/out/STOP",           // optional; a file whose appearance ends pt_emcee /
+                                           //   transdim_pt_emcee at the last recorded step (see below)
 
   // ---- Star (NamedTuple; src/runner.jl:1016-1040) --------------------
   "star": {
@@ -491,6 +493,22 @@ rather than a single number trusted.
   job ends with `status="failed"` (`src/runner.jl:1371-1418`). **Ignored under
   `juliacall`** (the GIL deadlocks the watchdog) — enforce the timeout on the
   Python side there.
+
+### `stop_file`
+A path watched while the sampler runs (`pt_emcee`, `transdim_pt_emcee`).
+Default `<output_dir>/STOP`. When the file appears after burn-in, the sampler
+ends production at the last fully recorded step and the job finishes normally
+(chains, plots, tables, summary), printing
+`stopping early: stop requested at step N/M (K draws kept)` on stdout. Before
+the end of burn-in there are no draws to keep and the job fails with an error
+saying so. The file is looked for about every 5 s of wall clock and at every
+diagnostic (`sampler.kwargs.diag_every`), never per step, and is never deleted
+by Nereus. Naming `stop_file` with a sampler that cannot stop early is an
+error. `summary.json` records how the run ended: `"stopped"` (`"steps"`,
+`"converged"`, `"interrupted"`, `"requested"`, `"max_seconds"`, `"max_evals"`),
+`"stopped_at_step"`, `"n_steps"`, `"n_draws_kept"` and `"stop_file"`. The same
+sampler also takes `max_seconds`, `max_evals` and, for `transdim_pt_emcee`,
+`convergence_stop` with its thresholds, in `sampler.kwargs`.
 
 ### `data`
 The `data` block must contain at least one of `rv`, `transit_photometry`,

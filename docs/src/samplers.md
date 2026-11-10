@@ -167,6 +167,9 @@ res = sample_pt_emcee(target, data;
     n_converged_checks  = 3,
     min_steps           = 0,
     diag_every          = 0,
+    max_seconds         = Inf,         # wall-clock limit, ends production gracefully
+    max_evals           = Inf,         # likelihood-evaluation limit, likewise
+    stop_file           = nothing,     # a file whose appearance stops the run
 )
 ```
 
@@ -192,6 +195,42 @@ spans more than ~2000 log units between prior bulk and posterior peak
 (needed for tight evidence-estimator agreement).
 
 **Target must be `unconstrained = false`** (bounded space).
+
+#### Stopping a run early
+
+Production can be ended before `n_steps` without losing the draws. The run stops
+at the last fully recorded step and finishes as usual (evidence, chains, and
+from `run_job`/`fit_*` the plots, tables and summary). The result's
+`stop = (; stopped, step, n_steps, n_draws, stop_file)` and the summary's
+`"stopped"` say how it ended:
+
+| `stopped` | what ended it |
+|---|---|
+| `"steps"` | nothing: it ran to `n_steps` (the default outcome) |
+| `"converged"` | `convergence_stop`: worst split-R̂ below `rhat_threshold` and worst tail-ESS above `tail_ess_threshold` for `n_converged_checks` consecutive diagnostics |
+| `"interrupted"` | Ctrl-C (an `InterruptException`) after burn-in; the step in flight is dropped whole, so no partial row is kept |
+| `"requested"` | the `stop_file` appeared. Looked for about every 5 s of wall clock, and at every diagnostic, never per step. The sampler never deletes it. `run_job` and `fit_*` with an output directory watch `<output_dir>/STOP` unless told otherwise |
+| `"max_seconds"`, `"max_evals"` | the limit was reached |
+
+One line says so on stdout, with the progress bar:
+`stopping early: <reason> at step N/M (K draws kept)`.
+
+Before the end of burn-in there are no draws to keep, so there the same events
+do not stop the run gracefully: an interrupt aborts, a stop file or a limit is
+an error that says so. A second interrupt while a graceful stop is winding up
+aborts as it always did. `Stopping` (see [API](api.md)) sets these from the
+`fit_*` entry points. The covered engines are `pt_emcee` and
+`transdim_pt_emcee`; the others abort on an interrupt, as before.
+
+`transdim_pt_emcee` takes the same `convergence_stop`, `rhat_threshold`,
+`tail_ess_threshold`, `n_converged_checks`, `min_steps`, `diag_every` and
+`science_params`, and prints the same live `Rhat`/`ESS` readout. Its gating set
+is the model index `n_planets`, every planet-slot parameter and `rho_s`: the
+slot parameters are assessed only over the draws where the slot is active, with
+the slots relabelled in period order so label switching is not read as
+non-convergence (the statistics of `convergence_report`). A slot active in
+under half the draws gates on R̂ only, and one active in under 1 % is not
+assessed.
 
 ### `sample_transdim_pt_emcee` — `name: "transdim_pt_emcee"` (requires `transdim`)
 
