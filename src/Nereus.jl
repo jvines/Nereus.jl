@@ -63,6 +63,7 @@ include("astrometry/projection.jl")  # PlanetOrbits-backed sky projection (needs
 include("astrometry/likelihood.jl")  # rel + HGCA log-likelihoods (needs projection + Theta)
 include("astrometry/loaders.jl")     # FITS / orvara-format loaders for catalogs
 include("astrometry/fetchers.jl")    # ESA bundle + GOST scraper (cached)
+include("astrometry/gaia_parallax.jl")  # runtime Gaia DR3 parallax lookup (by id or name, cached)
 include("astrometry/gaia_epoch.jl")  # Gaia DR4 epoch-astrometry reader → IADData (needs IADData)
 include("astrometry/solution_ladder.jl")  # exact 5/7/9-param evidences (needs IADData)
 include("likelihood.jl")     # calls gp_log_likelihood, check_stability, astrom_log_likelihood
@@ -241,7 +242,7 @@ export
     gost_window_avg_pm, gost_5param_fit,
     load_hgca_row, load_orvara_rv, load_orvara_relast,
     load_hip_iad, load_gost, load_gaia_dr3,
-    fetch_hip_iad, fetch_gost,
+    fetch_hip_iad, fetch_gost, fetch_gaia_parallax,
     load_tess_lc, load_vizier_rv, export_lightcurve,
     rv_log_likelihood, rv_predictions,
     transit_log_likelihood, phot_predictions,
