@@ -51,6 +51,7 @@ fallback bounds are used.
 - `stability::Symbol` — `:none`, `:amd`, `:gladman`; hard prior on orbital stability
 - `M_s::Float64` — stellar mass (M_sun); needed for stability and derived quantities
 - `R_s::Float64` — stellar radius (R_sun); needed for transit a/R* computation
+- `gaia_plx` — `(plx, plx_err)` in mas (e.g. from `fetch_gaia_parallax`); centres the default `plx` prior of an astrometric fit ahead of the HGCA/G23H catalogue values. A `priors["plx"]` overrides it
 - `external_priors::Vector{ExternalPrior}` — priors on derived quantities (ecc, rho_s)
 - `sharing::Dict{Symbol, Vector{Vector{String}}}` — instrument parameter sharing groups
 - `obliquity::ObliquityConfig` — RM / Doppler-tomography model options
@@ -91,6 +92,7 @@ function Params(;
     ttv_n_transits::Dict{Int, Int} = Dict{Int, Int}(),
     ttv_backend::Symbol = :ttvfaster,
     obliquity::ObliquityConfig = ObliquityConfig(),
+    gaia_plx = nothing,
 )
     max_kplanet >= 0 || throw(ArgumentError("max_kplanet must be ≥ 0"))
     trend_order in (0, 1, 2) || throw(ArgumentError(
@@ -181,7 +183,7 @@ function Params(;
     # Generate defaults from data (or use generic fallbacks)
     data_for_priors = data !== nothing ? data :
         Data(; t_rv=[0.0, 1000.0], rv=[-100.0, 100.0], rv_err=[1.0, 1.0])
-    defaults = default_priors(config, data_for_priors)
+    defaults = default_priors(config, data_for_priors; gaia_plx)
 
     # User overrides take precedence
     if priors !== nothing
