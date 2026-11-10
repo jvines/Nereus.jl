@@ -119,6 +119,7 @@ const TEST_UNITS = [
     (name = "test_transdim_pt_emcee_defaults.jl", seconds = 641, files = ["test_transdim_pt_emcee_defaults.jl"]),
     (name = "test_circular.jl", seconds = 149, files = ["test_circular.jl"]),
     (name = "test_node_flip.jl", seconds = 90, files = ["test_node_flip.jl"]),
+    (name = "test_cyclic_inclination.jl", seconds = 45, files = ["test_cyclic_inclination.jl"]),
     (name = "test_lambda_slide.jl", seconds = 1, files = ["test_lambda_slide.jl"]),
     (name = "test_label_switching.jl", seconds = 6, files = ["test_label_switching.jl"]),
     (name = "test_pt_donor_buffer.jl", seconds = 1, files = ["test_pt_donor_buffer.jl"]),
