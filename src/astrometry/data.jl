@@ -1001,7 +1001,8 @@ The spans of Gaia observations each release's astrometry was fitted to, as
 (Lindegren et al. 2018), EDR3/DR3 2014-07-25 10:30 to 2017-05-28 08:44 UTC
 (Lindegren et al. 2021). A GOST scan plan covers the whole mission, so a
 release's five-parameter solution is reproduced from the transits inside its
-window only (`_gost_window`).
+window only: the `window` keyword of `gost_5param_fit` in the
+likelihoods (HGCA, G23H, Gaia DR3 + IAD), `_gost_window` in the plots.
 """
 const GAIA_DR2_WINDOW = (56863.4375, 57531.4826)
 const GAIA_DR3_WINDOW = (56863.4375, 57901.3639)

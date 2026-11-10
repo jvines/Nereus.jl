@@ -200,10 +200,11 @@
             abscissa_err = fill(1.0, 5),
             psi          = [0.0, π/6, π/3, π/2, 2π/3],
         )
-        # 4 fake Gaia GOST transits across the DR3 window
+        # 6 fake Gaia GOST transits across the DR3 window (a five-parameter
+        # fit needs 5; `Data` refuses fewer when HGCA depends on them)
         gost = GOSTData(
-            t   = [57000.0, 57100.0, 57200.0, 57300.0],
-            psi = [0.1, 0.5, 1.0, 1.5],
+            t   = [57000.0, 57100.0, 57200.0, 57300.0, 57450.0, 57600.0],
+            psi = [0.1, 0.5, 1.0, 1.5, 2.1, 2.7],
         )
 
         data = Data(
@@ -228,7 +229,7 @@
         @test data.iad isa IADData
         @test data.gost isa GOSTData
         @test n_iad(data.iad) == 5
-        @test n_gost(data.gost) == 4
+        @test n_gost(data.gost) == 6
         @test has_astrometry(data)
     end
 

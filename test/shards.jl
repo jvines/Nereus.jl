@@ -50,6 +50,7 @@ const TEST_UNITS = [
     (name = "astrometry/test_ofti.jl", seconds = 19, files = ["astrometry/test_ofti.jl"]),
     (name = "astrometry/test_iad_gost.jl", seconds = 8, files = ["astrometry/test_iad_gost.jl"]),
     (name = "astrometry/test_iad_multi_instrument.jl", seconds = 10, files = ["astrometry/test_iad_multi_instrument.jl"]),
+    (name = "astrometry/test_gost_dr_windows.jl", seconds = 8, files = ["astrometry/test_gost_dr_windows.jl"]),
     (name = "astrometry/test_iad_marginalised_residuals.jl", seconds = 1, files = ["astrometry/test_iad_marginalised_residuals.jl"]),
     (name = "astrometry/test_iad_jitter.jl", seconds = 25, files = ["astrometry/test_iad_jitter.jl"]),
     (name = "epoch astrometry orbit + trans-dim plot draws (shares a fixture)", seconds = 157, files = ["astrometry/test_epoch_astrometry_orbit.jl", "test_transdim_plot_draws.jl"]),

@@ -406,6 +406,15 @@ function Data(;
               "Gaia DR3 solution) to actually constrain the Gaia epoch.", maxlog = 1)
     end
 
+    # The Gaia-epoch models fit only the transits inside the release's own
+    # window (GAIA_DR3_WINDOW; G23H's DR2 epoch GAIA_DR2_WINDOW). Fewer than
+    # five there and `gost_5param_fit` returns zeros — a zero orbital reflex
+    # at the Gaia epoch, which reads as a measurement. Refuse it here.
+    if gost !== nothing && (hgca !== nothing || gaia_dr3 !== nothing || g23h !== nothing)
+        _require_gost_window(gost, GAIA_DR3_WINDOW, "DR3")
+        g23h !== nothing && _require_gost_window(gost, GAIA_DR2_WINDOW, "DR2")
+    end
+
     return Data(
         Vector{Float64}(t_rv), Vector{Float64}(rv),
         Vector{Float64}(rv_err), rv_inst_vec, rv_comp_vec,
@@ -429,6 +438,16 @@ Number of photometric data points across every instrument, at native
 cadence (the light curve is never binned).
 """
 n_phot(data::Data) = length(data.t_phot)
+function _require_gost_window(gost::GOSTData, win::Tuple{Real, Real}, release::String)
+    n_in = count(t -> win[1] <= t <= win[2], gost.t)
+    n_in >= 5 || throw(ArgumentError(
+        "GOST has $n_in transit(s) inside the Gaia $release window (MJD $(win[1]) to " *
+        "$(win[2])); the Gaia $release proper motion is fitted through that window " *
+        "alone and needs at least 5. Fetch the scan plan over it (`fetch_gost`'s " *
+        "default range covers it)."))
+    return nothing
+end
+
 """
     has_astrometry(data) -> Bool
 

@@ -66,7 +66,10 @@ function _multi_iad_scenario(; with_gaia::Bool)
         # the true i = 60° by ~800 nats. The bit-for-bit pins never caught it
         # because they check exact values, not ordering — hence the
         # discrimination testset added below.
-        Δq_true = gost_5param_fit(orb, gost, M_sec; t_ref = jyear_to_mjd(2016.0))
+        # Gaia published the fit through the DR3 window's transits; the
+        # plan's last three scans fall after it.
+        Δq_true = gost_5param_fit(orb, gost, M_sec; t_ref = jyear_to_mjd(2016.0),
+                                  window = Nereus.GAIA_DR3_WINDOW)
         kw[:gaia_dr3] = GaiaDR3Data(
             params = (Δq_true[1], Δq_true[2], plx + Δq_true[3],
                       Δq_true[4], Δq_true[5]),
@@ -111,6 +114,19 @@ const PIN_RTOL = 1e-13
 # Joint-path goldens. Named so the discrimination testset below and the
 # pins above cannot drift apart silently.
 #
+# RE-PINNED 2026-11-10 (GOST DR3 window): `_iad_gaia_joint_log_likelihood`
+# fitted the orbit's Gaia five-parameter shift through EVERY transit of the
+# plan; the published DR3 solution comes from the 2014-07-25 to 2017-05-28
+# window only, and it now fits through that window
+# (`gost_5param_fit(...; window = GAIA_DR3_WINDOW)`). This fixture's plan runs
+# to MJD 58000, so its last three transits drop out — of the fit, and of the
+# fixture's published vector `Δq_true`, rebuilt the same way. Checked: with
+# the plan cut to the window by hand (27 transits), the old and new code give
+# these values bit for bit, and the new code gives them on the full plan too.
+# JOINT_TRUTH does not move (the vector is self-consistent at the truth, so
+# the Gaia residual is zero either way); the other three were -34001.345...,
+# -204.910... and -3328.259....
+#
 # RE-PINNED 2026-09-23 (reflex kernel, GOST side): `gost_5param_fit` stopped
 # calling `orbitsolve` per scan transit and now evaluates the orbit from the
 # same hoisted Thiele-Innes constants `_iad_residuals!` uses
@@ -125,9 +141,9 @@ const PIN_RTOL = 1e-13
 # a verbatim copy of its own previous accumulation over 60 random scan
 # geometries (worst relative 8.6e-16).
 const JOINT_TRUTH = -141.2694442258537
-const JOINT_3MSEC = -34001.345123468105
-const JOINT_I30   = -204.91035261440564
-const JOINT_OMEGA = -3328.2593093716064
+const JOINT_3MSEC = -53451.914548579094
+const JOINT_I30   = -321.00025212191383
+const JOINT_OMEGA = -3234.192242129348
 
 @testset "astrometry — multi-instrument" begin
 

@@ -405,6 +405,14 @@ the server's bounds on an out-of-range request). `force_refetch = true`
 re-runs the query. There is also a `load_gost(path; ...)` loader for an
 already-downloaded GOST CSV.
 
+The plan can run past the data releases (the default fetch goes to 2025),
+but each Gaia-epoch model fits only the transits inside its own release's
+window: `GAIA_DR3_WINDOW` (2014-07-25 to 2017-05-28) for the HGCA Gaia epoch,
+the G23H DR3 epoch and a Gaia DR3 five-parameter solution, `GAIA_DR2_WINDOW`
+(to 2016-05-23) for the G23H DR2 epoch. Transits outside are ignored, and
+`Data` refuses a plan with fewer than five inside the window a paired
+product needs.
+
 ### `G23HData` — Gaia DR2/DR3 + Hipparcos joint product
 
 The Thompson+ 2026 G23H successor to HGCA EDR3: **five** PM

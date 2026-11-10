@@ -56,7 +56,9 @@ function _jit_params(iad; iad_names = String[], gaia = false)
                         parallax_factor = sin.(2π .* (1:30) ./ 365.25))
         kw[:gost] = gost
         cov = zeros(5, 5); for k in 1:5; cov[k, k] = (k <= 2 ? 0.05 : 0.02)^2; end
-        Δq = gost_5param_fit(_jit_orbit(), gost, _JIT_ORB.M_sec; t_ref = jyear_to_mjd(2016.0))
+        # What DR3 published: the fit through its own window's transits.
+        Δq = gost_5param_fit(_jit_orbit(), gost, _JIT_ORB.M_sec; t_ref = jyear_to_mjd(2016.0),
+                             window = Nereus.GAIA_DR3_WINDOW)
         kw[:gaia_dr3] = GaiaDR3Data(params = (Δq[1], Δq[2], _JIT_ORB.plx + Δq[3], Δq[4], Δq[5]),
                                     cov = cov, t_ref = jyear_to_mjd(2016.0))
     end
