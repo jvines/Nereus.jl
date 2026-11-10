@@ -27,7 +27,7 @@
 # angle, because births re-sort planets between them (`_td_ensemble_recut!`).
 
 using Random: AbstractRNG, MersenneTwister
-using Statistics: median, quantile, std
+using Statistics: mean, median, quantile, std
 import MCMCChains
 
 export sample_transdim_pt_emcee, TransDimPTemceeResult
@@ -67,6 +67,75 @@ struct TransDimPTemceeResult
     # <log L> per rung -- see `LadderHistory`. The swap distance runs over the
     # dimensions active in both walkers.
     ladder::LadderHistory
+    # How the run ended: `(; stopped, step, n_steps, n_draws, stop_file)`, with
+    # `stopped` one of "steps", "converged", "interrupted", "requested",
+    # "max_seconds", "max_evals". See src/graceful_stop.jl.
+    stop::NamedTuple
+end
+
+# ------------------------------------------------------------------
+# Periodic convergence diagnostic on the β=1 ensemble of a trans-dim run (the
+# counterpart of `_pt_convergence`). Same return, same use: (mean R̂, worst R̂,
+# mean bulk ESS, min tail ESS), read by the live readout and by the optional
+# `convergence_stop` gate.
+#
+# The GATING SET is what a trans-dim posterior is made of that is defined across
+# walkers and models:
+#   - `n_planets`, the model index (its occupancy of 0, 1, 2 ... planets): a
+#     walker entrenched in another model order shows up as a R̂ on it, which no
+#     per-parameter statistic can see;
+#   - every planet-slot parameter (`*_k<j>`) and `rho_s`, which in a trans-dim
+#     chain exist only where the slot is active. They are assessed CONDITIONED
+#     on the slot's activity (a slot's value while inactive is stale junk that
+#     drifts to 1e6 and would poison an unconditional R̂), with the slots
+#     relabelled into period order per draw so label switching between
+#     exchangeable slots is not read as non-convergence. This is exactly the
+#     machinery of `convergence_report` (src/reporting.jl), which this sampler
+#     already printed at the end of the run: the gate and the final report
+#     agree on what converged means.
+# Slot parameters of a slot active in under 1 % of the draws are not assessed
+# (nothing to measure), and in under half of them gate on R̂ only: a disfavoured
+# model has to mix, not to reach an ESS. Noise-model parameters, γ, jitter and
+# offsets are not gated, as in `sample_pt_emcee`.
+# ------------------------------------------------------------------
+function _td_convergence(samples::AbstractMatrix, keep_idx::Int, n_walkers::Int,
+                         col_names::Vector{Symbol}, gate::Vector{Symbol},
+                         model_params; cap::Int = 2000)
+    (n_walkers < 2 || keep_idx < 4 * n_walkers) && return nothing
+    keep_idx % n_walkers == 0 || return nothing
+    n_step = keep_idx ÷ n_walkers
+    n_step < 4 && return nothing
+    stride = max(1, n_step ÷ cap)
+    kept = 1:stride:n_step
+    nk = length(kept)
+    # Only the columns the statistics read: the gating set, the activity bits
+    # and the planet-slot parameters the relabelling sorts by.
+    cols = Int[i for (i, nm) in enumerate(col_names)
+               if nm in gate || startswith(String(nm), "planet_active_") ||
+                  occursin(r"_k\d+$", String(nm))]
+    M = Matrix{Float64}(undef, nk * n_walkers, length(cols))
+    @inbounds for (si, s) in enumerate(kept), w in 1:n_walkers
+        row = (si - 1) * n_walkers + w
+        src = (s - 1) * n_walkers + w
+        for (j, c) in enumerate(cols)
+            M[row, j] = samples[src, c]
+        end
+    end
+    st = try
+        _convergence_stats(MCMCChains.Chains(M, col_names[cols]), n_walkers;
+                           params = gate, model_params)
+    catch err
+        err isa InterruptException && rethrow()
+        return nothing
+    end
+    st.failure === nothing || return nothing
+    rhf = filter(isfinite, st.rh)
+    isempty(rhf) && return nothing
+    bf = filter(isfinite, st.es)
+    tf = [t for (t, g) in zip(st.et, st.gate_ess) if g && isfinite(t)]
+    (mean(rhf), maximum(rhf), isempty(bf) ? 0.0 : mean(bf),
+     # nothing ESS-gated (every slot is rare): no ESS requirement, as the report
+     isempty(tf) ? Inf : minimum(tf))
 end
 
 # Debug event log for trans-dim moves, gated by ENV["TD_DEBUG_BIRTHS"]="1".
@@ -415,6 +484,30 @@ selection on planet count.
   0-planet model; 16 left 13% at the old budget and none at the new one.
 - `n_walkers::Int = 100`
 - `n_steps::Int = 3000`
+- `convergence_stop::Bool = false` — end production once the gating set has
+  worst split-R̂ below `rhat_threshold` and worst tail-ESS above
+  `tail_ess_threshold` for `n_converged_checks` consecutive diagnostics, no
+  earlier than `min_steps`; the draws kept so far are the result and
+  `stop.stopped` is `"converged"`. The gating set is the model index
+  (`n_planets`), every planet-slot parameter and `rho_s`, the slot parameters
+  assessed only over the draws where the slot is active (and relabelled in
+  period order, so label switching between slots is not read as
+  non-convergence) -- the statistics of `convergence_report`. A slot active in
+  under half the draws gates on R̂ only; one active in under 1 % is not
+  assessed. Noise-model parameters, γ, jitter and offsets are not gated.
+  `science_params` replaces the slot-and-`rho_s` part of the set with the names
+  given (`n_planets` stays in it).
+- `rhat_threshold::Real = 1.01`, `tail_ess_threshold::Real = 1000`,
+  `n_converged_checks::Int = 3`, `min_steps::Int = 0`, `diag_every::Int = 0`
+  (steps between diagnostics; default `max(200, n_steps ÷ 40)`) -- the same
+  settings, with the same meaning, as in `sample_pt_emcee`. The diagnostic also
+  drives the live `Rhat` mean/worst and `ESS` mean-bulk/min-tail readout of the
+  progress bar, whether or not the gate is on.
+- `max_seconds::Real = Inf`, `max_evals::Real = Inf`, `stop_file = nothing` --
+  as in `sample_pt_emcee`: end production gracefully on a wall-clock limit, an
+  evaluation limit, or the appearance of a file (looked for about every 5 s);
+  an error if that happens before the end of burn-in. An `InterruptException`
+  after burn-in ends production the same way (`stop.stopped == "interrupted"`).
 - `n_burnin::Int = 2000` — was 2000/1000, see `sample_pt_emcee`.
 - `prune_stranded::Bool = true` — as in `sample_pt_emcee`, in the joint
   (model, parameter) space: during burn-in a walker whose likelihood puts it
@@ -561,6 +654,16 @@ function sample_transdim_pt_emcee(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    diag_every::Int = 0,
+    convergence_stop::Bool = false,
+    science_params::Union{Nothing,Vector{String}} = nothing,
+    rhat_threshold::Real = 1.01,
+    tail_ess_threshold::Real = 1000,
+    n_converged_checks::Int = 3,
+    min_steps::Int = 0,
+    max_seconds::Real = Inf,
+    max_evals::Real = Inf,
+    stop_file::Union{Nothing,AbstractString} = nothing,
 )
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
@@ -1151,6 +1254,7 @@ function sample_transdim_pt_emcee(
     smd_hist  = zeros(Float64, n_steps, n_temps - 1)
     smd_scale = _swap_distance_scale(layout.unfrozen_priors, flat_shift)
     n_done    = 0
+    halt      = Threads.Atomic{Bool}(false)   # tells threaded loops to take no more tasks
     accept_transdim  = zeros(Int, max_k)
     propose_transdim = zeros(Int, max_k)
     # Noise-toggle moves get their OWN per-temp raw counters. They were
@@ -1264,6 +1368,7 @@ function sample_transdim_pt_emcee(
         half_chunks = _chunk_ranges(length(tasks), n_slots)
         Threads.@threads :static for slot in 1:length(half_chunks)
             for task_idx in half_chunks[slot]
+                halt[] && break
                 t, w = tasks[task_idx]
                 β = βs[t]
                 trng = task_rngs[task_idx]
@@ -1411,6 +1516,7 @@ function sample_transdim_pt_emcee(
         chunks_td = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
         Threads.@threads :static for slot in 1:length(chunks_td)
             for task_idx in chunks_td[slot]
+                halt[] && break
                 t = (task_idx - 1) ÷ n_walkers_eff + 1
                 w = (task_idx - 1) % n_walkers_eff + 1
                 trng = rngs_td[task_idx]
@@ -2013,6 +2119,22 @@ function sample_transdim_pt_emcee(
     pb = ProgressBar("td-pt_emcee"; total = n_steps, enabled = show_progress,
                      start = step0)
 
+    # --- Live convergence readout + optional run-until-converged ------
+    # (the gating set is described at `_td_convergence`)
+    _sci_names = science_params === nothing ?
+        String[nm for nm in layout.unfrozen_names if occursin(r"_k\d+$", nm) || nm == "rho_s"] :
+        science_params
+    gate_set = Symbol[:n_planets; Symbol.(_sci_names)]
+    diag_cols = vcat(Symbol.(layout.unfrozen_names), [:n_planets],
+                     [Symbol("planet_active_$k") for k in 1:max_k],
+                     [Symbol("noise_active_$(nm_idx)") for nm_idx in noise_toggle_idx])
+    diag_cadence = diag_every > 0 ? diag_every : max(200, n_steps ÷ 40)
+    rhat_str = "—"; ess_str = "—"
+    conv_run = 0; converged_at = 0
+    sc = StopControl(; max_seconds, max_evals, stop_file)
+    stop_reason = "steps"; stop_step = 0
+    cur_step = 0; step_keep0 = 0
+
     # --- Resume: put the saved run back exactly as it stopped ----------
     # In place throughout: the closures above captured these arrays (and the
     # TransDimStates, and the MoMS strategy), and rebinding a captured variable
@@ -2074,7 +2196,12 @@ function sample_transdim_pt_emcee(
     show_progress && any(is_held) &&
         _burnin_hold_info("td-pt_emcee", hold, params, n_burnin)
 
+    # An InterruptException after burn-in ends production at the last step that
+    # was fully recorded (the step it landed in is dropped whole); before that,
+    # or with nothing recorded, it aborts the run.
+    try
     for step in (step0 + 1):n_steps
+        cur_step = step; step_keep0 = keep_idx
         do_half_step!(tasks_h1, :h1); _np_chk("h1", step)
         do_half_step!(tasks_h2, :h2); _np_chk("h2", step)
         if !isempty(flips)
@@ -2280,6 +2407,24 @@ function sample_transdim_pt_emcee(
             end
         end
 
+        # ---- Periodic convergence diagnostic (β=1 gating set) ----
+        if step > n_burnin && (step - n_burnin) % diag_cadence == 0
+            diag = _td_convergence(samples, keep_idx, n_walkers_eff, diag_cols,
+                                   gate_set, params)
+            if diag !== nothing
+                meanr, maxr, meanb, mte = diag
+                rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))
+                ess_str  = string(round(Int, meanb), "/",
+                                  isfinite(mte) ? round(Int, mte) : "∞")
+                if convergence_stop
+                    pass = step >= min_steps && maxr < rhat_threshold &&
+                           mte > tail_ess_threshold
+                    conv_run = pass ? conv_run + 1 : 0
+                    conv_run >= n_converged_checks && (converged_at = step)
+                end
+            end
+        end
+
         if show_progress
             total_props = sum(propose_within)
             total_acc   = sum(accept_within)
@@ -2295,13 +2440,27 @@ function sample_transdim_pt_emcee(
                               :td_acc => round(td_rate, digits=3),
                               :td_n => td_acc,
                               :ntd_n => sum(accept_noise_transdim),
+                              :Rhat => rhat_str,    # mean/worst over the gating set
+                              :ESS => ess_str,      # mean(bulk)/worst(tail)
                               :nevals => n_evals_atomic[]))
         end
 
         # ---- Checkpoint: every `checkpoint_interval` s and on the last step
         # (src/checkpoint.jl); this sampler has no early stop -------------
+        # ---- Out-of-band stops (see src/graceful_stop.jl): an error during
+        # burn-in, where there is nothing to keep.
+        _step_hook!(step, sc)
+        stop_now = _stop_check!(sc, n_evals_atomic[];
+                    force = step > n_burnin && (step - n_burnin) % diag_cadence == 0)
+        if stop_now !== nothing
+            step <= n_burnin && throw(_stop_in_burnin_error(
+                "td-pt_emcee", stop_now, sc, step, n_burnin))
+            keep_idx > 0 || (stop_now = nothing)
+        end
+
         if ck_path !== nothing &&
-           (step == n_steps || time() - last_ck >= checkpoint_interval)
+           (step == n_steps || (convergence_stop && converged_at > 0) ||
+            stop_now !== nothing || time() - last_ck >= checkpoint_interval)
             write_checkpoint(ck_path, "transdim_pt_emcee", ck_fp, (; step,
                 state, logπ = logπ_arr, logL = logL_arr, td_states, betas = βs,
                 rng_master, rngs_h1, rngs_h2, rngs_td, rngs_flip, rngs_slide,
@@ -2324,8 +2483,35 @@ function sample_transdim_pt_emcee(
                 informed = _informed_cache_snapshot(rngs_td, informed_keys)))
             last_ck = time()
         end
+
+        if convergence_stop && converged_at > 0
+            show_progress && @info "td-pt_emcee: gating set converged at step $converged_at " *
+                "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)); stopping early"
+            stop_reason = "converged"; stop_step = step
+            break
+        end
+        if stop_now !== nothing
+            stop_reason = stop_now; stop_step = step
+            break
+        end
     end
+    catch err
+        err isa InterruptException && cur_step > n_burnin && step_keep0 > 0 ||
+            rethrow()
+        keep_idx = step_keep0
+        n_done = cur_step - 1
+        stop_reason = "interrupted"; stop_step = cur_step - 1
+        halt[] = true; sleep(0.5)         # let straggler threads finish their walker
+    end
+    stop_reason == "steps" && (stop_step = n_done)
     show_progress && finish!(pb)
+    stop_reason == "steps" ||
+        _announce_stop(stop_reason, stop_step, n_steps, keep_idx)
+    if convergence_stop && converged_at == 0 && stop_reason == "steps"
+        @warn "td-pt_emcee: hit n_steps=$n_steps WITHOUT meeting the convergence gate " *
+              "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)) on the gating set — " *
+              "results may be unconverged (last $rhat_str Rhat, $ess_str ESS)"
+    end
     show_progress && _node_flip_info("td-pt_emcee", flips, params, flip_proposed,
                                      flip_accepted)
     show_progress && _lambda_slide_info("td-pt_emcee", slides, params,
@@ -2399,5 +2585,6 @@ function sample_transdim_pt_emcee(
         copy(planet_birth_proposed), copy(planet_birth_accepted),
         copy(planet_death_proposed), copy(planet_death_accepted),
         _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
+        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc),
     )
 end
