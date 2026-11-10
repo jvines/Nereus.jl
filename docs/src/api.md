@@ -167,8 +167,25 @@ Uniform across engines, separate from sampler-specific knobs:
 ```julia
 Stopping(; max_seconds = nothing, max_evals = nothing,
            ess_min = nothing, rhat_max = nothing,
-           logz_tol = nothing, check_every = 500)
+           logz_tol = nothing, check_every = nothing)
 ```
+
+Pass it as `stopping=` to any `fit_rv`, `fit_transit`, `fit_astrometry` or
+`fit_joint`. Each field becomes the engine's own option, and a field an engine
+cannot honour is an `ArgumentError` that names the engines that can:
+
+| field | engine option | engines |
+|---|---|---|
+| `max_seconds` | `max_seconds` | `pt_emcee`, `transdim_pt_emcee` |
+| `max_evals` | `max_evals` | `pt_emcee`, `transdim_pt_emcee` |
+| `rhat_max` | `rhat_threshold` (and `convergence_stop = true`) | `pt_emcee`, `transdim_pt_emcee` |
+| `ess_min` | `tail_ess_threshold` (and `convergence_stop = true`) | `pt_emcee`, `transdim_pt_emcee` |
+| `check_every` | `diag_every` (steps between diagnostics) | `pt_emcee`, `transdim_pt_emcee` |
+| `logz_tol` | `dlogz` (`dlogz_batch` for `nested_dynamic`) | `nested`, `nested_ins`, `daedalus`, `nested_dynamic` |
+
+A field given together with the engine option it maps to, with a different
+value, is an error. The summary's `"stopped"` says how a run ended; see
+[Stopping a run early](samplers.md#Stopping-a-run-early).
 
 ---
 
@@ -184,6 +201,7 @@ Every entry point returns `(; chains, log_z, summary)`.
 | `"status"` | `"ok"`, or `"railed"` — see below |
 | `"log_z"` | marginal likelihood (`NaN` where the engine gives none) |
 | `"elapsed_sec"` | wall time |
+| `"stopped"` | how the sampler ended: `"steps"`, `"converged"`, `"interrupted"`, `"requested"`, `"max_seconds"` or `"max_evals"` (PT ensembles; with `"stopped_at_step"`, `"n_steps"`, `"n_draws_kept"` and, when a stop file was watched, `"stop_file"`) |
 | `"params"` | per-parameter median and credible intervals |
 | `"derived"` | physical quantities — masses, radii, separations, equilibrium temperatures |
 | `"output_dir"` | present when you passed one |

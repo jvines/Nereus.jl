@@ -96,6 +96,12 @@ Container for a `sample_pt_emcee` run.
 - `ladder::LadderHistory` — the ladder, the swap acceptance and the swap mean
   distance at every step, and `⟨log L⟩` per rung: what [`plot_ladder_rates`](@ref)
   and [`plot_beta_ladder`](@ref) draw. See [`LadderHistory`](@ref).
+- `stop::NamedTuple` — how the run ended: `(; stopped, step, n_steps, n_draws,
+  stop_file)`. `stopped` is `"steps"` (ran to `n_steps`), `"converged"` (the
+  `convergence_stop` gate), `"interrupted"` (Ctrl-C after burn-in),
+  `"requested"` (the stop file appeared), `"max_seconds"` or `"max_evals"`;
+  `step` is the last step recorded and `n_draws` the rows kept (walkers × kept
+  steps).
 """
 struct PTemceeResult
     chains::MCMCChains.Chains
@@ -108,6 +114,7 @@ struct PTemceeResult
     betas::Vector{Float64}
     n_evals::Int
     ladder::LadderHistory
+    stop::NamedTuple
 end
 
 """
@@ -614,6 +621,31 @@ in place.
   collapsed to 0.002 against a published 0.335, silently.
 - `n_walkers::Int=100` — walkers per temperature (≥ `2·n_dim + 2`, even).
 - `n_steps::Int=3000` — steps per walker.
+- `convergence_stop::Bool=false` — end production once the gating parameters
+  (the planet block and `rho_s`, or `science_params`) have worst split-R̂ below
+  `rhat_threshold` and worst tail-ESS above `tail_ess_threshold` for
+  `n_converged_checks` consecutive diagnostics, no earlier than `min_steps`.
+  The diagnostics run every `diag_every` steps (default `max(200, n_steps ÷ 40)`)
+  and also drive the live `Rhat` mean/worst and `ESS` readout, whether or not
+  the gate is on. The draws kept so far are the result; `stop.stopped` is
+  `"converged"`.
+- `rhat_threshold::Real=1.01`, `tail_ess_threshold::Real=1000`,
+  `n_converged_checks::Int=3`, `min_steps::Int=0`, `diag_every::Int=0` — the
+  gate's settings, see `convergence_stop`.
+- `max_seconds::Real=Inf`, `max_evals::Real=Inf` — end production gracefully
+  once this much wall-clock time has passed since the sampler started, or this
+  many likelihood evaluations have been made. Reached during burn-in, the run
+  fails with an error (there is nothing to keep yet).
+- `stop_file=nothing` — path of a file whose appearance asks the run to stop.
+  Looked for about every 5 s of wall clock (and at every diagnostic), never per
+  step. Once burn-in is over the run ends at the last recorded step and
+  finishes normally with `stop.stopped == "requested"`; before that it fails
+  with an error. The file is never deleted. `run_job` watches
+  `<output_dir>/STOP` unless the job's `stop_file` says otherwise.
+- An `InterruptException` (Ctrl-C) after burn-in ends production the same way,
+  with `stop.stopped == "interrupted"`; the row being written when it arrives
+  is dropped. During burn-in, or a second interrupt while the run is being
+  wound up, it aborts as before.
 - `n_burnin::Int=2000` — burn-in discarded from posterior + evidence.
   Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`, and
   every 50 steps through 3/4 of burn-in with the pruning (`_pt_recut_due`).
@@ -726,6 +758,9 @@ function sample_pt_emcee(
     tail_ess_threshold::Real = 1000,
     n_converged_checks::Int = 3,
     min_steps::Int = 0,
+    max_seconds::Real = Inf,
+    max_evals::Real = Inf,
+    stop_file::Union{Nothing,AbstractString} = nothing,
     adapt_ladder::Bool = false,
     ladder_adapt_window::Int = 50,
     ladder_adapt_ν0::Real = 10.0,
@@ -1234,6 +1269,9 @@ function sample_pt_emcee(
     # --- Live convergence readout + optional run-until-converged ------
     rhat_str = "—"; ess_str = "—"      # cached "mean/worst" displays
     conv_run = 0; converged_at = 0     # consecutive passing checks; stop step
+    sc = StopControl(; max_seconds, max_evals, stop_file)
+    stop_reason = "steps"; stop_step = 0   # how the loop ended; last step kept
+    cur_step = 0; step_keep0 = 0           # the step in flight; keep_idx before it
 
     # --- Resume: put the saved run back exactly as it stopped ----------
     # In place throughout: the closures above captured these arrays, and
@@ -1280,7 +1318,13 @@ function sample_pt_emcee(
         _burnin_hold_info("pt_emcee", hold, params, n_burnin)
 
     # --- Main loop ----------------------------------------------------
+    # An InterruptException after burn-in ends production at the last step that
+    # was fully recorded; the step it landed in is dropped whole (`keep_idx`
+    # goes back to its value at the top of that step). Before burn-in is over,
+    # or with nothing recorded, it propagates and the run aborts.
+    try
     for step in (step0 + 1):n_steps
+        cur_step = step; step_keep0 = keep_idx
         do_half_step!(tasks_h1, :h1)
         do_half_step!(tasks_h2, :h2)
 
@@ -1473,7 +1517,20 @@ function sample_pt_emcee(
 
         # ---- Checkpoint: every `checkpoint_interval` s, on the last step, and
         # before an early stop (src/checkpoint.jl) -------------------------
+        # ---- Out-of-band stops: stop file, wall-clock and evaluation limits.
+        # The file is looked for every few seconds (and at every diagnostic),
+        # never per step. During burn-in there is nothing to keep: an error.
+        _step_hook!(step, sc)
+        stop_now = _stop_check!(sc, n_evals_atomic[];
+                    force = step > n_burnin && (step - n_burnin) % diag_cadence == 0)
+        if stop_now !== nothing
+            step <= n_burnin && throw(_stop_in_burnin_error(
+                "pt_emcee", stop_now, sc, step, n_burnin))
+            keep_idx > 0 || (stop_now = nothing)   # `thin`: no row recorded yet
+        end
+
         if ck_path !== nothing && (step == n_steps || (convergence_stop && converged_at > 0) ||
+                                   stop_now !== nothing ||
                                    time() - last_ck >= checkpoint_interval)
             write_checkpoint(ck_path, "pt_emcee", ck_fp, (; step,
                 state, logπ = logπ_arr, logL = logL_arr, betas = βs, rng_master,
@@ -1494,10 +1551,26 @@ function sample_pt_emcee(
         if convergence_stop && converged_at > 0
             show_progress && @info "pt_emcee: science params converged at step $converged_at " *
                 "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)); stopping early"
+            stop_reason = "converged"; stop_step = step
+            break
+        end
+        if stop_now !== nothing
+            stop_reason = stop_now; stop_step = step
             break
         end
     end
+    catch err
+        err isa InterruptException && cur_step > n_burnin && step_keep0 > 0 ||
+            rethrow()
+        keep_idx = step_keep0
+        n_done = cur_step - 1
+        stop_reason = "interrupted"; stop_step = cur_step - 1
+        _drain_workers!(next_task)
+    end
+    stop_reason == "steps" && (stop_step = n_done)
     show_progress && finish!(pb)
+    stop_reason == "steps" ||
+        _announce_stop(stop_reason, stop_step, n_steps, keep_idx)
     show_progress && _pt_recut_info("pt_emcee", recut_moved)
     show_progress && _node_flip_info("pt_emcee", flips, params, flip_proposed,
                                      flip_accepted)
@@ -1505,7 +1578,7 @@ function sample_pt_emcee(
         "$(sum(pruned)) stranded walker state(s) onto their rung's mode " *
         "($(pruned[1]) at β = 1), all from a region whose total posterior mass " *
         "is bounded below e⁻¹⁰ of the mode's. The recorded chain is ordinary MCMC."
-    if convergence_stop && converged_at == 0
+    if convergence_stop && converged_at == 0 && stop_reason == "steps"
         @warn "pt_emcee: hit max_steps=$n_steps WITHOUT meeting the convergence gate " *
               "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)) on science params — " *
               "results may be unconverged (last $rhat_str Rhat, $ess_str ESS)"
@@ -1705,6 +1778,7 @@ function sample_pt_emcee(
     return PTemceeResult(
         chains, log_z, log_z_laplace, log_z_bridge, ev_report, acc_within, acc_swap,
         βs, n_evals_atomic[],
-        _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin)
+        _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
+        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc)
     )
 end
