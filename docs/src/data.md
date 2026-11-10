@@ -413,6 +413,15 @@ the G23H DR3 epoch and a Gaia DR3 five-parameter solution, `GAIA_DR2_WINDOW`
 `Data` refuses a plan with fewer than five inside the window a paired
 product needs.
 
+### Gaia DR3 parallax at runtime
+
+The astrometric fits need no parallax
+typed in: `fetch_gaia_parallax(source_id)` or `fetch_gaia_parallax("HIP 103836")`
+returns `(source_id, plx, plx_err, release, name)` in mas (raw DR3 value, no
+zero-point correction), cached under `gaia/`. In a job (or `fit_astrometry` /
+`fit_joint`) set `star.gaia_id` (or `gaia_id=`) / `star.name` (`name=`) and the
+value becomes the default `plx` prior.
+
 ### `G23HData` — Gaia DR2/DR3 + Hipparcos joint product
 
 The Thompson+ 2026 G23H successor to HGCA EDR3: **five** PM

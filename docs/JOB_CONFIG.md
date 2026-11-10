@@ -157,7 +157,17 @@ rather than a single number trusted.
     // Must be finite and >= 0; 0 holds that quantity fixed.
     "sigma_M_s": null,                     // M_sun
     "sigma_R_s": null,                     // R_sun
-    "sigma_T_eff": null                    // K
+    "sigma_T_eff": null,                   // K
+    // Gaia DR3 parallax at runtime, for the default `plx` prior of an
+    // astrometric fit. `gaia_id`: the DR3 source_id (integer, digits, or
+    // "Gaia DR3 <id>"). `name`: a Simbad-resolvable name, mapped to its DR3
+    // source_id (`gaia_id` wins if both are given). Queried only when a
+    // planet has astrometry AND `priors.plx` is absent; a failed query stops
+    // the job. Prior: Gaussian at the raw DR3 parallax (no zero-point
+    // correction), +-10 sigma truncated, ahead of the HGCA/G23H value.
+    // Recorded in summary.star.gaia. Cached under $NEREUS_DATA_CACHE/gaia.
+    "gaia_id": null,
+    "name": null
   },
 
   // ---- Data (at least ONE of these; src/runner.jl:574-663) ----------
@@ -711,6 +721,9 @@ numbers live under `fitted` / `derived`
   "chains_path":    "chains.nc",
   "config_path":    "/work/in/config.json",
   "elapsed_sec":    612.3,
+  "star": {"gaia": {"source_id": 6774368627975155968, "plx": 14.36,   // only when a Gaia
+                    "plx_err": 0.02, "release": "DR3",                // parallax was looked up
+                    "resolved_from": "name", "name": "HIP 103836"}},
 
   // ---- Evidence + sampler metrics (_populate_summary!) ----
   "log_z":   12345.67,                      // NaN for rjmcmc/moms/nuts/ofti

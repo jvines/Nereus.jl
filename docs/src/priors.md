@@ -288,7 +288,7 @@ plots are RM-consistent. Render the in-transit anomaly with the
 
 | Parameter | Meaning | Default |
 |---|---|---|
-| `plx` | parallax (mas) | `NormalPrior(μ, σ, lo, hi)` from the HGCA parallax (±10σ, floored at 0.001) if `data.hgca` is set; else `LogUniformPrior(0.1, 1000.0)` |
+| `plx` | parallax (mas) | `NormalPrior(μ, σ, lo, hi)` from, in order, the Gaia DR3 parallax looked up through `star.gaia_id` / `star.name` (`fetch_gaia_parallax`), the HGCA parallax if `data.hgca` is set, the G23H parallax if `data.g23h` is set (±10σ, floored at 0.001); else `LogUniformPrior(0.1, 1000.0)`. A `priors["plx"]` replaces all of these |
 | `M_pri` | primary mass (M_sun) | `FixedPrior(config.M_s)` if `M_s` set; else `LogUniformPrior(0.05, 5.0)`. Override with a `NormalPrior` to propagate stellar-mass uncertainty into the companion mass |
 
 ### TTV per-transit offsets

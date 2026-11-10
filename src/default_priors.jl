@@ -80,8 +80,13 @@ the data and model configuration. Follows EMPEROR conventions.
 
 The user can override any prior by passing it in the `priors` kwarg
 to `Params()`.
+
+With an astrometric planet the default `plx` prior is a Gaussian truncated at
+±10σ around, in order of preference: `gaia_plx` (a `(plx, plx_err)` NamedTuple,
+e.g. from [`fetch_gaia_parallax`](@ref)), the HGCA catalogue parallax, the G23H
+catalogue parallax; with none of them, `LogUniform(0.1, 1000)` mas.
 """
-function default_priors(config::ParamsConfig, data::Data)
+function default_priors(config::ParamsConfig, data::Data; gaia_plx = nothing)
     dic = Dict{String, PriorSpec}()
     parametrization = config.parametrization
     instruments = config.instruments
@@ -374,14 +379,23 @@ function default_priors(config::ParamsConfig, data::Data)
     # --- Astrometry: parallax (mas) and primary mass (M_sun) ---
     # If any planet has AS as a data source, we have `plx` and `M_pri`
     # slots in the layout. The default plx prior is Gaussian centered
-    # on the HGCA parallax. The default M_pri prior is a FixedPrior at
+    # on the Gaia DR3 / HGCA / G23H parallax. The default M_pri prior is a FixedPrior at
     # config.M_s (back-compat with the pre-sampling-M_pri code); the
     # user passes a NormalPrior to enable propagation of stellar-mass
     # uncertainty into the companion mass.
     if any(AS_SOURCE in m for m in config.planet_modes)
-        if data.hgca !== nothing
-            σ = max(data.hgca.plx_err, 1e-3)
-            μ = data.hgca.plx
+        plx_ref = if gaia_plx !== nothing
+            (gaia_plx.plx, gaia_plx.plx_err)
+        elseif data.hgca !== nothing
+            (data.hgca.plx, data.hgca.plx_err)
+        elseif data.g23h !== nothing
+            (data.g23h.plx, data.g23h.plx_err)
+        else
+            nothing
+        end
+        if plx_ref !== nothing
+            μ = plx_ref[1]
+            σ = max(plx_ref[2], 1e-3)
             lo = max(0.001, μ - 10 * σ)
             hi = μ + 10 * σ
             dic["plx"] = NormalPrior(μ, σ, lo, hi)
