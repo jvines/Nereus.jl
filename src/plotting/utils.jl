@@ -1244,3 +1244,74 @@ function bin_phasefold(x, y; target::Int = 15,
     end
     return x_bin, y_bin, yerr_bin
 end
+
+# ---------------------------------------------------------------------------
+# Angle-axis units
+# ---------------------------------------------------------------------------
+
+"""
+    _angle_unit(extent_mas) -> "mas" | "μas"
+
+The unit an astrometric axis group is read in: μas when the largest absolute
+axis limit is below 1 mas, mas otherwise.
+"""
+_angle_unit(extent_mas::Real) = extent_mas < 1 ? "μas" : "mas"
+
+# Tick labels of `values × scale`, rounded so float noise (0.002 mas × 1000 =
+# 2.0000000000000004) does not reach the label, then formatted by Makie's own
+# default tick formatter.
+function _scaled_ticklabels(scale::Real)
+    return values -> Makie.get_ticklabels(Makie.automatic,
+                         [round(v * scale; sigdigits = 10) for v in values])
+end
+
+"""
+    _angle_units!(entries...)
+    _angle_units!(axes; dims = :y, label)
+
+Choose one angle unit (mas or μas) for a group of astrometric axes that show
+the same quantity, and relabel them. Data stay in mas: when the unit is μas
+the tick labels show the values ×1000 and the axis label says μas. The unit
+comes from the extent of the group, the largest absolute value of the axes'
+final limits over the listed dimensions (`< 1` mas gives μas), so it is called
+once a figure is fully drawn and any explicit `limits!` are set.
+
+An entry is `(axis, dim, label)` with `dim` one of `:x`/`:y` and `label` a
+function `unit -> axis label` (a `String` or `rich(...)` text) called with
+`"mas"` or `"μas"`. The second form applies `dims` (a symbol or tuple of
+symbols) and one `label` function (or a function of `(unit, dim)`) to every axis
+in `axes`.
+
+Returns the unit string.
+"""
+function _angle_units!(entries::Tuple...)
+    ext = 0.0
+    for (ax, dim, _) in entries
+        reset_limits!(ax)
+        r = ax.finallimits[]
+        o, w = dim === :x ? (r.origin[1], r.widths[1]) : (r.origin[2], r.widths[2])
+        ext = max(ext, abs(o), abs(o + w))
+    end
+    unit = _angle_unit(ext)
+    scale = unit == "μas" ? 1000.0 : 1.0
+    for (ax, dim, label) in entries
+        if dim === :x
+            ax.xlabel = label(unit)
+            ax.xtickformat = scale == 1.0 ? Makie.automatic : _scaled_ticklabels(scale)
+        else
+            ax.ylabel = label(unit)
+            ax.ytickformat = scale == 1.0 ? Makie.automatic : _scaled_ticklabels(scale)
+        end
+    end
+    return unit
+end
+
+function _angle_units!(axes::AbstractVector; dims = :y, label)
+    ds = dims isa Symbol ? (dims,) : Tuple(dims)
+    entries = Tuple[]
+    for ax in axes, d in ds
+        lab = applicable(label, "mas", d) ? (u -> label(u, d)) : label
+        push!(entries, (ax, d, lab))
+    end
+    return _angle_units!(entries...)
+end

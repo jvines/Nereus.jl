@@ -183,12 +183,11 @@ end
 # so they are drawn thinner there than in a single-mission panel.
 _am_wide_linewidth(S) = S.zoom == 0 ? 2.5 : 1.5
 
-const _AM_XLABEL = "ΔRA·cos δ (mas)"
-const _AM_YLABEL = "Δδ (mas)"
+_am_oc_label(u) = "O−C ($u)"
 
 """A sky-plane axis: equal scales, East to the left."""
 function _am_sky_axis(pos; kw...)
-    ax = Axis(pos; xlabel = _AM_XLABEL, ylabel = _AM_YLABEL,
+    ax = Axis(pos; xlabel = _sky_xlabel("mas"), ylabel = _sky_ylabel("mas"),
               aspect = DataAspect(), kw...)
     _flip_xaxis!(ax)
     return ax
@@ -262,6 +261,7 @@ function _am_draw_sky!(ax, S, insts; frame, box = nothing, tag = nothing,
                color = (:black, 0.5), linestyle = :dash, linewidth = 1)
     end
     _sky_limits!(ax, frame...)
+    _sky_units!(ax)
     tag === nothing || text!(ax, 0.04, 0.97; text = tag, space = :relative,
                              align = (:left, :top), font = :bold, fontsize = 18)
     return ax
@@ -301,6 +301,7 @@ function _am_draw_oc!(ax, S, m::Int; x::Symbol = :epoch, tag = nothing)
           align = (:right, :bottom), fontsize = 15)
     tag === nothing || text!(ax, 0.02, 0.96; text = tag, space = :relative,
                              align = (:left, :top), font = :bold, fontsize = 18)
+    _angle_units!([ax]; dims = :y, label = _am_oc_label)
     return ax
 end
 
@@ -382,7 +383,7 @@ function plot_astrometry_model(chains, params, data;
     output === nothing || mkpath(joinpath(output, "models"))
     save_fig(fig, suffix) = base === nothing ? nothing :
         _save_plot("$(base)$(suffix).$fmt", fig; save_pdf = save_pdf, px_per_unit = 3)
-    oc_axis(pos; kw...) = Axis(pos; xlabel = "Epoch (yr)", ylabel = "O−C (mas)", kw...)
+    oc_axis(pos; kw...) = Axis(pos; xlabel = "Epoch (yr)", ylabel = _am_oc_label("mas"), kw...)
     wide_lw = _am_wide_linewidth(S)
 
     with_theme(nereus_theme()) do
@@ -525,7 +526,7 @@ function plot_epoch_astrometry_orbit(chains, params, data;
                       linewidth = _am_wide_linewidth(S))
         for (i, m) in enumerate(insts)
             last = i == length(insts)
-            ax_r = Axis(fig[2 + i, 1]; xlabel = "Orbital phase", ylabel = "O−C (mas)",
+            ax_r = Axis(fig[2 + i, 1]; xlabel = "Orbital phase", ylabel = _am_oc_label("mas"),
                         xlabelvisible = last, xticklabelsvisible = last)
             _am_draw_oc!(ax_r, S, m; x = :phase, tag = S.names[m])
             rowsize!(fig.layout, 2 + i, strip_h - (last ? 0 : 50))
