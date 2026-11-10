@@ -3,9 +3,11 @@
 # `RelAstromData`, `HGCAData`, and `Data.t_rv`.
 #
 # Conventions:
-#   - Sky-plane axes: x = ΔRA·cos δ (mas), y = Δδ (mas).
+#   - Sky-plane axes: x = ΔRA·cos δ, y = Δδ, in mas or μas (see below).
 #     Standard astronomy convention is north up, east left, so the
 #     RA axis is *flipped* (RA increases to the LEFT).
+#   - Angle units: data are mas (mas/yr); each figure's axis groups are read
+#     in μas (μas/yr) when their extent is under 1 mas (`_angle_units!`).
 #   - Posterior fans: `n_draws` random samples drawn from the chain;
 #     each draw gets its own orbit traced over one full period.
 #   - The host star sits at the origin of every sky-plane plot.
@@ -198,6 +200,25 @@ its orbit.
     return mod((t - t_peri) / P, 1.0)
 end
 
+# Axis labels of the astrometric angle axes, as functions of the unit string
+# ("mas", "μas", "mas/yr", "μas/yr") `_angle_units!` settles on.
+_sky_xlabel(u) = rich("ΔRA·cos δ ($u)")
+_sky_ylabel(u) = "Δδ ($u)"
+_abscissa_label(u) = "abscissa residual ($u)"
+_sep_label(u) = "Separation ($u)"
+_dsep_label(u) = "Δρ ($u)"
+_dmu_ra_label(u) = rich("Δμ", subscript("α*"), " ($u)")
+_dmu_dec_label(u) = rich("Δμ", subscript("δ"), " ($u)")
+_reflex_ra_label(u) = rich("μ", subscript("α*"), " reflex ($u)")
+_reflex_dec_label(u) = rich("μ", subscript("δ"), " reflex ($u)")
+
+"""
+    _sky_units!(ax)
+
+Unit for a sky-plane axis: x and y share one, read from the final limits.
+"""
+_sky_units!(ax) = _angle_units!((ax, :x, _sky_xlabel), (ax, :y, _sky_ylabel))
+
 """
     _flip_xaxis!(ax)
 
@@ -305,8 +326,8 @@ function plot_orbit_skyplane(chains, params, data;
         fig = Figure(; size = figsize)
         ga = fig[1, 1] = GridLayout()
         ax = Axis(ga[1, 1];
-                   xlabel = rich("ΔRA·cos δ (mas)"),
-                   ylabel = "Δδ (mas)",
+                   xlabel = _sky_xlabel("mas"),
+                   ylabel = _sky_ylabel("mas"),
                    aspect = DataAspect())
         _flip_xaxis!(ax)
 
@@ -483,6 +504,8 @@ function plot_orbit_skyplane(chains, params, data;
             resize!(fig.scene, round(Int, pw + 190), round(Int, ph + 150))
         end
 
+        _sky_units!(ax)
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models",
@@ -549,10 +572,10 @@ function plot_iad_residuals(chains, params, data;
         fig = Figure(; size = figsize)
         ax_psi = Axis(fig[1, 1];
                        xlabel = "ψ (rad)",
-                       ylabel = "abscissa residual (mas)")
+                       ylabel = _abscissa_label("mas"))
         ax_t   = Axis(fig[2, 1];
                        xlabel = "MJD",
-                       ylabel = "abscissa residual (mas)")
+                       ylabel = _abscissa_label("mas"))
 
         # The max-lp draw of the best-fit cluster, with its trans-dim active
         # set. NOT the per-parameter median: on Gaia-4 that sits off the ridge
@@ -610,6 +633,8 @@ function plot_iad_residuals(chains, params, data;
                   limits = (0.0, t_span_iad),
                   label = "MJD − $(round(Int, t_min_iad))",
                   labelsize = 16, ticklabelsize = 14)
+
+        _angle_units!([ax_psi, ax_t]; dims = :y, label = _abscissa_label)
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
@@ -791,9 +816,9 @@ function plot_pm_residuals(chains, params, data;
         σ_dec_ep = Float64[sqrt(hgca.cov_ep[k][2, 2]) for k in 1:3]
 
         ax_ra  = Axis(fig[1, 1];
-                       ylabel = rich("Δμ", subscript("α*"), " (mas/yr)"))
+                       ylabel = _dmu_ra_label("mas/yr"))
         ax_dec = Axis(fig[2, 1]; xlabel = "MJD",
-                                   ylabel = rich("Δμ", subscript("δ"), " (mas/yr)"))
+                                   ylabel = _dmu_dec_label("mas/yr"))
         linkxaxes!(ax_ra, ax_dec)
         hidexdecorations!(ax_ra; grid = false, ticks = false)
 
@@ -835,6 +860,9 @@ function plot_pm_residuals(chains, params, data;
                   limits = (0.0, t_span),
                   label = "MJD − $(round(Int, t_min))",
                   labelsize = 16, ticklabelsize = 14)
+
+        _angle_units!((ax_ra, :y, u -> _dmu_ra_label(u * "/yr")),
+                      (ax_dec, :y, u -> _dmu_dec_label(u * "/yr")))
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
@@ -896,8 +924,8 @@ function plot_rv_astrom_phasefold(chains, params, data;
                       xlabel = "Phase",
                       ylabel = rich("RV (m s", superscript("-1"), ")"))
         ax_sky = Axis(fig[2, 1];
-                       xlabel = rich("ΔRA·cos δ (mas)"),
-                       ylabel = "Δδ (mas)",
+                       xlabel = _sky_xlabel("mas"),
+                       ylabel = _sky_ylabel("mas"),
                        aspect = DataAspect())
         _flip_xaxis!(ax_sky)
 
@@ -1120,6 +1148,8 @@ function plot_rv_astrom_phasefold(chains, params, data;
                 tellheight = true, tellwidth = false,
                 nbanks = 2)
 
+        _sky_units!(ax_sky)
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models",
@@ -1202,7 +1232,7 @@ function plot_relastrom_timeseries(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_sep = Axis(fig[1, 1]; ylabel = "Separation (mas)")
+        ax_sep = Axis(fig[1, 1]; ylabel = _sep_label("mas"))
         ax_pa  = Axis(fig[2, 1]; xlabel = "MJD",
                                   ylabel = "PA (deg)")
         linkxaxes!(ax_sep, ax_pa)
@@ -1308,6 +1338,8 @@ function plot_relastrom_timeseries(chains, params, data;
         axislegend(ax_sep; position = :rt, framevisible = false,
                     labelsize = 14)
 
+        _angle_units!([ax_sep]; dims = :y, label = _sep_label)
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models",
@@ -1351,7 +1383,7 @@ function plot_relastrom_residuals(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_sep = Axis(fig[1, 1]; ylabel = "Δρ (mas)")
+        ax_sep = Axis(fig[1, 1]; ylabel = _dsep_label("mas"))
         ax_pa  = Axis(fig[2, 1]; xlabel = "MJD",
                                   ylabel = "ΔPA (deg)")
         linkxaxes!(ax_sep, ax_pa)
@@ -1410,6 +1442,8 @@ function plot_relastrom_residuals(chains, params, data;
                   color = NEREUS_COLORS.rv_bin, markersize = 11,
                   strokewidth = 1.0, strokecolor = :black)
 
+        _angle_units!([ax_sep]; dims = :y, label = _dsep_label)
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models",
@@ -1453,9 +1487,9 @@ function plot_g23h_residuals(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_ra  = Axis(fig[1, 1]; ylabel = rich("Δμ", subscript("α*"), " (mas/yr)"))
+        ax_ra  = Axis(fig[1, 1]; ylabel = _dmu_ra_label("mas/yr"))
         ax_dec = Axis(fig[2, 1]; xlabel = "MJD",
-                                   ylabel = rich("Δμ", subscript("δ"), " (mas/yr)"))
+                                   ylabel = _dmu_dec_label("mas/yr"))
         linkxaxes!(ax_ra, ax_dec)
         hidexdecorations!(ax_ra; grid = false, ticks = false)
 
@@ -1531,6 +1565,9 @@ function plot_g23h_residuals(chains, params, data;
                   label = "MJD − $(round(Int, t_min))",
                   labelsize = 16, ticklabelsize = 14)
 
+        _angle_units!((ax_ra, :y, u -> _dmu_ra_label(u * "/yr")),
+                      (ax_dec, :y, u -> _dmu_dec_label(u * "/yr")))
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models", "g23h_residuals.$fmt"), fig;
@@ -1598,9 +1635,9 @@ function plot_pm_anomaly(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_ra  = Axis(fig[1, 1]; ylabel = rich("μ", subscript("α*"), " reflex (mas/yr)"))
+        ax_ra  = Axis(fig[1, 1]; ylabel = _reflex_ra_label("mas/yr"))
         ax_dec = Axis(fig[2, 1]; xlabel = "MJD",
-                                   ylabel = rich("μ", subscript("δ"), " reflex (mas/yr)"))
+                                   ylabel = _reflex_dec_label("mas/yr"))
         linkxaxes!(ax_ra, ax_dec)
         hidexdecorations!(ax_ra; grid = false, ticks = false)
 
@@ -1831,6 +1868,9 @@ function plot_pm_anomaly(chains, params, data;
         end
 
         axislegend(ax_ra; position = :rt, framevisible = false, labelsize = 14)
+
+        _angle_units!((ax_ra, :y, u -> _reflex_ra_label(u * "/yr")),
+                      (ax_dec, :y, u -> _reflex_dec_label(u * "/yr")))
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
