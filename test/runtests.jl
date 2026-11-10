@@ -2521,6 +2521,18 @@ end
         @test "inc_k1"   in params_as.layout.names
         @test "Omega_k1" in params_as.layout.names
 
+        # The inclination SLOT is checked against the prior the sampler
+        # evaluates, the layout's: under a Sine prior an orbital inclination
+        # is drawn on the chart [-π/2, 3π/2] of a circle (src/circular.jl),
+        # so a birth can land in the mirror representative 2π - i (seed 19's
+        # rebirth drew 3.609). The inclination the model reads, `planet_inc`,
+        # is that slot folded into the user's [0, π]; both are checked. These
+        # bounds were the config's [0, π] while the slot was sampled there.
+        inc_lo, inc_hi = bounds(params_as.layout.unfrozen_priors[
+            findfirst(==("inc_k1"), params_as.layout.unfrozen_names)])
+        @test (inc_lo, inc_hi) == (-π / 2, 3π / 2)
+        @test bounds(params_as.config.priors["inc_k1"]) == (0.0, Float64(π))
+
         @testset "PriorBirth populates inc/Omega/K" begin
             rng_as = MersenneTwister(7)
             td_as  = TransDimState(max_planets=2)
@@ -2541,11 +2553,11 @@ end
             @test isfinite(inc_v) && isfinite(Omega_v)
             @test isfinite(K_v) && isfinite(P_v)
 
-            inc_lo, inc_hi = bounds(params_as.config.priors["inc_k1"])
             om_lo,  om_hi  = bounds(params_as.config.priors["Omega_k1"])
             K_lo,   K_hi   = bounds(params_as.config.priors["K_k1"])
             P_lo,   P_hi   = bounds(params_as.config.priors["P_k1"])
             @test inc_lo ≤ inc_v ≤ inc_hi
+            @test 0 ≤ Nereus.planet_inc(new_theta, 1) ≤ π
             @test om_lo  ≤ Omega_v ≤ om_hi
             @test K_lo   ≤ K_v   ≤ K_hi
             @test P_lo   ≤ P_v   ≤ P_hi
@@ -2568,9 +2580,9 @@ end
             Omega_v = get_param(new_theta, "Omega_k1")
             @test isfinite(inc_v) && isfinite(Omega_v)
 
-            inc_lo, inc_hi = bounds(params_as.config.priors["inc_k1"])
             om_lo,  om_hi  = bounds(params_as.config.priors["Omega_k1"])
             @test inc_lo ≤ inc_v   ≤ inc_hi
+            @test 0 ≤ Nereus.planet_inc(new_theta, 1) ≤ π
             @test om_lo  ≤ Omega_v ≤ om_hi
         end
 
@@ -2612,9 +2624,9 @@ end
             Omega_v = get_param(new_theta, "Omega_k1")
             @test isfinite(inc_v) && isfinite(Omega_v)
 
-            inc_lo, inc_hi = bounds(params_as.config.priors["inc_k1"])
             om_lo,  om_hi  = bounds(params_as.config.priors["Omega_k1"])
             @test inc_lo ≤ inc_v   ≤ inc_hi
+            @test 0 ≤ Nereus.planet_inc(new_theta, 1) ≤ π
             @test om_lo  ≤ Omega_v ≤ om_hi
 
             # Cloned values should be near (but not necessarily equal to)
@@ -2650,9 +2662,9 @@ end
             @test n_p(reborn) == 1
             inc_v   = get_param(reborn, "inc_k1")
             Omega_v = get_param(reborn, "Omega_k1")
-            inc_lo, inc_hi = bounds(params_as.config.priors["inc_k1"])
             om_lo,  om_hi  = bounds(params_as.config.priors["Omega_k1"])
             @test inc_lo ≤ inc_v   ≤ inc_hi
+            @test 0 ≤ Nereus.planet_inc(reborn, 1) ≤ π
             @test om_lo  ≤ Omega_v ≤ om_hi
         end
     end
