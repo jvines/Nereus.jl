@@ -139,7 +139,11 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       sharing = nothing, transdim_noise = false,
                       ttv_n_transits = nothing, ttv_backend = nothing,
                       # Collects `clip_transit_outliers` reports, when given.
-                      iad_reports = nothing)
+                      iad_reports = nothing,
+                      # The star's Gaia identity, for the default `plx` prior of
+                      # an astrometric fit (see `fetch_gaia_parallax`). Collects
+                      # the lookup into `gaia_report` when given.
+                      gaia_id = nothing, name = nothing, gaia_report = nothing)
     rv    = NamedTuple()
     phot  = NamedTuple()
     iad = hgca = gost = relast = nothing
@@ -202,6 +206,17 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
         haskey(pr, "M_pri") && (M_pri = _as_prior(pop!(pr, "M_pri")))
         priors = isempty(pr) ? nothing :
                  Dict{String, PriorSpec}(k => _as_prior(v) for (k, v) in pr)
+    end
+
+    # Gaia DR3 parallax, when asked for: only for a fit with astrometry, and
+    # never over a `plx` prior the caller gave. It ranks ahead of the HGCA
+    # catalogue value, which is why it is stated as the prior here and not left
+    # to the default. A failed lookup throws.
+    if plx === nothing && (gaia_id !== nothing || name !== nothing) &&
+       (iad !== nothing || hgca !== nothing || gost !== nothing || relast !== nothing)
+        g = _gaia_lookup_from_star((; gaia_id = gaia_id, name = name))
+        plx = _gaia_plx_prior(g)
+        gaia_report === nothing || push!(gaia_report, g)
     end
 
     # A photometry channel's `dilution` / `jitter` are priors on
@@ -546,6 +561,15 @@ Fit astrometry alone, no RV.
 so mass and parallax are degenerate without it. `priors["M_pri"]` sets the
 primary mass. Both are priors and both go in `priors` — there is no separate
 keyword for either.
+
+`gaia_id` (a Gaia DR3 source_id: an integer, digits, or `"Gaia DR3 <id>"`) or
+`name` (resolved to one through Simbad) makes the fit query the Gaia DR3
+parallax at runtime and use it as the default `plx` prior, a Gaussian truncated
+at ±10σ (raw catalogue value, no zero-point correction). It takes precedence
+over the HGCA parallax; a `priors["plx"]` takes precedence over it, and then
+nothing is queried. If the query fails the fit stops. See
+[`fetch_gaia_parallax`](@ref). The lookup is recorded in
+`summary["star"]["gaia"]`.
 """
 function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
                         relast = nothing, planets = 1,
@@ -561,9 +585,10 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
         (planets = _planet_spec(planets; block = default_astrom_planet()))
     star, kwargs = _split_star_kwargs(kwargs)
     reps = Any[]
-    tgt = _target_from([ch], planets; iad_reports = reps, kwargs...)
+    greps = Any[]
+    tgt = _target_from([ch], planets; iad_reports = reps, gaia_report = greps, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star, iad_outliers = reps)
+                   star, iad_outliers = reps, gaia = greps)
 end
 
 
@@ -602,10 +627,11 @@ function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
             "among the channels"))
     star, kwargs = _split_star_kwargs(kwargs)
     reps = Any[]
+    greps = Any[]
     tgt = _target_from(collect(channels), planets; iad_reports = reps,
-                       use_rho_s, kwargs...)
+                       gaia_report = greps, use_rho_s, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star, iad_outliers = reps)
+                   star, iad_outliers = reps, gaia = greps)
 end
 
 # ---------------------------------------------------------------------------
@@ -913,7 +939,7 @@ function _finish(target, engine, stopping, output_dir; op::String,
                 science::Bool = true, output = nothing,
                  transdim = nothing, plots = nothing, plot_kwargs = nothing,
                  save_pdf::Bool = false, star = Dict{Symbol,Any}(),
-                 iad_outliers = nothing)
+                 iad_outliers = nothing, gaia = nothing)
     t0 = time()
     # `Stopping` is exported, documented, and plumbed all the way through the
     # Python client -- and NOTHING in the package consumes it. Not _finish, not
@@ -979,6 +1005,9 @@ function _finish(target, engine, stopping, output_dir; op::String,
     # the Julia log still sees how many abscissae went, and which.
     (iad_outliers === nothing || isempty(iad_outliers)) ||
         (summary["iad_outliers"] = _iad_outlier_summary(iad_outliers))
+    # Where the parallax prior came from, when it was looked up.
+    (gaia === nothing || isempty(gaia)) ||
+        (summary["star"] = Dict{String,Any}("gaia" => _gaia_summary(gaia[1])))
     # Run health, per engine. Harvested from whatever the engine actually
     # returned plus, where the chain structure supports it, R-hat and ESS --
     # which pt_emcee has always computed for the progress bar and thrown away.

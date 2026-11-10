@@ -91,9 +91,12 @@ function run_job(cfg::AbstractDict)
         isempty(iad_outliers) ||
             (summary["iad_outliers"] = _iad_outlier_summary(iad_outliers))
         star       = _build_star(_get(cfg, :star; default = Dict()))
+        gaia = _resolve_gaia_plx(cfg, star)
+        gaia === nothing || (summary["star"] = Dict{String, Any}(
+            "gaia" => _gaia_summary(gaia)))
         params, target, menu = _build_model(cfg, data, star, inst_names_rv,
                                               inst_names_pm, inst_names_as,
-                                              inst_names_iad)
+                                              inst_names_iad; gaia_plx = gaia)
 
         # --- Run sampler (with optional wall-clock watchdog) ----------
         # `timeout_sec` (top-level config) bounds the sampler call so a
@@ -1073,7 +1076,33 @@ function _build_star(s)
         sigma_M_s   = sig(:sigma_M_s),
         sigma_R_s   = sig(:sigma_R_s),
         sigma_T_eff = sig(:sigma_T_eff),
+        # Which Gaia source is this star: `gaia_id` (a DR3 source_id) or `name`
+        # (resolved to one). They only feed the default parallax prior of an
+        # astrometric fit; see `_resolve_gaia_plx`.
+        gaia_id = let g = _get(s, :gaia_id; default = nothing)
+            g === nothing ? nothing : _parse_gaia_id(g)
+        end,
+        name  = let n = _get(s, :name; default = nothing)
+            n === nothing ? nothing : String(n)
+        end,
     )
+end
+
+# The Gaia DR3 parallax a fit asked for through `star.gaia_id` / `star.name`, or
+# `nothing`. Queried only when it can matter: the model has an astrometric
+# planet and the job gives no prior of its own on `plx`. A failed lookup stops
+# the job -- falling back to the catalogue parallax would silently change the
+# prior the user asked for.
+function _resolve_gaia_plx(cfg, star; kw...)
+    (star.gaia_id === nothing && star.name === nothing) && return nothing
+    mdl = _get(cfg, :model; default = Dict())
+    _has(mdl, :obliquity) && return nothing
+    modes_str = String.(_get(mdl, :planet_modes;
+                             default = fill("RV_ONLY", Int(_get(mdl, :max_kplanet; default = 1)))))
+    any(m -> AS_SOURCE in _PLANET_MODES[m], modes_str) || return nothing
+    pri = _get(cfg, :priors; default = Dict())
+    any(k -> String(k) == "plx", keys(pri)) && return nothing
+    return _gaia_lookup_from_star(star; kw...)
 end
 
 # The star block as `science_summary` takes it: the values AND their σ's. M★
@@ -1114,7 +1143,8 @@ const _PLANET_MODES = Dict(
 )
 
 function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
-                      inst_names_as = String[], inst_names_iad = String[])
+                      inst_names_as = String[], inst_names_iad = String[];
+                      gaia_plx = nothing)
     mdl = _get(cfg, :model; required = true)
     _has(mdl, :obliquity) &&
         return _build_obliquity_model(cfg, data, inst_names_rv, inst_names_pm)
@@ -1210,6 +1240,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     isempty(priors) || (p_kw[:priors] = priors)
     star.M_s !== nothing && (p_kw[:M_s] = Float64(star.M_s))
     star.R_s !== nothing && (p_kw[:R_s] = Float64(star.R_s))
+    gaia_plx === nothing || (p_kw[:gaia_plx] = (; plx = gaia_plx.plx, plx_err = gaia_plx.plx_err))
 
     # Instrument parameter sharing, e.g.
     #   "sharing": {"ld": [["TESS", "PESTi"]], "sigma": [["HARPS", "HARPSa"]]}

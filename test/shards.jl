@@ -95,6 +95,7 @@ const TEST_UNITS = [
     (name = "test_hgca_gost_channel.jl", seconds = 5, files = ["test_hgca_gost_channel.jl"]),
     (name = "test_gaia_parallax.jl", seconds = 10, files = ["test_gaia_parallax.jl"]),
     (name = "test_gaia_plx_prior.jl", seconds = 6, files = ["test_gaia_plx_prior.jl"]),
+    (name = "test_gaia_plx_wiring.jl", seconds = 10, files = ["test_gaia_plx_wiring.jl"]),
     (name = "test_fetch_resume.jl", seconds = 5, files = ["test_fetch_resume.jl"]),
     (name = "test_fit_summary_transdim.jl", seconds = 47, files = ["test_fit_summary_transdim.jl"]),
     # Two short fits (run_job, fit_rv); not yet measured on the CI runner.
