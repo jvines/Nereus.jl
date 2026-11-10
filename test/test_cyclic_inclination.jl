@@ -205,6 +205,24 @@ end
         end
     end
 
+    @testset "trans-dim convergence gate reads the inclination folded" begin
+        p = _params()
+        cols = vcat(Symbol.(p.layout.unfrozen_names), [:n_planets, :planet_active_1])
+        n_w, n_s = 16, 60
+        rng = MersenneTwister(4)
+        X = randn(rng, n_w * n_s, length(cols))
+        X[:, findfirst(==(:n_planets), cols)] .= 1.0
+        X[:, findfirst(==(:planet_active_1), cols)] .= 1.0
+        ji = findfirst(==(:inc_k1), cols)
+        X[:, ji] .= 2.5 .+ 0.05 .* randn(rng, n_w * n_s)
+        X[1:2:end, ji] .= 2π .- X[1:2:end, ji]     # half the walkers in the mirror
+        gate = Symbol[:n_planets; [c for c in cols if occursin(r"_k\d+$", String(c))]]
+        fold = Nereus.cyclic_inclination_indices(p)
+        @test fold == [ji]
+        @test Nereus._td_convergence(X, size(X, 1), n_w, cols, gate, p; fold)[2] < 1.1
+        @test Nereus._td_convergence(X, size(X, 1), n_w, cols, gate, p)[2] > 1.5
+    end
+
     @testset "Sine on the stellar inclination stays bounded" begin
         t_phot = collect(range(-0.1, 0.1; length = 60))
         d2 = Data(t_rv = t_rv, rv = zeros(length(t_rv)), rv_err = ones(length(t_rv)),

@@ -96,11 +96,14 @@ end
 # Slot parameters of a slot active in under 1 % of the draws are not assessed
 # (nothing to measure), and in under half of them gate on R̂ only: a disfavoured
 # model has to mix, not to reach an ESS. Noise-model parameters, γ, jitter and
-# offsets are not gated, as in `sample_pt_emcee`.
+# offsets are not gated, as in `sample_pt_emcee`. `fold` are the columns that
+# are cyclic inclinations, read folded to [0, π] as in `_pt_convergence`: a
+# walker in the mirror representative holds the same inclination.
 # ------------------------------------------------------------------
 function _td_convergence(samples::AbstractMatrix, keep_idx::Int, n_walkers::Int,
                          col_names::Vector{Symbol}, gate::Vector{Symbol},
-                         model_params; cap::Int = 2000)
+                         model_params; cap::Int = 2000,
+                         fold::AbstractVector{Int} = Int[])
     (n_walkers < 2 || keep_idx < 4 * n_walkers) && return nothing
     keep_idx % n_walkers == 0 || return nothing
     n_step = keep_idx ÷ n_walkers
@@ -118,7 +121,8 @@ function _td_convergence(samples::AbstractMatrix, keep_idx::Int, n_walkers::Int,
         row = (si - 1) * n_walkers + w
         src = (s - 1) * n_walkers + w
         for (j, c) in enumerate(cols)
-            M[row, j] = samples[src, c]
+            v = samples[src, c]
+            M[row, j] = c in fold ? fold_inclination(v) : v
         end
     end
     st = try
@@ -2421,7 +2425,7 @@ function sample_transdim_pt_emcee(
         # ---- Periodic convergence diagnostic (β=1 gating set) ----
         if step > n_burnin && (step - n_burnin) % diag_cadence == 0
             diag = _td_convergence(samples, keep_idx, n_walkers_eff, diag_cols,
-                                   gate_set, params)
+                                   gate_set, params; fold = cinc)
             if diag !== nothing
                 meanr, maxr, meanb, mte = diag
                 rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))
@@ -2581,7 +2585,10 @@ function sample_transdim_pt_emcee(
         # `n_walkers_eff` (not the requested NW) is the recorded walker count.
         # A chain is science-grade only if this PASSes; FAIL ⇒ sample more.
         try
-            convergence_report(chains, n_walkers_eff; model_params=params)
+            # Read folded, as the gate does; the returned chains stay raw.
+            rep = isempty(cinc) ? chains :
+                  fold_cyclic_inclinations!(deepcopy(chains), params)
+            convergence_report(rep, n_walkers_eff; model_params=params)
         catch e
             @warn "convergence_report failed (chain may be too short)" exception=e
         end

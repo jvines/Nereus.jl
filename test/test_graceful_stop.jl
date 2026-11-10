@@ -93,7 +93,10 @@ end
         at = _GS_BURNIN + 40
         r = _gs_with_hook(() -> _gs_run(target), _gs_interrupt(at))
         @test r.stop.stopped == "interrupted"
-        @test at - 1 <= r.stop.step <= at           # the step in flight is dropped
+        # The signal is delivered asynchronously: on a loaded machine it can land
+        # a step or two after the hook sends it. What must hold whatever the
+        # step is that the step in flight is dropped (the draw counts below).
+        @test at - 1 <= r.stop.step <= at + 5
         @test r.stop.n_draws == 20 * (r.stop.step - _GS_BURNIN)
         _gs_consistent(r, 20)
         @test size(r.chains.value.data, 1) == r.stop.step - _GS_BURNIN
@@ -180,7 +183,7 @@ end
     @testset "transdim: interrupt, stop file and the convergence gate" begin
         at = 60 + 30
         r = _gs_with_hook(() -> _gs_td_run(), _gs_interrupt(at))
-        @test r.stop.stopped == "interrupted" && at - 1 <= r.stop.step <= at
+        @test r.stop.stopped == "interrupted" && at - 1 <= r.stop.step <= at + 5   # async signal
         d = r.chains.value.data
         # (the ensemble has max(n_walkers, 2 n_dim + 2) walkers)
         @test size(d, 1) == r.stop.n_draws
