@@ -268,6 +268,21 @@ Accessors `planet_P`, `planet_K`, `planet_M_sec`, `planet_a` decode
 all three modes and derive missing quantities on the fly. All are
 ForwardDiff-clean.
 
+What is not sampled is still reported, in the **derived** table (never in the
+fitted one, so `K_k1` of the two tables cannot be confused):
+
+| derived key | unit | reported when |
+|---|---|---|
+| `P_days` (and `P_yr` in the science table) | d (yr) | `P` is not a slot: `:a_driven` |
+| `K` | m/s | `K` is not a slot and the planet has RV: `:M_sec_driven`, `:a_driven` |
+| `a_mas` | mas | the planet carries astrometry (`RVAS`, `RVPMAS`): `a·ϖ`, the relative orbit as an angle |
+| `alpha_star_uas` | μas | same: `a·ϖ·M_sec/(M_pri+M_sec)`, the host's reflex orbit (astrometric signature) |
+
+Each is evaluated per draw with `planet_P` / `planet_K` / `planet_a` /
+`planet_M_sec` / `astrom_M_pri` / `astrom_plx`, so all three modes agree with
+the likelihood; under `:K_driven` the companion mass behind `alpha_star_uas`
+comes from the mass function with the sampled inclination.
+
 ### `obs_prior::Bool` — O'Neil 2019 observation-based prior
 
 When `true`, applies the O'Neil 2019 (AJ 158, 4) observation-based
