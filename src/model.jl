@@ -2118,6 +2118,11 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
     frozen_idx      = Int[]
     frozen_values   = Float64[]
 
+    # Orbital inclinations, the slots `planet_inc` reads. A Sine prior on one
+    # is sampled on the circle (`WrappedSinePrior`, see src/circular.jl);
+    # `config.priors` keeps the prior as the user wrote it.
+    orbital_inc = _orbital_inclination_slots(planet_blocks)
+
     for (i, name) in enumerate(names)
         ps = config.priors[name]
         if is_fixed(ps)
@@ -2126,7 +2131,8 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         else
             push!(unfrozen_idx, i)
             push!(unfrozen_names, name)
-            push!(unfrozen_priors, ps)
+            push!(unfrozen_priors,
+                  i in orbital_inc && ps.dist isa Sine ? WrappedSinePrior() : ps)
         end
     end
 
@@ -2140,6 +2146,18 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         planet_blocks, systemic, packed,
     )
 end
+
+"""
+    _orbital_inclination_slots(planet_blocks) -> Set{Int}
+
+Theta slots holding a sampled orbital inclination `inc_k<N>`: the `inc` of an
+`RVASBlock` or of an astrometric `SB2Block`, the slots `planet_inc` reads (and
+folds). An `RVPMASBlock` derives i from the impact parameter and has none; the
+stellar inclination `i_star` is not a planet slot.
+"""
+_orbital_inclination_slots(planet_blocks) =
+    Set{Int}(b.inc for b in planet_blocks
+             if (b isa RVASBlock || b isa SB2Block) && b.inc > 0)
 
 # Public Params constructor is in params_constructor.jl (loaded after
 # data.jl and default_priors.jl to resolve dependencies).

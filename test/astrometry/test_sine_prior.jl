@@ -69,7 +69,7 @@
         end
     end
 
-    @testset "Wired through packed_priors (PACKED_SINE)" begin
+    @testset "Wired through packed_priors (PACKED_WRAPPED_SINE on an orbit)" begin
         # Build a tiny model that uses SinePrior on inc
         instruments = InstrumentConfig(rv=["X"])
         t_rv = collect(0.0:1.0:50.0)
@@ -88,7 +88,10 @@
         # Find inc_k1 in unfrozen
         idx_inc = findfirst(==("inc_k1"), params2.layout.unfrozen_names)
         @test idx_inc !== nothing
-        # The packed prior at this index should be PACKED_SINE = 6
-        @test params2.layout.packed_priors.type_ids[idx_inc] == Nereus.PACKED_SINE
+        # An orbital inclination with a Sine prior is sampled on a circle
+        # (src/circular.jl): the layout carries WrappedSinePrior, packed as
+        # PACKED_WRAPPED_SINE, and the config keeps the prior as written.
+        @test params2.layout.packed_priors.type_ids[idx_inc] == Nereus.PACKED_WRAPPED_SINE
+        @test params2.config.priors["inc_k1"].dist isa Nereus.Sine
     end
 end
