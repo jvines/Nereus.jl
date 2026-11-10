@@ -418,7 +418,7 @@ end
 # ---------------------------------------------------------------------
 
 """
-    gost_window_avg_pm(orb, gost, M_sec) -> (μra_avg, μdec_avg)
+    gost_window_avg_pm(orb, gost, M_sec; window = nothing) -> (μra_avg, μdec_avg)
 
 Compute the orbit's contribution to the catalog-reported (pmra, pmdec)
 when fitting a five-parameter solution to the Gaia mission's actual
@@ -445,7 +445,14 @@ components are the orbit-induced *catalog-PM shift* — they are what
 Gaia's 5-param fit would report as proper motion if the only signal
 were the orbital reflex.
 
-The reference epoch `t_ref` is set to the mean of `gost.t`, which
+`window = (mjd_start, mjd_end)` restricts the fit to the transits inside
+it. A catalogue proper motion comes from ONE data release, so the model of
+it must be fitted through that release's transits only: pass
+`GAIA_DR3_WINDOW` (or `GAIA_DR2_WINDOW`) — a GOST plan is usually fetched
+over the whole mission, and fitting through all of it averages the reflex
+over years the catalogue never saw. `nothing` uses every transit.
+
+The reference epoch `t_ref` is set to the mean of the transits used, which
 minimizes the covariance between (ra0, μα) and (dec0, μδ) and is the
 empirical "best" reference for these fits (Brandt 2018 §3, htof's
 `AstrometricFitter.find_optimal_central_epoch`).
@@ -459,13 +466,14 @@ Returns 0-magnitude PMs if the GOST data is degenerate (5×5 design
 matrix not positive-definite) — extremely rare for ≥ 5 transits with
 diverse scan angles, but defensive.
 """
-function gost_window_avg_pm(orb, gost, M_sec::Real)
-    Δq = gost_5param_fit(orb, gost, M_sec)
+function gost_window_avg_pm(orb, gost, M_sec::Real;
+                            window::Union{Nothing, Tuple{Real, Real}} = nothing)
+    Δq = gost_5param_fit(orb, gost, M_sec; window = window)
     return (Δq[4], Δq[5])
 end
 
 """
-    gost_5param_fit(orb, gost, M_sec; t_ref=mean(gost.t)) -> Δq::Vector{T}
+    gost_5param_fit(orb, gost, M_sec; t_ref=mean(gost.t), window=nothing) -> Δq::Vector{T}
 
 Forecast the orbit-induced **5-parameter astrometric shift** that Gaia's
 catalog pipeline would absorb when fitting through the orbital reflex.
@@ -481,6 +489,13 @@ reflex `Δη_orbit_i = Δra · sin ψ + Δdec · cos ψ` is the "data" the
 5-param solution would absorb. Solve `(XᵀX) Δq = Xᵀ Δη` in closed form
 via Cholesky; degenerate design returns zeros.
 
+`window = (mjd_start, mjd_end)` fits only the transits inside it (both ends
+inclusive), and the default `t_ref` becomes their mean. Use the data
+release's window (`GAIA_DR3_WINDOW`, `GAIA_DR2_WINDOW`) whenever the result
+models a published catalogue quantity. Fewer than 5 transits in the window
+returns zeros, as for a short plan; `Data` refuses such a plan up front
+when a Gaia-epoch product depends on it.
+
 This is the Gaia-side htof primitive. `gost_window_avg_pm` is the
 backward-compat 2-tuple wrapper returning only `(Δμα*, Δμδ)`.
 
@@ -489,12 +504,24 @@ refinement (G-mag-dependent — small relative to the published 5×5
 catalog covariance for characterization-quality orbits).
 """
 function gost_5param_fit(orb, gost, M_sec::Real;
-                          t_ref::Union{Nothing, Real} = nothing)
-    n = n_gost(gost)
+                          t_ref::Union{Nothing, Real} = nothing,
+                          window::Union{Nothing, Tuple{Real, Real}} = nothing)
     T = typeof(M_sec)
-    n >= 5 || return zeros(T, 5)
-
-    t_ref_gost = t_ref === nothing ? sum(gost.t) / n : Float64(t_ref)
+    if window === nothing
+        lo, hi = -Inf, Inf
+        n = n_gost(gost)
+        n >= 5 || return zeros(T, 5)
+        t_ref_gost = t_ref === nothing ? sum(gost.t) / n : Float64(t_ref)
+    else
+        lo, hi = Float64(window[1]), Float64(window[2])
+        n = 0; t_sum = 0.0
+        @inbounds for t in gost.t
+            lo <= t <= hi || continue
+            n += 1; t_sum += t
+        end
+        n >= 5 || return zeros(T, 5)
+        t_ref_gost = t_ref === nothing ? t_sum / n : Float64(t_ref)
+    end
 
     # Same hoist as `_iad_residuals!`: ONE orbit, `n` GOST transits, so reduce
     # the orbit to its epoch-independent constants once instead of re-deriving
@@ -503,18 +530,22 @@ function gost_5param_fit(orb, gost, M_sec::Real;
     # barrier below — deciding per transit would make the kernel a `Union` and
     # put a dynamic dispatch back on the inner loop.
     return _reflex_fast_applicable(orb) ?
-        _gost_5param_accumulate(_reflex_kernel(orb, M_sec), gost, M_sec, t_ref_gost, n) :
-        _gost_5param_accumulate(ReflexFallback(orb, M_sec), gost, M_sec, t_ref_gost, n)
+        _gost_5param_accumulate(_reflex_kernel(orb, M_sec), gost, M_sec, t_ref_gost, lo, hi) :
+        _gost_5param_accumulate(ReflexFallback(orb, M_sec), gost, M_sec, t_ref_gost, lo, hi)
 end
 
 """
-    _gost_5param_accumulate(rk, gost, M_sec, t_ref_gost, n) -> Δq (5-vector)
+    _gost_5param_accumulate(rk, gost, M_sec, t_ref_gost, lo, hi) -> Δq (5-vector)
 
 The normal-equation accumulation and solve behind [`gost_5param_fit`](@ref).
 Separate so it is a function barrier: it specialises on the concrete type of
 `rk`, which is what keeps `_reflex_offset` a static call in the transit loop.
+Transits outside `[lo, hi]` are skipped in place rather than copied out, so a
+windowed fit allocates nothing more than an unwindowed one; with
+`(-Inf, Inf)` every transit is used, in order, exactly as before.
 """
-function _gost_5param_accumulate(rk, gost, M_sec::Real, t_ref_gost::Real, n::Int)
+function _gost_5param_accumulate(rk, gost, M_sec::Real, t_ref_gost::Real,
+                                 lo::Float64, hi::Float64)
     T = typeof(M_sec)
 
     A11 = zero(T); A12 = zero(T); A13 = zero(T); A14 = zero(T); A15 = zero(T)
@@ -524,7 +555,8 @@ function _gost_5param_accumulate(rk, gost, M_sec::Real, t_ref_gost::Real, n::Int
     A55 = zero(T)
     v1 = zero(T); v2 = zero(T); v3 = zero(T); v4 = zero(T); v5 = zero(T)
 
-    @inbounds for j in 1:n
+    @inbounds for j in 1:n_gost(gost)
+        lo <= gost.t[j] <= hi || continue
         Δra, Δdec = _reflex_offset(rk, gost.t[j])
         s, c = sincos(gost.psi[j])
         plxf = gost.parallax_factor[j]
