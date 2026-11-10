@@ -415,9 +415,13 @@ under `:r1r2` they are `(r1, r2)`. Conversion helpers live in
 """
     planet_inc(theta, k) -> i
 
-Orbital inclination of planet `k` in radians.
+Orbital inclination of planet `k` in radians, in `[0, π]`.
 
-- For `RVASBlock`: read directly from the sampled `inc` slot.
+- For `RVASBlock` (and an astrometric `SB2Block`): the sampled `inc` slot
+  folded with [`fold_inclination`](@ref), `|x|` reduced through `x ≡ x + 2π`.
+  The slot is sampled on a circle under a Sine prior (`WrappedSinePrior`), so
+  `x`, `-x` and `x + 2π` must be one orbit for every likelihood; this accessor
+  is what makes them one. A value in `[0, π]` is returned bit for bit.
 - For `RVPMASBlock`: **derived** from the transit impact parameter `b`
   via the geometric relation
   `cos i = b · (1 + e sin ω) / ((a/R★) · (1 − e²))`. The arccos
@@ -429,8 +433,10 @@ Raises `ArgumentError` for the non-AS block types.
 @inline planet_inc(theta::Theta, k::Int) =
     _planet_inc(theta.params.layout.planet_blocks[k], theta)
 
-@inline _planet_inc(block::RVASBlock, theta::Theta) = theta.values[block.inc]
-@inline _planet_inc(block::SB2Block, theta::Theta) = theta.values[block.inc]
+@inline _planet_inc(block::RVASBlock, theta::Theta) =
+    fold_inclination(theta.values[block.inc])
+@inline _planet_inc(block::SB2Block, theta::Theta) =
+    fold_inclination(theta.values[block.inc])
 
 # RVPMASBlock: i is derived from b, not sampled.
 @inline function _planet_inc(block::RVPMASBlock, theta::Theta)

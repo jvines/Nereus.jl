@@ -259,7 +259,10 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
     # mode_laplace_evidence does. Skipping this is not a small error: a Gaussian
     # fitted to bounded samples escapes the box on essentially every draw in 22
     # dimensions, and the estimator returns overlap = 0 with no usable output.
-    D = _BridgeDraws(chains, pnames, target.transform)
+    # Cyclic inclinations are folded to [0, π] on the way (see
+    # `_bridge_folded` for the density that goes with that).
+    D = _BridgeDraws(chains, pnames, target.transform;
+                     cinc = cyclic_inclination_indices(target.params))
     N = D.N
     mom = _bridge_stage!(() -> _bridge_moments(D), timings, "transform")
     keep, N1 = mom.keep, mom.n
@@ -319,12 +322,15 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
     end
     v1 = Vector{Float64}(undef, N)
     ppb = ProgressBar("bridge posterior"; total = N, enabled = show_progress)
+    # The posterior is the FOLDED one where the target has cyclic inclinations
+    # (`_bridge_folded`): `fc` per draw, which `_bridge_draw!` put in [0, π].
+    fc = _bridge_fold_logc(D)
     _bridge_stage!(timings, "posterior_evals") do
         if jlp === nothing
             _bridge_eval!(v1; progress = _SharedProgress(ppb)) do c, i
                 keep[i] || return NaN
                 y = _bridge_draw!(ys[c], D, i)
-                _bridge_logdensity!(evs[c], y) - _bridge_logq!(zs[c], lq, y)
+                _bridge_logdensity!(evs[c], y) + fc - _bridge_logq!(zs[c], lq, y)
             end
         else
             pt = target.transform
@@ -333,7 +339,7 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
                 keep[i] || return NaN
                 y = _bridge_draw!(ys[c], D, i)
                 lj = pt === nothing ? 0.0 : Float64(transform_logabsdetjac_inv(y, pt))
-                _bridge_value(D, j, i) + lj - _bridge_logq!(zs[c], lq, y)
+                _bridge_value(D, j, i) + lj + fc - _bridge_logq!(zs[c], lq, y)
             end
         end
     end
@@ -348,7 +354,8 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
     qpb = ProgressBar("bridge proposal"; total = n_proposal, enabled = show_progress)
     _bridge_stage!(timings, "proposal_evals") do
         _bridge_eval!(v2; progress = _SharedProgress(qpb)) do c, i
-            _bridge_logdensity!(evs[c], @view Yp[:, i])
+            y = @view Yp[:, i]
+            _bridge_folded(D, y) ? _bridge_logdensity!(evs[c], y) + fc : -Inf
         end
     end
     finish!(qpb)
@@ -398,7 +405,8 @@ iterations of chain 1, then of chain 2, and so on. `_bridge_draw!` gathers one
 into a buffer and maps it to the target's unconstrained space when `pt` is a
 transform, with `transform_forward!` -- the same numbers the `d × N` matrix
 this replaces held. `lp` is the variable index of the chain's `:lp`, or
-`nothing`.
+`nothing`. `cinc` are the positions of the cyclic inclinations, which
+`_bridge_draw!` folds to `[0, π]` (see `_bridge_folded`).
 """
 struct _BridgeDraws{A<:AbstractArray, T}
     data::A
@@ -407,9 +415,10 @@ struct _BridgeDraws{A<:AbstractArray, T}
     pt::T
     n_iter::Int
     N::Int
+    cinc::Vector{Int}
 end
 
-function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt)
+function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt; cinc = Int[])
     data = chains.value.data
     vars = Base.names(chains)
     cols = Int[]
@@ -420,21 +429,55 @@ function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt)
     end
     n_iter = size(data, 1)
     return _BridgeDraws(data, cols, findfirst(==(:lp), vars), pt, n_iter,
-                        n_iter * size(data, 3))
+                        n_iter * size(data, 3), collect(Int, cinc))
 end
 
 """
     _bridge_draw!(y, D, i) -> y
 
-Draw `i` of `D` in the target's space, written into `y`.
+Draw `i` of `D` in the target's space, written into `y`, its cyclic
+inclinations folded to `[0, π]`.
 """
 @inline function _bridge_draw!(y::Vector{Float64}, D::_BridgeDraws, i::Int)
     ch, it = divrem(i - 1, D.n_iter)
     @inbounds for j in eachindex(D.cols)
         y[j] = Float64(D.data[it + 1, D.cols[j], ch + 1])
     end
+    @inbounds for j in D.cinc
+        y[j] = fold_inclination(y[j])
+    end
     D.pt === nothing || transform_forward!(y, y, D.pt)
     return y
+end
+
+# A cyclic inclination (src/circular.jl) is sampled on a circle, density
+# |sin x|/4 under p*, where x and -x are one orbit. The posterior draws come
+# folded to [0, π] (`_bridge_draw!`), so they sample the FOLDED posterior:
+# density 2·p* on [0, π] -- sin(i)/2 times the likelihood, the prior the user
+# wrote -- and none outside. That is the density bridged here, normalised to
+# the same Z. With p* itself, [0, π] holds only half of Z per cyclic
+# inclination (log Z low by log 2 each), and a proposal draw past 0 or π would
+# count mirror mass the posterior side never sampled. The transform is the
+# identity on these coordinates (`build_transform`), so y = x there.
+"""
+    _bridge_fold_logc(D) -> Float64
+
+`log 2` per cyclic inclination of `D`: the folded posterior's density over
+p*'s on `[0, π]`.
+"""
+_bridge_fold_logc(D::_BridgeDraws) = length(D.cinc) * log(2.0)
+
+"""
+    _bridge_folded(D, y) -> Bool
+
+Whether every cyclic inclination of the point `y` lies in `[0, π]`, where the
+folded posterior has its mass.
+"""
+@inline function _bridge_folded(D::_BridgeDraws, y::AbstractVector)
+    @inbounds for j in D.cinc
+        0 <= y[j] <= π || return false
+    end
+    return true
 end
 
 """

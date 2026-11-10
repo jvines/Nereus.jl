@@ -262,6 +262,120 @@ Base.rand(rng::AbstractRNG, d::WrappedUniform) = quantile(d, rand(rng))
 Distributions.insupport(::WrappedUniform, x::Real) = isfinite(x)
 
 # =====================================================================
+# WrappedSine — the isotropic inclination prior on a circle
+# =====================================================================
+
+"""
+    fold_inclination(x) -> i ∈ [0, π]
+
+The physical inclination of a sampled value `x`: `|x|` reduced to `[0, π]`
+through `x ≡ x + 2π` and `x ≡ -x`. A value already in `[0, π]` is returned
+untouched, bit for bit, so an inclination sampled under a bounded prior reads
+exactly as before.
+
+Every likelihood sees the orbit through `planet_inc`, which returns this: RVs
+through `|K|` (or `M_sec sin i`, with `sin(fold(x)) = |sin x|`), transits
+through `cos i`, astrometry through the sky projection. `x` and `-x`, and
+`x + 2πn`, are therefore one orbit, which is what lets the inclination be
+sampled on a circle ([`WrappedSine`](@ref)).
+
+Generic over `Real`: it is on the AD path (ForwardDiff, ReverseDiff, Enzyme),
+and uses only `abs`, comparisons and `mod`, like `kepler_solve`'s fold.
+"""
+@inline function fold_inclination(x::Real)
+    y = abs(x)
+    y <= π && return y
+    two_π = oftype(y, 2π)
+    y = mod(y, two_π)
+    return y <= π ? y : two_π - y
+end
+
+const _WRAPPED_SINE_LO = -π / 2
+const _WRAPPED_SINE_HI = 3π / 2
+
+"""
+    WrappedSine()
+
+The isotropic inclination prior `sin(i)/2` on `[0, π]`, lifted to a CIRCLE of
+circumference 2π: density `|sin x|/4` on the chart `[-π/2, 3π/2]`, which
+covers the circle once. Folded to `[0, π]` with [`fold_inclination`](@ref), it
+is exactly `sin(i)/2` again -- the two representatives `x` and `2π - x` (or
+`-x`) of each inclination carry half of its mass each.
+
+This is what a Sine prior on an orbital inclination `inc_k<N>` becomes in the
+layout the samplers evaluate (`config.priors` keeps `SinePrior()` as the user
+wrote it). Under the bounded `Sine` the samplers met a wall at `i = π` (and
+`0`): the logit transform sent it to `y = ±∞`, the ensemble walkers piled
+against it, and a near-face-on retrograde orbit was reported as railed. Every
+likelihood reads the inclination through `planet_inc`, which folds, so on the
+circle a walker passes through `i = π` into the mirror representative.
+
+The chart is `[-π/2, 3π/2]`, centred on the physical half `[0, π]`:
+
+* both points where the old prior had walls, `0` and `π`, are INTERIOR to it;
+  its edges, the one place a sampler still meets a wall, are the mirror image
+  of `i = 90°`, which a walker reaches only by passing through `0` or `π` and
+  then crossing the whole mirror half;
+* the median is `π/2`, as for `Sine`, so the code that starts a walker or
+  parks an inactive trans-dim slot at the prior median (`quantile(ps, 0.5)`)
+  lands on the prior's mode, not on one of its zeros at `0` or `π`;
+* an inclination in `[0, π]` is its own representative.
+
+The density is zero outside the chart, as `WrappedUniform`'s is not, because
+the periodic density on the whole line is improper: a parallel-tempering rung
+near β = 0 samples the prior, and there an ensemble spread over every period
+of it without bound -- inclination draws from -4.7e3 to 2.1e4 rad in a 1500
+step `pt_emcee` run -- and the swaps carried them to β = 1. On one chart the
+target is proper, and the folded posterior is the same.
+
+`quantile`, `cdf` and `rand` act on the chart, with `quantile` the exact
+inverse of `cdf` there, so nested samplers and prior draws start inside it.
+"""
+struct WrappedSine <: ContinuousUnivariateDistribution end
+
+Distributions.minimum(::WrappedSine) = _WRAPPED_SINE_LO
+Distributions.maximum(::WrappedSine) = _WRAPPED_SINE_HI
+Distributions.params(::WrappedSine) = ()
+Base.eltype(::Type{WrappedSine}) = Float64
+Distributions.logpdf(::WrappedSine, x::Real) =
+    _WRAPPED_SINE_LO <= x <= _WRAPPED_SINE_HI ?
+        log(abs(sin(x))) - log(oftype(float(x), 4)) : oftype(float(x), -Inf)
+
+# CDF over the chart, ∫_{-π/2}^x |sin t|/4 dt: a quarter of the mass on
+# [-π/2, 0], half on [0, π], a quarter on [π, 3π/2].
+function Distributions.cdf(::WrappedSine, x::Real)
+    if x <= _WRAPPED_SINE_LO
+        return zero(float(x))
+    elseif x >= _WRAPPED_SINE_HI
+        return one(float(x))
+    elseif x <= 0
+        return cos(x) / 4
+    elseif x <= π
+        return (2 - cos(x)) / 4
+    end
+    return 1 + cos(x) / 4
+end
+
+# Inverse CDF, piece by piece. On the middle half it is `Sine`'s acos(1 - 2u')
+# at u' = 2u - 1/2.
+function Distributions.quantile(::WrappedSine, u::Real)
+    if u <= 0
+        return oftype(float(u), _WRAPPED_SINE_LO)
+    elseif u >= 1
+        return oftype(float(u), _WRAPPED_SINE_HI)
+    elseif u <= 0.25
+        return -acos(4 * u)
+    elseif u <= 0.75
+        return acos(2 - 4 * u)
+    end
+    return oftype(float(u), 2π) - acos(4 * u - 4)
+end
+
+Base.rand(rng::AbstractRNG, d::WrappedSine) = quantile(d, rand(rng))
+Distributions.insupport(::WrappedSine, x::Real) =
+    _WRAPPED_SINE_LO <= x <= _WRAPPED_SINE_HI
+
+# =====================================================================
 # Fixed — marker for non-sampled parameters
 # =====================================================================
 
@@ -369,21 +483,54 @@ function WrappedUniformPrior(lo::Real, hi::Real)
 end
 
 """
+    WrappedSinePrior()
+
+[`WrappedSine`](@ref) with its chart `[-π/2, 3π/2]` as the bounds: the
+isotropic inclination prior on a circle, with no wall at `0` or `π`. Not something to
+write in a config: the layout builds it from a `SinePrior()` on an orbital
+inclination `inc_k<N>` (see [`SinePrior`](@ref)).
+"""
+WrappedSinePrior() = PriorSpec(WrappedSine(), _WRAPPED_SINE_LO, _WRAPPED_SINE_HI)
+
+"""
     is_wrapped(ps) -> Bool
 
-`true` for a `WrappedUniformPrior`: a circular parameter with no wall at its
-seam.
+`true` for a prior on a circle, which the samplers move on the line
+(identity transform, no logit): a `WrappedUniformPrior`, which has no wall at
+its seam and takes every finite value, or the cyclic inclination prior
+`WrappedSinePrior`, whose support is its chart `[-π/2, 3π/2]`, with `0` and
+`π` inside it (see [`WrappedSine`](@ref)).
 """
-is_wrapped(ps::PriorSpec) = ps.dist isa WrappedUniform
+is_wrapped(ps::PriorSpec) = ps.dist isa WrappedUniform || ps.dist isa WrappedSine
+
+"""
+    is_cyclic_inclination(ps) -> Bool
+
+`true` for a `WrappedSinePrior`: an orbital inclination sampled on a circle,
+read through [`fold_inclination`](@ref) and reported folded to `[0, π]`.
+"""
+is_cyclic_inclination(ps::PriorSpec) = ps.dist isa WrappedSine
 
 """
     SinePrior()
 
-Isotropic inclination prior on `[0, π]`: `p(i) = sin(i)/2`. Equivalent
+Isotropic inclination prior: `p(i) = sin(i)/2` on `[0, π]`. Equivalent
 to uniform-in-cos(i). Required for any orbit fit where inclination is
 a sampled parameter — without it the chain can escape into face-on
 (i ≈ 0) modes where huge M_sec × tiny sin i degenerately satisfies
 the RV mass function.
+
+On an orbital inclination (`inc_k<N>`) the samplers do not see the bounded
+`[0, π]` version: the layout carries the same prior on a circle,
+[`WrappedSinePrior`](@ref), with density `|sin x|/4` and no wall at `0` or
+`π`. The inclination is periodic there because every likelihood reads it
+through [`fold_inclination`](@ref) -- `x`, `-x` and `x + 2π` are one orbit --
+and folded to `[0, π]` it is exactly `sin(i)/2` again. The draws are folded
+before anything reads them, so chains, tables and plots report
+`i ∈ [0, π]`, and a posterior near `0` or `π` (face-on, retrograde) is not a
+rail. `config.priors` keeps `SinePrior()` as written. A Sine prior on any
+other parameter (the stellar inclination `i_star`) stays bounded on
+`[0, π]`.
 """
 SinePrior() = PriorSpec(Sine(), 0.0, π)
 
@@ -942,6 +1089,10 @@ function prior_to_dict(ps::PriorSpec)
         out["type"] = "Uniform"
     elseif d isa WrappedUniform
         out["type"] = "WrappedUniform"
+    elseif d isa WrappedSine
+        out["type"] = "WrappedSine"
+    elseif d isa Sine
+        out["type"] = "Sine"
     elseif d isa LogUniform
         out["type"] = "LogUniform"
     elseif d isa Truncated{<:Normal}
@@ -978,6 +1129,10 @@ function prior_from_dict(d::AbstractDict)
         return UniformPrior(d["lo"], d["hi"])
     elseif t == "WrappedUniform"
         return WrappedUniformPrior(d["lo"], d["hi"])
+    elseif t == "WrappedSine"
+        return WrappedSinePrior()
+    elseif t == "Sine"
+        return SinePrior()
     elseif t == "LogUniform"
         return LogUniformPrior(d["lo"], d["hi"])
     elseif t == "Normal"

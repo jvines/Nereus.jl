@@ -146,9 +146,15 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         N = length(lp)
         N >= 2d + 2 || return NaN
         pt = target.transform
+        # Cyclic inclinations folded to [0, π] (src/circular.jl): one
+        # representative's mode, whose Laplace volume holds half of Z per
+        # cyclic inclination -- the mirror one holds the rest (`fc` below).
+        cinc = cyclic_inclination_indices(target.params)
         Y = Matrix{Float64}(undef, d, N)
         @inbounds for i in 1:N
-            Y[:, i] = transform_forward(Float64[cols[j][i] for j in 1:d], pt)
+            xi = Float64[cols[j][i] for j in 1:d]
+            fold_cyclic_inclinations!(xi, target.params; idx = cinc)
+            Y[:, i] = transform_forward(xi, pt)
         end
         good = isfinite.(lp) .& vec(all(isfinite, Y; dims = 1))
         count(good) >= 2d + 2 || return NaN
@@ -160,7 +166,8 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         sel = md .< quantile(md, mode_frac)
         Yc = count(sel) >= 2d + 2 ? Y[:, sel] : Y
         Sc = cov(Yc; dims = 2) + 1e-8 * I(d)
-        return lp[imax] + 0.5 * d * log(2π) + 0.5 * logdet(Symmetric(Sc))
+        lz = lp[imax] + 0.5 * d * log(2π) + 0.5 * logdet(Symmetric(Sc))
+        return isempty(cinc) ? lz : lz + length(cinc) * log(2.0)
     catch
         return NaN
     end
@@ -175,10 +182,13 @@ end
 # WORST science param (max R-hat, min tail-ESS); nuisances are excluded so a
 # poorly-constrained jitter/GP hyperparameter can never stall the run — and a
 # nuisance that's coupled to a science param surfaces in that param's R-hat.
+# `fold` are the columns that are cyclic inclinations (src/circular.jl), read
+# folded to [0, π]: a walker that passed through π sits in the mirror
+# representative, the same inclination, and must not count as another mode.
 # ------------------------------------------------------------------
 function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
                           n_walkers::Int, science_cols::Vector{Int};
-                          cap::Int = 2000)
+                          cap::Int = 2000, fold::AbstractVector{Int} = Int[])
     (n_walkers < 2 || keep_idx < 4 * n_walkers) && return nothing
     keep_idx % n_walkers == 0 || return nothing
     n_step = keep_idx ÷ n_walkers
@@ -193,7 +203,8 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
         for (si, s) in enumerate(kept)
             base = (s - 1) * n_walkers + w
             for (ci, c) in enumerate(science_cols)
-                cube[si, ci, w] = samples[base, c]
+                v = samples[base, c]
+                cube[si, ci, w] = c in fold ? fold_inclination(v) : v
             end
         end
     end
@@ -848,6 +859,8 @@ function sample_pt_emcee(
     # end-of-run report.
     circ        = circular_indices(params)
     recut_moved = Dict{String,NTuple{2,Float64}}()
+    # Cyclic inclinations: no window, folded to [0, π] on the same schedule.
+    cinc        = cyclic_inclination_indices(params)
     # The move scale per dimension (see above), and the pruning tally per rung.
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
@@ -1409,6 +1422,15 @@ function sample_pt_emcee(
         β_hist[step, :] .= βs
         n_done = step
 
+        # ---- Cyclic inclinations (serial; burn-in only) -------------
+        # No seam to move: the walkers are folded back to [0, π] instead
+        # (src/circular.jl), every walker at every rung, on the re-cut
+        # schedule, so the stretch moves pair walkers in one representative.
+        # Before the pruning, which measures each rung's spread. Exact for the
+        # cached logπ / logL, as the re-cut is.
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
+            fold_cyclic_inclinations!(state, params; idx = cinc)
+
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_pt_prune_stranded!`. Stops at 3/4 of burn-in so the moved
         # walkers decorrelate from the ones they were copied onto, and runs
@@ -1475,7 +1497,8 @@ function sample_pt_emcee(
         # Mean/worst R-hat and bulk/tail ESS over the gating set; drives both
         # the live readout and (optionally) the run-until-converged stop.
         if step > n_burnin && (step - n_burnin) % diag_cadence == 0
-            diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols)
+            diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols;
+                                   fold = cinc)
             if diag !== nothing
                 meanr, maxr, meanb, mte = diag
                 rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))

@@ -140,15 +140,18 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
         # Apply multiplicative jitter for positive params, additive for others
         uf_pos = findfirst(==(our_slots[i]), layout.unfrozen_idx)
         if uf_pos !== nothing
-            lo, hi = bounds(layout.unfrozen_priors[uf_pos])
+            ps = layout.unfrozen_priors[uf_pos]
+            lo, hi = bounds(ps)
             jittered = donor_val + jitter_scale * (hi - lo) * randn(rng)
             # A circular angle wraps instead: the clamp piles every jitter that
             # crosses the seam onto the window edge -- a point mass, and a phase
             # or node the donor never had. Wrapped, the jitter is a wrapped
             # Gaussian, a function of circular distance only, so it is symmetric
-            # whichever window slot k (or the donor's slot) is charted in.
-            jittered = uf_pos in circ ? circular_relabel(jittered, lo, hi) :
-                                        clamp(jittered, lo, hi)
+            # whichever window slot k (or the donor's slot) is charted in. So
+            # does a cyclic inclination, whose chart is one period of a
+            # periodic density (src/circular.jl).
+            jittered = uf_pos in circ || is_cyclic_inclination(ps) ?
+                       circular_relabel(jittered, lo, hi) : clamp(jittered, lo, hi)
             new_values[our_slots[i]] = convert(T, jittered)
         else
             new_values[our_slots[i]] = convert(T, donor_val)

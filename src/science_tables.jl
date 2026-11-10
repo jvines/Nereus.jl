@@ -211,6 +211,7 @@ function science_fitted(chains, params::Params)
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
     circ = circular_names(params)
+    cinc = cyclic_inclination_names(params)
     jit = jitter_names(params)
     # The winning model's live SLOTS, not `1:modal_np`: after a death in the
     # middle of the slot list the live planet sits in a later slot, and the
@@ -232,9 +233,11 @@ function science_fitted(chains, params::Params)
         # in. This used to skip every angle, which was harmless while Ω and λ
         # were not registered as angles; now that they are, a narrow-arc λ prior
         # would have silently lost its flag. A jitter can be zero: only its
-        # upper bound is checked.
+        # upper bound is checked. A cyclic inclination has no bound at all
+        # (src/circular.jl): a CI reaching 0 or 180 deg is a face-on or
+        # retrograde orbit the sampler passed through, not a prior wall.
         _, is_ang = sci_param_unit(name, params)
-        if !(name in circ)
+        if !(name in circ) && !(name in cinc)
             ps = params.config.priors[name]
             lo, hi = bounds(ps)
             is_ang && ((lo, hi) = (rad2deg(lo), rad2deg(hi)))

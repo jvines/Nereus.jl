@@ -83,6 +83,10 @@ function _burnin_hold(params::Params, hold, frac::Real, n_burnin::Integer;
         s = log_scale_shift(ps)
         (ps.lo <= x <= ps.hi && (s === nothing || x + s > 0)) || throw(ArgumentError(
             "burnin_hold: $nm = $x is outside its prior's support [$(ps.lo), $(ps.hi)]"))
+        # A cyclic inclination is held at an inclination, its own
+        # representative: the burn-in folds (src/circular.jl) leave it alone.
+        (!is_cyclic_inclination(ps) || 0 <= x <= π) || throw(ArgumentError(
+            "burnin_hold: $nm = $x is not an inclination in [0, π]"))
         j in circ && throw(ArgumentError(
             "burnin_hold: $nm is a full-circle angle, whose window $sampler " *
             "re-charts during burn-in; it cannot be held"))

@@ -695,7 +695,8 @@ function compute_derived(chains, params::Params;
             derived["P_days"]       = Pv
             derived["ecc"]          = ev
             if Symbol("inc_k$k") in chain_syms           # astrometric SB2 → absolute
-                inc = _draws(chains, Symbol("inc_k$k"))
+                inc = fold_inclination.(_draws(chains, Symbol("inc_k$k")))
+                # (folded: a cyclic inclination; src/circular.jl)
                 s3  = max.(sin.(inc), 1e-6).^3
                 derived["M_A"]     = MA_sini3 ./ s3
                 derived["M_B"]     = MB_sini3 ./ s3

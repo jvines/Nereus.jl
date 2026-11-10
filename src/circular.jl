@@ -27,11 +27,37 @@
 # `config.priors` keeps each prior exactly as the user wrote it; only the layout
 # -- the prior the samplers evaluate -- carries the moved window.
 #
+# The orbital inclination is cyclic in a different way, and is FOLDED rather
+# than re-charted. i ∈ [0, π] is not an angle on a circle, but every likelihood
+# reads it through `planet_inc`, which returns |x| reduced through x ≡ x + 2π
+# (`fold_inclination`): RVs see |K| (or M_sec·|sin x|), transits cos i, and
+# astrometry the sky projection, so x, -x and x + 2π are one orbit. A Sine
+# prior on `inc_k<N>` is therefore sampled on a circle of circumference 2π
+# (`WrappedSinePrior`: density |sin x|/4 on the chart [-π/2, 3π/2], identity
+# transform), which is exactly sin(i)/2 once folded. Under the bounded Sine the
+# samplers met a wall at i = π: the logit sent it to y = ±∞, walkers piled
+# against it, and a near-face-on retrograde orbit was reported as railed at its
+# upper bound. On the chart 0 and π are interior points, and a walker passes
+# through π into the mirror representative 2π - i; the chart's edges, the
+# mirror image of i = 90°, are its only walls, and the density is zero past
+# them because on the whole line it would be improper (see `WrappedSine`).
+# Each representative carries the whole physical posterior (x and -x are
+# separated by the zeros of |sin x| at 0 and π), so there is no window to move:
+# the draws are folded to [0, π] instead, by `recenter_circular!` before
+# anything reads them, and the walkers are folded wherever this file's windows
+# re-chart them (prior draws, `circular_relabel_point!`, the samplers' burn-in
+# re-cuts), which keeps an ensemble in one representative. Both are exact: the
+# likelihood is the same at x and at fold(x), to the bit, and the prior up to
+# the rounding of sin(2π - x) against sin(x). Only an ORBITAL inclination under a Sine prior
+# is cyclic: a user's Uniform(0, π) or Normal on it keeps its walls, and a Sine
+# prior on the stellar inclination i★ stays bounded, since x → -x is not shown
+# to be a symmetry of the gravity-darkening and RM models.
+#
 # Deliberately NOT circular:
 #   * priors that are not Uniform over exactly one period. A narrow arc, a
 #     truncated Normal on Mo, a two-period U(-2π, 2π): those walls are the
 #     user's, and a density that is not periodic cannot be relabelled exactly.
-#   * inclination-like angles. i ∈ [0, π] is not periodic.
+#   * the inclination, which is folded instead (above).
 #   * Mo and φ_c whenever TTVs are modelled. TTV epoch numbering hangs off the
 #     transit time Tc = tp_to_tc(Tp) with Tp = t_ref − Mo·P/2π (under φ_c,
 #     Tc = t_ref_c + φ_c·P/2π), so a 2π shift relabels every transit and the
@@ -194,9 +220,10 @@ function circular_window(x::AbstractVector{<:Real}, lo::Real, lo_ref::Real;
 end
 
 # The same prior over a moved chart: Uniform stays Uniform, a wrapped prior
-# stays wrapped (it must not regain the wall it exists to remove).
+# stays wrapped (it must not regain the wall it exists to remove). Only ever
+# called for an `is_circular` parameter, whose prior is one of the two.
 _rewindow(ps::PriorSpec, lo::Real, hi::Real) =
-    is_wrapped(ps) ? PriorSpec(WrappedUniform(lo, hi), lo, hi) : UniformPrior(lo, hi)
+    ps.dist isa WrappedUniform ? PriorSpec(WrappedUniform(lo, hi), lo, hi) : UniformPrior(lo, hi)
 
 """
     set_circular_window!(params, i, lo; transforms = ()) -> (lo, hi)
@@ -264,7 +291,78 @@ function circular_relabel_point!(x::AbstractVector, params::Params)
         lo, hi = bounds(L.unfrozen_priors[i])
         x[i] = circular_relabel(x[i], lo, hi)
     end
+    # A cyclic inclination is folded to [0, π] (its own representative): an
+    # `init` written as 3.3 or -0.4 starts at 2π - 3.3 or 0.4.
+    fold_cyclic_inclinations!(x, params)
     return x
+end
+
+# ------------------------------------------------------------------
+# Cyclic inclination: folded, not re-charted (see the header).
+# ------------------------------------------------------------------
+
+"""
+    cyclic_inclination_indices(params) -> Vector{Int}
+
+Positions, in the unfrozen vector, of the orbital inclinations sampled on a
+circle (layout prior [`WrappedSinePrior`](@ref)).
+"""
+cyclic_inclination_indices(params::Params) =
+    Int[i for (i, ps) in enumerate(params.layout.unfrozen_priors)
+        if is_cyclic_inclination(ps)]
+
+"""
+    cyclic_inclination_names(params) -> Set{String}
+"""
+cyclic_inclination_names(params::Params) =
+    Set{String}(params.layout.unfrozen_names[i]
+                for i in cyclic_inclination_indices(params))
+
+"""
+    fold_cyclic_inclinations!(x, params; idx = cyclic_inclination_indices(params)) -> x
+
+Fold the cyclic inclinations of `x` to `[0, π]` with
+[`fold_inclination`](@ref). `x` is an unfrozen-vector point, or any array whose
+LAST dimension runs over the unfrozen parameters (a samples matrix, a sampler's
+`state[t, w, d]` or ring buffer). Exact: the log-density is the same at `x` and
+at its fold (the likelihood bit for bit; the prior up to rounding in
+`|sin x|`), so cached log-densities stay valid. A no-op without one.
+"""
+function fold_cyclic_inclinations!(x::AbstractArray, params::Params;
+                                   idx = cyclic_inclination_indices(params))
+    isempty(idx) && return x
+    nd = ndims(x)
+    for d in idx
+        v = selectdim(x, nd, d)
+        @inbounds for k in eachindex(v)
+            v[k] = fold_inclination(v[k])
+        end
+    end
+    return x
+end
+
+"""
+    fold_cyclic_inclinations!(chains, params) -> chains
+
+Fold every draw of each cyclic inclination in `chains` to `[0, π]`, in place.
+Run by [`recenter_circular!`](@ref), so `run_job` and `fit_*` hand on folded
+draws only. Columns missing from `chains` are skipped.
+"""
+function fold_cyclic_inclinations!(chains::MCMCChains.Chains, params::Params)
+    idx = cyclic_inclination_indices(params)
+    isempty(idx) && return chains
+    A = chains.value.data
+    vars = names(chains)
+    for i in idx
+        j = findfirst(==(Symbol(params.layout.unfrozen_names[i])), vars)
+        j === nothing && continue
+        col = view(A, :, j, :)
+        for k in eachindex(col)
+            x = col[k]
+            x isa Real && (col[k] = fold_inclination(x))
+        end
+    end
+    return chains
 end
 
 # ------------------------------------------------------------------
@@ -386,9 +484,14 @@ slots do not vote), with the median inside the user's own window, and every
 draw is relabelled into it. Summaries, science tables, fit_health, plots,
 `chains.nc` and the bridge evidence then see one contiguous posterior. Mutates
 `chains` and the layout in place; a no-op for an engine that already re-cut.
+
+Every cyclic inclination is folded to `[0, π]` first
+([`fold_cyclic_inclinations!`](@ref)): nothing downstream sees a representative
+outside it.
 """
 function recenter_circular!(chains::MCMCChains.Chains, params::Params;
                             transforms = ())
+    fold_cyclic_inclinations!(chains, params)
     idx = circular_indices(params)
     isempty(idx) && return chains
     A = chains.value.data
