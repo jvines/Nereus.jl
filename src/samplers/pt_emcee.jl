@@ -175,10 +175,13 @@ end
 # WORST science param (max R-hat, min tail-ESS); nuisances are excluded so a
 # poorly-constrained jitter/GP hyperparameter can never stall the run — and a
 # nuisance that's coupled to a science param surfaces in that param's R-hat.
+# `fold` are the columns that are cyclic inclinations (src/circular.jl), read
+# folded to [0, π]: a walker that passed through π sits in the mirror
+# representative, the same inclination, and must not count as another mode.
 # ------------------------------------------------------------------
 function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
                           n_walkers::Int, science_cols::Vector{Int};
-                          cap::Int = 2000)
+                          cap::Int = 2000, fold::AbstractVector{Int} = Int[])
     (n_walkers < 2 || keep_idx < 4 * n_walkers) && return nothing
     keep_idx % n_walkers == 0 || return nothing
     n_step = keep_idx ÷ n_walkers
@@ -193,7 +196,8 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
         for (si, s) in enumerate(kept)
             base = (s - 1) * n_walkers + w
             for (ci, c) in enumerate(science_cols)
-                cube[si, ci, w] = samples[base, c]
+                v = samples[base, c]
+                cube[si, ci, w] = c in fold ? fold_inclination(v) : v
             end
         end
     end
@@ -1446,7 +1450,8 @@ function sample_pt_emcee(
         # Mean/worst R-hat and bulk/tail ESS over the gating set; drives both
         # the live readout and (optionally) the run-until-converged stop.
         if step > n_burnin && (step - n_burnin) % diag_cadence == 0
-            diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols)
+            diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols;
+                                   fold = cinc)
             if diag !== nothing
                 meanr, maxr, meanb, mte = diag
                 rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))
