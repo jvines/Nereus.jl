@@ -87,7 +87,8 @@ encoded as a non-finite, mapped to 0.0) are ignored: we read the true bound
 from the prior, not the transform's clamp.
 
 Circular angles ([`is_circular`](@ref)) are never flagged: their bounds are
-where the chart of the circle was cut, not an edge of the support. Nor is a
+where the chart of the circle was cut, not an edge of the support. Neither is
+a cyclic inclination ([`is_cyclic_inclination`](@ref)), which has no bound. Nor is a
 jitter ([`jitter_names`](@ref)) at its lower bound, whatever that bound is.
 """
 function _detect_railed(x_bounded::AbstractVector{<:Real},
@@ -120,6 +121,9 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
         ps = priors[i]
         is_fixed(ps) && continue
         i in circ && continue
+        # A cyclic inclination has no bound at all: its chart edges are the
+        # mirror of i = 90°, and 0 and π are points it passes through.
+        is_cyclic_inclination(ps) && continue
         lo, hi = bounds(ps)
         (isfinite(lo) && isfinite(hi)) || continue   # only fully-bounded params
         span = hi - lo
@@ -195,7 +199,13 @@ function _same_basin(xa::AbstractVector, xb::AbstractVector,
         lo, hi = bounds(priors[i])
         (isfinite(lo) && isfinite(hi) && hi > lo) || continue
         d = abs(xa[i] - xb[i])
-        if i in circ
+        if is_cyclic_inclination(priors[i])
+            # x and -x (and x + 2π) are one orbit: compare the inclinations,
+            # on the physical span π.
+            d = abs(fold_inclination(xa[i]) - fold_inclination(xb[i]))
+            d / π > basin_rtol && return false
+            continue
+        elseif i in circ
             # Mo = 0.001 and Mo = 6.282 are the same orbit. Compared linearly
             # they were two basins, and the "runner-up" at the far end of the
             # window was the winner itself -- a spurious multimodal verdict.
@@ -694,6 +704,8 @@ function sample_map(
         lo, hi = bounds(layout.unfrozen_priors[i])
         x_bounded[i] = circular_relabel(x_bounded[i], lo, hi)
     end
+    # A cyclic inclination is reported folded to [0, π], its own representative.
+    fold_cyclic_inclinations!(x_bounded, params)
     railed_names = String[layout.unfrozen_names[i] for i in railed_idx]
 
     if railed

@@ -710,6 +710,8 @@ function sample_transdim_pt_emcee(
     circ_groups = circular_groups(params; permutable = td.planets)
     unify_circular_groups!(params, circ_groups; transforms = (target.transform,))
     recut_moved = Dict{String,NTuple{2,Float64}}()
+    # Cyclic inclinations: no window, folded to [0, π] on the re-cut schedule.
+    cinc = cyclic_inclination_indices(params)
     # Stretch scale per dimension (see the stretch move), pruning tally per rung,
     # and which component owns each dimension (see `_td_prune_stranded!`).
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
@@ -2248,6 +2250,12 @@ function sample_transdim_pt_emcee(
             _td_ensemble_recut!(state, td_states, params, circ_groups, strategy,
                                 (target.transform,), recut_moved)
         end
+        # A cyclic inclination is folded back to [0, π] instead, every walker
+        # (active or not) at every rung: no seam to move, and the cached
+        # log-densities stay valid (src/circular.jl). A MoMS off-value, the
+        # prior sample median (near π/2), is already its own representative.
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
+            fold_cyclic_inclinations!(state, params; idx = cinc)
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
         any(is_held) && _burnin_hold_due!(hold_med, hold, step, n_burnin,

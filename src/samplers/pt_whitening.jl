@@ -432,6 +432,19 @@ function sample_pt_whitening(
             end
         end
     end
+    # A cyclic inclination is folded to [0, π] on the same schedule
+    # (src/circular.jl): the walkers, and the ring's filled slots so the
+    # whitening (μ, σ) describe the one representative the walkers are in.
+    cinc = cyclic_inclination_indices(params)
+    function fold_whitening!()
+        fold_cyclic_inclinations!(state, params; idx = cinc)
+        for d in cinc, t in 1:n_temps
+            @inbounds for s in 1:ring_count[t], w in 1:n_walkers_eff
+                ring[t, s, w, d] = fold_inclination(ring[t, s, w, d])
+            end
+            refresh_whiten_dim!(t, d)
+        end
+    end
 
     # Dedicated swap scratch (serial swap loop runs AFTER the threaded
     # stretch half-steps, so single-threaded buffers are race-free).
@@ -764,6 +777,7 @@ function sample_pt_whitening(
         if !isempty(circ) && _pt_recut_due(step, n_burnin)
             recut_whitening!()
         end
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) && fold_whitening!()
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
         any(is_held) && _burnin_hold_due!(hold_med, hold, step, n_burnin,

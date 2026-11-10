@@ -76,6 +76,11 @@ function _draw_from_prior(target::NereusTarget, rng::AbstractRNG;
         end
     end
 
+    # A cyclic inclination (src/circular.jl) is drawn on its circle and folded
+    # to [0, π]: every walker then starts in the same representative, sin(i)/2
+    # distributed, rather than half of them in the mirror one.
+    cinc = cyclic_inclination_indices(params)
+
     last_lp = -Inf
     last_x = Vector{Float64}(undef, n)
     for attempt in 1:max_attempts
@@ -98,6 +103,7 @@ function _draw_from_prior(target::NereusTarget, rng::AbstractRNG;
             end
             x[i] = val
         end
+        fold_cyclic_inclinations!(x, params; idx = cinc)
         # canonical period order within each mode group (draw is in bounded
         # space, so sorting the values at the P positions sorts the periods)
         for grp in P_groups

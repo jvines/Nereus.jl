@@ -813,6 +813,8 @@ function sample_pt_emcee(
     # end-of-run report.
     circ        = circular_indices(params)
     recut_moved = Dict{String,NTuple{2,Float64}}()
+    # Cyclic inclinations: no window, folded to [0, π] on the same schedule.
+    cinc        = cyclic_inclination_indices(params)
     # The move scale per dimension (see above), and the pruning tally per rung.
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
@@ -1391,6 +1393,12 @@ function sample_pt_emcee(
             _pt_ensemble_recut!(state, params, circ, (target.transform,),
                                 recut_moved)
         end
+        # A cyclic inclination has no seam to move; its walkers are folded
+        # back to [0, π] instead (src/circular.jl), every walker at every rung,
+        # so the stretch moves pair walkers in one representative. Exact for
+        # the cached logπ / logL, as the re-cut is.
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
+            fold_cyclic_inclinations!(state, params; idx = cinc)
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
         !isempty(held_x) && _burnin_hold_due!(hold_med, hold, step, n_burnin,
