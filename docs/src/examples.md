@@ -393,7 +393,8 @@ transit and relative astrometry. `SinePrior()` takes no args.
 
 !!! warning "GOST is an auxiliary — it is inert without a Gaia-epoch product"
     `gost_log_likelihood` returns 0. GOST only window-averages the Gaia
-    epoch of a **paired** `hgca` / `gaia_dr3` / `g23h`. `Data(iad, gost)`
+    epoch of a **paired** `hgca` / `gaia_dr3` / `g23h`, through the transits
+    inside that release's window (DR3: 2014-07-25 to 2017-05-28). `Data(iad, gost)`
     with no `hgca`/`gaia_dr3` is therefore **IAD-only** (Hipparcos epoch)
     — the Gaia baseline is absent, and the `Data` constructor warns.
     Use `hgca` (above) or supply a Gaia DR3 5-param solution.
