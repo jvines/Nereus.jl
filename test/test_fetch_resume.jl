@@ -154,3 +154,52 @@ end
               !isfile(joinpath(dir, "out2", "ResRec", "H001", "missing.d"))
     end
 end
+
+@testset "verified download: sources in order, checksum gates each" begin
+    payload = rand(UInt8, 200_000)
+    good = bytes2hex(Nereus.SHA.sha256(payload))
+    mktempdir() do dir
+        # The first source serves a different file: rejected, deleted, next one used.
+        bad = _serve(rand(UInt8, 200_000)); ok = _serve(payload)
+        dest = joinpath(dir, "v1.bin")
+        Nereus._download_verified((bad.url, ok.url), dest; sha256 = good, backoff = 0.01)
+        @test read(dest) == payload
+        @test !isempty(bad.log) && !isempty(ok.log)
+        close(bad.server); close(ok.server)
+
+        # The first source is good: the second is never contacted.
+        ok = _serve(payload); unused = _serve(payload)
+        dest = joinpath(dir, "v2.bin")
+        Nereus._download_verified((ok.url, unused.url), dest; sha256 = uppercase(good),
+                                  backoff = 0.01)
+        @test read(dest) == payload
+        @test isempty(unused.log)
+        close(ok.server); close(unused.server)
+
+        # An unreachable first source falls through to the second.
+        ok = _serve(payload)
+        dest = joinpath(dir, "v3.bin")
+        Nereus._download_verified(("http://127.0.0.1:1/none.bin", ok.url), dest;
+                                  sha256 = good, attempts = 1, backoff = 0.01)
+        @test read(dest) == payload
+        close(ok.server)
+
+        # No source delivers the right file: an error naming each, nothing left behind.
+        b1 = _serve(rand(UInt8, 1000)); b2 = _serve(rand(UInt8, 1000))
+        dest = joinpath(dir, "v4.bin")
+        err = try
+            Nereus._download_verified((b1.url, b2.url), dest; sha256 = good, backoff = 0.01)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ErrorException
+        @test occursin(b1.url, err.msg) && occursin(b2.url, err.msg)
+        @test !isfile(dest)
+        close(b1.server); close(b2.server)
+    end
+    # The shipped constants: mirror first, ESA second, a SHA-256 to check against.
+    @test Nereus.HIP_IAD_BUNDLE_URLS[1] == Nereus.HIP_IAD_BUNDLE_URL_MIRROR
+    @test Nereus.HIP_IAD_BUNDLE_URLS[2] == Nereus.HIP_IAD_BUNDLE_URL_ESA
+    @test occursin(r"^[0-9a-f]{64}$", Nereus.HIP_IAD_BUNDLE_SHA256)
+end
