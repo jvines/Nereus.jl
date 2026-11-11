@@ -278,11 +278,19 @@ function _pt_hmc_core(parts, dim::Int,
         end
         @inbounds for i in 1:n_temps
             s = 0.0; for w in 1:W; s += states[i, w].logL; end
-            logL_buf[i] = s / W
-            sumL[i] += logL_buf[i]; sumL2[i] += logL_buf[i]^2
+            sumL[i] += s / W; sumL2[i] += (s / W)^2
         end
         nL += 1
-        update_evidence!(evidence_acc, logL_buf, βs)
+        # One update per walker. The walker-averaged log L went in instead,
+        # which TI does not mind but SS+ does: its terms are averages of
+        # L^(±Δβ/2), and exp of a mean is not a mean of exp (Jensen), so with
+        # more than one walker per rung every SS+ ratio was biased.
+        for w in 1:W
+            @inbounds for i in 1:n_temps
+                logL_buf[i] = states[i, w].logL
+            end
+            update_evidence!(evidence_acc, logL_buf, βs)
+        end
         for w in 1:W; push!(cold_ys, copy(states[n_temps, w].θ)); end
         update!(pb; n_done = sweep,
                 fields = (:logL => round(states[n_temps, 1].logL, digits = 2),))
