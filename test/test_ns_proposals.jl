@@ -8,6 +8,7 @@
 # again whenever a step left the unit cube, which favoured the middle of the
 # cube; a step out of it is now a rejected step.
 using Test, Random, Statistics, Distributions, Logging, NestedSamplers
+using LinearAlgebra: norm
 
 const _NSP = NestedSamplers.Proposals
 const _NSB = NestedSamplers.Bounds
@@ -147,6 +148,33 @@ end
             @test abs(cor(col(out, 1), col(out, 2)) - cor(col(ref, 1), col(ref, 2))) < 4 / sqrt(M)
         end
     end
+end
+
+@testset "bootstrap expansion covers the region the points came from" begin
+    # Rejection draws its points from the bounds, so the bounds must hold the
+    # whole constrained region, not only the live points. A MultiEllipsoid
+    # fitted to points uniform in a ball and enlarged by 1.25 in volume missed
+    # 14% of the ball (d = 4, 40 points) and 33% (d = 12, 120 points). The
+    # bootstrap expansion on the volume-halving split still missed 2% and 1.0%
+    # (d = 10, 100 points); split by dynesty's rule, 0.04% at d = 10. On an RM
+    # obliquity fit the bounds missed 12-22% of the constrained region and
+    # :unif put log Z 2 nats high.
+    ball(rng, d) = (x = randn(rng, d); x ./ norm(x) .* rand(rng)^(1 / d))
+    for (d, n) in ((4, 40), (10, 100), (12, 120))
+        rng = MersenneTwister(1)
+        outs = Float64[]
+        for _ in 1:20
+            x = reduce(hcat, [ball(rng, d) for _ in 1:n])
+            y = reduce(hcat, [ball(rng, d) for _ in 1:2000])
+            b = _NSB.fit(rng, _NSB.MultiEllipsoid, x; enlarge = 1.25, bootstrap = 5)
+            push!(outs, mean(!(c ∈ b) for c in eachcol(y)))
+        end
+        @test mean(outs) < 0.005
+    end
+    # the cube needs none, and only Rejection expands by default
+    @test _NSB.bootstrap_expansion(MersenneTwister(1), _NSB.NoBounds, rand(2, 10)) == 1.0
+    @test Nested(2, 50; proposal = _NSP.Rejection()).bootstrap == 5
+    @test Nested(2, 50; proposal = _NSP.RSlice()).bootstrap == 0
 end
 
 # A proposal that counts the starts it is handed below the likelihood threshold,

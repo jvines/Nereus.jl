@@ -10,6 +10,7 @@ struct Nested{B, P <: AbstractProposal} <: AbstractSampler
     min_eff::Float64
     proposal::P
     dlv::Float64
+    bootstrap::Int
 end
 
 """
@@ -17,6 +18,7 @@ end
         bounds=Bounds.MultiEllipsoid,
         proposal=:auto,
         enlarge=1.25,
+        bootstrap=default_bootstrap(proposal),
         update_interval=default_update_interval(proposal, ndims),
         min_ncall=2nactive,
         min_eff=0.10)
@@ -36,6 +38,7 @@ The original nested sampling algorithm is roughly equivalent to using `Bounds.El
 
 ## Other Parameters
 * `enlarge` - When fitting the bounds to live points, they will be enlarged (in terms of volume) by this linear factor.
+* `bootstrap` - With `bootstrap > 0`, the bounds are enlarged by the larger of `enlarge` and the bootstrap expansion from that many resamples of the live points ([`Bounds.bootstrap_expansion`](@ref), as dynesty). The default is 5 for `Proposals.Rejection`, which draws its points from the bounds and needs them to cover the constrained region, and 0 for the walks and slices, which take only their shape from the bounds.
 * `update_interval` - How often to refit the live points with the bounds as a fraction of `nactive`. By default this will be determined using `default_update_interval` for the given proposal
     * `Proposals.Rejection` - `1.5`
     * `Proposals.RWalk` and `Proposals.RStagger` - `0.15 * walks`
@@ -51,6 +54,7 @@ function Nested(ndims,
     bounds = Bounds.MultiEllipsoid,
     proposal = :auto,
     enlarge = 1.25,
+    bootstrap = nothing,
     min_ncall=2nactive,
     min_eff=0.10,
     kwargs...)
@@ -69,6 +73,8 @@ function Nested(ndims,
     end
 
     dlv = log(nactive + 1) - log(nactive)
+    bootstrap = bootstrap === nothing ? default_bootstrap(proposal) : Int(bootstrap)
+    bootstrap >= 0 || throw(ArgumentError("bootstrap must be ≥ 0 (got $bootstrap)"))
 
     update_interval_frac = get(kwargs, :update_interval, default_update_interval(proposal, ndims))
     update_interval = round(Int, update_interval_frac * nactive)
@@ -80,8 +86,12 @@ function Nested(ndims,
         min_ncall,
         min_eff,
         proposal,
-        dlv)
+        dlv,
+        bootstrap)
 end
+
+default_bootstrap(::Proposals.Rejection) = 5
+default_bootstrap(_) = 0
 
 default_update_interval(p::Proposals.Rejection, ndims) = 1.5
 default_update_interval(p::Proposals.RWalk, ndims) = 0.15 * p.walks

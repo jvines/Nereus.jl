@@ -114,4 +114,84 @@ include("ellipsoid.jl")
 include("multiellipsoid.jl")
 include("mlfriends.jl")
 
+"""
+    Bounds.fit(rng, B, points; pointvol=0, enlarge=1, bootstrap=0)
+
+Fit bounds of type `B` to `points` (one per column) and enlarge their volume by
+`enlarge`, or, with `bootstrap > 0`, by the larger of `enlarge` and the
+bootstrap expansion (dynesty's; Buchner 2016) as a volume factor: see
+[`Bounds.bootstrap_expansion`](@ref). A `MultiEllipsoid` is then split by
+dynesty's rule (`bic = true`, see its extended help).
+"""
+function fit(rng::AbstractRNG, B, points::AbstractMatrix; pointvol = 0, enlarge = 1, bootstrap = 0)
+    b = _fit(B, points, pointvol, bootstrap > 0)
+    factor = Float64(enlarge)
+    if bootstrap > 0
+        f = bootstrap_expansion(rng, B, points; pointvol = pointvol, nboot = bootstrap)
+        factor = max(factor, f^size(points, 1))
+    end
+    return scale!(b, factor)
+end
+
+"""
+    Bounds.bootstrap_expansion(rng, B, points; pointvol=0, nboot=5) -> Float64
+
+The linear factor by which bounds of type `B` fitted to `points` must grow to
+hold points they were not fitted to. `nboot` times: resample the points with
+replacement, fit the bounds to the distinct points drawn, and measure how far
+each point left out lies, in units of the radius of the nearest fitted
+ellipsoid along its direction (1 on the surface); the factor is the largest
+such distance, and at least 1.
+
+A fit holds the points it was fitted to and no more, while the constrained
+region those points were drawn from reaches past them, further with fewer
+points per dimension and per ellipsoid. A uniform draw from bounds that miss
+part of the region never lands there, so nested sampling drew its new points
+from a smaller region than the one it assigned them to, and log Z came out high.
+`NoBounds` is the cube and `MLFriends` calibrates itself this way already, so
+for those the factor is 1.
+"""
+bootstrap_expansion(rng::AbstractRNG, B, points::AbstractMatrix; pointvol = 0, nboot = 5) = 1.0
+
+# Bounds that must cover the region the points came from split by dynesty's
+# rule. The volume-halving rule splits a MultiEllipsoid into ellipsoids of
+# 2d+ points each, which the expansion cannot make cover: on a 10-d ball with
+# 100 points, 1.0% of it stayed outside after a 5-resample expansion (13% in
+# the worst of 20 fits), against 0.04% (0.6%) split by dynesty's rule, and the
+# bound was 50 times the ball's volume against 14.
+_fit(B, points, pointvol, bic) = fit(B, points; pointvol = pointvol)
+_fit(B::Type{<:MultiEllipsoid}, points, pointvol, bic) = fit(B, points; pointvol = pointvol, bic = bic)
+
+function bootstrap_expansion(rng::AbstractRNG, B::Type{<:Union{Ellipsoid,MultiEllipsoid}},
+                             points::AbstractMatrix; pointvol = 0, nboot = 5)
+    npoints = size(points, 2)
+    expand = 1.0
+    drawn = falses(npoints)
+    for _ in 1:nboot
+        fill!(drawn, false)
+        for _ in 1:npoints
+            drawn[rand(rng, 1:npoints)] = true
+        end
+        all(drawn) && continue
+        b = try
+            _fit(B, points[:, drawn], pointvol, true)
+        catch err
+            # k-means on near-duplicate points; the caller's own fit falls
+            # back to one ellipsoid for the same reason
+            err isa ArgumentError || rethrow(err)
+            continue
+        end
+        ells = b isa MultiEllipsoid ? b.ellipsoids : (b,)
+        for j in findall(!, drawn)
+            p = view(points, :, j)
+            d = minimum(ells) do ell
+                δ = p .- ell.center
+                sqrt(max(dot(δ, ell.A * δ), 0.0))
+            end
+            expand = max(expand, d)
+        end
+    end
+    return expand
+end
+
 end # module Bounds

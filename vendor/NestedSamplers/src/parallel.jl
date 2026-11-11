@@ -101,10 +101,10 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
     # --- bounds update (mirror step.jl) ---
     if !state.has_bounds && state.ncall > sampler.min_ncall &&
        state.it / state.ncall < sampler.min_eff
-        active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us; pointvol=pointvol), sampler.enlarge)
+        active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
         since_update = 0; has_bounds = true
     elseif state.has_bounds && state.since_update >= sampler.update_interval  # see step.jl
-        active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us; pointvol=pointvol), sampler.enlarge)
+        active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
         since_update = 0; has_bounds = true
     else
         active_bound = state.active_bound
@@ -132,14 +132,14 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
             point = state.us[:, rand(rng, alive)]
             bound = Bounds.bound_containing(rng, active_bound, point)
             if isnothing(bound)
-                active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us; pointvol=pointvol), sampler.enlarge)
+                active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
                 since_update = 0
                 bound = Bounds.bound_containing(rng, active_bound, point)
             end
             if isnothing(bound)
-                bound = Bounds.scale!(Bounds.fit(Bounds.Ellipsoid, state.us; pointvol=pointvol), sampler.enlarge)
+                bound = fit_bounds(rng, sampler, Bounds.Ellipsoid, state.us, pointvol)
             end
-            starts[j] = (point, bound)
+            starts[j] = (point, proposal_bound(sampler.proposal, active_bound, bound))  # see step.jl
         end
     end
 
@@ -149,12 +149,12 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
         Threads.@threads :static for j in 1:K
             tid = Threads.threadid()
             reps[j] = _draw_replacement(rngs[tid], props[tid], sampler, model,
-                                         has_bounds ? starts[j] : nothing, Lstar, state.us)
+                                         has_bounds ? starts[j] : nothing, Lstar, state.us, pointvol)
         end
     else
         for j in 1:K
             reps[j] = _draw_replacement(rng, props[1], sampler, model,
-                                         has_bounds ? starts[j] : nothing, Lstar, state.us)
+                                         has_bounds ? starts[j] : nothing, Lstar, state.us, pointvol)
         end
     end
 
@@ -199,10 +199,16 @@ end
 # Draw one new point with L ≥ Lstar via the sampler's proposal, from the start
 # point and bound chosen in `step_batch`; uniform rejection from the cube before
 # the first bound (`start === nothing`).
-function _draw_replacement(rng, proposal, sampler, model, start, Lstar, us)
+function _draw_replacement(rng, proposal, sampler, model, start, Lstar, us, pointvol)
     if start !== nothing
         point, bound = start
-        u, v, logl, nc = proposal(rng, point, Lstar, bound, model)
+        if proposal isa Proposals.Rejection
+            # refits during the search (see step.jl) stay with this draw
+            u, v, logl, nc = draw_uniform(rng, sampler, proposal, Lstar, bound, model, us,
+                                          pointvol, 0)
+        else
+            u, v, logl, nc = proposal(rng, point, Lstar, bound, model)
+        end
     else
         point = rand(rng, eltype(us), sampler.ndims)
         bound = Bounds.fit(Bounds.NoBounds, us)

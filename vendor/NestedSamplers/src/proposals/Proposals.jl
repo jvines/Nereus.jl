@@ -49,7 +49,7 @@ Propose a new live point by uniformly sampling within the bounding volume and re
 [^1]: John Skilling, 2004, AIP 735, 395  ["Nested Sampling"](https://aip.scitation.org/doi/abs/10.1063/1.1835238)
 
 ## Parameters
-- `maxiter` is the maximum number of samples that can be rejected before giving up and throwing an error.
+- `maxiter` is the maximum number of points inside the unit cube (likelihood calls) that can be rejected before giving up and throwing an error. Draws outside the cube cost no likelihood call and are not counted, up to `100maxiter` of them.
 """
 Base.@kwdef struct Rejection <: AbstractProposal
     maxiter::Int = 100_000
@@ -64,16 +64,31 @@ function (prop::Rejection)(
     bounds::AbstractBoundingSpace,
     model
 )
-    
-    ncall = 0
-    for _ in 1:prop.maxiter
+    u, v, logl, ncall, nout = draw_rejection(rng, logl_star, bounds, model, prop.maxiter)
+    u === nothing && throw(ErrorException("Couldn't generate a proper point after $ncall likelihood calls and $nout draws outside the unit cube. Bounds=$bounds, logl_star=$logl_star."))
+    return u, v, logl, ncall
+end
+
+# Uniform draws from `bounds` until one reaches `logl_star`, for at most
+# `maxcall` likelihood calls and `100maxcall` draws outside the unit cube.
+# Bounds expanded to cover the constrained region (the bootstrap expansion)
+# can lie mostly outside the cube while that region is still large: on an RM
+# obliquity fit 99% of the draws early on. A draw outside the cube costs no
+# likelihood call, so it does not count against `maxcall`. Returns
+# `(u, v, logl, ncall, nout)`, `u === nothing` if no draw reached `logl_star`.
+function draw_rejection(rng::AbstractRNG, logl_star, bounds::AbstractBoundingSpace, model, maxcall)
+    ncall = nout = 0
+    while ncall < maxcall && nout < 100 * maxcall
         u = rand(rng, bounds)
-        unitcheck(u) || continue
+        if !unitcheck(u)
+            nout += 1
+            continue
+        end
         v, logl = prior_transform_and_loglikelihood(model, u)
         ncall += 1
-        logl ≥ logl_star && return u, v, logl, ncall
+        logl ≥ logl_star && return u, v, logl, ncall, nout
     end
-    throw(ErrorException("Couldn't generate a proper point after $(prop.maxiter) attempts including $ncall likelihood calls. Bounds=$bounds, logl_star=$logl_star."))
+    return nothing, nothing, oftype(float(logl_star), -Inf), ncall, nout
 end
 
 Base.show(io::IO, p::Rejection) = print(io, "NestedSamplers.Proposals.Rejection")
