@@ -245,8 +245,12 @@ function sample_nested_dynamic(
     all_logL, all_u, log_wts, log_z = _merge_passes(base, batch, L_lo)
 
     # Posterior chain construction — same n_eff-aware fallback as
-    # sample_nested_ins. When n_eff < 200 the systematic resample
-    # collapses to the MAP; instead take the top dead points by weight.
+    # sample_nested_ins. When n_eff < 200 a resample collapses to the MAP;
+    # instead take the top dead points by weight. Otherwise i.i.d.
+    # multinomial, as sample_nested and sample_nested_ins: the points are in
+    # order of likelihood, and a systematic draw returned them sorted, so the
+    # chain's R-hat and ESS measured the sort (ESS 56 of 1,600 draws on an
+    # RV + IAD companion).
     log_w_shift = log_wts .- log_z
     log_w_max = maximum(log_w_shift)
     w = exp.(log_w_shift .- log_w_max)
@@ -254,7 +258,7 @@ function sample_nested_dynamic(
     n_eff = round(Int, 1 / sum(w .^ 2))
     if n_eff >= 200
         n_resample = n_eff
-        indices = _systematic_resample(rng, w, n_resample)
+        indices = _multinomial_resample(rng, w, n_resample)
     else
         perm = sortperm(w; rev = true)
         n_keep = min(max(n_eff, 200), length(w))

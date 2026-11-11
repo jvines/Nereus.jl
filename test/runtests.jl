@@ -4508,6 +4508,31 @@ if _in_shard("inline: Daedalus sampler")
         end
     end
 
+    @testset "a fixed planet set stays fixed" begin
+        # td.planets = false: the constrained kernel may not switch the
+        # planet off (its birth/death branch once fired regardless, and a
+        # run could end with every posterior draw planet-less).
+        rng = MersenneTwister(7)
+        t = sort(rand(rng, 40) .* 30.0)
+        rv = 5.0 .+ 12.0 .* sin.(2π .* t ./ 4.16) .+ 1.5 .* randn(rng, 40)
+        data = Data(; t_rv = t, rv = rv, rv_err = fill(1.5, 40))
+        params = Params(max_kplanet = 1, planet_modes = [RV_ONLY],
+                        instruments = InstrumentConfig(rv = ["X"]), data = data, M_s = 1.0,
+                        priors = Dict{String,PriorSpec}("P_k1" => NormalPrior(4.16, 0.05, 4.0, 4.3)))
+        target = NereusTarget(params, data; unconstrained = false)
+        td = TransDimConfig(max_kplanet = 1, planets = false, transdim_fraction = 0.4)
+        strategy = Nereus.MoMSBirth(params; rng = MersenneTwister(1))
+        start = Nereus._daedalus_init_point(target, data, strategy, td, 0.5, MersenneTwister(2))
+        @test start.planet_active == [true]
+        # No constraint (L_thr = -Inf): only the kernel's own moves decide.
+        on = [Nereus._daedalus_evolve(start, target, data, strategy, td, -Inf, 50, 0.5,
+                                      MersenneTwister(s)).planet_active[1] for s in 1:20]
+        @test all(on)
+        chains, _, _ = sample_daedalus(target, data; td, n_live = 40, n_mcmc = 15, seed = 42,
+                                       show_progress = false)
+        @test all(==(1), Array(chains[:, :n_planets, :]))
+    end
+
     @testset "noise toggling — runs end-to-end" begin
         # Daedalus now supports td.noise=true via the existing prior-draw
         # noise propose_noise_birth/death methods invoked from the

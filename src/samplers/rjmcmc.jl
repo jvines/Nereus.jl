@@ -61,6 +61,16 @@ Run a standalone RJMCMC sampler for trans-dimensional inference.
 - `seed::Int=1` — base random seed; chain `c` uses `seed + 1000*(c-1)`
 - `initial_scale::Float64=0.01` — initial Gaussian proposal scale
 - `target_accept::Float64=0.234` — target acceptance rate for within-model
+- `n_scouts::Int=16` — with a fixed set of planets (`td.planets = false`),
+  each chain starts from the best-supported of this many prior draws rather
+  than from one: every draw is moved by slice updates until it stops
+  climbing, those stranded where the posterior cannot carry mass are dropped
+  by the bound of the stranded-walker pruning, and the chain starts at one of
+  the rest, picked at random (src/samplers/scouts.jl). A chain started at one
+  draw that fell outside a narrow mode's basin stayed on a plateau tens of
+  thousands of nats below it for the whole run. `0` starts from one draw.
+  With planet births on the chain starts without planets, and the births
+  search for them.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (per chain: the position and trans-dim masks, the RNG, the
   slice widths, the RWM scales and their counters, the likelihood caches, the
@@ -108,12 +118,14 @@ function sample_rjmcmc(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    n_scouts::Int = 16,
 )
     initial_scale = Float64(initial_scale)   # JSON may deliver Ints
     target_accept = Float64(target_accept)
     within_model in (:slice, :rwm) ||
         throw(ArgumentError("within_model must be :slice or :rwm (got :$within_model)"))
     n_chains >= 1 || throw(ArgumentError("n_chains must be ≥ 1"))
+    n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     noise_swap_rate = Float64(noise_swap_rate)
     0.0 <= noise_swap_rate <= 1.0 ||
         throw(ArgumentError("noise_swap_rate must be in [0, 1]"))
@@ -141,9 +153,12 @@ function sample_rjmcmc(
     per_chain_samples = n_chains == 1 ? n_samples : max(1, cld(n_samples, n_chains))
     ck = nothing
     if ck_path !== nothing
+        # `n_scouts` only when not the default: a chain with no saved slot
+        # restarts from its seed, through the same start.
         ck_fp = run_fingerprint(target.params, data; n_warmup, seed, n_chains,
                                 within_model, noise_swap_rate, _td_fingerprint(td)...,
-                                polar_chart_key(target.params)...)
+                                polar_chart_key(target.params)...,
+                                (n_scouts == 16 ? (;) : (; n_scouts))...)
         saved = resume ? read_checkpoint(ck_path, "rjmcmc", ck_fp).chains::Vector{Any} :
                          Any[nothing for _ in 1:n_chains]
         for st in saved
@@ -168,7 +183,7 @@ function sample_rjmcmc(
                                    progress_every=progress_every,
                                    ck=ck, chain=1,
                                    checkpoint_interval=checkpoint_interval,
-                                   stop_at=stop_at)
+                                   stop_at=stop_at, n_scouts=n_scouts)
     end
     # Multi-chain: spawn n_chains independent chains. Total samples is
     # divided across chains; each chain runs full warmup independently
@@ -207,6 +222,7 @@ function sample_rjmcmc(
             ck = ck, chain = c,
             checkpoint_interval = checkpoint_interval,
             stop_at = stop_at,
+            n_scouts = n_scouts,
         ) finally
             # Finished or failed: the others are not left waiting for it.
             rv === nothing || _rendezvous_leave!(rv)
@@ -241,6 +257,7 @@ function _sample_rjmcmc_one(
     chain::Int = 1,                               # this chain's slot in it
     checkpoint_interval::Float64 = 900.0,
     stop_at::Int = 0,                             # _RJMCMC_STOP_AT
+    n_scouts::Int = 16,                           # scouted start (src/samplers/scouts.jl)
 )
     rng = MersenneTwister(seed)
     params = target.params
@@ -281,19 +298,28 @@ function _sample_rjmcmc_one(
     # Likelihood counter
     ctr = LikelihoodCounter()
 
+    # Slice sampling widths (initial stepping-out size per param)
+    widths = _prior_widths(layout)
+
     # Set systemics to random valid values from prior and evaluate the initial
-    # state; a resumed chain takes all of it from the checkpoint instead.
+    # state; a resumed chain takes all of it from the checkpoint instead. With a
+    # fixed set of planets, the start is the best-supported of `n_scouts` prior
+    # draws (src/samplers/scouts.jl): from one, the chain could settle on a
+    # plateau far below a narrow mode and never leave it.
     if saved === nothing
-        _init_systemics_from_prior!(theta, rng)
+        if n_scouts > 0 && !td.planets
+            theta.values .= only(_scout_starts(theta, data, rng, widths;
+                                               draw! = _init_systemics_from_prior!,
+                                               n_scouts, ctr))
+        else
+            _init_systemics_from_prior!(theta, rng)
+        end
         log_pi = log_prior(theta)
         log_L = _eval_ll(theta, data, ctr)
     else
         log_pi = saved.log_pi::Float64
         log_L = saved.log_L::Float64
     end
-
-    # Slice sampling widths (initial stepping-out size per param)
-    widths = _prior_widths(layout)
 
     # Workspace for BOTH ws-aware within-model kernels (:rwm and ws-:slice).
     # It carries the per-planet RV/transit caches + the Fix B total-phot cache,
