@@ -27,7 +27,8 @@ fields(s) = Dict{String,Any}(String(f) => getfield(s, f) for f in fieldnames(typ
                     along_scan_pos = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
     same_hgca(h) = h isa HGCAData && h.epochs == hgca.epochs &&
         h.pmra == hgca.pmra && h.pmdec == hgca.pmdec && h.cov_ep == hgca.cov_ep &&
-        h.plx == hgca.plx && h.plx_err == hgca.plx_err && h.hip_id == hgca.hip_id
+        h.plx == hgca.plx && h.plx_err == hgca.plx_err && h.hip_id == hgca.hip_id &&
+        h.epochs_ra == hgca.epochs_ra && h.epochs_dec == hgca.epochs_dec
 
     rv = Dict("source" => "RV", "data" => Dict("RV" => (t = [58000.0, 58100.0, 58200.0],
                                                      rv = [0.0, 1.0, 2.0], rv_err = [1.0, 1.0, 1.0])))

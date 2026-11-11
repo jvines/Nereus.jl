@@ -989,7 +989,10 @@ end
 
 # Three-epoch HGCA arrays (Hipparcos, HG, Gaia), built with the positional
 # constructor: the keyword one takes σ_pmra/σ_pmdec, not cov_ep. The epochs are
-# `t` in a config and `epochs` in the struct's field names.
+# `t` in a config and `epochs` in the struct's field names. `epochs_ra` /
+# `epochs_dec` are the catalogue's per-coordinate central epochs (MJD), which
+# the struct carries and the client's `load_hgca` therefore returns; absent,
+# both coordinates take `epochs`.
 function _hgca_from_values(vals)
     ep = _has(vals, :t) ? _get(vals, :t) : _get(vals, :epochs; required = true)
     ep    = Float64.(collect(ep))
@@ -998,13 +1001,19 @@ function _hgca_from_values(vals)
     cov   = [_hgca_cov(c) for c in _get(vals, :cov_ep; required = true)]
     (length(ep) == 3 && length(pmra) == 3 && length(pmdec) == 3 && length(cov) == 3) ||
         error("hgca inline values need exactly 3 epochs (Hipparcos, HG, Gaia)")
+    era = Float64.(collect(_get(vals, :epochs_ra;  default = ep)))
+    ede = Float64.(collect(_get(vals, :epochs_dec; default = ep)))
+    (length(era) == 3 && length(ede) == 3) ||
+        error("hgca `epochs_ra` / `epochs_dec` need exactly 3 entries (Hipparcos, HG, Gaia)")
+    _check_catalogue_epochs(era, ede, 1, 3, "hgca block")
     return HGCAData((ep[1], ep[2], ep[3]),
                     (pmra[1], pmra[2], pmra[3]),
                     (pmdec[1], pmdec[2], pmdec[3]),
                     (cov[1], cov[2], cov[3]),
                     Float64(_get(vals, :plx;     default = NaN)),
                     Float64(_get(vals, :plx_err; default = NaN)),
-                    Int(_get(vals, :hip_id;      default = 0)))
+                    Int(_get(vals, :hip_id;      default = 0)),
+                    (era[1], era[2], era[3]), (ede[1], ede[2], ede[3]))
 end
 
 # One epoch's 2×2 covariance: nested rows from a config, or the four entries

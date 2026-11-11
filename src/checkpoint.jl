@@ -108,6 +108,10 @@ _hash_skip(x::ParamsConfig, f::Symbol) =
     f === :obliquity && is_default_obliquity(x.obliquity)
 _hash_skip(x::ParametrizationConfig, f::Symbol) =
     f === :sample_a_Rs && !x.sample_a_Rs
+# Per-coordinate epochs equal to `epochs`: the epochs every HGCA had before.
+_hash_skip(x::HGCAData, f::Symbol) =
+    (f === :epochs_ra && x.epochs_ra == x.epochs) ||
+    (f === :epochs_dec && x.epochs_dec == x.epochs)
 
 """
     write_checkpoint(path, sampler, fingerprint, state::NamedTuple)
