@@ -639,17 +639,9 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
                                scratch_prop::Vector{Float64},
                                scratch_noise::Vector{Float64};
                                slot::Int = 1)
-    # Start from a random viable live point that isn't the one being
-    # replaced (same NS rule as the RWalk kernel).
-    rand_offset = rand(rng, 0:(n_live - 1))
-    start_idx = 0
-    @inbounds for offset in 0:(n_live - 1)
-        cand = ((rand_offset + offset) % n_live) + 1
-        if cand != idx_worst && live_logL[cand] > logL_worst
-            start_idx = cand
-            break
-        end
-    end
+    # Start from a live point inside the constraint other than the one being
+    # replaced, uniformly among them (as the RWalk kernel does).
+    start_idx = _pick_start(rng, live_logL, idx_worst, logL_worst)
     start_idx == 0 && return (nothing, -Inf)
     @inbounds for d in 1:n_dim
         scratch_cur[d] = live_u[d, start_idx]
