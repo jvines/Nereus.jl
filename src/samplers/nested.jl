@@ -243,10 +243,10 @@ function sample_nested(
     elseif proposal === :rslice
         NestedSamplers.Proposals.RSlice(; slices=slices_resolved, scale=walk_scale)
     elseif proposal === :hslice
-        # Reflective (Hamiltonian) slice — gradient-aware, for thin curved ridges.
-        # `slices` here = number of trajectories; the dimension-scaled default is
-        # fine. n_steps fixed at 15.
-        NestedSamplers.Proposals.HSlice(; slices=slices_resolved, n_steps=15, scale=walk_scale)
+        # Hamiltonian (reflective) slice: `slices` trajectories per new point,
+        # each reflecting off the likelihood constraint about the gradient where
+        # a step lands outside it (vendor/NestedSamplers Proposals.HSlice).
+        NestedSamplers.Proposals.HSlice(; slices=slices_resolved, scale=walk_scale)
     else  # :unif
         NestedSamplers.Proposals.Rejection()
     end

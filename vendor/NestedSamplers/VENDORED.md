@@ -41,5 +41,11 @@ Changed here since the commit above, so carry them over on an update:
   bound lasted, which with the refit check above was the whole run: log Z
   came out 1.5–2.7 below pt_emcee's on an RM obliquity fit. Either fix alone
   removes that.
+- `HSlice` is a reflective (Hamiltonian) slice sampler: trajectories that
+  reflect off the likelihood constraint about the gradient where a step lands
+  outside it, the new point drawn uniformly from a trajectory's inside points.
+  The commit above sliced along directions built from the likelihood gradient
+  at the current point, which depend on the state, so the move was not
+  reversible.
 
 License: MIT (see LICENSE) — original authors retained.

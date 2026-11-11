@@ -22,7 +22,8 @@ const _NSB = NestedSamplers.Bounds
     for (name, mk) in (("RSlice", () -> _NSP.RSlice(slices = 30)),
                        ("Slice", () -> _NSP.Slice(slices = 10)),
                        ("RWalk", () -> _NSP.RWalk(walks = 200)),
-                       ("RStagger", () -> _NSP.RStagger(walks = 200)))
+                       ("RStagger", () -> _NSP.RStagger(walks = 200)),
+                       ("HSlice", () -> _NSP.HSlice(slices = 10)))
         @testset "$name" begin
             rng = MersenneTwister(7)
             prop = mk()
@@ -48,7 +49,8 @@ const _NSB = NestedSamplers.Bounds
     mvn = MvNormal(fill(0.5, d), Σ)
     model = NestedModel(x -> logpdf(mvn, x), fill(Uniform(0, 1), d))
     for (name, mk) in (("RWalk", () -> _NSP.RWalk(walks = 25)),
-                       ("RSlice", () -> _NSP.RSlice(slices = 2d)))
+                       ("RSlice", () -> _NSP.RSlice(slices = 2d)),
+                       ("HSlice", () -> _NSP.HSlice(slices = d)))
         @testset "Gaussian, $name" begin
             spl = Nested(d, 300; bounds = _NSB.MultiEllipsoid, proposal = mk())
             ch, st = with_logger(NullLogger()) do
@@ -93,6 +95,45 @@ end
             @test nfit[] ≥ atleast
             @test abs(st.logz) < 0.6
         end
+    end
+end
+
+@testset "HSlice leaves the constrained uniform distribution unchanged" begin
+    # Points drawn uniformly inside a curved region (a banana in the unit
+    # square) must stay uniform after one move, whatever the move does, if the
+    # move is valid. The region is curved so reflections off it happen at
+    # every angle, and the bound is a fitted, rotated ellipse so the velocities'
+    # metric matters. The HSlice this replaced turned its slices along the
+    # likelihood contour at the current point, a direction that depends on the
+    # state: after one move from 6000 such points the mean of u2 moved by 6
+    # standard errors and the sd of u1 by +0.018 (+0.025 after three slices).
+    banana(u) = -(((u[1] - 0.5) / 0.3)^2 + ((u[2] - 0.3 - 1.5 * (u[1] - 0.5)^2) / 0.08)^2)
+    model = NestedModel(banana, [Uniform(0, 1), Uniform(0, 1)])
+    lstar = -1.0
+    function inside(rng, m)
+        out = Vector{Vector{Float64}}()
+        while length(out) < m
+            u = rand(rng, 2)
+            banana(u) ≥ lstar && push!(out, u)
+        end
+        return out
+    end
+    rng = MersenneTwister(11)
+    ref = inside(rng, 200_000)
+    starts = inside(rng, 20_000)
+    ell = _NSB.scale!(_NSB.fit(_NSB.Ellipsoid, reduce(hcat, inside(MersenneTwister(2), 500))), 1.25)
+    M = length(starts)
+    col(xs, j) = getindex.(xs, j)
+    for slices in (1, 3)
+        prop = _NSP.HSlice(slices = slices)
+        out = [prop(MersenneTwister(1000 + i), copy(starts[i]), lstar, ell, model)[1] for i in 1:M]
+        @test all(u -> banana(u) ≥ lstar, out)
+        for j in 1:2
+            sref = std(col(ref, j))
+            @test abs(mean(col(out, j)) - mean(col(ref, j))) < 4 * sref / sqrt(M)
+            @test abs(std(col(out, j)) - sref) < 4 * sref / sqrt(2M)
+        end
+        @test abs(cor(col(out, 1), col(out, 2)) - cor(col(ref, 1), col(ref, 2))) < 4 / sqrt(M)
     end
 end
 

@@ -467,50 +467,122 @@ function sample_slice(rng, axis, u, logl_star, model, nc, nexpand, ncontract)
 end
 
 """
-    Proposals.HSlice(; slices=5, n_steps=15, scale=1.0, fd=1e-3)
+    Proposals.HSlice(; slices=5, n_steps=20, scale=1.0, fd=1e-4)
 
-Hamiltonian (reflective) slice sampling. A trajectory steps through unit space
-along a random momentum; whenever it crosses the `L > L*` boundary it REFLECTS
-the velocity about the local likelihood gradient (estimated by finite
-differences), so the path follows the constrained region's curvature — Galilean
-Monte Carlo. This is the right move for thin, curved, high-dimensional ridges
-(e.g. the eccentricity `e–ω` banana of an RV posterior) where axis-aligned /
-random-direction slices and random walks mix poorly. Gradient-free to the caller
-(numerical reflection normal); cf. dynesty's `hslice` and Skilling's reflective
-slice.[^h]
+Hamiltonian slice sampling: reflective slice sampling (Neal 2003, sect. 7), the
+move of dynesty's `hslice` (Speagle 2020).[^h] From the current point a
+trajectory runs in straight steps along a random velocity. A step that lands
+outside the constraint `L ≥ L*` reflects the velocity off it, about the
+likelihood gradient at the point where it landed (off the cube's face, for a
+step out of the unit cube), and the trajectory goes on from there. The new
+point is drawn uniformly from the trajectory's points inside the constraint,
+and starts the next of `slices` trajectories.
+
+The move is reversible. A reflection depends only on the point where it
+happens and undoes itself, so the dynamics run backwards retrace the same
+points; that is why the gradient is taken at the point the step landed on, and
+not at a crossing located by bisection, which would depend on the direction of
+travel. The trajectory is placed around the current point at random, a
+uniform number of its `n_steps` steps backwards and the rest forwards, so each
+of its inside points would have drawn the same trajectory with the same
+probability, and a uniform pick among them leaves the uniform distribution on
+the constrained region unchanged. Velocities are drawn and reflected in the
+metric of the bound's axes, which keeps their distribution unchanged by a
+reflection.
 
 ## Parameters
-- `slices` — number of independent trajectories per replacement
+- `slices` — trajectories per new point, each starting where the last ended
 - `n_steps` — steps per trajectory
-- `scale` — step-size scale (× the bound's characteristic extent / n_steps)
-- `fd` — finite-difference step for the reflection normal
+- `scale` — step length, in units of the bound's axes divided by `n_steps`;
+  tuned between proposals toward a trajectory with 80% of its points inside
+- `fd` — finite-difference step in the unit cube for the gradient
 
-[^h]: Neal 2003; Skilling 2012; Speagle 2020 (dynesty), MNRAS 493, 3132.
+[^h]: Neal 2003, Ann. Statist. 31, 705; Speagle 2020, MNRAS 493, 3132.
 """
 @with_kw mutable struct HSlice <: AbstractProposal
     slices = 5
-    n_steps = 30
+    n_steps = 20
     scale = 1.0
-    fd = 1e-3
+    fd = 1e-4
 
     @assert slices ≥ 1 "Number of slices must be ≥ 1"
     @assert n_steps ≥ 1 "Number of steps must be ≥ 1"
-    @assert scale ≥ 0 "Proposal scale must be non-negative"
+    @assert scale > 0 "Proposal scale must be positive"
+    @assert fd > 0 "Finite-difference step must be positive"
 end
 
-# central-difference ∇_u logL at u (clamped to the unit cube); used only at
-# reflection points to set the reflection normal.
-function _hslice_gradient(model, u, fd)
-    n = length(u); g = zeros(n)
-    @inbounds for j in 1:n
-        up = copy(u); um = copy(u)
-        up[j] = clamp(u[j] + fd, 0.0, 1.0); um[j] = clamp(u[j] - fd, 0.0, 1.0)
-        _, lp = prior_transform_and_loglikelihood(model, up)
-        _, lm = prior_transform_and_loglikelihood(model, um)
-        h = up[j] - um[j]
-        g[j] = h > 0 ? (lp - lm) / h : 0.0
+# Fraction of a trajectory's points inside the constraint the scale is tuned to.
+const _HSLICE_INSIDE = 0.8
+
+# The direction to reflect off at `x`, a point outside the constraint: the
+# outward normal of the unit cube where `x` is outside it, otherwise ∇ log L by
+# forward differences (`l` = log L at `x`), each step taken towards the cube's
+# middle. A function of `x` alone, which the reversibility needs. Returns the
+# direction and the likelihood calls spent; `nothing` when there is no usable
+# gradient, and the velocity is then reversed.
+function _hslice_normal(model, x, l, fd)
+    n = length(x)
+    if !unitcheck(x)
+        return [xi ≥ 1 ? 1.0 : xi ≤ 0 ? -1.0 : 0.0 for xi in x], 0
     end
-    return g
+    g = zeros(n)
+    nc = 0
+    for j in 1:n
+        h = x[j] < 0.5 ? fd : -fd
+        xp = copy(x)
+        xp[j] += h
+        unitcheck(xp) || continue
+        _, lp = prior_transform_and_loglikelihood(model, xp)
+        nc += 1
+        g[j] = (lp - l) / h
+    end
+    m = maximum(abs, g)
+    (isfinite(m) && m > 0) || return nothing, nc
+    return g ./ m, nc
+end
+
+# Reflect `p` off the plane normal to `g`, in the metric `Σ` the velocities are
+# drawn in: p ← p − 2 (g·p)/(g·Σg) Σg keeps p'Σ⁻¹p and is its own inverse.
+function _hslice_reflect!(p, g, Σ)
+    if g === nothing
+        p .= .-p
+        return p
+    end
+    Σg = Σ * g
+    b = dot(g, Σg)
+    if !(isfinite(b) && b > 0)
+        p .= .-p
+        return p
+    end
+    p .-= (2 * dot(g, p) / b) .* Σg
+    return p
+end
+
+# Run `nsteps` steps from `x0` with velocity `p0`, pushing each point inside the
+# constraint onto `cands` as (u, v, logl). Returns (ncall, n_inside, n_outside).
+function _hslice_run!(cands, model, x0, p0, nsteps, logl_star, Σ, fd)
+    x = copy(x0)
+    p = copy(p0)
+    nc = nin = nout = 0
+    for _ in 1:nsteps
+        x .+= p
+        if unitcheck(x)
+            v, l = prior_transform_and_loglikelihood(model, x)
+            nc += 1
+            if l ≥ logl_star
+                push!(cands, (copy(x), v, l))
+                nin += 1
+                continue
+            end
+        else
+            l = -Inf
+        end
+        g, ncg = _hslice_normal(model, x, l, fd)
+        nc += ncg
+        _hslice_reflect!(p, g, Σ)
+        nout += 1
+    end
+    return nc, nin, nout
 end
 
 function (prop::HSlice)(
@@ -522,32 +594,34 @@ function (prop::HSlice)(
     kwargs...
 )
     n = length(point)
-    nc = nexpand = ncontract = 0
-    # characteristic linear extent of the bound → initial slice scale. The
-    # adaptive bracket in `sample_slice` (expand/contract) handles the actual
-    # feature thickness, so this need only be the right ORDER of magnitude.
-    R = max(Bounds.volume(bounds), eps())^(1 / n)
+    A = Matrix{Float64}(Bounds.axes(bounds))
+    Σ = A * A'
     u = collect(float.(point))
-    local v_out, logl_out
-    v_out, logl_out = prior_transform_and_loglikelihood(model, u)
-    for s in 1:prop.slices
-        d = randn(rng, n)
-        # On half the slices, project out the likelihood-gradient component so
-        # the slice runs along the ridge TANGENT (moves ALONG a thin curved
-        # ridge, where random/axis directions mostly hit its walls). The other
-        # half stay isotropic for cross-ridge coverage.
-        if isodd(s)
-            g = _hslice_gradient(model, u, prop.fd); nc += 2n
-            ng = norm(g)
-            ng > 1e-30 && (d .-= dot(d, g) / ng^2 .* g)
+    v, logl = prior_transform_and_loglikelihood(model, u)
+    nc = 1
+    nin = nout = 0
+    cands = Tuple{Vector{Float64},typeof(v),Float64}[]
+    for _ in 1:prop.slices
+        z = randn(rng, n)
+        z ./= norm(z)
+        # the step length is jittered per trajectory, against periodic orbits
+        p = (prop.scale * (0.5 + rand(rng)) / prop.n_steps) .* (A * z)
+        back = rand(rng, 0:prop.n_steps)
+        empty!(cands)
+        logl ≥ logl_star && push!(cands, (u, v, logl))
+        for (dir, k) in ((-1, back), (1, prop.n_steps - back))
+            c, i, o = _hslice_run!(cands, model, u, dir .* p, k, logl_star, Σ, prop.fd)
+            nc += c; nin += i; nout += o
         end
-        nd = norm(d)
-        nd < 1e-30 && (d = randn(rng, n); nd = norm(d))
-        axis = (prop.scale * R / sqrt(n)) .* (d ./ nd)
-        u, v_out, logl_out, nc, nexpand, ncontract =
-            sample_slice(rng, axis, u, logl_star, model, nc, nexpand, ncontract)
+        isempty(cands) && continue
+        u, v, logl = cands[rand(rng, 1:length(cands))]
     end
-    return u, v_out, logl_out, nc
+    logl ≥ logl_star ||
+        error("Hamiltonian slice sampling found no point inside the likelihood constraint.")
+    # tune the step length between proposals, toward the target inside fraction
+    f = nin / max(nin + nout, 1)
+    prop.scale *= exp(clamp((f - _HSLICE_INSIDE) / max(_HSLICE_INSIDE, 1 - _HSLICE_INSIDE), -1, 1))
+    return u, v, logl, nc
 end # end of function HSlice
 
 end # module Proposals

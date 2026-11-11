@@ -88,4 +88,6 @@ default_update_interval(p::Proposals.RWalk, ndims) = 0.15 * p.walks
 default_update_interval(p::Proposals.RStagger, ndims) = 0.15 * p.walks
 default_update_interval(p::Proposals.Slice, ndims) = 0.9 * ndims * p.slices
 default_update_interval(p::Proposals.RSlice, ndims) = 2.0 * p.slices
-default_update_interval(p::Proposals.HSlice, ndims) = 2.0 * p.slices
+# a trajectory costs about `n_steps` calls plus `ndims` for each reflection's
+# gradient; this refits about as often, in iterations, as RSlice's 2·slices
+default_update_interval(p::Proposals.HSlice, ndims) = 1.0 * p.slices * p.n_steps
