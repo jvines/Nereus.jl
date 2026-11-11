@@ -75,5 +75,9 @@ Changed here since the commit above, so carry them over on an update:
   outside, against 0.04%), and a walk or slice, whose metric is the ellipsoid
   holding its start, depended on where it started; on a 10-d RM obliquity fit
   (15 ellipsoids against 1–5) log Z came out 0.35–0.5 nats above pt_emcee's.
+- Batch NS (`sample_parallel`) shrinks the volume for the j-th of the K points
+  a batch removes as N - j + 1 live points do (log Z was (K - 1) H / (2N)
+  high), and walks start only at live points above the threshold, never at a
+  dead point, as dynesty's do.
 
 License: MIT (see LICENSE) — original authors retained.
