@@ -32,6 +32,7 @@ Data(;
     phot_inst = nothing, exposure_times = Float64[],
     relastrom = nothing, hgca = nothing, iad = nothing,
     gost = nothing, g23h = nothing, gaia_dr3 = nothing,
+    hip_scans = nothing,
 )
 ```
 
@@ -56,9 +57,10 @@ length consistency.
 | `relastrom` | `Union{Nothing, RelAstromData}` | Relative astrometry (RA/Dec offsets per epoch) — direct-imaging companions. |
 | `hgca` | `Union{Nothing, HGCAData}` | Hipparcos–Gaia Catalogue of Accelerations row (Brandt 2018, 2021). Auto-stage with `fetch_hgca(hip_id)`. The **validated** Hipparcos–Gaia path (recovers the orvara orbit on HD 159062). |
 | `iad` | `Union{Nothing, IADData}` | Along-scan Intermediate Astrometric Data. Auto-stage Hipparcos with `fetch_hip_iad(hip_id)`; **Gaia DR4 epoch astrometry** loads into the *same* channel via `read_gaia_epoch_votable` / `fetch_gaia_dr4_prerelease` (see below). Constrains the epoch abscissae; the Hip+Gaia IAD joint additionally needs `gaia_dr3` (implemented, not yet validated). |
-| `gost` | `Union{Nothing, GOSTData}` | Gaia scanning law from the GOST tool (predicted scan epochs + angles). Auto-stage with `fetch_gost(ra, dec)`. **Auxiliary, not a standalone measurement** — GOST only window-averages (Mode B) the Gaia epoch of a paired `hgca`/`gaia_dr3`/`g23h`; supplied alone (or only with `iad`) it is inert and the constructor warns. |
+| `gost` | `Union{Nothing, GOSTData}` | Gaia scanning law from the GOST tool (predicted scan epochs + angles). Auto-stage with `fetch_gost(ra, dec)`. **Auxiliary, not a standalone measurement** — GOST only window-averages (Mode B) the Gaia epoch(s) of a paired `hgca`/`gaia_dr3`/`g23h` (a five-parameter fit through the transits inside the release window); supplied alone (or only with `iad`) it is inert and the constructor warns. |
 | `g23h` | `Union{Nothing, G23HData}` | G23H five-PM Gaia DR2/DR3 + Hipparcos joint product (Thompson+ 2026, arXiv:2602.00235). |
 | `gaia_dr3` | `Union{Nothing, GaiaDR3Data}` | Gaia DR3 5-parameter astrometric solution. |
+| `hip_scans` | `Union{Nothing, IADData}` | The Hipparcos scan geometry (epochs, scan angles, parallax factors, abscissa errors) the HGCA / G23H **Hipparcos epoch** is fitted through, as the catalogue measured it. Resolved by the constructor: `iad` when it holds at least five scans inside `HIPPARCOS_WINDOW` (a fit with Hipparcos IAD uses the very same scans), else the `hip_scans` keyword (e.g. `fetch_hip_iad(hip_id)`), else `nothing`, with a warning that the Hipparcos epoch is then modelled as the instantaneous reflex. An `iad` and a `hip_scans` with different Hipparcos scans are refused. Never enters the likelihood on its own. `run_job` and the `fit_*` entry points fetch it by the catalogue row's `hip_id` (see `data.hip_scans` below). |
 
 Helper accessors:
 - `n_rv(data)`, `n_phot(data)` (defined on `Data`); `n_relast`,
@@ -288,17 +290,33 @@ Loader for the HGCA FITS catalogue:
 hgca = load_hgca_row("HGCA_vEDR3.fits", 27321)   # (fits_path, hip_id)
 ```
 
-!!! note "Hipparcos–Gaia (HG) proper motion is a mean, not an instantaneous PM"
-    The catalogue's cross-calibrated HG proper motion is the scaled
-    positional difference `(Gaia − Hip)/baseline`, i.e. the **mean**
-    reflex velocity over the ~25 yr baseline (Brandt 2021 Eq. 1). The
-    likelihood models it that way —
-    `(reflex_offset(Gaia) − reflex_offset(Hip))/baseline` — so the
-    inferred companion mass is correct even when the orbital period is
-    **comparable to the baseline** (the reflex is then strongly
-    non-linear across it). Treating the HG term as an instantaneous PM
-    at the midpoint biases the mass low for such short-period companions
-    (e.g. HD 4747 B, P≈33 yr — validated against orvara).
+The loader carries the catalogue's **per-coordinate central epochs**
+(`epoch_ra_hip`, `epoch_dec_hip`, `epoch_ra_gaia`, `epoch_dec_gaia`) as
+`epochs_ra` / `epochs_dec` (Hipparcos, HG midpoint, Gaia; MJD). They differ
+between coordinates by up to 1.2 yr at Hipparcos and 1.3 yr at Gaia, and each
+coordinate's position is modelled at its own epoch. Built by hand, both default
+to `epochs`.
+
+!!! note "Each HGCA quantity is modelled as the catalogue measured it"
+    - **Hipparcos PM**: a weighted five-parameter fit (scan angles, parallax
+      factors, 1/σ² from the abscissa errors) through the Hipparcos scans
+      inside `HIPPARCOS_WINDOW`, the reduction Brandt 2021 / orvara apply.
+      The scans are `data.hip_scans` (see `Data`); the 2007 reduction stands
+      in for the catalogue's 60/40 blend of the 1997 and 2007 ones.
+    - **Gaia PM**: the same fit through the GOST transits inside
+      `GAIA_DR3_WINDOW`.
+    - **Hipparcos–Gaia PM**: the scaled positional difference
+      `(pos_Gaia − pos_Hip)/(t_Gaia − t_Hip)` per coordinate, each position
+      from its mission's fit at that coordinate's central epoch (Brandt 2021
+      Eq. 1): the **mean** reflex velocity over the ~25 yr baseline, so the
+      inferred mass is right even when the period is comparable to the
+      baseline (e.g. HD 4747 B, P≈33 yr — validated against orvara).
+
+    Without scan geometry (`data.hip_scans === nothing`, with a warning) the
+    Hipparcos epoch falls back to the instantaneous reflex at the Hipparcos
+    epochs; without GOST the Gaia epoch does the same at the Gaia epochs.
+    For a period of a few years the fallback is wrong by far more than the
+    catalogue errors.
 
 ### `IADData` — Hipparcos along-scan
 
@@ -431,7 +449,7 @@ transits).
 
 ```julia
 g23h = G23HData(;
-    epochs  = mjd_epochs((1991.25, 2004.6, 2015.0, 2015.5, 2016.0)),
+    epochs  = mjd_epochs((1991.25, 2004.6, 2015.5, 2015.75, 2016.0)),
     pmra    = (pmra_1, …, pmra_5),     # mas/yr
     pmdec   = (pmdec_1, …, pmdec_5),   # mas/yr
     cov     = cov10x10,                # symmetric pos-def, ordering
@@ -439,9 +457,28 @@ g23h = G23HData(;
     plx     = parallax_mas,
     plx_err = parallax_err_mas,
     hip_id  = 18599,
+    # the catalogue's central epochs per coordinate (MJD); default `epochs`
+    epochs_ra  = mjd_epochs((ra_hip, ra_hg, ra_dr2, ra_dr32, ra_dr3)),
+    epochs_dec = mjd_epochs((dec_hip, dec_hg, dec_dr2, dec_dr32, dec_dr3)),
 )
-data = Data(; g23h = g23h)
+data = Data(; g23h = g23h, gost = gost, hip_scans = fetch_hip_iad(18599))
 ```
+
+What the likelihood models for each, per coordinate, following Thompson+ 2026
+and Octofitter's G23H implementation:
+
+| # | quantity | model |
+|---|---|---|
+| 1 | Hipparcos PM | five-parameter fit through the Hipparcos scans in `HIPPARCOS_WINDOW` (`data.hip_scans`) |
+| 2 | Hip→Gaia | `(pos_DR3(t_dr3) − pos_Hip(t_hip)) / (t_dr3 − t_hip)` |
+| 3 | DR2 PM | five-parameter fit through the GOST transits in `GAIA_DR2_WINDOW` |
+| 4 | DR3 − DR2 | `(pos_DR3(t_dr3) − pos_DR2(t_dr2)) / (t_dr3 − t_dr2)` |
+| 5 | DR3 PM | five-parameter fit through the GOST transits in `GAIA_DR3_WINDOW` |
+
+Every position is the fit's at that coordinate's central epoch, and every
+divisor the difference of those epochs (0.5 yr between the nominal J2016.0 and
+J2015.5). Without `hip_scans` (warned) or `gost`, the fits fall back to the
+instantaneous reflex at the epochs; #2 and #4 stay positional differences.
 
 The caller assembles the 10×10 covariance (typically in the Python
 sidecar reading the published catalog). UEVA, Hipparcos-IAD-jitter, and
@@ -589,7 +626,28 @@ LCs.
                       "plx": ..., "plx_err": ..., "hip_id": 27321 } }
 ```
 
-Inline `values` need exactly three epochs (Hipparcos, HG, Gaia).
+Inline `values` need exactly three epochs (Hipparcos, HG, Gaia). Optional
+`epochs_ra` / `epochs_dec` (three each, MJD) give the catalogue's
+per-coordinate central epochs; both default to `t`. The catalogue forms read
+them from the row.
+
+### `hip_scans` — Hipparcos scan geometry for the HGCA Hipparcos epoch
+
+```jsonc
+// absent (default): automatic — with an `hgca` block and no Hipparcos IAD in
+// `iad`, fetch the Hipparcos scans by the row's hip_id (`fetch_hip_iad`,
+// cached; a ~350 MB bundle on first use)
+"hip_scans": false                         // none: instantaneous Hipparcos epoch, warned
+"hip_scans": { "hip_id": 27321 }           // that star's scans
+"hip_scans": { "values": { "t": [...], "psi": [...],
+                           "parallax_factor": [...], "abscissa_err": [...] } }
+```
+
+With Hipparcos IAD in `iad` nothing is fetched: the HGCA Hipparcos epoch is
+fitted through the IAD's own scans. A failed fetch stops the job and names
+`hip_scans: false` as the way to proceed without the scans. The `fit_*`
+entry points take the same forms as `hip_scans` (`fit_astrometry`) or a
+channel's `"hip_scans"` key.
 
 ### `relastrom` — CSV or inline
 
