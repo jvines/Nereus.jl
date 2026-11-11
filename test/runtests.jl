@@ -816,7 +816,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
         params = Params(;
             priors=priors,
             max_kplanet=1,
-            parametrization=ParametrizationConfig(),
+            parametrization=ParametrizationConfig(time=:Mo),
             planet_modes=[RV_ONLY],
             instruments=ic,
         )
@@ -3212,10 +3212,12 @@ end
 
     # -----------------------------------------------------------------
     @testset "Validation — stability requires M_s for multi-planet" begin
-        # max_kplanet=1: stability irrelevant, no throw
+        # max_kplanet=1: stability irrelevant, no throw. No data, so an anchor
+        # that needs none (the default, phic, is measured from the data).
         @test Params(;
             max_kplanet=1, planet_modes=[RV_ONLY],
             instruments=InstrumentConfig(rv=["X"]),
+            parametrization=ParametrizationConfig(time=:Mo),
             stability=:amd,
         ) isa Params
         # max_kplanet≥2 without M_s: must throw
