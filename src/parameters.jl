@@ -951,7 +951,7 @@ for a planet without transit geometry.
     M = astrom_M_pri(theta)
     if isnan(M) && cfg.parametrization.use_rho_s && !isnan(cfg.R_s) && cfg.R_s > 0
         rho = theta.values[theta.params.layout.systemic.rho_s]
-        M = rho * 1.411 * (4 * T(π) / 3) * (cfg.R_s * T(R_SUN_CM))^3 / T(M_SUN_G)
+        M = rho * T(RHO_SUN_CGS) * (4 * T(π) / 3) * (cfg.R_s * T(R_SUN_CM))^3 / T(M_SUN_G)
     end
     return M
 end

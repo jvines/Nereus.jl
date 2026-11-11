@@ -119,14 +119,14 @@ end
     semimajor_axis_from_rho(rho_s, P, R_s, q = 0) -> a [AU]
 
 Semi-major axis from stellar density, period, and stellar radius.
-rho_s in SOLAR units (ρ/ρ_sun, ρ_sun = 1.411 g/cm³) — same convention as
+rho_s in SOLAR units (ρ/ρ_sun, ρ_sun = `RHO_SUN_CGS` ≈ 1.4098 g/cm³) — same convention as
 `rho_s_to_a_Rs`, which this delegates to. P in days, R_s in solar radii.
 `q = M_p/M_s` puts the companion in Kepler III (`M_s + M_p`); the default 0 is
 what a transit alone can give (it measures `ρ★(1+q)`).
 
 Note the asymmetry with the reported derived quantity `rho_star_transit`,
 which is in g/cm³: feeding a g/cm³ value in here inflates a/R★ by
-1.411^(1/3) ≈ 1.12.
+1.4098^(1/3) ≈ 1.12.
 """
 function semimajor_axis_from_rho(rho_s::Real, P::Real, R_s::Real, q::Real = 0)
     a_Rs = rho_s_to_a_Rs(rho_s, P, q)
@@ -1050,13 +1050,13 @@ function compute_derived(chains, params::Params;
 
             # Transit-derived stellar density (photoeccentric cross-check):
             # invert rho_s_to_a_Rs.  That map is, with ρ in SOLAR units (ρ_sun
-            # = 1.411 g/cm³), G_cgs = 6.674e-8, P_sec = P·86400:
-            #   a/R* = cbrt( G_cgs · (ρ·1.411) · P_sec² (1+q) / (3π) )
+            # = RHO_SUN_CGS), G_CGS, P_sec = P·86400:
+            #   a/R* = cbrt( G_CGS · (ρ·RHO_SUN_CGS) · P_sec² (1+q) / (3π) )
             # ⇒ ρ_cgs[g/cm³] = 3π · (a/R*)³ / (G_cgs · P_sec² (1+q)).
             # With q = M_p/M★ where the mass is determinable (K or M_sec); with no
             # mass information (transit-only) q = 0 and this is ρ★(1+q), the
             # density the light curve actually measures.
-            G_cgs = 6.674e-8
+            G_cgs = G_CGS
             rho_star_cgs = similar(a_Rs_d)
             @inbounds for j in eachindex(a_Rs_d)
                 P_sec = P[j] * 86400.0

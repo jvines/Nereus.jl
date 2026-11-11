@@ -1191,7 +1191,7 @@ eccentricity derived from √e sin ω / √e cos ω).
 
 # Supported quantities
 - `:ecc`   — eccentricity (per-planet, evaluated for each active planet)
-- `:rho_s` — stellar density in SOLAR units, ρ★/ρ☉ with ρ☉ = 1.411 g/cm³, as
+- `:rho_s` — stellar density in SOLAR units, ρ★/ρ☉ with ρ☉ = `RHO_SUN_CGS` ≈ 1.4098 g/cm³, as
   `rho_s` is sampled (global, evaluated once)
 
 # Fields

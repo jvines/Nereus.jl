@@ -427,7 +427,8 @@ end
     rho_s_to_a_Rs(rho_s, P, q = 0) -> a/R*
 
 Kepler's third law with the TOTAL mass: `(a/R*)³ = G ρ_s P² (1 + q) / (3π)`,
-`q = M_p / M★`. ρ_s in solar units (ρ_sun = 1.411 g/cm³), P in days.
+`q = M_p / M★`. ρ_s in solar units (`RHO_SUN_CGS` ≈ 1.4098 g/cm³, so a 1 M☉,
+1 R☉ star is ρ_s = 1), P in days; G is `G_CGS`.
 
 `q` defaults to 0, which is the case when nothing is known about the
 companion's mass, and then the light curve only measures the combination
@@ -439,9 +440,9 @@ jointly with the inclination implied by the impact parameter.
 """
 function rho_s_to_a_Rs(rho_s::Real, P::Real, q::Real = 0)
     # a/R* = ( G ρ P² (1+q) / (3π) )^(1/3), ρ in g/cm³ and P in seconds;
-    # ρ_s in solar units is ρ_rel · 1.411 g/cm³.
-    rho_cgs = rho_s * 1.411  # convert solar units to g/cm³
-    G_cgs = 6.674e-8         # cm³ g⁻¹ s⁻²
+    # ρ_s in solar units is ρ_rel · RHO_SUN_CGS g/cm³.
+    rho_cgs = rho_s * RHO_SUN_CGS
+    G_cgs = G_CGS
     P_sec = P * 86400.0
     return cbrt(G_cgs * rho_cgs * P_sec^2 * (1 + q) / (3π))
 end

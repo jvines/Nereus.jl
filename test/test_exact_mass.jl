@@ -130,7 +130,7 @@ end
 
     @testset "no mass information: the transit alone is unchanged" begin
         # the q = 0 default is the old function, bit for bit
-        old(rho, P) = cbrt(6.674e-8 * (rho * 1.411) * (P * 86400.0)^2 / (3π))
+        old(rho, P) = cbrt(Nereus.G_CGS * (rho * Nereus.RHO_SUN_CGS) * (P * 86400.0)^2 / (3π))
         for (rho, P) in ((1.0, 1.0), (0.532, 3.3), (2.2, 400.0))
             @test rho_s_to_a_Rs(rho, P) == old(rho, P)
         end
@@ -183,7 +183,7 @@ end
         d = compute_derived(ch, params; M_s = t.M, R_s = 1.0)[1].values
         @test only(unique(d["a_Rs"])) ≈ t.a rtol = 1e-12
         @test only(unique(d["mass_jup"])) ≈ 0.1 * t.M * Nereus.M_SUN_G / Nereus.M_JUP_G rtol = 1e-11
-        @test only(unique(d["rho_star_transit"])) ≈ t.rho * 1.411 rtol = 1e-12
+        @test only(unique(d["rho_star_transit"])) ≈ t.rho * Nereus.RHO_SUN_CGS rtol = 1e-12
         @test only(unique(d["a_au"])) ≈ t.a * Nereus.R_SUN_CM / Nereus.AU_CM rtol = 1e-12
 
     end
@@ -205,4 +205,23 @@ end
         @test Nereus.check_stability(Ps, Ks, es, M, mode) ==
               Nereus.check_stability(Ps, Ks, es, M, mode, order, mas, sma)
     end
+end
+
+@testset "one set of solar constants: the rho_star route and the (M_s, R_s) route agree" begin
+    # derived from M_SUN_G and R_SUN_CM, so the Sun is rho = 1 in solar units
+    @test Nereus.RHO_SUN_CGS ≈ 1.4098 rtol = 1e-3
+    @test Nereus.RHO_SUN_CGS == 3 * Nereus.M_SUN_G / (4π * Nereus.R_SUN_CM^3)
+    for (M, R, P) in ((1.0, 1.0, 10.0), (0.532^1.5, 0.532^0.5, 3.3), (1.3, 1.6, 400.0))
+        rho = M / R^3                                    # solar units
+        a_rho = rho_s_to_a_Rs(rho, P)
+        a_kepler = cbrt(Nereus.GM_SUN_CGS * M * (P * 86400.0)^2 / (4π^2)) /
+                   (R * Nereus.R_SUN_CM)
+        @test a_rho ≈ a_kepler rtol = 1e-14
+    end
+    @test rho_s_to_a_Rs(1.0, 10.0) ≈
+          cbrt(Nereus.GM_SUN_CGS * (10 * 86400.0)^2 / (4π^2)) / Nereus.R_SUN_CM rtol = 1e-14
+    # and with a companion, M_star + M_p on both routes
+    q = 0.07
+    @test rho_s_to_a_Rs(1.0, 10.0, q) ≈
+          cbrt(Nereus.GM_SUN_CGS * (1 + q) * (10 * 86400.0)^2 / (4π^2)) / Nereus.R_SUN_CM rtol = 1e-14
 end
