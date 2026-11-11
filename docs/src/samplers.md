@@ -658,6 +658,7 @@ chains, n_evals, strategy = sample_moms(target, data; td = td,
     show_progress           = true,
     within_model            = :slice,   # :slice | :rwm
     informed_birth_fraction = 0.0,      # data-informed births (BLS+LS)
+    n_scouts                = 16,       # td.planets = false: scouted start (see sample_rjmcmc)
 )
 ```
 
@@ -724,12 +725,23 @@ chains, n_evals = sample_rjmcmc(target, data; td = td,
     initial_scale = 0.01,              # initial Gaussian proposal scale
     target_accept = 0.234,             # within-model acceptance target
     within_model  = :slice,            # :slice | :rwm
+    n_scouts      = 16,                # td.planets = false: scouted start; 0 = one prior draw
     show_progress = true,
 )
 ```
 
 Multi-chain returns a single `Chains` with a populated `:chain` axis so R̂/ESS
 work. `run_job` surfaces `log_evidence = NaN`.
+
+With a fixed set of planets (`td.planets = false`) each chain starts from the
+best-supported of `n_scouts` prior draws: every draw is moved by slice updates
+until it stops climbing, the ones the stranded-walker bound shows to sit where
+the posterior cannot carry mass are dropped, and the chain starts at one of the
+rest, picked at random (`src/samplers/scouts.jl`). From a single draw, a chain
+that fell outside a narrow mode's basin settled on a plateau tens of thousands
+of nats below it and stayed there; the scouts keep it off such regions, not
+out of a second mode of comparable mass, which a local sampler still cannot
+cross. `sample_moms` starts the same way.
 
 **Target must be `unconstrained = false`.**
 
@@ -755,9 +767,14 @@ chains = sample_nuts(target;
     warm_start    = true,              # pt_emcee pre-search (disjoint-mode fix)
     warm_temps    = 6, warm_walkers = 40, warm_steps = 400, warm_burnin = 200,
     init          = nothing,           # bounded-space point; overrides warm_start
+    n_scouts      = 16,                # warm_start = false: scouted prior draws
     progress      = true,
 )
 ```
+
+With `warm_start = false` the chains start from scouted prior draws (as in
+`sample_rjmcmc`), each from a different one at random, rather than from one
+prior draw each.
 
 `ad_backend`: `:ForwardDiff` (fastest ≤ 15 params), `:Enzyme` (reverse-mode,
 better for many params / GP models), `:ReverseDiff` (needs `import
@@ -783,10 +800,16 @@ chains = sample_ensemble(target;
     n_burnin  = 1000,
     thinning  = 1,
     init      = nothing,               # else prior-draw walkers (EMPEROR-style)
+    n_scouts  = 16,                    # scouts in place of up to half the prior-drawn walkers
     seed      = 1,
     n_chains  = 1,                     # parallel chains via Threads.@spawn
 )
 ```
+
+The burn-in pruning moves stranded walkers onto those that found the mode, so
+it can do nothing for a chain none of whose walkers did. Without `init`, up to
+half the prior-drawn walkers are replaced by scouts (as in `sample_rjmcmc`),
+which the bound has kept off regions that cannot carry posterior mass.
 
 ### `sample_ess` *(library-only)*
 
