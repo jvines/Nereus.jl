@@ -278,5 +278,49 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         # The Tc fit reports no derived Tc: it samples it.
         chT = Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Tc_k1")), :lp))
         @test !haskey(compute_derived(chT, pT)[1].values, "Tc")
+
+        # Tp and Mo, per draw, from each draw's own P, e and ω: what the other
+        # anchors sample. Mo needs the data's t_ref, the epoch :Mo reads it at.
+        dv = compute_derived(ch, pφ; t_ref = data.t_ref)[1].values
+        @test !haskey(compute_derived(ch, pφ)[1].values, "Mo_deg")
+        Tp = dv["Tp"]; Mo = dv["Mo_deg"]
+        se = vec(Array(ch[:sesinw_k1])); sc = vec(Array(ch[:secosw_k1]))
+        e = se .^ 2 .+ sc .^ 2; ω = atan.(se, sc)
+        # the same orbit: Tp is Tc's periastron, up to whole periods
+        @test all(abs.(rem.(Tp .- tc_to_tp.(Tc, P, e, ω), P, Ref(RoundNearest))) .< 1e-6)
+        @test maximum(abs.(Tp .- Tc)) < maximum(P)        # one copy, beside Tc
+        # Mo at t_ref: Tp = t_ref − Mo·P/2π, modulo a period; in [0, 360) at the median
+        @test all(abs.(rem.(Tp .- (data.t_ref .- deg2rad.(Mo) .* P ./ 2π), P,
+                            Ref(RoundNearest))) .< 1e-6)
+        @test 0 <= median(Mo) < 360
+        # The Mo fit's own anchor goes untouched: nothing derived for it.
+        chM = Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Mo_k1")), :lp))
+        pM = mk(:Mo)
+        @test !any(k -> k in ("Tc", "Tp", "Mo_deg"),
+                   keys(compute_derived(chM, pM; t_ref = data.t_ref)[1].values))
+    end
+
+    @testset "chains.nc records the anchor and its epoch" begin
+        # A sampled phic_k<n> is undecodable without t_ref_c.
+        nm = pφ.layout.unfrozen_names
+        X = zeros(10, length(nm) + 1, 1)
+        for (j, _) in enumerate(nm)
+            X[:, j, 1] .= Nereus.quantile(pφ.layout.unfrozen_priors[j], 0.5)
+        end
+        mktempdir() do dir
+            for (p, names) in ((pφ, nm), (mk(:Mo), replace(nm, "phic_k1" => "Mo_k1")))
+                tm = p.config.parametrization.time
+                path = joinpath(dir, "chains_$(tm).nc")
+                save_chains(path, Chains(X, vcat(Symbol.(names), :lp)), p; data = data)
+                Nereus.NCDatasets.Dataset(path) do ds
+                    @test ds.attrib["time_anchor"] == String(tm)
+                    if tm === :phic
+                        @test ds.attrib["t_ref_c"] == t_ref_c
+                    else
+                        @test !haskey(ds.attrib, "t_ref_c")
+                    end
+                end
+            end
+        end
     end
 end

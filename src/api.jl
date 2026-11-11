@@ -1154,7 +1154,8 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
         summary["derived"] = chains === nothing ? Dict() :
             summarize_derived(chains, target.params;
                               M_s   = st.M_s, R_s = st.R_s, T_eff = st.T_eff,
-                              J_mag = st.J_mag, K_mag = st.K_mag, Ab = st.Ab)
+                              J_mag = st.J_mag, K_mag = st.K_mag, Ab = st.Ab,
+                              t_ref = target.data.t_ref)
     catch err
         summary["derived_error"] = sprint(showerror, err)
     end

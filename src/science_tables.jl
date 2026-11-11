@@ -301,8 +301,9 @@ const _DERIVED_UNITS = Dict{String, String}(
     "T14" => "hr",          "T23" => "hr",
     "depth_ppm" => "ppm",   "rho_star_transit" => "g/cm3",
     "grazing_frac" => "",
-    # transit time under the :phic parametrization (t_ref_c + φ_c·P/2π)
-    "Tc" => "BJD",
+    # under the :phic parametrization, the epochs the other anchors sample:
+    # transit time (t_ref_c + φ_c·P/2π), periastron time, mean anomaly at t_ref
+    "Tc" => "BJD",          "Tp" => "BJD",        "Mo_deg" => "deg",
     # per-instrument physical limb-darkening (keys are u1_<label>/u2_<label>;
     # those resolve to "" via the get-default, these bare entries are for
     # completeness/lookup robustness)
@@ -330,7 +331,7 @@ function science_derived(chains, params::Params;
                           J_mag=nothing, K_mag=nothing, Ab=0.0,
                           sigma_M_s=nothing, sigma_R_s=nothing, sigma_T_eff=nothing,
                           ms_frac=0.10, rs_frac=0.05, teff_abs=150.0,
-                          seed::Int=20260620)
+                          seed::Int=20260620, t_ref=nothing)
     cfg = params.config
     M_s === nothing && !isnan(cfg.M_s) && (M_s = cfg.M_s)
     R_s === nothing && hasproperty(cfg, :R_s) && !isnan(cfg.R_s) && (R_s = cfg.R_s)
@@ -365,7 +366,8 @@ function science_derived(chains, params::Params;
         kk in live || continue
         for dp in compute_derived(chains, params;
                                   M_s=ms_v, R_s=rs_v, T_eff=tf_v,
-                                  J_mag=J_mag, K_mag=K_mag, Ab=Ab, planets = kk:kk)
+                                  J_mag=J_mag, K_mag=K_mag, Ab=Ab, planets = kk:kk,
+                                  t_ref = t_ref)
             k = parse(Int, split(dp.name, "_")[end])     # "planet_1" → 1
             k in live || continue
             mask = _planet_active_mask(chains, k)
@@ -764,7 +766,7 @@ function science_summary(out_dir::AbstractString, chains, params::Params, data::
     der_e, der_c = science_derived(chains, params; M_s=M_s, R_s=R_s, T_eff=T_eff,
                                     J_mag=J_mag, K_mag=K_mag, Ab=Ab,
                                     sigma_M_s=sigma_M_s, sigma_R_s=sigma_R_s,
-                                    sigma_T_eff=sigma_T_eff)
+                                    sigma_T_eff=sigma_T_eff, t_ref=data.t_ref)
     modsel = science_model_selection(chains, params)
 
     tdir = joinpath(out_dir, "tables")

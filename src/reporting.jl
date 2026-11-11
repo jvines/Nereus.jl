@@ -104,24 +104,26 @@ end
 
 """
     summarize_derived(chains, params; M_s=nothing, R_s=nothing,
-                       T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0)
+                       T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0,
+                       t_ref=nothing)
 
 Compute summary statistics for derived parameters (eccentricity,
-omega, msini, radius, etc.) using `compute_derived`.
+omega, msini, radius, etc.) using `compute_derived`. `t_ref` (the data's
+`data.t_ref`) lets a transit-phase fit report `Mo_deg`; see `compute_derived`.
 
 Returns an ordered list of pairs: name => ParamStats.
 """
 function summarize_derived(chains, params::Params;
                             M_s=nothing, R_s=nothing,
                             T_eff=nothing, J_mag=nothing,
-                            K_mag=nothing, Ab=0.0)
+                            K_mag=nothing, Ab=0.0, t_ref=nothing)
     # Fall back to config.M_s if available
     if M_s === nothing && !isnan(params.config.M_s)
         M_s = params.config.M_s
     end
     derived_vec = compute_derived(chains, params;
                                    M_s=M_s, R_s=R_s, T_eff=T_eff,
-                                   J_mag=J_mag, K_mag=K_mag, Ab=Ab)
+                                   J_mag=J_mag, K_mag=K_mag, Ab=Ab, t_ref=t_ref)
     stats = Vector{Pair{String, ParamStats}}()
 
     for dp in derived_vec
