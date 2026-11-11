@@ -165,7 +165,7 @@ function _planet_draw(chains, params, planet_idx::Int; bf_cutoff::Real)
     tdc = _td_cols(chains, params)
     present = _planet_present_idx(chains, params, planet_idx; tdc = tdc)
     isempty(present) && return nothing
-    pool = intersect(present, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
+    pool = _sorted_intersect(present, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
     isempty(pool) && (pool = present)
     return _theta_best_lp(chains, params; active_idx = pool), pool
 end
@@ -1000,15 +1000,11 @@ function plot_rv_astrom_phasefold(chains, params, data;
         ph_fine = collect(range(-0.5, 0.5; length = 800))
         cred_idx = _credible_region_pool(chains, params, planet_idx;
                                           credmass = credmass)
-        band_idx = intersect(collect(active_idx), cred_idx)
+        band_idx = _sorted_intersect(active_idx, cred_idx)
         isempty(band_idx) && (band_idx = collect(active_idx))
         if !isempty(band_idx)
-            param_syms = names(chains, :parameters)
-            mat = Matrix{Float64}(undef, length(band_idx), length(param_syms))
-            for (j, sym) in enumerate(param_syms)
-                mat[:, j] = _draws(chains, sym)[band_idx]
-            end
-            ci_chains = MCMCChains.Chains(mat, param_syms)
+            # The band samples `band_idx` (`pool`), passed as indices rather
+            # than copied out as a sub-chain of every column.
             # PHASE ORIGIN. compute_ci_bands ignores fold_t0 and references
             # every draw to ITS OWN inferior conjunction Tc (deliberately — λ is
             # well determined where periastron is not). This panel, however,
@@ -1017,10 +1013,10 @@ function plot_rv_astrom_phasefold(chains, params, data;
             # back on the panel's periastron axis; without this the band sits a
             # constant ~Δ in phase away from the curve it is meant to bracket.
             Δφ = (_planet_Tc(theta_med, data, planet_idx) - tp_med) / P_med
-            ci = compute_ci_bands(ci_chains, params, data,
+            ci = compute_ci_bands(chains, params, data,
                                    tp_med .+ ph_fine .* P_med;
                                    planet = planet_idx, n_draws = n_draws,
-                                   bf_cutoff = Inf,
+                                   pool = band_idx,
                                    fold_phase = ph_fine .- Δφ, fold_t0 = tp_med)
             band!(ax_rv, ph_fine, ci.lo3, ci.hi3; color = (NEREUS_COLORS.ci, CI_ALPHA_3SIGMA))
             band!(ax_rv, ph_fine, ci.lo2, ci.hi2; color = (NEREUS_COLORS.ci, CI_ALPHA_2SIGMA))

@@ -67,7 +67,7 @@ function plot_rv_timeseries(chains, params, data;
         top_idx = _top_lp_draw_pool(chains; bf_cutoff=bf_cutoff)
         # An empty cut keeps the winning-model draws, not all draws: the
         # latter would let a non-winning planet count back in.
-        let cut = intersect(active_idx, top_idx)
+        let cut = _sorted_intersect(active_idx, top_idx)
             isempty(cut) || (active_idx = cut)
         end
         # Max-lp reference theta (jointly consistent; see set_theta_best_lp!)
@@ -325,7 +325,7 @@ function _sb2_plot_theta(chains, params, bf_cutoff)
         active_idx = collect(1:_n_flat_draws(chains)); theta = Theta{Float64}(params)
     end
     top = _top_lp_draw_pool(chains; bf_cutoff=bf_cutoff)
-    let cut = intersect(active_idx, top)          # empty cut: keep the winners
+    let cut = _sorted_intersect(active_idx, top)          # empty cut: keep the winners
         isempty(cut) || (active_idx = cut)
     end
     set_theta_best_lp!(theta, chains, params, active_idx)
@@ -547,7 +547,7 @@ function plot_rv_phasefold(chains, params, data;
             active_idx = winning_config_idx(chains, params, active_idx, td_state)
             theta_med = Theta{Float64}(params; td=td_state)
         else
-            active_idx = collect(1:_n_flat_draws(chains))
+            active_idx = 1:_n_flat_draws(chains)
             theta_med = Theta{Float64}(params)
         end
         # Band draw pool = the JOINT credible region of this planet's orbital
@@ -558,7 +558,7 @@ function plot_rv_phasefold(chains, params, data;
         # either keeps the MAP sliver (fake-tight) or, opened up, the whole
         # degenerate tail (useless). See `_credible_region_pool`.
         top_idx = _credible_region_pool(chains, params, planet; credmass=credmass)
-        let cut = intersect(collect(active_idx), top_idx)   # empty: keep winners
+        let cut = _sorted_intersect(active_idx, top_idx)   # empty: keep winners
             isempty(cut) || (active_idx = cut)
         end
 
@@ -642,26 +642,16 @@ function plot_rv_phasefold(chains, params, data;
         # well-sampled (smooth) rather than MC-hairy at the 3σ edge.
         ph_fine = collect(range(-0.5, 0.5; length=1000))
         t_fine = t0 .+ ph_fine .* P
-        # Build sub-chain for CI computation
-        if active_idx isa UnitRange
-            ci_chains = chains
-        else
-            param_syms = names(chains, :parameters)
-            mat = Matrix{Float64}(undef, length(active_idx), length(param_syms))
-            for (j, sym) in enumerate(param_syms)
-                mat[:, j] = _draws(chains, sym)[active_idx]
-            end
-            ci_chains = MCMCChains.Chains(mat, param_syms)
-        end
         # Fold each draw at its OWN period (phase-aligned) rather than on the
         # reference-period time grid t_fine — otherwise a broad period
         # posterior decoheres the per-draw curves into a kinky median + frayed
         # band (see compute_ci_bands).
-        # ci_chains is ALREADY restricted to the credible pool above, so the
-        # band must use all of it — disable compute_ci_bands' own lp cut.
-        ci = compute_ci_bands(ci_chains, params, data, t_fine;
+        # The band samples the credible pool above (`pool`), not
+        # compute_ci_bands' own lp cut. The pool is passed as indices: copying
+        # it out as a sub-chain cost every column at 85% of the draws.
+        ci = compute_ci_bands(chains, params, data, t_fine;
                                planet=planet, n_draws=n_draws,
-                               bf_cutoff=Inf,
+                               pool=active_idx,
                                fold_phase=ph_fine, fold_t0=t0)
 
         # Nested 1σ/2σ/3σ predictive bands (lightest→darkest), concentric

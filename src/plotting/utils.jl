@@ -614,26 +614,41 @@ component `comp` (1 = primary A, 2 = secondary B). For a normal planet
 secondary's lines). For the SB2 binary block `comp=1` gives +K_A and
 `comp=2` gives −K_B (anti-phase).
 """
-function compute_rv_model_planet(theta, data, t_grid, planet_k::Int; comp::Int=1)
+compute_rv_model_planet(theta, data, t_grid, planet_k::Int; comp::Int=1) =
+    compute_rv_model_planet!(zeros(length(t_grid)), theta, data, t_grid, planet_k;
+                             comp)
+
+# `compute_rv_model_planet` into `model` (length(t_grid)), overwritten: for a
+# caller that evaluates many draws on one grid.
+function compute_rv_model_planet!(model, theta, data, t_grid, planet_k::Int;
+                                  comp::Int=1)
     parametrization = theta.params.config.parametrization
     t_ref = data.t_ref
-    two_pi = 2π
+    fill!(model, 0.0)
 
     block = theta.params.layout.planet_blocks[planet_k]
-    has_K(block) || return zeros(length(t_grid))
+    has_K(block) || return model
 
     P = planet_P(theta, planet_k)
     KA, cB = block isa SB2Block ?
         (planet_K_A(theta, planet_k), -planet_K_B(theta, planet_k)) :
         (planet_K(theta, planet_k), 0.0)
     e, w = planet_e_w(theta, planet_k)
-    (e < 0 || e >= 1) && return zeros(length(t_grid))
+    (e < 0 || e >= 1) && return model
 
     ta = planet_time_anchor(theta, planet_k)
     Tp = anchor_to_tp(parametrization.time, ta, P, e, w, t_ref,
                       parametrization.t_ref_c)
 
-    model = zeros(length(t_grid))
+    return _add_keplerian!(model, t_grid, Tp, P, e, w, KA, cB, comp)
+end
+
+# The curve loop of `compute_rv_model_planet`, behind a function barrier. The
+# elements come out of an abstractly typed planet block, so inside the loop they
+# were boxed: an allocation per grid point, 230 bytes, 14 GB of garbage over a
+# 60,000-draw fold band.
+function _add_keplerian!(model, t_grid, Tp, P, e, w, KA, cB, comp)
+    two_pi = 2π
     for (i, t) in enumerate(t_grid)
         M = two_pi * (t - Tp) / P
         E = kepler_solve(M, e)
@@ -964,8 +979,10 @@ misses the cluster keeps the draws it is present in rather than none.
 function _band_pool(chains, params, planet, bf_cutoff)
     pool = _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff)
     planet === nothing && return pool
-    present = _planet_present_idx(chains, params, planet)
-    sub = intersect(pool, present)
+    tdc = _td_cols(chains, params)
+    tdc === nothing && return pool                # fixed dimension: every planet exists
+    present = _planet_present_idx(chains, params, planet; tdc = tdc)
+    sub = _sorted_intersect(pool, present)
     return isempty(sub) ? present : sub
 end
 
@@ -973,23 +990,113 @@ _nan_bands(n) = (nan = fill(NaN, n);
                  (; median = nan, lo1 = nan, hi1 = nan, lo2 = nan, hi2 = nan,
                     lo3 = nan, hi3 = nan))
 
+# The band probabilities: the median, then the Gaussian-equivalent 1σ/2σ/3σ
+# pairs (15.87/84.13, 2.28/97.72, 0.13/99.87 %).
+const _BAND_PROBS = [0.5, 0.1587, 0.8413, 0.0228, 0.9772, 0.0013, 0.9987]
+
+"""
+    _band_quantiles(models, n) -> (median, lo1, hi1, lo2, hi2, lo3, hi3)
+
+The band quantiles of each grid column over the first `n` rows (draws) of
+`models`: the same values `quantile(models[1:n, j], p)` gives for every `p`,
+from ONE copy and ONE sort per column. `mapslices` per probability copied
+every column seven times -- 2.6 GB of transient copies for a 60,000-draw fold.
+"""
+function _band_quantiles(models::Matrix{Float64}, n::Int)
+    ng = size(models, 2)
+    q = [Vector{Float64}(undef, ng) for _ in _BAND_PROBS]
+    buf = Vector{Float64}(undef, n)
+    for j in 1:ng
+        copyto!(buf, 1, models, (j - 1) * size(models, 1) + 1, n)
+        v = quantile!(buf, _BAND_PROBS)
+        for k in eachindex(q)
+            q[k][j] = v[k]
+        end
+    end
+    return (; median = q[1], lo1 = q[2], hi1 = q[3], lo2 = q[4], hi2 = q[5],
+              lo3 = q[6], hi3 = q[7])
+end
+
+"""
+    _given_band_pool(chains, params, planet, pool) -> Vector{Int}
+
+What `_band_pool(sub, params, planet, Inf)` returned for `sub`, the chain of
+the draws `pool` alone, as indices into the FULL chain: the draws of `pool`
+with a finite `:lp` (all of them if none is), and of those, for a
+single-planet band, the ones in which that planet exists.
+
+The folds used to build `sub` -- a copy of every column at every pooled draw,
+85% of a 5.8M-draw chain -- only for the band to read a few thousand rows of
+it. Passing the pool keeps the same draws, in the same order, so the same
+random subset is taken from it.
+"""
+function _given_band_pool(chains, params, planet, pool::AbstractVector{<:Integer})
+    sel = if :lp in Set(names(chains, :parameters))
+        lp = _draws_view(chains, :lp)
+        fin = Int[i for i in pool if isfinite(lp[i])]
+        isempty(fin) ? collect(Int, pool) : fin
+    else
+        collect(Int, pool)
+    end
+    planet === nothing && return sel
+    tdc = _td_cols(chains, params)
+    tdc === nothing && return sel                 # fixed dimension: every planet exists
+    present = _planet_present_idx(chains, params, planet; tdc = tdc)
+    sub = _sorted_intersect(sel, present)
+    return isempty(sub) ? _sorted_intersect(pool, present) : sub
+end
+
+"""
+    _sorted_intersect(a, b) -> Vector{Int}
+
+`intersect(a, b)` -- the elements of `a` that are in `b`, in `a`'s order --
+for index vectors. When both are sorted and free of repeats, as the draw
+pools are, a merge instead of a `Set` of `b`: a pool of millions of draws
+made a hash set of millions of entries to answer it.
+"""
+function _sorted_intersect(a::AbstractVector{<:Integer}, b::AbstractVector{<:Integer})
+    (_strictly_sorted(a) && _strictly_sorted(b)) || return intersect(a, b)
+    out = sizehint!(Int[], min(length(a), length(b)))
+    i, j = firstindex(a), firstindex(b)
+    @inbounds while i <= lastindex(a) && j <= lastindex(b)
+        x, y = a[i], b[j]
+        if x == y
+            push!(out, x); i += 1; j += 1
+        elseif x < y
+            i += 1
+        else
+            j += 1
+        end
+    end
+    return out
+end
+_strictly_sorted(v::AbstractUnitRange) = true
+_strictly_sorted(v) = all(i -> v[i] < v[i + 1], firstindex(v):lastindex(v) - 1)
+
 """
     compute_ci_bands(chains, params, data, t_grid;
-                      planet=nothing, n_draws=1000, bf_cutoff=10.0)
+                      planet=nothing, n_draws=1000, bf_cutoff=10.0, pool=nothing)
       -> (median, lo1, hi1, lo2, hi2, lo3, hi3)
 
 Compute credibility interval bands from posterior samples. EMPEROR
 convention: draws come only from the best-fit cluster — samples whose
 `:lp` is within `ln(bf_cutoff)` of the maximum log-posterior.
 If `planet` is specified, computes single-planet Keplerian only.
+
+`pool` (indices into `chains`) gives the draw pool instead, as a fold's
+credible region does: the band samples those of its draws with a finite
+`:lp` in which `planet` exists (`_given_band_pool`), and `bf_cutoff` is not
+used.
 """
 function compute_ci_bands(chains, params, data, t_grid;
                            planet::Union{Nothing, Int}=nothing,
                            n_draws::Int=1000,
                            bf_cutoff::Real=10.0,
                            fold_phase::Union{Nothing, AbstractVector}=nothing,
-                           fold_t0::Real=0.0)
-    pool = _band_pool(chains, params, planet, bf_cutoff)
+                           fold_t0::Real=0.0,
+                           pool::Union{Nothing, AbstractVector{<:Integer}}=nothing)
+    pool = pool === nothing ? _band_pool(chains, params, planet, bf_cutoff) :
+                              _given_band_pool(chains, params, planet, pool)
     n_grid0 = fold_phase !== nothing && planet !== nothing ? length(fold_phase) : length(t_grid)
     isempty(pool) && return _nan_bands(n_grid0)
     n_samples = length(pool)
@@ -1005,10 +1112,17 @@ function compute_ci_bands(chains, params, data, t_grid;
     fold = fold_phase !== nothing && planet !== nothing
     n_grid = fold ? length(fold_phase) : length(t_grid)
 
+    # Valid draws only, in the order drawn: a draw with a non-finite model is
+    # skipped rather than stored and then copied out (`models[valid, :]` was a
+    # second matrix the size of the first).
     models = Matrix{Float64}(undef, length(draw_idx), n_grid)
-    valid = trues(length(draw_idx))
+    n_ok = 0
+    # One grid and one curve, reused by every draw: per draw they were three
+    # fresh vectors of the grid, 1.4 GB of garbage over a 60,000-draw band.
+    t_eval = fold ? Vector{Float64}(undef, n_grid) : nothing
+    mbuf = Vector{Float64}(undef, n_grid)
 
-    for (i, idx) in enumerate(draw_idx)
+    for idx in draw_idx
         # Each draw with its own trans-dim active set: parked slots out.
         theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
 
@@ -1022,26 +1136,20 @@ function compute_ci_bands(chains, params, data, t_grid;
             # baseline phase smear, since each draw uses its own P.)
             P_draw  = planet_P(theta, planet)
             Tc_draw = _planet_Tc(theta, data, planet)
-            t_eval  = Tc_draw .+ collect(fold_phase) .* P_draw
-            m = compute_rv_model_planet(theta, data, t_eval, planet)
+            t_eval .= Tc_draw .+ fold_phase .* P_draw
+            m = compute_rv_model_planet!(mbuf, theta, data, t_eval, planet)
         elseif planet === nothing
             m = compute_rv_model_on_grid(theta, data, t_grid)
         else
-            m = compute_rv_model_planet(theta, data, t_grid, planet)
+            m = compute_rv_model_planet!(mbuf, theta, data, t_grid, planet)
         end
         # Reject samples with NaN/Inf model values
-        if any(!isfinite, m)
-            valid[i] = false
-            models[i, :] .= 0.0
-        else
-            models[i, :] = m
-        end
+        all(isfinite, m) || continue
+        n_ok += 1
+        models[n_ok, :] = m
     end
-    models = models[valid, :]
-    if isempty(models)                  # every draw non-finite → return NaN bands
-        nan = fill(NaN, n_grid)         # (band! skips NaN) rather than erroring
-        return (; median=nan, lo1=nan, hi1=nan, lo2=nan, hi2=nan, lo3=nan, hi3=nan)
-    end
+    # every draw non-finite → NaN bands (band! skips NaN) rather than erroring
+    n_ok == 0 && return _nan_bands(n_grid)
 
     # Nested 1/2/3σ bands = EMPIRICAL percentiles of the actual computed curves
     # (Gaussian-equivalent 15.87/84.13, 2.28/97.72, 0.13/99.87 %). This is the
@@ -1050,22 +1158,18 @@ function compute_ci_bands(chains, params, data, t_grid;
     # from enough draws (the caller passes a large `n_draws` on a coarse phase
     # grid), NOT from a Gaussian assumption — the outer percentile is MC-noisy
     # only when undersampled.
-    pq(p) = vec(mapslices(x -> quantile(x, p), models; dims=1))
-    return (; median = pq(0.5),
-            lo1 = pq(0.1587), hi1 = pq(0.8413),
-            lo2 = pq(0.0228), hi2 = pq(0.9772),
-            lo3 = pq(0.0013), hi3 = pq(0.9987))
+    return _band_quantiles(models, n_ok)
 end
 
 """
     compute_transit_ci_bands(chains, params, data, t_grid, ins_idx;
-                              planet=nothing, n_draws=1000, exposure=0.0)
+                              planet=nothing, n_draws=1000, exposure=0.0, pool=nothing)
 
 Same shape as `compute_ci_bands` but evaluates the transit photometric
 model on `t_grid` for instrument `ins_idx`. If `planet=k`, only that
 planet's transit is computed (no contribution from other planets).
 `exposure` (days) integrates every draw's model over that exposure; see
-`compute_transit_model_on_grid`.
+`compute_transit_model_on_grid`. `pool`: as for `compute_ci_bands`.
 """
 function compute_transit_ci_bands(chains, params, data, t_grid,
                                      ins_idx::Int;
@@ -1073,8 +1177,10 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
                                      exposure::Real=0.0,
                                      n_draws::Int=1000,
                                      bf_cutoff::Real=10.0,
-                                     fold_phase::Union{Nothing, AbstractVector}=nothing)
-    pool = _band_pool(chains, params, planet, bf_cutoff)
+                                     fold_phase::Union{Nothing, AbstractVector}=nothing,
+                                     pool::Union{Nothing, AbstractVector{<:Integer}}=nothing)
+    pool = pool === nothing ? _band_pool(chains, params, planet, bf_cutoff) :
+                              _given_band_pool(chains, params, planet, pool)
     n_grid = fold_phase === nothing ? length(t_grid) : length(fold_phase)
     isempty(pool) && return _nan_bands(n_grid)
     n_samples = length(pool)
@@ -1082,11 +1188,11 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
     tdc  = _td_cols(chains, params)
     cols = _chain_cols(chains, params)   # ONCE, not once per draw — see _chain_cols
 
-    models = Matrix{Float64}(undef, length(draw_idx), n_grid)
-    valid = trues(length(draw_idx))
+    models = Matrix{Float64}(undef, length(draw_idx), n_grid)   # valid draws only
+    n_ok = 0
 
     time_kind = params.config.parametrization.time
-    for (i, idx) in enumerate(draw_idx)
+    for idx in draw_idx
         # Each draw with its own trans-dim active set: parked slots out.
         theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
 
@@ -1109,18 +1215,12 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
         end
         m = compute_transit_model_on_grid(theta, data, t_eval, ins_idx;
                                             planet=planet, exposure=exposure)
-        if any(!isfinite, m)
-            valid[i] = false
-            models[i, :] .= 0.0
-        else
-            models[i, :] = m
-        end
+        all(isfinite, m) || continue
+        n_ok += 1
+        models[n_ok, :] = m
     end
-    models = models[valid, :]
-    if isempty(models)                  # every draw non-finite → return NaN bands
-        nan = fill(NaN, n_grid)         # (band! skips NaN) rather than erroring
-        return (; median=nan, lo1=nan, hi1=nan, lo2=nan, hi2=nan, lo3=nan, hi3=nan)
-    end
+    # every draw non-finite → NaN bands (band! skips NaN) rather than erroring
+    n_ok == 0 && return _nan_bands(n_grid)
 
     # Nested 1/2/3σ bands = EMPIRICAL percentiles of the actual computed curves
     # (Gaussian-equivalent 15.87/84.13, 2.28/97.72, 0.13/99.87 %). This is the
@@ -1129,11 +1229,7 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
     # from enough draws (the caller passes a large `n_draws` on a coarse phase
     # grid), NOT from a Gaussian assumption — the outer percentile is MC-noisy
     # only when undersampled.
-    pq(p) = vec(mapslices(x -> quantile(x, p), models; dims=1))
-    return (; median = pq(0.5),
-            lo1 = pq(0.1587), hi1 = pq(0.8413),
-            lo2 = pq(0.0228), hi2 = pq(0.9772),
-            lo3 = pq(0.0013), hi3 = pq(0.9987))
+    return _band_quantiles(models, n_ok)
 end
 
 """

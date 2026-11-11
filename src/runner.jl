@@ -2255,7 +2255,7 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         end
         if !haskey(ttv_kw, :planet_b_k)
             a = ttv_kw[:planet_a_k]
-            b = findfirst(k -> k != a && !isempty(intersect(present(k), present(a))),
+            b = findfirst(k -> k != a && !isempty(_sorted_intersect(present(k), present(a))),
                           1:max_k)
             ttv_kw[:planet_b_k] = b === nothing ? 0 : b
         end

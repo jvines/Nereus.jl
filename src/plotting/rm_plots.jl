@@ -67,7 +67,7 @@ function plot_rm(chains, params, data;
         else
             active_idx = collect(1:_n_flat_draws(chains)); theta_med = Theta{Float64}(params)
         end
-        let cut = intersect(active_idx, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
+        let cut = _sorted_intersect(active_idx, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
             isempty(cut) || (active_idx = cut)          # empty: keep the winners
         end
         set_theta_best_lp!(theta_med, chains, params, active_idx)
