@@ -17,6 +17,8 @@ using Test
 using Random
 using Nereus
 using MCMCChains
+using Statistics
+using NestedSamplers
 
 # ---- Shared synthetic single-planet RV target ------------------------
 function _make_rv_target(seed::Int = 2027; n_obs::Int = 30,
@@ -112,13 +114,14 @@ end
 # =====================================================================
 
 @testset "sample_nested_ins" begin
-    @testset "runs end-to-end and returns both NS and INS log Z" begin
+    @testset "runs end-to-end and returns the NS log Z" begin
         target, data, _ = _make_rv_target(2027)
         res = sample_nested_ins(target, data;
             n_live = 40, dlogz = 2.0, max_iter = 1500, seed = 1)
         @test res isa INSResult
         @test isfinite(res.log_z_ns)
-        @test isfinite(res.log_z_ins)
+        # the default walk does not draw from the bound (INSResult)
+        @test isnan(res.log_z_ins)
         @test res.n_iters > 0
         @test res.n_iters <= 1500
         # n_evals counts every rejection-sampling proposal, so it should
@@ -126,11 +129,6 @@ end
         @test res.n_evals > 40 + res.n_iters
         @test :K_k1 in names(res.chains, :parameters)
         @test size(res.chains, 1) > 0
-        # NS and INS are alternative estimators of the same Z; on
-        # well-mixed runs they agree to a few nats. We don't enforce
-        # tight agreement here (the budget is small) but they shouldn't
-        # be wildly inconsistent.
-        @test abs(res.log_z_ns - res.log_z_ins) < 50.0
     end
 
     @testset "accepts integer-valued float kwargs (JSON config path)" begin
@@ -142,18 +140,27 @@ end
             n_live = 40, walk_scale = 1, enlarge = 2, dlogz = 2,
             max_iter = 1500, seed = 1)
         @test res isa INSResult
-        @test isfinite(res.log_z_ins)
+        @test isfinite(res.log_z_ns)
     end
 
     @testset "proposal interface (:rwalk / :slice / :unif)" begin
         target, data, _ = _make_rv_target(2027)
         for prop in (:rwalk, :slice, :unif)
+            # :unif's bounds must cover the constrained region; on this
+            # multimodal target with 40 live points they grow so loose that
+            # by iteration 177 a point needs over 100 000 calls, and the run
+            # stops with an error. Its interface is all this checks.
             res = sample_nested_ins(target, data;
                 n_live = 40, proposal = prop, dlogz = 2.0,
-                max_iter = 2000, seed = 1)
+                max_iter = prop === :unif ? 150 : 2000, seed = 1)
             @test res isa INSResult
-            @test isfinite(res.log_z_ins)
+            @test isfinite(res.log_z_ns)
+            @test isfinite(res.log_z_ins) == (prop === :unif)
         end
+        # Past that point the run stops with an error. It used to stop
+        # quietly and return the truncated run's evidence and posterior.
+        @test_throws ErrorException sample_nested_ins(target, data;
+            n_live = 40, proposal = :unif, dlogz = 2.0, max_iter = 2000, seed = 1)
         @test_throws ArgumentError sample_nested_ins(target, data;
             n_live = 40, proposal = :banana, seed = 1)
     end
@@ -169,6 +176,57 @@ end
         fall, rise = _ns_row_order(target, res.chains)
         @test fall > 0.3 && rise > 0.3
     end
+
+    @testset "the walk and slice kernels leave the constrained uniform distribution unchanged" begin
+        # The replacement drawn from a live set that is uniform inside a curved
+        # constraint (a banana in the unit square) must be uniform inside it
+        # too. The walk sample_nested_ins and sample_nested_dynamic share used
+        # to grow or shrink its step inside the chain with the running
+        # acceptance and to count accepted steps: the sds came out 6-13
+        # standard errors narrow at n_walks = 2, 5 and 25.
+        banana(u) = -(((u[1] - 0.5) / 0.3)^2 + ((u[2] - 0.3 - 1.5 * (u[1] - 0.5)^2) / 0.08)^2)
+        lstar = -1.0
+        function inside(rng, m)
+            out = zeros(2, m); k = 0
+            while k < m
+                u = rand(rng, 2)
+                banana(u) ≥ lstar && (k += 1; out[:, k] = u)
+            end
+            return out
+        end
+        rng = MersenneTwister(11)
+        ref = inside(rng, 200_000)
+        N = 2000
+        live = inside(rng, N)
+        liveL = [banana(c) for c in eachcol(live)]
+        bound = NestedSamplers.Bounds.scale!(NestedSamplers.Bounds.fit(NestedSamplers.Bounds.Ellipsoid, live), 1.25)
+        evl(u, slot = 1) = (0 <= u[1] <= 1 && 0 <= u[2] <= 1) ? banana(u) : -Inf
+        M = 20_000
+        for (kernel, n_walks) in ((Nereus._rwalk_within_shell!, 2), (Nereus._rwalk_within_shell!, 25),
+                                  (Nereus._slice_within_shell!, 1), (Nereus._slice_within_shell!, 3))
+            out = zeros(2, M)
+            scale = kernel === Nereus._rwalk_within_shell! ? Ref(1.0) : 1.0
+            r = MersenneTwister(5)
+            a, b, c = zeros(2), zeros(2), zeros(2)
+            for i in 1:M
+                u, _ = kernel(live, liveL, r, evl, 2, N, 0, lstar, bound, 0.0,
+                              n_walks, scale, Float64[], Float64[], a, b, c)
+                out[:, i] = u
+                # a fresh live set now and then, so starts are not reused often
+                if i % 2000 == 0
+                    live .= inside(r, N)
+                    liveL .= [banana(cc) for cc in eachcol(live)]
+                end
+            end
+            @test all(cc -> banana(cc) ≥ lstar, eachcol(out))
+            for j in 1:2
+                sref = std(ref[j, :])
+                @test abs(mean(out[j, :]) - mean(ref[j, :])) < 4 * sref / sqrt(M)
+                @test abs(std(out[j, :]) - sref) < 4 * sref / sqrt(2M)
+            end
+            @test abs(cor(out[1, :], out[2, :]) - cor(ref[1, :], ref[2, :])) < 4 / sqrt(M)
+        end
+    end
 end
 
 
@@ -177,6 +235,39 @@ end
 # =====================================================================
 
 @testset "sample_nested_dynamic" begin
+    @testset "the merged run counts every pass's live points" begin
+        # Passes simulated in the prior volume X, where live points are
+        # uniform: log L = -X / 0.01, log Z = log(0.01 (1 - e^-100)). The
+        # baseline has 100 live points from the prior; the batch, 400 uniform
+        # below X = 0.1, stops at X = 0.02, short of most of the posterior.
+        # The merge counted only the baseline's live points above the
+        # batch's window, among them the batch's 400 last points, and log Z
+        # came out 0.58 low over 1000 runs, against +0.013 now (one run's
+        # error 0.16).
+        logL(X) = -X / 0.01
+        lz_true = log(0.01 * (1 - exp(-100)))
+        function pass(rng, n, X0, L_stop)
+            X = X0 .* rand(rng, n); dl = Float64[]; dn = Int[]
+            while true
+                i = argmax(X)
+                logL(X[i]) >= L_stop && break
+                push!(dl, logL(X[i])); push!(dn, n); X[i] *= rand(rng)
+            end
+            for (j, x) in enumerate(sort(X; rev = true))
+                push!(dl, logL(x)); push!(dn, n - j + 1)
+            end
+            m = length(dl)
+            Nereus._NSPassResult(dl, zeros(m), [[x] for x in dl], dn, 0.0, m, m)
+        end
+        rng = MersenneTwister(1)
+        zs = map(1:300) do _
+            base = pass(rng, 100, 1.0, logL(1e-4))
+            batch = pass(rng, 400, 0.1, logL(0.02))
+            Nereus._merge_passes(base, batch, logL(0.1))[4] - lz_true
+        end
+        @test abs(mean(zs)) < 0.06          # 6 standard errors
+    end
+
     @testset "two-pass run completes and returns combined log Z" begin
         target, data, _ = _make_rv_target(2027)
         # n_live_init bumped from 30 → 80: NestedSamplers main (the
@@ -198,13 +289,11 @@ end
         @test res.n_iters_batch > 0
         @test res.n_evals > 0
         @test isfinite(res.target_L_lo)
-        @test isfinite(res.target_L_hi)
-        # Importance window bounds are documented as `[L_lo, L_hi]` but
-        # can come out unordered at very small budgets (n_live_init=30
-        # + dlogz=2.0 + max_iter=1200) where the baseline NS exits with
-        # only a handful of dead points; the index lookup is then noisy.
-        # In production budgets (n_live_init ≥ 200, max_iter ≥ 10k) the
-        # ordering is well-behaved. We don't enforce it here.
+        # The window is two of the baseline's points in likelihood order, or
+        # L_hi = Inf when it reaches the last, as here: the baseline's live
+        # points at its loose stop (dlogz 2) hold most of the posterior, and
+        # the batch then runs to its own dlogz.
+        @test res.target_L_hi > res.target_L_lo
         @test :K_k1 in names(res.chains, :parameters)
         @test size(res.chains, 1) > 0
     end

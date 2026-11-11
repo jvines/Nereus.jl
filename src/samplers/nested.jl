@@ -27,9 +27,20 @@ The target must use `unconstrained=false` (bounded space).
   proposal note below; the two changes are coupled.
 - `bounds::Symbol=:multi` — bounding method (`:multi`, `:single`, `:none`)
 - `proposal::Symbol=:rslice` — within-bound proposal. One of
-  `:rwalk` (random walk), `:rstagger` (staggered random walk),
-  `:slice` (axis slice), `:rslice` (random-direction slice), or
-  `:unif` (uniform rejection; low-d only).
+  `:rwalk` (random walk), `:rstagger` (staggered random walk; the same walk
+  as `:rwalk` now), `:slice` (slices along the bounding ellipsoid's axes),
+  `:rslice` (random-direction slice), `:hslice` (Hamiltonian slice) or
+  `:unif` (uniform draws from the bound). `:unif` is for low dimension only:
+  its bounds are expanded as dynesty expands them (bootstrap) until they
+  cover the constrained region, and on a curved posterior in more than a few
+  dimensions they get so loose that a new point can take more than 100 000
+  likelihood calls, when the run stops with an error. On a 10-parameter RM
+  fit four runs of six stopped so, after 17–24 minutes; the two that
+  finished were 0.33 and 0.10 above pt_emcee's log Z. On a 7-parameter RV
+  fit three of three finished (+0.18 on average, 4–25 minutes each; `:rslice`
+  takes 2), and on a 2-parameter gravity-darkening fit it matches pt_emcee.
+  Before the expansion its bounds missed 12–22% of an RM fit's constrained
+  region and log Z came out 2 nats high.
   DEFAULT IS `:rslice`, NOT `:rwalk`. RWalk takes isotropic steps scaled
   by a single scalar inside the bounding ellipsoid; on the correlated RV
   ridges it cannot traverse the correlation, its acceptance collapses, the
@@ -40,21 +51,31 @@ The target must use `unconstrained=false` (bounded space).
   ellipsoid axes, which track the local correlation, so it follows the
   ridge and recovers truth on all three validation generators. `:rwalk`
   remains available for diagnostics but is NOT recommended for RV fits.
+  (Those failures were measured while every step of a walk or slice chain
+  restarted from the live point it copied, fixed since. With the fix and its
+  default chain, `:rwalk`'s posterior and log Z match pt_emcee's on RM
+  obliquity and gravity-darkening fits; on an eccentric RV fit its log Z is
+  0.18 high, against `:rslice`'s 0.06.)
 - `walk_scale::Real=1.0` — initial proposal scale for the walk / slice
   kernels (passed to NestedSamplers as `scale`).
-- `n_walks::Union{Int,Nothing}=nothing` — Metropolis steps per replacement for
-  `:rwalk` / `:rstagger`. `nothing` → dimension-scaled `max(25, 2·n_dim)`
-  (a fixed count under-decorrelates as n_dim grows → logZ biased low). An
-  explicit value is honored verbatim.
-- `slices::Union{Int,Nothing}=nothing` — slices per replacement for
-  `:slice` / `:rslice`. `nothing` → `max(5, 2·n_dim)` for `:rslice`
-  (PolyChord `num_repeats ∝ nDims`; dynesty `rslice`=`3+ndim`); `:slice`
-  already loops all n_dim axes internally so it stays at 5. Explicit honored.
-- `enlarge::Real=1.25` — linear volume factor by which the bounding
-  ellipsoid(s) are enlarged after fitting to the live set. Raise it if the
-  bound is under-covering, BUT note ellipsoidal bounds cannot conform to a
-  strongly-curved (e.g. eccentric-RV) likelihood ridge — there the evidence
-  bias is structural and `enlarge` does not remove it (use PT/TI evidence).
+- `n_walks::Union{Int,Nothing}=nothing` — walk steps per replacement for
+  `:rwalk` / `:rstagger`. `nothing` → `max(25, 10·n_dim)`.
+- `slices::Union{Int,Nothing}=nothing` — slices per replacement. `nothing` →
+  `max(5, 5·n_dim)` for `:rslice`, `max(5, 2·n_dim)` for `:hslice` and 5
+  for `:slice`, each of whose slices sweeps all n_dim axes of the bound.
+  Too short a chain leaves each new point near the live point it started
+  from and puts log Z high; how the defaults were chosen is noted where they
+  are set. An explicit `n_walks` or `slices` is honored verbatim.
+- `enlarge::Real=1.25` — volume factor by which the bounding ellipsoid(s)
+  are enlarged after fitting to the live set. For `:unif`, which draws from
+  the bound, the factor is the larger of this and the bootstrap expansion.
+  The walk and slice proposals take only their directions and scale from
+  the bound and move by the likelihood constraint itself, so a bound that
+  does not conform to a curved (e.g. eccentric-RV) ridge does not bias
+  their log Z: `:rslice` at its default came within 0.06 nats of pt_emcee's
+  on an eccentric RV fit. (An earlier note here called that bias
+  structural; it was measured while every chain step restarted from the
+  copied live point.)
 - `dlogz::Real=0.1` — stopping criterion (remaining evidence). Tighter than
   the canonical 0.5 because a loose tolerance let a run terminate while the
   live set was still confined to a wrong sub-mode (premature convergence at
@@ -115,30 +136,53 @@ function sample_nested(
     n_dim = length(layout.unfrozen_idx)
     rng = MersenneTwister(seed)
 
-    # --- Dimension-scaled decorrelation defaults --------------------------
-    # A single random-direction slice (RSlice) or Metropolis step (RWalk/
-    # RStagger) decorrelates the new live point in ~ONE direction, so the
-    # number of steps must grow ~linearly with n_dim to produce an
-    # independent draw from the constrained prior. A FIXED count (the old
-    # slices=5 / n_walks=25) is dimension-blind → under-decorrelates as n_dim
-    # grows → logZ biased LOW. This is the PolyChord prescription
-    # (`num_repeats ∝ nDims`, default 2·nDims) and dynesty's `rslice`
-    # default (`3 + ndim`). We default to PolyChord's 2·nDims, floored at the
-    # historical constants so low-d/easy problems never regress, and resolved
-    # only when the user left the knob unset (an explicit value is honored
-    # verbatim). The non-random `Slice` ALREADY loops over all n_dim axes per
-    # iteration (its `slices` is full ndim-sweeps), so it is NOT scaled here —
-    # scaling it too would be O(n_dim²).
+    # --- Decorrelation defaults ---------------------------------------------
+    # A new live point is the end of a chain of `slices` slices or `n_walks`
+    # walk steps from a live point inside the constraint. Too short a chain
+    # leaves it near that start: the live points descend from too few
+    # parents, each iteration shrinks the prior volume by more than the
+    # 1/n_live NS credits, and log Z comes out HIGH. A random-direction slice
+    # or a walk step moves the point along about one direction, so the count
+    # grows with n_dim (PolyChord's default is 5·nDims repeats, dynesty's
+    # rslice 3 + ndim). Each `:slice` slice sweeps all n_dim axes of the
+    # bound, so its count is not scaled.
     #
-    # NOTE (scope): dimension scaling fixes the DECORRELATION bias, which
-    # dominates on gentle posteriors. On sharply-curved RV ridges (the e–ω–Mo
-    # eccentricity banana) the residual evidence bias is the multi-ellipsoid
-    # BOUND failing to conform to the ridge — that is NOT removed by more
-    # slices or a larger `enlarge`; use PT/TI for evidence there, or the
-    # friends-bound (MLFriends) port. See project_ns_rslice_undermixing.
+    # Each default is the smallest multiple of n_dim whose log Z, averaged
+    # over 4-9 seeds, came within the NS error (0.17-0.22) of pt_emcee's on
+    # four fits: an RM obliquity fit at λ = 0° and 180° (10 parameters), an
+    # eccentric RV fit (7) and a gravity-darkening fit (2), with 500 live
+    # points (300 for the last). Seed-mean log Z minus pt_emcee's:
+    #
+    #   :rslice 2·n_dim   -0.05  +0.35  +0.07  -0.01   (RM 0°, RM 180°, RV, GD)
+    #           3·n_dim   +0.07  +0.23  -0.00  -0.08
+    #           5·n_dim   +0.02  +0.13  +0.06  +0.02   ← default
+    #   :slice  5         +0.13  +0.09  -0.01  -0.04   ← default
+    #   :hslice 2·n_dim   +0.13  +0.06  +0.06  -0.08   ← default
+    #   :rwalk  5·n_dim   +0.26  -0.06  +0.26  -0.21
+    #           10·n_dim  +0.07  +0.04  +0.18  -0.04   ← default
+    #
+    # `:rstagger` is the same walk as `:rwalk`. The walk's RV value is the
+    # largest of the defaults; with the walks run one at a time
+    # (`parallel = false`) it was -0.02 over six seeds, a difference of
+    # 1.5 standard errors that is not resolved. The floors keep a
+    # low-dimensional fit's chains from getting too short.
+    #
+    # The count only matters because the steps form one chain, each starting
+    # where the last ended (vendor/NestedSamplers/VENDORED.md). The fork used
+    # to start every step from the copied live point, so the new point was one
+    # step from it whatever the count: the live set descended from ever fewer
+    # ancestors and the posterior came out too narrow and off-centre (an RM
+    # obliquity fit gave λ sd 1.6–2.1° against pt_emcee's 2.1–2.5°, b's sd at
+    # half of pt_emcee's, the jitters up to 1.3 σ high). An earlier note here
+    # blamed the ellipsoid bound for an evidence bias on curved RV ridges that
+    # more slices did not remove; it was measured before the fix, when more
+    # slices could not help, and a slice takes only its direction from the
+    # bound.
     slices_resolved = slices !== nothing ? slices :
-                      (proposal === :slice ? 5 : max(5, 2 * n_dim))
-    n_walks_resolved = n_walks !== nothing ? n_walks : max(25, 2 * n_dim)
+                      proposal === :slice  ? 5 :
+                      proposal === :hslice ? max(5, 2 * n_dim) :
+                                             max(5, 5 * n_dim)
+    n_walks_resolved = n_walks !== nothing ? n_walks : max(25, 10 * n_dim)
     if slices === nothing || n_walks === nothing
         @info "sample_nested: dimension-scaled decorrelation (n_dim=$n_dim, " *
               "proposal=:$proposal) → slices=$slices_resolved " *
@@ -240,10 +284,10 @@ function sample_nested(
     elseif proposal === :rslice
         NestedSamplers.Proposals.RSlice(; slices=slices_resolved, scale=walk_scale)
     elseif proposal === :hslice
-        # Reflective (Hamiltonian) slice — gradient-aware, for thin curved ridges.
-        # `slices` here = number of trajectories; the dimension-scaled default is
-        # fine. n_steps fixed at 15.
-        NestedSamplers.Proposals.HSlice(; slices=slices_resolved, n_steps=15, scale=walk_scale)
+        # Hamiltonian (reflective) slice: `slices` trajectories per new point,
+        # each reflecting off the likelihood constraint about the gradient where
+        # a step lands outside it (vendor/NestedSamplers Proposals.HSlice).
+        NestedSamplers.Proposals.HSlice(; slices=slices_resolved, scale=walk_scale)
     else  # :unif
         NestedSamplers.Proposals.Rejection()
     end

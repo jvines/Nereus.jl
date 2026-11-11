@@ -27,7 +27,7 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 | `moms`             | `sample_moms`             | trans | **required** | — (NaN) |
 | `daedalus`          | `sample_daedalus`          | trans | **required** | yes (NS) |
 | `nested`           | `sample_nested`           | fixed | — | yes (NS) |
-| `nested_ins`       | `sample_nested_ins`       | fixed | — | yes (INS) |
+| `nested_ins`       | `sample_nested_ins`       | fixed | — | yes (NS) |
 | `nested_dynamic`   | `sample_nested_dynamic`   | fixed | — | yes (dynamic NS) |
 | `pa`               | `sample_pa`               | fixed | — | yes (PA) |
 | `smc`              | `sample_smc`              | fixed | — | yes (→ PA) |
@@ -80,14 +80,18 @@ directly.
 | Trans-dim + per-config evidence (Bayes-factor matrix) | `sample_daedalus` |
 | Lightweight trans-dim baseline | `sample_rjmcmc` |
 | Clean fixed-dim log Z (single run) | `sample_nested` |
-| Evidence cross-check with INS / dynamic allocation | `sample_nested_ins` / `sample_nested_dynamic` |
+| NS evidence from Nereus's own loop / dynamic allocation | `sample_nested_ins` / `sample_nested_dynamic` |
 | Visual-orbit fit (rel-astrom only, sparse arc, `:a_driven`) | `ofti_sample` |
 | Quick MAP / Laplace evidence / seed for PT | `sample_map` / `pathfinder_init` |
 
-For evidence on curved RV posteriors (eccentric ridges), prefer the PT/TI
-stack (`sample_pt_emcee`, `sample_pt_hmc`) over NS — ellipsoidal NS bounds
-cannot conform to a strongly-curved likelihood ridge and the log Z bias is
-structural there. See [Evidence](evidence.md).
+On curved RV posteriors (eccentric ridges) `sample_nested` with `:rslice`
+and its default chain length gives pt_emcee's log Z (within 0.06 nats on an
+eccentric RV fit): the slices take only their directions from the
+ellipsoidal bound, so it does not have to conform to the ridge. An earlier
+note here called the NS bias there structural; it was measured while every
+chain step restarted from the copied live point. `:rwalk`'s value there
+is the highest of the defaults, 0.18 nats high (see the defaults table
+below). See [Evidence](evidence.md).
 
 ---
 
@@ -474,8 +478,8 @@ chains, log_evidence = sample_nested(target, data;
     bounds     = :multi,                # :multi | :single | :none | :mlfriends
     proposal   = :rslice,               # :rwalk | :rstagger | :slice | :rslice | :unif | :hslice
     walk_scale = 1.0,
-    n_walks    = nothing,               # nothing → max(25, 2·n_dim) for walk kernels
-    slices     = nothing,               # nothing → max(5, 2·n_dim) for :rslice
+    n_walks    = nothing,               # nothing → max(25, 10·n_dim) for :rwalk / :rstagger
+    slices     = nothing,               # nothing → max(5, 5·n_dim) :rslice, max(5, 2·n_dim) :hslice, 5 :slice
     enlarge    = 1.25,
     dlogz      = 0.1,
     seed       = 1,
@@ -493,28 +497,82 @@ chains, log_evidence = sample_nested(target, data;
     random directions through the ellipsoid axes, tracks the local
     correlation, and recovers truth. Keep `:rslice` for RV fits.
 
-`n_walks` and `slices` are dimension-scaled by default — a fixed count
-under-decorrelates as dimension grows and biases log Z low. `:mlfriends`
+    Those `:rwalk` failures were measured while every step of a walk or
+    slice chain restarted from the live point it copied, so the new point
+    was one step from it whatever `n_walks` or `slices` said. The vendored
+    fork chains the steps now. On an RM obliquity fit `:rslice` then matches
+    pt_emcee (before: λ sd 1.6–2.1° against 2.1–2.5°), and so do `:rwalk`
+    and `:rstagger`.
+
+A new live point is the end of a chain of `slices` slices or `n_walks` walk
+steps from a live point inside the constraint. Too short a chain leaves it
+near its start, the live points descend from too few parents, and log Z
+comes out **high**, or scatters between runs far beyond the NS error. Each
+default is the smallest multiple of `n_dim` whose log Z, averaged over 4–9
+seeds, came within the NS error of pt_emcee's on an RM obliquity fit at
+λ = 0° and 180° (10 parameters), an eccentric RV fit (7) and a
+gravity-darkening fit (2), with the mean known to better than that error:
+
+| proposal | default | log Z − pt_emcee's (RM 0°, RM 180°, RV, GD) |
+|---|---|---|
+| `:rslice` | `max(5, 5·n_dim)` | +0.02, +0.13, +0.06, +0.02 (at `2·n_dim` and `3·n_dim`: +0.35 and +0.23 on RM 180°) |
+| `:slice` | 5 | +0.13, +0.09, −0.01, −0.04 |
+| `:hslice` | `max(5, 2·n_dim)` | +0.13, +0.06, +0.06, −0.08 |
+| `:rwalk`, `:rstagger` | `max(25, 10·n_dim)` | +0.07, +0.04, +0.18, −0.04 (at `5·n_dim`: +0.26 on RM 0° and RV, −0.21 on GD) |
+| `sample_nested_ins` `:rwalk` | `max(25, 5·n_dim)` | +0.15, −0.12, +0.15, −0.05 (at `2·n_dim` the mean passed but runs on RM 0° ranged from −1.5 to +1.1) |
+| `sample_nested_ins` `:slice` | `max(25, 2·n_dim)` | +0.09, −0.03, +0.08, +0.03 |
+| `sample_nested_dynamic` `:rwalk` | `max(25, 10·n_dim)` | −0.17, +0.22, −0.04, −0.11 (at `5·n_dim`: −0.37 on RM 0°) |
+| `sample_nested_dynamic` `:slice` | `max(25, 5·n_dim)` | +0.03, +0.10, −0.11, −0.01 (at `2·n_dim`: −0.39 and −0.49 on RM 0° and 180°) |
+
+The NS error was 0.17–0.22 for `sample_nested` (500 live points, 300 on the
+GD fit), 0.17–0.24 for `sample_nested_ins` (400) and 0.20–0.35 for
+`sample_nested_dynamic` (200 then 400), whose log Z carries the baseline's
+error: at the defaults its batch refines only the top of the likelihood. `:rwalk`'s RV value
+is the largest of the defaults; with the walks run one at a time
+(`parallel = false`) it was −0.02 over six seeds, a difference of 1.5
+standard errors that is not resolved.
+
+The MultiEllipsoid bound is split by dynesty's rule. A walk or slice takes
+its metric from the ellipsoid holding its start, so with the constrained
+region cut into many ellipsoids where a chain ended depended on where it
+started; split when its children halved its volume, the bound cut the RM
+fit into 15 ellipsoids (1–5 now) and log Z came out 0.35–0.5 high however
+long the chains. `:unif` draws from the bound itself, so its bound is
+expanded by dynesty's bootstrap until it covers the constrained region
+(before, it missed 12–22% of the RM fit's and log Z came out 2 nats high).
+On a curved posterior in more than a few dimensions that expansion leaves
+so little of the bound inside the constraint that a new point can take more
+than 100 000 likelihood calls, and the run stops with an error: four RM runs
+of six did, after 17–24 minutes (the other two came within 0.33 and 0.10 of
+pt_emcee's log Z). Three RV runs of three finished, +0.18 on average, in
+4–25 minutes against 2 for `:rslice`; the GD fit matches pt_emcee. Use
+`:unif` in low dimension only.
+
+`:mlfriends`
 (from the Nereus NestedSamplers fork) pairs only with `:unif`/`:rslice`/
 `:slice`; the random-walk kernels are auto-redirected to `:rslice`.
 
 With `parallel = true`, each iteration removes the `batch_size` lowest-
 likelihood live points and replaces them via concurrent constrained walks
-(`@threads :static`). `batch_size = 1` reproduces the serial sampler
-bit-for-bit; keep `batch_size ≤ n_live/20` so the O(`batch_size`/`n_live`)
-evidence bias stays well inside `logzerr`. `parallel` defaults to
-`!_is_under_juliacall()` — it threads in a pure-Julia process but falls back
-to serial under juliacall (Julia threads can deadlock on the Python GIL).
+(`@threads :static`), each started at a live point above the highest of
+them. The j-th point removed shrinks the prior volume as `n_live − j + 1`
+live points do, so the batch adds no evidence bias (crediting each with
+`1/n_live` put log Z `(batch_size − 1)·H/(2·n_live)` high: 0.58 nats with
+16 of 100 live points on a 2-d Gaussian). `batch_size = 1` runs the serial
+sampler; `:slice`, `:rslice` and `:hslice` always run serially. `parallel`
+defaults to `!_is_under_juliacall()` — it threads in a pure-Julia process
+but falls back to serial under juliacall (Julia threads can deadlock on the
+Python GIL).
 
 **Target must be `unconstrained = false`.**
 
 ### `sample_nested_ins` — `name: "nested_ins"`
 
-Importance Nested Sampling
-([Feroz+ 2019](https://ui.adsabs.harvard.edu/abs/2019OJAp....2E..10F/abstract)).
-Operates in **unit-cube space**; every likelihood eval (incl. rejected)
-contributes to the importance estimator `log Z_INS`, giving a second NS
-log Z value beyond standard `log Z_NS`.
+Nested sampling with Nereus's own loop and kernels, in **unit-cube space**.
+It records every likelihood evaluation, rejected ones included, for an
+importance sum after
+[Feroz+ 2019](https://ui.adsabs.harvard.edu/abs/2019OJAp....2E..10F/abstract),
+`log_z_ins`, but that sum is not an evidence (below); `log_z_ns` is.
 
 ```julia
 res = sample_nested_ins(target, data;
@@ -524,7 +582,7 @@ res = sample_nested_ins(target, data;
     dlogz                 = 0.01,
     max_iter              = 200_000,
     bound_update_interval = 50,
-    n_walks               = nothing,    # nothing → max(25, 2·n_dim)
+    n_walks               = nothing,    # nothing → max(25, 5·n_dim) :rwalk, max(25, 2·n_dim) :slice
     walk_scale            = 1.0,
     proposal              = :rwalk,     # :rwalk | :slice | :unif
     min_X_shrinkage       = 10.0,
@@ -533,10 +591,20 @@ res = sample_nested_ins(target, data;
 )
 ```
 
-Returns `INSResult(chains, log_z_ns, log_z_ins, n_iters, n_evals)`. These
-are Nereus's own accumulator-aware kernels (NestedSamplers' proposals can't
-feed the per-eval INS estimator). `run_job` surfaces `log_z_ins` as the
-sampler's `log_evidence`. When `n_eff < 200` (peaked posterior), the chain
+Returns `INSResult(chains, log_z_ns, log_z_ins, n_iters, n_evals)`. The
+kernels are Nereus's own, not NestedSamplers'. `:slice` runs each slice along
+a random direction through the axes of the bound's ellipsoid holding the
+chain's start, as `sample_nested`'s `:rslice` does; its directions used to be
+isotropic in the unit cube, and on an RM obliquity fit the posterior widths
+then scattered by 15–25% between seeds (b's sd 0.019–0.037 against
+pt_emcee's 0.027–0.028). `run_job` surfaces
+`log_z_ns` as the sampler's `log_evidence`. `log_z_ins` is `NaN` unless
+`proposal = :unif` and is not an evidence even then: each term estimates
+the evidence inside the bound its point was drawn from, which shrinks as
+the run goes on, so the sum comes out low (the unbiased form, Feroz et al.
+2013, weighs every point by all the bounds that contain it). With
+`:rwalk` it was reported as the evidence and came out up to 3.4 nats above
+pt_emcee's on RM and RV fits. When `n_eff < 200` (peaked posterior), the chain
 falls back to top-N dead points by weight rather than systematic resampling
 — bump `n_live` to 2000+ for full posterior coverage.
 
@@ -548,7 +616,10 @@ Dynamic NS
 ([Higson+ 2019](https://ui.adsabs.harvard.edu/abs/2019S&C....29..891H/abstract)).
 Two-pass: a baseline pass with `n_live_init`, then an importance-targeted
 batch pass with `n_live_batch` live points concentrated in the flagged
-likelihood band.
+likelihood band. The batch's live points are drawn inside `L > L_lo` by
+chains of the proposal from the baseline's points there, as dynesty seeds
+its batches, and the merged run counts at each likelihood the live points of
+every pass alive there.
 
 ```julia
 res = sample_nested_dynamic(target, data;
@@ -563,7 +634,7 @@ res = sample_nested_dynamic(target, data;
     pad                   = 1,
     max_iter              = 50_000,     # per pass
     bound_update_interval = 50,
-    n_walks               = nothing,    # nothing → max(25, 2·n_dim)
+    n_walks               = nothing,    # nothing → max(25, 10·n_dim) :rwalk, max(25, 5·n_dim) :slice
     walk_scale            = 1.0,
     proposal              = :rwalk,     # :rwalk | :slice | :unif
     seed                  = 1,

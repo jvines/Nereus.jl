@@ -31,8 +31,7 @@ reported as a single `EvidenceReport`
 
 For **nested samplers**, `log Z` is produced natively by the
 algorithm — see [`sample_nested`](samplers.md) and friends, which
-return the Skilling estimator and (for `sample_nested_ins`) the Feroz
-importance estimator `log_z_ins`. Those do **not** use the β-ladder
+return the Skilling estimator. Those do **not** use the β-ladder
 estimators on this page.
 
 Separately, `bridge_evidence` estimates log Z from **posterior samples
@@ -349,9 +348,8 @@ ladder give the same numbers, and log Z stays negative
 (`test_evidence_gaussian.jl:71-74`).
 
 Independent cross-validation: TI+/SS+/H+ agree with the analytic
-log Z to `< 0.01` nats on the 2D-Gaussian × box, and PT's SS+ agrees
-with `sample_nested_ins`'s `log_z_ins` to ~5 log units on the 22-d
-HD 18599 RVPM posterior. Earlier HD 18599 disagreements were
+log Z to `< 0.01` nats on the 2D-Gaussian × box. Earlier HD 18599
+disagreements were
 sampling/ladder-resolution effects, **not** estimator bugs — use
 `≥ 10` PT temperatures for trustworthy numbers.
 
@@ -652,11 +650,14 @@ until it is resolved.
   multiple configs). **Trust SS+** (`res.evidence_report.ss_plus[1]`).
   A spread of ~1 000 log units across estimators is normal on hard
   trans-dim targets; the SS+ value is the calibrated one to report.
-- **NS log Z cross-check**: compare PT's SS+ to `sample_nested_ins`'s
-  `log_z_ins` as an independent estimate. Agreement to a few log units
-  is confidence-building; large disagreement on a curved RV posterior
-  usually means NS is the biased one (its rslice can't mix the thin
-  e–ω–M₀ ridge) — see [sampler validation](sampler_validation.md).
+- **NS log Z cross-check**: compare PT's evidence to `sample_nested`'s
+  log Z, an independent estimate. NS under-decorrelated by too few slices
+  or walks per replacement comes out **high**: its live points descend
+  from too few parents, so each iteration shrinks the prior volume by
+  more than the `1/n_live` NS credits, and the high likelihoods get too
+  much of it. See the `slices` / `n_walks` defaults in
+  [the samplers page](samplers.md). `sample_nested_ins`'s `log_z_ins` is
+  not an evidence (`INSResult`).
 - **Ladder length matters.** Use `≥ 10` temperatures; a too-coarse
   ladder inflates TI quadrature error and destabilises the SS+ pairs.
   `sample_pt_hmc` and `sample_pt_emcee`/`sample_pt_whitening` support

@@ -133,8 +133,7 @@ function sample_daedalus(
     0.0 <= informed_birth_fraction <= 1.0 || throw(ArgumentError(
         "informed_birth_fraction must be in [0, 1]"))
     batch_size >= 1 || throw(ArgumentError("batch_size must be ≥ 1"))
-    batch_size <= n_live ÷ 4 || throw(ArgumentError(
-        "batch_size must be ≤ n_live/4 to keep batched-NS bias small"))
+    batch_size <= n_live ÷ 4 || throw(ArgumentError("batch_size must be ≤ n_live/4"))
     # Noise toggling supported via the existing `propose_noise_birth/death`
     # methods (RJMCMC-style prior-draw proposals). The M-H acceptance in
     # the constrained-MCMC kernel uses prior + proposal ratios with the
@@ -188,7 +187,6 @@ function sample_daedalus(
     # log(L_i) + log(w_i) to log Z (via logaddexp).
     log_Z          = -Inf
     log_X_prev     = 0.0  # log X_0 = 0 (full prior volume)
-    inv_N          = 1.0 / n_live
 
     dead_pts    = DaedalusPoint[]
     log_w_dead  = Float64[]   # log of width × likelihood (i.e. unnormalised weight)
@@ -212,9 +210,9 @@ function sample_daedalus(
 
         # --- Pick the batch_size worst live points ----------------------
         # batch_size == 1 reduces exactly to Skilling's serial recipe.
-        # batch_size > 1 follows dynesty's static-batched approach: kill
-        # the b worst points simultaneously, share ΔX_batch evenly across
-        # them, and evolve b replacements concurrently against the strict
+        # batch_size > 1 kills the b worst points together (lowest first),
+        # credits each its own prior volume (`_daedalus_batch_volumes`) and
+        # evolves b replacements concurrently against the strict
         # L > max(killed L) constraint.
         if batch_size == 1
             dead_indices = [argmin_log_L(live)]
@@ -228,19 +226,13 @@ function sample_daedalus(
         # stay above the truncation boundary.
         L_thr = maximum(live[idx].log_L for idx in dead_indices)
 
-        # ΔX for the batched contraction. log_dX_batch handles both
-        # serial (b=1) and batched cases via the same formula.
-        log_dX_batch  = log_X_prev + log1p(-exp(-batch_size * inv_N))
-        log_w_per     = log_dX_batch - log(batch_size)
-        log_X_curr    = log_X_prev - batch_size * inv_N
-
-        # Record each killed point with its own L (for posterior weights)
-        # and the shared per-dead weight log_w_per.
-        for idx in dead_indices
+        log_w_batch, log_X_curr = _daedalus_batch_volumes(log_X_prev, n_live,
+                                                          batch_size)
+        for (j, idx) in enumerate(dead_indices)
             push!(dead_pts,    live[idx])
-            push!(log_w_dead,  log_w_per)
+            push!(log_w_dead,  log_w_batch[j])
             push!(log_L_dead,  live[idx].log_L)
-            log_Z = _logaddexp(log_Z, log_w_per + live[idx].log_L)
+            log_Z = _logaddexp(log_Z, log_w_batch[j] + live[idx].log_L)
         end
 
         # Termination check (same as serial NS).
@@ -387,6 +379,23 @@ function _daedalus_update_scale!(scale::Base.RefValue{Float64}, acc::Int, rej::I
     ratio = acc / (acc + rej)
     scale[] = min(scale[] * exp((ratio - 0.5) / (0.5 * d)), sqrt(d))
     return scale
+end
+
+# The prior volume credited to each of the `b` lowest live points killed
+# together, lowest first, and log X after them. The j-th is the lowest of the
+# n_live - j + 1 live points left above the j - 1 killed below it, so it
+# shrinks log X by 1/(n_live - j + 1), and b = 1 is Skilling's step. The batch
+# used to shrink log X by b/n_live and share it evenly, which put log Z about
+# (b - 1)·H/(2·n_live) high, as it did NestedSamplers' batch NS
+# (vendor/NestedSamplers/src/parallel.jl).
+function _daedalus_batch_volumes(log_X::Float64, n_live::Int, b::Int)
+    log_w = Vector{Float64}(undef, b)
+    for j in 1:b
+        dlx = 1.0 / (n_live - j + 1)
+        log_w[j] = log_X + log1p(-exp(-dlx))
+        log_X -= dlx
+    end
+    return log_w, log_X
 end
 
 # =====================================================================

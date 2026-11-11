@@ -1,0 +1,245 @@
+# The vendored NestedSamplers proposals that `sample_nested` uses. Each one
+# replaces a dead point with a chain of steps from a copied live point, and the
+# chain has to move: every slice (Slice, RSlice) or walk step (RWalk, RStagger)
+# starts where the previous one ended. The fork used to start every step from
+# the copied point, so the new point was one step from it whatever
+# `slices`/`walks` said, and the live set lost its spread (an RM obliquity fit
+# came out with λ sd 1.6–2.1° against pt_emcee's 2.1–2.5°). The walks also drew
+# again whenever a step left the unit cube, which favoured the middle of the
+# cube; a step out of it is now a rejected step.
+using Test, Random, Statistics, Distributions, Logging, NestedSamplers
+using LinearAlgebra: norm
+
+const _NSP = NestedSamplers.Proposals
+const _NSB = NestedSamplers.Bounds
+
+@testset "nested proposals chain their steps" begin
+    # Flat likelihood on the unit square: the constrained region is the whole
+    # square, so a long chain forgets its start in the corner and ends uniform
+    # (mean 1/2, sd 1/√12 ≈ 0.289). Before the fix: RSlice mean 0.21, Slice
+    # 0.26, RWalk 0.36 with sd 0.21.
+    flat = NestedModel(x -> 0.0, [Uniform(0, 1), Uniform(0, 1)])
+    nb = _NSB.fit(_NSB.NoBounds, rand(MersenneTwister(0), 2, 4))
+    for (name, mk) in (("RSlice", () -> _NSP.RSlice(slices = 30)),
+                       ("Slice", () -> _NSP.Slice(slices = 10)),
+                       ("RWalk", () -> _NSP.RWalk(walks = 200)),
+                       ("RStagger", () -> _NSP.RStagger(walks = 200)),
+                       ("HSlice", () -> _NSP.HSlice(slices = 10)))
+        @testset "$name" begin
+            rng = MersenneTwister(7)
+            prop = mk()
+            xs = with_logger(NullLogger()) do
+                [prop(rng, [0.02, 0.02], -1.0, nb, flat)[1] for _ in 1:2000]
+            end
+            for j in 1:2
+                c = getindex.(xs, j)
+                @test all(x -> 0 < x < 1, c)
+                @test mean(c) ≈ 0.5 atol = 0.03          # 4.6 standard errors
+                @test std(c) ≈ 1 / sqrt(12) atol = 0.015
+            end
+        end
+    end
+
+    # The whole sampler on a correlated Gaussian inside the unit cube, whose
+    # evidence is 1 (log Z = 0) and whose sd is 0.03 per coordinate. Before the
+    # fix RWalk gave log Z +2.7 to +3.1 and sd 0.86–0.90 of the truth (seeds
+    # 1–3); after it, |log Z| ≤ 0.24 and sd 0.97–1.02 for RWalk, RSlice and
+    # Slice. The log Z error of one run is about 0.2 here.
+    d = 6
+    Σ = [0.03^2 * 0.8^abs(i - j) for i in 1:d, j in 1:d]
+    mvn = MvNormal(fill(0.5, d), Σ)
+    model = NestedModel(x -> logpdf(mvn, x), fill(Uniform(0, 1), d))
+    for (name, mk) in (("RWalk", () -> _NSP.RWalk(walks = 25)),
+                       ("RSlice", () -> _NSP.RSlice(slices = 2d)),
+                       ("HSlice", () -> _NSP.HSlice(slices = d)))
+        @testset "Gaussian, $name" begin
+            spl = Nested(d, 300; bounds = _NSB.MultiEllipsoid, proposal = mk())
+            ch, st = with_logger(NullLogger()) do
+                sample(MersenneTwister(1), model, spl; dlogz = 0.1, progress = false)
+            end
+            w = vec(Array(ch[:weights]))
+            w ./= sum(w)
+            X = Array(ch)[:, 1:d]
+            sds = [(m = sum(w .* X[:, j]); sqrt(sum(w .* (X[:, j] .- m) .^ 2))) for j in 1:d]
+            @test abs(st.logz) < 0.6
+            @test 0.9 < mean(sds) / 0.03 < 1.1
+        end
+    end
+end
+
+@testset "nested refits its bounds as it goes" begin
+    # The bounds are refit once `update_interval` likelihood calls have passed
+    # since the last fit. The check used to ask for an exact multiple of the
+    # interval, which a count that grows by a whole proposal at a time almost
+    # never hits: a run on this Gaussian refit 10 times with RWalk and twice
+    # with RSlice, each time because a live point fell outside the stale bound,
+    # and an RSlice run could stop with "Slice sampling appears to be stuck".
+    # Now about 110 refits with RWalk and 40 with RSlice.
+    d = 6
+    Σ = [0.03^2 * 0.8^abs(i - j) for i in 1:d, j in 1:d]
+    mvn = MvNormal(fill(0.5, d), Σ)
+    model = NestedModel(x -> logpdf(mvn, x), fill(Uniform(0, 1), d))
+    for (name, mk, atleast) in (("RWalk", () -> _NSP.RWalk(walks = 25), 60),
+                                ("RSlice", () -> _NSP.RSlice(slices = 2d), 25))
+        @testset "$name" begin
+            nfit = Ref(0)
+            seen = Ref{Any}(nothing)
+            cb = (rng, m, spl, smp, st, i; kw...) -> begin
+                b = st.active_bound
+                b !== nothing && b !== seen[] && (nfit[] += 1)
+                seen[] = b
+            end
+            spl = Nested(d, 300; bounds = _NSB.MultiEllipsoid, proposal = mk())
+            ch, st = with_logger(NullLogger()) do
+                sample(MersenneTwister(1), model, spl; dlogz = 0.1, progress = false, callback = cb)
+            end
+            @test nfit[] ≥ atleast
+            @test abs(st.logz) < 0.6
+        end
+    end
+end
+
+@testset "proposals leave the constrained uniform distribution unchanged" begin
+    # Points drawn uniformly inside a curved region (a banana in the unit
+    # square) must stay uniform after one move, whatever the move does, if the
+    # move is valid. The region is curved so reflections off it happen at
+    # every angle, and the bound is a fitted, rotated ellipse so the velocities'
+    # metric matters. The HSlice this replaced turned its slices along the
+    # likelihood contour at the current point, a direction that depends on the
+    # state: after one move from 6000 such points the mean of u2 moved by 6
+    # standard errors and the sd of u1 by +0.018 (+0.025 after three slices).
+    # RWalk walked on past `walks` until a step was accepted, which narrowed
+    # the sds by 10-14 standard errors at walks = 2 and 5 at walks = 5, and
+    # RStagger adapted its step inside the chain, which widened them by 6-8.
+    banana(u) = -(((u[1] - 0.5) / 0.3)^2 + ((u[2] - 0.3 - 1.5 * (u[1] - 0.5)^2) / 0.08)^2)
+    model = NestedModel(banana, [Uniform(0, 1), Uniform(0, 1)])
+    lstar = -1.0
+    function inside(rng, m)
+        out = Vector{Vector{Float64}}()
+        while length(out) < m
+            u = rand(rng, 2)
+            banana(u) ≥ lstar && push!(out, u)
+        end
+        return out
+    end
+    rng = MersenneTwister(11)
+    ref = inside(rng, 200_000)
+    starts = inside(rng, 20_000)
+    ell = _NSB.scale!(_NSB.fit(_NSB.Ellipsoid, reduce(hcat, inside(MersenneTwister(2), 500))), 1.25)
+    M = length(starts)
+    col(xs, j) = getindex.(xs, j)
+    for (name, mk) in (("HSlice, 1 slice", () -> _NSP.HSlice(slices = 1)),
+                       ("HSlice, 3 slices", () -> _NSP.HSlice(slices = 3)),
+                       ("RWalk, 2 walks", () -> _NSP.RWalk(walks = 2)),
+                       ("RWalk, 5 walks", () -> _NSP.RWalk(walks = 5)),
+                       ("RStagger, 5 walks", () -> _NSP.RStagger(walks = 5)),
+                       ("RStagger, 25 walks", () -> _NSP.RStagger(walks = 25)),
+                       ("RSlice, 1 slice", () -> _NSP.RSlice(slices = 1)),
+                       ("Slice, 1 slice", () -> _NSP.Slice(slices = 1)))
+        @testset "$name" begin
+            prop = mk()
+            out = [prop(MersenneTwister(1000 + i), copy(starts[i]), lstar, ell, model)[1] for i in 1:M]
+            @test all(u -> banana(u) ≥ lstar, out)
+            for j in 1:2
+                sref = std(col(ref, j))
+                @test abs(mean(col(out, j)) - mean(col(ref, j))) < 4 * sref / sqrt(M)
+                @test abs(std(col(out, j)) - sref) < 4 * sref / sqrt(2M)
+            end
+            @test abs(cor(col(out, 1), col(out, 2)) - cor(col(ref, 1), col(ref, 2))) < 4 / sqrt(M)
+        end
+    end
+end
+
+@testset "bootstrap expansion covers the region the points came from" begin
+    # Rejection draws its points from the bounds, so the bounds must hold the
+    # whole constrained region, not only the live points. A MultiEllipsoid
+    # fitted to points uniform in a ball and enlarged by 1.25 in volume missed
+    # 14% of the ball (d = 4, 40 points) and 33% (d = 12, 120 points). The
+    # bootstrap expansion on the volume-halving split still missed 2% and 1.0%
+    # (d = 10, 100 points); split by dynesty's rule, 0.04% at d = 10. On an RM
+    # obliquity fit the bounds missed 12-22% of the constrained region and
+    # :unif put log Z 2 nats high.
+    ball(rng, d) = (x = randn(rng, d); x ./ norm(x) .* rand(rng)^(1 / d))
+    for (d, n) in ((4, 40), (10, 100), (12, 120))
+        rng = MersenneTwister(1)
+        outs = Float64[]
+        for _ in 1:20
+            x = reduce(hcat, [ball(rng, d) for _ in 1:n])
+            y = reduce(hcat, [ball(rng, d) for _ in 1:2000])
+            b = _NSB.fit(rng, _NSB.MultiEllipsoid, x; enlarge = 1.25, bootstrap = 5)
+            push!(outs, mean(!(c ∈ b) for c in eachcol(y)))
+        end
+        @test mean(outs) < 0.005
+    end
+    # A curved, connected region stays in few ellipsoids, as dynesty splits
+    # it: 500 points in a 10-d half annulus came in 2-3 (seeds 1-3), against
+    # 8-14 by the volume-halving rule. Two separate copies still come apart.
+    arc(rng) = (r = sqrt(0.64 + 0.36rand(rng)); θ = π * rand(rng);
+                vcat(r * cos(θ), r * sin(θ), 0.2 .* rand(rng, 8) .- 0.1))
+    for s in 1:3
+        rng = MersenneTwister(s)
+        x = reduce(hcat, [arc(rng) for _ in 1:500])
+        @test length(_NSB.fit(_NSB.MultiEllipsoid, x).ellipsoids) <= 3
+        @test length(_NSB.fit(_NSB.MultiEllipsoid, x; bic = false).ellipsoids) >= 8
+        y = hcat(x .* 0.1 .- 1, x .* 0.1 .+ 1)
+        @test length(_NSB.fit(_NSB.MultiEllipsoid, y).ellipsoids) >= 2
+    end
+    # the cube needs none, and only Rejection expands by default
+    @test _NSB.bootstrap_expansion(MersenneTwister(1), _NSB.NoBounds, rand(2, 10)) == 1.0
+    @test Nested(2, 50; proposal = _NSP.Rejection()).bootstrap == 5
+    @test Nested(2, 50; proposal = _NSP.RSlice()).bootstrap == 0
+end
+
+# A proposal that counts the starts it is handed at or below the likelihood
+# threshold, then draws by rejection. Counted in a global: `sample_parallel` deep-copies
+# the proposal for each thread.
+const _NSP_STARTS = Ref((0, 0))
+struct _NSPRecordStart <: _NSP.AbstractProposal end
+NestedSamplers.default_update_interval(::_NSPRecordStart, ndims) = 1.5
+function (::_NSPRecordStart)(rng, point, logl_star, bound, model; kwargs...)
+    _, l = NestedSamplers.prior_transform_and_loglikelihood(model, point)
+    n, below = _NSP_STARTS[]
+    _NSP_STARTS[] = (n + 1, below + (l <= logl_star))
+    return _NSP.Rejection()(rng, point, logl_star, bound, model)
+end
+
+@testset "nested starts its walks inside the constraint" begin
+    # Each batch replaces the K lowest live points with K walks constrained
+    # above the K-th; a walk must start at a live point inside that constraint,
+    # not at one of the dead points. The batch path drew starts among all live
+    # points, the K-1 below the threshold included: (K-1)/N of the walks, 14%
+    # here, started outside; and both paths could start at the dead point on
+    # the threshold, which dynesty never picks.
+    model = NestedModel(x -> -sum(abs2, (x .- 0.5) ./ 0.01) / 2, fill(Uniform(0, 1), 2))
+    for K in (1, 8)
+        spl = Nested(2, 50; bounds = _NSB.MultiEllipsoid, proposal = _NSPRecordStart())
+        _NSP_STARTS[] = (0, 0)
+        with_logger(NullLogger()) do
+            NestedSamplers.sample_parallel(MersenneTwister(3), model, spl; batch_size = K,
+                                           parallel = false, dlogz = 0.5)
+        end
+        n, below = _NSP_STARTS[]
+        @test n > 200
+        @test below == 0
+    end
+end
+
+@testset "batch nested credits each dead point its volume" begin
+    # Removing the K lowest of N live points, the j-th is the lowest of the
+    # N - j + 1 left, so the prior volume shrinks by that count. Shrinking it
+    # by N for each, as when every point is replaced before the next goes,
+    # put log Z (K - 1) H / (2N) high: +0.58 here (K = 16, N = 100, H = 6.5)
+    # over 40 seeds, against +0.01 now. A 2-d Gaussian in the unit square,
+    # log Z = 0; one run's error is 0.29.
+    mvn = MvNormal(fill(0.5, 2), 0.01^2 * [1 0.5; 0.5 1])
+    model = NestedModel(x -> logpdf(mvn, x), fill(Uniform(0, 1), 2))
+    zs = map(1:20) do s
+        spl = Nested(2, 100; bounds = _NSB.MultiEllipsoid, proposal = _NSP.Rejection())
+        _, st = with_logger(NullLogger()) do
+            NestedSamplers.sample_parallel(MersenneTwister(s), model, spl; batch_size = 16,
+                                           parallel = false, dlogz = 0.01)
+        end
+        st.logz
+    end
+    @test abs(mean(zs)) < 0.2          # 3 standard errors
+end

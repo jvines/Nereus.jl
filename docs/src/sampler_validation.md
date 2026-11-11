@@ -186,7 +186,7 @@ excludes truth while passing naive R-hat / ESS. The current matrix has
 | `pt_emcee` | **Solid** | Recovers all three; within-walker split-R-hat ≈ 1.01–1.09, good ESS. |
 | `pt` (in-house / Pigeons) | **Solid** | Recovers all three; reliable fixed-dim log Z. |
 | `nested` | **Solid** | Recovers all three at `n_live = 1500` (`bounds = :multi`, `proposal = :rslice`); very high ESS (~10⁴). At `n_live = 400` the eccentric ridge silently mis-resolved — closed by the higher default. |
-| `nested_ins` | **Solid** | Recovers all three; INS log Z stable. |
+| `nested_ins` | **Solid** | Recovers all three. |
 | `nested_dynamic` | **Solid** | Recovers all three with dynamic live-point reallocation. |
 | `nuts` | **Solid (1-planet); honest-fail (2-planet)** | Recovers `easy`/`eccentric` cleanly (R-hat ≈ 1.005, ESS ~300) after the mass-matrix + warm-start fix. On 2-planet it recovers the values but R-hat ≈ 1.9 / low ESS — a **loud** non-convergence (label switching) surfaced via `nuts_diagnostics`, not a silent-wrong. Run more / longer chains for multi-planet. |
 | `pt_whitening` | **Solid** | Recovers all three after the ensemble-per-temperature rebuild (tempered stretch within-temp + ensemble-fit whitening-flow swaps). |
