@@ -50,6 +50,11 @@ const M_SUN_G   = GM_SUN_CGS / G_CGS      # g
 const R_SUN_M   = 6.9570e8                # m
 const R_SUN_CM  = 6.9570e10               # cm
 const L_SUN_W   = 3.828e26                # W
+# Mean solar density, from the constants above (≈ 1.4098 g/cm³): a 1 M_sun,
+# 1 R_sun star has ρ★ = 1 exactly in the solar units `rho_s` is sampled in.
+# Not a rounded literal: 1.411 made the ρ★ route and the (M_s, R_s) route to
+# a/R★ differ by 1.4e-4 for the same star.
+const RHO_SUN_CGS = 3 * M_SUN_G / (4π * R_SUN_CM^3)   # g cm^-3
 
 # --- Jupiter ---
 const M_JUP_KG  = 1.89813e27              # kg

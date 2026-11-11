@@ -62,12 +62,17 @@ from. The chain refines K via within-model MCMC; this estimator just
 needs to be in the right order of magnitude so the proposed K isn't
 absurd.
 
-Convention: K[m/s] = 0.6391 · P[d]^(-1/3) · M_p[M_⊕] · M_s[M_⊙]^(-2/3)
-which matches Lovis & Fischer (2010) eq 14 with sin i=1, e=0.
+Exact for a circular edge-on orbit: the mass function inverted for K,
+
+    K³ = 2πG/P · M_p³ / (M_s + M_p)²,
+
+with no `M_p << M_s` shortcut (the old 0.6391 P^(-1/3) M_p M_s^(-2/3) form).
 """
 function _K_from_mass(M_p_earth::Float64, P_days::Float64, M_s_solar::Float64)
     (P_days <= 0 || M_s_solar <= 0) && return 0.0
-    return 0.6391 * P_days ^ (-1.0/3.0) * M_p_earth * M_s_solar ^ (-2.0/3.0)
+    M_p = M_p_earth * (_ME / _MS)                 # M_sun
+    f_M = M_p^3 / (M_s_solar + M_p)^2
+    return cbrt(f_M / (_F_M_FACTOR * P_days))
 end
 
 """
@@ -108,8 +113,9 @@ chen_kipping_mass(R_p_earth::Real) =
 """
     K_estimate(M_p_earth, P_days, M_s_solar) -> K [m/s]
 
-Circular, edge-on (`sin i = 1`) RV semi-amplitude (Lovis & Fischer 2010
-eq. 14 with e=0).
+Circular, edge-on (`sin i = 1`) RV semi-amplitude from the exact mass
+function (`M_s + M_p` in Kepler III; Lovis & Fischer 2010 eq. 14 without the
+`M_p << M_s` limit).
 """
 K_estimate(M_p_earth::Real, P_days::Real, M_s_solar::Real) =
     _K_from_mass(Float64(M_p_earth), Float64(P_days), Float64(M_s_solar))

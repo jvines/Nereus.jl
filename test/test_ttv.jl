@@ -414,13 +414,25 @@ function _nb_predict(fx; t_min = nothing)
     return st
 end
 
+# The reference masses are the TRUE masses from the exact mass function, found
+# here by a plain fixed point on q = M_p/M_star that uses only `msec_from_K`
+# (itself checked against a BigFloat root): a/R* from Kepler III with M_star + M_p,
+# cos i from b at that a/R*, then the mass function at that sin i. Star: M_s = 1.
+function _exact_mass_ratio(o, b)
+    a0 = cbrt(Nereus.GM_SUN_CGS * (o.P * 86400)^2 / (4π^2)) / Nereus.R_SUN_CM
+    q = 0.0
+    for _ in 1:60
+        a = a0 * cbrt(1 + q)
+        ci = b * (1 + o.e * sin(o.ω)) / (a * (1 - o.e^2))
+        q = Nereus.msec_from_K(o.K, o.P, o.e, sqrt(1 - ci^2), 1.0)
+    end
+    return q
+end
+
 # TTVFaster called directly on transits n0 .. n0 + length - 1 of each planet,
 # the planets at their transit times with ϖ = ω - π/2.
 function _nb_direct(fx, st)
-    # The N-body backends take their masses from the closed form
-    # (`_msini_lowmass`, part of the model); `msini` is the exact one now.
-    pl = [Planet_plane_hk(Nereus._msini_lowmass(1.0, o.K, o.P, o.e) /
-                              sind(acosd(fx.bs[k] / fx.a_Rs[k])) * Nereus._MJ_PER_MS,
+    pl = [Planet_plane_hk(_exact_mass_ratio(o, fx.bs[k]),
                           o.P, o.Tc, o.e * sin(o.ω), -o.e * cos(o.ω))
           for (k, o) in enumerate(fx.orb)]
     ts = [[o.Tc + n * o.P for n in st.n0s[k] .+ (0:(length(st.δts[k]) - 1))]

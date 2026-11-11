@@ -69,60 +69,54 @@ function mass_function(K::Real, P::Real, e::Real)
 end
 
 """
+    mass_ratio_from_F(F) -> x
+
+Positive root of `x³ − F x² − 2F x − F = 0`, the mass function in the
+variables `x = M_sec / M_pri` and `F = f / (M_pri sin³ i)`
+(`x³ = F (1 + x)²`), by Cardano's method.
+
+The cubic has exactly one real root for every `F > 0`: its discriminant is
+`−F² (4F + 27) < 0`. Descartes allows two further negative roots, but they are
+complex, so the trigonometric branch is never needed. With `x = y + F/3` the
+depressed cubic is `y³ + p y + q = 0`,
+
+    p = −2F − F²/3,   q = −F − 2F²/3 − 2F³/27,
+
+and `(q/2)² + (p/3)³ = F² (4F + 27) / 108` exactly, so the square root needs no
+subtraction. `y = u + v` with `u = ∛(−q/2 + √D)`; the other cube root
+`−q/2 − √D` cancels catastrophically at small `F`, so `v = −p/(3u)` instead.
+Every term is positive: no cancellation anywhere on `F ∈ (0, ∞)`.
+
+Branches only on the primal value, so it is type-generic and ForwardDiff-safe.
+`F ≤ 0` returns 0.
+"""
+@inline function mass_ratio_from_F(F::T) where {T<:Real}
+    F > 0 || return zero(T)
+    three = T(3)
+    sD = F * sqrt((4F + 27) / 108)
+    mq2 = F / 2 + F^2 / three + F^3 / 27     # −q/2 > 0
+    mp3 = (2F + F^2 / three) / three         # −p/3 > 0
+    u = cbrt(mq2 + sD)
+    return u + mp3 / u + F / three
+end
+
+"""
     msec_from_K(K, P, e, sin_i, M_pri) -> M_sec
 
-Solve f(M) = M_sec³ sin³ i / (M_pri + M_sec)² for M_sec given the
-observed RV semi-amplitude `K`, period `P`, eccentricity `e`, sine-
-inclination `sin_i`, and primary mass `M_pri` (M_sun).
-
-Closed-form not available in general — the equation is cubic in M_sec.
-Solve via Newton iteration starting from the M_sec ≪ M_pri approximation
-M_sec ≈ (f_M · M_pri²)^(1/3) / sin i. Typically converges in 3–5
-iterations.
+Companion mass from the exact RV mass function
+`M_sec³ sin³ i / (M_pri + M_sec)² = f(K, P, e)`, no `M_sec << M_pri`
+approximation. The cubic in `x = M_sec / M_pri` is solved analytically
+([`mass_ratio_from_F`](@ref), Cardano), with `F = f / (M_pri sin³ i)`.
 
 `K` in m/s, `P` in days, `M_pri` in M_sun. Returns M_sec in M_sun.
-
-For low-mass companions (planets) the starter is already an excellent
-approximation and one Newton step is enough.
 """
 function msec_from_K(K::Real, P::Real, e::Real, sin_i::Real,
                      M_pri::Real)
     sin_i_safe = max(abs(sin_i), oftype(sin_i, 1e-12))
     K_safe = max(K, zero(K))
     f_M = mass_function(K_safe, P, e)
-    # Reparametrize via q = M_sec / M_total ∈ [0, 1):
-    #   f_M = M_sec³ sin³i / M_total²
-    #   M_sec = q M_pri / (1 - q)
-    #   ⇒ q³ × M_pri × sin³i / (1-q) = f_M
-    #   ⇒ q³ + r q − r = 0,  with r = f_M / (M_pri sin³i) × (1-q) absorbed
-    # Solve the cubic q³ × sin³i × M_pri − f_M (1-q) = 0 by damped
-    # Newton starting at the small-q approximation, with backtracking
-    # to keep q ∈ (0, 1).
-    sin3 = sin_i_safe^3
-    # Small-q starter: q ≈ (f_M / (sin³i × M_pri))^(1/3)
-    r_const = f_M / (sin3 * M_pri)
-    q_start = cbrt(r_const)
-    q = min(max(q_start, oftype(q_start, 1e-12)), oftype(q_start, 0.999))
-
-    # 30 Newton iterations: F(q) = q³ × sin³i × M_pri − f_M (1-q)
-    #   F'(q) = 3 q² × sin³i × M_pri + f_M
-    @inbounds for _ in 1:30
-        F  = q^3 * sin3 * M_pri - f_M * (1 - q)
-        Fp = 3 * q^2 * sin3 * M_pri + f_M
-        Δ  = F / Fp
-        # Backtrack: keep q ∈ (1e-12, 0.999)
-        step = Δ
-        for _bt in 1:20
-            q_new = q - step
-            if q_new > oftype(q, 1e-12) && q_new < oftype(q, 0.999)
-                q = q_new
-                break
-            end
-            step /= 2
-        end
-    end
-    # Convert back to M_sec
-    return q * M_pri / (1 - q)
+    F = f_M / (sin_i_safe^3 * M_pri)
+    return mass_ratio_from_F(F) * M_pri
 end
 
 # ---------------------------------------------------------------------

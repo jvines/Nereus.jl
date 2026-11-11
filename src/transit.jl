@@ -424,30 +424,80 @@ end
 end
 
 """
-    rho_s_to_a_Rs(rho_s, P) -> a/R*
+    rho_s_to_a_Rs(rho_s, P, q = 0) -> a/R*
 
-Kepler's third law: a/R* = (G ρ_s P² / (3π))^(1/3).
-ρ_s in solar units (ρ_sun), P in days.
+Kepler's third law with the TOTAL mass: `(a/R*)³ = G ρ_s P² (1 + q) / (3π)`,
+`q = M_p / M★`. ρ_s in solar units (`RHO_SUN_CGS` ≈ 1.4098 g/cm³, so a 1 M☉,
+1 R☉ star is ρ_s = 1), P in days; G is `G_CGS`.
+
+`q` defaults to 0, which is the case when nothing is known about the
+companion's mass, and then the light curve only measures the combination
+`ρ★ (1 + q)`: a transit-only fit has no mass to put in, so the density it
+reports carries that factor (≈ 1 + 1e-3 for a Jupiter, invisible; not for a
+brown dwarf or a stellar companion). Where the mass IS determinable (a sampled
+`K` or `M_sec`), the model passes it: see `planet_geometry`, which solves `q`
+jointly with the inclination implied by the impact parameter.
 """
-function rho_s_to_a_Rs(rho_s::Real, P::Real)
-    # G * ρ_sun * day² / (3π) in CGS, then take cube root
-    # Using: G = 6.674e-8 cm³/(g s²), ρ_sun = 1.411 g/cm³, day = 86400 s
-    # G * ρ_sun = 9.413e-8 /s², * day² = 9.413e-8 * 86400² = 702.6
-    # Factor: (G ρ_sun day² / (3π))^(1/3) = (702.6 / 3π)^(1/3) * (ρ/ρ_sun * P²)^(1/3)
-    # = 4.209 * (ρ/ρ_sun * P²)^(1/3)
-    # Actually, let me just use the exact constant.
-    # a/R* = ( (G / (3π)) * ρ_s * P² )^(1/3)
-    # with ρ_s in g/cm³ and P in seconds:
-    # G/(3π) = 6.674e-8 / (3π) = 7.077e-9 cm³/(g s²)
-    # P_sec = P * 86400
-    # a/R* = (7.077e-9 * ρ_s * (P*86400)²)^(1/3)
-    #
-    # For ρ_s in solar units (ρ_sun = 1.411 g/cm³):
-    # a/R* = (7.077e-9 * 1.411 * ρ_rel * 86400² * P²)^(1/3)
-    #       = (7.077e-9 * 1.411 * 7.4649e9 * ρ_rel * P²)^(1/3)
-    #       = (74.48 * ρ_rel * P²)^(1/3)
-    rho_cgs = rho_s * 1.411  # convert solar units to g/cm³
-    G_cgs = 6.674e-8         # cm³ g⁻¹ s⁻²
+function rho_s_to_a_Rs(rho_s::Real, P::Real, q::Real = 0)
+    # a/R* = ( G ρ P² (1+q) / (3π) )^(1/3), ρ in g/cm³ and P in seconds;
+    # ρ_s in solar units is ρ_rel · RHO_SUN_CGS g/cm³.
+    rho_cgs = rho_s * RHO_SUN_CGS
+    G_cgs = G_CGS
     P_sec = P * 86400.0
-    return cbrt(G_cgs * rho_cgs * P_sec^2 / (3π))
+    return cbrt(G_cgs * rho_cgs * P_sec^2 * (1 + q) / (3π))
+end
+
+const _Q_FIXEDPOINT_MAX = 60
+const _Q_FIXEDPOINT_RTOL = 1e-15
+
+"""
+    coupled_geometry(a0, b, e, sinw, f, M_pri; scale_a = true) -> (a_Rs, q, cos_i)
+
+The transit geometry and the companion mass solved together.
+
+`a0` is `a/R★` for a massless companion (from ρ★ or from `(M★, R★)` through
+Kepler III), `b` the impact parameter, `e`, `sinw` the orbit, `f` the RV mass
+function `P K³ (1−e²)^{3/2} / (2πG)` [M_sun] and `M_pri` the host mass [M_sun].
+The unknown is `q = M_p / M★`, and everything hangs on it:
+
+    a/R★   = a0 (1 + q)^{1/3}                      (Kepler III, M★ + M_p)
+    cos i  = b (1 + e sin ω) / ((a/R★)(1 − e²))    (transit geometry)
+    q      = x(f / (M★ sin³ i))                    (exact mass function)
+
+with `x` the Cardano root [`mass_ratio_from_F`](@ref). It is a fixed point in
+`q` started at 0, which contracts at about `q/3` per pass, so a planet needs
+two or three passes and `q = 0.5` about twenty; it runs until the primal value
+settles to 1e-15 (one more pass lets dual parts catch up), capped at
+$(_Q_FIXEDPOINT_MAX). Branches only on primal values: ForwardDiff-safe.
+
+`scale_a = false` is for an `a/R★` that is itself the sampled quantity (`a0`
+is then taken as final and `q` only follows from the geometry). A non-positive
+or non-finite `f` or `M_pri` means no mass information: `q = 0`.
+"""
+function coupled_geometry(a0::Real, b::Real, e::Real, sinw::Real, f::Real,
+                          M_pri::Real; scale_a::Bool = true)
+    T = promote_type(typeof(a0), typeof(b), typeof(e), typeof(sinw),
+                     typeof(f), typeof(M_pri), Float64)
+    omE = 1 - e * e
+    kk = b * (1 + e * sinw) / omE              # cos i = kk / a_Rs
+    fv, Mv = ForwardDiff_value(f), ForwardDiff_value(M_pri)
+    q = zero(T)
+    if isfinite(fv) && fv > 0 && isfinite(Mv) && Mv > 0
+        settled = false
+        for _ in 1:_Q_FIXEDPOINT_MAX
+            a = scale_a ? a0 * cbrt(1 + q) : convert(T, a0)
+            ci = clamp(kk / a, -one(T), one(T))
+            s2 = 1 - ci * ci
+            s3 = max(s2 * sqrt(max(s2, zero(T))), T(1e-36))
+            qn = mass_ratio_from_F(f / (M_pri * s3))
+            qv, qnv = ForwardDiff_value(q), ForwardDiff_value(qn)
+            done = abs(qnv - qv) <= _Q_FIXEDPOINT_RTOL * abs(qnv)
+            q = qn
+            settled && break
+            settled = done
+        end
+    end
+    a = scale_a ? a0 * cbrt(1 + q) : convert(T, a0)
+    ci = clamp(kk / a, -one(T), one(T))
+    return a, q, ci
 end

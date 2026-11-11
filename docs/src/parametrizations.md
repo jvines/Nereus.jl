@@ -221,11 +221,12 @@ The two transit-geometry slots (present only for PM planets,
 ### `use_rho_s::Bool` — stellar-density parametrisation
 
 - `false` (default) — each transiting planet's `a/R_⋆` is derived from
-  `P + M_⋆ + R_⋆` via Kepler III (so `M_s` and `R_s` must be set on
-  `Params`).
+  `P + M_⋆ + R_⋆` via Kepler III with the total mass `M_⋆ + M_p` (so `M_s` and
+  `R_s` must be set on `Params`).
 - `true` — a single **shared** stellar density `rho_s` slot is sampled
   (`src/model.jl:1832`) and `a/R_⋆` is derived from `rho_s + P` for
-  every transiting planet (`rho_s_to_a_Rs`). Use for multi-planet
+  every transiting planet (`rho_s_to_a_Rs`, with the total mass:
+  `(a/R_⋆)³ = G ρ_⋆ P² (1 + q)/(3π)`, `q = M_p/M_⋆`). Use for multi-planet
   transiting systems: `rho_s` is one physical quantity shared across
   the system, and sampling it directly trades N per-planet
   density-equivalent parameters for one. Standard for TESS-style
@@ -293,6 +294,32 @@ None of the derived masses or separations uses the `M_p << M_★` approximation:
 
 A brown dwarf (0.08 M_⊙ about 0.5 M_⊙) was 9 % off in `msini` with the closed
 form; a Jupiter about a Sun-like star moves by 0.07 %.
+
+The mass function is solved analytically. In `x = M_p/M_⋆` and
+`F = f/(M_⋆ sin³i)` it is `x³ − F x² − 2F x − F = 0`; its discriminant,
+`−F²(4F + 27)`, is negative for every `F > 0`, so there is exactly one real
+root and Cardano's formula gives it (`mass_ratio_from_F`) with no cancellation
+anywhere, to ≈ 4·10⁻¹⁶ relative over `F = 10⁻¹⁶ … 10⁴`.
+
+**The transit and the companion's mass.** The planet is in the transit through
+Kepler III, so a light curve measures `ρ_⋆(1 + q)`, not `ρ_⋆`. Where the planet's
+mass is determinable (a transiting planet with a sampled `K` or `M_sec`:
+`RVPM`, `RVPMAS`) the model solves `q`, `a/R_⋆` and `cos i` together
+(`planet_geometry`, `coupled_geometry`):
+
+    a/R_⋆ = a₀ (1 + q)^(1/3),   cos i = b(1 + e sin ω)/((a/R_⋆)(1 − e²)),
+    q = x( f / (M_⋆ sin³i) ),
+
+a fixed point started at `q = 0` that contracts at about `q/3` per pass (twenty
+passes at `q = 0.5`; two or three for a planet). `a₀` is the value for a massless
+companion, from `ρ_⋆` or from `(M_⋆, R_⋆)`. `M_⋆` is `astrom_M_pri` (the sampled
+`M_pri`, else `M_s`; for a `rho_s` model with neither, `ρ_⋆ R_⋆³`), the same star
+the RV mass function uses. A **transit-only** planet has no mass to put in: `q = 0`,
+and the fitted `rho_s` is then, strictly, `ρ_⋆(1 + q)` (invisible for a
+planet, 10⁻³ for a Jupiter; not for a brown dwarf or a stellar companion).
+`a_Rs`, `a_au`, `inc_deg`-dependent quantities (`T14`, `Teq`, `S_earth`, density,
+TSM/ESM) follow from the coupled `a/R_⋆`, and `rho_star_transit` is
+`ρ_⋆` once `1 + q` is divided out where `q` is known.
 
 ### `obs_prior::Bool` — O'Neil 2019 observation-based prior
 
