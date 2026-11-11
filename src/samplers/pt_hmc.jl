@@ -320,10 +320,20 @@ and the `EvidenceReport`.
   refused until `n_pilot` is given the original run's value.
 - `betas=nothing` : custom β-ladder (overrides default + disables adaptation)
 - `warm_start=true` : start from a short pt_emcee pre-search. With it off the
-  starts are prior draws, and the seams of the full-circle angles are placed
-  first by a short pathfinder pilot (`_seam_pilot!`). Either way the chains
-  re-cut them together at the phase boundaries of each warm-up's adaptation
-  (`_hmc_recut!`, voted by the β = 1 rung).
+  starts are scouted prior draws (`n_scouts`), and the seams of the
+  full-circle angles are placed first by a short pathfinder pilot
+  (`_seam_pilot!`). Either way the chains re-cut them together at the phase
+  boundaries of each warm-up's adaptation (`_hmc_recut!`, voted by the β = 1
+  rung).
+- `n_scouts=16` : without the warm start, every chain starts from one of the
+  prior draws, each moved by slice updates until it stops climbing, that the
+  bound of the stranded-walker pruning keeps (src/samplers/scouts.jl), as in
+  `sample_nuts`. Each chain's kernel is frozen at the end of its warm-up, so
+  where the warm-up ran decides how it samples. From one prior draw each, the
+  β = 1 chain of an RV + IAD companion ended its warm-up on a plateau 1,500
+  nats below the mode with a metric ten times too wide; brought to the mode by
+  a swap, it accepted no trajectory, and the run reported one point for all
+  1000 sweeps. `0` starts every chain from one draw.
 - `seed=1`, `progress=true`
 - `checkpoint=nothing` : path of a state file. The sampler writes its whole
   state there (the ladder; every temperature's positions, logL, mass matrix and
@@ -364,7 +374,9 @@ function sample_pt_hmc(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    n_scouts::Int = 16,
 )
+    n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     target_accept = Float64(target_accept)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
@@ -398,7 +410,7 @@ function sample_pt_hmc(
         warm_start || isempty(seam_indices(target.params)) ||
             _seam_pilot!(target, rand(rng, 1:typemax(Int32)))
         b = warm_start ? _warmstart_points(target, n, rng) :
-                         [_draw_from_prior(target, rng) for _ in 1:n]
+                         _cold_starts(target, n, rng, n_scouts)
         [transform_forward(x, target.transform) for x in b]
     end
 
@@ -415,7 +427,9 @@ function sample_pt_hmc(
         # The seams re-cut during each warm-up (`_hmc_recut!`): a checkpoint
         # from before that is another run, as is one from before polar
         # charts moved.
-        seam_recut = :adaptation_phases, polar_chart_key(target.params)...)
+        seam_recut = :adaptation_phases, polar_chart_key(target.params)...,
+        # Not the default: the final run's starts are drawn after the pilot.
+        (n_scouts == 16 ? (;) : (; n_scouts))...)
     ck = nothing
     if resume
         ck = try

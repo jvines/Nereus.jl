@@ -388,10 +388,16 @@ chains, log_ev, report = sample_pt_hmc(target;
     adapt_ladder       = true,          # pilot → re-grid β by √Var(logL) → final
     betas              = nothing,       # custom ladder; disables adaptation
     warm_start         = true,
+    n_scouts           = 16,            # warm_start = false: scouted prior draws
     seed               = 1,
     progress           = true,
 )
 ```
+
+With `warm_start = false` the chains start from scouted prior draws (as in
+`sample_nuts`). Each chain's kernel is frozen at the end of its warm-up, so a
+warm-up run on a plateau far below the mode leaves the β = 1 chain unable to
+move once a swap brings it there.
 
 `adapt_ladder` runs a short pilot, re-grids β by thermodynamic length
 (√Var logL), then the final run — minimising TI discretisation error.
