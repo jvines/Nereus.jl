@@ -356,14 +356,15 @@ function circular_relabel_point!(x::AbstractVector, params::Params)
 end
 
 # ------------------------------------------------------------------
-# Cyclic inclination: folded, not re-charted (see the header).
+# Polar angles (cyclic inclinations): folded, not re-charted (see the header).
 # ------------------------------------------------------------------
 
 """
     cyclic_inclination_indices(params) -> Vector{Int}
 
-Positions, in the unfrozen vector, of the orbital inclinations sampled on a
-circle (layout prior [`WrappedSinePrior`](@ref)).
+Positions, in the unfrozen vector, of the polar angles sampled on a circle --
+orbital and stellar inclinations under [`WrappedSinePrior`](@ref) or
+[`PolarFoldPrior`](@ref) (see [`is_cyclic_inclination`](@ref)).
 """
 cyclic_inclination_indices(params::Params) =
     Int[i for (i, ps) in enumerate(params.layout.unfrozen_priors)
@@ -377,18 +378,26 @@ cyclic_inclination_names(params::Params) =
                 for i in cyclic_inclination_indices(params))
 
 """
-    fold_cyclic_inclinations!(x, params; idx = cyclic_inclination_indices(params)) -> x
+    fold_cyclic_inclinations!(x, params; idx = cyclic_inclination_indices(params),
+                              sf = spin_flip(params), decide_from = nothing) -> x
 
-Fold the cyclic inclinations of `x` to `[0, π]` with
-[`fold_inclination`](@ref). `x` is an unfrozen-vector point, or any array whose
-LAST dimension runs over the unfrozen parameters (a samples matrix, a sampler's
-`state[t, w, d]` or ring buffer). Exact: the log-density is the same at `x` and
-at its fold (the likelihood bit for bit; the prior up to rounding in
-`|sin x|`), so cached log-densities stay valid. A no-op without one.
+Fold the cyclic inclinations of `x` to `[0, π]` with [`fold_inclination`](@ref),
+then put every point in one representative of the stellar spin flip when the
+model has that symmetry ([`spin_flip`](@ref); `sf`): `(i★, λ)` or
+`(π - i★, λ + π)`, whichever lies on the positive side of the layout's spin
+axis. `x` is an unfrozen-vector point, or any array whose LAST dimension runs
+over the unfrozen parameters (a samples matrix, a sampler's `state[t, w, d]`
+or ring buffer). With `decide_from` (an array of points in the same layout,
+e.g. the cold walkers) the spin axis is first re-chosen from those points
+([`decide_spin_axis!`](@ref)).
+
+Exact: the log-density is the same at `x` and at its image (the likelihood bit
+for bit for the fold, to rounding in sin/cos for the flip; the prior up to
+rounding), so cached log-densities stay valid. A no-op without either.
 """
 function fold_cyclic_inclinations!(x::AbstractArray, params::Params;
-                                   idx = cyclic_inclination_indices(params))
-    isempty(idx) && return x
+                                   idx = cyclic_inclination_indices(params),
+                                   sf = spin_flip(params), decide_from = nothing)
     nd = ndims(x)
     for d in idx
         v = selectdim(x, nd, d)
@@ -396,23 +405,34 @@ function fold_cyclic_inclinations!(x::AbstractArray, params::Params;
             v[k] = fold_inclination(v[k])
         end
     end
+    sf === nothing && return x
+    if decide_from !== nothing
+        P = decide_from
+        npd = ndims(P)
+        decide_spin_axis!(params, vec(selectdim(P, npd, sf.istar)),
+                          vec(selectdim(P, npd, sf.lams[1])))
+    end
+    _spin_canonical!(x, params, sf)
     return x
 end
 
 """
     fold_cyclic_inclinations!(chains, params) -> chains
 
-Fold every draw of each cyclic inclination in `chains` to `[0, π]`, in place.
-Run by [`recenter_circular!`](@ref), so `run_job` and `fit_*` hand on folded
-draws only. Columns missing from `chains` are skipped.
+Fold every draw of each cyclic inclination in `chains` to `[0, π]`, in place,
+and -- under the stellar spin-flip symmetry ([`spin_flip`](@ref)) -- choose the
+spin axis from the draws and put every draw in its representative. Run by
+[`recenter_circular!`](@ref), so `run_job` and `fit_*` hand on folded draws
+only. Columns missing from `chains` are skipped.
 """
 function fold_cyclic_inclinations!(chains::MCMCChains.Chains, params::Params)
     idx = cyclic_inclination_indices(params)
     isempty(idx) && return chains
     A = chains.value.data
     vars = names(chains)
+    col_of(i) = findfirst(==(Symbol(params.layout.unfrozen_names[i])), vars)
     for i in idx
-        j = findfirst(==(Symbol(params.layout.unfrozen_names[i])), vars)
+        j = col_of(i)
         j === nothing && continue
         col = view(A, :, j, :)
         for k in eachindex(col)
@@ -420,7 +440,208 @@ function fold_cyclic_inclinations!(chains::MCMCChains.Chains, params::Params)
             x isa Real && (col[k] = fold_inclination(x))
         end
     end
+    sf = spin_flip(params)
+    sf === nothing && return chains
+    ji = col_of(sf.istar)
+    jl = [col_of(d) for d in sf.lams]
+    (ji === nothing || any(isnothing, jl)) && return chains
+    decide_spin_axis!(params, Float64.(vec(view(A, :, ji, :))),
+                      Float64.(vec(view(A, :, jl[1], :))))
+    n = params.layout.spin_axis
+    wins = [bounds(params.layout.unfrozen_priors[d]) for d in sf.lams]
+    for c in axes(A, 3), r in axes(A, 1)
+        i_s = Float64(A[r, ji, c]); λ1 = Float64(A[r, jl[1], c])
+        spin_canonical(i_s, λ1, n) && continue
+        A[r, ji, c] = π - i_s
+        for (q, j) in enumerate(jl)
+            A[r, j, c] = circular_relabel(Float64(A[r, j, c]) + π, wins[q]...)
+        end
+    end
     return chains
+end
+
+# ------------------------------------------------------------------
+# The stellar spin flip.
+#
+# Gravity darkening cannot tell a spin vector from its reverse: the brightness
+# map depends on the colatitude through cos²θ only, and the disc mean and
+# v_eq = v sin i★ / sin i★ through sin² i★ and cos² i★ (src/gravity_darkening.jl),
+# so (i★, λ_k) and (π - i★, λ_k + π) for every λ_k are one light curve, exactly.
+# The spin vector s = (sin i★ sin λ, sin i★ cos λ, cos i★) goes to -s.
+# Velocities -- an RM anomaly or a Doppler shadow -- measure the sense of the
+# rotation and break it.
+#
+# A bounded i★ on [0, π/2] once held one representative of each spin: a wall
+# at i★ = 90°, against which an equator-on star railed, and which split its
+# posterior into two λ lobes π apart with nothing to carry walkers between
+# them. Now i★ is a polar angle on the whole of [0, π] (`polar_lift`), the
+# samplers roam both representatives, and the draws are put in ONE: the one on
+# the positive side of an axis n, s·n ≥ 0. Whatever n is, that is exact -- each
+# draw is replaced by its own image under a symmetry of the posterior. n is
+# chosen so the cut, the great circle s·n = 0, sits where the posterior is
+# thinnest: the principal axis of the draws' scatter matrix E[s sᵀ] (the same
+# for s and -s). n = (0, 0, 1) is the old convention i★ ≤ 90°, right for a
+# star far from equator-on; for an equator-on star n lies in the sky plane, and
+# the cut is a λ, not i★ = 90°.
+# ------------------------------------------------------------------
+
+"""
+    SpinFlip(istar, lams)
+
+Unfrozen positions of the stellar inclination and of every λ_k the spin flip
+moves with it (see [`spin_flip`](@ref)).
+"""
+struct SpinFlip
+    istar::Int
+    lams::Vector{Int}
+end
+
+"""
+    spin_flip(params) -> Union{Nothing, SpinFlip}
+
+The stellar spin-flip symmetry `(i★, λ_k) → (π - i★, λ_k + π)` when the
+posterior has it exactly, else `nothing`. It needs:
+
+* gravity darkening, the only reader of `i_star`, and no measurement of the
+  sense of rotation: no RM anomaly, no Doppler tomography (mode or residual
+  maps);
+* `i_star` a polar angle on its circle (`is_cyclic_inclination`) whose prior is
+  symmetric about 90° (Uniform or Sine on `[0, π]`);
+* every planet with an obliquity carries its λ_k as a full-circle angle under a
+  uniform prior over one period, so `λ + π` costs nothing.
+
+A Normal prior on `i_star` off 90°, a narrowed λ prior or a fixed one breaks
+the symmetry, and the representatives are then not equally probable: no
+canonicalisation, the sampler reports both.
+"""
+function spin_flip(params::Params)
+    L = params.layout
+    sys = L.systemic
+    sys.i_star > 0 || return nothing
+    modes = params.config.planet_modes
+    any(m -> has_any_rm(m) || has_dt(m), modes) && return nothing
+    isempty(sys.tomo_sigma_line) || return nothing
+    di = findfirst(==(sys.i_star), L.unfrozen_idx)
+    di === nothing && return nothing
+    ps = L.unfrozen_priors[di]
+    is_cyclic_inclination(ps) || return nothing
+    if ps.dist isa PolarFold
+        ps.dist.base.dist isa Distributions.Uniform || return nothing
+    end
+    lams = Int[]
+    for k in eachindex(modes)
+        has_obliquity(modes[k]) || continue
+        name = "lambda_k$k"
+        d = findfirst(==(name), L.unfrozen_names)
+        d === nothing && return nothing
+        pl = L.unfrozen_priors[d]
+        (is_circular(name, pl, params.config) &&
+         (pl.dist isa Distributions.Uniform || pl.dist isa WrappedUniform)) ||
+            return nothing
+        push!(lams, d)
+    end
+    isempty(lams) && return nothing
+    return SpinFlip(di, lams)
+end
+
+# The spin vector of (i★, λ), λ measured as in src/gravity_darkening.jl.
+@inline _spin_vec(i::Real, λ::Real) =
+    (sin(i) * sin(λ), sin(i) * cos(λ), cos(i))
+
+"""
+    spin_canonical(i_star, λ, n) -> Bool
+
+Whether `(i_star, λ)` is the reported representative of its spin: `s·n ≥ 0`.
+"""
+@inline function spin_canonical(i::Real, λ::Real, n::AbstractVector)
+    s = _spin_vec(i, λ)
+    return s[1] * n[1] + s[2] * n[2] + s[3] * n[3] >= 0
+end
+
+"""
+    decide_spin_axis!(params, i_star, λ) -> n
+
+Choose the spin-flip axis from draws of the (folded) stellar inclination and
+the first λ: the principal axis of `E[s sᵀ]`, so the cut `s·n = 0` sits where
+the draws are thinnest. The current axis is kept unless the new one cuts
+significantly fewer draws (3 Poisson σ), so a posterior with no preferred axis
+does not move it on noise.
+"""
+function decide_spin_axis!(params::Params, istar::AbstractVector, lam::AbstractVector)
+    T = zeros(3, 3)
+    S = NTuple{3,Float64}[]
+    for (i, λ) in zip(istar, lam)
+        (isfinite(i) && isfinite(λ)) || continue
+        s = _spin_vec(fold_inclination(Float64(i)), Float64(λ))
+        push!(S, s)
+        for a in 1:3, b in 1:3
+            T[a, b] += s[a] * s[b]
+        end
+    end
+    n_cur = params.layout.spin_axis
+    isempty(S) && return n_cur
+    E = LinearAlgebra.eigen(LinearAlgebra.Symmetric(T))
+    n_new = E.vectors[:, argmax(E.values)]
+    near(n) = count(s -> abs(s[1] * n[1] + s[2] * n[2] + s[3] * n[3]) < sind(5), S)
+    c_cur, c_new = near(n_cur), near(n_new)
+    if c_new + 3 * sqrt(c_new + 1) < c_cur
+        n_cur .= n_new ./ LinearAlgebra.norm(n_new)
+    end
+    return n_cur
+end
+
+# Put every point of `x` (last dimension = the unfrozen vector) in the
+# representative on the positive side of the layout's spin axis. λ's are
+# relabelled into their current windows after the + π.
+function _spin_canonical!(x::AbstractArray, params::Params, sf::SpinFlip)
+    n = params.layout.spin_axis
+    wins = [bounds(params.layout.unfrozen_priors[d]) for d in sf.lams]
+    nd = ndims(x)
+    if nd == 1
+        _spin_canonical_point!(x, sf, n, wins)
+        return x
+    end
+    for I in CartesianIndices(axes(x)[1:nd-1])
+        _spin_canonical_point!(view(x, I, :), sf, n, wins)
+    end
+    return x
+end
+
+@inline function _spin_canonical_point!(v::AbstractVector, sf::SpinFlip, n, wins)
+    i = fold_inclination(v[sf.istar])
+    spin_canonical(i, v[sf.lams[1]], n) && return v
+    v[sf.istar] = oftype(i, π) - i
+    for (q, d) in enumerate(sf.lams)
+        v[d] = circular_relabel(v[d] + π, wins[q]...)
+    end
+    return v
+end
+
+"""
+    n_symmetry_folds(params) -> Int
+
+How many two-to-one symmetries the reported draws are folded through: one per
+cyclic inclination, one more for the stellar spin flip. An evidence estimator
+that integrates the folded posterior with the unfolded density finds
+`Z / 2^n` and adds `n log 2`.
+"""
+n_symmetry_folds(params::Params) =
+    length(cyclic_inclination_indices(params)) + (spin_flip(params) === nothing ? 0 : 1)
+
+"""
+    in_folded_domain(x, params, sf = spin_flip(params)) -> Bool
+
+Whether the unfrozen-vector point `x` (bounded space) is a reported
+representative: every cyclic inclination in `[0, π]` and, under the spin flip,
+on the positive side of the spin axis.
+"""
+function in_folded_domain(x::AbstractVector, params::Params, sf = spin_flip(params);
+                          cinc = cyclic_inclination_indices(params))
+    for j in cinc
+        0 <= x[j] <= π || return false
+    end
+    sf === nothing && return true
+    return spin_canonical(x[sf.istar], x[sf.lams[1]], params.layout.spin_axis)
 end
 
 # ------------------------------------------------------------------
@@ -595,3 +816,73 @@ function circular_contiguous(v::AbstractVector{<:Real};
     end
     return out
 end
+
+# ------------------------------------------------------------------
+# Evidence estimators integrate the FOLDED posterior: every draw put in its
+# reported representative, the density 2^n p* there (n = `n_symmetry_folds`)
+# and nothing outside. `SpinCanon` freezes the spin flip, its axis and the λ
+# windows for one such pass, so every draw and every proposal is judged by the
+# same cut.
+# ------------------------------------------------------------------
+
+"""
+    SpinCanon(params) -> Union{Nothing, SpinCanon}
+
+The stellar spin flip of `params` with a copy of its current axis and λ
+windows, or `nothing` without the symmetry ([`spin_flip`](@ref)).
+"""
+struct SpinCanon
+    sf::SpinFlip
+    axis::Vector{Float64}
+    wins::Vector{NTuple{2,Float64}}
+end
+
+function spin_canon(params::Params)
+    sf = spin_flip(params)
+    sf === nothing && return nothing
+    return SpinCanon(sf, copy(params.layout.spin_axis),
+                     NTuple{2,Float64}[Float64.(bounds(params.layout.unfrozen_priors[d]))
+                                       for d in sf.lams])
+end
+
+"""
+    spin_canon!(x, sc) -> x
+
+Put the bounded-space point `x` (its cyclic inclinations already folded) in
+the reported representative of its spin. A no-op for `sc === nothing`.
+"""
+spin_canon!(x::AbstractVector, ::Nothing) = x
+spin_canon!(x::AbstractVector, sc::SpinCanon) =
+    _spin_canonical_point!(x, sc.sf, sc.axis, sc.wins)
+
+"""
+    spin_canon_ok(y, sc, pt) -> Bool
+
+Whether the point `y` -- in the target's space, `pt` its transform or
+`nothing` -- is the reported representative of its spin. The stellar
+inclination is untransformed (identity transform on a cyclic inclination);
+λ is mapped back to bounded space for the test.
+"""
+spin_canon_ok(y::AbstractVector, ::Nothing, pt) = true
+function spin_canon_ok(y::AbstractVector, sc::SpinCanon, pt)
+    j = sc.sf.lams[1]
+    λ = pt === nothing ? y[j] : _bounded_coord(y[j], j, pt)
+    return spin_canonical(y[sc.sf.istar], λ, sc.axis)
+end
+
+# One coordinate of `transform_inverse`.
+@inline function _bounded_coord(yj::Real, j::Int, pt)
+    tid = pt.type_ids[j]
+    tid == TRANSFORM_IDENTITY && return yj
+    lo = pt.lowers[j]
+    tid == TRANSFORM_LOGIT && return lo + (pt.uppers[j] - lo) / (1 + exp(-yj))
+    return lo + exp(yj)
+end
+
+"""
+    n_folds(sc, cinc) -> Int
+
+`length(cinc)` plus one under the spin flip: the `log 2`s an estimator that
+integrates the folded posterior adds back.
+"""
+n_folds(sc, cinc) = length(cinc) + (sc === nothing ? 0 : 1)

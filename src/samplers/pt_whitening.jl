@@ -433,16 +433,22 @@ function sample_pt_whitening(
         end
     end
     # A cyclic inclination is folded to [0, π] on the same schedule
-    # (src/circular.jl): the walkers, and the ring's filled slots so the
-    # whitening (μ, σ) describe the one representative the walkers are in.
+    # (src/circular.jl), and under the stellar spin flip (`spin_flip`) every
+    # point is put in one representative of the spin, the axis chosen from the
+    # cold rung: the walkers, and the ring's filled slots so the whitening
+    # (μ, σ) describe the one representative the walkers are in.
     cinc = cyclic_inclination_indices(params)
+    sflip = spin_flip(params)
+    fold_dims = sflip === nothing ? cinc : union(cinc, sflip.lams)
     function fold_whitening!()
-        fold_cyclic_inclinations!(state, params; idx = cinc)
-        for d in cinc, t in 1:n_temps
-            @inbounds for s in 1:ring_count[t], w in 1:n_walkers_eff
-                ring[t, s, w, d] = fold_inclination(ring[t, s, w, d])
+        fold_cyclic_inclinations!(state, params; idx = cinc, sf = sflip,
+                                  decide_from = view(state, 1, :, :))
+        for t in 1:n_temps
+            fold_cyclic_inclinations!(view(ring, t, 1:ring_count[t], 1:n_walkers_eff, :),
+                                      params; idx = cinc, sf = sflip)
+            for d in fold_dims
+                refresh_whiten_dim!(t, d)
             end
-            refresh_whiten_dim!(t, d)
         end
     end
 
@@ -625,6 +631,8 @@ function sample_pt_whitening(
             end
         end
         merge!(recut_moved, ck.recut_moved)
+        # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
+        hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         # Past the release, the saved walkers carry their own values.
         if hasproperty(ck, :hold_on)
             ck.hold_on || fill!(is_held, false)
@@ -774,10 +782,12 @@ function sample_pt_whitening(
         # steps through 3/4 of it so a mode found late is not held behind
         # the seam, and at the end to fix the chart for every recorded step.
         # logπ_arr / logL_arr stay valid (uniform prior, periodic likelihood).
+        # Folded first (and spin-flipped), so the re-cut chooses λ's seam
+        # from the representative the walkers end up in.
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) && fold_whitening!()
         if !isempty(circ) && _pt_recut_due(step, n_burnin)
             recut_whitening!()
         end
-        !isempty(cinc) && _pt_recut_due(step, n_burnin) && fold_whitening!()
 
         # ---- End of `burnin_hold` (threaded; within burn-in) -----------
         any(is_held) && _burnin_hold_due!(hold_med, hold, step, n_burnin,
@@ -826,7 +836,8 @@ function sample_pt_whitening(
                 flip_proposed, flip_accepted, n_evals = n_evals_atomic[],
                 keep_idx, samples = samples[1:keep_idx, :],
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
-                windows = circular_windows(params), recut_moved,
+                windows = circular_windows(params),
+                spin_axis = copy(params.layout.spin_axis), recut_moved,
                 hold_on = any(is_held), hold_med = hold_med[]))
             last_ck = time()
         end

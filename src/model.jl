@@ -1408,6 +1408,10 @@ struct ParamsLayout
     planet_blocks::Vector{PlanetBlock}
     systemic::SystemicIndices
     packed_priors::PackedPriors   # type-stable prior eval for Enzyme
+    # The axis n of the stellar spin-flip canonicalisation (src/circular.jl,
+    # `spin_flip`): of (i★, λ) and (π - i★, λ + π) the representative with
+    # s·n ≥ 0 is reported. Mutable contents; (0, 0, 1) = i★ ≤ π/2.
+    spin_axis::Vector{Float64}
 end
 
 # =====================================================================
@@ -2151,7 +2155,7 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         names, name_to_idx, n_total_, n_p_idx,
         unfrozen_idx, unfrozen_names, unfrozen_priors,
         frozen_idx, frozen_values,
-        planet_blocks, systemic, packed,
+        planet_blocks, systemic, packed, [0.0, 0.0, 1.0],
     )
 end
 

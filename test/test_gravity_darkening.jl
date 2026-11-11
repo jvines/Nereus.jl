@@ -637,14 +637,24 @@ using ForwardDiff
             M_s = 1.60, R_s = 1.47, kw...)
         hi(p) = p.config.priors["i_star"].hi
 
-        # Gravity darkening alone cannot tell a spin vector from its reverse,
-        # so (0, π) would hold every solution twice. Half the range, no loss.
-        @test hi(mk(Nereus.RVPM_GD)) ≈ π / 2
+        # Re-pinned (was π/2): gravity darkening alone cannot tell a spin
+        # vector from its reverse, and (0, π/2) held each solution once -- with
+        # a wall at i★ = 90° that an equator-on star railed against, splitting
+        # its posterior into two λ lobes π apart. Now (0, π), i★ a polar angle
+        # (`polar_lift`), and the draws put in one representative of the spin
+        # by `spin_flip`.
+        p_gd = mk(Nereus.RVPM_GD)
+        @test hi(p_gd) ≈ π
+        @test Nereus.spin_flip(p_gd) !== nothing
+        ig = findfirst(==("i_star"), p_gd.layout.unfrozen_names)
+        @test is_cyclic_inclination(p_gd.layout.unfrozen_priors[ig])
         # With RM velocities the sense of rotation is measured and λ is no
         # longer free to absorb the reversal: i★ > 90° is then a distinct star,
         # and a prior that stops at 90° excludes half of them.
         p_rm = mk(Nereus.RVPM_RM_GD)
         @test p_rm.config.priors["i_star"].lo == 0.0
         @test hi(p_rm) ≈ π
+        # ...and the sense of rotation is measured: no spin flip.
+        @test Nereus.spin_flip(p_rm) === nothing
     end
 end

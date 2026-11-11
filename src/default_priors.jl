@@ -491,17 +491,19 @@ function default_priors(config::ParamsConfig, data::Data; gaia_plx = nothing)
         # weakly-informative choice here; use cos-uniform explicitly if an
         # isotropic population prior is wanted.
         #
-        # The RANGE depends on what else is in the fit. Darkening alone cannot
-        # tell a spin vector from its reverse -- (i_star, lambda) and
-        # (pi - i_star, lambda + pi) are one light curve -- so [0, pi/2] already
-        # holds every solution once and [0, pi] would hold each twice. RM
-        # velocities or a tomogram measure the SENSE of rotation and pin lambda,
-        # which leaves i_star > pi/2 as a different star rather than a relabelling:
-        # stopping at pi/2 then drops half of the orientations.
+        # The RANGE is the whole of [0, pi], with or without a measurement of
+        # the sense of rotation. Darkening alone cannot tell a spin vector from
+        # its reverse -- (i_star, lambda) and (pi - i_star, lambda + pi) are one
+        # light curve -- and a range stopping at pi/2 to hold each solution once
+        # put a wall at i_star = 90 deg: an equator-on star railed against it,
+        # and its posterior split into two lambda lobes pi apart with nothing to
+        # carry walkers between them. On [0, pi] i_star is a polar angle
+        # (`polar_lift`), and the draws are put in one representative of the
+        # spin by `spin_flip` (src/circular.jl). RM velocities or a tomogram
+        # measure the sense and pin lambda, which leaves i_star > pi/2 a
+        # different star, not a relabelling.
         if any(has_gd(m) for m in config.planet_modes)
-            sense_known = any(has_any_rm(m) for m in config.planet_modes) ||
-                          !isempty(data.tomo)
-            dic["i_star"] = UniformPrior(0.0, sense_known ? pi : pi / 2)
+            dic["i_star"] = UniformPrior(0.0, pi)
         end
         # The per-band `gd_beta_<INST>` defaults are set in `_build_layout`,
         # where the photometric instrument names are known. Bolometric (0.25)

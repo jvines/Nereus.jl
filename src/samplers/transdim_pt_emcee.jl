@@ -2188,6 +2188,8 @@ function sample_transdim_pt_emcee(
                                  lo; transforms = (target.transform,))
         end
         merge!(recut_moved, ck.recut_moved)
+        # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
+        hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
         n_done = step0
         # Past the release, the saved walkers carry their own values.
@@ -2362,8 +2364,12 @@ function sample_transdim_pt_emcee(
         # the cached log-densities stay valid (src/circular.jl). A MoMS
         # off-value, the prior sample median (near π/2), is already its own
         # representative.
+        # Under the stellar spin flip (`spin_flip`) the walkers are also put in
+        # one representative of the spin, the axis chosen from the cold rung;
+        # before the re-cut, which then cuts λ's seam from the moved draws.
         !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
-            fold_cyclic_inclinations!(state, params; idx = cinc)
+            fold_cyclic_inclinations!(state, params; idx = cinc,
+                                      decide_from = view(state, 1, :, :))
 
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_td_prune_stranded!`. Same schedule as pt_emcee: every 50
@@ -2494,6 +2500,7 @@ function sample_transdim_pt_emcee(
                 smd_hist = smd_hist[1:step, :], keep_idx,
                 samples = samples[1:keep_idx, :], lp_samples = lp_samples[1:keep_idx],
                 evidence = evidence_acc, windows = circular_windows(params),
+                spin_axis = copy(params.layout.spin_axis),
                 recut_moved,
                 informed = _informed_cache_snapshot(rngs_td, informed_keys)))
             last_ck = time()
