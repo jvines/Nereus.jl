@@ -40,6 +40,10 @@ The target must use `unconstrained=false` (bounded space).
   ellipsoid axes, which track the local correlation, so it follows the
   ridge and recovers truth on all three validation generators. `:rwalk`
   remains available for diagnostics but is NOT recommended for RV fits.
+  (Those failures were measured while every step of a walk or slice chain
+  restarted from the live point it copied, fixed since. On an RM obliquity
+  fit the fixed `:rwalk` gets the posterior right, with log Z 3.7 below
+  `:rslice`'s.)
 - `walk_scale::Real=1.0` — initial proposal scale for the walk / slice
   kernels (passed to NestedSamplers as `scale`).
 - `n_walks::Union{Int,Nothing}=nothing` — Metropolis steps per replacement for
@@ -130,12 +134,17 @@ function sample_nested(
     # iteration (its `slices` is full ndim-sweeps), so it is NOT scaled here —
     # scaling it too would be O(n_dim²).
     #
-    # NOTE (scope): dimension scaling fixes the DECORRELATION bias, which
-    # dominates on gentle posteriors. On sharply-curved RV ridges (the e–ω–Mo
-    # eccentricity banana) the residual evidence bias is the multi-ellipsoid
-    # BOUND failing to conform to the ridge — that is NOT removed by more
-    # slices or a larger `enlarge`; use PT/TI for evidence there, or the
-    # friends-bound (MLFriends) port. See project_ns_rslice_undermixing.
+    # The count only matters because the steps form one chain, each starting
+    # where the last ended (vendor/NestedSamplers/VENDORED.md). The fork used
+    # to start every step from the copied live point, so the new point was one
+    # step from it whatever the count: the live set descended from ever fewer
+    # ancestors and the posterior came out too narrow and off-centre (an RM
+    # obliquity fit gave λ sd 1.6–2.1° against pt_emcee's 2.1–2.5°, b's sd at
+    # half of pt_emcee's, the jitters up to 1.3 σ high). An earlier note here
+    # blamed the ellipsoid bound for an evidence bias on curved RV ridges that
+    # more slices did not remove; it was measured before the fix, when more
+    # slices could not help, and a slice takes only its direction from the
+    # bound.
     slices_resolved = slices !== nothing ? slices :
                       (proposal === :slice ? 5 : max(5, 2 * n_dim))
     n_walks_resolved = n_walks !== nothing ? n_walks : max(25, 2 * n_dim)

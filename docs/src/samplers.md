@@ -474,6 +474,13 @@ chains, log_evidence = sample_nested(target, data;
     random directions through the ellipsoid axes, tracks the local
     correlation, and recovers truth. Keep `:rslice` for RV fits.
 
+    Those `:rwalk` failures were measured while every step of a walk or
+    slice chain restarted from the live point it copied, so the new point
+    was one step from it whatever `n_walks` or `slices` said. The vendored
+    fork chains the steps now. On an RM obliquity fit `:rslice` then matches
+    pt_emcee (before: λ sd 1.6–2.1° against 2.1–2.5°), and `:rwalk` gets
+    the posterior right with log Z 3.7 below `:rslice`'s.
+
 `n_walks` and `slices` are dimension-scaled by default — a fixed count
 under-decorrelates as dimension grows and biases log Z low. `:mlfriends`
 (from the Nereus NestedSamplers fork) pairs only with `:unif`/`:rslice`/
