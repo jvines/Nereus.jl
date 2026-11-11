@@ -217,28 +217,36 @@ Base.rand(rng::AbstractRNG, d::Sine) = quantile(d, rand(rng))
 Distributions.insupport(::Sine, x::Real) = (x >= 0) && (x <= π)
 
 # =====================================================================
-# WrappedUniform — uniform on a circle, wrapped rather than bounded
+# WrappedUniform — uniform on a circle, on one chart of it
 # =====================================================================
 
 """
     WrappedUniform(lo, hi)
 
 Uniform distribution on a CIRCLE of circumference `hi - lo`, charted on
-`[lo, hi)`. Unlike `Uniform(lo, hi)`, a value outside the chart is not
-rejected: it is the same point of the circle as its representative inside,
-so the density is `1/(hi - lo)` at every finite `x`.
+`[lo, hi]`: density `1/(hi - lo)` on the chart and zero outside it, the same
+density as `Uniform(lo, hi)`. Under a periodic likelihood it is a full-circle
+angle (src/circular.jl): the samplers move its chart's seam to the emptiest
+arc of the posterior, so the seam is never where the posterior is, and the
+draws are reported in one contiguous window.
 
-This is what "λ is periodic and is wrapped, never bounded" means for a
-sampler. A `Uniform` prior on an angle puts a wall at the seam: a stretch
-move that crosses it is rejected, and an unconstrained sampler (NUTS,
-`pt_hmc`) sees a logit wall at ±π. With `WrappedUniform` neither exists --
-the walkers and the Hamiltonian trajectories cross freely, and the draws are
-relabelled into `[lo, hi)` when the run is summarised. It is only correct for
-a parameter the likelihood reads PERIODICALLY (through sin/cos); see
-`WrappedUniformPrior`.
+It used to take every finite value, with no wall at all. A density periodic
+over the whole line is improper, and under parallel tempering that is fatal:
+the rungs near β = 0 sample the prior, the affine stretch move spreads an
+ensemble on a flat direction geometrically, and the swaps carry the spread to
+β = 1. Measured on an RM obliquity fit with `lambda_k1` under
+`WrappedUniformPrior(-π, π)` (`pt_emcee`, 8 rungs × 32 walkers, 3000 steps):
+λ reached ±1.6e12 rad in the hot rungs and 1.6e10 rad in the recorded cold
+chain, 88% of the cold draws sat outside the chart, every stretch move that
+paired walkers in different periods proposed a random angle, and the live
+R-hat on λ was 1.48 (1.12 even unwrapped). Re-wrapping each walker into the
+chart instead is not a valid MCMC move for an affine ensemble (the stretch
+move's reverse proposal then lands a period away). On one chart the target
+is proper, and the posterior on the circle is the same.
 
-`quantile`, `rand` and `cdf` act on the chart `[lo, hi)`, so nested samplers
-and prior draws start inside it.
+`quantile`, `rand` and `cdf` act on the chart, so nested samplers and prior
+draws start inside it. Only correct for a parameter the likelihood reads
+PERIODICALLY (through sin/cos); see `WrappedUniformPrior`.
 """
 struct WrappedUniform <: ContinuousUnivariateDistribution
     lo::Float64
@@ -254,12 +262,12 @@ Distributions.maximum(d::WrappedUniform) = d.hi
 Distributions.params(d::WrappedUniform) = (d.lo, d.hi)
 Base.eltype(::Type{WrappedUniform}) = Float64
 Distributions.logpdf(d::WrappedUniform, x::Real) =
-    isfinite(x) ? -log(d.hi - d.lo) * one(float(x)) : oftype(float(x), -Inf)
+    d.lo <= x <= d.hi ? -log(d.hi - d.lo) * one(float(x)) : oftype(float(x), -Inf)
 Distributions.cdf(d::WrappedUniform, x::Real) =
     clamp((x - d.lo) / (d.hi - d.lo), zero(float(x)), one(float(x)))
 Distributions.quantile(d::WrappedUniform, u::Real) = d.lo + (d.hi - d.lo) * u
 Base.rand(rng::AbstractRNG, d::WrappedUniform) = quantile(d, rand(rng))
-Distributions.insupport(::WrappedUniform, x::Real) = isfinite(x)
+Distributions.insupport(d::WrappedUniform, x::Real) = d.lo <= x <= d.hi
 
 # =====================================================================
 # WrappedSine — the isotropic inclination prior on a circle
@@ -464,15 +472,17 @@ end
 """
     WrappedUniformPrior(lo, hi)
 
-Uniform prior on a circle, charted on `[lo, hi)` and WRAPPED: a value outside
-the chart is not rejected but read as the same angle (density `1/(hi - lo)`
-everywhere). Use it for an angle the likelihood reads only periodically --
-the sky-projected obliquity `lambda_k<k>` is the case it exists for. The span
-must be one full period, `2π`, or the density would not be periodic.
+Uniform prior on a circle of circumference `2π`, charted on `[lo, hi]`. Use it
+for an angle the likelihood reads only periodically -- the sky-projected
+obliquity `lambda_k<k>` is the case it exists for. The span must be one full
+period, `2π`, or the density would not be periodic.
 
-The sampler then has no wall at the seam (see `WrappedUniform`). `bounds`
-returns the chart, which is where prior draws and nested-sampling transforms
-land and where the reported draws are relabelled.
+It is sampled exactly as a `UniformPrior` over one period of a full-circle
+angle is (src/circular.jl): the density is zero outside the chart, which keeps
+every tempered rung proper (see `WrappedUniform` for what happened without),
+and the samplers move the chart's seam to the emptiest arc of the posterior.
+`bounds` returns the current chart, which is where prior draws and
+nested-sampling transforms land and where the reported draws are relabelled.
 """
 function WrappedUniformPrior(lo::Real, hi::Real)
     lo < hi || throw(ArgumentError("WrappedUniformPrior requires lo < hi"))
@@ -487,29 +497,305 @@ end
 
 [`WrappedSine`](@ref) with its chart `[-π/2, 3π/2]` as the bounds: the
 isotropic inclination prior on a circle, with no wall at `0` or `π`. Not something to
-write in a config: the layout builds it from a `SinePrior()` on an orbital
-inclination `inc_k<N>` (see [`SinePrior`](@ref)).
+write in a config: the layout builds it from a `SinePrior()` on an orbital or
+stellar inclination (see [`SinePrior`](@ref), [`polar_lift`](@ref)).
 """
 WrappedSinePrior() = PriorSpec(WrappedSine(), _WRAPPED_SINE_LO, _WRAPPED_SINE_HI)
+
+# =====================================================================
+# PolarFold — any prior on a polar angle [0, π], lifted to the circle
+# =====================================================================
+
+"""
+    PolarFold(base)
+
+The prior `base` (a `PriorSpec` on exactly `[0, π]`) of a POLAR angle -- an
+inclination, orbital or stellar -- lifted to a circle of circumference 2π:
+density `p(fold_inclination(x))/2` on the chart `[-π/2, 3π/2]`, zero outside
+it. Folded to `[0, π]` it is exactly `base` again: the two representatives
+`x` and `-x` (or `2π - x`) of each inclination carry half of its mass each.
+[`WrappedSine`](@ref) is the case `base = SinePrior()`, kept as its own type.
+
+A polar angle's `[0, π]` has no edge a posterior can rail against: 0 and π are
+the poles, and a sampler passing through one comes out on the other side of
+it. Under `base` itself the samplers met walls there. This is only correct for
+a parameter every likelihood reads through `fold_inclination`, where `x`,
+`-x` and `x + 2π` are one configuration; the layout lifts only those
+(`polar_lift`). The chart's edges are the mirror image of `π/2`, which a walker
+reaches only by passing through a pole and crossing the whole mirror half.
+"""
+struct PolarFold{P} <: ContinuousUnivariateDistribution
+    base::P
+end
+
+Distributions.minimum(::PolarFold) = _WRAPPED_SINE_LO
+Distributions.maximum(::PolarFold) = _WRAPPED_SINE_HI
+Base.eltype(::Type{<:PolarFold}) = Float64
+Distributions.logpdf(d::PolarFold, x::Real) =
+    _WRAPPED_SINE_LO <= x <= _WRAPPED_SINE_HI ?
+        logpdf(d.base, fold_inclination(x)) - log(oftype(float(x), 2)) :
+        oftype(float(x), -Inf)
+
+# CDF over the chart from the base CDF F on [0, π]: the mirror quarter
+# [-π/2, 0] holds (F(π/2) - F(-x))/2, the physical half [0, π] F/2 on top,
+# and the mirror quarter [π, 3π/2] the rest.
+function Distributions.cdf(d::PolarFold, x::Real)
+    x <= _WRAPPED_SINE_LO && return zero(float(x))
+    x >= _WRAPPED_SINE_HI && return one(float(x))
+    Fh = cdf(d.base, π / 2)
+    x <= 0 && return (Fh - cdf(d.base, -x)) / 2
+    x <= π && return (Fh + cdf(d.base, x)) / 2
+    return Fh / 2 + 1 - cdf(d.base, 2π - x) / 2
+end
+
+function Distributions.quantile(d::PolarFold, u::Real)
+    u <= 0 && return oftype(float(u), _WRAPPED_SINE_LO)
+    u >= 1 && return oftype(float(u), _WRAPPED_SINE_HI)
+    Fh = cdf(d.base, π / 2)
+    a = Fh / 2
+    u <= a && return -quantile(d.base, clamp(Fh - 2u, 0, 1))
+    u <= a + 0.5 && return quantile(d.base, clamp(2u - Fh, 0, 1))
+    return oftype(float(u), 2π) - quantile(d.base, clamp(Fh + 2 - 2u, 0, 1))
+end
+
+Base.rand(rng::AbstractRNG, d::PolarFold) = quantile(d, rand(rng))
+Distributions.insupport(::PolarFold, x::Real) =
+    _WRAPPED_SINE_LO <= x <= _WRAPPED_SINE_HI
+
+"""
+    PolarFoldPrior(base::PriorSpec)
+
+[`PolarFold`](@ref) of `base` with its chart `[-π/2, 3π/2]` as the bounds. A
+`SinePrior` lifts to [`WrappedSinePrior`](@ref). Not something to write in a
+config: the layout builds it (see [`polar_lift`](@ref)).
+"""
+function PolarFoldPrior(base::PriorSpec)
+    _spans_polar(base) || throw(ArgumentError(
+        "PolarFoldPrior needs a prior on exactly [0, π]; got [$(base.lo), $(base.hi)]"))
+    base.dist isa Sine && return WrappedSinePrior()
+    return PriorSpec(PolarFold(base), _WRAPPED_SINE_LO, _WRAPPED_SINE_HI)
+end
+
+# A prior whose support is the whole polar range [0, π] (to the span tolerance
+# of a full-circle window), of a type `pack_priors` packs exactly.
+_spans_polar(ps::PriorSpec) =
+    (ps.dist isa Sine || ps.dist isa Distributions.Uniform ||
+     ps.dist isa Distributions.Truncated{<:Distributions.Normal}) &&
+    abs(ps.lo) <= 1e-4 * π && abs(ps.hi - π) <= 1e-4 * π
+
+"""
+    polar_lift(ps::PriorSpec) -> PriorSpec
+
+The prior the samplers evaluate for a polar angle whose user prior is `ps`:
+[`PolarFoldPrior`](@ref) when `ps` covers exactly `[0, π]` (Sine, Uniform or
+a Normal truncated there), `ps` itself otherwise. A prior on a sub-range
+(`UniformPrior(0, π/2)`, a Normal truncated inside `[0, π]`) is the user's
+choice: its edges are walls the user drew, and they stay.
+"""
+polar_lift(ps::PriorSpec) = _spans_polar(ps) ? PolarFoldPrior(ps) : ps
+
+# =====================================================================
+# WrappedPushforward — a prior over one or more periods, read on the circle
+# =====================================================================
+
+const _PUSH_NORMAL  = 1
+const _PUSH_UNIFORM = 2
+
+"""
+    WrappedPushforward
+
+The prior a user wrote for a full-circle angle, pushed forward onto the circle:
+density `p̃(θ) = Σₙ p(θ + 2πn)` over one period, charted on `[lo, hi]` (zero
+outside the chart). The likelihood reads the angle periodically, so what the
+data constrain is `θ mod 2π`, and `p̃` is exactly the prior that `p` puts on it:
+the posterior on the circle and the evidence are the same as for `p` on the
+line. On one chart, with the seam moved off the posterior like any full-circle
+angle (src/circular.jl), nothing is left to rail against:
+
+* a Normal `N(μ, σ)`, untruncated or truncated to `[blo, bhi]` with
+  `bhi - blo ≥ 2π`, becomes the wrapped normal (each term kept only where
+  `p` has support). Truncated to exactly one period, that is the periodic
+  extension of the truncated Normal. On the line a Normal on an angle put a
+  wall at its truncation (`±π`), or, untruncated, split a posterior near
+  `μ ± π` into two copies a period apart;
+* a Uniform over more than one period becomes `#{n : θ + 2πn ∈ [blo, bhi]} /
+  (bhi - blo)`: uniform when the span is a whole number of periods, a step
+  otherwise.
+
+`ref` is the lower edge of the window the draws are reported in (the user's
+own window when it was one period, else `μ - π` or `blo`). Built by the layout
+(`circular_lift`), never written in a config.
+"""
+struct WrappedPushforward <: ContinuousUnivariateDistribution
+    kind::Int
+    μ::Float64
+    σ::Float64
+    blo::Float64
+    bhi::Float64
+    logZ::Float64
+    ref::Float64
+    lo::Float64
+    hi::Float64
+end
+
+Distributions.minimum(d::WrappedPushforward) = d.lo
+Distributions.maximum(d::WrappedPushforward) = d.hi
+Base.eltype(::Type{WrappedPushforward}) = Float64
+
+"""
+    wrapped_push_logpdf(x, kind, μ, σ, blo, bhi, logZ) -> Real
+
+`log p̃(x)` of a [`WrappedPushforward`](@ref) at any finite `x` (periodic, no
+chart check). Generic over `Real` (ForwardDiff, ReverseDiff, Enzyme): the
+terms that enter are picked by `floor`/`ceil` on the value, the sum is a
+log-sum-exp of differentiable terms.
+"""
+@inline function wrapped_push_logpdf(x::Real, kind::Int, μ::Float64, σ::Float64,
+                                     blo::Float64, bhi::Float64, logZ::Float64)
+    two_π = 2π
+    if kind == _PUSH_UNIFORM
+        c = floor(Int, (bhi - x) / two_π) - ceil(Int, (blo - x) / two_π) + 1
+        return c > 0 ? (log(c) - log(bhi - blo)) * one(float(x)) :
+                       oftype(float(x), -Inf)
+    end
+    # Normal: the representatives within 12σ of μ, inside [blo, bhi].
+    nc = floor(Int, (μ - x) / two_π + 0.5)
+    M = min(ceil(Int, 12σ / two_π) + 1, 64)
+    nlo, nhi = nc - M, nc + M
+    isfinite(blo) && (nlo = max(nlo, ceil(Int, (blo - x) / two_π)))
+    isfinite(bhi) && (nhi = min(nhi, floor(Int, (bhi - x) / two_π)))
+    if nlo > nhi
+        # Nothing within 12σ of μ: the admissible representative nearest μ,
+        # alone (the others are smaller by more than e^-72).
+        n = nc
+        isfinite(blo) && (n = max(n, ceil(Int, (blo - x) / two_π)))
+        isfinite(bhi) && (n = min(n, floor(Int, (bhi - x) / two_π)))
+        z = (x + two_π * n - μ) / σ
+        return -z * z / 2 - log(σ) - log(two_π) / 2 - logZ
+    end
+    m = oftype(float(x), -Inf)
+    for n in nlo:nhi
+        z = (x + two_π * n - μ) / σ
+        m = max(m, -z * z / 2)
+    end
+    s = zero(m)
+    for n in nlo:nhi
+        z = (x + two_π * n - μ) / σ
+        s += exp(-z * z / 2 - m)
+    end
+    return m + log(s) - log(σ) - log(two_π) / 2 - logZ
+end
+
+Distributions.logpdf(d::WrappedPushforward, x::Real) =
+    d.lo <= x <= d.hi ?
+        wrapped_push_logpdf(x, d.kind, d.μ, d.σ, d.blo, d.bhi, d.logZ) :
+        oftype(float(x), -Inf)
+
+# Base mass of [a, b] ∩ [blo, bhi], normalised.
+function _push_mass(d::WrappedPushforward, a::Real, b::Real)
+    a, b = max(a, d.blo), min(b, d.bhi)
+    b <= a && return 0.0
+    d.kind == _PUSH_UNIFORM && return (b - a) / (d.bhi - d.blo)
+    N = Distributions.Normal(d.μ, d.σ)
+    return exp(Distributions.logdiffcdf(N, b, a) - d.logZ)
+end
+
+# The periods n whose copy [lo + 2πn, hi + 2πn] of the chart can hold mass.
+function _push_periods(d::WrappedPushforward)
+    L = d.kind == _PUSH_NORMAL ? max(d.blo, d.μ - 40d.σ) : d.blo
+    U = d.kind == _PUSH_NORMAL ? min(d.bhi, d.μ + 40d.σ) : d.bhi
+    return floor(Int, (L - d.hi) / 2π):ceil(Int, (U - d.lo) / 2π)
+end
+
+function Distributions.cdf(d::WrappedPushforward, x::Real)
+    x <= d.lo && return 0.0
+    x >= d.hi && return 1.0
+    s = 0.0
+    for n in _push_periods(d)
+        s += _push_mass(d, d.lo + 2π * n, x + 2π * n)
+    end
+    return clamp(s, 0.0, 1.0)
+end
+
+# Bisection on the chart: prior draws and nested-sampling transforms only.
+function Distributions.quantile(d::WrappedPushforward, u::Real)
+    u <= 0 && return d.lo
+    u >= 1 && return d.hi
+    a, b = d.lo, d.hi
+    for _ in 1:80
+        m = (a + b) / 2
+        cdf(d, m) < u ? (a = m) : (b = m)
+    end
+    return (a + b) / 2
+end
+
+Base.rand(rng::AbstractRNG, d::WrappedPushforward) = quantile(d, rand(rng))
+Distributions.insupport(d::WrappedPushforward, x::Real) = d.lo <= x <= d.hi
+
+# The same pushforward on another chart [lo, hi] (src/circular.jl moves it).
+_rechart(d::WrappedPushforward, lo::Real, hi::Real) =
+    WrappedPushforward(d.kind, d.μ, d.σ, d.blo, d.bhi, d.logZ, d.ref,
+                       Float64(lo), Float64(hi))
+
+"""
+    circular_lift(ps::PriorSpec) -> PriorSpec
+
+The prior the samplers evaluate for a full-circle angle (one the likelihood
+reads periodically) whose user prior is `ps`:
+
+* a Uniform over exactly one period, or a `WrappedUniformPrior`: `ps` itself;
+* a Uniform over more than one period, or a Normal whose support covers at
+  least one period (untruncated, or truncated to `bhi - blo ≥ 2π`): its
+  [`WrappedPushforward`](@ref) on one period -- charted on `[μ - π, μ + π]`
+  for a Normal (unless it was truncated to exactly one period, which is kept
+  as the chart), on `[blo, blo + 2π]` for a Uniform;
+* anything else -- an arc shorter than a period, a prior of another family --
+  `ps` itself: its walls are the user's.
+"""
+function circular_lift(ps::PriorSpec)
+    d = ps.dist
+    span = ps.hi - ps.lo
+    tol = 1e-4 * 2π
+    if d isa Distributions.Uniform
+        span > 2π + tol || return ps
+        return PriorSpec(WrappedPushforward(_PUSH_UNIFORM, NaN, NaN, ps.lo, ps.hi,
+                                            0.0, ps.lo, ps.lo, ps.lo + 2π),
+                         ps.lo, ps.lo + 2π)
+    end
+    N = d isa Distributions.Normal ? d :
+        d isa Distributions.Truncated{<:Distributions.Normal} ? d.untruncated : nothing
+    N === nothing && return ps
+    span >= 2π - tol || return ps
+    μ, σ = Float64(N.μ), Float64(N.σ)
+    logZ = isfinite(ps.lo) || isfinite(ps.hi) ?
+           Float64(Distributions.logdiffcdf(N, ps.hi, ps.lo)) : 0.0
+    one_period = abs(span - 2π) <= tol
+    lo = one_period ? ps.lo : μ - π
+    hi = one_period ? ps.hi : μ + π
+    return PriorSpec(WrappedPushforward(_PUSH_NORMAL, μ, σ, ps.lo, ps.hi, logZ,
+                                        lo, lo, hi), lo, hi)
+end
 
 """
     is_wrapped(ps) -> Bool
 
-`true` for a prior on a circle, which the samplers move on the line
-(identity transform, no logit): a `WrappedUniformPrior`, which has no wall at
-its seam and takes every finite value, or the cyclic inclination prior
-`WrappedSinePrior`, whose support is its chart `[-π/2, 3π/2]`, with `0` and
-`π` inside it (see [`WrappedSine`](@ref)).
+`true` for a prior the samplers move on the line with no logit (identity
+transform): a polar angle lifted to its circle, [`WrappedSinePrior`](@ref) or
+[`PolarFoldPrior`](@ref), whose support is the chart `[-π/2, 3π/2]` with the
+poles `0` and `π` inside it. A `WrappedUniformPrior` is not: it is a chart of
+a circle like a full-circle `UniformPrior`, walled at its seam, which the
+samplers move (src/circular.jl), and a logit serves it as it does the Uniform.
 """
-is_wrapped(ps::PriorSpec) = ps.dist isa WrappedUniform || ps.dist isa WrappedSine
+is_wrapped(ps::PriorSpec) = is_cyclic_inclination(ps)
 
 """
     is_cyclic_inclination(ps) -> Bool
 
-`true` for a `WrappedSinePrior`: an orbital inclination sampled on a circle,
-read through [`fold_inclination`](@ref) and reported folded to `[0, π]`.
+`true` for a polar angle sampled on a circle -- a [`WrappedSinePrior`](@ref)
+or [`PolarFoldPrior`](@ref): an orbital or stellar inclination read through
+[`fold_inclination`](@ref) and reported folded to `[0, π]`.
 """
-is_cyclic_inclination(ps::PriorSpec) = ps.dist isa WrappedSine
+is_cyclic_inclination(ps::PriorSpec) = ps.dist isa WrappedSine || ps.dist isa PolarFold
 
 """
     SinePrior()
@@ -700,8 +986,6 @@ fixed_value(ps::PriorSpec) = throw(ArgumentError("fixed_value called on non-fixe
 `true` iff `x` is within the hard bounds of the prior.
 """
 in_support(ps::PriorSpec, x::Real) = ps.lo <= x <= ps.hi
-# A wrapped angle has no wall: every finite value is a point of the circle.
-in_support(ps::PriorSpec{WrappedUniform}, x::Real) = isfinite(x)
 
 # --- logpdf ----------------------------------------------------------
 
@@ -1091,6 +1375,14 @@ function prior_to_dict(ps::PriorSpec)
         out["type"] = "WrappedUniform"
     elseif d isa WrappedSine
         out["type"] = "WrappedSine"
+    elseif d isa PolarFold
+        out["type"] = "PolarFold"
+        out["base"] = prior_to_dict(d.base)
+    elseif d isa WrappedPushforward
+        out["type"] = "WrappedPushforward"
+        out["kind"] = d.kind == _PUSH_NORMAL ? "normal" : "uniform"
+        out["mu"], out["sigma"] = d.μ, d.σ
+        out["blo"], out["bhi"], out["ref"] = d.blo, d.bhi, d.ref
     elseif d isa Sine
         out["type"] = "Sine"
     elseif d isa LogUniform
@@ -1099,6 +1391,9 @@ function prior_to_dict(ps::PriorSpec)
         out["type"] = "Normal"
         out["mu"] = d.untruncated.μ
         out["sigma"] = d.untruncated.σ
+    elseif d isa Normal
+        out["type"] = "Normal"
+        out["mu"], out["sigma"] = d.μ, d.σ
     elseif d isa Beta
         out["type"] = "Beta"
         out["a"] = d.α
@@ -1131,12 +1426,27 @@ function prior_from_dict(d::AbstractDict)
         return WrappedUniformPrior(d["lo"], d["hi"])
     elseif t == "WrappedSine"
         return WrappedSinePrior()
+    elseif t == "PolarFold"
+        return PolarFoldPrior(prior_from_dict(d["base"]))
+    elseif t == "WrappedPushforward"
+        k = d["kind"] == "normal" ? _PUSH_NORMAL : _PUSH_UNIFORM
+        blo, bhi = Float64(d["blo"]), Float64(d["bhi"])
+        logZ = k == _PUSH_NORMAL && (isfinite(blo) || isfinite(bhi)) ?
+            Float64(Distributions.logdiffcdf(Distributions.Normal(d["mu"], d["sigma"]), bhi, blo)) : 0.0
+        return PriorSpec(WrappedPushforward(k, d["mu"], d["sigma"], blo, bhi, logZ,
+                                            d["ref"], d["lo"], d["hi"]), d["lo"], d["hi"])
     elseif t == "Sine"
         return SinePrior()
     elseif t == "LogUniform"
         return LogUniformPrior(d["lo"], d["hi"])
     elseif t == "Normal"
-        return NormalPrior(d["mu"], d["sigma"], d["lo"], d["hi"])
+        # An untruncated Normal is written with infinite (or, from JSON, null)
+        # bounds; it is read back untruncated.
+        lo = get(d, "lo", nothing); hi = get(d, "hi", nothing)
+        lo = lo === nothing ? -Inf : Float64(lo)
+        hi = hi === nothing ? Inf : Float64(hi)
+        isfinite(lo) || isfinite(hi) || return NormalPrior(d["mu"], d["sigma"])
+        return NormalPrior(d["mu"], d["sigma"], lo, hi)
     elseif t == "Beta"
         lo = get(d, "lo", 0.0)
         hi = get(d, "hi", 1.0)

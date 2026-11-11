@@ -163,12 +163,7 @@ function propose_noise_birth(theta::Theta{T}, rng::AbstractRNG,
                 lo, hi = bounds(prior)
                 v = clamp(v, lo, hi)
                 new_values[slot] = convert(T, v)
-                log_q_fwd += eval_packed_logpdf(v,
-                    layout.packed_priors.type_ids[uf_pos],
-                    layout.packed_priors.params[uf_pos, 1],
-                    layout.packed_priors.params[uf_pos, 2],
-                    layout.packed_priors.lowers[uf_pos],
-                    layout.packed_priors.uppers[uf_pos])
+                log_q_fwd += eval_packed_logpdf(v, layout.packed_priors, uf_pos)
             end
         end
     end

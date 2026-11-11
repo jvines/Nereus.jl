@@ -8,7 +8,7 @@ using Nereus
 using Nereus: Theta, set_param!, get_param, log_prior, rv_log_likelihood,
               tomogram_log_likelihood, transit_log_likelihood, NereusTarget,
               transform_forward, eval_packed_logpdf, PACKED_WRAPPED, build_transform,
-              TRANSFORM_IDENTITY, set_circular_window!, is_circular,
+              TRANSFORM_IDENTITY, TRANSFORM_LOGIT, set_circular_window!, is_circular,
               _tomo_temporal_kernel, content_hash, _hash_skip, ParamsConfig,
               MaternGP, CeleriteSHO, NoiseModel, TomoNight, RMNight
 using ForwardDiff, LogDensityProblems
@@ -60,39 +60,53 @@ end
 
 @testset "obliquity model options" begin
 
-    @testset "wrapped lambda: a circle, not an interval" begin
+    @testset "wrapped lambda: a circle charted by a window with walls" begin
+        # Re-pinned: WrappedUniform used to have no wall (density 1/2π on the
+        # whole line, identity transform). Under the affine stretch moves that
+        # target is improper, and the ensemble spread geometrically: in a real
+        # pt_emcee RM fit (8 rungs x 32 walkers, 3000 steps) every cold walker
+        # ended outside [-π, π], hot rungs reached |λ| ~ 1e12 rad, 88% of the
+        # recorded draws lay outside the window, live R-hat read 1.48, and
+        # bridge and Laplace disagreed by 23.5 nats. It is now the circular
+        # Uniform: walls at the chart edges, which the burn-in re-cut moves to
+        # the emptiest arc (src/circular.jl), so the seam is never where the
+        # posterior is.
         ps = WrappedUniformPrior(-π, π)
-        @test is_wrapped(ps) && !is_wrapped(UniformPrior(-π, π))
+        @test !is_wrapped(ps) && is_wrapped(WrappedSinePrior())
         @test_throws ArgumentError WrappedUniformPrior(0.0, 3.0)   # not one period
-        # density 1/2π everywhere, including outside the chart
-        for x in (-π, 0.3, π, 7.5, -20.0)
+        for x in (-1.0π, 0.3, 1.0π)
             @test logpdf(ps, x) ≈ -log(2π)
             @test eval_packed_logpdf(Float64(x), PACKED_WRAPPED, 0.0, 0.0, -π * 1.0, π * 1.0) ≈ -log(2π)
         end
-        @test logpdf(ps, Inf) == -Inf
-        @test logpdf(UniformPrior(-π, π), 7.5) == -Inf          # the wall it removes
+        for x in (7.5, -20.0, Inf)
+            @test logpdf(ps, x) == -Inf
+            @test eval_packed_logpdf(Float64(x), PACKED_WRAPPED, 0.0, 0.0, -π * 1.0, π * 1.0) == -Inf
+        end
         @test prior_from_dict(prior_to_dict(ps)).dist isa Nereus.WrappedUniform
 
         d, _, p = ot_params(OT_RM, OT_TOMO)
         i = findfirst(==("lambda_k1"), p.layout.unfrozen_names)
-        @test is_wrapped(p.layout.unfrozen_priors[i])
         @test is_circular("lambda_k1", p.layout.unfrozen_priors[i], p.config)
-        # no logit wall for the unconstrained samplers
-        @test build_transform(p).type_ids[i] == TRANSFORM_IDENTITY
-        # moving the chart keeps it wrapped
-        set_circular_window!(p, i, 0.0)
-        @test is_wrapped(p.layout.unfrozen_priors[i]) && p.layout.unfrozen_priors[i].lo == 0.0
-        # the posterior is periodic in lambda: +2π is the same point
+        # the logit of every other bounded parameter
+        @test build_transform(p).type_ids[i] == TRANSFORM_LOGIT
+        # the posterior is periodic in lambda: +2π is the same point once the
+        # window holds it
         th = ot_seat(p)
         tg = NereusTarget(p, d; unconstrained = false)
         x = [th.values[s] for s in p.layout.unfrozen_idx]
+        v = tg(x)
         x2 = copy(x); x2[i] += 2π
-        @test tg(x2) ≈ tg(x) rtol = 1e-12
-        @test isfinite(tg(x2))
-        # bounded lambda is still available
+        @test tg(x2) == -Inf                    # past the wall of this chart
+        set_circular_window!(p, i, x[i] + 0.5)  # a chart holding x + 2π
+        @test p.layout.unfrozen_priors[i].lo == x[i] + 0.5
+        @test is_circular("lambda_k1", p.layout.unfrozen_priors[i], p.config)
+        @test tg(x2) ≈ v rtol = 1e-12
+        @test isfinite(v)
+        # `:bounded` is the same circle
         _, _, pb = ot_params(OT_RM, OT_TOMO; lambda_prior = :bounded)
         ib = findfirst(==("lambda_k1"), pb.layout.unfrozen_names)
-        @test !is_wrapped(pb.layout.unfrozen_priors[ib])
+        @test is_circular("lambda_k1", pb.layout.unfrozen_priors[ib], pb.config)
+        @test build_transform(pb).type_ids[ib] == TRANSFORM_LOGIT
     end
 
     @testset "per-night sigma0: beta_p derived, no free amplitude" begin

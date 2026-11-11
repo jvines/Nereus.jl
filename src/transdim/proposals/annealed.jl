@@ -56,12 +56,7 @@ function _noise_block_logprior(theta::Theta, slots::Vector{Int})
     @inbounds for slot in slots
         uf = findfirst(==(slot), layout.unfrozen_idx)
         uf === nothing && continue
-        lp += eval_packed_logpdf(theta.values[slot],
-                layout.packed_priors.type_ids[uf],
-                layout.packed_priors.params[uf, 1],
-                layout.packed_priors.params[uf, 2],
-                layout.packed_priors.lowers[uf],
-                layout.packed_priors.uppers[uf])
+        lp += eval_packed_logpdf(theta.values[slot], layout.packed_priors, uf)
     end
     return lp
 end
@@ -260,12 +255,7 @@ function propose_noise_death(theta::Theta{T}, rng::AbstractRNG,
                 isfinite(lq) || return (theta, convert(T, -Inf))
                 log_q_rev += lq
             elseif uf_pos !== nothing
-                log_q_rev += eval_packed_logpdf(theta.values[slot],
-                    layout.packed_priors.type_ids[uf_pos],
-                    layout.packed_priors.params[uf_pos, 1],
-                    layout.packed_priors.params[uf_pos, 2],
-                    layout.packed_priors.lowers[uf_pos],
-                    layout.packed_priors.uppers[uf_pos])
+                log_q_rev += eval_packed_logpdf(theta.values[slot], layout.packed_priors, uf_pos)
             end
         end
     end

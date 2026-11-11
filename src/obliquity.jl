@@ -174,9 +174,11 @@ framework default.
   approximately equivalent density prior, the behaviour before this option
   existed); `:kepler` derives a/R★ from `M_s`, `R_s` and P.
 - `ecc = 0.0` (default) fixes a circular orbit; `ecc = :free` samples it.
-- λ (`lambda_k1`) is uniform on the full circle and WRAPPED (`lambda_prior =
-  :wrapped`, a `WrappedUniformPrior(-π, π)`): no sampler sees a wall at the
-  seam. `:bounded` restores `UniformPrior(-π, π)`.
+- λ (`lambda_k1`) is uniform on the full circle (`lambda_prior = :wrapped`, a
+  `WrappedUniformPrior(-π, π)`; `:bounded`, a `UniformPrior(-π, π)`, is now
+  the same prior). Both are charted by a one-period window whose seam the
+  samplers move off the posterior (src/circular.jl), so λ ≈ ±180° never meets
+  a wall.
 
 # The RM anomaly
 - `sigma0`: the MEASURED out-of-transit CCF width σ₀ (m/s) of each RM night --

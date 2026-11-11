@@ -18,15 +18,18 @@ const PACKED_MODJEFFREYS  = 3
 const PACKED_BETA         = 4
 const PACKED_FIXED        = 5
 const PACKED_SINE         = 6  # p(x) = sin(x)/2 on [0, π]
-const PACKED_WRAPPED      = 7  # uniform on a circle, chart [lo, hi): no wall
+const PACKED_WRAPPED      = 7  # uniform on a circle, chart [lo, hi] (walled like UNIFORM)
 const PACKED_WRAPPED_SINE = 8  # |sin x|/4 on the chart [-π/2, 3π/2] (cyclic inclination)
+const PACKED_POLAR        = 9  # p(fold(x))/2 on [-π/2, 3π/2]; base tid in p3 (polar angle)
+const PACKED_WRAPPED_NORMAL = 10 # wrapped Normal(p1, p2) truncated to [p3, p4], log mass p5
+const PACKED_WRAPPED_STEP = 11 # Uniform(p3, p4) wrapped onto one period
 
 """
     PackedPriors
 
 Type-stable prior storage. Each prior is encoded as:
 - `type_ids[i]::Int` — distribution type (PACKED_UNIFORM, etc.)
-- `params[i,:]::NTuple{4,Float64}` — hyperparameters (meaning depends on type)
+- `params[i,:]` — five hyperparameters (meaning depends on type)
 - `lowers[i]::Float64` — hard lower bound
 - `uppers[i]::Float64` — hard upper bound
 
@@ -37,10 +40,14 @@ Layout of `params[i,:]` per type:
 - MODJEFFREYS: (knee, unused, unused, unused) — density ∝ 1/(x+knee)
 - BETA:        (a, b, unused, unused) — Beta(a,b) on [lo,hi]
 - FIXED:       (value, unused, unused, unused) — contributes 0 to logp
+- POLAR:       (base p1, base p2, base type id, unused, base log mass) — the
+               base prior on [0, π] read at fold(x), halved
+- WRAPPED_NORMAL: (μ, σ, blo, bhi, log mass on [blo, bhi])
+- WRAPPED_STEP:   (unused, unused, blo, bhi, unused)
 """
 struct PackedPriors
     type_ids::Vector{Int}
-    params::Matrix{Float64}   # n × 4
+    params::Matrix{Float64}   # n × 5
     lowers::Vector{Float64}
     uppers::Vector{Float64}
 end
@@ -55,7 +62,7 @@ used in the hot path.
 function pack_priors(priors::AbstractVector{<:PriorSpec})
     n = length(priors)
     type_ids = Vector{Int}(undef, n)
-    pars = zeros(Float64, n, 4)
+    pars = zeros(Float64, n, 5)
     lowers = Vector{Float64}(undef, n)
     uppers = Vector{Float64}(undef, n)
 
@@ -74,6 +81,19 @@ function pack_priors(priors::AbstractVector{<:PriorSpec})
             type_ids[i] = PACKED_WRAPPED
         elseif d isa WrappedSine
             type_ids[i] = PACKED_WRAPPED_SINE
+        elseif d isa PolarFold
+            # The base prior on [0, π], packed as it would be on its own.
+            b = pack_priors([d.base])
+            type_ids[i] = PACKED_POLAR
+            pars[i, 1], pars[i, 2] = b.params[1, 1], b.params[1, 2]
+            pars[i, 3] = b.type_ids[1]
+            bd = d.base.dist
+            pars[i, 5] = bd isa Distributions.Truncated{<:Distributions.Normal} ?
+                Distributions.logdiffcdf(bd.untruncated, d.base.hi, d.base.lo) : 0.0
+        elseif d isa WrappedPushforward
+            type_ids[i] = d.kind == _PUSH_NORMAL ? PACKED_WRAPPED_NORMAL : PACKED_WRAPPED_STEP
+            pars[i, 1], pars[i, 2] = d.μ, d.σ
+            pars[i, 3], pars[i, 4], pars[i, 5] = d.blo, d.bhi, d.logZ
         elseif d isa Distributions.LogUniform
             type_ids[i] = PACKED_LOGUNIFORM
         elseif d isa Distributions.Truncated{<:Distributions.Normal}
@@ -107,19 +127,51 @@ function pack_priors(priors::AbstractVector{<:PriorSpec})
 end
 
 """
-    eval_packed_logpdf(x, tid, p1, p2, lo, hi) -> Float64
+    eval_packed_logpdf(x, pp::PackedPriors, i) -> Float64
+    eval_packed_logpdf(x, tid, p1, p2, lo, hi[, p3, p4, p5]) -> Float64
 
-Evaluate log-pdf of a single packed prior at value `x`. Type-stable:
-dispatches on `tid` via if/elseif, no dynamic dispatch, Enzyme-safe.
+Evaluate log-pdf of a single packed prior at value `x`: prior `i` of `pp`, or
+one given by its fields. Type-stable: dispatches on `tid` via if/elseif, no
+dynamic dispatch, Enzyme-safe. The six-field form leaves `p3`-`p5` at zero,
+which is right for every type but the polar and wrapped pushforward ones
+(`PACKED_POLAR`, `PACKED_WRAPPED_NORMAL`, `PACKED_WRAPPED_STEP`): read those
+through `pp` and `i`.
 """
+@inline eval_packed_logpdf(x::Real, pp::PackedPriors, i::Int) =
+    eval_packed_logpdf(x, pp.type_ids[i], pp.params[i, 1], pp.params[i, 2],
+                       pp.lowers[i], pp.uppers[i],
+                       pp.params[i, 3], pp.params[i, 4], pp.params[i, 5])
+
+@inline eval_packed_logpdf(x::Real, tid::Int, p1::Float64, p2::Float64,
+                           lo::Float64, hi::Float64) =
+    eval_packed_logpdf(x, tid, p1, p2, lo, hi, 0.0, 0.0, 0.0)
+
 @inline function eval_packed_logpdf(x::Real, tid::Int,
                                      p1::Float64, p2::Float64,
-                                     lo::Float64, hi::Float64)
-    # A wrapped angle has no wall: every finite value is a point of the
-    # circle, with the uniform density of the chart. Checked BEFORE the bounds.
-    if tid == PACKED_WRAPPED
-        return isfinite(x) ? -log(hi - lo) : -Inf
+                                     lo::Float64, hi::Float64,
+                                     p3::Float64, p4::Float64, p5::Float64)
+    # A polar angle (an inclination) on its circle: the base prior on [0, π]
+    # read at the fold of x, halved, on the chart [lo, hi] = [-π/2, 3π/2]
+    # (see `PolarFold`). `p5` is the base's log mass on [0, π] (a truncated
+    # Normal's), so the lifted density is normalised.
+    if tid == PACKED_POLAR
+        lo <= x <= hi || return -Inf
+        return _eval_packed_base(fold_inclination(x), round(Int, p3), p1, p2,
+                                 0.0, Float64(π)) - p5 - log(2.0)
     end
+    # A full-circle angle's prior pushed forward onto one period
+    # (`WrappedPushforward`): periodic, walled at its chart.
+    if tid == PACKED_WRAPPED_NORMAL || tid == PACKED_WRAPPED_STEP
+        lo <= x <= hi || return -Inf
+        return wrapped_push_logpdf(x, tid == PACKED_WRAPPED_NORMAL ? _PUSH_NORMAL :
+                                      _PUSH_UNIFORM, p1, p2, p3, p4, p5)
+    end
+    return _eval_packed_base(x, tid, p1, p2, lo, hi)
+end
+
+@inline function _eval_packed_base(x::Real, tid::Int,
+                                   p1::Float64, p2::Float64,
+                                   lo::Float64, hi::Float64)
     # The cyclic inclination: sin(i)/2 on [0, π] lifted to the circle, density
     # |sin x|/4 on its chart [lo, hi] = [-π/2, 3π/2], where 0 and π are
     # interior points. Zero outside the chart, which keeps the target proper
@@ -137,7 +189,7 @@ dispatches on `tid` via if/elseif, no dynamic dispatch, Enzyme-safe.
 
     if tid == PACKED_FIXED
         return 0.0
-    elseif tid == PACKED_UNIFORM
+    elseif tid == PACKED_UNIFORM || tid == PACKED_WRAPPED   # WrappedUniform: walled
         return -log(hi - lo)
     elseif tid == PACKED_NORMAL
         μ, σ = p1, p2
@@ -196,7 +248,8 @@ function log_prior_packed(values::AbstractVector, unfrozen_idx::Vector{Int},
         p2 = params_mat[i, 2]
         lo = lowers[i]
         hi = uppers[i]
-        lp = eval_packed_logpdf(x, tid, p1, p2, lo, hi)
+        lp = eval_packed_logpdf(x, tid, p1, p2, lo, hi,
+                                params_mat[i, 3], params_mat[i, 4], params_mat[i, 5])
         if !isfinite(lp)
             return convert(eltype(values), -Inf)
         end

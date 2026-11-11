@@ -1062,11 +1062,7 @@ function _log_prior_transdim(theta::Theta{T}) where {T}
         slot in skip_slots && continue
         x = theta.values[slot]
         tid = packed.type_ids[i]
-        p1 = packed.params[i, 1]
-        p2 = packed.params[i, 2]
-        lo = packed.lowers[i]
-        hi = packed.uppers[i]
-        lp = eval_packed_logpdf(x, tid, p1, p2, lo, hi)
+        lp = eval_packed_logpdf(x, packed, i)
         if !isfinite(lp)
             return convert(T, -Inf)
         end
