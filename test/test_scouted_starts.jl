@@ -5,14 +5,15 @@
 # local move leaves. rjmcmc, moms and cold NUTS started each chain at one prior
 # draw, and the ensemble every walker; 3 of 8 single chains of each of the
 # first three stranded at i = 45°, two of four NUTS chains, and one ensemble of
-# four at i = 5° (at 161°, 1,500 nats down).
+# four at i = 5° (at 161°, 1,500 nats down). Cold pt_hmc froze its β = 1
+# chain, and Pathfinder's runs all stopped on the plateau, the same way.
 #
 # Pinned: the scouts the bound drops are the stranded ones and only those; a
 # target without a signal, where the plateau IS the posterior, keeps every
 # scout; and every chain of each local sampler comes back in the mode.
 
 using Nereus, MCMCChains, Random, Test
-using Statistics: median, mean
+using Statistics: median, mean, std
 using Nereus: Theta, set_param!, IADData
 
 const _SC_N = 220
@@ -21,13 +22,14 @@ const _SC_T = sort(57000 .+ 1800 .* rand(_SC_RNG, _SC_N))
 const _SC_PSI = 2π .* rand(_SC_RNG, _SC_N)
 const _SC_TRV = sort(57000 .+ 1800 .* rand(_SC_RNG, 40))
 
-function _sc_build(w, rv; unconstrained)
+function _sc_build(w, rv; unconstrained, efree = false)
     dt = (_SC_T .- mean(_SC_T)) ./ 365.25
     pf = sin.(2π .* (_SC_T .- 57000) ./ 365.25 .- _SC_PSI)
     iad = IADData(t = _SC_T, abscissa = w, abscissa_err = fill(0.05, _SC_N), psi = _SC_PSI,
                   parallax_factor = pf, pm_factor = dt)
     blk = (a = LogUniformPrior(0.8, 2.0), M_sec = LogUniformPrior(0.003, 0.03),
-           sesinw = FixedPrior(0.0), secosw = FixedPrior(0.0), inc = SinePrior(),
+           sesinw = efree ? UniformPrior(-1.0, 1.0) : FixedPrior(0.0),
+           secosw = efree ? UniformPrior(-1.0, 1.0) : FixedPrior(0.0), inc = SinePrior(),
            Omega = UniformPrior(0.0, 2π), Mo = UniformPrior(0.0, 2π))
     tg = build_target(M_pri = 0.644, planets = (b = blk,), iad = iad,
                       rv = (HARPS = (data = (t = _SC_TRV, rv = rv, rv_err = fill(5.0, 40)),
@@ -36,8 +38,9 @@ function _sc_build(w, rv; unconstrained)
     return NereusTarget(tg.params, tg.data; unconstrained)
 end
 
-# The companion at inclination `inc_deg` (signal = false: noise alone).
-function _sc_target(inc_deg; unconstrained = false, signal = true)
+# The companion at inclination `inc_deg` (signal = false: noise alone; efree:
+# √e sin ω and √e cos ω sampled on U(-1, 1), the truth still circular).
+function _sc_target(inc_deg; unconstrained = false, signal = true, efree = false)
     tg0 = _sc_build(zeros(_SC_N), zeros(40); unconstrained = false)
     th = Theta{Float64}(tg0.params)
     for (nm, v) in ("a_k1" => 1.18, "M_sec_k1" => 0.0105, "inc_k1" => deg2rad(inc_deg),
@@ -52,7 +55,7 @@ function _sc_target(inc_deg; unconstrained = false, signal = true)
     rng = MersenneTwister(12)
     w = (signal ? -r : zeros(_SC_N)) .+ 0.05 .* randn(rng, _SC_N)
     rv = (signal ? rvm : zeros(40)) .+ 5.0 .* randn(rng, 40)
-    return _sc_build(w, rv; unconstrained)
+    return _sc_build(w, rv; unconstrained, efree)
 end
 
 _sc_draw!(tg) = (th, r) -> (th.values[th.params.layout.unfrozen_idx] .=
@@ -115,6 +118,31 @@ end
         ch = sample_nuts(tg; n_samples = 200, n_warmup = 300, n_chains = 4,
                          warm_start = false, seed = 3, progress = false)
         _sc_in_mode(ch, 88.7; tol = 4.0)
+    end
+
+    # Each rung's kernel is frozen at the end of its warm-up: one run on the
+    # plateau left the β = 1 chain unable to move once a swap brought it to
+    # the mode (one point for all 1000 sweeps, seeds 1 and 2).
+    @testset "cold pt_hmc: the β = 1 chain in the mode, and moving" begin
+        tg = _sc_target(5.0; unconstrained = true)
+        ch, _, _ = sample_pt_hmc(tg; n_temps = 4, n_sweeps = 300, n_warmup = 200,
+                                 warm_start = false, seed = 1, progress = false)
+        _sc_in_mode(ch, 4.9; tol = 1.5)
+        @test std(vec(Array(ch[:, :inc_k1, 1]))) > deg2rad(0.1)
+    end
+
+    # Pathfinder's own starts: all 8 runs on the plateau at e = 0.885.
+    @testset "pathfinder: the draws in the mode" begin
+        tg = _sc_target(89.5; unconstrained = true, efree = true)
+        pf = pathfinder_init(tg; n_runs = 8, n_draws = 200, seed = 1)
+        L = tg.params.layout
+        X = reduce(hcat, [Nereus.transform_inverse(pf.draws[:, j], tg.transform)
+                          for j in axes(pf.draws, 2)])
+        ii = findfirst(==("inc_k1"), L.unfrozen_names)
+        e = X[findfirst(==("sesinw_k1"), L.unfrozen_names), :] .^ 2 .+
+            X[findfirst(==("secosw_k1"), L.unfrozen_names), :] .^ 2
+        @test abs(rad2deg(median(Nereus.fold_inclination.(X[ii, :]))) - 88.7) < 3
+        @test median(e) < 0.05
     end
 
     @testset "ensemble: every chain in the mode" begin
