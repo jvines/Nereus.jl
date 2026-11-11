@@ -416,9 +416,10 @@ when there is no IAD or the planet has no astrometric orbit.
 (Hipparcos / Hipparcos–Gaia / Gaia): `Δμ = μ_obs − μ_model − μ_b` in α*
 (top) and δ (bottom) vs MJD with per-epoch 1σ, and the marginalized χ².
 `μ_model` is the likelihood's own (`_hgca_model_pm`: every active
-companion, the Hipparcos–Gaia epoch as the mean reflex velocity over the
-baseline, GOST Mode B at the Gaia epoch when scan plans are given) at the
-best-fit (max-lp) draw; `μ_b` is marginalized as in
+companion; the Hipparcos and Gaia epochs as five-parameter fits through
+the Hipparcos scans and the DR3 GOST window, the Hipparcos–Gaia epoch as the
+positional difference between them, the mean reflex velocity over the
+baseline) at the best-fit (max-lp) draw; `μ_b` is marginalized as in
 `hgca_log_likelihood`, so the χ² is the fit's.
 Requires `data.hgca`. Dispatched as the `hgca_pm_residuals` plot,
 written `models/hgca_pm_residuals_K<k>.png`.
@@ -429,7 +430,9 @@ Per-epoch PM residuals for **G23H** ([Thompson+ 2026](https://ui.adsabs.harvard.
 five epochs (Hip, HG long-baseline, Gaia DR2, DR3−DR2, DR3).
 `Δμ_α* = μ_α*_obs − μ_α*_model − μ_b` (top) and `Δμ_δ` (bottom) vs MJD
 (mas/yr or μas/yr). The model PM is the likelihood's own (`_g23h_model_pm`: every
-active companion, GOST Mode B at DR3 when scan plans are given) at the
+active companion; Hipparcos, DR2 and DR3 as fits through the Hipparcos
+scans and the GOST windows, Hip→Gaia and DR3−DR2 as positional differences
+between those fits) at the
 best-fit (max-lp) draw, and `μ_b` is marginalized under the full 10×10
 covariance as in `g23h_log_likelihood`; errorbars from its diagonal.
 Requires `data.g23h`.

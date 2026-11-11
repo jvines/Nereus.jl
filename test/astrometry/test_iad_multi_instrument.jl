@@ -130,7 +130,8 @@ const PIN_RTOL = 1e-13
 # RE-PINNED 2026-09-23 (reflex kernel, GOST side): `gost_5param_fit` stopped
 # calling `orbitsolve` per scan transit and now evaluates the orbit from the
 # same hoisted Thiele-Innes constants `_iad_residuals!` uses
-# (`_gost_5param_accumulate`, src/astrometry/projection.jl). The joint path
+# (`_gost_5param_accumulate`, now `_scan_5param_accumulate`, which leaves the
+# GOST path bit for bit as it was; src/astrometry/projection.jl). The joint path
 # reaches it twice — `_multi_iad_scenario` builds `Δq_true` with it, and
 # `_iad_gaia_joint_log_likelihood` calls it per evaluation — so all four
 # goldens below are exposed to the reordered multiply-adds. Three moved, by

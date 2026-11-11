@@ -230,6 +230,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     rv    = NamedTuple()
     phot  = NamedTuple()
     iad = hgca = gost = relast = nothing
+    hip_spec = nothing
     iad_names = String[]          # per IAD instrument; "" = no jitter
     for ch in channels
         src = String(get(ch, "source", ""))
@@ -268,6 +269,14 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                     "plan per sky position"))
                 gost = ch_gost
             end
+            # The Hipparcos scans of the HGCA Hipparcos epoch (`_hip_scans_for`).
+            ch_hip = get(ch, "hip_scans", nothing)
+            if ch_hip !== nothing
+                (hip_spec === nothing || isequal(hip_spec, ch_hip)) || throw(ArgumentError(
+                    "two AS channels supply different `hip_scans`; it is the one " *
+                    "Hipparcos scan geometry of the system"))
+                hip_spec = ch_hip
+            end
             # No parallax/m_pri here: both are priors and belong in `priors`.
         elseif src in ("RM", "RM_R", "RM_A", "TOMO", "TTV", "TTV_NB", "SB")
             # handled by the technique-specific entry points below
@@ -275,6 +284,9 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
             throw(ArgumentError("unknown channel source $(repr(src))"))
         end
     end
+    # Fetched by the HGCA row's hip_id unless the IAD already has the scans or
+    # the channel says otherwise.
+    hip_scans = _hip_scans_for(hip_spec, iad, hgca, nothing)
     # Only pass stellar mass when we actually have one: build_target types
     # M_s::Real, and an RV-only fit legitimately has no stellar mass (K-driven
     # parametrisation needs none). Passing nothing is a TypeError, not a default.
@@ -329,6 +341,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     kw = Dict{Symbol,Any}(:planets => planet_spec, :rv => rv,
                           :phot => phot, :iad => iad, :hgca => hgca,
                           :gost => gost, :relAST => relast, :plx => plx,
+                          :hip_scans => hip_scans,
                           :trend_order => trend_order,
                           :noise_models => noise_models, :priors => priors,
                           :stability => stability,
@@ -653,9 +666,16 @@ over the HGCA parallax; a `priors["plx"]` takes precedence over it, and then
 nothing is queried. If the query fails the fit stops. See
 [`fetch_gaia_parallax`](@ref). The lookup is recorded in
 `summary["star"]["gaia"]`.
+
+`hip_scans` is the Hipparcos scan geometry the HGCA Hipparcos epoch is fitted
+through. Left out, it is the IAD's own scans when `iad` holds Hipparcos data,
+and otherwise fetched by the HGCA row's `hip_id`; `false` models the Hipparcos
+epoch instantaneously instead (with a warning). See `_hip_scans_for` for the
+other forms. An astrometry channel of `fit_joint` takes the same `"hip_scans"`
+key.
 """
 function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
-                        relast = nothing, planets = 1,
+                        relast = nothing, hip_scans = nothing, planets = 1,
                         engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
@@ -664,7 +684,7 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
     # NOT resolved here: `_target_from` resolves the spec, and has to see it
     # unresolved to read the per-instrument `jitter` / `clip_outliers` keys.
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
-              "relast" => relast)
+              "relast" => relast, "hip_scans" => hip_scans)
     planets isa NamedTuple ||
         (planets = _planet_spec(planets; block = default_astrom_planet()))
     star, kwargs = _split_star_kwargs(kwargs)

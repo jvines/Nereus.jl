@@ -85,6 +85,9 @@ docstring above for the full block grammar and example.
   `:dilution` / `:jitter` (a prior, or a `Real` for fixed, on
   `dilution_<name>` / `jitter_<name>`).
 - `relAST`, `hgca`, `iad`, `gost`, `g23h` — astrometry data objects.
+- `hip_scans` — the Hipparcos scan geometry (an `IADData`, e.g.
+  `fetch_hip_iad(hip_id)`) the HGCA / G23H Hipparcos epoch is fitted through,
+  when `iad` holds no Hipparcos scans; see `Data`. Not fetched here.
 - `plx` — parallax prior. `Real` for fixed, `PriorSpec` for sampled.
 - `parametrization` — `:K_driven`, `:M_sec_driven`, or `:a_driven`.
   When `nothing` (default), auto-detected from which params are
@@ -120,6 +123,7 @@ function build_target(;
     gost = nothing,
     g23h = nothing,
     gaia_dr3 = nothing,
+    hip_scans = nothing,
     as_names = String[],
     iad_names = String[],
     plx = nothing,
@@ -261,6 +265,7 @@ function build_target(;
         gost      = gost,
         g23h      = g23h,
         gaia_dr3  = gaia_dr3,
+        hip_scans = hip_scans,
     )
 
     instruments = InstrumentConfig(rv = rv_names, pm = phot_names,

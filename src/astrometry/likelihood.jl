@@ -10,12 +10,14 @@
 #                                  evaluate.
 #
 #  * `hgca_log_likelihood`       — quadratic form in 3-PM residuals
-#                                  (Hipparcos, long-baseline, Gaia) per
-#                                  axis, with the per-axis 3×3 covariance.
-#                                  HGCA Mode A: instantaneous PM at the
-#                                  three reference epochs, no scan-window
-#                                  absorption (Mode B / IAD+GOST is
-#                                  Phase 2).
+#                                  (Hipparcos, long-baseline, Gaia) with
+#                                  the within-epoch 2×2 covariance. Each
+#                                  model PM is the catalogue's own
+#                                  measurement of the reflex: five-
+#                                  parameter fits through the Hipparcos
+#                                  IAD scans and the Gaia DR3 GOST
+#                                  transits, and their positional
+#                                  difference (`_catalogue_epoch`).
 #
 # Analytic marginalization of nuisance linear parameters (parallax,
 # barycenter PM components) lives in `marginalization.jl` and is called
@@ -148,43 +150,87 @@ function relastrom_log_likelihood(theta::Theta{T}, data) where {T<:Real}
 end
 
 # ---------------------------------------------------------------------
-# HGCA absolute astrometry (Mode A: instantaneous PM at 3 epochs)
+# HGCA absolute astrometry
 # ---------------------------------------------------------------------
+
+"""
+    _catalogue_epoch(orb, M_sec, scans, window, t_ra, t_dec) -> (Δα*, Δδ, μα*, μδ)
+
+The stellar reflex of `(orb, M_sec)` as ONE catalogue epoch measured it: the
+position (RA at `t_ra`, Dec at `t_dec`) and proper motion of a five-parameter
+fit through the scans of `scans` inside `window` ([`scan_5param_fit`](@ref)):
+the Hipparcos IAD scans in `HIPPARCOS_WINDOW`, the GOST transits in
+`GAIA_DR2_WINDOW` or `GAIA_DR3_WINDOW`. `(Δα*, Δδ)` in mas, `(μα*, μδ)` in
+mas/yr.
+
+`scans === nothing` means that mission's scan geometry is not available, and
+the epoch falls back to the instantaneous reflex at the same epochs: the
+offset at `t_ra` / `t_dec` and the proper motion there. `Data` warns when that
+happens for Hipparcos; for Gaia it is the absence of a GOST plan.
+
+This is the one routine behind every HGCA and G23H model quantity, in the
+likelihoods and in the figures, so the same data is always modelled the same
+way.
+"""
+function _catalogue_epoch(orb, M_sec, scans, window, t_ra::Float64, t_dec::Float64)
+    if scans === nothing
+        if t_ra == t_dec
+            oα, oδ = star_reflex_offset(orb, t_ra, M_sec)
+            μα, μδ = star_reflex_pm(orb, t_ra, M_sec)
+        else
+            oα = star_reflex_offset(orb, t_ra,  M_sec)[1]
+            oδ = star_reflex_offset(orb, t_dec, M_sec)[2]
+            μα = star_reflex_pm(orb, t_ra,  M_sec)[1]
+            μδ = star_reflex_pm(orb, t_dec, M_sec)[2]
+        end
+        return (oα, oδ, μα, μδ)
+    end
+    q = scan_5param_fit(orb, scans, M_sec; t_ref = (t_ra, t_dec), window = window)
+    return (q[1], q[2], q[4], q[5])
+end
+
+# The Hipparcos scan geometry the HGCA/G23H models fit through: `Data`'s
+# `hip_scans` (the IAD's own scans when the fit has IAD), or nothing.
+_hip_scans(data) = hasproperty(data, :hip_scans) ? getproperty(data, :hip_scans) : nothing
 
 """
     _hgca_model_pm(theta, hgca, data, M_pri, plx, t_ref) -> (pmra_mod, pmdec_mod)
 
-The model proper motion at the three HGCA epochs: the summed stellar reflex
-of every astrometrically active companion, with the Hipparcos–Gaia epoch as
-the mean reflex velocity over the baseline and the Gaia epoch through GOST
-(Mode B) when scan plans are supplied: a five-parameter fit through the scans
-inside the Gaia DR3 window, which gives both the Gaia proper motion and the
-Gaia position the Hipparcos–Gaia difference uses. The part of `hgca_log_likelihood`
-that `plot_pm_residuals` must reproduce exactly, so it lives here once.
+The model proper motion at the three HGCA epochs, summed over every
+astrometrically active companion, each modelled the way the catalogue measured
+it (Brandt 2018, 2021; the orvara / htof forward model):
+
+1. **Hipparcos**: the proper motion of a weighted five-parameter fit through
+   the Hipparcos IAD scans inside `HIPPARCOS_WINDOW` (`data.hip_scans`).
+2. **Hipparcos–Gaia**: the positional difference, coordinate by coordinate,
+   `(α*_Gaia(t_α,G) − α*_Hip(t_α,H)) / (t_α,G − t_α,H)` and the same in Dec,
+   between the Gaia position (DR3-window fit) and the Hipparcos position (the
+   fit of 1.), each at the catalogue's central epoch of that coordinate
+   (`hgca.epochs_ra`, `hgca.epochs_dec`).
+3. **Gaia**: the proper motion of a five-parameter fit through the GOST
+   transits inside `GAIA_DR3_WINDOW` (`data.gost`) — the HGCA Gaia values are
+   EDR3's, and a GOST plan fetched over the whole mission would otherwise
+   average the reflex over years the catalogue never saw.
+
+The Hipparcos fit is weighted by the IAD abscissa errors and uses the 2007
+reduction's scan geometry, which stands in for the HGCA's 60/40 blend of the
+1997 and 2007 reductions. Without Hipparcos scans (`data.hip_scans ===
+nothing`) epoch 1 and the Hipparcos end of epoch 2 fall back to the
+instantaneous reflex at the Hipparcos epochs; without GOST, epoch 3 and the
+Gaia end of epoch 2 fall back likewise (see [`_catalogue_epoch`](@ref)).
+
+The part of `hgca_log_likelihood` that `plot_hgca_residuals` and
+`plot_pm_anomaly` must reproduce exactly, so it lives here once.
 """
 function _hgca_model_pm(theta::Theta{T}, hgca, data, M_pri, plx, t_ref) where {T<:Real}
-    # Sum of stellar reflex PM at the three epochs from all astrometry-
-    # bearing companions.
-    #
-    # Hip epoch (ie=1) and Gaia epoch (ie=3) are catalog INSTANTANEOUS PMs
-    # at their reference epochs. The Hipparcos–Gaia epoch (ie=2) is NOT
-    # instantaneous: it is the MEAN reflex velocity over the ~25 yr baseline
-    # = (Gaia pos − Hip pos)/baseline (Brandt 2021 Eq. 1), handled below.
-    #
-    # Gaia epoch: if GOST scan-plan data are supplied, use the orbit-induced
-    # catalog-PM shift from a 5-param fit through the GOST transits (HGCA
-    # Mode B; Brandt 2018 §4); otherwise the instantaneous reflex PM at the
-    # Gaia reference epoch. Mode B matters for `P` ≲ Gaia mission window.
-    #
-    # The fit uses ONLY the transits inside the DR3 window: the HGCA Gaia
-    # proper motion and position are EDR3's, measured from 2014-07-25 to
-    # 2017-05-28. A GOST plan is fetched over the whole mission (to 2025 by
-    # default), and fitting through all of it averages the reflex over seven
-    # years the catalogue never saw. The same fit's position at the Gaia
-    # epoch is the Gaia end of the Hipparcos–Gaia difference.
     pmra_mod  = zeros(T, 3)
     pmdec_mod = zeros(T, 3)
-    use_gost_mode_b = data.gost !== nothing
+    era, ede = hgca.epochs_ra, hgca.epochs_dec
+    hip  = _hip_scans(data)
+    gost = data.gost
+    # Hipparcos–Gaia divisors: the catalogue's epoch differences, per coordinate.
+    dt_ra  = (era[3] - era[1]) / 365.25
+    dt_dec = (ede[3] - ede[1]) / 365.25
     for k in planet_indices(theta)
         block = theta.params.layout.planet_blocks[k]
         has_AS(block) || continue
@@ -194,35 +240,20 @@ function _hgca_model_pm(theta::Theta{T}, hgca, data, M_pri, plx, t_ref) where {T
         # Defaults true, so fixed-dim behaviour is unchanged.
         is_planet_as_active(theta, k) || continue
         orb, M_sec = _planet_orbit(theta, k, M_pri, plx, t_ref)
-        ΔqG = use_gost_mode_b ?
-            gost_5param_fit(orb, data.gost, M_sec; t_ref = hgca.epochs[3],
-                            window = GAIA_DR3_WINDOW) : nothing
-        for ie in 1:3
-            t_e = hgca.epochs[ie]
-            if ie == 2
-                # HG epoch: the catalog "Hipparcos–Gaia" PM is the SCALED
-                # POSITIONAL DIFFERENCE (Gaia pos − Hip pos)/baseline — i.e. the
-                # MEAN reflex velocity over the ~25 yr baseline, not the
-                # instantaneous PM at the midpoint (Brandt 2021 Eq. 1). For
-                # P ≫ baseline (e.g. HD 159062, P=354 yr) the two agree to
-                # <0.1 mas/yr, but for P comparable to the baseline (e.g.
-                # HD 4747, P≈33 yr → ~75% of an orbit over the baseline) the
-                # reflex is highly non-linear and the instantaneous-PM
-                # approximation badly biases the inferred mass low.
-                oH = star_reflex_offset(orb, hgca.epochs[1], M_sec)   # Hip
-                oG = ΔqG === nothing ?
-                    star_reflex_offset(orb, hgca.epochs[3], M_sec) :  # Gaia
-                    (ΔqG[1], ΔqG[2])
-                dt_yr = (hgca.epochs[3] - hgca.epochs[1]) / oftype(t_e, 365.25)
-                μra, μdec = (oG[1] - oH[1]) / dt_yr, (oG[2] - oH[2]) / dt_yr
-            elseif ie == 3 && ΔqG !== nothing
-                μra, μdec = ΔqG[4], ΔqG[5]
-            else
-                μra, μdec = star_reflex_pm(orb, t_e, M_sec)
-            end
-            pmra_mod[ie]  += μra
-            pmdec_mod[ie] += μdec
-        end
+        H = _catalogue_epoch(orb, M_sec, hip,  HIPPARCOS_WINDOW, era[1], ede[1])
+        G = _catalogue_epoch(orb, M_sec, gost, GAIA_DR3_WINDOW,  era[3], ede[3])
+        pmra_mod[1]  += H[3]
+        pmdec_mod[1] += H[4]
+        # The catalogue "Hipparcos–Gaia" PM is the SCALED POSITIONAL DIFFERENCE,
+        # the mean reflex velocity over the ~25 yr baseline, not the
+        # instantaneous PM at its midpoint (Brandt 2021 Eq. 1). For P ≫ baseline
+        # (HD 159062, P = 354 yr) the two agree to < 0.1 mas/yr; for P
+        # comparable to it (HD 4747, P ≈ 33 yr) the reflex is highly non-linear
+        # and the instantaneous approximation biases the mass low.
+        pmra_mod[2]  += (G[1] - H[1]) / dt_ra
+        pmdec_mod[2] += (G[2] - H[2]) / dt_dec
+        pmra_mod[3]  += G[3]
+        pmdec_mod[3] += G[4]
     end
     return pmra_mod, pmdec_mod
 end
@@ -243,6 +274,11 @@ The barycentric PM is **analytically marginalized jointly in (RA, Dec)**:
 optimal `μ_b = A⁻¹ v` where `A = Σ_k C_k⁻¹` (2×2) and
 `v = Σ_k C_k⁻¹ r_k` (2-vector). Marginalized χ² is then
 `Σ_k r_kᵀ C_k⁻¹ r_k − vᵀ A⁻¹ v` plus the Gaussian normalization.
+
+The reflex at each epoch is the catalogue's own measurement of it — fits
+through the Hipparcos scans and the Gaia DR3 transits, and their positional
+difference at the per-coordinate central epochs; see
+[`_hgca_model_pm`](@ref).
 
 Returns 0 if `data.hgca` is `nothing`.
 """
@@ -1404,12 +1440,13 @@ Returns 0 by design — GOST's likelihood contribution is **folded into
 `hgca_log_likelihood`** as the HGCA Mode-B upgrade (Brandt 2018 §4).
 
 When `data.gost` and `data.hgca` are both present, the Gaia-epoch
-reflex term in the HGCA likelihood is replaced from the instantaneous
-`star_reflex_pm(orb, hgca.epochs[3], M_sec)` value by a 5-parameter fit to
+reflex terms in the HGCA likelihood (the Gaia proper motion, and the Gaia
+position of the Hipparcos–Gaia difference) are a 5-parameter fit to
 the orbit-induced along-scan signal across the Gaia transits inside the
 data release's window (`GAIA_DR3_WINDOW`; G23H's DR2 epoch uses
 `GAIA_DR2_WINDOW`) — i.e. exactly what Gaia's catalog pipeline does, modulo
-the per-transit weighting. Transits outside the window are ignored.
+the per-transit weighting — instead of the instantaneous reflex at the Gaia
+epoch. Transits outside the window are ignored.
 
 Mode B differs from Mode A only when the orbit's period is comparable
 to or shorter than Gaia's ~3-yr mission window. For Phase 1 targets
@@ -1449,17 +1486,42 @@ end
 """
     _g23h_model_pm(theta, g23h, data, M_pri, plx, t_ref) -> (pmra_mod, pmdec_mod)
 
-The model proper motion at the five G23H epochs: the summed stellar reflex of
-every astrometrically active companion, the DR2 and DR3 epochs through GOST
-(Mode B) when scan plans are supplied, each fitted through the transits
-inside its own data release's window. The part of `g23h_log_likelihood` that
-`plot_g23h_residuals` must reproduce exactly, so it lives here once.
+The model proper motion at the five G23H epochs, summed over every
+astrometrically active companion, each modelled the way Thompson+ 2026 define
+it (§II–III, Table 1; Octofitter's `G23HObs` forward model):
+
+1. **Hipparcos**: proper motion of a weighted five-parameter fit through the
+   Hipparcos IAD scans inside `HIPPARCOS_WINDOW` (`data.hip_scans`).
+2. **Hipparcos→Gaia**: `(DR3 position − Hipparcos position) / Δt`, per
+   coordinate, each position from its own fit at the catalogue's central
+   epoch of that coordinate, `Δt = epochs_*[5] − epochs_*[1]`.
+3. **DR2**: proper motion of a fit through the GOST transits inside
+   `GAIA_DR2_WINDOW`.
+4. **DR3−DR2**: `(DR3 position − DR2 position) / Δt`, per coordinate, the
+   positions at the DR3 and DR2 central epochs, `Δt = epochs_*[5] −
+   epochs_*[3]`. With the nominal J2016.0 / J2015.5 that is 0.5 yr.
+5. **DR3**: proper motion of a fit through the GOST transits inside
+   `GAIA_DR3_WINDOW`.
+
+`epochs_ra` / `epochs_dec` are `g23h`'s per-coordinate central epochs. Without
+Hipparcos scans the Hipparcos epoch falls back to the instantaneous reflex at
+its epochs, without GOST the two Gaia epochs do (see
+[`_catalogue_epoch`](@ref)); the positional differences stay positional
+differences either way.
+
+The part of `g23h_log_likelihood` that `plot_g23h_residuals` and
+`plot_pm_anomaly` must reproduce exactly, so it lives here once.
 """
 function _g23h_model_pm(theta::Theta{T}, g23h, data, M_pri, plx, t_ref) where {T<:Real}
-    # Forward-model stellar reflex PM at each of 5 G23H epochs.
     pmra_mod  = zeros(T, 5)
     pmdec_mod = zeros(T, 5)
-    use_gost_mode_b = data.gost !== nothing
+    era, ede = g23h.epochs_ra, g23h.epochs_dec
+    hip  = _hip_scans(data)
+    gost = data.gost
+    dHG_ra  = (era[5] - era[1]) / 365.25
+    dHG_dec = (ede[5] - ede[1]) / 365.25
+    d32_ra  = (era[5] - era[3]) / 365.25
+    d32_dec = (ede[5] - ede[3]) / 365.25
     for k in planet_indices(theta)
         block = theta.params.layout.planet_blocks[k]
         has_AS(block) || continue
@@ -1469,20 +1531,19 @@ function _g23h_model_pm(theta::Theta{T}, g23h, data, M_pri, plx, t_ref) where {T
         # Defaults true, so fixed-dim behaviour is unchanged.
         is_planet_as_active(theta, k) || continue
         orb, M_sec = _planet_orbit(theta, k, M_pri, plx, t_ref)
-        for ie in 1:5
-            t_e = g23h.epochs[ie]
-            if ie == 5 && use_gost_mode_b
-                μra, μdec = gost_window_avg_pm(orb, data.gost, M_sec;
-                                               window = GAIA_DR3_WINDOW)
-            elseif ie == 3 && use_gost_mode_b
-                μra, μdec = gost_window_avg_pm(orb, data.gost, M_sec;
-                                               window = GAIA_DR2_WINDOW)
-            else
-                μra, μdec = star_reflex_pm(orb, t_e, M_sec)
-            end
-            pmra_mod[ie]  += μra
-            pmdec_mod[ie] += μdec
-        end
+        H  = _catalogue_epoch(orb, M_sec, hip,  HIPPARCOS_WINDOW, era[1], ede[1])
+        D2 = _catalogue_epoch(orb, M_sec, gost, GAIA_DR2_WINDOW,  era[3], ede[3])
+        D3 = _catalogue_epoch(orb, M_sec, gost, GAIA_DR3_WINDOW,  era[5], ede[5])
+        pmra_mod[1]  += H[3]
+        pmdec_mod[1] += H[4]
+        pmra_mod[2]  += (D3[1] - H[1]) / dHG_ra
+        pmdec_mod[2] += (D3[2] - H[2]) / dHG_dec
+        pmra_mod[3]  += D2[3]
+        pmdec_mod[3] += D2[4]
+        pmra_mod[4]  += (D3[1] - D2[1]) / d32_ra
+        pmdec_mod[4] += (D3[2] - D2[2]) / d32_dec
+        pmra_mod[5]  += D3[3]
+        pmdec_mod[5] += D3[4]
     end
     return pmra_mod, pmdec_mod
 end
@@ -1498,11 +1559,12 @@ DR2↔DR3 cross-correlation arising from shared transits.
 
 # Algorithm
 
-For each of the five reference epochs `t_e` we forward-model the
-stellar reflex PM `(μ_α*_e, μ_δ_e) = Σ_k star_reflex_pm(orb_k, t_e,
-M_sec_k)` over astrometry-bearing companions. Stack the five 2-vector
-residuals into a 10-vector `r ∈ ℝ^10` ordered
-`(pmra_1, pmdec_1, ..., pmra_5, pmdec_5)`.
+For each of the five quantities we forward-model the stellar reflex
+the way the catalogue measured it ([`_g23h_model_pm`](@ref)): five-parameter
+fits through the Hipparcos scans and the DR2 and DR3 GOST transits, and the
+two positional differences between them, summed over astrometry-bearing
+companions. Stack the five 2-vector residuals into a 10-vector `r ∈ ℝ^10`
+ordered `(pmra_1, pmdec_1, ..., pmra_5, pmdec_5)`.
 
 The system barycentric PM `μ_b ∈ ℝ²` is shared across all five
 epochs and analytically marginalized: with design matrix `X ∈ ℝ^{10×2}`
@@ -1517,11 +1579,10 @@ with `A = XᵀΣ⁻¹X` (2×2) and `v = XᵀΣ⁻¹r` (2-vector). Returns
 
 (10 obs − 2 marginalized = 8 effective DOF → −8/2 ·log(2π).)
 
-If `data.gost` is also present, the Gaia DR2 (k=3) and DR3 (k=5) epoch
-reflexes are upgraded to GOST-window-averaged values via
-`gost_window_avg_pm`, each through the transits inside its own release's
-window (`GAIA_DR2_WINDOW`, `GAIA_DR3_WINDOW`), matching the HGCA Mode B
-treatment in `hgca_log_likelihood`.
+The Gaia fits need `data.gost` (each through the transits inside its own
+release's window, `GAIA_DR2_WINDOW`, `GAIA_DR3_WINDOW`) and the Hipparcos fit
+`data.hip_scans`; whichever is missing falls back to the instantaneous reflex
+at that release's epochs, as in `hgca_log_likelihood`.
 
 Returns 0 if `data.g23h` is `nothing`.
 

@@ -109,6 +109,8 @@ end
         pmra, pmdec = Nereus._hgca_model_pm(th_all, HGCA, d_all, M_pri, plx, d_all.t_ref)
         q = gost_5param_fit(orb, G_ALL, M_sec; t_ref = HGCA.epochs[3], window = W3)
         @test (pmra[3], pmdec[3]) == (q[4], q[5])
+        # No Hipparcos scans in this fixture: the Hipparcos end is the
+        # instantaneous fallback (test_hip_epoch_models.jl covers the fit).
         oH = Nereus.star_reflex_offset(orb, HGCA.epochs[1], M_sec)
         dt = (HGCA.epochs[3] - HGCA.epochs[1]) / 365.25
         @test pmra[2]  == (q[1] - oH[1]) / dt
@@ -123,11 +125,26 @@ end
 
         orb, M_sec, M_pri, plx = _gw_orbit_of(th_all, d_all)
         pmra, pmdec = Nereus._g23h_model_pm(th_all, G23H, d_all, M_pri, plx, d_all.t_ref)
-        @test (pmra[5], pmdec[5]) == gost_window_avg_pm(orb, G_ALL, M_sec; window = W3)
-        @test (pmra[3], pmdec[3]) == gost_window_avg_pm(orb, G_ALL, M_sec; window = W2)
-        for ie in (1, 2, 4)
-            @test (pmra[ie], pmdec[ie]) == Nereus.star_reflex_pm(orb, G23H.epochs[ie], M_sec)
-        end
+        # Each release's fit is referred to its catalogue epoch, which the
+        # positional differences need; the proper motion is the same fit's, to
+        # rounding (it used to be compared bit for bit with the fit at the
+        # transits' mean epoch, `gost_window_avg_pm`).
+        q3 = gost_5param_fit(orb, G_ALL, M_sec; t_ref = G23H.epochs[5], window = W3)
+        q2 = gost_5param_fit(orb, G_ALL, M_sec; t_ref = G23H.epochs[3], window = W2)
+        @test (pmra[5], pmdec[5]) == (q3[4], q3[5])
+        @test (pmra[3], pmdec[3]) == (q2[4], q2[5])
+        @test collect((pmra[5], pmdec[5])) ≈
+              collect(gost_window_avg_pm(orb, G_ALL, M_sec; window = W3)) rtol = 1e-10
+        # No Hipparcos scans here: the Hipparcos epoch is the instantaneous
+        # reflex (with a warning). Hip→Gaia and DR3−DR2 are positional
+        # differences over the epoch differences, not instantaneous proper
+        # motions at 2004.6 and 2015.75 as they used to be.
+        @test (pmra[1], pmdec[1]) == Nereus.star_reflex_pm(orb, G23H.epochs[1], M_sec)
+        oH = Nereus.star_reflex_offset(orb, G23H.epochs[1], M_sec)
+        @test pmra[2]  == (q3[1] - oH[1]) / ((G23H.epochs[5] - G23H.epochs[1]) / 365.25)
+        @test pmdec[2] == (q3[2] - oH[2]) / ((G23H.epochs[5] - G23H.epochs[1]) / 365.25)
+        @test pmra[4]  == (q3[1] - q2[1]) / ((G23H.epochs[5] - G23H.epochs[3]) / 365.25)
+        @test pmdec[4] == (q3[2] - q2[2]) / ((G23H.epochs[5] - G23H.epochs[3]) / 365.25)
 
         # Transits after DR2 but inside DR3 move the DR3 epoch, not the DR2 one.
         d_nox, th_nox = _gw_setup(gost = G_NOX, g23h = G23H)

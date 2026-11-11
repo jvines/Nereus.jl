@@ -213,6 +213,7 @@ rather than a single number trusted.
       "to":   "2025-01-15T00:00:00"
     },
     "hgca":      { "fits": "/work/in/HGCA_vEDR3.fits", "hip_id": 24205 },  // Brandt eDR3 HGCA, OR `hip_id` alone, OR `values`
+    // "hip_scans": false,             // Hipparcos scans of the HGCA Hipparcos epoch: default fetched by hip_id; false = instantaneous
     "relastrom": { "csv": "/work/in/relastrom.csv" },             // direct-imaging, OR `values`
     "gaia_dr3":  { "params": [86.5, 1.2, 35.2, 12.1, -5.4],       // [α, δ, ϖ, μα*, μδ]
                    "cov": [[/* 5×5 */]], "t_ref": 2016.0 }
@@ -571,7 +572,16 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   and pulls the row — the VALIDATED Hipparcos–Gaia path, recovers the orvara
   orbit on HD 159062), or `{fits, hip_id}` for a local copy of the catalogue, or `values`
   (exactly 3 epochs: `t`, `pmra`, `pmdec`, `cov_ep`, plus `plx`, `plx_err`,
-  `hip_id`). Pair with `gost` for the Mode-B Gaia epoch.
+  `hip_id`, and optionally the per-coordinate central epochs `epochs_ra` /
+  `epochs_dec`). Pair with `gost` for the Gaia epoch (a fit through the DR3
+  window). The Hipparcos epoch is a fit through the Hipparcos scans:
+  Hipparcos IAD in `iad` if present, else fetched by `hip_id` (see
+  `hip_scans`).
+- **`hip_scans`** — the Hipparcos scan geometry of the HGCA Hipparcos epoch.
+  Absent: automatic (the IAD's scans, else fetched by the `hgca` row's
+  `hip_id`; ~350 MB bundle on first use, then cached). `false`: none, and the
+  Hipparcos epoch is the instantaneous reflex (warned). `{hip_id}` or `values`
+  (`t`, `psi`, `parallax_factor`, `abscissa_err`).
 - **`relastrom`** — `{csv}` or `values` (`t`, `ra_off`, `dec_off`, `ra_err`,
   `dec_err`, `planet_idx?`).
 - **`gaia_dr3`** — `{params:[α,δ,ϖ,μα*,μδ], cov:5×5, t_ref}`.

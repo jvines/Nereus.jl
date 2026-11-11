@@ -27,13 +27,18 @@ fields(s) = Dict{String,Any}(String(f) => getfield(s, f) for f in fieldnames(typ
                     along_scan_pos = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
     same_hgca(h) = h isa HGCAData && h.epochs == hgca.epochs &&
         h.pmra == hgca.pmra && h.pmdec == hgca.pmdec && h.cov_ep == hgca.cov_ep &&
-        h.plx == hgca.plx && h.plx_err == hgca.plx_err && h.hip_id == hgca.hip_id
+        h.plx == hgca.plx && h.plx_err == hgca.plx_err && h.hip_id == hgca.hip_id &&
+        h.epochs_ra == hgca.epochs_ra && h.epochs_dec == hgca.epochs_dec
 
     rv = Dict("source" => "RV", "data" => Dict("RV" => (t = [58000.0, 58100.0, 58200.0],
                                                      rv = [0.0, 1.0, 2.0], rv_err = [1.0, 1.0, 1.0])))
     priors = Dict("plx" => Dict("type" => "normal", "mu" => 50.0, "sigma" => 0.05),
                   "M_pri" => Dict("type" => "normal", "mu" => 1.0, "sigma" => 0.05))
-    as(; kw...) = Dict{String,Any}("source" => "AS", (String(k) => v for (k, v) in kw)...)
+    # `hip_scans = false`: an HGCA row with a Hipparcos ID otherwise fetches
+    # that star's Hipparcos scans (a 350 MB bundle on first use), which the
+    # HGCA Hipparcos epoch is fitted through. Not what these tests are about.
+    as(; kw...) = Dict{String,Any}("source" => "AS", "hip_scans" => false,
+                                   (String(k) => v for (k, v) in kw)...)
 
     @testset "loader field dicts round-trip into Data" begin
         # The struct carries `hip_id`; the values must win over an auto-fetch.

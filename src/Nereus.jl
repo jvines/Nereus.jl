@@ -242,7 +242,7 @@ export
     mass_function, msec_from_K, mass_ratio_from_F, a_from_P,
     planet_geometry, coupled_geometry,
     relastrom_offset, star_reflex_offset, star_reflex_pm,
-    gost_window_avg_pm, gost_5param_fit,
+    gost_window_avg_pm, gost_5param_fit, scan_5param_fit,
     load_hgca_row, load_orvara_rv, load_orvara_relast,
     load_hip_iad, load_gost, load_gaia_dr3,
     fetch_hip_iad, fetch_gost, fetch_gaia_parallax,

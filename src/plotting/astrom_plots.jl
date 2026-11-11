@@ -747,10 +747,10 @@ Hipparcos–Gaia / Gaia): `Δμ = μ_obs − μ_model − μ_b` in α* (top) and
 fit's, not an approximation of it:
 
   - `μ_model` is `_hgca_model_pm`, the model `hgca_log_likelihood` uses
-    (every active companion's reflex; the Hipparcos–Gaia epoch as the mean
-    reflex velocity over the baseline; the Gaia epoch through GOST when scan
-    plans are supplied), at the max-lp draw in which companion `planet_idx`
-    exists;
+    (every active companion's reflex; the Hipparcos epoch a fit through the
+    Hipparcos scans, the Gaia epoch one through the DR3 GOST window, the
+    Hipparcos–Gaia epoch their positional difference), at the max-lp draw
+    in which companion `planet_idx` exists;
   - `μ_b` is the barycentric PM, analytically marginalized with the same
     2×2 within-epoch covariances as the likelihood.
 
@@ -784,9 +784,9 @@ function plot_pm_residuals(chains, params, data;
         theta_med = first(drawn)
 
         # The model PM the likelihood compares with the catalogue: EVERY
-        # active companion's reflex, the Hipparcos–Gaia epoch as the mean
-        # reflex velocity over the baseline, the Gaia epoch through GOST when
-        # scan plans are supplied (`_hgca_model_pm`, shared with
+        # active companion's reflex, the Hipparcos and Gaia epochs as fits
+        # through their scans, the Hipparcos–Gaia epoch as the positional
+        # difference between those fits (`_hgca_model_pm`, shared with
         # `hgca_log_likelihood`). This figure used to take planet
         # `planet_idx`'s instantaneous reflex alone, so its residuals and χ²
         # were not the fit's whenever there were other companions or the
@@ -1470,9 +1470,10 @@ data. Five epochs: Hip, HG long-baseline, Gaia DR2, DR3-DR2, DR3.
   top    — Δμ_α* = μ_α*_obs − μ_α*_model  vs MJD   [mas/yr]
   bottom — Δμ_δ  = μ_δ_obs  − μ_δ_model  vs MJD   [mas/yr]
 
-Model PM = instantaneous reflex PM at each epoch (Mode A; no
-window-averaging). Errorbars from the diagonal of the G23H 10×10
-within-epoch covariance.
+Model PM = `_g23h_model_pm`, the likelihood's own: fits through the
+Hipparcos scans (`data.hip_scans`) and the DR2 / DR3 GOST windows, and the
+Hipparcos→Gaia and DR3−DR2 positional differences between them. Errorbars
+from the diagonal of the G23H 10×10 within-epoch covariance.
 """
 function plot_g23h_residuals(chains, params, data;
                               output::Union{Nothing, String} = nothing,
@@ -1582,13 +1583,15 @@ end
 # 8. Proper-motion-anomaly trajectory along GOST scan window
 # =====================================================================
 
-# The summed reflex PM that a Gaia release's five-parameter solution absorbs,
-# fitted through the scans `gw` of its window.
-function _dr_reflex_pm(orbs, Ms, gw)
+# The summed reflex PM that a release's five-parameter solution absorbs, fitted
+# through the scans of `scans` inside its window `win`: `_catalogue_epoch`, the
+# routine the HGCA and G23H likelihoods model their Gaia epochs with. `t` is
+# the release's epoch (the proper motion does not depend on it).
+function _dr_reflex_pm(orbs, Ms, scans, win, t::Real)
     μa = 0.0; μd = 0.0
     for j in eachindex(orbs)
-        a_j, d_j = gost_window_avg_pm(orbs[j], gw, Ms[j])
-        μa += a_j; μd += d_j
+        q = Nereus._catalogue_epoch(orbs[j], Ms[j], scans, win, Float64(t), Float64(t))
+        μa += q[3]; μd += q[4]
     end
     return μa, μd
 end
@@ -1609,8 +1612,9 @@ of every companion the likelihood couples to the astrometry -- drawn among
 the draws in which companion `planet_idx` exists. HGCA / G23H observed PMs
 at their tabulated epochs, less the barycentric PM each likelihood
 marginalizes (`_hgca_mub`, `_g23h_mub`), beside open markers for the
-likelihood's own model at those epochs (baseline-mean at Hipparcos–Gaia,
-GOST window at Gaia -- not points on the instantaneous curve).
+likelihood's own model at those epochs (`_hgca_model_pm`, `_g23h_model_pm`: fits
+through the Hipparcos scans and the Gaia windows, and their positional
+differences -- not points on the instantaneous curve).
 
 Gaia DR2 and DR3 as GOST projects them: the reflex PM each release's
 five-parameter solution absorbs, fitted through the scans inside that
@@ -1652,16 +1656,15 @@ function plot_pm_anomaly(chains, params, data;
 
         # Gaia DR2 and DR3 as GOST projects them, each through the scans of
         # its own window: GOST plans the whole mission (the fetcher's default
-        # runs to 2025), and neither catalogue was fitted to all of it. A
+        # runs to 2025), and neither catalogue was fitted to all of it. The fit
+        # is the likelihood's own (`_dr_reflex_pm` → `_catalogue_epoch`). A
         # release with fewer than five scans in its window is left out.
         pal = cool_pastel(2)
         dr_proj = [(label = "Gaia DR2 (GOST)", win = GAIA_DR2_WINDOW,
-                    t = jyear_to_mjd(2015.5), color = pal[1], marker = :circle,
-                    gw = _gost_window(gost, GAIA_DR2_WINDOW)),
+                    t = jyear_to_mjd(2015.5), color = pal[1], marker = :circle),
                    (label = "Gaia DR3 (GOST)", win = GAIA_DR3_WINDOW,
-                    t = jyear_to_mjd(2016.0), color = pal[2], marker = :rect,
-                    gw = _gost_window(gost, GAIA_DR3_WINDOW))]
-        filter!(d -> d.gw !== nothing, dr_proj)
+                    t = jyear_to_mjd(2016.0), color = pal[2], marker = :rect)]
+        filter!(d -> Nereus._n_in_window(gost.t, d.win) >= 5, dr_proj)
 
         # Dense time grid spanning all astrometric epochs (Hip + Gaia +
         # GOST + relAST) so the model curve is shown wherever a data
@@ -1715,7 +1718,7 @@ function plot_pm_anomaly(chains, params, data;
                         end
                     end
                     for (w, d) in enumerate(dr_proj)
-                        proj_ra[q, w], proj_dec[q, w] = _dr_reflex_pm(orbs_i, Ms_i, d.gw)
+                        proj_ra[q, w], proj_dec[q, w] = _dr_reflex_pm(orbs_i, Ms_i, gost, d.win, d.t)
                     end
                 catch
                 end
@@ -1796,9 +1799,9 @@ function plot_pm_anomaly(chains, params, data;
         # catalogue's Hipparcos–Gaia value, which carries the mean reflex over
         # the baseline and so shifted every point by the signal itself when
         # P ≫ 25 yr. The likelihood's own model at each epoch is drawn as an
-        # open marker: the Hipparcos–Gaia epoch is a baseline-mean reflex and
-        # the Gaia epoch a GOST-window average, neither a point on the
-        # instantaneous curve.
+        # open marker: the Hipparcos and Gaia epochs are fits through their
+        # missions' scans and the Hipparcos–Gaia epoch a positional difference,
+        # none of them a point on the instantaneous curve.
         function _overlay!(ts, μra_obs, μdec_obs, σ_ra, σ_dec, μra_mod, μdec_mod, mb,
                            color, marker, label)
             μb1, μb2 = mb === nothing ? (0.0, 0.0) : mb[1:2]
@@ -1851,7 +1854,7 @@ function plot_pm_anomaly(chains, params, data;
         # point leaves both visible.
         for (w, d) in enumerate(dr_proj)
             bf = isempty(active_orbs) ? (NaN, NaN) :
-                 _dr_reflex_pm(active_orbs, active_Msec, d.gw)
+                 _dr_reflex_pm(active_orbs, active_Msec, gost, d.win, d.t)
             for (ax, v, col) in ((ax_ra,  bf[1], view(proj_ra,  :, w)),
                                  (ax_dec, bf[2], view(proj_dec, :, w)))
                 isfinite(v) || continue
