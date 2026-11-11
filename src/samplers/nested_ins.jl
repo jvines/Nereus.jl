@@ -38,7 +38,13 @@ Container for a `sample_nested_ins` run.
 # Fields
 - `chains::MCMCChains.Chains` — posterior samples (importance-resampled).
 - `log_z_ns::Float64` — Skilling-style NS log Z (iso-likelihood shells).
-- `log_z_ins::Float64` — INS log Z (importance over all evaluations).
+- `log_z_ins::Float64` — the sum of `L·V` over every evaluation, divided by
+  their number, `V` the volume of the bound it was drawn from. `NaN` unless
+  `proposal = :unif`: the walk and slice kernels do not draw from the bound.
+  Not an evidence to report even then: each term estimates the evidence
+  inside the bound its point was drawn from, which shrinks as the run goes
+  on, so it comes out low. The unbiased form (Feroz et al. 2013) weighs each
+  point by every bound that contains it. `log_z_ns` is the evidence.
 - `n_iters::Int` — outer NS iterations completed.
 - `n_evals::Int` — total likelihood evaluations (NS + rejected proposals).
 """
@@ -53,8 +59,10 @@ end
 """
     sample_nested_ins(target, data; kwargs...) -> INSResult
 
-Importance Nested Sampling. Standard NS posterior + log Z + an INS
-log Z that uses every likelihood evaluation (incl. rejected proposals).
+Nested sampling with Nereus's own loop and kernels: the posterior and the
+NS log Z (`log_z_ns`), plus, with `proposal = :unif`, a sum over every
+likelihood evaluation (`log_z_ins`, see [`INSResult`](@ref): not an evidence
+to report).
 
 Operates in **unit-cube space**: `u ∈ [0,1]^n_dim`, prior-transformed
 to bounded params via per-coordinate `quantile(prior, u)`. The
@@ -78,9 +86,8 @@ machinery use the same draws.
   acceptance and fixed within each; for `:slice` the initial slice width.
 - `proposal::Symbol=:rwalk` — within-shell move: `:rwalk` (random walk),
   `:slice` (random-direction slice), or `:unif` (rejection; low-d only).
-  These are Nereus's own accumulator-aware kernels — NestedSamplers'
-  proposal types can't feed the per-evaluation INS estimator, so INS
-  cannot reuse them.
+  These are Nereus's own kernels: every likelihood call they make is
+  recorded for `log_z_ins`.
 - `min_X_shrinkage::Real=10.0` — min log prior-volume shrinkage before
   the dlogz stop can trigger.
 - `seed::Int=1`
@@ -361,9 +368,16 @@ function sample_nested_ins(
         push!(dead_u, copy(live_u[:, i]))
     end
 
-    # --- INS log Z = log(Σ L_i · V_i) − log(N_total_evals) -----
+    # --- log(Σ L_i · V_i) − log(N_total_evals), see INSResult -----
+    # Defined only for draws from the bound: the walk and slice kernels move
+    # within the constraint, and their points have no proposal volume. With
+    # :rwalk it came out 1.2-1.7 nats above pt_emcee's evidence on an RM
+    # obliquity fit and up to 3.4 above on an eccentric-RV fit, while run_job
+    # reported it as the evidence.
     finite_idx = findall(isfinite, ins_log_L)
-    if isempty(finite_idx)
+    if proposal !== :unif
+        log_z_ins = NaN
+    elseif isempty(finite_idx)
         log_z_ins = -Inf
     else
         terms = ins_log_L[finite_idx] .+ ins_log_V[finite_idx]

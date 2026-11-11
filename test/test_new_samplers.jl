@@ -101,13 +101,14 @@ end
 # =====================================================================
 
 @testset "sample_nested_ins" begin
-    @testset "runs end-to-end and returns both NS and INS log Z" begin
+    @testset "runs end-to-end and returns the NS log Z" begin
         target, data, _ = _make_rv_target(2027)
         res = sample_nested_ins(target, data;
             n_live = 40, dlogz = 2.0, max_iter = 1500, seed = 1)
         @test res isa INSResult
         @test isfinite(res.log_z_ns)
-        @test isfinite(res.log_z_ins)
+        # the default walk does not draw from the bound (INSResult)
+        @test isnan(res.log_z_ins)
         @test res.n_iters > 0
         @test res.n_iters <= 1500
         # n_evals counts every rejection-sampling proposal, so it should
@@ -115,11 +116,6 @@ end
         @test res.n_evals > 40 + res.n_iters
         @test :K_k1 in names(res.chains, :parameters)
         @test size(res.chains, 1) > 0
-        # NS and INS are alternative estimators of the same Z; on
-        # well-mixed runs they agree to a few nats. We don't enforce
-        # tight agreement here (the budget is small) but they shouldn't
-        # be wildly inconsistent.
-        @test abs(res.log_z_ns - res.log_z_ins) < 50.0
     end
 
     @testset "accepts integer-valued float kwargs (JSON config path)" begin
@@ -131,7 +127,7 @@ end
             n_live = 40, walk_scale = 1, enlarge = 2, dlogz = 2,
             max_iter = 1500, seed = 1)
         @test res isa INSResult
-        @test isfinite(res.log_z_ins)
+        @test isfinite(res.log_z_ns)
     end
 
     @testset "proposal interface (:rwalk / :slice / :unif)" begin
@@ -141,7 +137,8 @@ end
                 n_live = 40, proposal = prop, dlogz = 2.0,
                 max_iter = 2000, seed = 1)
             @test res isa INSResult
-            @test isfinite(res.log_z_ins)
+            @test isfinite(res.log_z_ns)
+            @test isfinite(res.log_z_ins) == (prop === :unif)
         end
         @test_throws ArgumentError sample_nested_ins(target, data;
             n_live = 40, proposal = :banana, seed = 1)

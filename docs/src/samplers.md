@@ -27,7 +27,7 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 | `moms`             | `sample_moms`             | trans | **required** | — (NaN) |
 | `daedalus`          | `sample_daedalus`          | trans | **required** | yes (NS) |
 | `nested`           | `sample_nested`           | fixed | — | yes (NS) |
-| `nested_ins`       | `sample_nested_ins`       | fixed | — | yes (INS) |
+| `nested_ins`       | `sample_nested_ins`       | fixed | — | yes (NS) |
 | `nested_dynamic`   | `sample_nested_dynamic`   | fixed | — | yes (dynamic NS) |
 | `pa`               | `sample_pa`               | fixed | — | yes (PA) |
 | `smc`              | `sample_smc`              | fixed | — | yes (→ PA) |
@@ -80,7 +80,7 @@ directly.
 | Trans-dim + per-config evidence (Bayes-factor matrix) | `sample_daedalus` |
 | Lightweight trans-dim baseline | `sample_rjmcmc` |
 | Clean fixed-dim log Z (single run) | `sample_nested` |
-| Evidence cross-check with INS / dynamic allocation | `sample_nested_ins` / `sample_nested_dynamic` |
+| NS evidence from Nereus's own loop / dynamic allocation | `sample_nested_ins` / `sample_nested_dynamic` |
 | Visual-orbit fit (rel-astrom only, sparse arc, `:a_driven`) | `ofti_sample` |
 | Quick MAP / Laplace evidence / seed for PT | `sample_map` / `pathfinder_init` |
 
@@ -521,10 +521,15 @@ res = sample_nested_ins(target, data;
 )
 ```
 
-Returns `INSResult(chains, log_z_ns, log_z_ins, n_iters, n_evals)`. These
-are Nereus's own accumulator-aware kernels (NestedSamplers' proposals can't
-feed the per-eval INS estimator). `run_job` surfaces `log_z_ins` as the
-sampler's `log_evidence`. When `n_eff < 200` (peaked posterior), the chain
+Returns `INSResult(chains, log_z_ns, log_z_ins, n_iters, n_evals)`. The
+kernels are Nereus's own, not NestedSamplers'. `run_job` surfaces
+`log_z_ns` as the sampler's `log_evidence`. `log_z_ins` is `NaN` unless
+`proposal = :unif` and is not an evidence even then: each term estimates
+the evidence inside the bound its point was drawn from, which shrinks as
+the run goes on, so the sum comes out low (the unbiased form, Feroz et al.
+2013, weighs every point by all the bounds that contain it). With
+`:rwalk` it was reported as the evidence and came out up to 3.4 nats above
+pt_emcee's on RM and RV fits. When `n_eff < 200` (peaked posterior), the chain
 falls back to top-N dead points by weight rather than systematic resampling
 — bump `n_live` to 2000+ for full posterior coverage.
 

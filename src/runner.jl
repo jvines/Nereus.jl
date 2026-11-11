@@ -1722,7 +1722,8 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                  n_evals = res.n_evals)
     elseif name == "nested_ins"
         res = sample_nested_ins(target, data; kw...)
-        return (chains = res.chains, log_evidence = res.log_z_ins,
+        # the NS estimate: log_z_ins is not an evidence (INSResult)
+        return (chains = res.chains, log_evidence = res.log_z_ns,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = res.n_evals)
     elseif name == "nested_dynamic"
