@@ -37,7 +37,9 @@ Works in unconstrained space (with transforms) by default.
 - `init::Union{Nothing, Vector{Float64}}=nothing` — if provided, walkers scatter around this point; otherwise drawn from prior (EMPEROR-style)
 - `seed::Int=1`
 - `n_chains::Int=1` — independent ensembles run on Julia threads, chain `c`
-  seeded with `seed + c - 1`.
+  seeded with `seed + c - 1`. They share the circular windows: the burn-in
+  re-cut is taken from the walkers of all of them, at a point where each has
+  stopped at the same step.
 - `show_progress::Bool=true` — progress bar (the first chain's, when
   `n_chains > 1`).
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
@@ -76,17 +78,37 @@ function sample_ensemble(
 
     # Multi-chain: fan out `n_chains` independent ensemble runs on
     # Julia threads. Each chain re-draws its walker init and runs
-    # the stretch move on its own state, so concurrent execution
-    # is race-free. Useful both for wall-clock speed (Goodman-Weare
-    # within-chain walker stepping is single-threaded here)
+    # the stretch move on its own state. Useful both for wall-clock speed
+    # (Goodman-Weare within-chain walker stepping is single-threaded here)
     # and for between-chain R-hat convergence diagnostics.
+    #
+    # The chains share ONE Params, so the burn-in re-cut of the circular
+    # seams (which moves the layout's windows) is taken at a rendezvous
+    # (src/circular.jl): on each due step every chain stops, the last to arrive
+    # re-cuts from all their walkers and relabels every chain's, and all carry
+    # on. Their checkpoints are read here, before any starts, so a resume puts
+    # the shared windows back once (`_ensemble_multichain_setup!`).
     if n_chains > 1
+        n_dim = length(target.params.layout.unfrozen_idx)
+        nw = max(n_walkers, 2 * n_dim + 2)
+        fps = [_ensemble_fingerprint(target, nw, n_burnin, thinning, seed + c - 1,
+                                     n_chains, init) for c in 1:n_chains]
+        cks = Any[resume ? read_checkpoint(_chain_checkpoint_path(ck_path, c),
+                                           "ensemble", fps[c]) : nothing
+                  for c in 1:n_chains]
+        rv = _ensemble_multichain_setup!(target, cks, max(n_steps, 2),
+                                         n_burnin * thinning)
         tasks = Vector{Task}(undef, n_chains)
         for c in 1:n_chains
             ck_c = ck_path === nothing ? nothing : _chain_checkpoint_path(ck_path, c)
-            tasks[c] = Threads.@spawn _ensemble_chain(target, n_walkers, n_steps,
-                n_burnin, thinning, init, seed + c - 1, n_chains,
-                show_progress && c == 1, ck_c, ck_every, resume)
+            tasks[c] = Threads.@spawn try
+                _ensemble_chain(target, n_walkers, n_steps,
+                    n_burnin, thinning, init, seed + c - 1, n_chains,
+                    show_progress && c == 1, ck_c, ck_every, resume;
+                    pre = (fp = fps[c], ck = cks[c]), rendezvous = rv)
+            finally
+                rv === nothing || _rendezvous_leave!(rv)
+            end
         end
         return MCMCChains.chainscat([fetch(t) for t in tasks]...)
     end
@@ -99,6 +121,106 @@ end
 function _chain_checkpoint_path(path::AbstractString, c::Int)
     base, ext = splitext(path)
     return string(base, "_chain", c, ext)
+end
+
+# What an ensemble checkpoint must match (src/checkpoint.jl). The walkers are
+# stored in the sampling coordinates, so the circular windows and whether the
+# target is unconstrained are part of it.
+_ensemble_fingerprint(target::NereusTarget, n_walkers, n_burnin, thinning, seed,
+                      n_chains, init) =
+    run_fingerprint(target.params, target.data; n_walkers, n_burnin, thinning,
+        seed, n_chains, init = init === nothing ? nothing : copy(init),
+        unconstrained = target.transform !== nothing,
+        windows = circular_windows(target.params))
+
+"""
+    _ensemble_recut!(x, params, transform, rv) -> Bool
+
+The burn-in re-cut of one chain's walkers `x` ([`recut_walkers!`](@ref)). With
+a rendezvous `rv` (several chains over one `Params`) the chains re-cut
+together: the last to arrive pools every chain's walkers, re-cuts from all of
+them and writes each chain's back. Returns whether any walker moved (then the
+caller redoes its log-densities).
+"""
+function _ensemble_recut!(x::Matrix{Float64}, params::Params, transform,
+                          rv::Union{Nothing,_Rendezvous})
+    rv === nothing && return recut_walkers!(x, params, transform)
+    return _rendezvous!(rv, x) do xs
+        X = reduce(hcat, xs)
+        recut_walkers!(X, params, transform) || return false
+        o = 0
+        for xc in xs
+            xc .= view(X, :, (o + 1):(o + size(xc, 2)))
+            o += size(xc, 2)
+        end
+        return true
+    end
+end
+
+"""
+    _ensemble_multichain_setup!(target, cks, n_steps, n_burn_steps)
+        -> Union{Nothing,_Rendezvous}
+
+Before the chains of a multi-chain ensemble start: put back the shared windows
+of a resumed run (those of the furthest chain; any chain saved in older charts
+is relabelled into them, `_ensemble_rechart_checkpoint!`), and return the
+rendezvous for the burn-in re-cuts still to come -- `nothing` when there are
+none, or when the resumed chains are out of step (different numbers of re-cuts
+left), in which case the windows stay as they are: a chain still re-cutting
+would move them under one that is not.
+"""
+function _ensemble_multichain_setup!(target::NereusTarget, cks, n_steps::Int,
+                                     n_burn_steps::Int)
+    params = target.params
+    isempty(circular_indices(params)) && isempty(cyclic_inclination_indices(params)) &&
+        return nothing
+    trs = target.transform === nothing ? () : (target.transform,)
+    steps = Int[ck === nothing ? 0 : ck.step::Int for ck in cks]
+    have = Bool[ck !== nothing && hasproperty(ck, :windows) for ck in cks]
+    if any(have)
+        ref = argmax([have[c] ? steps[c] : -1 for c in eachindex(cks)])
+        wref = cks[ref].windows
+        for c in eachindex(cks)
+            have[c] && cks[c].windows != wref || continue
+            _ensemble_rechart_checkpoint!(target, cks[c], wref)
+        end
+        _restore_shared_windows!(params, wref, trs)
+        params.layout.spin_axis .= cks[ref].spin_axis
+    end
+    B = n_burn_steps
+    left = [count(s -> _pt_recut_due(s, B), (st + 1):min(B, n_steps)) for st in steps]
+    return allequal(left) && first(left) > 0 ? _Rendezvous(length(cks)) : nothing
+end
+
+# A chain's checkpointed walkers and kept draws, saved in the charts
+# `ck.windows`, moved into the charts `wref`: through the bounded coordinates,
+# relabelled by whole periods. Through a logit that changes the walkers'
+# coordinates and Jacobians, so their log-densities are redone. Serial: called
+# before any chain runs.
+function _ensemble_rechart_checkpoint!(target::NereusTarget, ck, wref)
+    params, tr = target.params, target.transform
+    trs = tr === nothing ? () : (tr,)
+    L = params.layout
+    circ = circular_indices(params)
+    kept = ck.kept::Array{Float64, 3}
+    cols = [view(ck.x, :, j) for j in axes(ck.x, 2)]
+    append!(cols, view(kept, :, j, s) for j in axes(kept, 2), s in axes(kept, 3))
+    _restore_shared_windows!(params, ck.windows, trs)
+    W = [tr === nothing ? Vector{Float64}(y) : transform_inverse(Vector{Float64}(y), tr)
+         for y in cols]
+    _restore_shared_windows!(params, wref, trs)
+    for (y, w) in zip(cols, W)
+        for i in circ
+            lo, hi = bounds(L.unfrozen_priors[i])
+            w[i] = circular_relabel(w[i], lo, hi)
+        end
+        y .= tr === nothing ? w : transform_forward(w, tr)
+    end
+    for j in axes(ck.x, 2)
+        lp = LogDensityProblems.logdensity(target, ck.x[:, j])
+        ck.lastll[j] = isfinite(lp) ? lp : -1e300
+    end
+    return ck
 end
 
 # One stretch-move step of the whole ensemble, in place: each half of the
@@ -140,7 +262,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
                          init::Union{Nothing, Vector{Float64}}, seed::Int,
                          n_chains::Int, show_progress::Bool,
                          ck_path::Union{Nothing, String}, ck_every::Float64,
-                         resume::Bool)
+                         resume::Bool; pre = nothing,
+                         rendezvous::Union{Nothing,_Rendezvous} = nothing)
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -161,10 +284,12 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     # circular parameters and whether the target is unconstrained are part of
     # what the run depends on. On resume nothing is drawn: the saved state
     # replaces initialisation and the loop carries on from step `step0 + 1`.
-    ck_fp = run_fingerprint(params, target.data; n_walkers, n_burnin, thinning,
-        seed, n_chains, init = init === nothing ? nothing : copy(init),
-        unconstrained = has_transform, windows = circular_windows(params))
-    ck = resume ? read_checkpoint(ck_path, "ensemble", ck_fp) : nothing
+    # With several chains `sample_ensemble` has read the checkpoint (`pre`).
+    ck_fp = pre === nothing ?
+        _ensemble_fingerprint(target, n_walkers, n_burnin, thinning, seed,
+                              n_chains, init) : pre.fp
+    ck = pre !== nothing ? pre.ck :
+         resume ? read_checkpoint(ck_path, "ensemble", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
         "the checkpoint is at step $step0; n_steps = $n_steps would end before it"))
@@ -222,8 +347,9 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         copy!(rng, ck.rng::MersenneTwister)
         ck_kept = ck.kept::Array{Float64, 3}
         kept[:, :, 1:size(ck_kept, 3)] .= ck_kept
-        # Windows (and spin axis) the saved walkers live in, moved by the re-cut.
-        if hasproperty(ck, :windows)
+        # Windows (and spin axis) the saved walkers live in, moved by the re-cut;
+        # with several chains put back, once for all, by `sample_ensemble`.
+        if pre === nothing && hasproperty(ck, :windows)
             for (nm, (lo, _)) in ck.windows
                 set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
                                      lo; transforms = has_transform ? (target.transform,) : ())
@@ -244,11 +370,12 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         # emptiest arc, so a mode across a seam is not split between two walls
         # that stretch moves cannot carry walkers between. A move through the
         # logit changes the walkers' Jacobians: their log-densities are redone.
-        # One chain only: concurrent chains share `params`, whose windows a
-        # re-cut moves (as rjmcmc and moms; recenter_circular! still joins the
-        # seam of their output).
-        if n_chains == 1 && step <= n_burnin * thinning && _pt_recut_due(step, n_burnin * thinning) &&
-           recut_walkers!(x, params, target.transform)
+        # Concurrent chains share `params`, whose windows a re-cut moves: they
+        # re-cut together, at a rendezvous (`_ensemble_recut!`), or -- after a
+        # resume that left them out of step -- not at all.
+        if step <= n_burnin * thinning && _pt_recut_due(step, n_burnin * thinning) &&
+           (n_chains == 1 || rendezvous !== nothing) &&
+           _ensemble_recut!(x, params, target.transform, rendezvous)
             for j in 1:n_walkers
                 lastll[j] = logpost(x[:, j])
             end
