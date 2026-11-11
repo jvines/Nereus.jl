@@ -35,6 +35,10 @@
 # its walkers: its burn-in pruning moves stranded walkers onto those that
 # found the mode, and had nothing to move them to when none had. One chain of
 # four at i = 5° sat at i = 161°, 1,500 nats below the mode, for the whole run.
+# Cold pt_hmc and pathfinder_init start from them through `_cold_starts`
+# (src/samplers/nuts.jl): pt_hmc freezes each chain's kernel where its warm-up
+# ended, and a β = 1 warm-up on the plateau left a kernel that could not move
+# at the mode; Pathfinder's 8 L-BFGS runs all stopped on such plateaus.
 #
 # A chain is never started from a point the bound did not clear, but nothing
 # guarantees that some scout found the mode; with p the chance that one prior

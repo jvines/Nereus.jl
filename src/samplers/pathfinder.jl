@@ -61,9 +61,9 @@ Run multipath Pathfinder on `target`. Returns:
   one of those the stranded-walker bound keeps, picked at random
   (src/samplers/scouts.jl), rather than from Pathfinder's own uniform draws
   on (-2, 2) in the unconstrained coordinates. From those, all 8 runs on an
-  RV + IAD companion with free e stopped on a plateau at e = 0.885, 34,000
-  nats below the mode, and the draws were all there. `0` keeps Pathfinder's
-  starts.
+  RV + IAD companion with free e stopped on plateaus at e = 0.78-1.00,
+  34,000-47,000 nats below the mode, and every draw came from the best of
+  them, at e = 0.885. `0` keeps Pathfinder's starts.
 - `quiet`: when `true` (default), suppresses the chatty Pathfinder /
   PSIS `@warn` output for high Pareto-k or rejected L-BFGS updates,
   and replaces it with a single one-line Nereus summary printed at
