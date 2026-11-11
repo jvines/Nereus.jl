@@ -1995,7 +1995,9 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
     _RELEASE_SCENES[] = true
     _PLOT_KW_SEEN[] = Set{Symbol}()       # filled by `_kw_for`
     seen_kw = Set{Symbol}()
-    release = _large_chain(chains)
+    _prev_release_mem = _RELEASE_MEMORY[]
+    _RELEASE_MEMORY[] = _large_chain(chains)     # see `_RELEASE_MEMORY`
+    _RELEASED_AT[] = Base.gc_bytes()
     try
     for (i, plot_name) in enumerate(expanded)
         update!(pb; n_done = i - 1, fields = (:now => String(plot_name),))
@@ -2020,14 +2022,16 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
             @warn "Plot `$plot_name` failed" exception = (err, catch_backtrace())
         end
         # A figure's garbage (its scene, its draws, its band matrix) is dead once
-        # the file is written, but the collector runs on its own schedule, and
+        # its file is written, but the collector runs on its own schedule, and
         # across the set the heap grew by gigabytes of it before a collection.
-        # For a large chain, collect between figures (see `_large_chain`), so
-        # the stage peaks at its largest figure instead of at their sum.
-        release && _release_memory()
+        # For a large chain, collect between figures once enough is allocated
+        # (`_save_plot` checks after each file, this after each kind), so the
+        # stage peaks near its largest figure instead of at a sum of several.
+        _RELEASE_MEMORY[] && _release_memory_if_due()
     end
     finally
         _RELEASE_SCENES[] = _prev_release
+        _RELEASE_MEMORY[] = _prev_release_mem
         seen_kw = something(_PLOT_KW_SEEN[], seen_kw)
         _PLOT_KW_SEEN[] = nothing
     end

@@ -20,6 +20,10 @@ Returns the primary `filename`.
 """
 function _save_plot(filename::AbstractString, fig;
                      save_pdf::Bool=false, release=nothing, save_kwargs...)
+    # Built, a large figure has left its garbage behind; rendering it adds the
+    # pixel buffers (235 MB apiece for the 23-parameter corner). Collect first
+    # if due, so the two do not stack.
+    _RELEASE_MEMORY[] && _release_memory_if_due()
     save(filename, fig; save_kwargs...)
     if save_pdf
         base, ext = splitext(filename)
@@ -32,6 +36,7 @@ function _save_plot(filename::AbstractString, fig;
     # batch producer is the only layer that knows the figure is being thrown
     # away, so it opts in via `_RELEASE_SCENES` (see `_make_plots`).
     (release === nothing ? _RELEASE_SCENES[] : release) && _release_scene!(fig)
+    _RELEASE_MEMORY[] && _release_memory_if_due()
     return filename
 end
 
@@ -42,6 +47,30 @@ must still get a usable figure back. `_make_plots` turns it on for the
 duration of a batch render, where the figures are written and discarded.
 """
 const _RELEASE_SCENES = Ref(false)
+
+"""
+Whether `_save_plot` collects after writing a figure, once `_RELEASE_EVERY`
+bytes have been allocated since the last collection. `_make_plots` turns it on
+for a large chain (`_large_chain`), where a figure's garbage is hundreds of MB.
+
+A figure's scene outlives the young collections that run while it is built,
+so what it allocates is promoted and is freed only by a full collection,
+which Julia runs once the old generation has grown in proportion to the live
+heap -- a fit's heap, here. Across a set of figures (the posterior grids
+write one per parameter) that garbage piled up by hundreds of MB before a
+collection. Collecting after every figure would cost a full collection each,
+for figures that allocated next to nothing.
+"""
+const _RELEASE_MEMORY = Ref(false)
+const _RELEASED_AT = Ref{Int64}(0)            # `Base.gc_bytes()` at the last one
+const _RELEASE_EVERY = 256 * 2^20
+
+function _release_memory_if_due()
+    Base.gc_bytes() - _RELEASED_AT[] < _RELEASE_EVERY && return nothing
+    _release_memory()
+    _RELEASED_AT[] = Base.gc_bytes()
+    return nothing
+end
 
 """
     _release_scene!(fig)
