@@ -127,6 +127,8 @@ const TEST_UNITS = [
     (name = "test_cyclic_inclination.jl", seconds = 45, files = ["test_cyclic_inclination.jl"]),
     # measured: 46 s, one process, 8 threads (2026-11-10)
     (name = "test_angles_never_rail.jl", seconds = 46, files = ["test_angles_never_rail.jl"]),
+    # measured: 2 s, one process, 8 threads (2026-11-11)
+    (name = "test_packed_normalisation.jl", seconds = 2, files = ["test_packed_normalisation.jl"]),
     (name = "test_lambda_slide.jl", seconds = 1, files = ["test_lambda_slide.jl"]),
     (name = "test_label_switching.jl", seconds = 6, files = ["test_label_switching.jl"]),
     (name = "test_pt_donor_buffer.jl", seconds = 1, files = ["test_pt_donor_buffer.jl"]),

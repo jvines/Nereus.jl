@@ -100,6 +100,7 @@ function pack_priors(priors::AbstractVector{<:PriorSpec})
             type_ids[i] = PACKED_NORMAL
             pars[i, 1] = d.untruncated.μ
             pars[i, 2] = d.untruncated.σ
+            pars[i, 5] = _normal_logmass(d.untruncated, ps.lo, ps.hi)
         elseif d isa Distributions.Normal
             type_ids[i] = PACKED_NORMAL
             pars[i, 1] = d.μ
@@ -108,6 +109,15 @@ function pack_priors(priors::AbstractVector{<:PriorSpec})
             type_ids[i] = PACKED_BETA
             pars[i, 1] = d.α
             pars[i, 2] = d.β
+            pars[i, 5] = _beta_lognorm(d.α, d.β)
+        elseif d isa Distributions.AffineDistribution && d.ρ isa Distributions.Beta
+            # BetaPrior(a, b; lo, hi) off [0, 1]: lo + (hi - lo) Beta(a, b). This
+            # fell through to the Uniform fallback below, so the samplers saw
+            # a flat prior where the user wrote a Beta.
+            type_ids[i] = PACKED_BETA
+            pars[i, 1] = d.ρ.α
+            pars[i, 2] = d.ρ.β
+            pars[i, 5] = _beta_lognorm(d.ρ.α, d.ρ.β)
         elseif d isa ModJeffreys
             type_ids[i] = PACKED_MODJEFFREYS
             pars[i, 1] = d.knee
@@ -144,7 +154,32 @@ through `pp` and `i`.
 
 @inline eval_packed_logpdf(x::Real, tid::Int, p1::Float64, p2::Float64,
                            lo::Float64, hi::Float64) =
-    eval_packed_logpdf(x, tid, p1, p2, lo, hi, 0.0, 0.0, 0.0)
+    eval_packed_logpdf(x, tid, p1, p2, lo, hi, 0.0, 0.0,
+                       _packed_lognorm(tid, p1, p2, lo, hi))
+
+# The log normaliser `p5` of a truncated Normal (its log mass on [lo, hi]) or a
+# Beta (log B(a, b)), which `pack_priors` stores and the evaluation subtracts.
+_packed_lognorm(tid::Int, p1::Float64, p2::Float64, lo::Float64, hi::Float64) =
+    tid == PACKED_NORMAL ? _normal_logmass(Distributions.Normal(p1, p2), lo, hi) :
+    tid == PACKED_BETA ? _beta_lognorm(p1, p2) : 0.0
+
+"""
+    _normal_logmass(N, lo, hi) -> Float64
+
+`log P(lo ≤ X ≤ hi)` for `X ~ N`: the truncation constant of a Normal prior,
+`0` when it is not truncated.
+"""
+function _normal_logmass(N::Distributions.Normal, lo::Real, hi::Real)
+    (isfinite(lo) || isfinite(hi)) || return 0.0
+    isfinite(lo) || return Float64(Distributions.logcdf(N, hi))
+    isfinite(hi) || return Float64(Distributions.logccdf(N, lo))
+    return Float64(Distributions.logdiffcdf(N, hi, lo))
+end
+
+# log B(a, b), from the normalised Beta logpdf at 1/2.
+_beta_lognorm(a::Real, b::Real) =
+    Float64((a - 1) * log(0.5) + (b - 1) * log(0.5) -
+            Distributions.logpdf(Distributions.Beta(a, b), 0.5))
 
 @inline function eval_packed_logpdf(x::Real, tid::Int,
                                      p1::Float64, p2::Float64,
@@ -166,7 +201,12 @@ through `pp` and `i`.
         return wrapped_push_logpdf(x, tid == PACKED_WRAPPED_NORMAL ? _PUSH_NORMAL :
                                       _PUSH_UNIFORM, p1, p2, p3, p4, p5)
     end
-    return _eval_packed_base(x, tid, p1, p2, lo, hi)
+    # A truncated Normal and a Beta less their log normaliser `p5`, so the
+    # packed density is the normalised one the Distributions path evaluates.
+    # The constant does not cancel everywhere: trans-dim birth and death ratios
+    # evaluate the born parameters' priors, and the evidence carries it.
+    v = _eval_packed_base(x, tid, p1, p2, lo, hi)
+    return (tid == PACKED_NORMAL || tid == PACKED_BETA) ? v - p5 : v
 end
 
 @inline function _eval_packed_base(x::Real, tid::Int,
@@ -194,11 +234,9 @@ end
     elseif tid == PACKED_NORMAL
         μ, σ = p1, p2
         z = (x - μ) / σ
+        # The untruncated Normal; the truncation constant (p5) is subtracted
+        # by `eval_packed_logpdf`.
         return -0.5 * z * z - log(σ) - 0.5 * log(2π)
-        # Note: this is the unnormalised truncated-Normal logpdf
-        # (doesn't include the truncation normalisation constant).
-        # For MCMC this is fine — the constant cancels in the
-        # acceptance ratio.
     elseif tid == PACKED_LOGUNIFORM
         if x <= 0
             return -Inf
@@ -220,8 +258,8 @@ end
         if t <= 0 || t >= 1
             return -Inf
         end
+        # log B(a, b) (p5) is subtracted by `eval_packed_logpdf`.
         return (a - 1) * log(t) + (b - 1) * log(1 - t) - log(hi - lo)
-        # Omits logbeta(a,b) normalisation — constant, cancels in MCMC.
     elseif tid == PACKED_SINE
         # p(x) = sin(x)/2 on [0, π]; logpdf = log(sin(x)) - log(2)
         # Bounds already checked above.
