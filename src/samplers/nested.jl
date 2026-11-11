@@ -65,6 +65,13 @@ The target must use `unconstrained=false` (bounded space).
   the remaining evidence `dlogz` the run stops on, `stage` (how far log dlogz
   has come toward the threshold, in percent) and `ncall`. There is no total, so
   no ETA, and the stage is not a fraction of the run time.
+- `seam_pilot::Bool=true` — with full-circle angles in the model, first run
+  a small nested pilot (`sample_nested_ins`, `max(50, n_live ÷ 10)` live points,
+  `dlogz = 1`) whose live points place each angle's seam in its emptiest arc.
+  NestedSamplers.jl owns its loop, so the seam cannot move during the run, and
+  a mode across it would be two pieces whose shares of the live points drift
+  (src/circular.jl). Polar angles map the unit cube onto their base prior on
+  `[0, π]`, which has no seam.
 """
 function sample_nested(
     target::NereusTarget,
@@ -81,6 +88,7 @@ function sample_nested(
     parallel::Bool = !_is_under_juliacall(),
     batch_size::Int = 0,   # 0 → auto (nthreads when parallel, else 1)
     show_progress::Bool = true,
+    seam_pilot::Bool = true,
 )
     bounds in (:multi, :single, :none, :mlfriends) ||
         throw(ArgumentError("bounds must be :multi, :single, :none, or " *
@@ -140,7 +148,15 @@ function sample_nested(
     # Build prior distributions vector for NestedModel.
     # NestedSamplers accepts a vector of univariate distributions that
     # define the prior transform (unit cube → parameter space).
-    prior_dists = [layout.unfrozen_priors[j].dist for j in 1:n_dim]
+    #
+    # Angles (src/circular.jl): a polar angle maps onto its base prior on
+    # [0, π]; each full-circle angle's seam is placed, before the run, from a
+    # small nested pilot whose own loop re-cuts it at every bound refit.
+    if seam_pilot && !isempty(circular_indices(params))
+        sample_nested_ins(target, data; n_live = max(50, n_live ÷ 10), dlogz = 1.0,
+                          seed = seed + 7919, show_progress = false)
+    end
+    prior_dists = [_ns_prior(layout.unfrozen_priors[j]).dist for j in 1:n_dim]
 
     # Log-likelihood function: maps bounded parameter vector → log L.
     # NestedSamplers draws from the prior internally via prior_dists,

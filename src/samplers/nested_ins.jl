@@ -127,6 +127,7 @@ function sample_nested_ins(
     unfrozen_idx = layout.unfrozen_idx
     unfrozen_priors = layout.unfrozen_priors
     rng = MersenneTwister(seed)
+    ns_tr = target.transform === nothing ? () : (target.transform,)
 
     # Per-slot Theta buffer. NS outer loop is sequential (one replacement
     # per iter, run on slot 1 by default) but the init pass threads over
@@ -155,7 +156,7 @@ function sample_nested_ins(
         # transform u → bounded x via per-coord prior quantile
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             ps = unfrozen_priors[j]
-            theta.values[idx] = prior_transform(u[j], ps)
+            theta.values[idx] = prior_transform(u[j], _ns_prior(ps))
         end
         ll = rv_log_likelihood(theta, data, wb)
         isfinite(ll) || return -Inf
@@ -299,6 +300,9 @@ function sample_nested_ins(
         # duplicate live points (RWalk-in-tight-shell signature). Fall
         # back to a single Ellipsoid bound in that case.
         if iter % bound_update_interval == 0
+            # Seams of the circular angles moved off the live points first
+            # (`_ns_recut!`): the refit below is in the new chart.
+            _ns_recut!(live_u, (dead_u,), params; transforms = ns_tr)
             pv = exp(log_X) / n_live
             try
                 bound = NestedSamplers.Bounds.scale!(
@@ -399,7 +403,7 @@ function sample_nested_ins(
     samples = Matrix{Float64}(undef, n_resample, n_dim)
     for (i, idx) in enumerate(indices)
         for (j, _) in enumerate(unfrozen_idx)
-            samples[i, j] = prior_transform(dead_u[idx][j], unfrozen_priors[j])
+            samples[i, j] = prior_transform(dead_u[idx][j], _ns_prior(unfrozen_priors[j]))
         end
     end
 

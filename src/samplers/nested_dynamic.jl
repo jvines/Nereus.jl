@@ -230,6 +230,7 @@ function sample_nested_dynamic(
                       bound_update_interval = bound_update_interval,
                       L_min = L_lo, L_max = L_hi,
                       init_u = init_u, init_logL = init_logL,
+                      extra_dead = (base.dead_u,),
                       n_walks = n_walks, walk_scale = walk_scale,
                       proposal = proposal,
                       seed = seed + 2, verbose = verbose,
@@ -289,7 +290,7 @@ function sample_nested_dynamic(
     samples = Matrix{Float64}(undef, n_resample, n_dim)
     for (i, idx) in enumerate(indices)
         for (j, _) in enumerate(layout.unfrozen_idx)
-            samples[i, j] = prior_transform(all_u[idx][j], layout.unfrozen_priors[j])
+            samples[i, j] = prior_transform(all_u[idx][j], _ns_prior(layout.unfrozen_priors[j]))
         end
     end
 
@@ -321,6 +322,7 @@ function _ns_inner(target::NereusTarget, data::Data;
                    L_min::Float64, L_max::Float64,
                    init_u::Union{Nothing,Matrix{Float64}} = nothing,
                    init_logL::Union{Nothing,Vector{Float64}} = nothing,
+                   extra_dead = (),   # earlier passes' dead points, rotated by a re-cut too
                    n_walks::Int = 25,
                    walk_scale::Float64 = 1.0,
                    proposal::Symbol = :rwalk,
@@ -355,7 +357,7 @@ function _ns_inner(target::NereusTarget, data::Data;
         theta = thread_theta[slot]
         wb = thread_ws[slot]
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
-            theta.values[idx] = prior_transform(u[j], unfrozen_priors[j])
+            theta.values[idx] = prior_transform(u[j], _ns_prior(unfrozen_priors[j]))
         end
         ll = rv_log_likelihood(theta, data, wb)
         isfinite(ll) || return -Inf
@@ -487,6 +489,10 @@ function _ns_inner(target::NereusTarget, data::Data;
         live_logL[idx_worst] = new_logL
 
         if iter % bound_update_interval == 0
+            # Seams of the circular angles moved off the live points first
+            # (`_ns_recut!`, sample_nested_ins): the refit is in the new chart.
+            _ns_recut!(live_u, (dead_u, extra_dead...), params;
+                       transforms = target.transform === nothing ? () : (target.transform,))
             # MultiEllipsoid.fit calls k-means; clustering NaN's when
             # live points become near-duplicate after RWalk shrinks σ
             # in a tight shell. Fall back to single Ellipsoid in that

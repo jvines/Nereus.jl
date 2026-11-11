@@ -1189,3 +1189,66 @@ function _fold_polar_slots!(values::AbstractVector, params::Params)
     end
     return changed
 end
+
+# ------------------------------------------------------------------
+# Nested sampling: angles in the unit cube.
+# ------------------------------------------------------------------
+#
+# A nested sampler replaces a dead point by a walk from a random live point,
+# so pieces of the constrained region that no walk crosses keep whatever share
+# of the live points chance leaves them: the share random-walks, and a piece
+# can die. A seam is such a crossing. Measured on an RM fit with λ = 180° on
+# the seam of [-π, π]: 23 % of the mass above 180° (pt_emcee), 8 % from the
+# INS sampler and 31 % from NestedSamplers' rslice.
+#
+# A polar angle needs no circle here: its base prior on [0, π] has no seam
+# (the poles are the ends of the range, not cuts through a mode), so the unit
+# cube maps onto the base (`_ns_prior`). A full-circle angle has no chart
+# without a seam, so the seam is moved: in the loops this package owns, to
+# the emptiest arc of the live points at each bound refit (`_ns_recut!`);
+# for NestedSamplers.jl, which owns its loop, before the run from a pilot.
+
+"""
+    _ns_prior(ps) -> PriorSpec
+
+The prior a nested sampler's unit cube maps onto: a polar angle's base prior
+on `[0, π]` (the lifted chart's seam would split a mode at i = 90°, and the
+fold makes the two the same orbit), anything else as it is.
+"""
+_ns_prior(ps::PriorSpec) = ps.dist isa PolarFold ? ps.dist.base :
+                           ps.dist isa WrappedSine ? SinePrior() : ps
+
+"""
+    _ns_recut!(live_u, dead_sets, params; transforms = ()) -> Bool
+
+Nested sampling's seam re-cut, in the unit cube. Each full-circle angle's
+window moves to the emptiest arc of the live points
+([`recut_circular_param!`](@ref)), and every live and dead point's coordinate
+`u` rotates with it: on the circle the prior's CDF from the new seam is the
+old one less its value there, so `u' = mod(u - F_old(lo_new), 1)` is the same
+angle. The constrained region, the live points' uniform distribution over it
+and every likelihood are unchanged; the caller refits its bound. `dead_sets`
+is a collection of vectors of dead points' `u`.
+"""
+function _ns_recut!(live_u::AbstractMatrix, dead_sets, params::Params;
+                    transforms = ())
+    L = params.layout
+    moved = false
+    for d in circular_indices(params)
+        ps = L.unfrozen_priors[d]
+        xs = Float64[quantile(ps, live_u[d, i]) for i in axes(live_u, 2)]
+        lo0, hi0 = bounds(ps)
+        win = recut_circular_param!(params, d, xs; transforms)
+        win === nothing && continue
+        c = Float64(cdf(ps, circular_relabel(first(win), lo0, hi0)))
+        rot(u) = (v = u - c; v < 0 ? v + 1 : v)
+        for i in axes(live_u, 2)
+            live_u[d, i] = rot(live_u[d, i])
+        end
+        for set in dead_sets, du in set
+            du[d] = rot(du[d])
+        end
+        moved = true
+    end
+    return moved
+end
