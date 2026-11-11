@@ -51,6 +51,15 @@ Works in unconstrained space (with transforms) by default.
   from an RM λ constrained to ±2°, or at the seam of its window, where the
   logit's plateau holds it for good. Burn-in only: every recorded step is
   ordinary MCMC.
+- `n_scouts::Int=16` — without `init`, the walkers drawn from the prior are
+  joined by up to `n_walkers ÷ 2` scouts in place of as many of them: prior
+  draws moved by slice updates until they stop climbing, less those the bound
+  of the stranded-walker pruning shows to be where the posterior cannot carry
+  mass (src/samplers/scouts.jl). The pruning only moves walkers onto ones that
+  found the mode; when none of a chain's did, it had nothing to move them to,
+  and one chain in four of an RV + IAD companion at i = 5° sat 1,500 nats
+  below the mode, at i = 161°, for the whole run. `0` draws every walker from
+  the prior.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (the walkers, their log-densities, the RNG, the step reached and
   the draws kept so far) at the end of the run and every `checkpoint_interval`
@@ -80,7 +89,9 @@ function sample_ensemble(
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
     prune_stranded::Bool = true,
+    n_scouts::Int = 16,
 )
+    n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))
@@ -102,7 +113,8 @@ function sample_ensemble(
         n_dim = length(target.params.layout.unfrozen_idx)
         nw = max(n_walkers, 2 * n_dim + 2)
         fps = [_ensemble_fingerprint(target, nw, n_burnin, thinning, seed + c - 1,
-                                     n_chains, init, prune_stranded) for c in 1:n_chains]
+                                     n_chains, init, prune_stranded, n_scouts)
+               for c in 1:n_chains]
         cks = Any[resume ? read_checkpoint(_chain_checkpoint_path(ck_path, c),
                                            "ensemble", fps[c]) : nothing
                   for c in 1:n_chains]
@@ -115,7 +127,8 @@ function sample_ensemble(
                 _ensemble_chain(target, n_walkers, n_steps,
                     n_burnin, thinning, init, seed + c - 1, n_chains,
                     show_progress && c == 1, ck_c, ck_every, resume;
-                    pre = (fp = fps[c], ck = cks[c]), rendezvous = rv, prune_stranded)
+                    pre = (fp = fps[c], ck = cks[c]), rendezvous = rv, prune_stranded,
+                    n_scouts)
             finally
                 rv === nothing || _rendezvous_leave!(rv)
             end
@@ -123,7 +136,8 @@ function sample_ensemble(
         return MCMCChains.chainscat([fetch(t) for t in tasks]...)
     end
     return _ensemble_chain(target, n_walkers, n_steps, n_burnin, thinning, init,
-                           seed, n_chains, show_progress, ck_path, ck_every, resume; prune_stranded)
+                           seed, n_chains, show_progress, ck_path, ck_every, resume;
+                           prune_stranded, n_scouts)
 end
 
 # Chain `c`'s state file in a multi-chain run: "dir/ensemble_state.jls" ->
@@ -136,15 +150,17 @@ end
 # What an ensemble checkpoint must match (src/checkpoint.jl). The walkers are
 # stored in the sampling coordinates, so the circular windows and whether the
 # target is unconstrained are part of it. So is turning the stranded-walker
-# pruning off; on, the default, it leaves the fingerprint as it was before the
-# pruning existed.
+# pruning off, or scouting with other than 16; the defaults leave the
+# fingerprint as it was before either existed.
 _ensemble_fingerprint(target::NereusTarget, n_walkers, n_burnin, thinning, seed,
-                      n_chains, init, prune_stranded::Bool = true) =
+                      n_chains, init, prune_stranded::Bool = true,
+                      n_scouts::Int = 16) =
     run_fingerprint(target.params, target.data; n_walkers, n_burnin, thinning,
         seed, n_chains, init = init === nothing ? nothing : copy(init),
         unconstrained = target.transform !== nothing,
         windows = circular_windows(target.params),
-        (prune_stranded ? (;) : (; prune_stranded = false))...)
+        (prune_stranded ? (;) : (; prune_stranded = false))...,
+        (n_scouts == 16 ? (;) : (; n_scouts))...)
 
 """
     _ensemble_recut!(x, params, transform, rv) -> Bool
@@ -276,7 +292,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
                          ck_path::Union{Nothing, String}, ck_every::Float64,
                          resume::Bool; pre = nothing,
                          rendezvous::Union{Nothing,_Rendezvous} = nothing,
-                         prune_stranded::Bool = true)
+                         prune_stranded::Bool = true, n_scouts::Int = 16)
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -300,7 +316,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     # With several chains `sample_ensemble` has read the checkpoint (`pre`).
     ck_fp = pre === nothing ?
         _ensemble_fingerprint(target, n_walkers, n_burnin, thinning, seed,
-                              n_chains, init, prune_stranded) : pre.fp
+                              n_chains, init, prune_stranded, n_scouts) : pre.fp
     ck = pre !== nothing ? pre.ck :
          resume ? read_checkpoint(ck_path, "ensemble", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
@@ -351,6 +367,20 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
             end
             n_valid = count(valid)
             n_valid == n_walkers || @warn "Only $n_valid / $n_walkers walkers initialized with finite posterior after $max_attempts attempts"
+            # Scouts (src/samplers/scouts.jl) in place of up to half the
+            # walkers, at random: the pruning can then move the rest onto a
+            # mode even when no prior-drawn walker of this chain finds it.
+            if n_scouts > 0
+                uf = layout.unfrozen_idx
+                draw!(th, r) = (th.values[uf] .= _draw_from_prior(target, r); th)
+                surv = _scout_survivors(Theta{Float64}(params), target.data, rng,
+                                        _prior_widths(layout); draw!, n_scouts)
+                k = min(length(surv), n_walkers ÷ 2)
+                for (j, v) in zip(randperm(rng, n_walkers)[1:k], surv[1:k])
+                    x[:, j] = has_transform ? transform_forward(v[uf], target.transform) :
+                                              v[uf]
+                end
+            end
         end
         for j in 1:n_walkers
             lastll[j] = logpost(x[:, j])

@@ -27,7 +27,8 @@ import Transducers: ThreadedEx, SequentialEx
                     n_runs::Int = 8,
                     n_draws::Int = 100,
                     seed::Int = 42,
-                    quiet::Bool = true)
+                    quiet::Bool = true,
+                    n_scouts::Int = 16)
     -> NamedTuple{(:draws, :per_run_draws, :fit_distribution,
                     :psis_result, :pathfinder_result)}
 
@@ -56,6 +57,13 @@ Run multipath Pathfinder on `target`. Returns:
   without excessive cost.
 - `n_draws`: total samples to return after ESS reweighting.
 - `seed`: RNG seed for the L-BFGS initial points.
+- `n_scouts`: the L-BFGS runs start from scouted prior draws, each run from
+  one of those the stranded-walker bound keeps, picked at random
+  (src/samplers/scouts.jl), rather than from Pathfinder's own uniform draws
+  on (-2, 2) in the unconstrained coordinates. From those, all 8 runs on an
+  RV + IAD companion with free e stopped on plateaus at e = 0.78-1.00,
+  34,000-47,000 nats below the mode, and every draw came from the best of
+  them, at e = 0.885. `0` keeps Pathfinder's starts.
 - `quiet`: when `true` (default), suppresses the chatty Pathfinder /
   PSIS `@warn` output for high Pareto-k or rejected L-BFGS updates,
   and replaces it with a single one-line Nereus summary printed at
@@ -81,7 +89,9 @@ function pathfinder_init(target::NereusTarget;
                          n_runs::Int = 8,
                          n_draws::Int = 100,
                          seed::Int = 42,
-                         quiet::Bool = true)
+                         quiet::Bool = true,
+                         n_scouts::Int = 16)
+    n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     n_dim = LogDensityProblems.dimension(target)
 
     # multipathfinder expects (logp, ndim, ndraws) and we pass our target
@@ -141,7 +151,12 @@ function pathfinder_init(target::NereusTarget;
             executor = exec,
         )
     end
-    result = run(nothing)
+    # The starts: scouted prior draws (src/samplers/scouts.jl) in the
+    # coordinates Pathfinder runs in, or its own with `n_scouts = 0`.
+    init1 = n_scouts == 0 ? nothing :
+        [target.transform === nothing ? x : transform_forward(x, target.transform)
+         for x in _cold_starts(target, n_runs, rng, n_scouts)]
+    result = run(init1)
 
     # Angles. A full-circle angle is charted on one walled period, a polar
     # angle on one too, first [-π/2, 3π/2], whose seam is the far image of the

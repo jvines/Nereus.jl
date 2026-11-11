@@ -267,7 +267,13 @@ function sample_pa(
             return sum_w^2 / sum_w2 / n_replicas
         end
         lo, hi = 0.0, 1.0 - β_cur
-        if ess_at(hi) >= ess_target
+        # The last step allowed goes to β = 1 whatever its ESS. Stopping short
+        # returned the population at β < 1 as the posterior, with the evidence
+        # summed to there: sample_smc's 50 steps ended an RV + IAD companion
+        # with free e at β = 0.43, i = 88.5 ± 2.3° against 88.6 ± 1.5° and
+        # log Z = 51 against 160.
+        forced = step == max_steps
+        if forced || ess_at(hi) >= ess_target
             Δβ = hi  # full step to β=1 keeps ESS above target
         else
             # Bisect for Δβ where ess_at(Δβ) ≈ ess_target
@@ -294,6 +300,13 @@ function sample_pa(
         W = exp.(log_W)
         ess_norm = 1.0 / sum(W .^ 2) / n_replicas
         push!(ess_history, ess_norm)
+        forced && ess_norm < ess_target &&
+            @warn "sample_pa: max_steps = $max_steps reached at β = " *
+                  "$(round(β_cur; sigdigits = 3)); the last step went to β = 1 " *
+                  "with ESS/N = $(round(ess_norm; sigdigits = 2)) (target " *
+                  "$ess_target), so the posterior is resampled from few replicas " *
+                  "and the log-evidence's last increment is noisy. Raise " *
+                  "max_steps (sample_smc: pass more betas)."
 
         # ---- 3. Systematic resampling ------------------------------
         # Low-variance resampling: divide [0, 1) into N equal bins,

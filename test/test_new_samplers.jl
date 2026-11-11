@@ -38,6 +38,19 @@ function _make_rv_target(seed::Int = 2027; n_obs::Int = 30,
     return target, data, params
 end
 
+# Whether a resampled chain comes back in an order: the fractions of
+# consecutive rows (distinct likelihoods) whose log-likelihood falls and
+# rises. Dead points are stored in order of likelihood, so a systematic
+# resample of them never falls, and the top-by-weight fallback rarely rises;
+# an i.i.d. draw does each about half the time.
+function _ns_row_order(target, ch)
+    nm = Symbol.(target.params.layout.unfrozen_names)
+    ll = [Nereus._logdensity_parts(target, Float64[ch[i, n, 1] for n in nm])[2]
+          for i in 1:size(ch, 1)]
+    d = filter(!=(0.0), diff(ll))
+    return count(<(0), d) / length(d), count(>(0), d) / length(d)
+end
+
 
 # =====================================================================
 # Basic NS via NestedSamplers.jl wrapper
@@ -144,6 +157,18 @@ end
         @test_throws ArgumentError sample_nested_ins(target, data;
             n_live = 40, proposal = :banana, seed = 1)
     end
+
+    # The posterior rows are an i.i.d. draw from the weighted dead points:
+    # a systematic one came back in likelihood order, and the chain's R-hat
+    # and ESS measured the order.
+    @testset "posterior rows in no order" begin
+        target, data, _ = _make_rv_target(2027)
+        res = sample_nested_ins(target, data; n_live = 400, dlogz = 0.5, seed = 1,
+                                show_progress = false)
+        @test size(res.chains, 1) >= 200
+        fall, rise = _ns_row_order(target, res.chains)
+        @test fall > 0.3 && rise > 0.3
+    end
 end
 
 
@@ -182,6 +207,15 @@ end
         # ordering is well-behaved. We don't enforce it here.
         @test :K_k1 in names(res.chains, :parameters)
         @test size(res.chains, 1) > 0
+    end
+
+    @testset "posterior rows in no order" begin
+        target, data, _ = _make_rv_target(2027)
+        res = sample_nested_dynamic(target, data; n_live_init = 200, n_live_batch = 200,
+                                    seed = 1)
+        @test size(res.chains, 1) >= 200
+        fall, rise = _ns_row_order(target, res.chains)
+        @test fall > 0.3 && rise > 0.3
     end
 
     @testset "proposal interface (:rwalk / :slice)" begin
@@ -253,6 +287,16 @@ end
         @test isfinite(res.log_evidence)
         @test res.n_evals > 0
         @test res.chains isa MCMCChains.Chains
+    end
+
+    # Four steps do not anneal this target at ESS/N = 0.9. The fourth goes to
+    # β = 1 anyway, with a warning: stopping short returned the tempered
+    # population as the posterior.
+    @testset "the last step reaches β = 1" begin
+        res = @test_logs (:warn, r"max_steps = 4 reached") match_mode = :any sample_smc(target, data;
+            betas = [0.0, 0.25, 0.5, 0.75, 1.0], n_replicas = 30, n_mcmc = 2, seed = 1)
+        @test res.beta_history[end] == 1.0
+        @test length(res.beta_history) == 5
     end
 end
 

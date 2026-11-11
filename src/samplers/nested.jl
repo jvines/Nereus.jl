@@ -161,9 +161,15 @@ function sample_nested(
     # Angles (src/circular.jl): each full-circle or polar angle's seam is
     # placed, before the run, from a small nested pilot whose own loop re-cuts
     # it at every bound refit.
+    #
+    # The pilot's posterior is discarded, and so is what it logs: its warning
+    # of a thin posterior (n_eff 134-192 at 50 live points on an RV + IAD
+    # companion, where the run itself had 3,000-11,000) read as this run's.
     if seam_pilot && !isempty(seam_indices(params))
-        sample_nested_ins(target, data; n_live = max(50, n_live ÷ 10), dlogz = 1.0,
-                          seed = seed + 7919, show_progress = false)
+        Logging.with_logger(Logging.NullLogger()) do
+            sample_nested_ins(target, data; n_live = max(50, n_live ÷ 10), dlogz = 1.0,
+                              seed = seed + 7919, show_progress = false)
+        end
     end
     prior_dists = [_ns_prior(layout.unfrozen_priors[j]).dist for j in 1:n_dim]
 

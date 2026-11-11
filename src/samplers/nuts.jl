@@ -276,6 +276,21 @@ function _warmstart_points(target::NereusTarget, n_chains::Int,
     end
 end
 
+# The cold start (`warm_start = false`, no `init`): `n_chains` bounded-space
+# points, scouted (`_scout_starts`, src/samplers/scouts.jl) from `n_scouts`
+# draws of `_draw_from_prior`, or with `n_scouts = 0` one draw per chain.
+function _cold_starts(target::NereusTarget, n_chains::Int, rng::AbstractRNG,
+                      n_scouts::Int)
+    n_scouts > 0 || return [_draw_from_prior(target, rng) for _ in 1:n_chains]
+    params = target.params
+    uf = params.layout.unfrozen_idx
+    draw!(th, r) = (th.values[uf] .= _draw_from_prior(target, r); th)
+    starts = _scout_starts(Theta{Float64}(params), target.data, rng,
+                           _prior_widths(params.layout); draw!,
+                           n_starts = n_chains, n_scouts)
+    return [v[uf] for v in starts]
+end
+
 """
     nuts_diagnostics(chains) -> NamedTuple | nothing
 
@@ -333,12 +348,21 @@ size / tree depth are attached to `chains.info` (see
   its former default, `true`, is resumed by passing `compile_tape = true`.
 - `warm_start::Bool=true`  : warm-start chains from a short pt_emcee
   pre-search. Disable only if you pass `init` or know the target is
-  trivially unimodal; with it off, independent prior-draw inits will
-  freeze NUTS in disjoint modes on multi-planet RV posteriors.
+  trivially unimodal; with it off, the chains start from scouted prior
+  draws (`n_scouts`), which keep them off regions that cannot carry
+  posterior mass but cannot place them in modes of comparable mass:
+  NUTS will still freeze in disjoint modes on multi-planet RV posteriors.
   Without it, the seams of the full-circle angles are placed by a short
   pathfinder pilot instead (`_seam_pilot!`). Either way the chains re-cut
   them together at the phase boundaries of the adaptation (`_hmc_recut!`), so
   that none is left against a seam the start placed on the posterior.
+- `n_scouts::Int=16` : without the warm start or `init`, the chains start
+  from `n_scouts` prior draws, each moved by slice updates until it stops
+  climbing, less those the bound of the stranded-walker pruning shows to be
+  where the posterior cannot carry mass; each chain from a different one at
+  random (src/samplers/scouts.jl). From one prior draw each, two of four
+  chains on an RV + IAD companion settled 23,000-45,000 nats below the mode,
+  on a plateau no trajectory leaves. `0` starts each chain from one draw.
 - `warm_temps`, `warm_walkers`, `warm_steps`, `warm_burnin` : pt_emcee
   pre-search budget (defaults 6 / 40 / 400 / 200).
 - `init::Union{Nothing, Vector{Float64}}=nothing` : initial position in
@@ -399,10 +423,12 @@ function sample_nuts(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    n_scouts::Int = 16,
     kwargs...
 )
     seed !== nothing && rng !== nothing && throw(ArgumentError(
         "sample_nuts takes `seed` or `rng`, not both"))
+    n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     # Rebound once, here. No closure below captures `rng`, so it is not boxed.
     rng = seed !== nothing ? MersenneTwister(seed) :
           rng === nothing ? Random.default_rng() : rng
@@ -459,8 +485,9 @@ function sample_nuts(
     if ck === nothing
         # Per-chain bounded-space init points. `init` (if given) pins every
         # chain at the same point; otherwise warm-start from a short pt_emcee
-        # pre-search (the disjoint-mode fix), or fall back to independent
-        # prior draws when warm_start is off.
+        # pre-search (the disjoint-mode fix), or, with warm_start off, scouted
+        # prior draws (src/samplers/scouts.jl): each chain a different one of
+        # those the stranded-walker bound keeps.
         #
         # Without the warm start's re-chart the windows are placed here, before
         # the chains re-cut them during the adaptation (`_hmc_recut!`): centred
@@ -479,11 +506,7 @@ function sample_nuts(
         else
             isempty(seam_indices(params)) ||
                 _seam_pilot!(target, rand(rng, 1:typemax(Int32)))
-            pts = Vector{Vector{Float64}}(undef, n_chains)
-            for c in 1:n_chains
-                pts[c] = _draw_from_prior(target, rng)
-            end
-            pts
+            _cold_starts(target, n_chains, rng, n_scouts)
         end
         # One RNG stream per chain, seeded from `rng`. A single chain runs on
         # `rng` itself.

@@ -74,6 +74,9 @@ warm-starting a follow-up run.
   used in the spike-and-slab log-prior (Bayes factors between N_p
   configurations are unbiased only when this is set deliberately by the
   user; default 0.5 corresponds to a uniform prior over models).
+- `n_scouts::Int = 16` — with a fixed set of planets (`td.planets = false`),
+  each chain starts from the best-supported of this many prior draws, as in
+  `sample_rjmcmc` (src/samplers/scouts.jl). `0` starts from one draw.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (the chain's position and model indicators, the RNG, the MoMS
   proposal scales and off-values, the within-model RWM scales and likelihood
@@ -126,6 +129,7 @@ function sample_moms(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    n_scouts::Int = 16,
     # Testing hook, not an option: end the run after this iteration (warmup
     # counted) with the checkpoint written there, as a kill right after that
     # checkpoint would. 0 runs to the end.
@@ -144,6 +148,7 @@ function sample_moms(
     0.0 <= informed_birth_fraction <= 1.0 || throw(ArgumentError(
         "informed_birth_fraction must be in [0, 1]"))
     n_chains >= 1 || throw(ArgumentError("n_chains must be ≥ 1"))
+    n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))
@@ -182,7 +187,8 @@ function sample_moms(
              _moms_fingerprint(target.params, data, td; n_warmup,
                  seed = seed + 1000 * (c - 1), n_chains, chain = c, init_scale,
                  target_birth_accept, inclusion_prior, within_model,
-                 informed_birth_fraction)
+                 informed_birth_fraction,
+                 (n_scouts == 16 ? (;) : (; n_scouts))...)
         st = resume ? read_checkpoint(path, "moms", fp) : nothing
         if st !== nothing
             it = st.iter::Int
@@ -227,6 +233,7 @@ function sample_moms(
                 ck_path = ck_c.path, ck_fp = ck_c.fp, ck = ck_c.state,
                 checkpoint_interval = checkpoint_interval,
                 stop_after = _stop_after,
+                n_scouts = n_scouts,
             ) finally
                 rv === nothing || _rendezvous_leave!(rv)
             end
@@ -249,7 +256,7 @@ function sample_moms(
                             ck_path = cks[1].path, ck_fp = cks[1].fp,
                             ck = cks[1].state,
                             checkpoint_interval = checkpoint_interval,
-                            stop_after = _stop_after)
+                            stop_after = _stop_after, n_scouts = n_scouts)
 end
 
 # Chain `c`'s state file: the path itself for one chain, `<stem>_chain<c><ext>`
@@ -300,6 +307,7 @@ function _sample_moms_one(
     ck::Union{Nothing,NamedTuple} = nothing,
     checkpoint_interval::Float64 = 900.0,
     stop_after::Int = 0,
+    n_scouts::Int = 16,
 )
     rng    = MersenneTwister(seed)
     params = target.params
@@ -331,9 +339,19 @@ function _sample_moms_one(
         end
     end
     theta = Theta{Float64}(params; td = td_state)
-    _init_systemics_from_prior!(theta, rng)
-
     ctr = LikelihoodCounter()
+    widths = _prior_widths(layout)
+    # With a fixed set of planets the start is the best-supported of
+    # `n_scouts` prior draws (src/samplers/scouts.jl), as in rjmcmc. Not on
+    # resume, which replaces the start below.
+    if ck === nothing && n_scouts > 0 && !td.planets
+        theta.values .= only(_scout_starts(theta, data, rng, widths;
+                                           draw! = _init_systemics_from_prior!,
+                                           n_scouts, ctr))
+    else
+        _init_systemics_from_prior!(theta, rng)
+    end
+
     # Use the spike-and-slab log-prior so γ-flips have unbiased M-H
     # ratios. Within-model slice sampling internally uses Nereus's
     # continuous log_prior — that's fine because at fixed γ the
@@ -341,7 +359,6 @@ function _sample_moms_one(
     # is invariant under constant offsets in log_prior.
     log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
     log_L  = _eval_ll(theta, data, ctr)
-    widths = _prior_widths(layout)
 
     # PTWorkspace lets us call the fast RWM within-model move when
     # `within_model = :rwm`. Slice sampling spends 30-100 likelihood

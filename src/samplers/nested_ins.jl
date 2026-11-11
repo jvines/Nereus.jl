@@ -366,14 +366,20 @@ function sample_nested_ins(
     end
 
     # --- Posterior chain construction ----------------------------------
-    # Systematic importance resampling clones the MAP when the posterior
-    # is peaked enough that `n_eff ≪ N`: all N indices land on the same
-    # max-weight dead point. To preserve actual posterior diversity we
-    # split on `n_eff` (Kish 1965): if it's large enough for unbiased
-    # resampling, do the standard systematic draw; otherwise return the
-    # top-N unique dead points sorted by weight descending. The latter
-    # is biased low (mode-heavy) but it shows the *support* of the
-    # posterior, not a degenerate single-point chain.
+    # Importance resampling clones the MAP when the posterior is peaked
+    # enough that `n_eff ≪ N`: all N indices land on the same max-weight
+    # dead point. To preserve actual posterior diversity we split on
+    # `n_eff` (Kish 1965): if it's large enough for unbiased resampling,
+    # draw n_eff indices; otherwise return the top-N unique dead points
+    # sorted by weight descending. The latter is biased low (mode-heavy)
+    # but it shows the *support* of the posterior, not a degenerate
+    # single-point chain.
+    #
+    # The draw is i.i.d. multinomial, as in `sample_nested`, not
+    # systematic: systematic resampling walks the dead points in their
+    # order, which is the order of increasing likelihood, so the chain came
+    # back sorted and its R-hat and ESS measured the sort. On an RV + IAD
+    # companion a single run read R-hat 1.06-1.11 on its own draws.
     n_dead = length(dead_logL)
     log_w = Float64[dead_logwt[i] - log_z_ns for i in 1:n_dead]
     log_w_max = maximum(log_w)
@@ -384,7 +390,7 @@ function sample_nested_ins(
     if n_eff >= 200
         # Standard importance resampling
         n_resample = n_eff
-        indices = _systematic_resample(rng, w, n_resample)
+        indices = _multinomial_resample(rng, w, n_resample)
     else
         # Peaked posterior — take the top dead points by weight, keeping
         # uniqueness. This avoids the resample-collapse failure on real-
@@ -710,19 +716,3 @@ function _rejection_within_bound!(rng::AbstractRNG,
     return (nothing, -Inf)
 end
 
-
-"""Systematic resampling — same low-variance pattern used by sample_pa."""
-function _systematic_resample(rng::AbstractRNG, w::Vector{Float64}, n::Int)
-    cdf = cumsum(w)
-    u0 = rand(rng) / n
-    indices = Vector{Int}(undef, n)
-    j = 1
-    for k in 1:n
-        u = u0 + (k - 1) / n
-        while j < length(cdf) && cdf[j] < u
-            j += 1
-        end
-        indices[k] = j
-    end
-    return indices
-end
