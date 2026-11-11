@@ -48,6 +48,20 @@ function _plotmem_chain(params, vals, n, n_walk; seed = 5)
     return Chains(arr, vcat(Symbol.(nm), [:lp]))
 end
 
+# A PNG's chunks other than the image data: type, data and CRC.
+function _png_meta(path)
+    b = read(path)
+    i = 9
+    out = Tuple{String, Vector{UInt8}}[]
+    while i <= length(b)
+        n = Int(ntoh(reinterpret(UInt32, b[i:i+3])[1]))
+        t = String(b[i+4:i+7])
+        t == "IDAT" || push!(out, (t, b[i+8:i+11+n]))
+        i += 12 + n
+    end
+    return out
+end
+
 _plotmem_stage(chains, params, data) = Nereus._make_plots(
     Dict("output" => Dict("plots" => ["auto"], "show_progress" => false)),
     chains, params, data, mktempdir())
@@ -121,6 +135,43 @@ _plotmem_stage(chains, params, data) = Nereus._make_plots(
         b = Nereus.compute_ci_bands(ch, params, data, ph; planet = 1, n_draws = 1_500,
                                     pool, fold_phase = ph)
         @test a == b
+    end
+
+    @testset "a PNG written from the Cairo surface is Makie's PNG" begin
+        # `_save_png` encodes the Cairo surface itself instead of Makie's
+        # converted copies: the same pixels and the same metadata chunks.
+        M = _PLOTMEM_MAKIE
+        d = mktempdir()
+        fig = M.Figure(size = (320, 240))
+        ax = M.Axis(fig[1, 1]; xlabel = "time (d)", ylabel = "RV (m/s)")
+        M.scatter!(ax, randn(MersenneTwister(1), 400), randn(MersenneTwister(2), 400);
+                   color = 1:400, colormap = :cool, alpha = 0.4, rasterize = 2)
+        M.lines!(ax, 1:10, (1:10) .^ 2; color = M.to_colormap(:cool)[end])
+        for ppu in (1, 2, 3)
+            a, b = joinpath(d, "makie$ppu.png"), joinpath(d, "cairo$ppu.png")
+            M.save(a, fig; px_per_unit = ppu)
+            Nereus._save_png(b, fig; px_per_unit = ppu)
+            @test M.FileIO.load(a) == M.FileIO.load(b)
+            @test _png_meta(a) == _png_meta(b)
+        end
+        # The one function on CairoMakie's internals: the figure's image, at its
+        # device scale, or an error naming it.
+        surface, ppu = Nereus._cairo_png_surface(fig; px_per_unit = 2)
+        @test ppu == 2.0
+        @test size(surface.data) == (640, 480)
+        @test_throws ErrorException Nereus._cairo_png_surface(nothing)
+        # Its allocation is the surface itself, without copies: under 1.5 images
+        # (Makie's `save`, about 2), and the encoder's alone under half of one
+        # -- boxed pixels, for one, would cost several.
+        big = M.Figure(size = (800, 600))
+        M.scatter!(M.Axis(big[1, 1]), randn(MersenneTwister(3), 400),
+                   randn(MersenneTwister(4), 400); color = 1:400, colormap = :cool)
+        b = joinpath(d, "big.png")
+        Nereus._save_png(b, big; px_per_unit = 2)
+        img = 4 * 1600 * 1200
+        @test @allocated(Nereus._save_png(b, big; px_per_unit = 2)) < 1.5 * img
+        Nereus._png_idat(surface.data)
+        @test @allocated(Nereus._png_idat(surface.data)) < 4 * 640 * 480 / 2
     end
 
     @testset "a large chain's figures collect once enough is allocated" begin

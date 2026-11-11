@@ -1,6 +1,7 @@
 # Plotting utilities: phase folding, CI computation, binning, model evaluation.
 
 using Statistics: mean, median, median!, std, quantile, quantile!
+import CodecZlib                  # `_save_png`'s image data
 
 """
     _save_plot(filename, fig; save_pdf=false, save_kwargs...)
@@ -24,7 +25,11 @@ function _save_plot(filename::AbstractString, fig;
     # pixel buffers (235 MB apiece for the 23-parameter corner). Collect first
     # if due, so the two do not stack.
     _RELEASE_MEMORY[] && _release_memory_if_due()
-    save(filename, fig; save_kwargs...)
+    if lowercase(splitext(filename)[2]) == ".png"
+        _save_png(filename, fig; save_kwargs...)    # without the image's copies
+    else
+        save(filename, fig; save_kwargs...)
+    end
     if save_pdf
         base, ext = splitext(filename)
         if lowercase(ext) == ".png"
@@ -119,6 +124,133 @@ function _release_scene!(fig)
         # the reason a figure that is already on disk reports a failure.
     end
     return nothing
+end
+
+# ---------------------------------------------------------------------------
+# PNG output straight from the Cairo surface
+# ---------------------------------------------------------------------------
+#
+# Makie's PNG path renders into a Cairo surface, then hands a view of it to
+# FileIO, which converts the pixels before encoding: the surface and its
+# converted copies are alive together. For the 7632x7712 corner that is 235 MB
+# apiece, about 670 MB held while one file is written. `_save_png` encodes the
+# surface itself, a row at a time, and writes the metadata Makie's path writes
+# -- sRGB/gAMA/cHRM and the resolution, 96 dpi per unit as `save` sets it -- in
+# the same chunk order.
+
+"""
+    _cairo_png_surface(fig; px_per_unit = nothing) -> (surface, px_per_unit)
+
+Draw `fig` onto a CairoMakie image surface, exactly as `save(path, fig)` does
+for a PNG, and return the surface with its device scale. This is the ONE
+place that reaches into CairoMakie's internals (`Screen(scene, config, nothing,
+IMAGE)`, `colorbuffer(::Screen{IMAGE})` drawing onto `screen.surface`); it
+checks each and throws if they no longer hold, rather than writing something
+else. `test/test_plot_memory.jl` compares its output with Makie's `save`.
+"""
+function _cairo_png_surface(fig; px_per_unit = nothing)
+    CM = CairoMakie
+    M = CM.Makie
+    try
+        scene = M.get_scene(fig)
+        M.update_state_before_display!(fig)
+        cfg = Dict{Symbol, Any}(:visible => false)
+        px_per_unit === nothing || (cfg[:px_per_unit] = px_per_unit)
+        config = M.merge_screen_config(CM.ScreenConfig, cfg)
+        screen = CM.Screen(scene, config, nothing, CM.IMAGE)
+        M.events(fig).tick[] = M.Tick(M.OneTimeRenderTick, 0, 0.0, 0.0)
+        img = M.colorbuffer(screen)                 # draws onto screen.surface
+        surface = getfield(screen, :surface)
+        ppu = Float64(M.px_per_unit(screen))
+        w, h = size(surface.data)
+        sizeof(eltype(surface.data)) == 4 || error("the surface is not 32-bit ARGB")
+        (surface isa CM.Cairo.CairoSurface && size(img) == (h, w) &&
+         (w, h) == round.(Int, ppu .* M.size(scene))) ||
+            error("the surface is not the figure's image")
+        return surface, ppu
+    catch err
+        error("CairoMakie internals changed, cannot write a PNG from the Cairo " *
+              "surface (`_cairo_png_surface`): " * sprint(showerror, err))
+    end
+end
+
+# CRC-32 (ISO 3309, as PNG uses), for the chunks written here.
+function _png_crc(bytes)
+    c = 0xffffffff
+    for b in bytes
+        c ⊻= b
+        for _ in 1:8
+            c = (c >> 1) ⊻ (0xedb88320 * (c & 0x00000001))
+        end
+    end
+    return ~c
+end
+
+function _png_chunk(io, type::String, data::AbstractVector{UInt8})
+    write(io, hton(UInt32(length(data))))
+    td = vcat(Vector{UInt8}(codeunits(type)), data)
+    write(io, td)
+    write(io, hton(_png_crc(td)))
+    return nothing
+end
+
+# The zlib stream of a PNG's image data: 8-bit RGBA rows, filter type 0, from
+# the surface's 32-bit ARGB words (a column of `px` per image row). Its own
+# function so the loop is compiled for the matrix's type -- the surface comes
+# back from `_cairo_png_surface` untyped.
+function _png_idat(px::AbstractMatrix)
+    w, h = size(px)
+    TS = CodecZlib.TranscodingStreams
+    z = IOBuffer()
+    zs = CodecZlib.ZlibCompressorStream(z)
+    row = Vector{UInt8}(undef, 1 + 4w)
+    row[1] = 0x00                            # filter type: none
+    @inbounds for y in 1:h
+        for x in 1:w
+            p = reinterpret(UInt32, px[x, y])
+            row[4x - 2] = (p >> 16) % UInt8  # R
+            row[4x - 1] = (p >> 8) % UInt8   # G
+            row[4x]     = p % UInt8          # B
+            row[4x + 1] = (p >> 24) % UInt8  # A
+        end
+        write(zs, row)
+    end
+    write(zs, TS.TOKEN_END)
+    flush(zs)
+    idat = take!(z)
+    close(zs)
+    return idat
+end
+
+"""
+    _save_png(path, fig; px_per_unit = nothing)
+
+Write `fig` to the PNG `path` as `save(path, fig; px_per_unit)` writes it --
+the same RGBA pixels (the surface's bytes, as Makie hands them to the
+encoder), the same metadata chunks in the same order -- encoding the Cairo
+surface a row at a time instead of from converted copies of the whole image
+(see `_cairo_png_surface`).
+"""
+function _save_png(path::AbstractString, fig; px_per_unit = nothing)
+    surface, ppu = _cairo_png_surface(fig; px_per_unit)
+    w, h = size(surface.data)
+    ppm = round(UInt32, ppu * 96 / 0.0254)   # pixels per metre, as `save` sets dpi
+    idat = _png_idat(surface.data)
+    out = IOBuffer()
+    write(out, UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    _png_chunk(out, "IHDR", vcat(reinterpret(UInt8, hton.(UInt32[w, h])),
+                                 UInt8[8, 6, 0, 0, 0]))     # 8-bit RGBA
+    _png_chunk(out, "sRGB", UInt8[0x00])
+    _png_chunk(out, "gAMA", reinterpret(UInt8, [hton(UInt32(45455))]))
+    _png_chunk(out, "cHRM", reinterpret(UInt8, hton.(UInt32[
+        31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000])))
+    _png_chunk(out, "pHYs", vcat(reinterpret(UInt8, [hton(ppm), hton(ppm)]), 0x01))
+    for lo in 1:65536:length(idat)
+        _png_chunk(out, "IDAT", view(idat, lo:min(lo + 65535, length(idat))))
+    end
+    _png_chunk(out, "IEND", UInt8[])
+    write(path, take!(out))
+    return path
 end
 
 """

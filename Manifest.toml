@@ -2,7 +2,7 @@
 
 julia_version = "1.13.3"
 manifest_format = "2.1"
-project_hash = "219246d8d127fc38c9b62283d6451b0030f41e18"
+project_hash = "4c7062e9d82f3aa8a2753e486dd39c4631d2e297"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "bbc22a9a08a0ef6460041086d8a7b27940ed4ffd"
@@ -2127,7 +2127,7 @@ uuid = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
 version = "0.4.27"
 
 [[deps.Nereus]]
-deps = ["ADTypes", "AdvancedHMC", "AffineInvariantMCMC", "Base64", "BayesianGLS", "Bijectors", "CairoMakie", "ChainRulesCore", "Colors", "Dates", "DelimitedFiles", "Distributions", "Downloads", "EllipticalSliceSampling", "Enzyme", "FFTW", "FITSIO", "ForwardDiff", "JSON3", "L1Periodograms", "LaTeXStrings", "LineSearches", "LinearAlgebra", "LogDensityProblems", "LogDensityProblemsAD", "LogExpFunctions", "Logging", "LombScargle", "MCMCChains", "NCDatasets", "NbodyGradient", "NestedSamplers", "Optim", "OptimizationOptimJL", "PairPlots", "ParetoSmooth", "Pathfinder", "Pigeons", "PlanetOrbits", "Printf", "Random", "ReverseDiff", "SHA", "SavitzkyGolay", "Serialization", "SpecialFunctions", "Statistics", "TTVFaster", "Transducers", "TransitLeastSquares", "Transits", "p7zip_jll"]
+deps = ["ADTypes", "AdvancedHMC", "AffineInvariantMCMC", "Base64", "BayesianGLS", "Bijectors", "CairoMakie", "ChainRulesCore", "CodecZlib", "Colors", "Dates", "DelimitedFiles", "Distributions", "Downloads", "EllipticalSliceSampling", "Enzyme", "FFTW", "FITSIO", "ForwardDiff", "JSON3", "L1Periodograms", "LaTeXStrings", "LineSearches", "LinearAlgebra", "LogDensityProblems", "LogDensityProblemsAD", "LogExpFunctions", "Logging", "LombScargle", "MCMCChains", "NCDatasets", "NbodyGradient", "NestedSamplers", "Optim", "OptimizationOptimJL", "PairPlots", "ParetoSmooth", "Pathfinder", "Pigeons", "PlanetOrbits", "Printf", "Random", "ReverseDiff", "SHA", "SavitzkyGolay", "Serialization", "SpecialFunctions", "Statistics", "TTVFaster", "Transducers", "TransitLeastSquares", "Transits", "p7zip_jll"]
 path = "."
 uuid = "c7a1e4b5-9f3d-4e8a-b2c6-5f8d9e1a3b7c"
 version = "0.8.10"
