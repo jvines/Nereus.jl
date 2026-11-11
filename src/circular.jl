@@ -818,6 +818,81 @@ function circular_contiguous(v::AbstractVector{<:Real};
 end
 
 # ------------------------------------------------------------------
+# Live convergence diagnostics read every angle on its circle.
+#
+# The live R-hat / ESS (`_pt_convergence`, `_td_convergence`) and the end-of-run
+# `convergence_report` treat each walker as a chain. Two walkers in different
+# representatives of one state -- a cyclic inclination either side of a pole,
+# a spin either side of its flip, a full-circle angle either side of its seam
+# -- would count as separate modes and hold R-hat up on a converged run. Each
+# diagnostic row is put in its reported representative first (folded,
+# spin-flipped by the layout's axis), and each full-circle angle's column is
+# relabelled into the window whose seam sits in the emptiest arc of the draws.
+# ------------------------------------------------------------------
+
+"""
+    AngleCanon(params)
+
+What the live convergence diagnostics need to read the angles of a samples
+buffer (columns = the unfrozen vector) in their reported representatives:
+the cyclic inclinations to fold, the spin flip and its axis, the circular
+angles to unwrap.
+"""
+struct AngleCanon
+    fold::Vector{Int}
+    sf::Union{Nothing, SpinFlip}
+    axis::Vector{Float64}
+    circ::Vector{Int}
+end
+
+AngleCanon(params::Params) =
+    AngleCanon(cyclic_inclination_indices(params), spin_flip(params),
+               copy(params.layout.spin_axis), circular_indices(params))
+
+"""
+    canon_row_flips(ac, samples, src) -> Bool
+
+Whether row `src` of `samples` is the mirror representative of its spin (the
+spin-flip image of the reported one).
+"""
+@inline canon_row_flips(ac::AngleCanon, samples::AbstractMatrix, src::Int) =
+    ac.sf !== nothing &&
+    !spin_canonical(fold_inclination(samples[src, ac.sf.istar]),
+                    samples[src, ac.sf.lams[1]], ac.axis)
+
+"""
+    canon_value(ac, samples, src, c, flip) -> Float64
+
+`samples[src, c]` in its reported representative: folded if `c` is a cyclic
+inclination, moved through the spin flip if `flip` (see [`canon_row_flips`](@ref)).
+A λ is shifted by π without relabelling: [`unwrap_circular!`](@ref) does that.
+"""
+@inline function canon_value(ac::AngleCanon, samples::AbstractMatrix, src::Int,
+                             c::Int, flip::Bool)
+    v = Float64(samples[src, c])
+    c in ac.fold && (v = fold_inclination(v))
+    if flip
+        c == ac.sf.istar && return π - v
+        c in ac.sf.lams && return v + π
+    end
+    return v
+end
+
+"""
+    unwrap_circular!(v) -> v
+
+Relabel the angle draws `v` (radians) into the one-period window whose seam
+sits in their emptiest arc ([`circular_contiguous`](@ref)), in place.
+"""
+function unwrap_circular!(v::AbstractArray)
+    w = circular_contiguous(vec(v); period = CIRCULAR_PERIOD, lo_ref = 0.0)
+    @inbounds for (k, i) in enumerate(eachindex(v))
+        v[i] = w[k]
+    end
+    return v
+end
+
+# ------------------------------------------------------------------
 # Evidence estimators integrate the FOLDED posterior: every draw put in its
 # reported representative, the density 2^n p* there (n = `n_symmetry_folds`)
 # and nothing outside. `SpinCanon` freezes the spin flip, its axis and the λ

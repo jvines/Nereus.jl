@@ -186,13 +186,19 @@ end
 # WORST science param (max R-hat, min tail-ESS); nuisances are excluded so a
 # poorly-constrained jitter/GP hyperparameter can never stall the run — and a
 # nuisance that's coupled to a science param surfaces in that param's R-hat.
-# `fold` are the columns that are cyclic inclinations (src/circular.jl), read
-# folded to [0, π]: a walker that passed through π sits in the mirror
-# representative, the same inclination, and must not count as another mode.
+# `canon` (an `AngleCanon`, src/circular.jl) reads every angle in its reported
+# representative: cyclic inclinations folded to [0, π] (a walker that passed
+# through π sits in the mirror representative, the same inclination), the
+# stellar spin flipped by the layout's axis, and each full-circle angle
+# relabelled into the window with its seam in the emptiest arc -- walkers one
+# representative apart must not count as separate modes. `fold` alone folds
+# those columns and nothing else.
 # ------------------------------------------------------------------
 function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
                           n_walkers::Int, science_cols::Vector{Int};
-                          cap::Int = 2000, fold::AbstractVector{Int} = Int[])
+                          cap::Int = 2000, fold::AbstractVector{Int} = Int[],
+                          canon::Union{Nothing, AngleCanon} = nothing)
+    ac = canon === nothing ? AngleCanon(collect(Int, fold), nothing, Float64[], Int[]) : canon
     (n_walkers < 2 || keep_idx < 4 * n_walkers) && return nothing
     keep_idx % n_walkers == 0 || return nothing
     n_step = keep_idx ÷ n_walkers
@@ -206,11 +212,14 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
     @inbounds for w in 1:n_walkers
         for (si, s) in enumerate(kept)
             base = (s - 1) * n_walkers + w
+            flip = canon_row_flips(ac, samples, base)
             for (ci, c) in enumerate(science_cols)
-                v = samples[base, c]
-                cube[si, ci, w] = c in fold ? fold_inclination(v) : v
+                cube[si, ci, w] = canon_value(ac, samples, base, c, flip)
             end
         end
+    end
+    for (ci, c) in enumerate(science_cols)
+        c in ac.circ && unwrap_circular!(view(cube, :, ci, :))
     end
     local rh, bess, tess
     try
@@ -1508,7 +1517,7 @@ function sample_pt_emcee(
         # the live readout and (optionally) the run-until-converged stop.
         if step > n_burnin && (step - n_burnin) % diag_cadence == 0
             diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols;
-                                   fold = cinc)
+                                   canon = AngleCanon(params))
             if diag !== nothing
                 meanr, maxr, meanb, mte = diag
                 rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))
