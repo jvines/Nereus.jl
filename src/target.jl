@@ -389,6 +389,23 @@ function EnzymeGradientConfig(target::NereusTarget{PackedTransforms})
     )
 end
 
+# Take the arrays the restore fallback puts back afresh from `target`, after a
+# circular window moved (`set_circular_window!`); the copies taken when `cfg`
+# was built would otherwise put the old bounds back after the next gradient.
+# Only while no chain sharing `target` evaluates it: during a gradient the
+# fallback's arrays may stand zeroed. The HMC seam re-cut calls it from its
+# leader, every chain waiting (`_hmc_recut_windows!`).
+function _enzyme_resync!(cfg::EnzymeGradientConfig, target::NereusTarget{PackedTransforms})
+    pp = target.params.layout.packed_priors
+    pt = target.transform
+    cfg.pp_lowers .= pp.lowers
+    cfg.pp_uppers .= pp.uppers
+    cfg.pp_params .= pp.params
+    cfg.pt_lowers .= pt.lowers
+    cfg.pt_uppers .= pt.uppers
+    return cfg
+end
+
 """
     enzyme_logdensity_and_gradient!(cfg, target, y) -> (lp, grad)
 

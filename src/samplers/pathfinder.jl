@@ -257,10 +257,12 @@ end
     _seam_pilot!(target, seed) -> Bool
 
 The circular windows placed by a pathfinder pilot ([`pathfinder_init`](@ref),
-which re-cuts the seams from its own draws), for a sampler that would start in
-the layout's charts and never move a seam itself: NUTS and pt_hmc without their
-pt_emcee warm start. They walk in the logit chart, where a seam is a wall at
-±∞, and a mode across it is two slivers, one per wall, that no chain crosses
+which re-cuts the seams from its own draws), for the samplers that would
+otherwise start in the layout's charts: NUTS and pt_hmc without their pt_emcee
+warm start, whose chains re-cut the seams themselves only once their adaptation
+has run to a phase boundary (`_hmc_recut!`). They walk in the logit chart,
+where a seam is a wall at ±∞, and a mode across it is two slivers, one per
+wall, that no chain crosses
 (NUTS on Mo ≈ 0 without a moved chart: 358° ± 2° against the true 7° ± 5°).
 Only full-circle angles need it: a polar angle's draws are folded into
 `[0, π]`, clear of its chart's seam. Returns whether a window moved. A pilot

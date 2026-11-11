@@ -336,7 +336,9 @@ size / tree depth are attached to `chains.info` (see
   trivially unimodal; with it off, independent prior-draw inits will
   freeze NUTS in disjoint modes on multi-planet RV posteriors.
   Without it, the seams of the full-circle angles are placed by a short
-  pathfinder pilot instead (`_seam_pilot!`): NUTS never moves one itself.
+  pathfinder pilot instead (`_seam_pilot!`). Either way the chains re-cut
+  them together at the phase boundaries of the adaptation (`_hmc_recut!`), so
+  that none is left against a seam the start placed on the posterior.
 - `warm_temps`, `warm_walkers`, `warm_steps`, `warm_burnin` : pt_emcee
   pre-search budget (defaults 6 / 40 / 400 / 200).
 - `init::Union{Nothing, Vector{Float64}}=nothing` : initial position in
@@ -434,7 +436,10 @@ function sample_nuts(
         init = init === nothing ? nothing : copy(init),
         seed = seed === nothing ? nothing : Int(seed),
         rng = _rng_fingerprint(rng),
-        advancedhmc = string(pkgversion(AdvancedHMC)))
+        advancedhmc = string(pkgversion(AdvancedHMC)),
+        # The seams re-cut at the adaptation's phase boundaries (`_hmc_recut!`):
+        # a checkpoint from before that is another run, and holds no trace.
+        seam_recut = :adaptation_phases)
     ck = resume ? read_checkpoint(ck_path, "nuts", ck_fp) : nothing
     if ck !== nothing
         for (c, s) in enumerate(ck.chains)
@@ -442,6 +447,11 @@ function sample_nuts(
                 "chain $c of the checkpoint is at iteration $(s.step); " *
                 "n_warmup + n_samples = $n_total would end before it"))
         end
+        # Every entry is between the same two re-cuts (`_nuts_recut!` writes them
+        # all at once), so the chains resume in one chart.
+        allequal(_nuts_started(s) && s.circ !== nothing ? s.circ.recut_at : 0
+                 for s in ck.chains) || throw(ArgumentError(
+            "the checkpoint's chains stand on both sides of a seam re-cut"))
     end
 
     if ck === nothing
@@ -450,12 +460,12 @@ function sample_nuts(
         # pre-search (the disjoint-mode fix), or fall back to independent
         # prior draws when warm_start is off.
         #
-        # NUTS never moves a seam itself (src/circular.jl), so without the warm
-        # start's re-chart the windows are placed here: centred on a caller's
-        # `init`, the one point known to be in the posterior (which also keeps
-        # an angle written in the user's window off a moved window's wall,
-        # where transform_forward would clamp it), or by a pathfinder pilot
-        # before prior draws (`_seam_pilot!`).
+        # Without the warm start's re-chart the windows are placed here, before
+        # the chains re-cut them during the adaptation (`_hmc_recut!`): centred
+        # on a caller's `init`, the one point known to be in the posterior
+        # (which also keeps an angle written in the user's window off a moved
+        # window's wall, where transform_forward would clamp it), or by a
+        # pathfinder pilot before prior draws (`_seam_pilot!`).
         init_points = if init !== nothing
             x0 = _center_windows_on!(params, copy(init);
                                      transforms = (target.transform,))
@@ -515,11 +525,21 @@ function sample_nuts(
           _NutsCheckpoint(ck_path, ck_fp, Float64(checkpoint_interval), snaps,
                           copy(rng), circular_windows(params), ReentrantLock())
     stops = _NUTS_STOP_AFTER[]
-    chain_kw = (; n_samples, n_warmup, target_accept, ad_backend)
+    # The seam re-cut during the adaptation, all chains together (`_hmc_recut!`).
+    # A chain that ends, stopped or failed, aborts the rendezvous: a re-cut is
+    # taken by every chain or none.
+    rc = _has_recut_angles(params) ?
+         _HMCRecut(params, target.transform, _Rendezvous(n_chains)) : nothing
+    chain_kw = (; n_samples, n_warmup, target_accept, ad_backend, rc)
+    run_chain(c, rng_c, prog) = try
+        _nuts_chain(target, c, snaps[c], ckw, get(stops, c, 0); chain_kw...,
+                    rng = rng_c, progress = prog)
+    finally
+        rc === nothing || _rendezvous_abort!(rc.rv)
+    end
 
     if n_chains == 1
-        res = [_nuts_chain(target, 1, snaps[1], ckw, get(stops, 1, 0); chain_kw...,
-                           rng = chain_rngs[1], progress)]
+        res = [run_chain(1, chain_rngs[1], progress)]
     else
         # Run chains in parallel. Only show progress on chain 1. Each task
         # owns its own NereusTarget AD wrapper + RNG so there is no shared
@@ -527,12 +547,8 @@ function sample_nuts(
         tasks = Vector{Task}(undef, n_chains)
         for c in 1:n_chains
             chain_rng = chain_rngs[c]
-            snap = snaps[c]
             show_progress = progress && (c == 1)
-            stop = get(stops, c, 0)
-            tasks[c] = Threads.@spawn _nuts_chain(
-                target, c, snap, ckw, stop; chain_kw...,
-                rng = chain_rng, progress = show_progress)
+            tasks[c] = Threads.@spawn run_chain(c, chain_rng, show_progress)
         end
         res = [fetch(t) for t in tasks]
     end
@@ -611,23 +627,41 @@ function _rng_fingerprint(rng::AbstractRNG)
 end
 
 """
-    _nuts_snapshot!(ckw, c, step, z, metric, kernel, adaptor, rng, draws, stats)
+    _nuts_snap(step, z, metric, kernel, adaptor, rng, draws, stats, cs) -> NamedTuple
 
-Save chain `c`'s state after iteration `step` as its entry in `ckw` and write
-the checkpoint file, which holds every chain's latest entry. Copies everything
-the chain goes on mutating.
+A chain's checkpoint entry after iteration `step`. Copies everything the chain
+goes on mutating. `circ` is the seam re-cut's part (`_HMCRecutChain`'s trace
+and the last boundary re-cut), `nothing` for a target without such angles.
 """
-function _nuts_snapshot!(ckw::_NutsCheckpoint, c::Int, step::Int, z, metric, kernel,
-                         adaptor, rng::AbstractRNG, draws, stats)
+function _nuts_snap(step::Int, z, metric, kernel, adaptor, rng::AbstractRNG, draws, stats,
+                    cs)
     # One deepcopy for all four: during warm-up the metric's M⁻¹ is the
     # adaptor's variance array itself, and stays one array in the copy.
     live = deepcopy((; z, metric, kernel, adaptor))
-    snap = (; step, live..., rng = copy(rng), draws = copy(draws), stats = copy(stats))
+    circ = cs === nothing ? nothing : (; trace = deepcopy(cs.trace), cs.recut_at)
+    return (; step, live..., rng = copy(rng), draws = copy(draws), stats = copy(stats),
+            circ)
+end
+
+# Write the checkpoint file from `ckw`'s entries. With `ckw.lock` held.
+_nuts_write!(ckw::_NutsCheckpoint) =
+    write_checkpoint(ckw.path, "nuts", ckw.fingerprint,
+                     (; chains = ckw.snaps, rng_master = ckw.rng_master,
+                        windows = ckw.windows))
+
+"""
+    _nuts_snapshot!(ckw, c, step, z, metric, kernel, adaptor, rng, draws, stats, cs)
+
+Save chain `c`'s state after iteration `step` as its entry in `ckw`
+(`_nuts_snap`) and write the checkpoint file, which holds every chain's latest
+entry.
+"""
+function _nuts_snapshot!(ckw::_NutsCheckpoint, c::Int, step::Int, z, metric, kernel,
+                         adaptor, rng::AbstractRNG, draws, stats, cs)
+    snap = _nuts_snap(step, z, metric, kernel, adaptor, rng, draws, stats, cs)
     lock(ckw.lock) do
         ckw.snaps[c] = snap
-        write_checkpoint(ckw.path, "nuts", ckw.fingerprint,
-                         (; chains = ckw.snaps, rng_master = ckw.rng_master,
-                            windows = ckw.windows))
+        _nuts_write!(ckw)
     end
     return nothing
 end
@@ -647,17 +681,288 @@ its log density was off by hundreds of nats and its gradients by as much as
 the gradients themselves (test/test_nuts_reversediff.jl).
 """
 function _nuts_logdensity_fns(target::NereusTarget, ad_backend::Symbol)
+    ℓ_fn, ∂ℓ_fn, _ = _nuts_logdensity_resync(target, ad_backend)
+    return ℓ_fn, ∂ℓ_fn
+end
+
+# `_nuts_logdensity_fns` and what must run after a circular window moves before
+# they are called again: `nothing`, or for the Enzyme path the resync of its
+# restore fallback (`_enzyme_resync!`).
+function _nuts_logdensity_resync(target::NereusTarget, ad_backend::Symbol)
     if ad_backend === :Enzyme && target.transform isa PackedTransforms
         # Custom Enzyme path with explicit Const arguments.
         enzyme_cfg = EnzymeGradientConfig(target)
         ℓ_fn = y -> enzyme_logdensity_and_gradient!(enzyme_cfg, target, y)[1]
         ∂ℓ_fn = y -> enzyme_logdensity_and_gradient!(enzyme_cfg, target, y)
-    else
-        ℓ_ad = LogDensityProblemsAD.ADgradient(ad_backend, target)
-        ℓ_fn = y -> LogDensityProblems.logdensity(ℓ_ad, y)
-        ∂ℓ_fn = y -> LogDensityProblems.logdensity_and_gradient(ℓ_ad, y)
+        return ℓ_fn, ∂ℓ_fn, () -> _enzyme_resync!(enzyme_cfg, target)
     end
-    return ℓ_fn, ∂ℓ_fn
+    ℓ_ad = LogDensityProblemsAD.ADgradient(ad_backend, target)
+    ℓ_fn = y -> LogDensityProblems.logdensity(ℓ_ad, y)
+    ∂ℓ_fn = y -> LogDensityProblems.logdensity_and_gradient(ℓ_ad, y)
+    return ℓ_fn, ∂ℓ_fn, nothing
+end
+
+# =====================================================================
+# Seam re-cut during the HMC adaptation (NUTS and pt_hmc)
+#
+# NUTS and pt_hmc walk in the logit chart, where a circular window's seam is a
+# wall at y = ±∞. Without the pt_emcee warm start the windows are placed once,
+# by a pathfinder pilot (`_seam_pilot!`), and chains from prior draws then
+# found their way to a mode across a seam the pilot had left on the posterior
+# (or to a minor mode against one), and stayed there: on an RV fit with Mo and
+# ω both near their seams, one of four NUTS chains sat at ω = -2.5°, the wall
+# of the pilot's [-362.5°, -2.5°), for its whole run, and the pt_hmc cold chain
+# came back in a mode 170° from pt_emcee's.
+#
+# So the chains re-cut the seams themselves during the adaptation, at its
+# phase boundaries: the end of the step-size-only init buffer and every end of
+# a metric window (Stan's schedule; the last one opens the term buffer). All
+# chains of a run share the windows (they live in the layout), so they meet
+# there (`_Rendezvous`): each brings the angles it visited since the previous
+# boundary (the second half of the init buffer, whose start is the transient
+# from a prior draw), the last to arrive moves each window's seam to the
+# emptiest arc of the pooled visits (`recut_circular_param!`, which moves
+# nothing unless the seam is crowded), and every chain relabels its position
+# into the new windows. A chain held at a wall had piled its visits there, so
+# the seam leaves it and it is in the interior of its chart, free to cross to
+# the main mode; if it stays in a minor mode it does so inside the window.
+# Cyclic inclinations are folded to [0, π] at the same points, as the other
+# samplers' re-cuts fold them.
+#
+# A move re-charts a coordinate, so at a window end, where the adaptor has
+# just set the metric from the window's draws in the old chart, those draws
+# are re-expressed in the new one and the coordinate's variance re-estimated
+# as the Welford estimator would have (`_welford_var`). The step size's dual
+# averaging restarts at every window end anyway. Warm-up draws are discarded
+# and the adaptation stops before the first kept draw, so the kept chain is
+# an ordinary NUTS chain on the final charts.
+# =====================================================================
+
+"""
+    _HMCRecut(params, transform, rv)
+
+What the chains of one run share for the seam re-cut: the layout (its circular
+windows), the target's `PackedTransforms` (`nothing` for a bounded target), the
+full-circle and cyclic-inclination positions, and the rendezvous of all the
+chains that adapt together.
+"""
+struct _HMCRecut
+    params::Params
+    transform::Union{Nothing,PackedTransforms}
+    circ::Vector{Int}
+    cinc::Vector{Int}
+    rv::_Rendezvous
+end
+_HMCRecut(params::Params, transform, rv::_Rendezvous) =
+    _HMCRecut(params, transform isa PackedTransforms ? transform : nothing,
+              circular_indices(params), cyclic_inclination_indices(params), rv)
+
+"""Whether the target has an angle the re-cut handles."""
+_has_recut_angles(params::Params) =
+    !(isempty(circular_indices(params)) && isempty(cyclic_inclination_indices(params)))
+
+"""
+    _hmc_recut_marks(adaptor, n_warmup) -> (marks, ends)
+
+The iterations after whose adaptation step the chains re-cut: the end of the
+init buffer and every window end of `adaptor`'s schedule (Stan's), all before
+the last warm-up iteration; `ends` are the window ends among them, where the
+metric was just set.
+"""
+function _hmc_recut_marks(adaptor::AdvancedHMC.StanHMCAdaptor, n_warmup::Int)
+    st = AdvancedHMC.Adaptation.StanHMCAdaptorState()
+    AdvancedHMC.Adaptation.initialize!(st, adaptor.init_buffer, adaptor.term_buffer,
+                                       adaptor.window_size, n_warmup)
+    ends = filter(b -> 1 <= b < n_warmup, st.window_splits)
+    marks = sort!(unique!(filter(b -> 1 <= b < n_warmup, vcat(adaptor.init_buffer, ends))))
+    return marks, ends
+end
+
+"""
+    _HMCRecutChain
+
+One chain's part in the re-cut: the run's `_HMCRecut`, the boundaries, the
+bounded values of the re-cut angles it visited since the last one (`trace`,
+one vector per angle, full-circle ones first) and the last boundary whose
+re-cut it has taken (`recut_at`). `vote`: whether its visits place the seams
+(pt_hmc's hot rungs move with the windows but do not choose them). `resync`:
+what must run after a window moved, before the chain's log density is called
+again (`_nuts_logdensity_resync`), or `nothing`.
+"""
+mutable struct _HMCRecutChain
+    rc::_HMCRecut
+    marks::Vector{Int}
+    ends::Vector{Int}
+    last_mark::Int
+    trace::Vector{Vector{Float64}}
+    recut_at::Int
+    vote::Bool
+    resync::Any
+end
+function _HMCRecutChain(rc::_HMCRecut, adaptor, n_warmup::Int;
+                        trace = nothing, recut_at::Int = 0, vote::Bool = true,
+                        resync = nothing)
+    marks, ends = _hmc_recut_marks(adaptor, n_warmup)
+    tr = trace === nothing ? [Float64[] for _ in 1:(length(rc.circ) + length(rc.cinc))] :
+         trace
+    return _HMCRecutChain(rc, marks, ends, isempty(marks) ? 0 : last(marks), tr,
+                          recut_at, vote, resync)
+end
+
+"""A chain saved at boundary `step` before its re-cut was taken."""
+_hmc_recut_pending(cs::_HMCRecutChain, step::Int) = step in cs.marks && cs.recut_at < step
+
+# The angles' coordinates of a target-space point, one at a time.
+_hmc_bounded(θ, d::Int, pt) = pt === nothing ? Float64(θ[d]) : _bounded_coord(θ[d], d, pt)
+function _hmc_unbounded(x::Float64, d::Int, pt)
+    pt === nothing && return x
+    tid = pt.type_ids[d]
+    tid == TRANSFORM_IDENTITY && return x
+    lo = pt.lowers[d]
+    tid == TRANSFORM_LOG && return log(max(x - lo, 1e-10))
+    t = clamp((x - lo) / (pt.uppers[d] - lo), 1e-10, 1.0 - 1e-10)
+    return log(t / (1 - t))
+end
+
+"""Record the re-cut angles of target-space position `θ` in the chain's trace."""
+function _hmc_trace!(cs::_HMCRecutChain, θ)
+    rc = cs.rc
+    k = 0
+    for d in rc.circ
+        push!(cs.trace[k += 1], _hmc_bounded(θ, d, rc.transform))
+    end
+    for d in rc.cinc
+        push!(cs.trace[k += 1], _hmc_bounded(θ, d, rc.transform))
+    end
+    return cs
+end
+
+"""The Welford variance estimate AdvancedHMC's `WelfordVar` gives `ys`."""
+function _welford_var(ys::AbstractVector{Float64})
+    n = length(ys)
+    μ = sum(ys) / n
+    M = sum(y -> (y - μ)^2, ys)
+    return n / ((n + 5) * (n - 1)) * M + 1e-3 * (5 / (n + 5))
+end
+
+# The leader's work at a re-cut: every window from the pooled visits of the
+# chains that vote (in chain order, so the pool does not depend on who arrived
+# last), and each chain's `resync` if one moved, while all of them wait.
+# Returns the moved windows as (position, lo, hi).
+function _hmc_recut_windows!(rc::_HMCRecut, payloads)
+    voters = sort!([p for p in payloads if p.votes !== nothing]; by = p -> p.c)
+    moved = Tuple{Int,Float64,Float64}[]
+    isempty(voters) && return moved
+    tr = rc.transform === nothing ? () : (rc.transform,)
+    for (k, d) in enumerate(rc.circ)
+        pooled = reduce(vcat, (p.votes[k] for p in voters))
+        win = recut_circular_param!(rc.params, d, pooled; transforms = tr)
+        win === nothing || push!(moved, (d, win[1], win[2]))
+    end
+    if !isempty(moved)
+        for p in payloads
+            p.resync === nothing || p.resync()
+        end
+    end
+    return moved
+end
+
+"""
+    _hmc_recut!(cs, i, c, z, h, adaptor) -> (moved, z, h) or nothing
+
+Chain `c`'s re-cut after the adaptation step of boundary `i`: meet the other
+chains (`nothing` if the rendezvous was aborted, with nothing changed), then
+relabel `z`'s position into the moved windows and fold its cyclic
+inclinations, re-estimating the metric of every re-charted coordinate when `i`
+is a window end. Returns whether anything changed and the chain's new phase
+point and Hamiltonian (`h` is rebuilt only if the metric changed, `z` only if
+the position or its chart did). Empties the trace.
+"""
+function _hmc_recut!(cs::_HMCRecutChain, i::Int, c::Int, z, h, adaptor)
+    rc = cs.rc
+    pt = rc.transform
+    nc = length(rc.circ)
+    first_phase = i == cs.marks[1]
+    votes = cs.vote ?
+        [first_phase ? cs.trace[k][(length(cs.trace[k]) ÷ 2 + 1):end] : cs.trace[k]
+         for k in 1:nc] : nothing
+    # Read before the meeting: the leader moves the windows and the transform.
+    x = Float64[_hmc_bounded(z.θ, d, pt) for d in vcat(rc.circ, rc.cinc)]
+    moved = _rendezvous!(ps -> _hmc_recut_windows!(rc, ps), rc.rv,
+                         (; c, votes, cs.resync))
+    moved === _RV_ABORTED && return nothing
+
+    # New bounded values (position and trace) of every coordinate whose value
+    # or chart changed.
+    win = Dict(d => (lo, hi) for (d, lo, hi) in moved)
+    changed = Tuple{Int,Int,Float64,Vector{Float64}}[]   # (k, d, x', trace')
+    for (k, d) in enumerate(vcat(rc.circ, rc.cinc))
+        if haskey(win, d)
+            lo, hi = win[d]
+            push!(changed, (k, d, circular_relabel(x[k], lo, hi),
+                            Float64[circular_relabel(v, lo, hi) for v in cs.trace[k]]))
+        elseif k > nc
+            xf = fold_inclination(x[k])
+            tf = Float64[fold_inclination(v) for v in cs.trace[k]]
+            (xf == x[k] && tf == cs.trace[k]) && continue
+            push!(changed, (k, d, xf, tf))
+        end
+    end
+    any_change = !isempty(changed)
+    if any_change
+        if i in cs.ends
+            var = adaptor.pc.var
+            for (k, d, _, tr) in changed
+                length(tr) >= 2 || continue
+                var[d] = _welford_var(Float64[_hmc_unbounded(v, d, pt) for v in tr])
+            end
+            h = AdvancedHMC.update(h, adaptor)
+        end
+        θ = copy(z.θ)
+        for (k, d, xn, _) in changed
+            θ[d] = _hmc_unbounded(xn, d, pt)
+        end
+        z = AdvancedHMC.phasepoint(h, θ, z.r)
+    end
+    foreach(empty!, cs.trace)
+    cs.recut_at = i
+    return any_change, z, h
+end
+
+"""
+    _nuts_recut!(cs, i, c, z, h, κ, adaptor, rng, draws, stats, ckw)
+        -> (status, z, h)
+
+A NUTS chain's re-cut at boundary `i` (`_hmc_recut!`), and with a checkpoint a
+second meeting at which the last chain writes every chain's state after it,
+with the new windows, in one file. Before that write the file holds every
+chain before the re-cut and the old windows, after it every chain after the
+re-cut and the new ones: never chains in two charts, which one shared target
+could not resume. `status`: `:ok`; `:pending` if another chain stopped before
+the re-cut, which was not taken (nothing changed); `:lost` if one stopped
+between the two meetings (the chain is re-charted, but the file still holds
+it before the re-cut).
+"""
+function _nuts_recut!(cs::_HMCRecutChain, i::Int, c::Int, z, h, κ, adaptor, rng,
+                      draws, stats, ckw::Union{Nothing,_NutsCheckpoint})
+    r = _hmc_recut!(cs, i, c, z, h, adaptor)
+    r === nothing && return (:pending, z, h)
+    _, z, h = r
+    ckw === nothing && return (:ok, z, h)
+    snap = _nuts_snap(i, z, h.metric, κ, adaptor, rng, draws, stats, cs)
+    params = cs.rc.params
+    w = _rendezvous!(cs.rc.rv, (; c, snap)) do payloads
+        lock(ckw.lock) do
+            for p in payloads
+                ckw.snaps[p.c] = p.snap
+            end
+            empty!(ckw.windows)
+            merge!(ckw.windows, circular_windows(params))
+            _nuts_write!(ckw)
+        end
+        nothing
+    end
+    return (w === _RV_ABORTED ? :lost : :ok, z, h)
 end
 
 """
@@ -679,10 +984,11 @@ function _nuts_chain(
     stop::Int;
     n_samples::Int, n_warmup::Int, target_accept::Float64,
     ad_backend::Symbol,
-    rng::AbstractRNG, progress::Bool
+    rng::AbstractRNG, progress::Bool,
+    rc::Union{Nothing,_HMCRecut} = nothing
 )
     dim = LogDensityProblems.dimension(target)
-    ℓ_fn, ∂ℓ_fn = _nuts_logdensity_fns(target, ad_backend)
+    ℓ_fn, ∂ℓ_fn, resync = _nuts_logdensity_resync(target, ad_backend)
     kinetic = AdvancedHMC.GaussianKinetic()
 
     # `rng` already holds the stream of the chain's entry (`sample_nuts` put
@@ -740,12 +1046,17 @@ function _nuts_chain(
         draws = copy(snap.draws::Vector{Vector{Float64}})
         stats = copy(snap.stats::Vector{NamedTuple})
     end
+    # The seam re-cut's state: fresh, or the trace and last re-cut saved.
+    cs = rc === nothing ? nothing :
+         !_nuts_started(snap) ? _HMCRecutChain(rc, adaptor, n_warmup; resync) :
+         _HMCRecutChain(rc, adaptor, n_warmup; trace = deepcopy(snap.circ.trace),
+                        recut_at = snap.circ.recut_at::Int, resync)
 
     n_total = n_warmup + n_samples
     sizehint!(draws, n_samples); sizehint!(stats, n_samples)
     pb = ProgressBar("NUTS"; total = n_total, enabled = progress, start = step0)
     done = _nuts_loop!(rng, hamiltonian, kernel, adaptor, z, draws, stats, step0,
-                       n_total, n_warmup, c, ckw, stop, pb)
+                       n_total, n_warmup, c, ckw, stop, pb, cs)
     finish!(pb)
     done || return nothing
 
@@ -794,21 +1105,37 @@ end
 
 """
     _nuts_loop!(rng, h, κ, adaptor, z, draws, stats, step0, n_total, n_warmup,
-                c, ckw, stop, pb) -> Bool
+                c, ckw, stop, pb, cs) -> Bool
 
 Iterations `step0 + 1 : n_total` of one NUTS chain: the loop of
 `AdvancedHMC.sample(rng, h, κ, θ, n_total, adaptor, n_warmup; drop_warmup =
 true)`, step for step and draw for draw, appending the post-warmup positions
-and statistics to `draws` and `stats`. Between iterations the chain is `z`'s
-position, `rng`, the metric of `h`, the step size of `κ` and the adaptor's
-state, all of which a checkpoint saves. Returns `false` if the test hook
-stopped it at `stop`.
+and statistics to `draws` and `stats`, plus the seam re-cut at the phase
+boundaries of the adaptation (`cs`, a `_HMCRecutChain`, `nothing` without
+angles to re-cut; see `_hmc_recut!`). Between iterations the chain is `z`'s
+position, `rng`, the metric of `h`, the step size of `κ`, the adaptor's state
+and `cs`'s trace, all of which a checkpoint saves. Returns `false` if the test
+hook stopped it at `stop`, or another chain stopped before a re-cut that needs
+them all.
 """
 function _nuts_loop!(rng::AbstractRNG, h, κ, adaptor, z,
                      draws::Vector{Vector{Float64}}, stats::Vector{NamedTuple},
                      step0::Int, n_total::Int, n_warmup::Int, c::Int,
-                     ckw::Union{Nothing,_NutsCheckpoint}, stop::Int, pb::ProgressBar)
+                     ckw::Union{Nothing,_NutsCheckpoint}, stop::Int, pb::ProgressBar,
+                     cs::Union{Nothing,_HMCRecutChain})
     last_ck = time()
+    # Saved at a boundary whose re-cut the other chains had not reached (the
+    # round was aborted, `_nuts_recut!`): the re-cut first, exactly where the
+    # uninterrupted run took it, after that iteration's adaptation.
+    if cs !== nothing && _hmc_recut_pending(cs, step0)
+        st, z, h = _nuts_recut!(cs, step0, c, z, h, κ, adaptor, rng, draws, stats, ckw)
+        st === :ok || return false   # its entry is still the one it resumed from
+        if step0 == stop
+            ckw === nothing ||
+                _nuts_snapshot!(ckw, c, step0, z, h.metric, κ, adaptor, rng, draws, stats, cs)
+            return false
+        end
+    end
     for i in (step0 + 1):n_total
         t = AdvancedHMC.transition(rng, h, κ, z)
         tstat = AdvancedHMC.stat(t)
@@ -824,11 +1151,31 @@ function _nuts_loop!(rng::AbstractRNG, h, κ, adaptor, z,
                           :ε => AdvancedHMC.nom_step_size(κ.τ.integrator),
                           :accept => tstat.acceptance_rate))
 
+        # ---- Seam re-cut at the adaptation's phase boundaries -------------
+        if cs !== nothing && i <= cs.last_mark
+            _hmc_trace!(cs, z.θ)
+            if i in cs.marks
+                st, z, h = _nuts_recut!(cs, i, c, z, h, κ, adaptor, rng, draws, stats, ckw)
+                if st === :pending
+                    # Another chain stopped first, so the re-cut cannot be
+                    # taken. Saved as it stands, the re-cut pending: the
+                    # checkpoint's other entries and windows are of this chart.
+                    ckw === nothing ||
+                        _nuts_snapshot!(ckw, c, i, z, h.metric, κ, adaptor, rng, draws,
+                                        stats, cs)
+                    return false
+                end
+                # :lost -- re-charted, but the others never saved theirs: the
+                # checkpoint keeps every chain before this re-cut.
+                st === :lost && return false
+            end
+        end
+
         # ---- Checkpoint: every `checkpoint_interval` s, on the last
         # iteration, and before the test hook's stop (src/checkpoint.jl) ---
         if ckw !== nothing && (i == n_total || i == stop ||
                                time() - last_ck >= ckw.interval)
-            _nuts_snapshot!(ckw, c, i, z, h.metric, κ, adaptor, rng, draws, stats)
+            _nuts_snapshot!(ckw, c, i, z, h.metric, κ, adaptor, rng, draws, stats, cs)
             last_ck = time()
         end
         i == stop && return false

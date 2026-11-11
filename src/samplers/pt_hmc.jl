@@ -21,7 +21,7 @@ using AdvancedHMC
 using ForwardDiff
 using MCMCChains
 using Random
-using Statistics: mean, var
+using Statistics: mean
 
 # One NUTS chain pinned to a temperature. `Minv` (diagonal inverse mass matrix)
 # and `ε` (step size) are what its frozen kernel is built from, kept so that a
@@ -63,10 +63,26 @@ function _temper_closures(parts, β::Float64)
 end
 
 # Warm-up one temperature (Stan windowed adaptor → step size + diagonal mass
-# matrix), then FREEZE a kernel whose metric is the post-warm-up sample variance
-# and whose step size is re-found — avoids reaching into adaptor internals.
+# matrix), run on for another `n_warmup` iterations with what it adapted, then
+# FREEZE that kernel: the adapted diagonal metric and the dual-averaged step
+# size. The frozen kernel used to take the variance of those last iterations
+# as its metric and a step size re-found at their last point by
+# `find_good_stepsize`, a one-point heuristic that only seeds the dual
+# averaging. On an RV fit it gave the β = 1 rung 0.8 or 1.6, where the adapted
+# 0.2 accepts 0.9: every trajectory diverged and the cold chain kept one point
+# for all 800 sweeps.
+#
+# The loop is `AdvancedHMC.sample(rng, h0, κ0, θ0, 2n_warmup, adaptor, n_warmup;
+# drop_warmup = true)` written out, step for step, so that the seams can be
+# re-cut at the adaptation's phase boundaries with every other chain of the
+# core (`_hmc_recut!`; `recut` the run's `_HMCRecut`, `nothing` without angles
+# to re-cut). `vote`: whether this chain's visits place the seams (the β = 1
+# rung's); `c` its index at the rendezvous. Returns `nothing` if the rendezvous
+# was aborted, which only a failed warm-up of another chain does.
 function _warmup_temp(rng, ℓ_fn, ∂ℓ_fn, θ0::Vector{Float64}, n_warmup::Int,
-                       target_accept::Float64, dim::Int)
+                       target_accept::Float64, dim::Int;
+                       recut::Union{Nothing,_HMCRecut} = nothing, vote::Bool = false,
+                       c::Int = 0)
     metric0 = AdvancedHMC.DiagEuclideanMetric(dim)
     h0 = AdvancedHMC.Hamiltonian(metric0, AdvancedHMC.GaussianKinetic(), ℓ_fn, ∂ℓ_fn)
     ε0 = AdvancedHMC.find_good_stepsize(rng, h0, θ0)
@@ -76,19 +92,27 @@ function _warmup_temp(rng, ℓ_fn, ∂ℓ_fn, θ0::Vector{Float64}, n_warmup::In
     adaptor = AdvancedHMC.StanHMCAdaptor(
         AdvancedHMC.MassMatrixAdaptor(metric0),
         AdvancedHMC.StepSizeAdaptor(target_accept, integ0))
-    samples, _ = AdvancedHMC.sample(rng, h0, κ0, θ0, 2 * n_warmup, adaptor, n_warmup;
-                                    drop_warmup = true, progress = false, verbose = false)
-    θ_final = isempty(samples) ? θ0 : copy(samples[end])
-    M⁻¹ = ones(Float64, dim)
-    if length(samples) > 4
-        Y = reduce(hcat, samples)
-        @inbounds for d in 1:dim
-            v = var(@view Y[d, :]); M⁻¹[d] = (isfinite(v) && v > 0) ? v : 1.0
+    cs = recut === nothing ? nothing : _HMCRecutChain(recut, adaptor, n_warmup; vote)
+    hw, t = AdvancedHMC.sample_init(rng, h0, θ0)
+    z, κw = t.z, κ0
+    for i in 1:(2 * n_warmup)
+        t = AdvancedHMC.transition(rng, hw, κw, z)
+        tstat = AdvancedHMC.stat(t)
+        hw, κw, _ = AdvancedHMC.Adaptation.adapt!(hw, κw, adaptor, i, n_warmup, t.z.θ,
+                                                  tstat.acceptance_rate)
+        z = t.z
+        if cs !== nothing && i <= cs.last_mark
+            _hmc_trace!(cs, z.θ)
+            if i in cs.marks
+                r = _hmc_recut!(cs, i, c, z, hw, adaptor)
+                r === nothing && return nothing
+                _, z, hw = r
+            end
         end
     end
-    metric = AdvancedHMC.DiagEuclideanMetric(M⁻¹)
-    h = AdvancedHMC.Hamiltonian(metric, AdvancedHMC.GaussianKinetic(), ℓ_fn, ∂ℓ_fn)
-    ε = Float64(AdvancedHMC.find_good_stepsize(rng, h, θ_final))
+    θ_final = copy(z.θ)
+    M⁻¹ = copy(hw.metric.M⁻¹)
+    ε = Float64(AdvancedHMC.nom_step_size(κw.τ.integrator))
     h, κ = _frozen_nuts(ℓ_fn, ∂ℓ_fn, M⁻¹, ε)
     return h, κ, θ_final, M⁻¹, ε
 end
@@ -162,7 +186,8 @@ function _pt_hmc_core(parts, dim::Int,
                        target_accept::Float64, W::Int, progress::Bool,
                        rng::AbstractRNG, label::String = "PT-HMC",
                        saved::Union{Nothing,NamedTuple} = nothing,
-                       save = nothing, checkpoint_interval::Real = Inf)
+                       save = nothing, checkpoint_interval::Real = Inf,
+                       recut::Union{Nothing,NamedTuple} = nothing)
     n_temps = length(βs)
     states = Matrix{_HMCTempState}(undef, n_temps, W)
     if saved === nothing
@@ -170,17 +195,30 @@ function _pt_hmc_core(parts, dim::Int,
             "_pt_hmc_core needs `init_ys` unless it continues a `saved` state"))
         seeds = rand(rng, UInt64, n_temps * W)
         tasks = Matrix{Task}(undef, n_temps, W)
+        # Every chain of every rung re-cuts the seams with the others during
+        # its warm-up (`_hmc_recut!`), the β = 1 rung voting; one that ends
+        # aborts the rendezvous so that none waits for it.
+        rc = recut === nothing ? nothing :
+             _HMCRecut(recut.params, recut.transform, _Rendezvous(n_temps * W))
         for i in 1:n_temps, w in 1:W
-            θ0 = init_ys[(i - 1) * W + w]; s = seeds[(i - 1) * W + w]; β = βs[i]
-            tasks[i, w] = Threads.@spawn begin
+            idx = (i - 1) * W + w
+            θ0 = init_ys[idx]; s = seeds[idx]; β = βs[i]
+            tasks[i, w] = Threads.@spawn try
                 crng = MersenneTwister(s)
                 ℓ_fn, ∂ℓ_fn = _temper_closures(parts, β)
-                h, κ, θf, Minv, ε = _warmup_temp(crng, ℓ_fn, ∂ℓ_fn, θ0, n_warmup,
-                                                 target_accept, dim)
-                _HMCTempState(h, κ, θf, parts(θf)[2], Minv, ε)
+                r = _warmup_temp(crng, ℓ_fn, ∂ℓ_fn, θ0, n_warmup, target_accept, dim;
+                                 recut = rc, vote = β == 1.0, c = idx)
+                r === nothing ? nothing :
+                    _HMCTempState(r[1], r[2], r[3], parts(r[3])[2], r[4], r[5])
+            finally
+                rc === nothing || _rendezvous_abort!(rc.rv)
             end
         end
-        for i in 1:n_temps, w in 1:W; states[i, w] = fetch(tasks[i, w]); end
+        # In order, so a failed warm-up rethrows here; the chains it aborted
+        # return `nothing`.
+        warm = [fetch(tasks[i, w]) for i in 1:n_temps, w in 1:W]
+        any(isnothing, warm) && error("a pt_hmc warm-up was aborted with no chain failing")
+        states .= warm
     else
         # Put the saved chains back: positions, logL and the frozen kernels.
         θ_s = saved.θ::Matrix{Vector{Float64}}
@@ -283,7 +321,9 @@ and the `EvidenceReport`.
 - `betas=nothing` : custom β-ladder (overrides default + disables adaptation)
 - `warm_start=true` : start from a short pt_emcee pre-search. With it off the
   starts are prior draws, and the seams of the full-circle angles are placed
-  first by a short pathfinder pilot (`_seam_pilot!`).
+  first by a short pathfinder pilot (`_seam_pilot!`). Either way the chains
+  re-cut them together at the phase boundaries of each warm-up's adaptation
+  (`_hmc_recut!`, voted by the β = 1 rung).
 - `seed=1`, `progress=true`
 - `checkpoint=nothing` : path of a state file. The sampler writes its whole
   state there (the ladder; every temperature's positions, logL, mass matrix and
@@ -371,7 +411,10 @@ function sample_pt_hmc(
     # ladder as built, before the pilot re-grids it.
     ck_fp = run_fingerprint(target.params, target.data; n_temps, ladder = copy(βs),
         adapt_ladder = do_pilot, n_pilot = pilot_sweeps, n_warmup,
-        n_walkers_per_temp = W, swap_interval, target_accept, warm_start, seed)
+        n_walkers_per_temp = W, swap_interval, target_accept, warm_start, seed,
+        # The seams re-cut during each warm-up (`_hmc_recut!`): a checkpoint
+        # from before that is another run.
+        seam_recut = :adaptation_phases)
     ck = nothing
     if resume
         ck = try
@@ -401,6 +444,9 @@ function sample_pt_hmc(
         end
     end
     # A core's `save`: the checkpoint of phase `ph` around the core's state.
+    # The windows the warm-ups re-cut (`_hmc_recut!`): the target's own.
+    recut = _has_recut_angles(target.params) ?
+            (; params = target.params, transform = target.transform) : nothing
     saver(ph::Symbol) = ck_path === nothing ? nothing : core -> begin
         write_checkpoint(ck_path, "pt_hmc", ck_fp, (; phase = ph, rng,
             windows = circular_windows(target.params), core))
@@ -419,7 +465,7 @@ function sample_pt_hmc(
                              W = W, progress = progress, rng = rng, label = "PT-HMC pilot",
                              saved = phase === :pilot ? ck.core : nothing,
                              save = saver(:pilot),
-                             checkpoint_interval = checkpoint_interval)
+                             checkpoint_interval = checkpoint_interval, recut)
         βs = _adapt_ladder(βs, pilot.varlogL)
     elseif phase === :final
         βs = copy(ck.core.betas::Vector{Float64})
@@ -431,7 +477,7 @@ function sample_pt_hmc(
                        swap_interval = swap_interval, target_accept = target_accept,
                        W = W, progress = progress, rng = rng,
                        saved = phase === :final ? ck.core : nothing,
-                       save = saver(:final), checkpoint_interval = checkpoint_interval)
+                       save = saver(:final), checkpoint_interval = checkpoint_interval, recut)
 
     n_post = length(res.cold_ys)
     pnames = vcat(Symbol.(target.params.layout.unfrozen_names), [:lp])
