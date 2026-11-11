@@ -50,19 +50,6 @@ end
     return msec_from_K(K, P, e, 1.0, M_s)
 end
 
-# The closed form with M_p << M_s: K√(1-e²)(P/2πG)^(1/3) M_s^(2/3). It is NOT
-# used by the derived table. It stays for code that is part of a MODEL (the
-# stability filter and the TTV N-body masses), where switching to the exact
-# mass would change what is sampled, not just what is reported.
-function _msini_lowmass(M_s::Real, K::Real, P::Real, e::Real)
-    (e < 0 || e >= 1 || !(P > 0) || !(M_s > 0)) && return NaN
-    P_s = P * _DS
-    M_s_g = M_s * _MS
-    ee = sqrt(1 - e^2)
-    mp_sini = K * 100 * ee * (P_s / (2π * G_CGS))^(1/3) * M_s_g^(2/3)
-    return mp_sini / _MJ
-end
-
 """
     planet_mass(M_s, K, P, e, inc_deg) -> M_p [M_Jup]
 
@@ -129,18 +116,20 @@ function semimajor_axis_au(P::Real, M_s::Real, M_p::Real = 0.0)
 end
 
 """
-    semimajor_axis_from_rho(rho_s, P, R_s) -> a [AU]
+    semimajor_axis_from_rho(rho_s, P, R_s, q = 0) -> a [AU]
 
 Semi-major axis from stellar density, period, and stellar radius.
-rho_s in SOLAR units (ρ/ρ_sun, ρ_sun = 1.411 g/cm³) — same convention as
+rho_s in SOLAR units (ρ/ρ_sun, ρ_sun = `RHO_SUN_CGS` ≈ 1.4098 g/cm³) — same convention as
 `rho_s_to_a_Rs`, which this delegates to. P in days, R_s in solar radii.
+`q = M_p/M_s` puts the companion in Kepler III (`M_s + M_p`); the default 0 is
+what a transit alone can give (it measures `ρ★(1+q)`).
 
 Note the asymmetry with the reported derived quantity `rho_star_transit`,
 which is in g/cm³: feeding a g/cm³ value in here inflates a/R★ by
-1.411^(1/3) ≈ 1.12.
+1.4098^(1/3) ≈ 1.12.
 """
-function semimajor_axis_from_rho(rho_s::Real, P::Real, R_s::Real)
-    a_Rs = rho_s_to_a_Rs(rho_s, P)
+function semimajor_axis_from_rho(rho_s::Real, P::Real, R_s::Real, q::Real = 0)
+    a_Rs = rho_s_to_a_Rs(rho_s, P, q)
     return a_Rs * R_s * _RS / AU_CM
 end
 
@@ -261,11 +250,12 @@ function is_amd_stable(periods, masses_jup, eccentricities, M_s::Real)
     n = length(periods)
     n >= 2 || return true
     for k in 1:(n - 1)
-        a1 = semimajor_axis_au(periods[k], M_s)
-        a2 = semimajor_axis_au(periods[k + 1], M_s)
-        alpha = a1 / a2
         m1 = masses_jup[k]
         m2 = masses_jup[k + 1]
+        # Kepler III with the total mass M_s + m of each planet.
+        a1 = semimajor_axis_au(periods[k], M_s, m1 * (_MJ / _MS))
+        a2 = semimajor_axis_au(periods[k + 1], M_s, m2 * (_MJ / _MS))
+        alpha = a1 / a2
         gamma = m1 / m2
         eps = (m1 + m2) * _MJ / (M_s * _MS)
         e1 = eccentricities[k]
@@ -311,7 +301,7 @@ function is_gladman_stable(periods, masses_jup, eccentricities, M_s::Real)
     n >= 2 || return true
 
     # Masses and semi-major axes (already sorted by period)
-    sma = [semimajor_axis_au(periods[k], M_s) for k in 1:n]
+    sma = [semimajor_axis_au(periods[k], M_s, masses_jup[k] * (_MJ / _MS)) for k in 1:n]
     for k in 1:n
         (sma[k] <= 0 || masses_jup[k] <= 0) && return false
     end
@@ -381,7 +371,9 @@ end
 """
     check_stability(Ps, Ks, es, M_s, mode) -> Bool
 
-Check orbital stability from RV observables. Computes msini internally,
+Check orbital stability from RV observables. Computes the exact minimum masses
+(`msini`, from the full mass function) and the semi-major axes from Kepler III
+with `M_s + M_p` (the minimum mass, as no inclination is available here) internally,
 sorts by period, and dispatches to the selected criterion.
 
 For planet pairs near low-order mean-motion resonances (2:1, 3:2, 4:3,
@@ -405,9 +397,10 @@ function check_stability(Ps, Ks, es, M_s::Real, mode::Symbol)
     # Sort by period
     order = sortperm(Ps)
     periods_sorted = Ps[order]
-    masses_sorted  = [_msini_lowmass(M_s, Ks[i], Ps[i], es[i]) for i in order]
+    masses_sorted  = [msini(M_s, Ks[i], Ps[i], es[i]) for i in order]
     ecc_sorted     = es[order]
-    sma_sorted     = [semimajor_axis_au(periods_sorted[k], M_s) for k in 1:n]
+    sma_sorted     = [semimajor_axis_au(periods_sorted[k], M_s, masses_sorted[k] * (_MJ / _MS))
+                      for k in 1:n]
 
     # Check each adjacent pair
     for k in 1:(n - 1)
@@ -455,8 +448,8 @@ function check_stability(Ps, Ks, es, M_s::Real, mode::Symbol,
     # Fill masses and sma using sorted order
     @inbounds for k in 1:n
         i = order_buf[k]
-        masses_buf[k] = _msini_lowmass(M_s, Ks[i], Ps[i], es[i])
-        sma_buf[k] = semimajor_axis_au(Ps[i], M_s)
+        masses_buf[k] = msini(M_s, Ks[i], Ps[i], es[i])
+        sma_buf[k] = semimajor_axis_au(Ps[i], M_s, masses_buf[k] * (_MJ / _MS))
     end
 
     # Check each adjacent pair
@@ -819,9 +812,70 @@ function compute_derived(chains, params::Params;
         msec_min = (has_rv && ms !== nothing) ?
                    _msec_min.(ms, K, P, e) : nothing
 
+        # Transit geometry (b, rr), decoded before a/R★: the companion's mass
+        # enters a/R★ and needs sin i, which comes from b.
+        has_geom = has_geometry(block)
+        b_samp = rr_samp = nothing
+        if has_geom
+            if parametrization.geom === :b_rr
+                b_samp = _col("b_k$k")
+                rr_samp = _col("rr_k$k")
+            else  # :r1r2
+                r1 = _col("r1_k$k")
+                r2 = _col("r2_k$k")
+                rr_samp = r1 .* (1 .+ r2) ./ 2
+                b_samp = r1 .* (1 .- r2) ./ 2
+            end
+        end
+
+        # Companion mass ratio q = M_p/M_star for the transit's a/R★, the way
+        # the likelihood has it (`planet_geometry`): Kepler III with M★ + M_p, and
+        # sin i from b, solved together with the exact mass function (K sampled)
+        # or taken from the sampled M_sec. M★ is this table's per-draw stellar
+        # mass, else the sampled M_pri, else the config's.
+        has_msec = Symbol("M_sec_k$k") in chain_syms
+        mstar = ms !== nothing ? ms :
+                (:M_pri in chain_syms ? _draws(chains, :M_pri) :
+                 (isnan(config.M_s) ? nothing :
+                  fill(Float64(config.M_s), n_samples)))
+        want_q = has_geom && mstar !== nothing && (has_rv || has_msec)
+        q_vec = nothing                      # per-draw q when determinable
+        # (a/R★ for q = 0, is the value `a_Rs_q0` below; scale = false when a/R★
+        # is itself the sampled quantity)
+        a_Rs_q0 = nothing
+        scale_a = true
+        if haskey(params.layout.name_to_idx, "a_Rs_k$k")
+            a_Rs_q0 = _col("a_Rs_k$k"); scale_a = false
+        elseif haskey(params.layout.name_to_idx, "rho_s")
+            a_Rs_q0 = rho_s_to_a_Rs.(_col("rho_s"), P)
+        elseif ms !== nothing && rs !== nothing
+            a_Rs_q0 = cbrt.(GM_SUN_CGS .* ms .* (P .* _DS) .^ 2 ./ (4π^2)) ./
+                      (rs .* R_SUN_CM)
+        end
+        if want_q && a_Rs_q0 !== nothing
+            nq = length(a_Rs_q0)
+            q_vec = Vector{Float64}(undef, nq)
+            a_new = Vector{Float64}(undef, nq)
+            msec_col = has_rv ? nothing : _col("M_sec_k$k")
+            @inbounds for j in 1:nq
+                if has_rv
+                    a_new[j], q_vec[j], _ = coupled_geometry(
+                        a_Rs_q0[j], b_samp[j], e[j], sin(w[j]),
+                        mass_function(K[j], P[j], e[j]), mstar[j]; scale_a)
+                else
+                    q_vec[j] = msec_col[j] / mstar[j]
+                    a_new[j] = scale_a ? a_Rs_q0[j] * cbrt(1 + q_vec[j]) : a_Rs_q0[j]
+                end
+            end
+        end
+
         # a/R* and a(AU)
         has_rho = haskey(params.layout.name_to_idx, "rho_s")
-        if haskey(params.layout.name_to_idx, "a_Rs_k$k")
+        if q_vec !== nothing
+            # a/R★ with the companion's mass in Kepler III (M★ + M_p)
+            derived["a_Rs"] = a_new
+            rs !== nothing && (derived["a_au"] = a_new .* rs .* _RS ./ AU_CM)
+        elseif haskey(params.layout.name_to_idx, "a_Rs_k$k")
             # a/R★ sampled directly (`sample_a_Rs`)
             a_Rs_samples = _col("a_Rs_k$k")
             derived["a_Rs"] = a_Rs_samples
@@ -861,17 +915,7 @@ function compute_derived(chains, params::Params;
         want_ang && (derived["a_au"] = a_model)
 
         # Inclination (transit planets)
-        has_geom = has_geometry(block)
         if has_geom
-            if parametrization.geom === :b_rr
-                b_samp = _col("b_k$k")
-                rr_samp = _col("rr_k$k")
-            else  # :r1r2
-                r1 = _col("r1_k$k")
-                r2 = _col("r2_k$k")
-                rr_samp = r1 .* (1 .+ r2) ./ 2
-                b_samp = r1 .* (1 .- r2) ./ 2
-            end
             derived["rr"] = rr_samp
             derived["b"] = b_samp
 
@@ -889,7 +933,13 @@ function compute_derived(chains, params::Params;
         end
 
         # True mass (RV + transit + stellar mass + inclination)
-        if has_rv && has_geom && ms !== nothing && haskey(derived, "inc_deg")
+        if has_rv && q_vec !== nothing
+            # q is the exact mass ratio at the transit's own sin i (the
+            # likelihood's `planet_M_sec`), with the table's stellar mass.
+            m_jup = q_vec .* mstar .* (_MS / _MJ)
+            derived["mass_jup"] = m_jup
+            derived["mass_earth"] = m_jup .* (_MJ / _ME)
+        elseif has_rv && has_geom && ms !== nothing && haskey(derived, "inc_deg")
             m_jup = planet_mass.(ms, K, P, e, derived["inc_deg"])
             derived["mass_jup"] = m_jup
             derived["mass_earth"] = m_jup .* (_MJ / _ME)
@@ -1017,15 +1067,18 @@ function compute_derived(chains, params::Params;
 
             # Transit-derived stellar density (photoeccentric cross-check):
             # invert rho_s_to_a_Rs.  That map is, with ρ in SOLAR units (ρ_sun
-            # = 1.411 g/cm³), G_cgs = 6.674e-8, P_sec = P·86400:
-            #   a/R* = cbrt( G_cgs · (ρ·1.411) · P_sec² / (3π) )
-            # ⇒ ρ_solar = 3π · (a/R*)³ / (G_cgs · 1.411 · P_sec²),
-            # and ρ_cgs[g/cm³] = ρ_solar · 1.411 = 3π · (a/R*)³ / (G_cgs · P_sec²).
-            G_cgs = 6.674e-8
+            # = RHO_SUN_CGS), G_CGS, P_sec = P·86400:
+            #   a/R* = cbrt( G_CGS · (ρ·RHO_SUN_CGS) · P_sec² (1+q) / (3π) )
+            # ⇒ ρ_cgs[g/cm³] = 3π · (a/R*)³ / (G_cgs · P_sec² (1+q)).
+            # With q = M_p/M★ where the mass is determinable (K or M_sec); with no
+            # mass information (transit-only) q = 0 and this is ρ★(1+q), the
+            # density the light curve actually measures.
+            G_cgs = G_CGS
             rho_star_cgs = similar(a_Rs_d)
             @inbounds for j in eachindex(a_Rs_d)
                 P_sec = P[j] * 86400.0
-                rho_star_cgs[j] = 3π * a_Rs_d[j]^3 / (G_cgs * P_sec^2)
+                qj = q_vec === nothing ? 0.0 : q_vec[j]
+                rho_star_cgs[j] = 3π * a_Rs_d[j]^3 / (G_cgs * P_sec^2 * (1 + qj))
             end
             derived["rho_star_transit"] = rho_star_cgs
 

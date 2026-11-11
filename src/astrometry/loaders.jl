@@ -29,9 +29,14 @@ Read a single row of the HGCA EDR3 catalog (`HGCA_vEDR3.fits` from
 Brandt 2021) and return an `HGCAData` with full per-epoch 2×2 RA-Dec
 covariance.
 
-Epochs are tabulated in HGCA per-axis (`epoch_ra_*`, `epoch_dec_*`); we
-take the RA epochs as the canonical times since the RA and Dec epochs
-agree to within rounding for all sources.
+Epochs are tabulated in HGCA per mission and per coordinate
+(`epoch_ra_hip`, `epoch_dec_hip`, `epoch_ra_gaia`, `epoch_dec_gaia`, Julian
+years): the central epoch of each coordinate's position. They do NOT agree
+between coordinates — by up to 1.2 yr at Hipparcos and 1.3 yr at Gaia across
+the catalogue — and the Hipparcos–Gaia proper motion is the positional
+difference between them, coordinate by coordinate. All four are carried, as
+`epochs_ra = (Hip, HG, Gaia)` and `epochs_dec` likewise, with the HG entry the
+midpoint. `epochs` (used for plotting and `t_ref`) keeps the RA epochs.
 """
 function load_hgca_row(fits_path::AbstractString, hip_id::Integer)
     isfile(fits_path) || throw(ArgumentError("HGCA file not found: $fits_path"))
@@ -43,11 +48,14 @@ function load_hgca_row(fits_path::AbstractString, hip_id::Integer)
         idx === nothing && throw(ArgumentError(
             "Hipparcos ID $hip_id not found in HGCA EDR3 catalog"))
 
-        # Epochs (Julian year → MJD)
-        epoch_hip_jy  = read(hdu, "epoch_ra_hip")[idx]
-        epoch_gaia_jy = read(hdu, "epoch_ra_gaia")[idx]
+        # Central epochs, per mission and per coordinate (Julian year → MJD)
+        epoch_hip_jy  = Float64(read(hdu, "epoch_ra_hip")[idx])
+        epoch_gaia_jy = Float64(read(hdu, "epoch_ra_gaia")[idx])
         # HG epoch is the midpoint of the two missions
         epoch_hg_jy   = (epoch_hip_jy + epoch_gaia_jy) / 2
+        dec_hip_jy    = Float64(read(hdu, "epoch_dec_hip")[idx])
+        dec_gaia_jy   = Float64(read(hdu, "epoch_dec_gaia")[idx])
+        dec_hg_jy     = (dec_hip_jy + dec_gaia_jy) / 2
 
         # Proper motions (mas/yr)
         pmra_hip   = read(hdu, "pmra_hip")[idx]
@@ -84,6 +92,8 @@ function load_hgca_row(fits_path::AbstractString, hip_id::Integer)
             plx     = Float64(plx),
             plx_err = Float64(plx_err),
             hip_id  = Int(hip_id),
+            epochs_ra  = mjd_epochs((epoch_hip_jy, epoch_hg_jy, epoch_gaia_jy)),
+            epochs_dec = mjd_epochs((dec_hip_jy, dec_hg_jy, dec_gaia_jy)),
         )
     finally
         close(f)

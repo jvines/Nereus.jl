@@ -69,60 +69,54 @@ function mass_function(K::Real, P::Real, e::Real)
 end
 
 """
+    mass_ratio_from_F(F) -> x
+
+Positive root of `x³ − F x² − 2F x − F = 0`, the mass function in the
+variables `x = M_sec / M_pri` and `F = f / (M_pri sin³ i)`
+(`x³ = F (1 + x)²`), by Cardano's method.
+
+The cubic has exactly one real root for every `F > 0`: its discriminant is
+`−F² (4F + 27) < 0`. Descartes allows two further negative roots, but they are
+complex, so the trigonometric branch is never needed. With `x = y + F/3` the
+depressed cubic is `y³ + p y + q = 0`,
+
+    p = −2F − F²/3,   q = −F − 2F²/3 − 2F³/27,
+
+and `(q/2)² + (p/3)³ = F² (4F + 27) / 108` exactly, so the square root needs no
+subtraction. `y = u + v` with `u = ∛(−q/2 + √D)`; the other cube root
+`−q/2 − √D` cancels catastrophically at small `F`, so `v = −p/(3u)` instead.
+Every term is positive: no cancellation anywhere on `F ∈ (0, ∞)`.
+
+Branches only on the primal value, so it is type-generic and ForwardDiff-safe.
+`F ≤ 0` returns 0.
+"""
+@inline function mass_ratio_from_F(F::T) where {T<:Real}
+    F > 0 || return zero(T)
+    three = T(3)
+    sD = F * sqrt((4F + 27) / 108)
+    mq2 = F / 2 + F^2 / three + F^3 / 27     # −q/2 > 0
+    mp3 = (2F + F^2 / three) / three         # −p/3 > 0
+    u = cbrt(mq2 + sD)
+    return u + mp3 / u + F / three
+end
+
+"""
     msec_from_K(K, P, e, sin_i, M_pri) -> M_sec
 
-Solve f(M) = M_sec³ sin³ i / (M_pri + M_sec)² for M_sec given the
-observed RV semi-amplitude `K`, period `P`, eccentricity `e`, sine-
-inclination `sin_i`, and primary mass `M_pri` (M_sun).
-
-Closed-form not available in general — the equation is cubic in M_sec.
-Solve via Newton iteration starting from the M_sec ≪ M_pri approximation
-M_sec ≈ (f_M · M_pri²)^(1/3) / sin i. Typically converges in 3–5
-iterations.
+Companion mass from the exact RV mass function
+`M_sec³ sin³ i / (M_pri + M_sec)² = f(K, P, e)`, no `M_sec << M_pri`
+approximation. The cubic in `x = M_sec / M_pri` is solved analytically
+([`mass_ratio_from_F`](@ref), Cardano), with `F = f / (M_pri sin³ i)`.
 
 `K` in m/s, `P` in days, `M_pri` in M_sun. Returns M_sec in M_sun.
-
-For low-mass companions (planets) the starter is already an excellent
-approximation and one Newton step is enough.
 """
 function msec_from_K(K::Real, P::Real, e::Real, sin_i::Real,
                      M_pri::Real)
     sin_i_safe = max(abs(sin_i), oftype(sin_i, 1e-12))
     K_safe = max(K, zero(K))
     f_M = mass_function(K_safe, P, e)
-    # Reparametrize via q = M_sec / M_total ∈ [0, 1):
-    #   f_M = M_sec³ sin³i / M_total²
-    #   M_sec = q M_pri / (1 - q)
-    #   ⇒ q³ × M_pri × sin³i / (1-q) = f_M
-    #   ⇒ q³ + r q − r = 0,  with r = f_M / (M_pri sin³i) × (1-q) absorbed
-    # Solve the cubic q³ × sin³i × M_pri − f_M (1-q) = 0 by damped
-    # Newton starting at the small-q approximation, with backtracking
-    # to keep q ∈ (0, 1).
-    sin3 = sin_i_safe^3
-    # Small-q starter: q ≈ (f_M / (sin³i × M_pri))^(1/3)
-    r_const = f_M / (sin3 * M_pri)
-    q_start = cbrt(r_const)
-    q = min(max(q_start, oftype(q_start, 1e-12)), oftype(q_start, 0.999))
-
-    # 30 Newton iterations: F(q) = q³ × sin³i × M_pri − f_M (1-q)
-    #   F'(q) = 3 q² × sin³i × M_pri + f_M
-    @inbounds for _ in 1:30
-        F  = q^3 * sin3 * M_pri - f_M * (1 - q)
-        Fp = 3 * q^2 * sin3 * M_pri + f_M
-        Δ  = F / Fp
-        # Backtrack: keep q ∈ (1e-12, 0.999)
-        step = Δ
-        for _bt in 1:20
-            q_new = q - step
-            if q_new > oftype(q, 1e-12) && q_new < oftype(q, 0.999)
-                q = q_new
-                break
-            end
-            step /= 2
-        end
-    end
-    # Convert back to M_sec
-    return q * M_pri / (1 - q)
+    F = f_M / (sin_i_safe^3 * M_pri)
+    return mass_ratio_from_F(F) * M_pri
 end
 
 # ---------------------------------------------------------------------
@@ -496,6 +490,10 @@ models a published catalogue quantity. Fewer than 5 transits in the window
 returns zeros, as for a short plan; `Data` refuses such a plan up front
 when a Gaia-epoch product depends on it.
 
+`t_ref` may also be a pair `(t_α, t_δ)`: the position in each coordinate at
+its own epoch, as the catalogues tabulate them (see [`scan_5param_fit`](@ref),
+which this is the GOST case of).
+
 This is the Gaia-side htof primitive. `gost_window_avg_pm` is the
 backward-compat 2-tuple wrapper returning only `(Δμα*, Δμδ)`.
 
@@ -503,95 +501,194 @@ Uniform per-transit weight; per-transit AL precision is a future
 refinement (G-mag-dependent — small relative to the published 5×5
 catalog covariance for characterization-quality orbits).
 """
-function gost_5param_fit(orb, gost, M_sec::Real;
-                          t_ref::Union{Nothing, Real} = nothing,
-                          window::Union{Nothing, Tuple{Real, Real}} = nothing)
+gost_5param_fit(orb, gost, M_sec::Real;
+                t_ref::Union{Nothing, Real, Tuple{Real, Real}} = nothing,
+                window::Union{Nothing, Tuple{Real, Real}} = nothing) =
+    scan_5param_fit(orb, gost, M_sec; t_ref = t_ref, window = window)
+
+# ---------------------------------------------------------------------
+# Five-parameter fit of the reflex through a mission's scans
+# ---------------------------------------------------------------------
+#
+# A catalogue proper motion (Hipparcos, Gaia DR2, Gaia DR3) is not the
+# instantaneous reflex at some epoch: it is the proper motion of a linear
+# five-parameter solution fitted to that mission's along-scan abscissae. So the
+# model of it is that same fit, run on the reflex. One solver serves both
+# missions; only where the scan geometry comes from differs:
+#
+#   GOST plan (Gaia)          t, ψ (sincos taken here), parallax factor; every
+#                             transit weighs the same.
+#   IADData (Hipparcos IAD)   t, sin ψ / cos ψ (cached at construction),
+#                             parallax factor, and 1/σ² from the abscissa
+#                             errors — the weights the reduction used. The
+#                             abscissae themselves are never read.
+#
+# Both use the along-scan projection Δη = Δα*·sin ψ + Δδ·cos ψ that
+# `_iad_residuals!` uses (see `along_scan_projection`), and the design columns
+# are built from the same sin ψ, cos ψ, so a pure linear motion comes back
+# exactly in either case — what `test_hip_epoch_models.jl` checks.
+
+_scan_n(s::IADData) = n_iad(s)
+@inline _scan_t(s::IADData, j::Int) = s.t[j]
+@inline _scan_sc(s::IADData, j::Int) = (s.sinpsi[j], s.cospsi[j])
+@inline _scan_plxf(s::IADData, j::Int) = s.parallax_factor[j]
+@inline _scan_w(s::IADData, j::Int) = s.weight[j]
+_scan_tsum(s::IADData) = sum(s.t)
+
+# A GOST plan, or anything carrying its three columns.
+_scan_n(s) = length(s.t)
+@inline _scan_t(s, j::Int) = s.t[j]
+@inline _scan_sc(s, j::Int) = sincos(s.psi[j])
+@inline _scan_plxf(s, j::Int) = s.parallax_factor[j]
+@inline _scan_w(s, j::Int) = 1.0
+_scan_tsum(s) = sum(s.t)
+
+_ref_epochs(::Nothing, t_mean::Float64) = (t_mean, t_mean)
+_ref_epochs(t::Real, ::Float64) = (Float64(t), Float64(t))
+_ref_epochs(t::Tuple{Real, Real}, ::Float64) = (Float64(t[1]), Float64(t[2]))
+
+_kernel_eltype(::ReflexKernel{T}) where {T} = T
+_kernel_eltype(k::ReflexFallback) = typeof(k.M_sec)
+
+"""
+    scan_5param_fit(orb, scans, M_sec; t_ref = nothing, window = nothing) -> Δq::Vector{T}
+
+The five-parameter solution `Δq = (Δα*, Δδ, Δϖ, Δμα*, Δμδ)` in
+`(mas, mas, mas, mas/yr, mas/yr)` that a catalogue's linear astrometric fit
+absorbs from the stellar reflex of `(orb, M_sec)`, given the scans that fit
+was made to: the model of a catalogue position and proper motion.
+
+`scans` is a `GOSTData` scan plan (Gaia: uniform weights) or an `IADData`
+(Hipparcos intermediate data: each abscissa weighted by `1/abscissa_err²`, as
+in the reduction; only the scan geometry is read). Per scan `j` the fitted
+model is
+
+    η_j = Δα* sin ψ_j + Δδ cos ψ_j + Δϖ f_j
+          + Δμα* sin ψ_j (t_j − t_α)/yr + Δμδ cos ψ_j (t_j − t_δ)/yr
+
+with `f_j` the along-scan parallax factor and `yr = 365.25 d`, solved by
+weighted least squares against the reflex's along-scan projection.
+
+- `t_ref`: the epoch(s) the fitted position refers to. `nothing` is the mean
+  epoch of the scans used; a number sets both coordinates; a pair `(t_α, t_δ)`
+  sets each on its own, which is how the HGCA and G23H tabulate their central
+  epochs (`epoch_ra_hip`, `epoch_dec_hip`, …). The proper motion does not
+  depend on it — moving a reference epoch only re-mixes the position column —
+  the position does.
+- `window = (mjd_start, mjd_end)`: only the scans inside (both ends
+  inclusive), e.g. `HIPPARCOS_WINDOW`, `GAIA_DR3_WINDOW`.
+
+Fewer than 5 scans in the window, or a degenerate design, returns zeros.
+
+Generic over the element type, so ForwardDiff Duals pass through: the normal
+matrix is data-only and stays `Float64`, the orbit enters only through the
+right-hand side. Abscissae that share an epoch exactly (a Hipparcos
+great-circle's several, typically ~3 per epoch) share one Kepler solve.
+"""
+function scan_5param_fit(orb, scans, M_sec::Real;
+                         t_ref::Union{Nothing, Real, Tuple{Real, Real}} = nothing,
+                         window::Union{Nothing, Tuple{Real, Real}} = nothing)
     T = typeof(M_sec)
     if window === nothing
         lo, hi = -Inf, Inf
-        n = n_gost(gost)
+        n = _scan_n(scans)
         n >= 5 || return zeros(T, 5)
-        t_ref_gost = t_ref === nothing ? sum(gost.t) / n : Float64(t_ref)
+        t_mean = _scan_tsum(scans) / n
     else
         lo, hi = Float64(window[1]), Float64(window[2])
         n = 0; t_sum = 0.0
-        @inbounds for t in gost.t
+        @inbounds for j in 1:_scan_n(scans)
+            t = _scan_t(scans, j)
             lo <= t <= hi || continue
             n += 1; t_sum += t
         end
         n >= 5 || return zeros(T, 5)
-        t_ref_gost = t_ref === nothing ? t_sum / n : Float64(t_ref)
+        t_mean = t_sum / n
     end
+    t_ra, t_dec = _ref_epochs(t_ref, t_mean)
 
-    # Same hoist as `_iad_residuals!`: ONE orbit, `n` GOST transits, so reduce
-    # the orbit to its epoch-independent constants once instead of re-deriving
-    # its geometry inside `orbitsolve` at every transit. The fast/fallback
-    # choice is made HERE, for the whole scan, and a CONCRETE kernel goes to the
-    # barrier below — deciding per transit would make the kernel a `Union` and
-    # put a dynamic dispatch back on the inner loop.
+    # Same hoist as `_iad_residuals!`: ONE orbit, `n` scans, so reduce the
+    # orbit to its epoch-independent constants once instead of re-deriving its
+    # geometry inside `orbitsolve` at every scan. The fast/fallback choice is
+    # made HERE, for the whole scan, and a CONCRETE kernel goes to the barrier
+    # below — deciding per scan would make the kernel a `Union` and put a
+    # dynamic dispatch back on the inner loop.
     return _reflex_fast_applicable(orb) ?
-        _gost_5param_accumulate(_reflex_kernel(orb, M_sec), gost, M_sec, t_ref_gost, lo, hi) :
-        _gost_5param_accumulate(ReflexFallback(orb, M_sec), gost, M_sec, t_ref_gost, lo, hi)
+        _scan_5param_accumulate(_reflex_kernel(orb, M_sec), scans, M_sec, t_ra, t_dec, lo, hi) :
+        _scan_5param_accumulate(ReflexFallback(orb, M_sec), scans, M_sec, t_ra, t_dec, lo, hi)
 end
 
 """
-    _gost_5param_accumulate(rk, gost, M_sec, t_ref_gost, lo, hi) -> Δq (5-vector)
+    _scan_5param_accumulate(rk, scans, M_sec, t_ra, t_dec, lo, hi) -> Δq (5-vector)
 
-The normal-equation accumulation and solve behind [`gost_5param_fit`](@ref).
-Separate so it is a function barrier: it specialises on the concrete type of
-`rk`, which is what keeps `_reflex_offset` a static call in the transit loop.
-Transits outside `[lo, hi]` are skipped in place rather than copied out, so a
-windowed fit allocates nothing more than an unwindowed one; with
-`(-Inf, Inf)` every transit is used, in order, exactly as before.
+The normal-equation accumulation and solve behind [`scan_5param_fit`](@ref).
+Separate so it is a function barrier: it specialises on the concrete types of
+`rk` and `scans`, which is what keeps `_reflex_offset` and the scan accessors
+static calls in the loop. Scans outside `[lo, hi]` are skipped in place rather
+than copied out, so a windowed fit allocates nothing more than an unwindowed
+one.
+
+For a GOST plan with one reference epoch this is the old GOST-only
+accumulation operation for operation (its weight is exactly 1.0, so `w·x` is
+`x` bit for bit), and its results are unchanged to the last bit.
 """
-function _gost_5param_accumulate(rk, gost, M_sec::Real, t_ref_gost::Real,
+function _scan_5param_accumulate(rk, scans, M_sec::Real, t_ra::Float64, t_dec::Float64,
                                  lo::Float64, hi::Float64)
-    T = typeof(M_sec)
+    T = promote_type(typeof(M_sec), _kernel_eltype(rk))
 
-    A11 = zero(T); A12 = zero(T); A13 = zero(T); A14 = zero(T); A15 = zero(T)
-    A22 = zero(T); A23 = zero(T); A24 = zero(T); A25 = zero(T)
-    A33 = zero(T); A34 = zero(T); A35 = zero(T)
-    A44 = zero(T); A45 = zero(T)
-    A55 = zero(T)
+    # XᵀWX is data-only, so it is accumulated (and factorised) in Float64
+    # whatever `T` is; only XᵀWΔη carries the orbit.
+    A11 = 0.0; A12 = 0.0; A13 = 0.0; A14 = 0.0; A15 = 0.0
+    A22 = 0.0; A23 = 0.0; A24 = 0.0; A25 = 0.0
+    A33 = 0.0; A34 = 0.0; A35 = 0.0
+    A44 = 0.0; A45 = 0.0
+    A55 = 0.0
     v1 = zero(T); v2 = zero(T); v3 = zero(T); v4 = zero(T); v5 = zero(T)
 
-    @inbounds for j in 1:n_gost(gost)
-        lo <= gost.t[j] <= hi || continue
-        Δra, Δdec = _reflex_offset(rk, gost.t[j])
-        s, c = sincos(gost.psi[j])
-        plxf = gost.parallax_factor[j]
-        dt   = (gost.t[j] - t_ref_gost) / 365.25
+    t_prev = NaN
+    Δra = zero(T); Δdec = zero(T)
+    @inbounds for j in 1:_scan_n(scans)
+        t = _scan_t(scans, j)
+        lo <= t <= hi || continue
+        if t != t_prev
+            o = _reflex_offset(rk, t)
+            Δra = T(o[1]); Δdec = T(o[2])
+            t_prev = t
+        end
+        s, c = _scan_sc(scans, j)
+        w    = _scan_w(scans, j)
         x1 = s
         x2 = c
-        x3 = plxf
-        x4 = s * dt
-        x5 = c * dt
+        x3 = _scan_plxf(scans, j)
+        x4 = s * ((t - t_ra) / 365.25)
+        x5 = c * ((t - t_dec) / 365.25)
         d_eta = Δra * s + Δdec * c
+        wx1 = w * x1; wx2 = w * x2; wx3 = w * x3; wx4 = w * x4; wx5 = w * x5
 
-        v1 += x1 * d_eta
-        v2 += x2 * d_eta
-        v3 += x3 * d_eta
-        v4 += x4 * d_eta
-        v5 += x5 * d_eta
+        v1 += wx1 * d_eta
+        v2 += wx2 * d_eta
+        v3 += wx3 * d_eta
+        v4 += wx4 * d_eta
+        v5 += wx5 * d_eta
 
-        A11 += x1 * x1
-        A12 += x1 * x2
-        A13 += x1 * x3
-        A14 += x1 * x4
-        A15 += x1 * x5
-        A22 += x2 * x2
-        A23 += x2 * x3
-        A24 += x2 * x4
-        A25 += x2 * x5
-        A33 += x3 * x3
-        A34 += x3 * x4
-        A35 += x3 * x5
-        A44 += x4 * x4
-        A45 += x4 * x5
-        A55 += x5 * x5
+        A11 += wx1 * x1
+        A12 += wx1 * x2
+        A13 += wx1 * x3
+        A14 += wx1 * x4
+        A15 += wx1 * x5
+        A22 += wx2 * x2
+        A23 += wx2 * x3
+        A24 += wx2 * x4
+        A25 += wx2 * x5
+        A33 += wx3 * x3
+        A34 += wx3 * x4
+        A35 += wx3 * x5
+        A44 += wx4 * x4
+        A45 += wx4 * x5
+        A55 += wx5 * x5
     end
 
-    A = Matrix{T}(undef, 5, 5)
+    A = Matrix{Float64}(undef, 5, 5)
     A[1,1]=A11; A[1,2]=A12; A[1,3]=A13; A[1,4]=A14; A[1,5]=A15
     A[2,1]=A12; A[2,2]=A22; A[2,3]=A23; A[2,4]=A24; A[2,5]=A25
     A[3,1]=A13; A[3,2]=A23; A[3,3]=A33; A[3,4]=A34; A[3,5]=A35

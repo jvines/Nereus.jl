@@ -452,14 +452,19 @@
             epochs5 = mjd_epochs((1991.25, 2004.6, 2015.0, 2015.5, 2016.0))
             pmra_true = Tuple(zeros(5)); pmdec_true = Tuple(zeros(5))
             σ = 0.05
-            pmra_obs = ntuple(5) do ie
-                μra, _ = Nereus.star_reflex_pm(orb, epochs5[ie], M_sec)
-                μra + σ * randn(rng)
+            # G23H's own definitions, as `_g23h_model_pm` evaluates them with
+            # no scan geometry: instantaneous reflex at the Hipparcos, DR2 and
+            # DR3 epochs; Hip→Gaia and DR3−DR2 as positional differences over
+            # the epoch differences (they were instantaneous proper motions).
+            off(t) = Nereus.star_reflex_offset(orb, t, M_sec)
+            dpos(a, b) = (off(epochs5[b]) .- off(epochs5[a])) ./
+                         ((epochs5[b] - epochs5[a]) / 365.25)
+            μ_true = ntuple(5) do ie
+                ie == 2 ? dpos(1, 5) : ie == 4 ? dpos(3, 5) :
+                          Nereus.star_reflex_pm(orb, epochs5[ie], M_sec)
             end
-            pmdec_obs = ntuple(5) do ie
-                _, μdec = Nereus.star_reflex_pm(orb, epochs5[ie], M_sec)
-                μdec + σ * randn(rng)
-            end
+            pmra_obs  = ntuple(ie -> μ_true[ie][1] + σ * randn(rng), 5)
+            pmdec_obs = ntuple(ie -> μ_true[ie][2] + σ * randn(rng), 5)
             cov = zeros(10, 10)
             for ie in 1:5
                 cov[2*ie - 1, 2*ie - 1] = σ^2

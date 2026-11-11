@@ -216,6 +216,24 @@ Each epoch carries a 2×2 within-epoch RA-Dec covariance matrix
 The three epochs are treated as independent in time — orvara's
 likelihood does the same (Brandt 2021, Appendix Eq. 1).
 
+# Per-coordinate epochs
+
+The HGCA tabulates a central epoch per mission AND per coordinate
+(`epoch_ra_hip`, `epoch_dec_hip`, `epoch_ra_gaia`, `epoch_dec_gaia`): the
+epoch at which that coordinate's position is uncorrelated with its proper
+motion. They are not one epoch: across the catalogue the Hipparcos RA and Dec
+epochs differ by up to 1.2 yr, the Gaia ones by up to 1.3 yr (HIP 103836:
+1991.20 / 1991.39 and 2015.96 / 2016.11). The Hipparcos–Gaia proper motion is
+the positional difference between those epochs, coordinate by coordinate
+(Brandt 2018 §3; orvara and Octofitter model it the same way):
+
+    μα*,HG = (α*_Gaia(t_α,Gaia) − α*_Hip(t_α,Hip)) / (t_α,Gaia − t_α,Hip)
+
+and likewise in Dec with the Dec epochs. `epochs_ra` and `epochs_dec` carry
+them, as `(Hip, HG, Gaia)` in MJD with the HG entry the midpoint of the other
+two; [`hgca_log_likelihood`](@ref) fits the reflex to those epochs. `epochs`
+stays the one-per-quantity tuple used for plotting and `t_ref`.
+
 # Fields
 - `epochs::NTuple{3, Float64}`     : (Hip, HG, Gaia) MJD
 - `pmra::NTuple{3, Float64}`       : (Hip, HG, Gaia) μ_α* (mas/yr)
@@ -226,6 +244,8 @@ likelihood does the same (Brandt 2021, Appendix Eq. 1).
 - `plx::Float64`                   : Gaia parallax (mas)
 - `plx_err::Float64`               : 1σ parallax uncertainty (mas)
 - `hip_id::Int`                    : Hipparcos catalog ID
+- `epochs_ra::NTuple{3, Float64}`  : (Hip, HG, Gaia) central epochs of RA (MJD)
+- `epochs_dec::NTuple{3, Float64}` : (Hip, HG, Gaia) central epochs of Dec (MJD)
 
 # Invariants
 - Each 2×2 covariance matrix is symmetric positive-definite.
@@ -239,11 +259,18 @@ struct HGCAData
     plx::Float64
     plx_err::Float64
     hip_id::Int
+    epochs_ra::NTuple{3, Float64}
+    epochs_dec::NTuple{3, Float64}
 end
+
+# The pre-per-coordinate positional form: both coordinates at `epochs`.
+HGCAData(epochs, pmra, pmdec, cov_ep, plx, plx_err, hip_id) =
+    HGCAData(epochs, pmra, pmdec, cov_ep, plx, plx_err, hip_id,
+             NTuple{3, Float64}(Float64.(epochs)), NTuple{3, Float64}(Float64.(epochs)))
 
 """
     HGCAData(; epochs, pmra, pmdec, sigma_pmra, sigma_pmdec, corr_pmra_pmdec,
-              plx, plx_err, hip_id)
+              plx, plx_err, hip_id, epochs_ra = epochs, epochs_dec = epochs)
 
 Keyword constructor. Pass per-epoch 1σ errors and within-epoch
 RA-Dec correlations; the constructor builds the three 2×2 matrices.
@@ -252,6 +279,11 @@ RA-Dec correlations; the constructor builds the three 2×2 matrices.
 - `sigma_pmra::NTuple{3, Real}`     : (Hip, HG, Gaia) σ on pmra (mas/yr)
 - `sigma_pmdec::NTuple{3, Real}`    : (Hip, HG, Gaia) σ on pmdec (mas/yr)
 - `corr_pmra_pmdec::NTuple{3, Real}`: (Hip, HG, Gaia) ρ_RA-Dec ∈ [−1, 1]
+- `epochs_ra`, `epochs_dec`         : the catalogue's per-coordinate central
+                                      epochs (MJD), see the type's docstring.
+                                      Default to `epochs` for both
+                                      coordinates; [`load_hgca_row`](@ref)
+                                      fills them from the catalogue.
 
 Use `mjd_epochs(epochs_jyear)` to convert decimal-year epoch tuples to MJD.
 """
@@ -265,6 +297,8 @@ function HGCAData(;
     plx::Real,
     plx_err::Real,
     hip_id::Integer,
+    epochs_ra::Union{Nothing, NTuple{3, <:Real}} = nothing,
+    epochs_dec::Union{Nothing, NTuple{3, <:Real}} = nothing,
 )
     plx > 0     || throw(ArgumentError("plx must be > 0"))
     plx_err > 0 || throw(ArgumentError("plx_err must be > 0"))
@@ -278,15 +312,32 @@ function HGCAData(;
         Matrix{Float64}([σra^2          ρ*σra*σdec;
                          ρ*σra*σdec     σdec^2     ])
     end, 3)
+    ep  = NTuple{3, Float64}(Float64.(epochs))
+    era = epochs_ra  === nothing ? ep : NTuple{3, Float64}(Float64.(epochs_ra))
+    ede = epochs_dec === nothing ? ep : NTuple{3, Float64}(Float64.(epochs_dec))
+    _check_catalogue_epochs(era, ede, 1, 3, "HGCAData")
     return HGCAData(
-        NTuple{3, Float64}(Float64.(epochs)),
+        ep,
         NTuple{3, Float64}(Float64.(pmra)),
         NTuple{3, Float64}(Float64.(pmdec)),
         cov_eps,
         Float64(plx),
         Float64(plx_err),
         Int(hip_id),
+        era, ede,
     )
+end
+
+# The per-coordinate epochs set the divisor of a positional-difference proper
+# motion, so they must be finite and the two ends of that difference distinct.
+function _check_catalogue_epochs(era, ede, i0::Int, i1::Int, who::String)
+    (all(isfinite, era) && all(isfinite, ede)) ||
+        throw(ArgumentError("$who: epochs_ra / epochs_dec must be finite"))
+    (era[i1] != era[i0] && ede[i1] != ede[i0]) || throw(ArgumentError(
+        "$who: the epochs at the two ends of a positional difference coincide " *
+        "(epochs_ra[$i0] = $(era[i0]), epochs_ra[$i1] = $(era[i1]), " *
+        "epochs_dec[$i0] = $(ede[i0]), epochs_dec[$i1] = $(ede[i1]))"))
+    return nothing
 end
 
 """
@@ -1008,6 +1059,25 @@ const GAIA_DR2_WINDOW = (56863.4375, 57531.4826)
 const GAIA_DR3_WINDOW = (56863.4375, 57901.3639)
 
 """
+    HIPPARCOS_WINDOW
+
+The span of the Hipparcos mission's observations, `(start, end)` in MJD: the
+Julian years 1989.84 to 1993.20. Every unrejected record of the 2007
+reduction's intermediate data (the `ResRec_JavaTool_2014` bundle
+[`fetch_hip_iad`](@ref) reads, all sources) lies between EPOCH −1.4049 and
++1.9458 yr from J1991.25, i.e. 1989.8451 to 1993.1958; the window is that
+range rounded outwards. The Hipparcos epoch of the HGCA and G23H models is a
+five-parameter fit through the scans inside it — which also keeps the Gaia
+transits of a merged Hipparcos + Gaia `IADData` out of that fit.
+"""
+const HIPPARCOS_WINDOW = ((1989.84 - 2000.0) * 365.25 + 51544.5,
+                          (1993.20 - 2000.0) * 365.25 + 51544.5)
+
+# Scans of `t` inside `win`, both ends inclusive.
+_n_in_window(t::AbstractVector{<:Real}, win::Tuple{Real, Real}) =
+    count(x -> win[1] <= x <= win[2], t)
+
+"""
     _gost_window(gost, (t0, t1)) -> GOSTData or nothing
 
 The transits of `gost` with `t0 ≤ t ≤ t1`, or `nothing` when fewer than five
@@ -1031,11 +1101,28 @@ acceleration analysis (arXiv:2602.00235).
 G23H tabulates **five proper-motion measurements** per source instead
 of HGCA's three:
 
-  1. Hipparcos epoch (~1991.25)
-  2. Hipparcos→Gaia long-baseline (~2004.6)
-  3. Gaia DR2 (~2015.0)
-  4. Gaia DR3−DR2 derived (mean ~2015.5)
+  1. Hipparcos epoch (~1991.25) — adopted from the HGCA
+  2. Hipparcos→Gaia long-baseline (~2004) — adopted from the HGCA
+  3. Gaia DR2 (~2015.5)
+  4. Gaia DR3−DR2 scaled position difference (~2015.75)
   5. Gaia DR3 (~2016.0)
+
+# What each one is, and at which epochs
+
+Thompson+ 2026 §II–III and Table 1, and Octofitter's `G23HObs`, which is the
+catalogue's reference forward model:
+
+  - 1, 3, 5 are the proper motions of five-parameter fits over the
+    Hipparcos, DR2 and DR3 observations.
+  - 2 is `(α*_DR3(t_DR3) − α*_Hip(t_Hip)) / (t_DR3 − t_Hip)`, per coordinate.
+  - 4 is `(α*_DR3(t_DR3) − α*_DR2(t_DR2)) / (t_DR3 − t_DR2)`, per coordinate.
+
+Every `t` there is the catalogue's CENTRAL epoch of that release and
+coordinate (`epoch_ra_hip`, `epoch_dec_hip`, `epoch_ra_dr2`, …, the epochs
+the paper propagates both catalogues to before differencing), not the DR2
+and DR3 reference epochs J2015.5 and J2016.0. Pass them as `epochs_ra` and
+`epochs_dec`, ordered like `epochs`; the HG and DR3−DR2 entries of those are
+not used by the model (their divisors come from the end-point epochs).
 
 Crucially, DR2 and DR3 share transit data — their PMs are correlated
 (estimated `ρ_{DR2,DR3}` from the ratio of matched transits). The
@@ -1064,6 +1151,10 @@ to match the full Thompson+ 2026 likelihood):
 - `plx::Float64` — parallax (mas)
 - `plx_err::Float64` — 1σ on parallax (mas)
 - `hip_id::Int` — Hipparcos catalog ID
+- `epochs_ra::NTuple{5, Float64}` — central epochs of RA, ordered like
+  `epochs` (MJD): the catalogue's `epoch_ra_hip`, `epoch_ra_hg`,
+  `epoch_ra_dr2`, `epoch_ra_dr32`, `epoch_ra_dr3`
+- `epochs_dec::NTuple{5, Float64}` — the same for Dec
 
 # Invariants
 - `cov` is 10×10, symmetric, positive-definite.
@@ -1077,15 +1168,29 @@ struct G23HData
     plx::Float64
     plx_err::Float64
     hip_id::Int
+    epochs_ra::NTuple{5, Float64}
+    epochs_dec::NTuple{5, Float64}
 end
 
+# The pre-per-coordinate positional form: both coordinates at `epochs`.
+G23HData(epochs, pmra, pmdec, cov, plx, plx_err, hip_id) =
+    G23HData(epochs, pmra, pmdec, cov, plx, plx_err, hip_id,
+             NTuple{5, Float64}(Float64.(epochs)), NTuple{5, Float64}(Float64.(epochs)))
+
 """
-    G23HData(; epochs, pmra, pmdec, cov, plx, plx_err, hip_id)
+    G23HData(; epochs, pmra, pmdec, cov, plx, plx_err, hip_id,
+               epochs_ra = epochs, epochs_dec = epochs)
 
 Keyword constructor. The caller passes a 10×10 covariance matrix
 already populated with within-epoch 2×2 blocks AND the DR2↔DR3 4×4
 cross-block (off-diagonal index pairs `(5:6, 9:10)` and `(9:10, 5:6)`
 under the `[pmra_1, pmdec_1, ..., pmra_5, pmdec_5]` ordering).
+
+`epochs_ra` / `epochs_dec` are the catalogue's per-coordinate central epochs
+(MJD; the catalogue tabulates Julian years, so `mjd_epochs` them). They set the
+reference epochs of the Hipparcos, DR2 and DR3 fits and the divisors of the
+two positional differences, so pass them whenever you have the catalogue row;
+both default to `epochs`.
 """
 function G23HData(;
     epochs::NTuple{5, <:Real},
@@ -1095,6 +1200,8 @@ function G23HData(;
     plx::Real,
     plx_err::Real,
     hip_id::Integer,
+    epochs_ra::Union{Nothing, NTuple{5, <:Real}} = nothing,
+    epochs_dec::Union{Nothing, NTuple{5, <:Real}} = nothing,
 )
     plx > 0     || throw(ArgumentError("plx must be > 0"))
     plx_err > 0 || throw(ArgumentError("plx_err must be > 0"))
@@ -1103,14 +1210,20 @@ function G23HData(;
     cov_sym = Symmetric(Matrix{Float64}(cov))
     isposdef(cov_sym) ||
         throw(ArgumentError("cov must be symmetric positive-definite"))
+    ep  = NTuple{5, Float64}(Float64.(epochs))
+    era = epochs_ra  === nothing ? ep : NTuple{5, Float64}(Float64.(epochs_ra))
+    ede = epochs_dec === nothing ? ep : NTuple{5, Float64}(Float64.(epochs_dec))
+    _check_catalogue_epochs(era, ede, 1, 5, "G23HData")   # Hip → DR3
+    _check_catalogue_epochs(era, ede, 3, 5, "G23HData")   # DR2 → DR3
     return G23HData(
-        NTuple{5, Float64}(Float64.(epochs)),
+        ep,
         NTuple{5, Float64}(Float64.(pmra)),
         NTuple{5, Float64}(Float64.(pmdec)),
         Matrix{Float64}(cov_sym),
         Float64(plx),
         Float64(plx_err),
         Int(hip_id),
+        era, ede,
     )
 end
 

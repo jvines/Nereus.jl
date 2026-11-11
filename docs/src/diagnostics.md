@@ -124,12 +124,12 @@ scalars — useful for a quick number without a chain:
 | `planet_mass(M_s, K, P, e, inc_deg)` | companion mass |
 | `planet_radius`, `planet_radius_earth`, `radius_from_depth` | radius from the radius ratio or transit depth |
 | `planet_density`, `planet_density_earth` | bulk density |
-| `semimajor_axis_au(P, M_s)`, `semimajor_axis_from_rho` | orbital separation |
+| `semimajor_axis_au(P, M_s, M_p)`, `semimajor_axis_from_rho` | orbital separation (Kepler III with `M_s + M_p`) |
 | `equilibrium_temperature(T_eff, a_Rs; Ab)` | T_eq |
 | `incident_flux`, `incident_flux_earth` | insolation |
 | `esm` | emission spectroscopy metric — JWST target ranking |
 | `chen_kipping_mass` | mass from radius via the Chen & Kipping relation |
-| `mass_function`, `msec_from_K` | the RV mass function and its inversion |
+| `mass_function`, `msec_from_K`, `mass_ratio_from_F` | the RV mass function and its exact (Cardano) inversion |
 | `stellar_mass_from_density` | host mass from `rho_s` |
 | `inclination_deg`, `sky_separation`, `a_from_P` | geometry conversions |
 | `kepler_solve`, `tp_to_tc`, `ew_to_sesinw`, `kipping_q_to_u` | element and parametrisation conversions |

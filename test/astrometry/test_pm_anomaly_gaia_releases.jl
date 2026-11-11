@@ -53,8 +53,12 @@ const _Mk = Nereus.CairoMakie.Makie
     end
     _, orbs, Ms = Nereus._iad_active_orbits(θ, astrom_M_pri(θ), astrom_plx(θ),
                                             target.data.t_ref)
-    want(gw) = Nereus._dr_reflex_pm(orbs, Ms, gw)
-    dr2, dr3, full = want(w2), want(w3), want(gost)
+    # The figure's projection is the likelihood's own fit through the window
+    # (`_dr_reflex_pm` → `_catalogue_epoch`); `nothing` fits every transit.
+    want(win, ep) = Nereus._dr_reflex_pm(orbs, Ms, gost, win, jyear_to_mjd(ep))
+    dr2  = want(Nereus.GAIA_DR2_WINDOW, 2015.5)
+    dr3  = want(Nereus.GAIA_DR3_WINDOW, 2016.0)
+    full = want(nothing, 2016.0)
     # the fixture can tell the windows apart
     @test abs(dr3[1] - full[1]) + abs(dr3[2] - full[2]) > 0.1
 

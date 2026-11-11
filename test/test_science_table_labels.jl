@@ -110,7 +110,7 @@ end
     @test rho["value"] ≈ 0.532 rtol = 1e-3
     der = sci["derived"]["parameters"]["rho_star_transit_k1"]
     @test der["unit"] == "g/cm3"
-    @test der["value"] ≈ 0.532 * 1.411 rtol = 1e-3        # 0.750 g/cm³
+    @test der["value"] ≈ 0.532 * Nereus.RHO_SUN_CGS rtol = 1e-3        # 0.750 g/cm³
     # ... and so in every table written
     dat = read(joinpath(out, "tables", "fitted.dat"), String)
     @test occursin(r"rho_s\s.*rho_sun", dat)

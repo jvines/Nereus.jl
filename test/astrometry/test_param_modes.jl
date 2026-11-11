@@ -141,6 +141,25 @@ end
 # Sampled slots are (P, K, e1, e2, t, b, r, Omega) — 8 per planet.
 # Compared to the pre-fix code (P, K, e1, e2, t, b, r, inc, Omega) =
 # 9, this is exactly one fewer.
+# RE-PINNED (exact mass in Kepler III): the transit's a/R* carries the planet,
+# a/R* = [G (M_s + M_p) P^2 / 4 pi^2]^(1/3) / R_s, and M_p comes from the exact
+# mass function at the sin i that b implies at that a/R*. The reference solves
+# that by a plain fixed point on the planet mass (msec_from_K, no coupled_geometry),
+# so the old pin (M_p = 0, a/R* from M_s alone) moves by q/3 in a/R* -- 6e-8
+# rad in i for the K = 1 m/s, P = 10 d planet used here.
+function _expected_cos_i(; P, K, e, ω, b, M_s = 1.0, R_s = 1.0)
+    GM = 1.3271244e26
+    M_p = 0.0
+    cos_i = 0.0
+    for _ in 1:60
+        a_cm = cbrt(GM * (M_s + M_p) * (P * 86400.0)^2 / (4 * π^2))
+        a_Rs = a_cm / 6.9570e10 / R_s
+        cos_i = b * (1 + e * sin(ω)) / (a_Rs * (1 - e^2))
+        M_p = Nereus.msec_from_K(K, P, e, sqrt(1 - cos_i^2), M_s)
+    end
+    return cos_i
+end
+
 @testset "RVPMASBlock: inclination derived from b" begin
 
     function _make_rvpmas_setup(; use_rho_s::Bool=false, M_s::Float64=1.0,
@@ -227,12 +246,8 @@ end
         set_param!(theta, "q1_Y", 0.5)
         set_param!(theta, "q2_Y", 0.5)
 
-        # Compute expected a/R* from M_s=1, R_s=1, P=10 d.
-        P_s = 10.0 * 86400.0
-        GM = 1.3271244e26
-        a_cm = cbrt(GM * P_s^2 / (4 * π^2))
-        a_Rs = a_cm / 6.9570e10
-        expected_i = acos(0.5 / a_Rs)
+        # Expected cos i for M_s=1, R_s=1, P=10 d, K=1 m/s (exact masses).
+        expected_i = acos(_expected_cos_i(P = 10.0, K = 1.0, e = 0.0, ω = 0.0, b = 0.5))
 
         @test planet_inc(theta, 1) ≈ expected_i rtol=1e-10
     end
@@ -264,12 +279,8 @@ end
         set_param!(theta, "q1_Y", 0.5)
         set_param!(theta, "q2_Y", 0.5)
 
-        P_s = 10.0 * 86400.0
-        GM = 1.3271244e26
-        a_cm = cbrt(GM * P_s^2 / (4 * π^2))
-        a_Rs = a_cm / 6.9570e10
-        expected_cos_i = b * (1 + e * sin(ω)) / (a_Rs * (1 - e^2))
-        expected_i = acos(expected_cos_i)
+        # sesinw/secosw give e and ω back as e and atan(sin, cos) = ω
+        expected_i = acos(_expected_cos_i(P = 10.0, K = 1.0, e = e, ω = ω, b = b))
 
         @test planet_inc(theta, 1) ≈ expected_i rtol=1e-10
     end

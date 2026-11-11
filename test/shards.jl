@@ -51,6 +51,8 @@ const TEST_UNITS = [
     (name = "astrometry/test_iad_gost.jl", seconds = 8, files = ["astrometry/test_iad_gost.jl"]),
     (name = "astrometry/test_iad_multi_instrument.jl", seconds = 10, files = ["astrometry/test_iad_multi_instrument.jl"]),
     (name = "astrometry/test_gost_dr_windows.jl", seconds = 8, files = ["astrometry/test_gost_dr_windows.jl"]),
+    # measured standalone (16.8 s, 2026-11-10, arm64), not in a five-shard CI run
+    (name = "astrometry/test_hip_epoch_models.jl", seconds = 17, files = ["astrometry/test_hip_epoch_models.jl"]),
     (name = "astrometry/test_iad_marginalised_residuals.jl", seconds = 1, files = ["astrometry/test_iad_marginalised_residuals.jl"]),
     (name = "astrometry/test_iad_jitter.jl", seconds = 25, files = ["astrometry/test_iad_jitter.jl"]),
     (name = "epoch astrometry orbit + trans-dim plot draws (shares a fixture)", seconds = 157, files = ["astrometry/test_epoch_astrometry_orbit.jl", "test_transdim_plot_draws.jl"]),
@@ -154,6 +156,7 @@ const TEST_UNITS = [
     (name = "test_transdim_caches.jl", seconds = 1, files = ["test_transdim_caches.jl"]),
     (name = "test_birth_death_reversibility.jl", seconds = 1, files = ["test_birth_death_reversibility.jl"]),
     (name = "test_derived_angular.jl", seconds = 25, files = ["test_derived_angular.jl"]),
+    (name = "test_exact_mass.jl", seconds = 30, files = ["test_exact_mass.jl"]),
     (name = "test_informed_birth_a_driven.jl", seconds = 2, files = ["test_informed_birth_a_driven.jl"]),
     (name = "test_alias_jump.jl", seconds = 1, files = ["test_alias_jump.jl"]),
     (name = "test_transdim_death_counters.jl", seconds = 7, files = ["test_transdim_death_counters.jl"]),
