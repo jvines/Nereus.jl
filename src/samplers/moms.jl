@@ -493,7 +493,15 @@ function _sample_moms_one(
                     accepted && (n_accepts_planet[k_touched] += 1)
                 end
             elseif td.noise && !isempty(td.toggleable)
-                _noise_move!(theta, data, td, rng, log_pi, log_L;
+                # The moves shared with rjmcmc judge `log_prior` of their
+                # proposals against the current value they are handed, so
+                # they get `log_prior(theta)`, not the spike-and-slab `log_pi`
+                # (which adds log p_inc per active planet and log(1 - p_inc)
+                # per inactive one). Handed `log_pi`, every noise toggle and swap
+                # was judged against a shifted density, as were the first
+                # slice level and the RWM steps up to the first acceptance of
+                # every within-model sweep.
+                _noise_move!(theta, data, td, rng, log_prior(theta), log_L;
                               ctr=ctr) do new_lpi, new_lL
                     log_pi = new_lpi
                     log_L  = new_lL
@@ -525,7 +533,7 @@ function _sample_moms_one(
                 # slice stepping out. Adapt σ during warmup only.
                 adapt = iter <= n_warmup
                 _within_model_move_rwm!(theta, data, rng, rwm_ws,
-                                          log_pi, log_L;
+                                          log_prior(theta), log_L;
                                           adapt = adapt,
                                           ctr = ctr) do new_lpi, new_lL
                     log_pi = new_lpi
@@ -533,7 +541,8 @@ function _sample_moms_one(
                 end
             else  # :slice — ws path so the Fix B phot cache applies
                 _within_model_move!(theta, data, rng, 1.0, widths,
-                                     log_pi, log_L, rwm_ws; ctr=ctr) do new_lpi, new_lL
+                                     log_prior(theta), log_L, rwm_ws;
+                                     ctr=ctr) do new_lpi, new_lL
                     log_pi = new_lpi
                     log_L  = new_lL
                 end
