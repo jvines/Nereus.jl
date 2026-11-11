@@ -23,5 +23,7 @@ Changed here since the commit above, so carry them over on an update:
   walk step starts where the previous one ended. The commit above starts every
   step from the copied live point, so the new point is one step from it
   whatever `slices`/`walks` say.
+- `RWalk` and `RStagger` count a step out of the unit cube as a rejected step
+  instead of drawing again until one lands inside.
 
 License: MIT (see LICENSE) — original authors retained.

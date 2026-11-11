@@ -119,27 +119,23 @@ function (prop::RWalk)(
     cur = point
 
     while nc < prop.walks || iszero(accept)
+        # check scale factor to avoid over-shrinking
+        prop.scale < 1e-15 * scale_init && error("Random walk sampling appears to be stuck.")
         # get proposed point
-        while true
-            # check scale factor to avoid over-shrinking
-            prop.scale < 1e-15 * scale_init && error("Random walk sampling appears to be stuck.")
-            # transform to proposal distribution
-            du = randoffset(rng, bounds)
-            u_prop = @. cur + prop.scale * du
-            # inside unit-cube
-            unitcheck(u_prop) && break
-            
-            fail += 1
+        du = randoffset(rng, bounds)
+        u_prop = @. cur + prop.scale * du
+        # A step out of the unit cube is a rejected step, as one out of the
+        # constraint is. Drawing again until a step lands inside made the
+        # proposal depend on how much of it the cube holds, which favours the
+        # cube's middle: a posterior against a prior edge came out short of it.
+        logl_prop = if unitcheck(u_prop)
+            ncall += 1
+            v_prop, l = prior_transform_and_loglikelihood(model, u_prop)
+            l
+        else
             nfail += 1
-            # check if stuck generating bad numbers
-            if fail > 100 * prop.walks
-                @warn "Random number generation appears extremely inefficient. Adjusting the scale-factor accordingly"
-                fail = 0
-                prop.scale *= exp(-1/n)
-            end
+            -Inf
         end
-        # check proposed point
-        v_prop, logl_prop = prior_transform_and_loglikelihood(model, u_prop)
         if logl_prop ≥ logl_star
             u = cur = u_prop
             v = v_prop
@@ -149,7 +145,6 @@ function (prop::RWalk)(
             reject += 1
         end
         nc += 1
-        ncall += 1
         
         # check if stuck generating bad points
         if nc > 50 * prop.walks
@@ -216,27 +211,20 @@ function (prop::RStagger)(
     cur = point   # the walk's current position (see RWalk)
     
     while nc < prop.walks || iszero(accept)
+        # check scale factor to avoid over-shrinking
+        prop.scale < 1e-15 * scale_init && error("Random walk sampling appears to be stuck.")
         # get proposed point
-        while true
-            # check scale factor to avoid over-shrinking
-            prop.scale < 1e-15 * scale_init && error("Random walk sampling appears to be stuck.")
-            # transform to proposal distribution
-            du = randoffset(rng, bounds)
-            u_prop = @. cur + prop.scale * stagger * du
-            # inside unit-cube
-            unitcheck(u_prop) && break
-            
-            fail += 1
+        du = randoffset(rng, bounds)
+        u_prop = @. cur + prop.scale * stagger * du
+        # out of the unit cube is a rejected step (see RWalk)
+        logl_prop = if unitcheck(u_prop)
+            ncall += 1
+            v_prop, l = prior_transform_and_loglikelihood(model, u_prop)
+            l
+        else
             nfail += 1
-            # check if stuck generating bad numbers
-            if fail > 100 * prop.walks
-                @warn "Random number generation appears extremely inefficient. Adjusting the scale-factor accordingly"
-                fail = 0
-                prop.scale *= exp(-1/n)
-            end
-        end 
-        # check proposed point
-        v_prop, logl_prop = prior_transform_and_loglikelihood(model, u_prop)
+            -Inf
+        end
         if logl_prop ≥ logl_star
             u = cur = u_prop
             v = v_prop
@@ -246,7 +234,6 @@ function (prop::RStagger)(
             reject += 1
         end
         nc += 1
-        ncall += 1
         
         # adjust _stagger_ to target an acceptance ratio of `prop.ratio`
         ratio = accept / (accept + reject)
