@@ -1995,6 +1995,7 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
     _RELEASE_SCENES[] = true
     _PLOT_KW_SEEN[] = Set{Symbol}()       # filled by `_kw_for`
     seen_kw = Set{Symbol}()
+    release = _large_chain(chains)
     try
     for (i, plot_name) in enumerate(expanded)
         update!(pb; n_done = i - 1, fields = (:now => String(plot_name),))
@@ -2018,6 +2019,12 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
         catch err
             @warn "Plot `$plot_name` failed" exception = (err, catch_backtrace())
         end
+        # A figure's garbage (its scene, its draws, its band matrix) is dead once
+        # the file is written, but the collector runs on its own schedule, and
+        # across the set the heap grew by gigabytes of it before a collection.
+        # For a large chain, collect between figures (see `_large_chain`), so
+        # the stage peaks at its largest figure instead of at their sum.
+        release && _release_memory()
     end
     finally
         _RELEASE_SCENES[] = _prev_release
