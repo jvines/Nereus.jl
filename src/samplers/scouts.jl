@@ -31,6 +31,11 @@
 # above, 5 of 16 scouts settled on the plateau (log L ≈ -23,000), the cut came
 # out at log L ≈ 148 and the other 11 sat at 192-195.
 #
+# The ensemble (src/samplers/ensemble.jl) takes the survivors as up to half
+# its walkers: its burn-in pruning moves stranded walkers onto those that
+# found the mode, and had nothing to move them to when none had. One chain of
+# four at i = 5° sat at i = 161°, 1,500 nats below the mode, for the whole run.
+#
 # A chain is never started from a point the bound did not clear, but nothing
 # guarantees that some scout found the mode; with p the chance that one prior
 # draw does not, all of them miss with probability p^n_scouts (p ≈ 0.4 above,
