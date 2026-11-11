@@ -1185,7 +1185,7 @@ const PHYSICAL_BOUNDS = Dict{String, Tuple{Float64, Float64}}(
     "r2"      => (0.0, 1.0),       # Espinoza 2018 r2
     "a"       => (0.0, Inf),       # Semi-major axis (a/Rs or AU)
     "rho_s"   => (0.0, Inf),       # Stellar density [ρ☉] (multi-seg base)
-    "inc"     => (0.0, 180.0),     # Inclination [deg]
+    "inc"     => (0.0, Float64(π)), # Inclination [rad]
     "q1"      => (0.0, 1.0),       # Kipping LD
     "q2"      => (0.0, 1.0),       # Kipping LD
     # --- RV instrumental ---
