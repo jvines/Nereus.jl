@@ -56,7 +56,7 @@ Every parallel-tempering sampler feeds the same
 | `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:1157`) |
 | `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:2168`) |
 | `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_whitening.jl:731`) |
-| `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | TI+ (`pt_hmc.jl:447`) |
+| `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | bridge if usable, else SS+ if quotable, else `NaN` (`_pt_hmc_evidence`) |
 
 Notes for a production reader:
 
@@ -66,11 +66,20 @@ Notes for a production reader:
   as `.evidence_report` (typed `Any`, `transdim_pt_emcee.jl:45`). The
   tuple-returning samplers (`sample_pt`, `sample_pt_hmc`) put the
   scalar `log_evidence` in the tuple; `sample_pt_hmc` additionally
-  returns the full `EvidenceReport` as a third element.
+  returns the full `EvidenceReport` as a third element, and as a fourth
+  the bridge and mode-Laplace values, whether SS+ is quotable and why not,
+  which one it reported, the ladder and the swap acceptance per rung pair.
 - **Headline estimator differs.** The in-house ensemble samplers
   (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`) pick **H+** as the
   headline `log_evidence` (falling back TI+ → TI when H+ is non-finite).
-  `sample_pt` and `sample_pt_hmc` report **TI+** as the headline.
+  `sample_pt` reports **TI+** as the headline. `sample_pt_hmc` reports
+  bridge sampling on its cold chain when the reference has the effective
+  samples it needs, else SS+ when its ladder starts at β = 0 and every
+  adjacent pair of rungs swaps at least `swap_min` (5%) of the time, else
+  `NaN` with a warning saying why. Its ladder is β = 0 and a geometric run
+  from `beta_min`: from β = 0 the integrand climbs through four decades in
+  the first segment, which TI+ does not resolve (1 to 4 nats low at 8 to 12
+  rungs) and SS+ does (within 0.3 of an exact log Z).
   Whichever you trust, all four numbers are always in the report — read
   the one that suits your posterior (see
   [Practical guidance](#practical-guidance)).
@@ -265,7 +274,7 @@ For the tuple-returning samplers:
 ```julia
 chains, log_z          = sample_pt(target)            # TI+ headline
 chains, log_z, n_evals = sample_pt(target; td = td)   # trans-dim 3-tuple
-chains, log_z, report  = sample_pt_hmc(target)        # report is EvidenceReport
+chains, log_z, report, ev = sample_pt_hmc(target)    # report is EvidenceReport
 ```
 
 ### Through `run_job`
@@ -628,8 +637,8 @@ until it is resolved.
 ## Practical guidance
 
 - **Fixed-dim PT on a single posterior**: take H+ (the ensemble samplers'
-  default headline) — or TI+ from `sample_pt`/`sample_pt_hmc` — as the
-  reported value.
+  default headline) — or TI+ from `sample_pt`, SS+ from `sample_pt_hmc` — as
+  the reported value.
 
   ⚠ **But mutual agreement between TI/TI+/SS+/H+ is NOT evidence that they are
   right.** All four read the same shared `mean_logL[k]` array, so a bias in

@@ -21,7 +21,7 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 | `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (TI⁺/SS⁺/H⁺) |
 | `transdim_pt_emcee` | `sample_transdim_pt_emcee` | trans | **required** | occupancy |
 | `pt`               | `sample_pt`               | both  | optional (`td`) | yes (TI⁺) |
-| `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (TI⁺) |
+| `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (bridge / SS⁺) |
 | `pt_whitening`     | `sample_pt_whitening`     | fixed | — | yes |
 | `rjmcmc`           | `sample_rjmcmc`           | trans | **required** | — (NaN) |
 | `moms`             | `sample_moms`             | trans | **required** | — (NaN) |
