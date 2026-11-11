@@ -21,7 +21,7 @@ using AdvancedHMC
 using ForwardDiff
 using MCMCChains
 using Random
-using Statistics: mean, var
+using Statistics: mean
 
 # One NUTS chain pinned to a temperature. `Minv` (diagonal inverse mass matrix)
 # and `ε` (step size) are what its frozen kernel is built from, kept so that a
@@ -63,8 +63,14 @@ function _temper_closures(parts, β::Float64)
 end
 
 # Warm-up one temperature (Stan windowed adaptor → step size + diagonal mass
-# matrix), then FREEZE a kernel whose metric is the post-warm-up sample variance
-# and whose step size is re-found — avoids reaching into adaptor internals.
+# matrix), run on for another `n_warmup` iterations with what it adapted, then
+# FREEZE that kernel: the adapted diagonal metric and the dual-averaged step
+# size. The frozen kernel used to take the variance of those last iterations
+# as its metric and a step size re-found at their last point by
+# `find_good_stepsize`, a one-point heuristic that only seeds the dual
+# averaging. On an RV fit it gave the β = 1 rung 0.8 or 1.6, where the adapted
+# 0.2 accepts 0.9: every trajectory diverged and the cold chain kept one point
+# for all 800 sweeps.
 #
 # The loop is `AdvancedHMC.sample(rng, h0, κ0, θ0, 2n_warmup, adaptor, n_warmup;
 # drop_warmup = true)` written out, step for step, so that the seams can be
@@ -89,14 +95,12 @@ function _warmup_temp(rng, ℓ_fn, ∂ℓ_fn, θ0::Vector{Float64}, n_warmup::In
     cs = recut === nothing ? nothing : _HMCRecutChain(recut, adaptor, n_warmup; vote)
     hw, t = AdvancedHMC.sample_init(rng, h0, θ0)
     z, κw = t.z, κ0
-    samples = Vector{Vector{Float64}}()
     for i in 1:(2 * n_warmup)
         t = AdvancedHMC.transition(rng, hw, κw, z)
         tstat = AdvancedHMC.stat(t)
         hw, κw, _ = AdvancedHMC.Adaptation.adapt!(hw, κw, adaptor, i, n_warmup, t.z.θ,
                                                   tstat.acceptance_rate)
         z = t.z
-        i > n_warmup && push!(samples, z.θ)
         if cs !== nothing && i <= cs.last_mark
             _hmc_trace!(cs, z.θ)
             if i in cs.marks
@@ -106,17 +110,9 @@ function _warmup_temp(rng, ℓ_fn, ∂ℓ_fn, θ0::Vector{Float64}, n_warmup::In
             end
         end
     end
-    θ_final = isempty(samples) ? θ0 : copy(samples[end])
-    M⁻¹ = ones(Float64, dim)
-    if length(samples) > 4
-        Y = reduce(hcat, samples)
-        @inbounds for d in 1:dim
-            v = var(@view Y[d, :]); M⁻¹[d] = (isfinite(v) && v > 0) ? v : 1.0
-        end
-    end
-    metric = AdvancedHMC.DiagEuclideanMetric(M⁻¹)
-    h = AdvancedHMC.Hamiltonian(metric, AdvancedHMC.GaussianKinetic(), ℓ_fn, ∂ℓ_fn)
-    ε = Float64(AdvancedHMC.find_good_stepsize(rng, h, θ_final))
+    θ_final = copy(z.θ)
+    M⁻¹ = copy(hw.metric.M⁻¹)
+    ε = Float64(AdvancedHMC.nom_step_size(κw.τ.integrator))
     h, κ = _frozen_nuts(ℓ_fn, ∂ℓ_fn, M⁻¹, ε)
     return h, κ, θ_final, M⁻¹, ε
 end
