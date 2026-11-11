@@ -1,6 +1,6 @@
 # Plotting utilities: phase folding, CI computation, binning, model evaluation.
 
-using Statistics: mean, median, std, quantile
+using Statistics: mean, median, median!, std, quantile, quantile!
 
 """
     _save_plot(filename, fig; save_pdf=false, save_kwargs...)
@@ -893,13 +893,25 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
     n_flat = _n_flat_draws(chains)
     allnames = String.(names(chains, :parameters))
     Psym = Symbol("P_k$(planet)")
-    Pv = Psym in Symbol.(allnames) ? _draws(chains, Psym) : nothing
+    Pv = Psym in Symbol.(allnames) ? _draws_view(chains, Psym) : nothing
     timekind = params.config.parametrization.time
     anchor = timekind in (:Mo, :phic, :Tp) ? String(timekind) : ""  # wrapping anchors
 
-    _zsq(c) = begin
-        m = median(c); s = 1.4826 * median(abs.(c .- m))
-        s > 0 ? ((c .- m) ./ s) .^ 2 : nothing
+    # Two chain-length scratch vectors, reused for every parameter: the medians
+    # need a copy to partially sort, and the anchor's cos/sin a place to live.
+    # Each step used to allocate its own (the column, |c - m|, the z², cos, sin,
+    # the copy `quantile` sorts): about seven 46 MB vectors per parameter on a
+    # 5.8M-draw chain, the same values in the same order.
+    scratch = Vector{Float64}(undef, n_flat)
+    trig    = Vector{Float64}(undef, n_flat)
+    # dist2 += ((c - median) / (1.4826 MAD))², unless c does not vary.
+    function _add_zsq!(dist2, c)
+        m = median!(copyto!(scratch, c))
+        scratch .= abs.(c .- m)
+        s = 1.4826 * median!(scratch)
+        s > 0 || return false
+        @. dist2 += ((c - m) / s)^2
+        return true
     end
 
     dist2 = zeros(Float64, n_flat)
@@ -909,25 +921,35 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
         mch === nothing && continue
         parse(Int, mch.captures[2]) == planet || continue
         base = mch.captures[1]
-        c = _draws(chains, Symbol(nm))
+        c = _draws_view(chains, Symbol(nm))
         length(c) == n_flat || continue
         if base == anchor                     # wrapping phase anchor → (cos, sin)
-            ang = base == "Tp" ? (Pv === nothing ? c : 2π .* (c ./ Pv)) : c  # Mo, phic: rad
-            for comp in (cos.(ang), sin.(ang))
-                z = _zsq(comp); z === nothing && continue
-                @. dist2 += z;
+            # Mo, phic: radians; Tp: a time, turned into a phase by its draw's P
+            for f in (cos, sin)
+                _phase_trig!(trig, f, c, base == "Tp" ? Pv : nothing)
+                _add_zsq!(dist2, trig)
             end
             used += 1
         else                                   # linear param
-            z = _zsq(c); z === nothing && continue
-            @. dist2 += z
+            _add_zsq!(dist2, c) || continue
             used += 1
         end
     end
     used == 0 && return collect(1:n_flat)
-    thr = quantile(dist2, clamp(Float64(credmass), 0.01, 1.0))
+    thr = quantile!(copyto!(scratch, dist2), clamp(Float64(credmass), 0.01, 1.0))
     pool = findall(<=(thr), dist2)
     return isempty(pool) ? collect(1:n_flat) : pool
+end
+
+# `f` of the phase anchor `c`, into `out`: `c` itself in radians (Mo, phic), or
+# 2π c / P for a time anchor (Tp, `P` given).
+function _phase_trig!(out, f, c, P)
+    if P === nothing
+        @inbounds for i in eachindex(out); out[i] = f(c[i]); end
+    else
+        @inbounds for i in eachindex(out); out[i] = f(2π * (c[i] / P[i])); end
+    end
+    return out
 end
 
 """
