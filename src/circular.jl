@@ -1029,3 +1029,163 @@ function restricted_angles(params::Params)
     end
     return out
 end
+
+# ------------------------------------------------------------------
+# Several chains over one shared Params: where they all stand still.
+# ------------------------------------------------------------------
+#
+# A circular window lives in the layout, which every chain of a multi-chain
+# run shares. A chain cannot move it alone: the others would find their states
+# outside the new support mid-sweep. The re-cut is therefore taken at a
+# rendezvous: each chain arrives with its state at the same point of its own
+# warmup (the samplers' schedules depend only on the step count, which every
+# chain shares), the last to arrive runs the re-cut over the pooled states of
+# all of them while the rest wait, and every chain then carries on with the
+# result. No chain evaluates the target while the windows move.
+
+"""
+    _Rendezvous(n)
+
+A meeting point for `n` chains. See [`_rendezvous!`](@ref) and
+[`_rendezvous_leave!`](@ref).
+"""
+mutable struct _Rendezvous
+    cond::Threads.Condition
+    n::Int                    # chains still taking part
+    payloads::Vector{Any}     # this round's arrivals
+    gen::Int                  # rounds completed
+    f::Any                    # this round's leader function
+    result::Any
+    err::Any
+end
+_Rendezvous(n::Integer) = _Rendezvous(Threads.Condition(), Int(n), Any[], 0,
+                                      nothing, nothing, nothing)
+
+# Run the round: the leader function over every arrival's payload, its result
+# (or error) left for all of them. Called with the lock held.
+function _rendezvous_run!(rv::_Rendezvous)
+    rv.result, rv.err = nothing, nothing
+    try
+        rv.result = rv.f(rv.payloads)
+    catch e
+        rv.err = e
+    end
+    rv.payloads = Any[]
+    rv.gen += 1
+    notify(rv.cond)
+    return nothing
+end
+
+"""
+    _rendezvous!(f, rv, payload) -> result
+
+Arrive at the rendezvous with `payload`. The last chain to arrive calls
+`f(payloads)` (one payload per arrival, in arrival order) while the others
+wait; every chain then returns `f`'s result, or rethrows its error. `f` may
+touch only the payloads and what the chains share, never the caller's locals:
+whichever chain arrives last runs it.
+"""
+function _rendezvous!(f, rv::_Rendezvous, payload)
+    lock(rv.cond)
+    try
+        push!(rv.payloads, payload)
+        rv.f = f
+        g = rv.gen
+        if length(rv.payloads) >= rv.n
+            _rendezvous_run!(rv)
+        else
+            while rv.gen == g
+                wait(rv.cond)
+            end
+        end
+        rv.err === nothing || throw(rv.err)
+        return rv.result
+    finally
+        unlock(rv.cond)
+    end
+end
+
+"""
+    _rendezvous_leave!(rv)
+
+A chain stops taking part (it finished, or threw): the round in progress, if
+every remaining chain has arrived, runs now rather than waiting for it.
+"""
+function _rendezvous_leave!(rv::_Rendezvous)
+    lock(rv.cond)
+    try
+        rv.n -= 1
+        !isempty(rv.payloads) && length(rv.payloads) >= rv.n && _rendezvous_run!(rv)
+    finally
+        unlock(rv.cond)
+    end
+    return nothing
+end
+
+"""
+    _restore_shared_windows!(params, windows, transforms) -> Bool
+
+Put the layout's circular windows back as a checkpoint saved them (`windows`, a
+`circular_windows` Dict), before the chains of a resumed multi-chain run start.
+Returns whether any moved.
+"""
+function _restore_shared_windows!(params::Params, windows, transforms)
+    L = params.layout
+    moved = false
+    for (nm, (lo, _)) in windows
+        i = findfirst(==(nm), L.unfrozen_names)
+        i === nothing && continue
+        L.unfrozen_priors[i].lo == lo && continue
+        set_circular_window!(params, i, lo; transforms)
+        moved = true
+    end
+    return moved
+end
+
+"""
+    _relabel_into_windows!(values, params, saved_windows) -> Vector{(pos, shift)}
+
+A resumed chain's slot-vector `values`, saved while the layout's windows were
+`saved_windows`, relabelled by whole periods into the windows the layout holds
+now. Returns each moved window's unfrozen position and `shift = lo_now -
+lo_saved` (for MoMS off-values). The log-density is unchanged: a circular
+angle's prior and likelihood are periodic.
+"""
+function _relabel_into_windows!(values::AbstractVector, params::Params, saved_windows)
+    L = params.layout
+    shifts = Tuple{Int,Float64}[]
+    for (nm, (lo_s, _)) in saved_windows
+        d = findfirst(==(nm), L.unfrozen_names)
+        d === nothing && continue
+        lo, hi = bounds(L.unfrozen_priors[d])
+        lo == lo_s && continue
+        s = L.unfrozen_idx[d]
+        values[s] = circular_relabel(values[s], lo, hi)
+        push!(shifts, (d, lo - lo_s))
+    end
+    return shifts
+end
+
+"""
+    _fold_polar_slots!(values, params) -> Bool
+
+Fold every polar angle (cyclic inclination) of a slot-vector `values` -- a
+`Theta`'s, inactive planet slots included -- to `[0, π]`, its representative.
+The half-period chart `[-π/2, 3π/2]` has its seam on the far image of the
+equator, so a local sampler parked in the far copy of a mode at i = 90° sees
+only one side of it; folded, the mode sits in the interior of the near copy.
+Exact for the log-density (see [`fold_cyclic_inclinations!`](@ref)). Returns
+whether any value changed.
+"""
+function _fold_polar_slots!(values::AbstractVector, params::Params)
+    L = params.layout
+    changed = false
+    for d in cyclic_inclination_indices(params)
+        s = L.unfrozen_idx[d]
+        v = fold_inclination(values[s])
+        v == values[s] && continue
+        values[s] = v
+        changed = true
+    end
+    return changed
+end
