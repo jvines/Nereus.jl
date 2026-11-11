@@ -544,6 +544,19 @@ function spin_flip(params::Params)
     return SpinFlip(di, lams)
 end
 
+"""
+    SPIN_SENSE_NOTE
+
+The note a report carries when the data measure the stellar spin axis but not
+its sense ([`spin_flip`](@ref): gravity darkening without an RM anomaly or
+Doppler tomography, under priors that do not pick one). The representatives
+fit alike, so ψ is reported as the angle between the spin axis and the orbit
+normal, folded to [0°, 90°] (`compute_derived`); i★ and λ stay in the
+representative the sampler kept.
+"""
+const SPIN_SENSE_NOTE = "rotation sense not constrained by the data: " *
+    "(i★, λ) ≡ (180°−i★, λ+180°), ψ ≡ 180°−ψ"
+
 # The spin vector of (i★, λ), λ measured as in src/gravity_darkening.jl.
 @inline _spin_vec(i::Real, λ::Real) =
     (sin(i) * sin(λ), sin(i) * cos(λ), cos(i))

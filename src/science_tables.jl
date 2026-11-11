@@ -263,7 +263,23 @@ function science_fitted(chains, params::Params)
         "note" => "stats conditioned on each component being active; " *
                   "occupancy field = P(component active | data)",
     )
+    _spin_sense_notes!(entries, conditioning, params,
+                       name -> name == "i_star" || startswith(name, "lambda_k"))
     return entries, conditioning
+end
+
+# The rotation-sense note (`SPIN_SENSE_NOTE`) on the rows it concerns and in
+# the table's conditioning, when the data leave the sense open (`spin_flip`).
+function _spin_sense_notes!(entries, conditioning, params::Params, concerns)
+    spin_flip(params) === nothing && return nothing
+    hit = false
+    for (k, d) in entries
+        concerns(k) || continue
+        d["spin_sense_note"] = SPIN_SENSE_NOTE
+        hit = true
+    end
+    hit && (conditioning["spin_sense"] = SPIN_SENSE_NOTE)
+    return nothing
 end
 
 # --- derived-parameter table (with stellar-uncertainty propagation) ----
@@ -378,6 +394,12 @@ function science_derived(chains, params::Params;
                                      "stellar" => stellar,
         "note" => "derived per-draw with stellar (M★/R★/T_eff) uncertainty " *
                   "propagated; conditioned on planet active")
+    # ψ is folded to the axis angle by compute_derived; i★ and λ (and |λ|,
+    # which the flip sends to 180° - |λ|) are the sampler's representative.
+    _spin_sense_notes!(entries, conditioning, params,
+                       k -> any(p -> startswith(k, p),
+                                ("psi_deg_k", "i_star_deg_k", "lambda_deg_k",
+                                 "lambda_abs_deg_k")))
     return entries, conditioning
 end
 
@@ -550,22 +572,31 @@ end
 _yamlval(v) = v isa AbstractString ? "\"$v\"" :
               v isa AbstractVector ? "[" * join(string.(v), ", ") * "]" : string(v)
 
-function _write_dat(path, entries, title)
+function _write_dat(path, entries, title; note = nothing)
     open(path, "w") do io
         println(io, "# ", title)
+        note === nothing || println(io, "# * ", note)
         @printf(io, "# %-22s %16s %14s %16s %-8s %8s\n",
                 "parameter", "value", "err_lo", "err_hi", "unit", "occ")
         for (k, v) in entries
             vs, lo, hi = _fmt3(v["value"], v["err_lo"], v["err_hi"])
-            rail = get(v, "railed", false) ? "  railed" : ""
+            rail = (get(v, "railed", false) ? "  railed" : "") *
+                   (haskey(v, "spin_sense_note") ? "  *" : "")
             @printf(io, "%-24s %16s %14s %16s %-8s %8.3f%s\n",
                     k, vs, "-"*lo, "+"*hi, v["unit"], v["occupancy"], rail)
         end
     end
 end
 
-function _write_tex(path, entries, caption)
+# `SPIN_SENSE_NOTE` in TeX; any other note as it is.
+_texnote(note) = note == SPIN_SENSE_NOTE ?
+    "rotation sense not constrained by the data: " *
+    "\$(i_\\star, \\lambda) \\equiv (180^\\circ - i_\\star, \\lambda + 180^\\circ)\$, " *
+    "\$\\psi \\equiv 180^\\circ - \\psi\$" : note
+
+function _write_tex(path, entries, caption; note = nothing)
     any_rail = any(get(v, "railed", false) for (_, v) in entries)
+    any_spin = note !== nothing && any(haskey(v, "spin_sense_note") for (_, v) in entries)
     open(path, "w") do io
         println(io, "\\begin{table}")
         println(io, "\\centering")
@@ -577,6 +608,8 @@ function _write_tex(path, entries, caption)
         for (k, v) in entries
             vs, lo, hi = _fmt3(v["value"], v["err_lo"], v["err_hi"])
             dag = get(v, "railed", false) ? "\\textsuperscript{\$\\dagger\$}" : ""
+            any_spin && haskey(v, "spin_sense_note") &&
+                (dag *= "\\textsuperscript{\$\\ddagger\$}")
             println(io, _texsym(k), " & ",
                     "\$$(vs)^{+$(hi)}_{-$(lo)}\$", dag, " & ", _texunit(v["unit"]), " \\\\")
         end
@@ -585,6 +618,8 @@ function _write_tex(path, entries, caption)
         any_rail && println(io, "{\\footnotesize \$^{\\dagger}\$ prior-dominated: " *
                                 "the 3\$\\sigma\$ CI rails against a prior bound; " *
                                 "treat as a limit, not a measurement.}")
+        any_spin && println(io, "{\\footnotesize \$^{\\ddagger}\$ ",
+                            _texnote(note), ".}")
         println(io, "\\end{table}")
     end
 end
@@ -609,8 +644,8 @@ function write_science_table(dir::AbstractString, name::AbstractString,
             open(p, "w") do io; JSON3.write(io, obj; allow_inf=true); end
         elseif fmt === :csv;  _write_csv(p, entries)
         elseif fmt === :ecsv; _write_ecsv(p, entries, meta)
-        elseif fmt === :dat;  _write_dat(p, entries, title)
-        elseif fmt === :tex;  _write_tex(p, entries, title)
+        elseif fmt === :dat;  _write_dat(p, entries, title; note = get(meta, "spin_sense", nothing))
+        elseif fmt === :tex;  _write_tex(p, entries, title; note = get(meta, "spin_sense", nothing))
         else; continue
         end
         paths[String(fmt)] = p

@@ -347,3 +347,52 @@ _anr_cdist(a, b) = abs(rem2pi(a - b, RoundNearest))
         @test _anr_cdist(median(v), 0.02) < 0.3
     end
 end
+
+@testset "GD alone: ψ is the axis angle, every report says why" begin
+    # A spin at ψ ≈ 122° in the representative the sampler kept (i★ ≈ λ ≈ 2.6).
+    # Gravity darkening alone cannot tell it from (π - i★, λ + π), at 58°: ψ
+    # is reported folded to [0°, 90°], i★ and λ as sampled, and the tables and
+    # their conditioning carry the note. A prior that picks the sense (a Normal
+    # on i★ off 90°) keeps ψ as it is, with no note.
+    rng = MersenneTwister(7)
+    n = 2000
+    draws = hcat(2.6 .+ 0.05 .* randn(rng, n), 2.6 .+ 0.05 .* randn(rng, n))
+    ch = MCMCChains.Chains(draws, [:i_star, :lambda_k1])
+    pg, _ = _anr_gd()
+    pn, _ = _anr_gd(; extra = Dict{String, Any}(
+        "i_star" => Dict("type" => "NormalPrior", "args" => [1.0, 0.3, 0.0, π])))
+    @test spin_flip(pg) !== nothing && spin_flip(pn) === nothing
+    for (p, open_sense) in ((pg, true), (pn, false))
+        v = only(Nereus.compute_derived(ch, p)).values
+        ip = deg2rad.(v["inc_deg"])
+        raw = rad2deg.(acos.(clamp.(cos.(draws[:, 1]) .* cos.(ip) .+
+                                    sin.(draws[:, 1]) .* sin.(ip) .* cos.(draws[:, 2]), -1, 1)))
+        @test median(raw) > 110
+        @test v["psi_deg"] ≈ (open_sense ? min.(raw, 180 .- raw) : raw)
+        @test (maximum(v["psi_deg"]) <= 90) == open_sense
+        # i★ and λ stay where the sampler kept them.
+        @test v["i_star_deg"] ≈ rad2deg.(draws[:, 1])
+        @test median(v["lambda_deg"]) ≈ rad2deg(2.6) atol = 1
+        fe, fc = Nereus.science_fitted(ch, p)
+        de, dc = Nereus.science_derived(ch, p)
+        note = Nereus.SPIN_SENSE_NOTE
+        @test haskey(fc, "spin_sense") == open_sense == haskey(dc, "spin_sense")
+        for (k, d) in fe
+            @test haskey(d, "spin_sense_note") == (open_sense && k in ("i_star", "lambda_k1"))
+        end
+        for (k, d) in de
+            concerned = any(q -> startswith(k, q), ("psi_deg", "i_star_deg", "lambda_deg",
+                                                     "lambda_abs_deg"))
+            @test haskey(d, "spin_sense_note") == (open_sense && concerned)
+        end
+        dir = mktempdir()
+        paths = Nereus.write_science_table(dir, "derived", de, dc;
+                                           formats = (:dat, :tex, :ecsv, :json))
+        dat, tex, ecsv = read(paths["dat"], String), read(paths["tex"], String),
+                         read(paths["ecsv"], String)
+        @test occursin(note, dat) == open_sense
+        @test occursin("rotation sense not constrained by the data", tex) == open_sense
+        @test occursin("\\ddagger", tex) == open_sense
+        @test occursin(note, ecsv) == open_sense
+    end
+end

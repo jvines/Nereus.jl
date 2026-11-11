@@ -652,6 +652,10 @@ function compute_derived(chains, params::Params;
         ld_u["u2_" * label] = last.(uu)
     end
 
+    # The data measure the stellar spin axis but not its sense (gravity
+    # darkening alone): ψ is folded to the axis angle below.
+    spin_axis_only = spin_flip(params) !== nothing
+
     # Where a derived angle's degrees window starts. One that IS a sampled
     # circular parameter takes the user's own window, like the fitted table:
     # U(0, 2π) reads ~350°, not ~-10°. An atan-derived ω (sesinw/secosw,
@@ -954,6 +958,14 @@ function compute_derived(chains, params::Params;
                             sin(ist[j]) * sin(ip_r) * cos(lam[j])
                         psi[j] = rad2deg(acos(clamp(c, -1.0, 1.0)))
                     end
+                    # Gravity darkening alone measures the spin AXIS, not
+                    # its sense: (i★, λ) and (π - i★, λ + π) fit the data
+                    # alike and send ψ to 180° - ψ (`spin_flip`). i★ and λ
+                    # stay in the representative the sampler kept; ψ is the
+                    # axis's angle to the orbit normal, folded to [0°, 90°]
+                    # (SPIN_SENSE_NOTE). With RM or Doppler tomography the
+                    # sense is measured and nothing folds.
+                    spin_axis_only && (psi .= min.(psi, 180.0 .- psi))
                     derived["i_star_deg"] = rad2deg.(ist[1:n_psi])
                     derived["psi_deg"] = psi
                 end

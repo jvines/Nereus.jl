@@ -1124,6 +1124,9 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
     catch err
         summary["derived_error"] = sprint(showerror, err)
     end
+    # The data measure the spin axis but not its sense: ψ is folded to the axis
+    # angle in the derived block, i★ and λ are one representative of two.
+    spin_flip(target.params) === nothing || (summary["spin_sense"] = SPIN_SENSE_NOTE)
     if get(get(summary, "map", Dict()), "railed", false)
         summary["status"] = "railed"
         summary["error"] = "MAP railed against a prior bound on: " *
