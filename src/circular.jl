@@ -27,28 +27,42 @@
 # `config.priors` keeps each prior exactly as the user wrote it; only the layout
 # -- the prior the samplers evaluate -- carries the moved window.
 #
-# The orbital inclination is cyclic in a different way, and is FOLDED rather
-# than re-charted. i ∈ [0, π] is not an angle on a circle, but every likelihood
-# reads it through `planet_inc`, which returns |x| reduced through x ≡ x + 2π
-# (`fold_inclination`): RVs see |K| (or M_sec·|sin x|), transits cos i, and
-# astrometry the sky projection, so x, -x and x + 2π are one orbit. A Sine
-# prior on `inc_k<N>` is therefore sampled on a circle of circumference 2π
-# (`WrappedSinePrior`: density |sin x|/4 on the chart [-π/2, 3π/2], identity
+# The orbital inclination is cyclic in a different way. i ∈ [0, π] is not an
+# angle on a circle, but every likelihood reads it through `planet_inc`, which
+# returns |x| reduced through x ≡ x + 2π (`fold_inclination`): RVs see |K| (or
+# M_sec·|sin x|), transits cos i, and astrometry the sky projection, so x, -x
+# and x + 2π are one orbit. A Sine prior on `inc_k<N>` is therefore sampled on
+# a circle of circumference 2π (`WrappedSinePrior`: density |sin x|/4, identity
 # transform), which is exactly sin(i)/2 once folded. Under the bounded Sine the
 # samplers met a wall at i = π: the logit sent it to y = ±∞, walkers piled
 # against it, and a near-face-on retrograde orbit was reported as railed at its
-# upper bound. On the chart 0 and π are interior points, and a walker passes
-# through π into the mirror representative 2π - i; the chart's edges, the
-# mirror image of i = 90°, are its only walls, and the density is zero past
-# them because on the whole line it would be improper (see `WrappedSine`).
-# Each representative carries the whole physical posterior (x and -x are
-# separated by the zeros of |sin x| at 0 and π), so there is no window to move:
-# the draws are folded to [0, π] instead, by `recenter_circular!` before
-# anything reads them, and the walkers are folded wherever this file's windows
-# re-chart them (prior draws, `circular_relabel_point!`, the samplers' burn-in
-# re-cuts), which keeps an ensemble in one representative. Both are exact: the
-# likelihood is the same at x and at fold(x), to the bit, and the prior up to
-# the rounding of sin(2π - x) against sin(x).
+# upper bound. On the circle 0 and π are points a walker passes through, into
+# the mirror representative 2π - i (or -i).
+#
+# The circle still needs a chart, [c, c + 2π], with walls at its seam, and the
+# density is zero past them because on the whole line it would be improper
+# (see `WrappedSine`). The posterior on the circle is the physical one twice
+# over, at x and at its mirror -x, so a seam can cut the mirror copy as surely
+# as the original. The first chart, [-π/2, 3π/2], has its seam on the mirror
+# image of i = 90°: every edge-on posterior -- an astrometric orbit of a
+# transiting planet, inc ≈ 90° from RVs and astrometry, a gravity-darkened star
+# seen equator-on -- had its mirror mode cut in two by the walls, and walkers
+# that reached it through a pole, or that swaps carried down from a hot rung,
+# sat against them. The density is 2π-periodic, so the chart is moved exactly
+# as a full-circle angle's window is, by the same re-cuts at the same points
+# of every sampler: the seam goes where the pooled draws and their mirror
+# images are thinnest (`recut_circular_param!`), which is a pole for an
+# edge-on posterior and stays on the equator's image for a face-on or inclined
+# one. Of the two mirror-equivalent places the cut may pick, it takes the one
+# in [π, 2π], so the chart always holds the physical half [0, π].
+#
+# Each representative carries the whole physical posterior, so the draws are
+# also folded to [0, π]: by `recenter_circular!` before anything reads them,
+# and in the samplers wherever a chart may move (prior draws,
+# `circular_relabel_point!`, the burn-in re-cuts), which keeps an ensemble in
+# one representative. Both are exact: the likelihood is the same at x and at
+# fold(x), to the bit, and the prior up to the rounding of sin(2π - x) against
+# sin(x). With the chart holding [0, π] the folded value is always inside it.
 #
 # Every polar angle is cyclic this way, whatever prior covers [0, π]: the
 # orbital inclination and the stellar inclination i★ (which gravity darkening
@@ -82,7 +96,10 @@
 #   * priors that cover only an arc of the circle. A narrow arc, a Normal
 #     truncated inside one period: those walls are the user's, and the
 #     reporters say a rail against them is the prior's (`restricted_angles`).
-#   * the inclinations, which are folded instead (above).
+#   * the inclinations, which are polar, not full-circle (above): their
+#     charts move through the same re-cuts (`seam_indices`), but
+#     `is_circular` and everything that reports a full-circle angle
+#     leave them out.
 #   * Mo and φ_c whenever TTVs are modelled. TTV epoch numbering hangs off the
 #     transit time Tc = tp_to_tc(Tp) with Tp = t_ref − Mo·P/2π (under φ_c,
 #     Tc = t_ref_c + φ_c·P/2π), so a 2π shift relabels every transit and the
@@ -150,10 +167,13 @@ Lower edge of the window the user's convention puts circular unfrozen
 parameter `i` in: its prior's own `lo` when that prior was one period, else
 the reference edge its [`WrappedPushforward`](@ref) carries (`μ - π` for a
 Normal, `blo` for a Uniform over several periods). Reported medians land in
-`[ref, ref + 2π)`.
+`[ref, ref + 2π)`. For a polar angle, whose draws are reported folded, the
+first chart's `-π/2`.
 """
 function circular_ref_lo(params::Params, i::Int)
     ps = params.layout.unfrozen_priors[i]
+    # A polar angle's first chart, centred on [0, π]: it has no user window.
+    is_cyclic_inclination(ps) && return _WRAPPED_SINE_LO
     ps.dist isa WrappedPushforward && return ps.dist.ref
     return params.config.priors[params.layout.unfrozen_names[i]].lo
 end
@@ -175,6 +195,18 @@ function circular_indices(params::Params)
 end
 
 """
+    seam_indices(params) -> Vector{Int}
+
+Positions, in the unfrozen vector, of every angle whose chart the samplers
+move: the full-circle angles ([`circular_indices`](@ref)) and the polar angles
+on their circles ([`cyclic_inclination_indices`](@ref)), in layout order. The
+re-cuts, the windows several chains share and the checkpoints go over these;
+the reports keep the two kinds apart.
+"""
+seam_indices(params::Params) =
+    sort!(vcat(circular_indices(params), cyclic_inclination_indices(params)))
+
+"""
     circular_names(params) -> Set{String}
 """
 circular_names(params::Params) =
@@ -183,15 +215,16 @@ circular_names(params::Params) =
 """
     circular_windows(params) -> Dict{String, Tuple{Float64, Float64}}
 
-The layout's current window of every circular parameter. Taken right after an
-engine returns and BEFORE [`recenter_circular!`](@ref), it is the chart the
-engine actually sampled in -- the one place a seam it could not cross still
-shows (see `_run_fit_health!`).
+The layout's current window of every angle whose chart moves
+([`seam_indices`](@ref): full-circle and polar). Taken right after an engine
+returns and BEFORE [`recenter_circular!`](@ref), it is the chart the engine
+actually sampled in -- the one place a seam it could not cross still shows
+(see `_run_fit_health!`). The checkpoints save it, and a resume puts it back.
 """
 circular_windows(params::Params) =
     Dict{String, Tuple{Float64, Float64}}(
         params.layout.unfrozen_names[i] => bounds(params.layout.unfrozen_priors[i])
-        for i in circular_indices(params))
+        for i in seam_indices(params))
 
 """
     circular_relabel(x, lo, hi; period = 2π) -> Real
@@ -275,9 +308,13 @@ function circular_window(x::AbstractVector{<:Real}, lo::Real, lo_ref::Real;
 end
 
 # The same prior over a moved chart: Uniform stays Uniform, a WrappedUniform
-# stays one, a pushforward keeps its density (it is periodic) on the new chart.
-# Only ever called for an `is_circular` parameter, whose prior is one of these.
+# stays one, a pushforward keeps its density (it is periodic) on the new chart,
+# and so does a polar angle's lifted prior. Only ever called for a
+# `seam_indices` parameter, whose prior is one of these.
 function _rewindow(ps::PriorSpec, lo::Real, hi::Real)
+    ps.dist isa WrappedSine && return PriorSpec(WrappedSine(Float64(lo), Float64(hi)), lo, hi)
+    ps.dist isa PolarFold &&
+        return PriorSpec(PolarFold(ps.dist.base, Float64(lo), Float64(hi)), lo, hi)
     ps.dist isa WrappedUniform && return PriorSpec(WrappedUniform(lo, hi), lo, hi)
     ps.dist isa WrappedPushforward && return PriorSpec(_rechart(ps.dist, lo, hi), lo, hi)
     return UniformPrior(lo, hi)
@@ -286,11 +323,12 @@ end
 """
     set_circular_window!(params, i, lo; transforms = ()) -> (lo, hi)
 
-Move circular unfrozen parameter `i` to the window `[lo, lo + span)` everywhere
-the samplers read its bounds: the layout's `PriorSpec`, the packed priors, and
-every `PackedTransforms` in `transforms`. `config.priors` keeps what the user
-wrote. Exact: the prior is periodic and still covers one period (Uniform, or a
-pushforward evaluated on the circle), so its density does not change.
+Move unfrozen parameter `i` (a full-circle or polar angle, [`seam_indices`](@ref))
+to the window `[lo, lo + span)` everywhere the samplers read its bounds: the
+layout's `PriorSpec`, the packed priors, and every `PackedTransforms` in
+`transforms`. `config.priors` keeps what the user wrote. Exact: the prior is
+periodic and still covers one period (Uniform, a pushforward evaluated on the
+circle, or a polar angle's lifted prior), so its density does not change.
 
 The caller must then move every stored value of the parameter into the new
 window with [`circular_relabel`](@ref) -- hot rungs, ring buffers, cached
@@ -322,13 +360,14 @@ Pick a new window for circular unfrozen parameter `i` from `draws` (its current
 posterior draws; exclude inactive trans-dim slots, non-finite entries are
 ignored) and move it there with [`set_circular_window!`](@ref). Returns the new
 `(lo, hi)`, or `nothing` when the window stays put. After a move the caller must
-relabel all of its own state into `(lo, hi)`.
+relabel all of its own state into `(lo, hi)`. A polar angle's chart is cut by
+[`polar_window`](@ref), from the draws and their mirror images.
 """
 function recut_circular_param!(params::Params, i::Int,
                                draws::AbstractVector{<:Real}; transforms = ())
     ps = params.layout.unfrozen_priors[i]
-    lo_ref = circular_ref_lo(params, i)
-    new_lo = circular_window(draws, ps.lo, lo_ref)
+    new_lo = is_cyclic_inclination(ps) ? polar_window(draws, ps.lo) :
+             circular_window(draws, ps.lo, circular_ref_lo(params, i))
     new_lo == ps.lo && return nothing
     return set_circular_window!(params, i, new_lo; transforms)
 end
@@ -344,7 +383,7 @@ at -Inf (or, through the logit, pinned to the wall).
 """
 function circular_relabel_point!(x::AbstractVector, params::Params)
     L = params.layout
-    for i in circular_indices(params)
+    for i in seam_indices(params)
         lo, hi = bounds(L.unfrozen_priors[i])
         x[i] = circular_relabel(x[i], lo, hi)
     end
@@ -355,8 +394,77 @@ function circular_relabel_point!(x::AbstractVector, params::Params)
 end
 
 # ------------------------------------------------------------------
-# Polar angles (cyclic inclinations): folded, not re-charted (see the header).
+# Polar angles (cyclic inclinations): re-charted, and folded (see the header).
 # ------------------------------------------------------------------
+
+"""
+    polar_window(draws, lo) -> Float64
+
+Lower edge of the chart for a polar angle currently charted from `lo`, cut from
+`draws` (any representatives; non-finite ones are ignored). The posterior on
+the circle is symmetric under `x → -x`, and a sampler can reach either copy,
+so the seam is placed by [`circular_cut`](@ref) on the folded draws AND their
+mirror images: a pole for an edge-on posterior (its copies at ±90°), and the
+current seam kept for a face-on or inclined one, where it is already clear of
+both copies. A cut in `(0, π)` is replaced by its mirror in `(π, 2π)`, which is
+just as empty, and the edge is returned in `[-π, 0]`: the chart then always
+holds the physical half `[0, π]`, where folded values land. Returns `lo`
+exactly when the seam stays.
+"""
+function polar_window(draws::AbstractVector{<:Real}, lo::Real)
+    xs = Float64[]
+    for x in draws
+        isfinite(x) || continue
+        f = fold_inclination(Float64(x))
+        push!(xs, f, -f)
+    end
+    c = circular_cut(xs, lo)
+    c == lo && return Float64(lo)
+    s = mod(c, CIRCULAR_PERIOD)
+    0 < s < π && (s = CIRCULAR_PERIOD - s)
+    new_lo = s == 0 ? 0.0 : s - CIRCULAR_PERIOD
+    # The same seam as `lo`, written another period over: nothing moves.
+    rem2pi(new_lo - lo, RoundNearest) == 0 && return Float64(lo)
+    return new_lo
+end
+
+"""
+    polar_centre_lo(x) -> Float64
+
+The chart edge a single polar value `x` (a caller's `init`, an optimum)
+places the seam by: as far as it can be from `fold(x)` and its mirror, which is
+the pole farther from them -- `π` (chart `[-π, π]`) for an inclination below
+90°, `0` (chart `[0, 2π]`) from 90° up. Not the antipode of `x`, which is the
+mirror image of 90° for an edge-on value.
+"""
+polar_centre_lo(x::Real) = fold_inclination(Float64(x)) < π / 2 ? -Float64(π) : 0.0
+
+"""
+    prior_centre(ps) -> Float64
+
+A point at the middle of prior `ps` for code that parks or starts a walker
+there: its median, or for a polar angle the median on its first chart
+`[-π/2, 3π/2]` (`π/2` for a Sine prior, always in `[0, π]`, which every chart
+holds). A moved chart's own median can be a pole, where a Sine prior's density
+is zero.
+"""
+prior_centre(ps::PriorSpec) = is_cyclic_inclination(ps) ?
+    circular_relabel(quantile(_rewindow(ps, _WRAPPED_SINE_LO, _WRAPPED_SINE_HI), 0.5),
+                     ps.lo, ps.hi) :
+    quantile(ps, 0.5)
+
+"""
+    moved_off_value(off, ps, shift) -> Float64
+
+A MoMS off-value (the parked value and birth centre of an inactive planet's
+slot) after its parameter's window moved by `shift` to `ps`'s: a full-circle
+angle's moves with the window, keeping its place in it; a polar angle's is
+relabelled into the new chart, keeping its inclination, since a fixed place in
+the chart can be a pole.
+"""
+moved_off_value(off::Real, ps::PriorSpec, shift::Real) =
+    is_cyclic_inclination(ps) ? circular_relabel(Float64(off), ps.lo, ps.hi) :
+                                off + shift
 
 """
     cyclic_inclination_indices(params) -> Vector{Int}
@@ -679,14 +787,16 @@ end
 """
     circular_groups(params; permutable) -> Vector{Vector{Tuple{Int,Int}}}
 
-The circular parameters grouped by the window they must share, as
-`(unfrozen position, owning planet)` pairs. `permutable = true` for a sampler
-that births planets or swaps planet blocks between slots: same-mode slots then
-share one window per angle. Otherwise every parameter is its own group.
+The angles whose charts move ([`seam_indices`](@ref): full-circle and polar)
+grouped by the window they must share, as `(unfrozen position, owning planet)`
+pairs; the owner is 0 for the stellar inclination, which no planet owns.
+`permutable = true` for a sampler that births planets or swaps planet blocks
+between slots: same-mode slots then share one window per angle. Otherwise
+every parameter is its own group.
 """
 function circular_groups(params::Params; permutable::Bool)
     L = params.layout
-    circ = circular_indices(params)
+    circ = seam_indices(params)
     groups = Vector{Vector{Tuple{Int,Int}}}()
     isempty(circ) && return groups
     modes  = params.config.planet_modes
@@ -694,8 +804,15 @@ function circular_groups(params::Params; permutable::Bool)
     done = falses(length(L.unfrozen_idx))
     for d in circ
         done[d] && continue
-        # `is_circular` only accepts `<angle>_k<k>`, so the owner is in the name.
-        k = parse(Int, match(r"_k(\d+)$", L.unfrozen_names[d]).captures[1])
+        # `is_circular` only accepts `<angle>_k<k>`, and a polar angle is a
+        # planet's `inc_k<k>` or the star's `i_star`, owner 0: always present.
+        m = match(r"_k(\d+)$", L.unfrozen_names[d])
+        if m === nothing
+            done[d] = true
+            push!(groups, [(d, 0)])
+            continue
+        end
+        k = parse(Int, m.captures[1])
         q = permutable && k <= length(blocks) ?
             findfirst(==(L.unfrozen_idx[d]), planet_slot_indices(blocks[k])) :
             nothing
@@ -985,15 +1102,16 @@ The burn-in re-cut of `sample_pt_emcee`, for an ensemble `X` (n_dim × n_walkers
 held in the target's own coordinates (`transform` a `PackedTransforms`, or
 `nothing` for a bounded target): cyclic inclinations folded to `[0, π]`, the
 stellar spin put in one representative ([`spin_flip`](@ref), axis chosen from
-the walkers), and each full-circle angle's window moved so its seam sits in the
-emptiest arc of the walkers ([`recut_circular_param!`](@ref), which also moves
-the transform's bounds). Returns whether any walker moved. Through a logit the
+the walkers), and each full-circle or polar angle's window moved so its seam
+sits in the emptiest arc of the walkers (and, for a polar one, of their mirror
+images; [`recut_circular_param!`](@ref), which also moves the transform's
+bounds). Returns whether any walker moved. Through a logit the
 move changes the walker's unconstrained coordinate and its Jacobian, so the
 caller re-evaluates its cached log-densities when this returns `true`.
 """
 function recut_walkers!(X::AbstractMatrix{Float64}, params::Params, transform)
     cinc = cyclic_inclination_indices(params)
-    circ = circular_indices(params)
+    circ = seam_indices(params)
     (isempty(cinc) && isempty(circ)) && return false
     W = Matrix{Float64}(undef, size(X, 2), size(X, 1))
     for j in axes(X, 2)
@@ -1210,12 +1328,11 @@ end
     _fold_polar_slots!(values, params) -> Bool
 
 Fold every polar angle (cyclic inclination) of a slot-vector `values` -- a
-`Theta`'s, inactive planet slots included -- to `[0, π]`, its representative.
-The half-period chart `[-π/2, 3π/2]` has its seam on the far image of the
-equator, so a local sampler parked in the far copy of a mode at i = 90° sees
-only one side of it; folded, the mode sits in the interior of the near copy.
-Exact for the log-density (see [`fold_cyclic_inclinations!`](@ref)). Returns
-whether any value changed.
+`Theta`'s, inactive planet slots included -- to `[0, π]`, its representative,
+which every chart holds ([`polar_window`](@ref)): a local sampler then works in
+one copy of the posterior, the one its chart was cut around. Exact for the
+log-density (see [`fold_cyclic_inclinations!`](@ref)). Returns whether any
+value changed.
 """
 function _fold_polar_slots!(values::AbstractVector, params::Params)
     L = params.layout
@@ -1241,29 +1358,31 @@ end
 # the seam of [-π, π]: 23 % of the mass above 180° (pt_emcee), 8 % from the
 # INS sampler and 31 % from NestedSamplers' rslice.
 #
-# A polar angle needs no circle here: its base prior on [0, π] has no seam
-# (the poles are the ends of the range, not cuts through a mode), so the unit
-# cube maps onto the base (`_ns_prior`). A full-circle angle has no chart
-# without a seam, so the seam is moved: in the loops this package owns, to
-# the emptiest arc of the live points at each bound refit (`_ns_recut!`);
-# for NestedSamplers.jl, which owns its loop, before the run from a pilot.
+# A full-circle angle has no chart without a seam, so the seam is moved: in the
+# loops this package owns, to the emptiest arc of the live points at each bound
+# refit (`_ns_recut!`); for NestedSamplers.jl, which owns its loop, before the
+# run from a pilot. A polar angle is charted on its circle as in every other
+# sampler and re-cut the same way, from the live points and their mirror
+# images. Its base prior on [0, π] has walls at the poles, which cut a face-on
+# or retrograde posterior; on the circle the two copies of the posterior carry
+# identical likelihoods, so a copy the live points abandon does not bias the
+# evidence (the volume each live point stands for is the same in both).
 
 """
     _ns_prior(ps) -> PriorSpec
 
-The prior a nested sampler's unit cube maps onto: a polar angle's base prior
-on `[0, π]` (the lifted chart's seam would split a mode at i = 90°, and the
-fold makes the two the same orbit), anything else as it is.
+The prior a nested sampler's unit cube maps onto: the layout's own, a polar
+angle on its current chart included (see the section above).
 """
-_ns_prior(ps::PriorSpec) = ps.dist isa PolarFold ? ps.dist.base :
-                           ps.dist isa WrappedSine ? SinePrior() : ps
+_ns_prior(ps::PriorSpec) = ps
 
 """
     _ns_recut!(live_u, dead_sets, params; transforms = ()) -> Bool
 
-Nested sampling's seam re-cut, in the unit cube. Each full-circle angle's
-window moves to the emptiest arc of the live points
-([`recut_circular_param!`](@ref)), and every live and dead point's coordinate
+Nested sampling's seam re-cut, in the unit cube. Each full-circle or polar
+angle's window moves to the emptiest arc of the live points (and, for a polar
+one, of their mirror images; [`recut_circular_param!`](@ref)), and every live
+and dead point's coordinate
 `u` rotates with it: on the circle the prior's CDF from the new seam is the
 old one less its value there, so `u' = mod(u - F_old(lo_new), 1)` is the same
 angle. The constrained region, the live points' uniform distribution over it
@@ -1274,7 +1393,7 @@ function _ns_recut!(live_u::AbstractMatrix, dead_sets, params::Params;
                     transforms = ())
     L = params.layout
     moved = false
-    for d in circular_indices(params)
+    for d in seam_indices(params)
         ps = L.unfrozen_priors[d]
         xs = Float64[quantile(ps, live_u[d, i]) for i in axes(live_u, 2)]
         lo0, hi0 = bounds(ps)

@@ -99,17 +99,21 @@ chain escapes into face-on (`i ≈ 0` or `π`) modes where huge `M_sec`
 priors["inc_k1"] = SinePrior()
 ```
 
-On an orbital inclination (`inc_k<N>`) the samplers treat it as cyclic: `i`
-and `-i` (and `i + 2π`) are the same orbit, so the inclination is sampled on a
-circle with density `|sin x|/4`, on the chart `[-π/2, 3π/2]` where `0` and `π`
-are interior points, and every draw is folded back to `[0, π]` before it is
-reported. A retrograde, nearly face-on orbit therefore samples freely through
-`i = 180°` instead of piling up against it, and `fit_health` does not report
-it railed there. The induced prior on the folded inclination is still
-`sin(i)/2`, and `config.priors` keeps `SinePrior()` as written. A `SinePrior`
-on any other parameter (the stellar inclination `i_star`) stays bounded on
-`[0, π]`, and any other prior on `inc_k<N>` (a `UniformPrior(0, π)`, say) is
-left as written.
+On a polar angle -- an orbital inclination (`inc_k<N>`) or the stellar
+inclination (`i_star`) -- the samplers treat it as cyclic: `i` and `-i` (and
+`i + 2π`) are the same orbit or star, so the inclination is sampled on a circle
+with density `|sin x|/4`, where `0` and `π` are points a sampler passes
+through, and every draw is folded back to `[0, π]` before it is reported. A
+retrograde, nearly face-on orbit therefore samples freely through `i = 180°`
+instead of piling up against it, and `fit_health` does not report it railed
+there. The circle is sampled on a chart of one period, whose seam the samplers
+move to where the posterior and its mirror image `-i` are thinnest: a pole for
+an edge-on posterior, the mirror image of `i = 90°` for a face-on or inclined
+one. The induced prior on the folded inclination is still `sin(i)/2`, and
+`config.priors` keeps `SinePrior()` as written. Any other prior over all of
+`[0, π]` on a polar angle (a `UniformPrior(0, π)`, a Normal truncated to
+`[0, π]`) is lifted the same way, its density reflected at both poles; a prior
+on part of `[0, π]` keeps its walls.
 
 ### `FixedPrior(value)`
 
