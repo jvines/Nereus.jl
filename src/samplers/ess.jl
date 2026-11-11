@@ -131,12 +131,14 @@ function _sample_ess(target::NereusTarget, data::Data; n_steps::Int, n_burnin::I
     # 2590 m/s width became a 6.7e6 m/s sd (the walk left the box and every
     # draw was discarded), a 1e-3 width a 1e-6 sd.
     prior = MvNormal(centers, widths)
-    # The box the draws are kept in: the prior bounds, i.e. the circular
-    # windows as they are now. A WRAPPED angle has no box: its draws are
-    # relabelled into the chart instead of discarded (infinite bounds here,
-    # relabelled when the chains are built).
-    lo = Float64[is_wrapped(ps) ? -Inf : ps.lo for ps in layout.unfrozen_priors]
-    hi = Float64[is_wrapped(ps) ?  Inf : ps.hi for ps in layout.unfrozen_priors]
+    # The box the draws are kept in: the prior bounds. An angle has no box:
+    # the likelihood is periodic in it, so a draw past a full-circle angle's
+    # window or a polar angle's pole is the same state, and is put in its
+    # reported representative (`circular_relabel_point!`: relabelled into the
+    # window, folded, spin-flipped) as it is kept, not discarded.
+    angles = union(circular_indices(params), cyclic_inclination_indices(params))
+    lo = Float64[j in angles ? -Inf : ps.lo for (j, ps) in enumerate(layout.unfrozen_priors)]
+    hi = Float64[j in angles ?  Inf : ps.hi for (j, ps) in enumerate(layout.unfrozen_priors)]
 
     # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
     # One state file per chain. Chain c is ESS seeded with `seed + c - 1`;
@@ -235,7 +237,8 @@ function _ess_chain(target::NereusTarget, data::Data, prior, lo::Vector{Float64}
     end
 
     _ess_steps!(kept, rng, model, state, step0, n_steps, n_burnin, lo, hi,
-                ck_path, ck_fp, checkpoint_interval)
+                ck_path, ck_fp, checkpoint_interval,
+                x -> circular_relabel_point!(x, params))
 
     n_keep = length(kept) ÷ n_dim
     n_post = max(n_steps - n_burnin, 0)
@@ -250,7 +253,7 @@ end
 function _ess_steps!(kept::Vector{Float64}, rng::MersenneTwister, model, state,
                      step0::Int, n_steps::Int, n_burnin::Int, lo::Vector{Float64},
                      hi::Vector{Float64}, ck_path::Union{Nothing,String},
-                     ck_fp::NamedTuple, checkpoint_interval::Real)
+                     ck_fp::NamedTuple, checkpoint_interval::Real, canon! = identity)
     mcmc_step = EllipticalSliceSampling.AbstractMCMC.step
     sampler = ESS()
     last_ck = time()
@@ -265,7 +268,7 @@ function _ess_steps!(kept::Vector{Float64}, rng::MersenneTwister, model, state,
                     break
                 end
             end
-            in_bounds && append!(kept, draw)
+            in_bounds && append!(kept, canon!(copy(draw)))
         end
 
         # ---- Checkpoint: every `checkpoint_interval` s and on the last step

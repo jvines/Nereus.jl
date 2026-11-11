@@ -961,3 +961,48 @@ end
 integrates the folded posterior adds back.
 """
 n_folds(sc, cinc) = length(cinc) + (sc === nothing ? 0 : 1)
+
+# ------------------------------------------------------------------
+# Burn-in re-cut for samplers whose walkers live in the TARGET's space.
+# ------------------------------------------------------------------
+
+"""
+    recut_walkers!(X, params, transform) -> Bool
+
+The burn-in re-cut of `sample_pt_emcee`, for an ensemble `X` (n_dim × n_walkers)
+held in the target's own coordinates (`transform` a `PackedTransforms`, or
+`nothing` for a bounded target): cyclic inclinations folded to `[0, π]`, the
+stellar spin put in one representative ([`spin_flip`](@ref), axis chosen from
+the walkers), and each full-circle angle's window moved so its seam sits in the
+emptiest arc of the walkers ([`recut_circular_param!`](@ref), which also moves
+the transform's bounds). Returns whether any walker moved. Through a logit the
+move changes the walker's unconstrained coordinate and its Jacobian, so the
+caller re-evaluates its cached log-densities when this returns `true`.
+"""
+function recut_walkers!(X::AbstractMatrix{Float64}, params::Params, transform)
+    cinc = cyclic_inclination_indices(params)
+    circ = circular_indices(params)
+    (isempty(cinc) && isempty(circ)) && return false
+    W = Matrix{Float64}(undef, size(X, 2), size(X, 1))
+    for j in axes(X, 2)
+        W[j, :] .= transform === nothing ? view(X, :, j) :
+                   transform_inverse(X[:, j], transform)
+    end
+    W0 = copy(W)
+    fold_cyclic_inclinations!(W, params; idx = cinc, decide_from = W)
+    tr = transform === nothing ? () : (transform,)
+    for d in circ
+        win = recut_circular_param!(params, d, view(W, :, d); transforms = tr)
+        win === nothing && continue
+        lo, hi = win
+        @inbounds for j in axes(W, 1)
+            W[j, d] = circular_relabel(W[j, d], lo, hi)
+        end
+    end
+    W == W0 && return false
+    for j in axes(X, 2)
+        X[:, j] .= transform === nothing ? view(W, j, :) :
+                   transform_forward(W[j, :], transform)
+    end
+    return true
+end

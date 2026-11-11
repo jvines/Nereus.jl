@@ -222,6 +222,14 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         copy!(rng, ck.rng::MersenneTwister)
         ck_kept = ck.kept::Array{Float64, 3}
         kept[:, :, 1:size(ck_kept, 3)] .= ck_kept
+        # Windows (and spin axis) the saved walkers live in, moved by the re-cut.
+        if hasproperty(ck, :windows)
+            for (nm, (lo, _)) in ck.windows
+                set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
+                                     lo; transforms = has_transform ? (target.transform,) : ())
+            end
+            params.layout.spin_axis .= ck.spin_axis
+        end
     end
 
     # --- Main loop ----------------------------------------------------
@@ -231,6 +239,20 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     last_ck = time()
     for step in (step0 + 1):n_steps
         _stretch_step!(logpost, x, lastll, rng, divisions)
+        # ---- Burn-in re-cut (src/circular.jl): on pt_emcee's schedule, the
+        # walkers folded, spin-flipped and every full-circle seam moved to the
+        # emptiest arc, so a mode across a seam is not split between two walls
+        # that stretch moves cannot carry walkers between. A move through the
+        # logit changes the walkers' Jacobians: their log-densities are redone.
+        # One chain only: concurrent chains share `params`, whose windows a
+        # re-cut moves (as rjmcmc and moms; recenter_circular! still joins the
+        # seam of their output).
+        if n_chains == 1 && step <= n_burnin * thinning && _pt_recut_due(step, n_burnin * thinning) &&
+           recut_walkers!(x, params, target.transform)
+            for j in 1:n_walkers
+                lastll[j] = logpost(x[:, j])
+            end
+        end
         if step % thinning == 0
             k = div(step, thinning) - n_burnin
             k > 0 && (kept[:, :, k] .= x)
@@ -241,7 +263,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         if ck_path !== nothing && (step == n_steps || time() - last_ck >= ck_every)
             n_kept = max(div(step, thinning) - n_burnin, 0)
             write_checkpoint(ck_path, "ensemble", ck_fp, (; step, x, lastll, rng,
-                kept = kept[:, :, 1:n_kept]))
+                kept = kept[:, :, 1:n_kept], windows = circular_windows(params),
+                spin_axis = copy(params.layout.spin_axis)))
             last_ck = time()
         end
     end
