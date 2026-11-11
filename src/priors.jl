@@ -623,7 +623,8 @@ angle (src/circular.jl), nothing is left to rail against:
   otherwise.
 
 `ref` is the lower edge of the window the draws are reported in (the user's
-own window when it was one period, else `μ - π` or `blo`). Built by the layout
+own window when it was one period, else `μ - π`, or for a Uniform the period
+centred in `[blo, bhi]`). Built by the layout
 (`circular_lift`), never written in a config.
 """
 struct WrappedPushforward <: ContinuousUnivariateDistribution
@@ -758,9 +759,13 @@ function circular_lift(ps::PriorSpec)
     tol = 1e-4 * 2π
     if d isa Distributions.Uniform
         span > 2π + tol || return ps
+        # Charted on the period centred in the user's range: U(-2π, 2π) is
+        # reported on [-π, π), and a value written inside the middle period
+        # of the range is on the chart as written.
+        lo = (ps.lo + ps.hi) / 2 - π
         return PriorSpec(WrappedPushforward(_PUSH_UNIFORM, NaN, NaN, ps.lo, ps.hi,
-                                            0.0, ps.lo, ps.lo, ps.lo + 2π),
-                         ps.lo, ps.lo + 2π)
+                                            0.0, lo, lo, lo + 2π),
+                         lo, lo + 2π)
     end
     N = d isa Distributions.Normal ? d :
         d isa Distributions.Truncated{<:Distributions.Normal} ? d.untruncated : nothing
