@@ -134,7 +134,7 @@ end
     # Pathfinder's own starts: all 8 runs on the plateau at e = 0.885.
     @testset "pathfinder: the draws in the mode" begin
         tg = _sc_target(89.5; unconstrained = true, efree = true)
-        pf = pathfinder_init(tg; n_runs = 8, n_draws = 200, seed = 1)
+        pf = pathfinder_init(tg; n_runs = 8, n_draws = 400, seed = 3)
         L = tg.params.layout
         X = reduce(hcat, [Nereus.transform_inverse(pf.draws[:, j], tg.transform)
                           for j in axes(pf.draws, 2)])
