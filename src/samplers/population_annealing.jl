@@ -28,6 +28,8 @@
 #   resample only when the ESS of the accumulated weights falls below
 #   resample_ess × N. Avoids the "schedule tuning" problem of static
 #   schedules, and the clones of resampling at every step.
+# - **Adaptive mutation** — sweep until the replicas' positions have
+#   decorrelated from where the sweeps started (`decorrelation`).
 # - **MCMC mutation** = simple Gaussian RWM with prior-scale step;
 #   independent per replica → fully threaded (Threads.@threads :static).
 # - **Systematic resampling** — low-variance, deterministic given the
@@ -56,6 +58,10 @@ Container for a `sample_pa` run.
   the reweighting and before any resampling.
 - `acceptance::Float64` — mean MCMC mutation acceptance rate.
 - `n_evals::Int` — total likelihood evaluations.
+- `sweep_history::Vector{Int}` — mutation sweeps at each step.
+- `corr_history::Vector{Float64}` — at each step, the largest correlation
+  (over parameters) left between the replicas' positions before and after the
+  mutation sweeps; `decorrelation` is its target.
 - `resampled::Vector{Bool}` — whether each step resampled.
 """
 struct PAResult
@@ -66,6 +72,8 @@ struct PAResult
     ess_history::Vector{Float64}
     acceptance::Float64
     n_evals::Int
+    sweep_history::Vector{Int}
+    corr_history::Vector{Float64}
     resampled::Vector{Bool}
 end
 
@@ -77,7 +85,7 @@ Population Annealing sequential MC sampler.
 # Keywords
 - `n_replicas::Int=500` — population size. Larger N → tighter log Z + posterior.
 - `n_mcmc::Int=10` — MINIMUM MCMC mutation sweeps per anneal step. The mutation
-  loop is adaptive (see `mcmc_target_moves`): it always runs at least `n_mcmc`
+  loop is adaptive (see `decorrelation`): it always runs at least `n_mcmc`
   sweeps and then keeps sweeping until the population has decorrelated, so a
   small `n_mcmc` is no longer the magic constant that decides whether the
   sampler mixes.
@@ -103,14 +111,23 @@ Population Annealing sequential MC sampler.
   replicas carry their weights, and every step mutates them. Resampling at every
   step (as this sampler did) cloned the population ~50 times on the way to
   β = 1.
-- `mcmc_target_moves::Float64=5.0` — adaptive-mutation target: keep running
-  mutation sweeps at the current β until each replica has, in expectation,
-  accumulated this many ACCEPTED moves (cumulative acceptance-rate × sweeps ≥
-  target). Decouples mixing from the raw `n_mcmc` count: a low-acceptance β step
-  automatically gets more sweeps, a high-acceptance step fewer. This is what
-  stops resampling from out-pacing mutation (the effective-sample-collapse that
-  biased e). Set to 0 to disable adaptivity and run exactly `n_mcmc` sweeps.
-- `max_mcmc_mult::Int=12` — safety cap on adaptive sweeps: never run more than
+- `decorrelation::Float64=0.2` — adaptive-mutation target: after `n_mcmc`
+  sweeps, keep sweeping at the current β until no parameter's positions
+  correlate with where the sweeps started by more than this (weighted rank
+  correlation across the replicas, the largest over parameters). A clone and
+  its parent start at one point; they are independent draws only once each has
+  forgotten it. A count of accepted moves is not that: a stretch move accepts
+  short steps. On an RV + IAD companion (300 replicas) the population returned
+  at β = 1 had a least ESS of 179-182 with i = 89.5° and 16 with e free at
+  i = 45°; with this and `resample_ess` it has 236-291 and 163, for 10-30
+  times the likelihood evaluations. On a 1-planet RV with free e, log Z came
+  out 8-16 nats below nested INS and is now within 2. Where a parameter cannot
+  decorrelate (the e-ω-M₀ ridge of a free e near 0) each step runs to the
+  `max_mcmc_mult` cap. `0` disables it.
+- `mcmc_target_moves::Float64=5.0` — a second floor: keep sweeping until each
+  replica has, in expectation, this many ACCEPTED moves. With it and
+  `decorrelation` both 0, exactly `n_mcmc` sweeps run.
+- `max_mcmc_mult::Int=30` — safety cap on adaptive sweeps: never run more than
   `max_mcmc_mult × n_mcmc` sweeps at one β step, bounding worst-case cost.
 - `step_scale::Float64=0.05` — only used by `mutation_kernel=:rwm`. RWM step
   size as fraction of prior range (or 1·σ for normal priors). Adapted between
@@ -146,8 +163,9 @@ function sample_pa(
     mutation_kernel::Symbol = :stretch,
     stretch_a::Real = 2.0,
     mcmc_target_moves::Real = 5.0,
-    max_mcmc_mult::Int = 12,
+    max_mcmc_mult::Int = 30,
     resample_ess::Real = 0.5,
+    decorrelation::Real = 0.2,
     seed::Int = 1,
     show_progress::Bool = true,
 )
@@ -158,6 +176,7 @@ function sample_pa(
     stretch_a  = Float64(stretch_a)
     mcmc_target_moves = Float64(mcmc_target_moves)
     resample_ess = Float64(resample_ess)
+    decorrelation = Float64(decorrelation)
     mutation_kernel in (:stretch, :rwm, :adaptive_cov) || throw(ArgumentError(
         "mutation_kernel must be :stretch (default), :rwm, or :adaptive_cov; " *
         "got :$mutation_kernel"))
@@ -261,6 +280,8 @@ function sample_pa(
     β_history     = Float64[0.0]
     ess_history   = Float64[]
     accept_history = Float64[]
+    sweep_history = Int[]
+    corr_history  = Float64[]
     resampled     = Bool[]
     # Normalised log-weights of the replicas, carried between resamplings.
     log_Wt = fill(-log(n_replicas), n_replicas)
@@ -548,20 +569,32 @@ function sample_pa(
                     mutation_kernel === :adaptive_cov  ? adaptive_cov_sweep! :
                                                          rwm_sweep!
 
-        # Adaptive sweep loop: ≥ n_mcmc sweeps, then continue until each
+        # Adaptive sweep loop: ≥ n_mcmc sweeps, then continue until no
+        # parameter's positions correlate with where the sweeps started by
+        # more than `decorrelation` (`_pa_max_corr`, weighted by W) and each
         # replica has ~mcmc_target_moves accepted moves, capped at
-        # max_mcmc_mult × n_mcmc. With mcmc_target_moves ≤ 0 the loop runs
+        # max_mcmc_mult × n_mcmc. With both targets ≤ 0 the loop runs
         # exactly n_mcmc sweeps (legacy fixed behaviour).
-        sweep_cap = mcmc_target_moves > 0 ? max(n_mcmc, max_mcmc_mult * n_mcmc) : n_mcmc
+        adaptive = mcmc_target_moves > 0 || decorrelation > 0
+        sweep_cap = adaptive ? max(n_mcmc, max_mcmc_mult * n_mcmc) : n_mcmc
+        X0 = copy(replicas)
         n_sweeps  = 0
+        ρ_max = NaN
         while n_sweeps < sweep_cap
             do_sweep!()
             n_sweeps += 1
             n_sweeps >= n_mcmc || continue
-            mcmc_target_moves > 0 || break
+            adaptive || break
             # accepted moves per replica so far this β step
-            (accept_count[] / n_replicas) >= mcmc_target_moves && break
+            mcmc_target_moves > 0 && accept_count[] / n_replicas < mcmc_target_moves &&
+                continue
+            decorrelation > 0 || break
+            ρ_max = _pa_max_corr(X0, replicas, W)
+            ρ_max <= decorrelation && break
         end
+        isnan(ρ_max) && (ρ_max = _pa_max_corr(X0, replicas, W))
+        push!(sweep_history, n_sweeps)
+        push!(corr_history, ρ_max)
 
         acc_rate = accept_count[] / max(propose_count[], 1)
         push!(accept_history, acc_rate)
@@ -588,6 +621,7 @@ function sample_pa(
                                   fields = (:β => round(β_cur, digits=3),
                                             :acc => round(acc_rate, digits=3),
                                             :ess => round(ess_norm, digits=3),
+                                            :sweeps => n_sweeps,
                                             :logZ => round(log_z_total, digits=2)))
     end
     show_progress && finish!(pb)
@@ -598,7 +632,7 @@ function sample_pa(
     mean_acc = isempty(accept_history) ? 0.0 : sum(accept_history) / length(accept_history)
     return PAResult(
         chains, log_z_total, log_z_history, β_history, ess_history,
-        mean_acc, n_evals[], resampled
+        mean_acc, n_evals[], sweep_history, corr_history, resampled
     )
 end
 
@@ -609,4 +643,43 @@ function _pa_weighted_cov(X::AbstractMatrix{Float64}, W::AbstractVector{Float64}
     Xc = X .- μ'
     Σ = (Xc .* W)' * Xc
     return Σ ./ max(1 - sum(abs2, W), eps())
+end
+
+# The largest |weighted rank correlation|, over the columns (parameters), of
+# the replicas' positions in `X0` and in `X` (rows paired): Pearson's on the
+# ranks, so a log-uniform prior's decades or a few outlying replicas do not
+# decide it. 0 for a column that is constant in either.
+function _pa_max_corr(X0::AbstractMatrix{Float64}, X::AbstractMatrix{Float64},
+                      W::AbstractVector{Float64})
+    ρ = 0.0
+    @inbounds for d in axes(X, 2)
+        a = _pa_ranks(@view X0[:, d]); b = _pa_ranks(@view X[:, d])
+        μa = sum(W .* a); μb = sum(W .* b)
+        sab = saa = sbb = 0.0
+        for i in eachindex(W)
+            da = a[i] - μa; db = b[i] - μb
+            sab += W[i] * da * db; saa += W[i] * da^2; sbb += W[i] * db^2
+        end
+        (saa > 0 && sbb > 0) || continue
+        ρ = max(ρ, abs(sab) / sqrt(saa * sbb))
+    end
+    return ρ
+end
+
+# Ranks of `v`, ties given their mean rank.
+function _pa_ranks(v::AbstractVector{Float64})
+    p = sortperm(v)
+    r = Vector{Float64}(undef, length(v))
+    i = 1
+    @inbounds while i <= length(v)
+        j = i
+        while j < length(v) && v[p[j + 1]] == v[p[i]]
+            j += 1
+        end
+        for k in i:j
+            r[p[k]] = (i + j) / 2
+        end
+        i = j + 1
+    end
+    return r
 end
