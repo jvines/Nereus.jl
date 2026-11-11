@@ -340,7 +340,9 @@ function _sample_pt_transdim(
         warmup_rounds = evidence_warmup_rounds, within_model,
         td = _pt_td_key(td),
         init = init_key !== nothing ? init_key :
-               init === nothing ? :prior : hash(Matrix{Float64}(init)))
+               init === nothing ? :prior : hash(Matrix{Float64}(init)),
+        # The warm-up history is saved per group, and polar angles are groups.
+        polar_chart_key(params)...)
     ck = resume ? read_checkpoint(ck_path, "pt", ck_fp) : nothing
     iter0 = ck === nothing ? 0 : ck.iter::Int
     iter0 <= total_samples || throw(ArgumentError(

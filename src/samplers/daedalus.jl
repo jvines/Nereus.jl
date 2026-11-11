@@ -987,10 +987,13 @@ function _daedalus_recut!(live::Vector{DaedalusPoint}, params::Params, groups,
         old = Float64[L.unfrozen_priors[d].lo for (d, _) in grp]
         recut_circular_group!(params, grp, draws) === nothing && continue
         for (j, (d, _)) in enumerate(grp)
-            shift = L.unfrozen_priors[d].lo - old[j]
+            ps = L.unfrozen_priors[d]
+            shift = ps.lo - old[j]
             for k in eachindex(strategy.slot_indices)
                 q = findfirst(==(d), strategy.slot_indices[k])
-                q === nothing || (strategy.off_values[k][q] += shift)
+                q === nothing ||
+                    (strategy.off_values[k][q] = moved_off_value(strategy.off_values[k][q],
+                                                                 ps, shift))
             end
         end
     end

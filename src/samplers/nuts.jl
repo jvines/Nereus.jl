@@ -141,7 +141,7 @@ function _draw_from_prior(target::NereusTarget, rng::AbstractRNG;
     x_med = Vector{Float64}(undef, n)
     @inbounds for i in 1:n
         ps = layout.unfrozen_priors[i]
-        val = quantile(ps, 0.5)
+        val = prior_centre(ps)
         if !isfinite(val)
             lo, hi = bounds(ps)
             val = isfinite(lo) && isfinite(hi) ? (lo+hi)/2 :
@@ -438,8 +438,10 @@ function sample_nuts(
         rng = _rng_fingerprint(rng),
         advancedhmc = string(pkgversion(AdvancedHMC)),
         # The seams re-cut at the adaptation's phase boundaries (`_hmc_recut!`):
-        # a checkpoint from before that is another run, and holds no trace.
-        seam_recut = :adaptation_phases)
+        # a checkpoint from before that is another run, and holds no trace;
+        # with polar angles, one from before their charts moved holds a trace
+        # of another layout.
+        seam_recut = :adaptation_phases, polar_chart_key(params)...)
     ck = resume ? read_checkpoint(ck_path, "nuts", ck_fp) : nothing
     if ck !== nothing
         for (c, s) in enumerate(ck.chains)
@@ -475,7 +477,7 @@ function sample_nuts(
                               n_temps = warm_temps, n_walkers = warm_walkers,
                               n_steps = warm_steps, n_burnin = warm_burnin)
         else
-            isempty(circular_indices(params)) ||
+            isempty(seam_indices(params)) ||
                 _seam_pilot!(target, rand(rng, 1:typemax(Int32)))
             pts = Vector{Vector{Float64}}(undef, n_chains)
             for c in 1:n_chains
@@ -743,8 +745,9 @@ end
 
 What the chains of one run share for the seam re-cut: the layout (its circular
 windows), the target's `PackedTransforms` (`nothing` for a bounded target), the
-full-circle and cyclic-inclination positions, and the rendezvous of all the
-chains that adapt together.
+positions of every angle whose chart moves (`circ`, [`seam_indices`](@ref):
+full-circle and polar) and of the polar ones among them (`cinc`, which are also
+folded), and the rendezvous of all the chains that adapt together.
 """
 struct _HMCRecut
     params::Params
@@ -755,11 +758,10 @@ struct _HMCRecut
 end
 _HMCRecut(params::Params, transform, rv::_Rendezvous) =
     _HMCRecut(params, transform isa PackedTransforms ? transform : nothing,
-              circular_indices(params), cyclic_inclination_indices(params), rv)
+              seam_indices(params), cyclic_inclination_indices(params), rv)
 
 """Whether the target has an angle the re-cut handles."""
-_has_recut_angles(params::Params) =
-    !(isempty(circular_indices(params)) && isempty(cyclic_inclination_indices(params)))
+_has_recut_angles(params::Params) = !isempty(seam_indices(params))
 
 """
     _hmc_recut_marks(adaptor, n_warmup) -> (marks, ends)
@@ -803,8 +805,7 @@ function _HMCRecutChain(rc::_HMCRecut, adaptor, n_warmup::Int;
                         trace = nothing, recut_at::Int = 0, vote::Bool = true,
                         resync = nothing)
     marks, ends = _hmc_recut_marks(adaptor, n_warmup)
-    tr = trace === nothing ? [Float64[] for _ in 1:(length(rc.circ) + length(rc.cinc))] :
-         trace
+    tr = trace === nothing ? [Float64[] for _ in rc.circ] : trace
     return _HMCRecutChain(rc, marks, ends, isempty(marks) ? 0 : last(marks), tr,
                           recut_at, vote, resync)
 end
@@ -827,12 +828,8 @@ end
 """Record the re-cut angles of target-space position `θ` in the chain's trace."""
 function _hmc_trace!(cs::_HMCRecutChain, θ)
     rc = cs.rc
-    k = 0
-    for d in rc.circ
-        push!(cs.trace[k += 1], _hmc_bounded(θ, d, rc.transform))
-    end
-    for d in rc.cinc
-        push!(cs.trace[k += 1], _hmc_bounded(θ, d, rc.transform))
+    for (k, d) in enumerate(rc.circ)
+        push!(cs.trace[k], _hmc_bounded(θ, d, rc.transform))
     end
     return cs
 end
@@ -873,8 +870,8 @@ end
 Chain `c`'s re-cut after the adaptation step of boundary `i`: meet the other
 chains (`nothing` if the rendezvous was aborted, with nothing changed), then
 relabel `z`'s position into the moved windows and fold its cyclic
-inclinations, re-estimating the metric of every re-charted coordinate when `i`
-is a window end. Returns whether anything changed and the chain's new phase
+inclinations (into `[0, π]`, which every polar chart holds), re-estimating the
+metric of every re-charted coordinate when `i` is a window end. Returns whether anything changed and the chain's new phase
 point and Hamiltonian (`h` is rebuilt only if the metric changed, `z` only if
 the position or its chart did). Empties the trace.
 """
@@ -887,7 +884,7 @@ function _hmc_recut!(cs::_HMCRecutChain, i::Int, c::Int, z, h, adaptor)
         [first_phase ? cs.trace[k][(length(cs.trace[k]) ÷ 2 + 1):end] : cs.trace[k]
          for k in 1:nc] : nothing
     # Read before the meeting: the leader moves the windows and the transform.
-    x = Float64[_hmc_bounded(z.θ, d, pt) for d in vcat(rc.circ, rc.cinc)]
+    x = Float64[_hmc_bounded(z.θ, d, pt) for d in rc.circ]
     moved = _rendezvous!(ps -> _hmc_recut_windows!(rc, ps), rc.rv,
                          (; c, votes, cs.resync))
     moved === _RV_ABORTED && return nothing
@@ -896,16 +893,17 @@ function _hmc_recut!(cs::_HMCRecutChain, i::Int, c::Int, z, h, adaptor)
     # or chart changed.
     win = Dict(d => (lo, hi) for (d, lo, hi) in moved)
     changed = Tuple{Int,Int,Float64,Vector{Float64}}[]   # (k, d, x', trace')
-    for (k, d) in enumerate(vcat(rc.circ, rc.cinc))
-        if haskey(win, d)
+    for (k, d) in enumerate(rc.circ)
+        if d in rc.cinc
+            # Folded: [0, π] is inside every polar chart, moved or not.
+            xf = fold_inclination(x[k])
+            tf = Float64[fold_inclination(v) for v in cs.trace[k]]
+            (xf == x[k] && tf == cs.trace[k] && !haskey(win, d)) && continue
+            push!(changed, (k, d, xf, tf))
+        elseif haskey(win, d)
             lo, hi = win[d]
             push!(changed, (k, d, circular_relabel(x[k], lo, hi),
                             Float64[circular_relabel(v, lo, hi) for v in cs.trace[k]]))
-        elseif k > nc
-            xf = fold_inclination(x[k])
-            tf = Float64[fold_inclination(v) for v in cs.trace[k]]
-            (xf == x[k] && tf == cs.trace[k]) && continue
-            push!(changed, (k, d, xf, tf))
         end
     end
     any_change = !isempty(changed)

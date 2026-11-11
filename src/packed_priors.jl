@@ -19,8 +19,8 @@ const PACKED_BETA         = 4
 const PACKED_FIXED        = 5
 const PACKED_SINE         = 6  # p(x) = sin(x)/2 on [0, π]
 const PACKED_WRAPPED      = 7  # uniform on a circle, chart [lo, hi] (walled like UNIFORM)
-const PACKED_WRAPPED_SINE = 8  # |sin x|/4 on the chart [-π/2, 3π/2] (cyclic inclination)
-const PACKED_POLAR        = 9  # p(fold(x))/2 on [-π/2, 3π/2]; base tid in p3 (polar angle)
+const PACKED_WRAPPED_SINE = 8  # |sin x|/4 on a movable chart [lo, lo + 2π] (cyclic inclination)
+const PACKED_POLAR        = 9  # p(fold(x))/2 on a movable chart; base tid in p3 (polar angle)
 const PACKED_WRAPPED_NORMAL = 10 # wrapped Normal(p1, p2) truncated to [p3, p4], log mass p5
 const PACKED_WRAPPED_STEP = 11 # Uniform(p3, p4) wrapped onto one period
 
@@ -186,8 +186,8 @@ _beta_lognorm(a::Real, b::Real) =
                                      lo::Float64, hi::Float64,
                                      p3::Float64, p4::Float64, p5::Float64)
     # A polar angle (an inclination) on its circle: the base prior on [0, π]
-    # read at the fold of x, halved, on the chart [lo, hi] = [-π/2, 3π/2]
-    # (see `PolarFold`). `p5` is the base's log mass on [0, π] (a truncated
+    # read at the fold of x, halved, on its chart [lo, hi] = [lo, lo + 2π],
+    # which the samplers move (see `PolarFold`). `p5` is the base's log mass on [0, π] (a truncated
     # Normal's), so the lifted density is normalised.
     if tid == PACKED_POLAR
         lo <= x <= hi || return -Inf
@@ -213,8 +213,8 @@ end
                                    p1::Float64, p2::Float64,
                                    lo::Float64, hi::Float64)
     # The cyclic inclination: sin(i)/2 on [0, π] lifted to the circle, density
-    # |sin x|/4 on its chart [lo, hi] = [-π/2, 3π/2], where 0 and π are
-    # interior points. Zero outside the chart, which keeps the target proper
+    # |sin x|/4 on its chart [lo, hi] = [lo, lo + 2π], which the samplers
+    # move; 0 and π are interior points unless the seam sits on one. Zero outside the chart, which keeps the target proper
     # (see `WrappedSine`). Same Float64 arithmetic as `logpdf(::WrappedSine)`.
     if tid == PACKED_WRAPPED_SINE
         return lo <= x <= hi ? log(abs(sin(x))) - log(4.0) : -Inf

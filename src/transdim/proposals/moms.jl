@@ -81,8 +81,12 @@ function _moms_off_and_scale(prior::PriorSpec, init_scale::Float64,
     K = 101
     samples = Float64[]
     sizehint!(samples, K)
+    # A polar angle's draws are read on its first chart [-π/2, 3π/2], where
+    # the median is an inclination, not a pole a moved chart can put there.
+    polar = is_cyclic_inclination(prior)
     for _ in 1:K
         v = rand(rng, prior.dist)
+        polar && (v = circular_relabel(v, _WRAPPED_SINE_LO, _WRAPPED_SINE_HI))
         isfinite(v) && push!(samples, v)
     end
     isempty(samples) && return (0.0, init_scale)
@@ -96,6 +100,7 @@ function _moms_off_and_scale(prior::PriorSpec, init_scale::Float64,
     lo, hi = bounds(prior)
     width = isfinite(lo) && isfinite(hi) ? (hi - lo) : Inf
     scale = clamp(init_scale * iqr_stddev, 0.0, isfinite(width) ? width / 2 : Inf)
+    polar && (med = circular_relabel(med, lo, hi))
     return (med, scale)
 end
 

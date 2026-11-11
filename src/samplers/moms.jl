@@ -269,7 +269,7 @@ end
 # structs need not. The rest of the model, the data and the informed-birth
 # switches are in `run_fingerprint` itself (src/checkpoint.jl).
 function _moms_fingerprint(params::Params, data::Data, td::TransDimConfig; settings...)
-    return run_fingerprint(params, data; settings...,
+    return run_fingerprint(params, data; settings..., polar_chart_key(params)...,
         planets = td.planets, max_kplanet = td.max_kplanet, noise = td.noise,
         toggleable = content_hash(td.toggleable),
         transdim_fraction = td.transdim_fraction,
@@ -451,7 +451,8 @@ function _sample_moms_one(
             for (pos, shift) in sh, k in eachindex(strategy.slot_indices)
                 q = findfirst(==(pos), strategy.slot_indices[k])
                 q === nothing && continue
-                strategy.off_values[k][q] += shift
+                strategy.off_values[k][q] = moved_off_value(strategy.off_values[k][q],
+                                                            layout.unfrozen_priors[pos], shift)
             end
             if !isempty(sh)
                 log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
@@ -583,11 +584,14 @@ function _sample_moms_one(
             # seam and centre every blind birth on the emptiest arc of the
             # posterior. Birth and death read the same off-value and the
             # same bounds, so the kernel stays balanced; adapted here, in
-            # warmup, like the scales.
+            # warmup, like the scales. A polar angle's is relabelled instead
+            # (`moved_off_value`).
             for m in moved, k in eachindex(strategy.slot_indices)
                 q = findfirst(==(m.pos), strategy.slot_indices[k])
                 q === nothing && continue
-                strategy.off_values[k][q] += m.shift
+                strategy.off_values[k][q] = moved_off_value(strategy.off_values[k][q],
+                                                            params.layout.unfrozen_priors[m.pos],
+                                                            m.shift)
             end
             folded = _fold_polar_slots!(theta.values, params)
             # Same density in either chart; re-evaluated only so the

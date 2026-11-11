@@ -417,8 +417,9 @@ function sample_pt_whitening(
     # holds past positions of every rung, so relabel its filled slots for
     # each moved coordinate (slots 1:ring_count[t] -- the ring fills in
     # order before it wraps) and refresh that coordinate's (μ, σ). The other
-    # coordinates keep their statistics and their refresh cadence.
-    circ        = circular_indices(params)
+    # coordinates keep their statistics and their refresh cadence. Polar
+    # angles' charts move with the full-circle ones (`seam_indices`).
+    circ        = seam_indices(params)
     recut_moved = Dict{String,NTuple{2,Float64}}()
     function recut_whitening!()
         for d in _pt_ensemble_recut!(state, params, circ, (target.transform,),

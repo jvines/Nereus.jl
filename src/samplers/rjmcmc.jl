@@ -142,7 +142,8 @@ function sample_rjmcmc(
     ck = nothing
     if ck_path !== nothing
         ck_fp = run_fingerprint(target.params, data; n_warmup, seed, n_chains,
-                                within_model, noise_swap_rate, _td_fingerprint(td)...)
+                                within_model, noise_swap_rate, _td_fingerprint(td)...,
+                                polar_chart_key(target.params)...)
         saved = resume ? read_checkpoint(ck_path, "rjmcmc", ck_fp).chains::Vector{Any} :
                          Any[nothing for _ in 1:n_chains]
         for st in saved
@@ -1443,7 +1444,8 @@ function _record_circular_warmup!(tr::_CircularWarmupTrace, theta::Theta)
     td = theta.td
     @inbounds for g in eachindex(tr.groups), (j, (_, k)) in enumerate(tr.groups[g])
         if td !== nothing
-            k <= length(td.planet_active) && !td.planet_active[k] && continue
+            # Owner 0 is the star's (i★): always there.
+            1 <= k <= length(td.planet_active) && !td.planet_active[k] && continue
             tr.node[g][j] && !is_as_active(td, k) && continue
         end
         push!(tr.draws[g], Float64(theta.values[tr.slots[g][j]]))
