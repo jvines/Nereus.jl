@@ -389,22 +389,22 @@ function _ns_inner(target::NereusTarget, data::Data;
     end
     n_evals = init_u === nothing ? n_live : 0
 
+    # :unif draws its points from the bound, which must then cover the
+    # constrained region: bootstrap-expand it, as sample_nested does
+    # (`Bounds.bootstrap_expansion`). The walks take only their shape from it.
+    n_boot = proposal === :unif ? 5 : 0
     pointvol = 1.0 / n_live
     bound = try
-        NestedSamplers.Bounds.scale!(
-            NestedSamplers.Bounds.fit(BoundT, live_u; pointvol=pointvol),
-            enlarge)
+        NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     catch err
         err isa ArgumentError || rethrow(err)
         # Initial live points are too clustered for MultiEllipsoid
         # k-means (e.g. baseline-pass live points already convergence-
         # tight when passed to the batch pass). Fall back to a single
         # Ellipsoid for the starting bound.
-        NestedSamplers.Bounds.scale!(
-            NestedSamplers.Bounds.fit(
-                NestedSamplers.Bounds.Ellipsoid,
-                live_u; pointvol = pointvol),
-            enlarge)
+        NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     end
 
     dead_logL    = Float64[]
@@ -479,12 +479,20 @@ function _ns_inner(target::NereusTarget, data::Data;
                                   _scratch_L, _scratch_V,
                                   scratch_cur, scratch_prop, scratch_noise)
         else  # :unif
-            _rejection_within_bound!(rng, eval_loglike, n_dim,
+            u_r, l_r, bound = _rejection_within_bound!(rng, eval_loglike, n_dim,
                                       max(logL_worst, L_min), bound,
                                       log_V_cur,
-                                      _scratch_L, _scratch_V)
+                                      _scratch_L, _scratch_V;
+                                      refit = let pv = exp(log_X) / n_live
+                                          () -> _fit_ins_bound(rng, BoundT, live_u, pv,
+                                                               enlarge, n_boot)
+                                      end,
+                                      refit_every = round(Int, 1.5 * n_live))
+            (u_r, l_r)
         end
         n_evals += length(_scratch_V)
+        # stopping would return a truncated run's evidence (sample_nested_ins)
+        new_u === nothing && proposal === :unif && _rejection_failed(iter)
         new_u === nothing && break
         @inbounds for d in 1:n_dim
             live_u[d, idx_worst] = new_u[d]
@@ -502,18 +510,12 @@ function _ns_inner(target::NereusTarget, data::Data;
             # case — slightly less efficient bound geometry but never
             # fails.
             try
-                bound = NestedSamplers.Bounds.scale!(
-                    NestedSamplers.Bounds.fit(BoundT, live_u;
-                                               pointvol = exp(log_X) / n_live),
-                    enlarge)
+                bound = NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = exp(log_X) / n_live, enlarge = enlarge, bootstrap = n_boot)
             catch err
                 err isa ArgumentError || rethrow(err)
-                bound = NestedSamplers.Bounds.scale!(
-                    NestedSamplers.Bounds.fit(
-                        NestedSamplers.Bounds.Ellipsoid,
-                        live_u;
-                        pointvol = exp(log_X) / n_live),
-                    enlarge)
+                bound = NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = exp(log_X) / n_live, enlarge = enlarge, bootstrap = n_boot)
             end
         end
 

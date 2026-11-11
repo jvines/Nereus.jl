@@ -194,18 +194,21 @@ function sample_nested_ins(
 
     # Fit initial bound (with MultiEllipsoid fallback to single Ellipsoid
     # when k-means clustering fails on near-duplicate live points).
+    # :unif draws its points from the bound, which must then cover the
+    # constrained region, so the bound is bootstrap-expanded for it as in
+    # sample_nested (`Bounds.bootstrap_expansion`): fitted to the live points
+    # and enlarged by 1.25 in volume, a MultiEllipsoid missed 12-22% of the
+    # constrained region of an RM obliquity fit. The walks take only their
+    # shape from the bound.
+    n_boot = proposal === :unif ? 5 : 0
     pointvol = 1.0 / n_live
     bound = try
-        NestedSamplers.Bounds.scale!(
-            NestedSamplers.Bounds.fit(BoundT, live_u; pointvol=pointvol),
-            enlarge)
+        NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     catch err
         err isa ArgumentError || rethrow(err)
-        NestedSamplers.Bounds.scale!(
-            NestedSamplers.Bounds.fit(
-                NestedSamplers.Bounds.Ellipsoid,
-                live_u; pointvol = pointvol),
-            enlarge)
+        NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     end
 
     # INS accumulators (one entry per likelihood evaluation made during
@@ -290,11 +293,19 @@ function sample_nested_ins(
                                   ins_log_L, ins_log_V,
                                   scratch_cur, scratch_prop, scratch_noise)
         else  # :unif
-            _rejection_within_bound!(rng, eval_loglike, n_dim,
+            u_r, l_r, bound = _rejection_within_bound!(rng, eval_loglike, n_dim,
                                       logL_worst, bound, log_V_cur,
-                                      ins_log_L, ins_log_V)
+                                      ins_log_L, ins_log_V;
+                                      refit = let pv = exp(log_X) / n_live
+                                          () -> _fit_ins_bound(rng, BoundT, live_u, pv,
+                                                               enlarge, n_boot)
+                                      end,
+                                      refit_every = round(Int, 1.5 * n_live))
+            (u_r, l_r)
         end
         if new_u === nothing
+            # stopping would return a truncated run's evidence
+            proposal === :unif && _rejection_failed(iter)
             verbose && @warn "INS: no new candidate accepted at iter $iter; stopping"
             break
         end
@@ -318,16 +329,12 @@ function sample_nested_ins(
             _ns_recut!(live_u, (dead_u,), params; transforms = ns_tr)
             pv = exp(log_X) / n_live
             try
-                bound = NestedSamplers.Bounds.scale!(
-                    NestedSamplers.Bounds.fit(BoundT, live_u; pointvol=pv),
-                    enlarge)
+                bound = NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = pv, enlarge = enlarge, bootstrap = n_boot)
             catch err
                 err isa ArgumentError || rethrow(err)
-                bound = NestedSamplers.Bounds.scale!(
-                    NestedSamplers.Bounds.fit(
-                        NestedSamplers.Bounds.Ellipsoid,
-                        live_u; pointvol = pv),
-                    enlarge)
+                bound = NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = pv, enlarge = enlarge, bootstrap = n_boot)
             end
         end
 
@@ -725,23 +732,62 @@ function _rejection_within_bound!(rng::AbstractRNG,
                                    logL_worst::Float64, bound,
                                    log_V_cur::Float64,
                                    ins_log_L::Vector{Float64},
-                                   ins_log_V::Vector{Float64})
-    for _ in 1:10_000
+                                   ins_log_V::Vector{Float64};
+                                   refit = nothing, refit_every::Int = typemax(Int))
+    # A draw outside the cube costs no likelihood call, and the bootstrap-
+    # expanded bound can lie mostly outside the cube while the constrained
+    # region is still large, so those draws have a cap of their own. Each one
+    # still counts in the INS normalisation, with L = 0.
+    #
+    # `refit()` refits the bound every `refit_every` likelihood calls during
+    # the search, each refit with a fresh bootstrap expansion, as dynesty and
+    # sample_nested do (vendored `draw_uniform`): an expansion that came out
+    # far too large is otherwise drawn from until the caps run out. The bound
+    # the search ends on is returned with the point.
+    ncall = nout = since = 0
+    while ncall < 100_000 && nout < 1_000_000
+        if refit !== nothing && since ≥ refit_every
+            bound = refit()
+            log_V_cur = log(NestedSamplers.Bounds.volume(bound))
+            since = 0
+        end
         u_prop = rand(rng, bound)
         in_cube = all(0 <= u <= 1 for u in u_prop)
         if !in_cube
             push!(ins_log_L, -Inf)
             push!(ins_log_V, log_V_cur)
+            nout += 1
             continue
         end
+        ncall += 1
+        since += 1
         logL_prop = eval_loglike(u_prop)
         push!(ins_log_L, logL_prop)
         push!(ins_log_V, log_V_cur)
         if logL_prop > logL_worst
-            return (u_prop, logL_prop)
+            return (u_prop, logL_prop, bound)
         end
     end
-    return (nothing, -Inf)
+    return (nothing, -Inf, bound)
+end
+
+_rejection_failed(iter) =
+    error("no point from the bound reached the likelihood threshold at iteration " *
+          "$iter after 100 000 likelihood calls (proposal = :unif): ellipsoids that " *
+          "cover this constrained region are too loose for uniform draws, so use " *
+          ":rwalk or :slice")
+
+# The bound fitted to the live points; a single Ellipsoid when MultiEllipsoid's
+# k-means fails on near-duplicate points.
+function _fit_ins_bound(rng, BoundT, live_u, pointvol, enlarge, n_boot)
+    try
+        NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
+    catch err
+        err isa ArgumentError || rethrow(err)
+        NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
+    end
 end
 
 

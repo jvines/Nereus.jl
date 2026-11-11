@@ -133,13 +133,21 @@ end
     @testset "proposal interface (:rwalk / :slice / :unif)" begin
         target, data, _ = _make_rv_target(2027)
         for prop in (:rwalk, :slice, :unif)
+            # :unif's bounds must cover the constrained region; on this
+            # multimodal target with 40 live points they grow so loose that
+            # by iteration 177 a point needs over 100 000 calls, and the run
+            # stops with an error. Its interface is all this checks.
             res = sample_nested_ins(target, data;
                 n_live = 40, proposal = prop, dlogz = 2.0,
-                max_iter = 2000, seed = 1)
+                max_iter = prop === :unif ? 150 : 2000, seed = 1)
             @test res isa INSResult
             @test isfinite(res.log_z_ns)
             @test isfinite(res.log_z_ins) == (prop === :unif)
         end
+        # Past that point the run stops with an error. It used to stop
+        # quietly and return the truncated run's evidence and posterior.
+        @test_throws ErrorException sample_nested_ins(target, data;
+            n_live = 40, proposal = :unif, dlogz = 2.0, max_iter = 2000, seed = 1)
         @test_throws ArgumentError sample_nested_ins(target, data;
             n_live = 40, proposal = :banana, seed = 1)
     end
