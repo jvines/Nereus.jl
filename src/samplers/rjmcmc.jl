@@ -549,10 +549,20 @@ end
 """
     _prior_widths(layout) -> Vector{Float64}
 
-Precompute a natural scale for each unfrozen parameter from its prior.
-For log-uniform priors, use a fraction of the log-range (perturbation
-in log-space). For bounded priors, use a fraction of the width.
-This gives sensible initial perturbation magnitudes before adaptation.
+Precompute a natural scale for each unfrozen parameter from its prior: the
+slice sampler's stepping-out width (fixed for the run, so it must not be far
+too small: stepping out grows the bracket by one width at a time, 32 at
+most) and the RWM's starting σ. For bounded priors, the width of the support.
+For a prior flat in `log(x + s)` (`log_scale_shift`: s = 0 for LogUniform, the
+knee for ModJeffreys), a tenth of the geometric mean of `lo + s` and `hi + s`.
+
+A ModJeffreys starts at 0, and its geometric mean used to be taken without
+the knee, of `max(lo, 1e-10)` and `hi`: 1.4e-5 for the default K prior
+ModJeffreys(100, 200). A slice step that size moves K by ~1e-4 per
+iteration, so K stayed at its initial draw (sd 0.008 m/s over 8000
+iterations on an RM fit) and the jitter grew to absorb the orbit it left
+unfitted. Every ModJeffreys parameter (K, astrometric and photometric
+jitters) was frozen the same way in rjmcmc, moms and pt.
 """
 function _prior_widths(layout::ParamsLayout)
     n = length(layout.unfrozen_idx)
@@ -566,10 +576,9 @@ function _prior_widths(layout::ParamsLayout)
         if !isfinite(w) || w ≤ 0
             widths[i] = 1.0
         elseif tid == PACKED_LOGUNIFORM || tid == PACKED_MODJEFFREYS
-            # Log-scale priors: perturb proportional to current value
-            # Use geometric mean of bounds as reference scale
-            mid = sqrt(max(lo, 1e-10) * hi)
-            widths[i] = mid * 0.1  # ~10% of geometric mean
+            s = something(log_scale_shift(layout.unfrozen_priors[i]), 0.0)
+            mid = sqrt(max(lo + s, 1e-10) * (hi + s))
+            widths[i] = mid * 0.1  # ~10% of the geometric mean on its log scale
         else
             widths[i] = w
         end
