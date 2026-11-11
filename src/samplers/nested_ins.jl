@@ -87,7 +87,8 @@ machinery use the same draws.
   times the NS error. An explicit value is honored verbatim.
 - `walk_scale::Real=1.0` — initial proposal scale: for `:rwalk` the step in
   units of the bounding ellipsoid's axes, adapted between chains toward 50 %
-  acceptance and fixed within each; for `:slice` the initial bracket, in units of an ellipsoid axis vector.
+  acceptance and fixed within each; for `:slice` the initial bracket, in
+  units of an ellipsoid axis vector.
 - `proposal::Symbol=:rwalk` — within-shell move: `:rwalk` (random walk),
   `:slice` (random-direction slice), or `:unif` (rejection; low-d only).
   These are Nereus's own kernels: every likelihood call they make is

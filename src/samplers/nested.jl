@@ -33,11 +33,14 @@ The target must use `unconstrained=false` (bounded space).
   `:unif` (uniform draws from the bound). `:unif` is for low dimension only:
   its bounds are expanded as dynesty expands them (bootstrap) until they
   cover the constrained region, and on a curved posterior in more than a few
-  dimensions they get so loose that a new point takes more than 100 000
-  likelihood calls, when the run stops with an error. It does on 7- and
-  10-parameter RV and RM fits; on a 2-parameter gravity-darkening fit it
-  matches pt_emcee. Before the expansion its bounds missed 12–22% of an RM
-  fit's constrained region and log Z came out 2 nats high.
+  dimensions they get so loose that a new point can take more than 100 000
+  likelihood calls, when the run stops with an error. On a 10-parameter RM
+  fit four runs of six stopped so, after 17–24 minutes; the two that
+  finished were 0.33 and 0.10 above pt_emcee's log Z. On a 7-parameter RV
+  fit three of three finished (+0.18 on average, 4–25 minutes each; `:rslice`
+  takes 2), and on a 2-parameter gravity-darkening fit it matches pt_emcee.
+  Before the expansion its bounds missed 12–22% of an RM fit's constrained
+  region and log Z came out 2 nats high.
   DEFAULT IS `:rslice`, NOT `:rwalk`. RWalk takes isotropic steps scaled
   by a single scalar inside the bounding ellipsoid; on the correlated RV
   ridges it cannot traverse the correlation, its acceptance collapses, the
@@ -52,7 +55,7 @@ The target must use `unconstrained=false` (bounded space).
   restarted from the live point it copied, fixed since. With the fix and its
   default chain, `:rwalk`'s posterior and log Z match pt_emcee's on RM
   obliquity and gravity-darkening fits; on an eccentric RV fit its log Z is
-  0.25 high, against `:rslice`'s 0.06.)
+  0.18 high, against `:rslice`'s 0.06.)
 - `walk_scale::Real=1.0` — initial proposal scale for the walk / slice
   kernels (passed to NestedSamplers as `scale`).
 - `n_walks::Union{Int,Nothing}=nothing` — walk steps per replacement for
