@@ -40,12 +40,33 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         @test pc.time === :phic && isnan(pc.t_ref_c)
         @test ParametrizationConfig(time = :phic, t_ref_c = 5.0).t_ref_c == 5.0
         @test isnan(ParametrizationConfig().t_ref_c)
-        # The default anchor: the transit phase, except under the O'Neil prior,
-        # whose density is over one fixed period of Tp (which Mo spans).
-        @test ParametrizationConfig().time === :phic
+        # No anchor given: `:auto`, unresolved until a Params is built. It
+        # resolves to the anchor the priors name, else the transit phase, except
+        # under the O'Neil prior, whose density is over one fixed period of Tp
+        # (which Mo spans).
+        @test ParametrizationConfig().time === :auto
+        @test ParametrizationConfig(time = nothing).time === :auto
+        @test ParametrizationConfig(obs_prior = true).time === :auto
         @test Nereus.default_time_anchor() === :phic
-        @test ParametrizationConfig(obs_prior = true).time === :Mo
-        @test ParametrizationConfig(obs_prior = true, time = :phic).time === :phic
+        @test Nereus.default_time_anchor(obs_prior = true) === :Mo
+        res(pc, pr) = Nereus.resolve_time_anchor(pc, pr).time
+        moD = Dict{String, PriorSpec}("Mo_k1" => UniformPrior(0.0, 2π))
+        @test res(ParametrizationConfig(), nothing) === :phic
+        @test res(ParametrizationConfig(), Dict{String, PriorSpec}()) === :phic
+        @test res(ParametrizationConfig(obs_prior = true), nothing) === :Mo
+        @test res(ParametrizationConfig(mass = :M_sec_driven), moD) === :Mo
+        @test res(ParametrizationConfig(obs_prior = true),
+                  Dict{String, PriorSpec}("Tp_k1" => UniformPrior(0.0, 1.0))) === :Tp
+        # An explicit anchor is kept, whatever the priors name.
+        @test res(ParametrizationConfig(time = :Tc), moD) === :Tc
+        @test res(ParametrizationConfig(obs_prior = true, time = :phic), nothing) === :phic
+        # The rest of the configuration is carried over unchanged.
+        pcr = Nereus.resolve_time_anchor(ParametrizationConfig(ew = :esinw, geom = :r1r2,
+                  mass = :M_sec_driven, marginalize_gamma = true, t_ref_c = 3.0), moD)
+        @test (pcr.ew, pcr.geom, pcr.mass, pcr.marginalize_gamma, pcr.t_ref_c) ==
+              (:esinw, :r1r2, :M_sec_driven, true, 3.0)
+        @test_throws ArgumentError Nereus.resolve_time_anchor(ParametrizationConfig(),
+            merge(moD, Dict{String, PriorSpec}("phic_k2" => UniformPrior(-π, π))))
         for t in (:Mo, :Tp, :Tc)
             @test ParametrizationConfig(time = t).time === t
         end
@@ -132,13 +153,41 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         @test_throws ArgumentError Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
             instruments = InstrumentConfig(rv = ["HARPS"]),
             priors = merge(moP, Dict{String, PriorSpec}("Tc_k1" => UniformPrior(0.0, 1.0))))
-        # An explicit parametrization without `time` is the default anchor; a
-        # prior left on Mo is then named as another anchor's, not as a typo.
+        # An explicit parametrization that gives no `time` resolves the same
+        # way: the anchor the priors name ...
+        drv = Data(; t_rv = t_rv, rv = data.rv, rv_err = data.rv_err)
+        mkP(pc, pr) = Params(; max_kplanet = 1, planet_modes = [RV_ONLY], data = drv,
+                               instruments = InstrumentConfig(rv = ["HARPS"]),
+                               parametrization = pc, priors = pr)
+        pM = mkP(ParametrizationConfig(mass = :K_driven, ew = :sesinw), moP)
+        @test pM.config.parametrization.time === :Mo && "Mo_k1" in pM.layout.unfrozen_names
+        @test mkP(ParametrizationConfig(mass = :M_sec_driven), moP).config.parametrization.time === :Mo
+        # ... else the default, and the O'Neil fallback under obs_prior.
+        @test mkP(ParametrizationConfig(mass = :K_driven), nothing).config.parametrization.time === :phic
+        @test Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+                       instruments = InstrumentConfig(rv = ["HARPS"]),
+                       parametrization = ParametrizationConfig(obs_prior = true)
+                      ).config.parametrization.time === :Mo
+        # Two anchors in the priors throw here too.
+        @test_throws ArgumentError mkP(ParametrizationConfig(mass = :K_driven),
+            merge(moP, Dict{String, PriorSpec}("Tc_k1" => UniformPrior(0.0, 1.0))))
+        # The Params holds the anchor sampled, never :auto, so the checkpoint
+        # fingerprint and equality see what was sampled: `:auto` that resolved
+        # to Mo is the same model as an explicit Mo, and not a phic one.
+        pE = mkP(ParametrizationConfig(mass = :K_driven, time = :Mo), moP)
+        @test pM.config.parametrization === pE.config.parametrization
+        @test Nereus.content_hash(pM.config) == Nereus.content_hash(pE.config)
+        @test isequal(Nereus.run_fingerprint(pM, drv), Nereus.run_fingerprint(pE, drv))
+        pA = mkP(ParametrizationConfig(), nothing)
+        pφE = mkP(ParametrizationConfig(time = :phic), nothing)
+        @test pA.config.parametrization.time === :phic
+        @test pA.config.parametrization === pφE.config.parametrization
+        @test isequal(Nereus.run_fingerprint(pA, drv), Nereus.run_fingerprint(pφE, drv))
+        @test Nereus.content_hash(pA.config) != Nereus.content_hash(pM.config)
+        # An explicit anchor with a prior left on another: named as another
+        # anchor's, not as a typo.
         msg = try
-            Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
-                     data = Data(; t_rv = t_rv, rv = data.rv, rv_err = data.rv_err),
-                     instruments = InstrumentConfig(rv = ["HARPS"]),
-                     parametrization = ParametrizationConfig(ew = :sesinw), priors = moP)
+            mkP(ParametrizationConfig(time = :phic), moP)
             ""
         catch err
             sprint(showerror, err)

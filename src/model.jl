@@ -575,14 +575,18 @@ combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
 # =====================================================================
 
 """
-    ParametrizationConfig(; ew=:sesinw, time=:phic, geom=:b_rr, use_rho_s=false,
+    ParametrizationConfig(; ew=:sesinw, time=:auto, geom=:b_rr, use_rho_s=false,
                             mass=:K_driven, t_ref_c=NaN)
 
 Choices for how orbital parameters are parametrized in the sampler.
 
 # Fields
 - `ew::Symbol`        : one of `:sesinw`, `:esinw`, `:ew`
-- `time::Symbol`      : one of `:phic` (the default), `:Mo`, `:Tp`, `:Tc`.
+- `time::Symbol`      : one of `:phic`, `:Mo`, `:Tp`, `:Tc`, or `:auto` (the
+                         default), which `Params` resolves when it is built
+                         (`resolve_time_anchor`): the anchor the priors name
+                         (an `Mo_k1` prior → `:Mo`), else `:phic`. A `Params`
+                         never holds `:auto`.
                          `:phic` samples the transit phase
                          φ_c = 2π (Tc − t_ref_c) / P, Tc on a circle: one
                          period wide at every P, and pinned by the transit like
@@ -593,8 +597,8 @@ Choices for how orbital parameters are parametrized in the sampler.
                          ridge the samplers mix along badly, biasing e. For
                          fixed (P, e, ω) the map Mo → φ_c is a shift, so a
                          uniform φ_c is the same prior as a uniform Mo.
-                         With `obs_prior = true` the default is `:Mo` (see
-                         `obs_prior`).
+                         With `obs_prior = true` `:auto` resolves to `:Mo`
+                         (see `obs_prior`).
 - `obs_prior::Bool`   : the O'Neil (2019) observation-based prior for
                          relative astrometry. It is a density in
                          (P, e, Tp) over ONE fixed period of Tp (orbitize!'s
@@ -602,7 +606,7 @@ Choices for how orbital parameters are parametrized in the sampler.
                          such a window, Tp ∈ (t_ref − P, t_ref]; the `:phic`
                          window in Tp moves with (e, ω), which would reweight
                          the prior by ω. So when `time` is not given and
-                         `obs_prior` is on, `time` is `:Mo`.
+                         `obs_prior` is on, the anchor is `:Mo`.
 - `t_ref_c::Float64`  : the epoch φ_c is measured from. `NaN` (the default)
                          is filled in by `Params` from the data: the median
                          photometric time, else `data.t_ref` (see
@@ -662,18 +666,18 @@ struct ParametrizationConfig
 end
 
 function ParametrizationConfig(; ew::Symbol=:sesinw,
-                                time::Union{Symbol,Nothing}=nothing,
+                                time::Union{Symbol,Nothing}=:auto,
                                 geom::Symbol=:b_rr, use_rho_s::Bool=false,
                                 mass::Symbol=:K_driven,
                                 obs_prior::Bool=false,
                                 marginalize_gamma::Bool=false,
                                 sample_a_Rs::Bool=false,
                                 t_ref_c::Real=NaN)
-    time === nothing && (time = default_time_anchor(; obs_prior))
+    time === nothing && (time = :auto)
     ew in (:sesinw, :esinw, :ew) ||
         throw(ArgumentError("ew must be :sesinw, :esinw, or :ew; got :$ew"))
-    time in (:Mo, :Tp, :Tc, :phic) ||
-        throw(ArgumentError("time must be :Mo, :Tp, :Tc or :phic; got :$time"))
+    time in (:Mo, :Tp, :Tc, :phic, :auto) ||
+        throw(ArgumentError("time must be :Mo, :Tp, :Tc, :phic or :auto; got :$time"))
     (isnan(t_ref_c) || isfinite(t_ref_c)) ||
         throw(ArgumentError("t_ref_c must be finite, or NaN to take it from the data"))
     geom in (:b_rr, :r1r2) ||
@@ -690,10 +694,10 @@ end
 """
     default_time_anchor(; obs_prior=false) -> Symbol
 
-The time anchor a fit gets when none is given: `:phic`, the transit phase,
-except `:Mo` under the O'Neil `obs_prior`. `ParametrizationConfig`,
-`build_target`, the `fit_*` functions and run_job all take it from here.
-See `ParametrizationConfig` for why.
+The time anchor a fit gets when none is given and its priors name none:
+`:phic`, the transit phase, except `:Mo` under the O'Neil `obs_prior`.
+`resolve_time_anchor` (so `Params`, run_job and the `fit_*` functions) and
+`build_target` all take it from here. See `ParametrizationConfig` for why.
 """
 default_time_anchor(; obs_prior::Bool = false) = obs_prior ? :Mo : :phic
 
@@ -731,6 +735,25 @@ photometry it is `data.t_ref`.
 """
 phic_reference_epoch(data) =
     isempty(data.t_phot) ? Float64(data.t_ref) : Float64(median(data.t_phot))
+
+"""
+    resolve_time_anchor(pc, priors) -> ParametrizationConfig
+
+`pc` with `time = :auto` replaced by the anchor the model samples: the one
+`priors` name (`time_anchor_named`; two different ones throw), else
+`default_time_anchor(; obs_prior = pc.obs_prior)`. An explicit anchor is kept
+as given. `Params` calls it before anything else, so a `Params` -- and the
+checkpoint fingerprint and equality built from it -- holds the anchor actually
+sampled, never `:auto`.
+"""
+function resolve_time_anchor(pc::ParametrizationConfig, priors)
+    pc.time === :auto || return pc
+    named = priors === nothing ? nothing : time_anchor_named(keys(priors))
+    time = named === nothing ? default_time_anchor(; obs_prior = pc.obs_prior) : named
+    return ParametrizationConfig(pc.ew, time, pc.geom, pc.use_rho_s, pc.mass,
+                                 pc.obs_prior, pc.marginalize_gamma,
+                                 pc.sample_a_Rs, pc.t_ref_c)
+end
 
 # The same parametrization with the φ_c epoch filled in.
 function _with_t_ref_c(pc::ParametrizationConfig, t_ref_c::Real)

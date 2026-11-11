@@ -34,9 +34,10 @@
 #   * `parametrization.mass`  — `:a_driven` if `a` declared, else
 #                               `:M_sec_driven` if `M_sec` declared without
 #                               `K`, else `:K_driven`
-#   * `parametrization.time`  — the anchor the first planet declares (`Tc`,
-#                               `phic`, `Tp`, `Mo`), else `time_anchor`'s
-#                               default, the transit phase `:phic`
+#   * `parametrization.time`  — `time_anchor`, else the anchor the first
+#                               planet declares (`Tc`, `phic`, `Tp`, `Mo`),
+#                               else the one the other planets or `priors`
+#                               name, else the transit phase `:phic`
 #   * `instruments.rv_names`  — keys of `rv` NamedTuple in order
 #   * per-key namespacing     — planet params get `_kN`, instrument
 #                               params get `_NAME`
@@ -183,9 +184,10 @@ function build_target(;
                                              require_mass = has_rv) :
                 parametrization
 
-    # Auto-detect time anchor from the first planet's declared params, then
-    # from the names in `priors` (`time_anchor_named`); with none declared, the
-    # default (`default_time_anchor`: the transit phase).
+    # Auto-detect time anchor from the first planet's declared params; with
+    # none declared there, `:auto`, which Params resolves from the names in the
+    # priors (the planet blocks' and the user's, `resolve_time_anchor`), else
+    # the default (`default_time_anchor`: the transit phase).
     time_kind = if time_anchor !== nothing
         time_anchor
     else
@@ -196,9 +198,7 @@ function build_target(;
         elseif  :Tp in ks; :Tp
         elseif  :Mo in ks; :Mo
         else
-            # none in the block: the anchor the priors name, else the default
-            named = priors === nothing ? nothing : time_anchor_named(keys(priors))
-            named === nothing ? default_time_anchor() : named
+            :auto
         end
     end
 

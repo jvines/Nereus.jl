@@ -1233,19 +1233,17 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     pm = [_PLANET_MODES[m] for m in modes_str]
 
     par = _get(mdl, :parametrization; default = Dict())
-    # `time`, when absent, is ParametrizationConfig's default, as in build_target
-    # and fit_*: the transit phase phic (`default_time_anchor`). It was Tp here
-    # once, whose default prior spans the whole baseline and so holds
-    # baseline/P copies of the orbit; the ensemble cannot mix across them (see
-    # `_warn_repeating_time_window`), and a default job on an easy 12.3 d
+    # `time`, when absent, is ParametrizationConfig's default `:auto`, as in
+    # build_target and fit_*: Params resolves it to the anchor the priors name
+    # (`Mo_k1`, ...), else the transit phase phic (`default_time_anchor`). It
+    # was Tp here once, whose default prior spans the whole baseline and so
+    # holds baseline/P copies of the orbit; the ensemble cannot mix across them
+    # (see `_warn_repeating_time_window`), and a default job on an easy 12.3 d
     # target never converged. Then Mo, whose low-e ridge with ω biased e.
-    # A config whose priors name an anchor (`Mo_k1`, ...) and no `time` samples
-    # that anchor, as build_target does with a planet block's names.
     time_str = _get(par, :time; default = nothing)
     parametrization = ParametrizationConfig(
         mass = _MASS_MODE[String(_get(par, :mass; default = "K_driven"))],
-        time = time_str !== nothing ? _TIME_ANCHOR[String(time_str)] :
-               time_anchor_named(String.(keys(_get(cfg, :priors; default = Dict())))),
+        time = time_str === nothing ? :auto : _TIME_ANCHOR[String(time_str)],
         ew   = _EW_PARAM[String(_get(par, :ew; default = "sesinw"))],
         geom = _GEOM_PARAM[String(_get(par, :geom; default = "b_rr"))],
         marginalize_gamma = Bool(_get(par, :marginalize_gamma; default = false)),

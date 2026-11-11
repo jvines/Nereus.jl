@@ -771,7 +771,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
     @testset "ParametrizationConfig" begin
         pc = ParametrizationConfig()
         @test pc.ew === :sesinw
-        @test pc.time === :phic          # the transit phase; Mo before
+        @test pc.time === :auto          # resolved by Params: the transit phase unless the priors name another (Mo before)
         @test pc.geom === :b_rr
         @test pc.use_rho_s == false
 
