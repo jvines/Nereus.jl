@@ -88,11 +88,11 @@ standard error √(H / n_live) (Skilling 2006; H the information).
   covariance (two independent live points are `2d` apart), up to
   `40 × n_mcmc` steps; fixed for each walk. `0` walks `n_mcmc` steps. A walk
   of 25 steps, one coordinate at a time at a fixed 1/50 of its prior width,
-  left the replacements close to their donors: on an RV + IAD companion log Z
-  spread over 150-169 across 8 seeds (nested INS 163.6-164.6), and 25 steps
-  of the covariance-shaped walk put it at 155 with i = 89.5°, against 163.9
-  at 16 (163.5-164.3 over three seeds; 32 and 64 give the same) and bridge
-  sampling's 163.9.
+  left the replacements close to their donors: on an RV + IAD companion with
+  i = 5° log Z spread over 150-169 across 8 seeds, where bridge sampling gives
+  165.5 (now 165.6-166.0 over four). With i = 89.5°, 25 steps of the
+  covariance-shaped walk put it at 155, against 163.9 at 16 (163.5-164.3 over
+  three seeds; 32 and 64 give the same) and bridge sampling's 163.9.
 - `init_scale::Float64 = 1.0` — initial MoMS proposal scale (× IQR-stddev).
 - `inclusion_prior::Float64 = 0.5` — Bernoulli prior on each γ_k at init,
   also used as the spike-and-slab γ-prior in the corrected log-prior so
@@ -415,17 +415,15 @@ function _daedalus_init_point(target::NereusTarget, data::Data,
     end
     theta = Theta{Float64}(params; td = td_state)
 
+    # Every coordinate a prior draw, γ included: nested sampling's volumes
+    # count from live points drawn from the prior. γ used to be set to each
+    # instrument's median RV (`_seed_gammas_from_data!`, as the MCMC samplers
+    # start their chains): every live point then had the same γ, the live
+    # points' covariance none in γ, and the replacement walks left γ where it
+    # was until about a quarter of the run had gone (RV + IAD companion,
+    # i = 5°). The evidence counted the prior's γ volume as if the data's γ
+    # filled it.
     _init_systemics_from_prior!(theta, rng)
-
-    # Override γ values with per-instrument median(rv_i). The default
-    # init_systemics draws γ from broad priors — for multi-instrument
-    # data those random γ are far from the right zero-points and dominate
-    # the residual chi², which forces the constrained log_L threshold
-    # to absorb large γ swings before the chain can ever consider planet
-    # signals. Seeding γ at the per-instrument median puts each live
-    # point on a sane starting calibration; the MCMC still walks γ
-    # afterwards if the data prefers something different.
-    _seed_gammas_from_data!(theta, data)
 
     # All planets start inactive (β at off-value). We then attempt to
     # activate each planet independently with probability inclusion_prior.
@@ -699,7 +697,10 @@ end
 # there are enough of them (d + 2) and it factorises; otherwise a diagonal of
 # each slot's sd over the live points where it is active, or, with fewer than
 # two of those (or no `live`), 1/50 of its prior width, the fixed step this
-# kernel used to take one coordinate at a time.
+# kernel used to take one coordinate at a time. A slot whose live points share
+# one value (to rounding) takes that 1/50 step too: its covariance factorised
+# with a pivot of ~1e-16 and froze the slot (γ, when the live points all
+# started at the data's).
 function _daedalus_proposal(theta::Theta, live::Union{Nothing,Vector{DaedalusPoint}})
     params = theta.params
     layout = params.layout
@@ -714,14 +715,19 @@ function _daedalus_proposal(theta::Theta, live::Union{Nothing,Vector{DaedalusPoi
     live === nothing && return (act = act, pos = pos, L = LowerTriangular(Matrix(Diagonal(sd))))
     same = [q for q in live if q.planet_active == theta.td.planet_active &&
                                q.noise_active == theta.td.noise_active]
+    spread(s, m, k) = s > 1e-12 * (abs(m) + sd[k])
     if length(same) >= d + 2
         X = [q.values[a] for q in same, a in act]
-        F = cholesky(Symmetric(cov(X)); check = false)
-        issuccess(F) && all(>(0), diag(F.L)) && return (act = act, pos = pos, L = F.L)
+        C = cov(X)
+        m = vec(mean(X; dims = 1))
+        if all(k -> spread(sqrt(max(C[k, k], 0.0)), m[k], k), 1:d)
+            F = cholesky(Symmetric(C); check = false)
+            issuccess(F) && all(>(0), diag(F.L)) && return (act = act, pos = pos, L = F.L)
+        end
     end
     for k in 1:d
         v = Float64[q.values[act[k]] for q in live if _slot_active(q, act[k], params)]
-        length(v) >= 2 && std(v) > 0 && (sd[k] = std(v))
+        length(v) >= 2 && spread(std(v), mean(v), k) && (sd[k] = std(v))
     end
     return (act = act, pos = pos, L = LowerTriangular(Matrix(Diagonal(sd))))
 end

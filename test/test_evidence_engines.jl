@@ -2,9 +2,11 @@
 # Hipparcos-IAD companion:
 #
 # - Daedalus replaced a dead point by a short walk that stayed by its donor
-#   (log Z over 150-169 across 8 seeds where nested INS gives 163.6-164.6). The
-#   walk now moves every coordinate at once, shaped by the live points, at a
-#   scale adapted between walks, for as many steps as decorrelate it.
+#   (log Z over 150-169 across 8 seeds at i = 5°, where bridge sampling gives
+#   165.5), and its live points all started at the data's γ. The walk now moves
+#   every coordinate at once, shaped by the live points, at a scale adapted
+#   between walks, for as many steps as decorrelate it, and the live points
+#   start from the prior.
 # - pt_hmc's quadratic ladder from β = 0 left the integrand's climb through
 #   four decades to one segment (TI+ at -5 and -624 where log Z is 164). Its
 #   ladder is now β = 0 and a geometric run from beta_min, the tempered value
@@ -108,6 +110,10 @@ end
     live = [Nereus._daedalus_init_point(tg, data, strategy, td, 0.5, MersenneTwister(k))
             for k in 1:120]
     d = length(params.layout.unfrozen_idx)
+    # The live points start as prior draws, γ included: it was the data's median
+    # RV at every one of them, which the walks then could not move.
+    g = [p.values[params.layout.name_to_idx["gamma_X"]] for p in live]
+    @test allunique(g)
     # No constraint (L_thr = -Inf): the constrained prior is the prior, and the
     # live points are draws from it. The walk's scale and length adapt over 40
     # walks as in sample_daedalus, then 150 walks from one donor must spread
