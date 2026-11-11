@@ -45,9 +45,9 @@ function _theta_from_chain_row(chains, params, idx::Int;
 end
 
 """
-    _chain_cols(chains, params) -> Vector{Tuple{String,Vector{Float64}}}
+    _chain_cols(chains, params) -> Vector{Tuple{String, <:AbstractVector{Float64}}}
 
-Every unfrozen parameter's flat column, materialised ONCE.
+Every unfrozen parameter's flat column, looked up ONCE.
 
 `chains[sym]` is an AxisArray view, so `_draws(chains, sym)` COPIES the whole
 column. Doing that inside `_theta_from_chain_row` — which is called once per
@@ -59,16 +59,17 @@ getting there.
 
 Hoist it beside `tdc` and pass both when calling in a loop. The default argument
 keeps a bare single-row call working exactly as before.
+
+The columns are views into the chain (`_draws_view`), not copies. Copied, every
+call materialised the whole chain to read the rows it uses: through the default
+argument above, `_theta_best_lp` copied every column of a joint fit to read ONE
+row (23 columns x 5.8M draws = 1 GB), and `plot_orbit_skyplane` did the same
+with no fan to draw.
 """
 function _chain_cols(chains, params)
     chain_names = Set(names(chains, :parameters))
-    cols = Tuple{String,Vector{Float64}}[]
-    for name in params.layout.unfrozen_names
-        sym = Symbol(name)
-        sym in chain_names || continue
-        push!(cols, (name, _draws(chains, sym)))
-    end
-    return cols
+    return [(name, _draws_view(chains, Symbol(name)))
+            for name in params.layout.unfrozen_names if Symbol(name) in chain_names]
 end
 
 """
@@ -88,7 +89,7 @@ function _theta_median(chains, params; active_idx = nothing)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in chain_names || continue
-        vals = _draws(chains, sym)
+        vals = _draws_view(chains, sym)
         if active_idx !== nothing
             vals = vals[active_idx]
         end
@@ -105,10 +106,16 @@ The draw with the highest finite `:lp` among `idxs` (all draws when
 """
 function _best_lp_row(chains, idxs = nothing)
     (:lp in Set(names(chains, :parameters))) || return nothing
-    lp = _draws(chains, :lp)
-    cand = filter(i -> isfinite(lp[i]), idxs === nothing ? (1:length(lp)) : idxs)
-    isempty(cand) && return nothing
-    return cand[argmax(@view lp[cand])]
+    lp = _draws_view(chains, :lp)
+    # The first maximum, as `argmax` over the finite candidates picked it, without
+    # copying the column or collecting the candidates.
+    best = nothing
+    for i in (idxs === nothing ? (1:length(lp)) : idxs)
+        v = lp[i]
+        isfinite(v) || continue
+        (best === nothing || isless(lp[best], v)) && (best = i)
+    end
+    return best
 end
 
 """

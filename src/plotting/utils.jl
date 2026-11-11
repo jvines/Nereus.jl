@@ -284,7 +284,7 @@ flattened `Symbol => Vector` dict the PPC/LOO code works on), or `nothing`
 for a fixed-dimension chain (no `n_planets`, no `planet_active_<k>`).
 """
 _td_cols(chains, params) =
-    _td_cols_from(Set(names(chains, :parameters)), s -> _draws(chains, s), params)
+    _td_cols_from(Set(names(chains, :parameters)), s -> _draws_view(chains, s), params)
 _td_cols(flat::AbstractDict{Symbol}, params) =
     _td_cols_from(Set(keys(flat)), s -> flat[s], params)
 
@@ -442,7 +442,7 @@ function winning_td_state(chains, params, active_idx,
     for nm_idx in 1:n_noise
         col = Symbol("noise_active_$nm_idx")
         if col in chain_names
-            noise_samp = _draws(chains, col)[active_idx]
+            noise_samp = _draws_view(chains, col)[active_idx]
             isempty(noise_samp) && continue
             if count(noise_samp .== 1.0) / length(noise_samp) > 0.5
                 td_state.noise_active[nm_idx] = true
@@ -496,7 +496,7 @@ function winning_config_idx(chains, params, active_idx, td_state)
         col in chain_names || continue          # always-on model → no constraint
         matched_any = true
         want = td_state.noise_active[nm_idx] ? 1.0 : 0.0
-        samp = _draws(chains, col)[active_idx]
+        samp = _draws_view(chains, col)[active_idx]
         @. keep &= (samp == want)
     end
     matched_any || return active_idx
@@ -852,12 +852,17 @@ function _top_lp_draw_pool(chains; bf_cutoff::Real=10.0)
     n_flat = _n_flat_draws(chains)
     chain_names = Set(names(chains, :parameters))
     (:lp in chain_names) || return collect(1:n_flat)
-    lp = _draws(chains, :lp)
-    finite_mask = isfinite.(lp)
-    any(finite_mask) || return collect(1:n_flat)
-    lp_max = maximum(lp[finite_mask])
+    lp = _draws_view(chains, :lp)          # read in place: no copy of the column
+    lp_max = -Inf
+    any_finite = false
+    for v in lp
+        isfinite(v) || continue
+        any_finite = true
+        v > lp_max && (lp_max = v)
+    end
+    any_finite || return collect(1:n_flat)
     threshold = lp_max - log(bf_cutoff)
-    pool = findall(i -> finite_mask[i] && lp[i] >= threshold, 1:n_flat)
+    pool = findall(v -> isfinite(v) && v >= threshold, lp)
     return isempty(pool) ? collect(1:n_flat) : pool
 end
 
@@ -1134,7 +1139,7 @@ function set_theta_best_lp!(theta, chains, params, active_idx)
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            set_param!(theta, name, _draws(chains, sym)[ibest])
+            set_param!(theta, name, _draws_view(chains, sym)[ibest])
         end
         tdc = _td_cols(chains, params)
         tdc === nothing || (theta.td = _row_td_state(tdc, params, ibest))
@@ -1142,7 +1147,7 @@ function set_theta_best_lp!(theta, chains, params, active_idx)
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            set_param!(theta, name, median(_draws(chains, sym)[active_idx]))
+            set_param!(theta, name, median(_draws_view(chains, sym)[active_idx]))
         end
         # No `:lp` (rjmcmc, MoMS, daedalus, trans-dim PT): the medians stand
         # for these draws, and so must their modal live slots -- the caller's

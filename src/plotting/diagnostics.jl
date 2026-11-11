@@ -1,6 +1,6 @@
 # Diagnostic plots: trace, posteriors, histograms, corner.
 
-using Statistics: mean, std, median, quantile
+using Statistics: mean, std, median, median!, quantile, quantile!
 using Distributions: fit, Normal
 using PairPlots                 # top-level load avoids world-age in plot_corner
 using PairPlots: pairplot       # pull the entry-point into local scope
@@ -35,7 +35,7 @@ function plot_trace(chains, params;
             sym = Symbol(name)
             sym in chain_names || continue
 
-            samp_arr = Array(chains[sym])  # (n_iter, n_chain) or (n_iter,)
+            samp_arr = _iter_chain_view(chains, sym)   # (n_iter, n_chain), in place
             fig = Figure(; size=figsize)
             ax = Axis(fig[1, 1];
                         xlabel="Iteration", ylabel=name)
@@ -119,9 +119,11 @@ function plot_histograms(chains, params;
                     color=NEREUS_COLORS.post, linewidth=3)
 
             # Stats text box
-            med = median(samp)
-            q16 = quantile(samp, 0.16)
-            q84 = quantile(samp, 0.84)
+            # One scratch copy for the three order statistics, not one each.
+            buf = copy(samp)
+            med = median!(buf)
+            q16, q84 = quantile!(buf, [0.16, 0.84])
+            buf = nothing
             stats_text = "median = $(round(med; digits=4))\n" *
                          "+$(round(q84 - med; digits=4))\n" *
                          "-$(round(med - q16; digits=4))"
@@ -187,15 +189,18 @@ function plot_posteriors(chains, params;
             return
         end
 
-        lp_all = _draws(chains, :lp)
-        lp_max = maximum(lp_all[isfinite.(lp_all)])
+        lp_all = _draws_view(chains, :lp)     # in place: only the kept draws are copied
+        lp_max = -Inf
+        for v in lp_all
+            isfinite(v) && v > lp_max && (lp_max = v)
+        end
         keep = 1:cld(length(lp_all), max_points):length(lp_all)
         lp = lp_all[keep]
 
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            samp = _draws(chains, sym)[keep]
+            samp = _draws_view(chains, sym)[keep]   # the kept draws only
 
             # Full posterior
             fig = Figure(; size=figsize)
@@ -267,9 +272,12 @@ objects after `pairplot` returns produces a byte-identical PNG.
 # A corner panel's limits from the full sample: its finite extrema padded 5%, as
 # Makie's autolimits pad. No limits (`(;)`) for a constant or empty column.
 function _corner_lims(x::AbstractVector)
-    f = filter(isfinite, x)
-    isempty(f) && return (;)
-    lo, hi = extrema(f)
+    lo, hi = Inf, -Inf                      # finite extrema, without a filtered copy
+    for v in x
+        isfinite(v) || continue
+        v < lo && (lo = v)
+        v > hi && (hi = v)
+    end
     hi > lo || return (;)
     pad = 0.05 * (hi - lo)
     return (; lims = (; low = lo - pad, high = hi + pad))
@@ -302,7 +310,11 @@ function plot_corner(chains, params;
         # straight from the column names. (The `labels=Vector{String}`
         # kwarg form was deprecated; current API wants Dict{Symbol,…} —
         # avoid the issue entirely by going through a named column source.)
-        cols = [_draws(chains, Symbol(name)) for name in pnames]
+        # Each column is read in place (`_draws_view`): only the thinned draws
+        # are copied, and the limits come from the full column without a copy of
+        # it. Copied whole, the columns were the chain over again -- 1 GB for a
+        # 23-parameter, 5.8M-draw fit -- held for the whole figure.
+        cols = [_draws_view(chains, Symbol(name)) for name in pnames]
         n_draws = isempty(cols) ? 0 : length(first(cols))
         keep = 1:max(1, cld(n_draws, max_draws)):n_draws     # every k-th draw
         data_nt = NamedTuple{Tuple(Symbol.(pnames))}(Tuple(c[keep] for c in cols))
