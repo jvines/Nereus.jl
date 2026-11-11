@@ -295,8 +295,7 @@ pushforward evaluated on the circle), so its density does not change.
 The caller must then move every stored value of the parameter into the new
 window with [`circular_relabel`](@ref) -- hot rungs, ring buffers, cached
 proposals -- before the next log-density evaluation, or those values sit
-outside the support. An `EnzymeGradientConfig` built before the move snapshots
-the old bounds and must be rebuilt.
+outside the support.
 """
 function set_circular_window!(params::Params, i::Int, lo::Real; transforms = ())
     L = params.layout
@@ -1059,8 +1058,8 @@ end
 """
     _Rendezvous(n)
 
-A meeting point for `n` chains. See [`_rendezvous!`](@ref) and
-[`_rendezvous_leave!`](@ref).
+A meeting point for `n` chains. See [`_rendezvous!`](@ref),
+[`_rendezvous_leave!`](@ref) and [`_rendezvous_abort!`](@ref).
 """
 mutable struct _Rendezvous
     cond::Threads.Condition
@@ -1070,9 +1069,14 @@ mutable struct _Rendezvous
     f::Any                    # this round's leader function
     result::Any
     err::Any
+    aborted::Bool             # no round runs any more (`_rendezvous_abort!`)
 end
 _Rendezvous(n::Integer) = _Rendezvous(Threads.Condition(), Int(n), Any[], 0,
-                                      nothing, nothing, nothing)
+                                      nothing, nothing, nothing, false)
+
+"""What `_rendezvous!` returns once the rendezvous has been aborted."""
+struct _RendezvousAborted end
+const _RV_ABORTED = _RendezvousAborted()
 
 # Run the round: the leader function over every arrival's payload, its result
 # (or error) left for all of them. Called with the lock held.
@@ -1096,20 +1100,23 @@ Arrive at the rendezvous with `payload`. The last chain to arrive calls
 `f(payloads)` (one payload per arrival, in arrival order) while the others
 wait; every chain then returns `f`'s result, or rethrows its error. `f` may
 touch only the payloads and what the chains share, never the caller's locals:
-whichever chain arrives last runs it.
+whichever chain arrives last runs it. Once the rendezvous is aborted no round runs:
+every chain waiting, or arriving later, gets `_RV_ABORTED` instead.
 """
 function _rendezvous!(f, rv::_Rendezvous, payload)
     lock(rv.cond)
     try
+        rv.aborted && return _RV_ABORTED
         push!(rv.payloads, payload)
         rv.f = f
         g = rv.gen
         if length(rv.payloads) >= rv.n
             _rendezvous_run!(rv)
         else
-            while rv.gen == g
+            while rv.gen == g && !rv.aborted
                 wait(rv.cond)
             end
+            rv.gen == g && return _RV_ABORTED
         end
         rv.err === nothing || throw(rv.err)
         return rv.result
@@ -1129,6 +1136,26 @@ function _rendezvous_leave!(rv::_Rendezvous)
     try
         rv.n -= 1
         !isempty(rv.payloads) && length(rv.payloads) >= rv.n && _rendezvous_run!(rv)
+    finally
+        unlock(rv.cond)
+    end
+    return nothing
+end
+
+"""
+    _rendezvous_abort!(rv)
+
+A chain stops taking part, and no round may run without it: the round in
+progress and every later one end with `_RV_ABORTED` for the chains that wait at
+them. For a re-cut that must pool every chain or none (`_hmc_recut!`), where a
+round of the others alone would move the windows differently from the run that
+waits for all of them.
+"""
+function _rendezvous_abort!(rv::_Rendezvous)
+    lock(rv.cond)
+    try
+        rv.aborted = true
+        notify(rv.cond)
     finally
         unlock(rv.cond)
     end
