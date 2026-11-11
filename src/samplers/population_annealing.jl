@@ -23,9 +23,11 @@
 #
 # This implementation:
 # - **Replicas live in BOUNDED space** (same as pt_emcee).
-# - **Adaptive β schedule** — pick the next β so the effective sample
-#   size (ESS) drops to ess_target × N. Avoids the "schedule tuning"
-#   problem of static schedules.
+# - **Adaptive β schedule** — pick the next β so the conditional ESS
+#   (Zhou, Johansen & Aston 2016) of the reweighting is ess_target × N, and
+#   resample only when the ESS of the accumulated weights falls below
+#   resample_ess × N. Avoids the "schedule tuning" problem of static
+#   schedules, and the clones of resampling at every step.
 # - **MCMC mutation** = simple Gaussian RWM with prior-scale step;
 #   independent per replica → fully threaded (Threads.@threads :static).
 # - **Systematic resampling** — low-variance, deterministic given the
@@ -50,9 +52,11 @@ Container for a `sample_pa` run.
 - `log_evidence::Float64` — accumulated log Z (unbiased estimator).
 - `log_evidence_history::Vector{Float64}` — per-step log dZ contributions.
 - `beta_history::Vector{Float64}` — adaptive β schedule that the run produced.
-- `ess_history::Vector{Float64}` — ESS / N at each step (target ~ess_target).
+- `ess_history::Vector{Float64}` — ESS / N of the weights at each step, after
+  the reweighting and before any resampling.
 - `acceptance::Float64` — mean MCMC mutation acceptance rate.
 - `n_evals::Int` — total likelihood evaluations.
+- `resampled::Vector{Bool}` — whether each step resampled.
 """
 struct PAResult
     chains::MCMCChains.Chains
@@ -62,6 +66,7 @@ struct PAResult
     ess_history::Vector{Float64}
     acceptance::Float64
     n_evals::Int
+    resampled::Vector{Bool}
 end
 
 """
@@ -76,7 +81,10 @@ Population Annealing sequential MC sampler.
   sweeps and then keeps sweeping until the population has decorrelated, so a
   small `n_mcmc` is no longer the magic constant that decides whether the
   sampler mixes.
-- `ess_target::Float64=0.9` — adaptive β picks each step so ESS / N = this. This
+- `ess_target::Float64=0.9` — adaptive β picks each step so the conditional ESS
+  of its reweighting (Zhou, Johansen & Aston 2016, the ESS of the incremental
+  weights under the current ones; the plain ESS when those are equal) is this
+  fraction of N. This
   is the SMC *temperature-crawl* target: a HIGH value (0.9) makes β advance in
   many small increments so the population re-equilibrates between resamplings.
   The previous default 0.5 advanced β in ~10–15 giant jumps; the mutation
@@ -90,6 +98,11 @@ Population Annealing sequential MC sampler.
   mutation needs the slack.
 - `max_steps::Int=200` — hard cap on annealing steps (with `ess_target=0.9` a
   typical RV fit takes 30–70 steps, well under the cap).
+- `resample_ess::Float64=0.5` — resample when the ESS of the accumulated
+  weights falls below this fraction of N, and at β = 1. Between resamplings the
+  replicas carry their weights, and every step mutates them. Resampling at every
+  step (as this sampler did) cloned the population ~50 times on the way to
+  β = 1.
 - `mcmc_target_moves::Float64=5.0` — adaptive-mutation target: keep running
   mutation sweeps at the current β until each replica has, in expectation,
   accumulated this many ACCEPTED moves (cumulative acceptance-rate × sweeps ≥
@@ -134,6 +147,7 @@ function sample_pa(
     stretch_a::Real = 2.0,
     mcmc_target_moves::Real = 5.0,
     max_mcmc_mult::Int = 12,
+    resample_ess::Real = 0.5,
     seed::Int = 1,
     show_progress::Bool = true,
 )
@@ -143,6 +157,7 @@ function sample_pa(
     step_scale = Float64(step_scale)
     stretch_a  = Float64(stretch_a)
     mcmc_target_moves = Float64(mcmc_target_moves)
+    resample_ess = Float64(resample_ess)
     mutation_kernel in (:stretch, :rwm, :adaptive_cov) || throw(ArgumentError(
         "mutation_kernel must be :stretch (default), :rwm, or :adaptive_cov; " *
         "got :$mutation_kernel"))
@@ -246,6 +261,9 @@ function sample_pa(
     β_history     = Float64[0.0]
     ess_history   = Float64[]
     accept_history = Float64[]
+    resampled     = Bool[]
+    # Normalised log-weights of the replicas, carried between resamplings.
+    log_Wt = fill(-log(n_replicas), n_replicas)
 
     pb = ProgressBar("PA"; total = max_steps, enabled = show_progress)
     step = 0
@@ -253,18 +271,19 @@ function sample_pa(
     while β_cur < 1.0 && step < max_steps
         step += 1
 
-        # ---- 1. Adaptive β: bisect to ESS/N = ess_target -----------
-        # Effective sample size at proposed β_new given current logL:
-        #   ESS = (Σ wᵢ)² / Σ wᵢ²
-        # where wᵢ = exp((β_new − β_cur) · logL_i). We bisect Δβ ∈
-        # [0, 1−β_cur] to land ESS/N at ess_target. Closed-form
-        # logsumexp keeps everything numerically stable.
+        # ---- 1. Adaptive β: bisect to CESS/N = ess_target ----------
+        # Conditional ESS of the incremental weights wᵢ = exp(Δβ · logL_i)
+        # under the current normalised weights Wᵢ (Zhou, Johansen & Aston
+        # 2016, JCGS 25, 701):
+        #   CESS = N (Σ Wᵢ wᵢ)² / Σ Wᵢ wᵢ²
+        # — the ESS of the reweighting itself, whatever the weights already
+        # carried; with equal Wᵢ it is the plain ESS. We bisect Δβ ∈
+        # [0, 1−β_cur] to land CESS/N at ess_target, in logsumexp form.
         function ess_at(Δβ::Float64)
-            log_w = Δβ .* logL
-            m = maximum(log_w)
-            sum_w  = sum(exp.(log_w .- m))
-            sum_w2 = sum(exp.(2 .* (log_w .- m)))
-            return sum_w^2 / sum_w2 / n_replicas
+            a = log_Wt .+ Δβ .* logL
+            b = log_Wt .+ 2Δβ .* logL
+            ma, mb = maximum(a), maximum(b)
+            return exp(2 * (ma + log(sum(exp.(a .- ma)))) - (mb + log(sum(exp.(b .- mb)))))
         end
         lo, hi = 0.0, 1.0 - β_cur
         # The last step allowed goes to β = 1 whatever its ESS. Stopping short
@@ -285,60 +304,72 @@ function sample_pa(
         end
         Δβ = max(Δβ, 1e-6)  # ensure forward progress
         β_new = min(β_cur + Δβ, 1.0)
+        Δβ = β_new - β_cur
+        cess = ess_at(Δβ)
 
-        # ---- 2. Compute weights + log incremental Z ----------------
-        log_w = Δβ .* logL
-        m_log_w = maximum(log_w)
-        sum_w = sum(exp.(log_w .- m_log_w))
-        log_dZ = m_log_w + log(sum_w / n_replicas)
+        # ---- 2. Reweight + log incremental Z ------------------------
+        # log dZ = log Σ Wᵢ wᵢ: the ratio Z(β_new)/Z(β_cur) estimated from
+        # the weighted population.
+        log_a = log_Wt .+ Δβ .* logL
+        m_a = maximum(log_a)
+        lse = m_a + log(sum(exp.(log_a .- m_a)))
+        log_dZ = lse
         log_z_total += log_dZ
         push!(log_z_history, log_dZ)
         push!(β_history, β_new)
 
-        # Normalized weights (in log space → exp + renormalize)
-        log_W = log_w .- m_log_w .- log(sum_w)
-        W = exp.(log_W)
+        log_Wt = log_a .- lse
+        W = exp.(log_Wt)
         ess_norm = 1.0 / sum(W .^ 2) / n_replicas
         push!(ess_history, ess_norm)
-        forced && ess_norm < ess_target &&
+        forced && cess < ess_target &&
             @warn "sample_pa: max_steps = $max_steps reached at β = " *
                   "$(round(β_cur; sigdigits = 3)); the last step went to β = 1 " *
-                  "with ESS/N = $(round(ess_norm; sigdigits = 2)) (target " *
+                  "with a conditional ESS/N of $(round(cess; sigdigits = 2)) (target " *
                   "$ess_target), so the posterior is resampled from few replicas " *
                   "and the log-evidence's last increment is noisy. Raise " *
                   "max_steps (sample_smc: pass more betas)."
 
-        # ---- 3. Systematic resampling ------------------------------
+        # ---- 3. Systematic resampling, when the weights call for it --
         # Low-variance resampling: divide [0, 1) into N equal bins,
         # offset by u/N where u ~ U(0, 1), and select replicas whose
         # CDF interval the bin lands in. Preserves more diversity
-        # than multinomial.
-        cdf = cumsum(W)
-        u0 = rand(rng_master) / n_replicas
-        indices = Vector{Int}(undef, n_replicas)
-        j = 1
-        @inbounds for k in 1:n_replicas
-            u = u0 + (k - 1) / n_replicas
-            while j < n_replicas && cdf[j] < u
-                j += 1
+        # than multinomial. At β = 1 always (unless the weights are
+        # already equal), so the returned population is equally weighted;
+        # the mutation below then decorrelates its clones.
+        do_resample = ess_norm < resample_ess ||
+                      (β_new >= 1.0 && ess_norm < 1 - 1e-12)
+        push!(resampled, do_resample)
+        if do_resample
+            cdf = cumsum(W)
+            u0 = rand(rng_master) / n_replicas
+            indices = Vector{Int}(undef, n_replicas)
+            j = 1
+            @inbounds for k in 1:n_replicas
+                u = u0 + (k - 1) / n_replicas
+                while j < n_replicas && cdf[j] < u
+                    j += 1
+                end
+                indices[k] = j
             end
-            indices[k] = j
-        end
 
-        new_replicas = Matrix{Float64}(undef, n_replicas, n_dim)
-        new_logL = Vector{Float64}(undef, n_replicas)
-        new_logπ = Vector{Float64}(undef, n_replicas)
-        @inbounds for k in 1:n_replicas
-            src = indices[k]
-            for d in 1:n_dim
-                new_replicas[k, d] = replicas[src, d]
+            new_replicas = Matrix{Float64}(undef, n_replicas, n_dim)
+            new_logL = Vector{Float64}(undef, n_replicas)
+            new_logπ = Vector{Float64}(undef, n_replicas)
+            @inbounds for k in 1:n_replicas
+                src = indices[k]
+                for d in 1:n_dim
+                    new_replicas[k, d] = replicas[src, d]
+                end
+                new_logL[k] = logL[src]
+                new_logπ[k] = logπ[src]
             end
-            new_logL[k] = logL[src]
-            new_logπ[k] = logπ[src]
+            replicas = new_replicas
+            logL     = new_logL
+            logπ     = new_logπ
+            fill!(log_Wt, -log(n_replicas))
+            W = exp.(log_Wt)
         end
-        replicas = new_replicas
-        logL     = new_logL
-        logπ     = new_logπ
 
         # ---- 3b. Re-cut the angles' charts on the resampled population --
         # The mutation kernels move replicas within each full-circle angle's
@@ -395,10 +426,10 @@ function sample_pa(
         # Two-half ensemble bookkeeping (stretch only).
         half = n_replicas ÷ 2
 
-        # adaptive_cov: refit Cholesky factor from the current (resampled)
+        # adaptive_cov: refit Cholesky factor from the current (weighted)
         # population ONCE per β step (ridge-regularized for near-singular Σ).
         if mutation_kernel === :adaptive_cov
-            Σ_emp = cov(replicas)               # n_dim × n_dim
+            Σ_emp = _pa_weighted_cov(replicas, W)   # n_dim × n_dim
             @inbounds for d in 1:n_dim
                 Σ_emp[d, d] += cov_ridge        # diagonal ridge
             end
@@ -567,6 +598,15 @@ function sample_pa(
     mean_acc = isempty(accept_history) ? 0.0 : sum(accept_history) / length(accept_history)
     return PAResult(
         chains, log_z_total, log_z_history, β_history, ess_history,
-        mean_acc, n_evals[]
+        mean_acc, n_evals[], resampled
     )
+end
+
+# Covariance of the rows of `X` under the normalised weights `W` (the
+# unbiased reliability-weights form; `cov(X)` when they are equal).
+function _pa_weighted_cov(X::AbstractMatrix{Float64}, W::AbstractVector{Float64})
+    μ = vec(sum(W .* X; dims = 1))
+    Xc = X .- μ'
+    Σ = (Xc .* W)' * Xc
+    return Σ ./ max(1 - sum(abs2, W), eps())
 end
