@@ -327,6 +327,21 @@ function sample_pa(
         logL     = new_logL
         logπ     = new_logπ
 
+        # ---- 3b. Re-cut the angles' charts on the resampled population --
+        # The mutation kernels move replicas within each full-circle angle's
+        # one-period window, walled at its seam: a mode across the seam would be
+        # two pieces that no stretch, random-walk or covariance move carries a
+        # replica between, and whose 2π split wrecks the adaptive covariance.
+        # Every β step the seam is moved to the emptiest arc of the population,
+        # polar angles folded and the spin put in one representative
+        # (`recut_walkers!`, as in pt_emcee's burn-in). The density is periodic,
+        # so a relabel by whole periods (or a fold) leaves each replica's cached
+        # log-prior and log-likelihood as they were (to rounding) and the
+        # importance weights untouched: the population still targets π_β.
+        let X = permutedims(replicas)
+            recut_walkers!(X, params, nothing) && permutedims!(replicas, X, (2, 1))
+        end
+
         # ---- 4. MCMC mutation at β_new (ADAPTIVE sweep count) ----
         # The resampling step in (3) duplicates high-weight replicas and
         # kills the rest, so immediately after a resample the population is
