@@ -437,6 +437,20 @@ function PairPlots.bodyplot(ax::Makie.Axis, viz::_CornerContour, series,
 end
 
 
+# A corner panel's limits from the full sample: its finite extrema padded 5%, as
+# Makie's autolimits pad. No limits (`(;)`) for a constant or empty column.
+function _corner_lims(x::AbstractVector)
+    lo, hi = Inf, -Inf                      # finite extrema, without a filtered copy
+    for v in x
+        isfinite(v) || continue
+        v < lo && (lo = v)
+        v > hi && (hi = v)
+    end
+    hi > lo || return (;)
+    pad = 0.05 * (hi - lo)
+    return (; lims = (; low = lo - pad, high = hi + pad))
+end
+
 """
     plot_corner(chains, params;
                  output=nothing, fmt=:png,
@@ -475,20 +489,6 @@ moved with the thinned extrema (now pinned, as above). `rasterize` is not the fi
 either — `PairPlots.Scatter` drops the keyword, and setting it on the plot
 objects after `pairplot` returns produces a byte-identical PNG.
 """
-# A corner panel's limits from the full sample: its finite extrema padded 5%, as
-# Makie's autolimits pad. No limits (`(;)`) for a constant or empty column.
-function _corner_lims(x::AbstractVector)
-    lo, hi = Inf, -Inf                      # finite extrema, without a filtered copy
-    for v in x
-        isfinite(v) || continue
-        v < lo && (lo = v)
-        v > hi && (hi = v)
-    end
-    hi > lo || return (;)
-    pad = 0.05 * (hi - lo)
-    return (; lims = (; low = lo - pad, high = hi + pad))
-end
-
 function plot_corner(chains, params;
                       output::Union{Nothing, String}=nothing,
                       fmt::Symbol=:png,
