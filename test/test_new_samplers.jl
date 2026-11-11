@@ -210,6 +210,39 @@ end
 # =====================================================================
 
 @testset "sample_nested_dynamic" begin
+    @testset "the merged run counts every pass's live points" begin
+        # Passes simulated in the prior volume X, where live points are
+        # uniform: log L = -X / 0.01, log Z = log(0.01 (1 - e^-100)). The
+        # baseline has 100 live points from the prior; the batch, 400 uniform
+        # below X = 0.1, stops at X = 0.02, short of most of the posterior.
+        # The merge counted only the baseline's live points above the
+        # batch's window, among them the batch's 400 last points, and log Z
+        # came out 0.58 low over 1000 runs, against +0.013 now (one run's
+        # error 0.16).
+        logL(X) = -X / 0.01
+        lz_true = log(0.01 * (1 - exp(-100)))
+        function pass(rng, n, X0, L_stop)
+            X = X0 .* rand(rng, n); dl = Float64[]; dn = Int[]
+            while true
+                i = argmax(X)
+                logL(X[i]) >= L_stop && break
+                push!(dl, logL(X[i])); push!(dn, n); X[i] *= rand(rng)
+            end
+            for (j, x) in enumerate(sort(X; rev = true))
+                push!(dl, logL(x)); push!(dn, n - j + 1)
+            end
+            m = length(dl)
+            Nereus._NSPassResult(dl, zeros(m), [[x] for x in dl], dn, 0.0, m, m)
+        end
+        rng = MersenneTwister(1)
+        zs = map(1:300) do _
+            base = pass(rng, 100, 1.0, logL(1e-4))
+            batch = pass(rng, 400, 0.1, logL(0.02))
+            Nereus._merge_passes(base, batch, logL(0.1))[4] - lz_true
+        end
+        @test abs(mean(zs)) < 0.06          # 6 standard errors
+    end
+
     @testset "two-pass run completes and returns combined log Z" begin
         target, data, _ = _make_rv_target(2027)
         # n_live_init bumped from 30 → 80: NestedSamplers main (the
@@ -231,13 +264,11 @@ end
         @test res.n_iters_batch > 0
         @test res.n_evals > 0
         @test isfinite(res.target_L_lo)
-        @test isfinite(res.target_L_hi)
-        # Importance window bounds are documented as `[L_lo, L_hi]` but
-        # can come out unordered at very small budgets (n_live_init=30
-        # + dlogz=2.0 + max_iter=1200) where the baseline NS exits with
-        # only a handful of dead points; the index lookup is then noisy.
-        # In production budgets (n_live_init ≥ 200, max_iter ≥ 10k) the
-        # ordering is well-behaved. We don't enforce it here.
+        # The window is two of the baseline's points in likelihood order, or
+        # L_hi = Inf when it reaches the last, as here: the baseline's live
+        # points at its loose stop (dlogz 2) hold most of the posterior, and
+        # the batch then runs to its own dlogz.
+        @test res.target_L_hi > res.target_L_lo
         @test :K_k1 in names(res.chains, :parameters)
         @test size(res.chains, 1) > 0
     end
