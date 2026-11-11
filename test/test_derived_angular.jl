@@ -158,11 +158,15 @@ end
     K_of(m, M, P, e) = cbrt(m^3 / (M + m)^2 /
                             (Nereus._F_M_FACTOR * P * (1 - e^2)^1.5))
 
+    # The M_p << M closed form, which Nereus no longer contains: kept here only
+    # to size the error the exact inversion removes. In M_sun.
+    lowmass(M, K, P, e) = cbrt(Nereus.mass_function(K, P, e) * M^2)
+
     @testset "brown dwarf about an M dwarf: the closed form is ~9% off" begin
         M, m, P, e = 0.5, 0.08, 400.0, 0.2
         K = K_of(m, M, P, e)
         @test msini(M, K, P, e) / MS_MJ ≈ m rtol = 1e-10
-        @test abs(Nereus._msini_lowmass(M, K, P, e) / MS_MJ - m) / m > 0.09
+        @test abs(lowmass(M, K, P, e) - m) / m > 0.09
         # at an inclination the true mass is the same inversion at sin i
         inc = 40.0
         @test planet_mass(M, K, P, e, 90.0) ≈ msini(M, K, P, e) rtol = 1e-12
@@ -175,7 +179,7 @@ end
         M, m, P, e = 1.0, 9.5e-4, 4332.0, 0.05
         K = K_of(m, M, P, e)
         @test msini(M, K, P, e) / MS_MJ ≈ m rtol = 1e-10
-        @test abs(msini(M, K, P, e) / Nereus._msini_lowmass(M, K, P, e) - 1) < 1e-3
+        @test abs(msini(M, K, P, e) / MS_MJ / lowmass(M, K, P, e) - 1) < 1e-3
         @test abs(semimajor_axis_au(P, M, m) / semimajor_axis_au(P, M) - 1) < 1e-3
     end
 

@@ -767,9 +767,6 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
     a_Rs = Vector{Float64}(undef, n_transit)
     transits = Vector{Bool}(undef, n_transit)
 
-    use_rho = parametrization.use_rho_s
-    rho_val = use_rho ? rho_s(theta) : 0.0
-
     j = 0
     for k in p_idx_list
         block = theta.params.layout.planet_blocks[k]
@@ -796,22 +793,8 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
             rrs[j] = rr_raw
         end
 
-        if (ai = a_Rs_slot(theta, k)) > 0
-            a_Rs[j] = theta.values[ai]
-        elseif use_rho
-            a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
-        else
-            M_s = theta.params.config.M_s
-            R_s = theta.params.config.R_s
-            if !isnan(M_s) && !isnan(R_s) && R_s > 0
-                P_s = Ps[j] * 86400.0
-                GM = GM_SUN_CGS * M_s
-                a_cm = cbrt(GM * P_s^2 / (4 * π^2))
-                a_Rs[j] = a_cm / (R_s * R_SUN_CM)
-            else
-                return fill(NaN, n_grid)
-            end
-        end
+        a_Rs[j] = planet_a_Rs(theta, k, Ps[j])   # M_star + M_p; see `planet_geometry`
+        isnan(a_Rs[j]) && return fill(NaN, n_grid)
 
         transits[j] = bs[j] < 1 + rrs[j]
     end
