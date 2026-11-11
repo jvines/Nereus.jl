@@ -288,6 +288,16 @@ end
         @test res.n_evals > 0
         @test res.chains isa MCMCChains.Chains
     end
+
+    # Four steps do not anneal this target at ESS/N = 0.9. The fourth goes to
+    # β = 1 anyway, with a warning: stopping short returned the tempered
+    # population as the posterior.
+    @testset "the last step reaches β = 1" begin
+        res = @test_logs (:warn, r"max_steps = 4 reached") match_mode = :any sample_smc(target, data;
+            betas = [0.0, 0.25, 0.5, 0.75, 1.0], n_replicas = 30, n_mcmc = 2, seed = 1)
+        @test res.beta_history[end] == 1.0
+        @test length(res.beta_history) == 5
+    end
 end
 
 
