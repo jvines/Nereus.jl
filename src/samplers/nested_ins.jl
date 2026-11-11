@@ -77,13 +77,17 @@ machinery use the same draws.
 - `dlogz::Real=0.5` — stopping when log(Z_remaining/Z_done) < dlogz.
 - `max_iter::Int=50_000`
 - `bound_update_interval::Int=50` — refit ellipsoid every N iterations.
-- `n_walks::Union{Int,Nothing}=nothing` — Metropolis steps per replacement
-  (`:rwalk`) or slice sweeps (`:slice`). `nothing` → dimension-scaled
-  `max(25, 2·n_dim)` (a fixed count under-decorrelates as n_dim grows → logZ
-  biased low). Explicit value honored verbatim.
+- `n_walks::Union{Int,Nothing}=nothing` — walk steps (`:rwalk`) or slices
+  (`:slice`, each along a random direction through the bound's ellipsoid
+  axes) per replacement.
+  `nothing` → `max(25, 5·n_dim)` for `:rwalk` and `max(25, 2·n_dim)` for
+  `:slice`. Too few leave each new point near the live point its chain
+  started from: with `max(25, 2·n_dim)` the walk's log Z on an RM obliquity
+  fit scattered between seeds from 1.5 below pt_emcee's to 1.1 above, four
+  times the NS error. An explicit value is honored verbatim.
 - `walk_scale::Real=1.0` — initial proposal scale: for `:rwalk` the step in
   units of the bounding ellipsoid's axes, adapted between chains toward 50 %
-  acceptance and fixed within each; for `:slice` the initial slice width.
+  acceptance and fixed within each; for `:slice` the initial bracket, in units of an ellipsoid axis vector.
 - `proposal::Symbol=:rwalk` — within-shell move: `:rwalk` (random walk),
   `:slice` (random-direction slice), or `:unif` (rejection; low-d only).
   These are Nereus's own kernels: every likelihood call they make is
@@ -128,11 +132,15 @@ function sample_nested_ins(
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
-    # Dimension-scaled within-shell decorrelation: a fixed step count is
-    # dimension-blind and under-decorrelates as n_dim grows → logZ biased low
-    # (PolyChord `num_repeats ∝ nDims`). `nothing` → max(25, 2·n_dim); an
-    # explicit value is honored verbatim. See sample_nested / project_ns_rslice_undermixing.
-    n_walks = n_walks === nothing ? max(25, 2 * n_dim) : n_walks
+    # Steps per replacement, chosen as sample_nested's are (the decorrelation
+    # note there): the smallest multiple of n_dim whose log Z, averaged over
+    # six seeds, came within the NS error (0.17-0.25) of pt_emcee's on all
+    # four test fits, the mean known to better than that error. At 2·n_dim
+    # the walk's mean passed (-0.17, +0.16, +0.16, +0.02), but its runs
+    # scattered by 0.95 nats on the RM fit at 0°, so the mean was known only
+    # to 0.39; at 5·n_dim they scatter by 0.3, as the slice's do at 2·n_dim.
+    n_walks = n_walks === nothing ?
+              max(25, (proposal === :slice ? 2 : 5) * n_dim) : n_walks
     unfrozen_idx = layout.unfrozen_idx
     unfrozen_priors = layout.unfrozen_priors
     rng = MersenneTwister(seed)
