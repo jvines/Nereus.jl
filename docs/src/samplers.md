@@ -916,8 +916,13 @@ result = pathfinder_init(target;
     n_draws = 100,                     # samples after ESS reweighting
     seed    = 42,
     quiet   = true,                    # one-line summary instead of chatty PSIS @warn
+    n_scouts = 16,                     # L-BFGS starts: scouted prior draws; 0 = Pathfinder's own
 )
 ```
+
+The runs start from scouted prior draws (as `sample_rjmcmc`'s chains do), each
+from one of those that may carry posterior mass; from Pathfinder's own uniform
+starts every run could stop on the same plateau far below the mode.
 
 Returns a NamedTuple with `draws` (IS-reweighted), `per_run_draws` (one draw
 per L-BFGS run — preserves basin diversity even when `pareto_shape > 0.7`),
