@@ -302,12 +302,12 @@ const _WRAPPED_SINE_LO = -π / 2
 const _WRAPPED_SINE_HI = 3π / 2
 
 """
-    WrappedSine()
+    WrappedSine(lo = -π/2, hi = lo + 2π)
 
 The isotropic inclination prior `sin(i)/2` on `[0, π]`, lifted to a CIRCLE of
-circumference 2π: density `|sin x|/4` on the chart `[-π/2, 3π/2]`, which
-covers the circle once. Folded to `[0, π]` with [`fold_inclination`](@ref), it
-is exactly `sin(i)/2` again -- the two representatives `x` and `2π - x` (or
+circumference 2π: density `|sin x|/4` on the chart `[lo, hi]`, which covers
+the circle once. Folded to `[0, π]` with [`fold_inclination`](@ref), it is
+exactly `sin(i)/2` again -- the two representatives `x` and `2π - x` (or
 `-x`) of each inclination carry half of its mass each.
 
 This is what a Sine prior on an orbital inclination `inc_k<N>` becomes in the
@@ -318,19 +318,17 @@ against it, and a near-face-on retrograde orbit was reported as railed. Every
 likelihood reads the inclination through `planet_inc`, which folds, so on the
 circle a walker passes through `i = π` into the mirror representative.
 
-The chart is `[-π/2, 3π/2]`, centred on the physical half `[0, π]`:
+The chart is a window on the circle, like a full-circle angle's: the density
+is 2π-periodic, so where its seam sits changes nothing but the walls, and the
+samplers move it to where the posterior and its mirror image are thinnest
+(src/circular.jl). It starts at `[-π/2, 3π/2]`, centred on the physical half
+`[0, π]`, whose edges are the mirror image of `i = 90°`: right for a face-on
+or inclined orbit, and moved to a pole for an edge-on one, whose mirror mode
+those edges would cut. The default chart's median is `π/2`, so code that parks
+a walker at the prior median lands on the prior's mode.
 
-* both points where the old prior had walls, `0` and `π`, are INTERIOR to it;
-  its edges, the one place a sampler still meets a wall, are the mirror image
-  of `i = 90°`, which a walker reaches only by passing through `0` or `π` and
-  then crossing the whole mirror half;
-* the median is `π/2`, as for `Sine`, so the code that starts a walker or
-  parks an inactive trans-dim slot at the prior median (`quantile(ps, 0.5)`)
-  lands on the prior's mode, not on one of its zeros at `0` or `π`;
-* an inclination in `[0, π]` is its own representative.
-
-The density is zero outside the chart, as `WrappedUniform`'s is not, because
-the periodic density on the whole line is improper: a parallel-tempering rung
+The density is zero outside the chart, as `WrappedUniform`'s is, because the
+periodic density on the whole line is improper: a parallel-tempering rung
 near β = 0 samples the prior, and there an ensemble spread over every period
 of it without bound -- inclination draws from -4.7e3 to 2.1e4 rad in a 1500
 step `pt_emcee` run -- and the swaps carried them to β = 1. On one chart the
@@ -339,19 +337,23 @@ target is proper, and the folded posterior is the same.
 `quantile`, `cdf` and `rand` act on the chart, with `quantile` the exact
 inverse of `cdf` there, so nested samplers and prior draws start inside it.
 """
-struct WrappedSine <: ContinuousUnivariateDistribution end
+struct WrappedSine <: ContinuousUnivariateDistribution
+    lo::Float64
+    hi::Float64
+end
+WrappedSine() = WrappedSine(_WRAPPED_SINE_LO, _WRAPPED_SINE_HI)
 
-Distributions.minimum(::WrappedSine) = _WRAPPED_SINE_LO
-Distributions.maximum(::WrappedSine) = _WRAPPED_SINE_HI
+Distributions.minimum(d::WrappedSine) = d.lo
+Distributions.maximum(d::WrappedSine) = d.hi
 Distributions.params(::WrappedSine) = ()
 Base.eltype(::Type{WrappedSine}) = Float64
-Distributions.logpdf(::WrappedSine, x::Real) =
-    _WRAPPED_SINE_LO <= x <= _WRAPPED_SINE_HI ?
+Distributions.logpdf(d::WrappedSine, x::Real) =
+    d.lo <= x <= d.hi ?
         log(abs(sin(x))) - log(oftype(float(x), 4)) : oftype(float(x), -Inf)
 
-# CDF over the chart, ∫_{-π/2}^x |sin t|/4 dt: a quarter of the mass on
-# [-π/2, 0], half on [0, π], a quarter on [π, 3π/2].
-function Distributions.cdf(::WrappedSine, x::Real)
+# The CDF on the reference chart [-π/2, 3π/2], ∫_{-π/2}^x |sin t|/4 dt: a
+# quarter of the mass on [-π/2, 0], half on [0, π], a quarter on [π, 3π/2].
+function _wrapped_sine_cdf0(x::Real)
     if x <= _WRAPPED_SINE_LO
         return zero(float(x))
     elseif x >= _WRAPPED_SINE_HI
@@ -364,9 +366,9 @@ function Distributions.cdf(::WrappedSine, x::Real)
     return 1 + cos(x) / 4
 end
 
-# Inverse CDF, piece by piece. On the middle half it is `Sine`'s acos(1 - 2u')
+# Its inverse, piece by piece. On the middle half it is `Sine`'s acos(1 - 2u')
 # at u' = 2u - 1/2.
-function Distributions.quantile(::WrappedSine, u::Real)
+function _wrapped_sine_quantile0(u::Real)
     if u <= 0
         return oftype(float(u), _WRAPPED_SINE_LO)
     elseif u >= 1
@@ -379,9 +381,39 @@ function Distributions.quantile(::WrappedSine, u::Real)
     return oftype(float(u), 2π) - acos(4 * u - 4)
 end
 
+# A polar chart [lo, hi] (hi = lo + 2π) carries one unit of a 2π-periodic
+# density. `cdf0` / `q0` are that density's CDF and its inverse on the
+# reference chart [-π/2, 3π/2]; `_polar_cum` sums it over the line (one unit per
+# period), and the chart's CDF is its increase from `lo`. On the reference
+# chart both reduce to `cdf0` and `q0`, to the bit.
+@inline function _polar_cum(cdf0, x::Real)
+    k = floor((x - _WRAPPED_SINE_LO) / oftype(float(x), 2π))
+    k == 0 && return cdf0(x)
+    return k + cdf0(x - oftype(float(x), 2π) * k)
+end
+
+function _polar_cdf(cdf0, lo::Real, hi::Real, x::Real)
+    x <= lo && return zero(float(x))
+    x >= hi && return one(float(x))
+    return clamp(_polar_cum(cdf0, x) - _polar_cum(cdf0, lo), zero(float(x)), one(float(x)))
+end
+
+function _polar_quantile(q0, cdf0, lo::Real, hi::Real, u::Real)
+    u <= 0 && return oftype(float(u), lo)
+    u >= 1 && return oftype(float(u), hi)
+    v = _polar_cum(cdf0, lo) + u
+    k = floor(v)
+    x = k == 0 ? q0(v) : q0(v - k) + oftype(float(u), 2π) * k
+    return clamp(x, oftype(float(u), lo), oftype(float(u), hi))
+end
+
+Distributions.cdf(d::WrappedSine, x::Real) =
+    _polar_cdf(_wrapped_sine_cdf0, d.lo, d.hi, x)
+Distributions.quantile(d::WrappedSine, u::Real) =
+    _polar_quantile(_wrapped_sine_quantile0, _wrapped_sine_cdf0, d.lo, d.hi, u)
+
 Base.rand(rng::AbstractRNG, d::WrappedSine) = quantile(d, rand(rng))
-Distributions.insupport(::WrappedSine, x::Real) =
-    _WRAPPED_SINE_LO <= x <= _WRAPPED_SINE_HI
+Distributions.insupport(d::WrappedSine, x::Real) = d.lo <= x <= d.hi
 
 # =====================================================================
 # Fixed — marker for non-sampled parameters
@@ -493,27 +525,29 @@ function WrappedUniformPrior(lo::Real, hi::Real)
 end
 
 """
-    WrappedSinePrior()
+    WrappedSinePrior(lo = -π/2, hi = lo + 2π)
 
-[`WrappedSine`](@ref) with its chart `[-π/2, 3π/2]` as the bounds: the
-isotropic inclination prior on a circle, with no wall at `0` or `π`. Not something to
+[`WrappedSine`](@ref) with its chart `[lo, hi]` as the bounds: the isotropic
+inclination prior on a circle, with no wall at `0` or `π`. Not something to
 write in a config: the layout builds it from a `SinePrior()` on an orbital or
-stellar inclination (see [`SinePrior`](@ref), [`polar_lift`](@ref)).
+stellar inclination (see [`SinePrior`](@ref), [`polar_lift`](@ref)), on the
+default chart, and the samplers move the chart (`set_circular_window!`).
 """
-WrappedSinePrior() = PriorSpec(WrappedSine(), _WRAPPED_SINE_LO, _WRAPPED_SINE_HI)
+WrappedSinePrior(lo::Real = _WRAPPED_SINE_LO, hi::Real = lo + 2π) =
+    PriorSpec(WrappedSine(Float64(lo), Float64(hi)), lo, hi)
 
 # =====================================================================
 # PolarFold — any prior on a polar angle [0, π], lifted to the circle
 # =====================================================================
 
 """
-    PolarFold(base)
+    PolarFold(base, lo = -π/2, hi = lo + 2π)
 
 The prior `base` (a `PriorSpec` on exactly `[0, π]`) of a POLAR angle -- an
 inclination, orbital or stellar -- lifted to a circle of circumference 2π:
-density `p(fold_inclination(x))/2` on the chart `[-π/2, 3π/2]`, zero outside
-it. Folded to `[0, π]` it is exactly `base` again: the two representatives
-`x` and `-x` (or `2π - x`) of each inclination carry half of its mass each.
+density `p(fold_inclination(x))/2` on the chart `[lo, hi]`, zero outside it.
+Folded to `[0, π]` it is exactly `base` again: the two representatives `x`
+and `-x` (or `2π - x`) of each inclination carry half of its mass each.
 [`WrappedSine`](@ref) is the case `base = SinePrior()`, kept as its own type.
 
 A polar angle's `[0, π]` has no edge a posterior can rail against: 0 and π are
@@ -521,25 +555,28 @@ the poles, and a sampler passing through one comes out on the other side of
 it. Under `base` itself the samplers met walls there. This is only correct for
 a parameter every likelihood reads through `fold_inclination`, where `x`,
 `-x` and `x + 2π` are one configuration; the layout lifts only those
-(`polar_lift`). The chart's edges are the mirror image of `π/2`, which a walker
-reaches only by passing through a pole and crossing the whole mirror half.
+(`polar_lift`). The density is 2π-periodic, so the chart is a window the
+samplers move, as for [`WrappedSine`](@ref); it starts at `[-π/2, 3π/2]`.
 """
 struct PolarFold{P} <: ContinuousUnivariateDistribution
     base::P
+    lo::Float64
+    hi::Float64
 end
+PolarFold(base) = PolarFold(base, _WRAPPED_SINE_LO, _WRAPPED_SINE_HI)
 
-Distributions.minimum(::PolarFold) = _WRAPPED_SINE_LO
-Distributions.maximum(::PolarFold) = _WRAPPED_SINE_HI
+Distributions.minimum(d::PolarFold) = d.lo
+Distributions.maximum(d::PolarFold) = d.hi
 Base.eltype(::Type{<:PolarFold}) = Float64
 Distributions.logpdf(d::PolarFold, x::Real) =
-    _WRAPPED_SINE_LO <= x <= _WRAPPED_SINE_HI ?
+    d.lo <= x <= d.hi ?
         logpdf(d.base, fold_inclination(x)) - log(oftype(float(x), 2)) :
         oftype(float(x), -Inf)
 
-# CDF over the chart from the base CDF F on [0, π]: the mirror quarter
-# [-π/2, 0] holds (F(π/2) - F(-x))/2, the physical half [0, π] F/2 on top,
-# and the mirror quarter [π, 3π/2] the rest.
-function Distributions.cdf(d::PolarFold, x::Real)
+# The CDF on the reference chart [-π/2, 3π/2] from the base CDF F on [0, π]:
+# the mirror quarter [-π/2, 0] holds (F(π/2) - F(-x))/2, the physical half
+# [0, π] F/2 on top, and the mirror quarter [π, 3π/2] the rest.
+function _polar_fold_cdf0(d::PolarFold, x::Real)
     x <= _WRAPPED_SINE_LO && return zero(float(x))
     x >= _WRAPPED_SINE_HI && return one(float(x))
     Fh = cdf(d.base, π / 2)
@@ -548,7 +585,7 @@ function Distributions.cdf(d::PolarFold, x::Real)
     return Fh / 2 + 1 - cdf(d.base, 2π - x) / 2
 end
 
-function Distributions.quantile(d::PolarFold, u::Real)
+function _polar_fold_quantile0(d::PolarFold, u::Real)
     u <= 0 && return oftype(float(u), _WRAPPED_SINE_LO)
     u >= 1 && return oftype(float(u), _WRAPPED_SINE_HI)
     Fh = cdf(d.base, π / 2)
@@ -558,22 +595,29 @@ function Distributions.quantile(d::PolarFold, u::Real)
     return oftype(float(u), 2π) - quantile(d.base, clamp(Fh + 2 - 2u, 0, 1))
 end
 
+Distributions.cdf(d::PolarFold, x::Real) =
+    _polar_cdf(y -> _polar_fold_cdf0(d, y), d.lo, d.hi, x)
+Distributions.quantile(d::PolarFold, u::Real) =
+    _polar_quantile(v -> _polar_fold_quantile0(d, v), y -> _polar_fold_cdf0(d, y),
+                    d.lo, d.hi, u)
+
 Base.rand(rng::AbstractRNG, d::PolarFold) = quantile(d, rand(rng))
-Distributions.insupport(::PolarFold, x::Real) =
-    _WRAPPED_SINE_LO <= x <= _WRAPPED_SINE_HI
+Distributions.insupport(d::PolarFold, x::Real) = d.lo <= x <= d.hi
 
 """
-    PolarFoldPrior(base::PriorSpec)
+    PolarFoldPrior(base::PriorSpec; lo = -π/2, hi = lo + 2π)
 
-[`PolarFold`](@ref) of `base` with its chart `[-π/2, 3π/2]` as the bounds. A
+[`PolarFold`](@ref) of `base` on the chart `[lo, hi]`, which are the bounds. A
 `SinePrior` lifts to [`WrappedSinePrior`](@ref). Not something to write in a
-config: the layout builds it (see [`polar_lift`](@ref)).
+config: the layout builds it on the default chart (see [`polar_lift`](@ref)),
+and the samplers move the chart.
 """
-function PolarFoldPrior(base::PriorSpec)
+function PolarFoldPrior(base::PriorSpec; lo::Real = _WRAPPED_SINE_LO,
+                        hi::Real = lo + 2π)
     _spans_polar(base) || throw(ArgumentError(
         "PolarFoldPrior needs a prior on exactly [0, π]; got [$(base.lo), $(base.hi)]"))
-    base.dist isa Sine && return WrappedSinePrior()
-    return PriorSpec(PolarFold(base), _WRAPPED_SINE_LO, _WRAPPED_SINE_HI)
+    base.dist isa Sine && return WrappedSinePrior(lo, hi)
+    return PriorSpec(PolarFold(base, Float64(lo), Float64(hi)), lo, hi)
 end
 
 # A prior whose support is the whole polar range [0, π] (to the span tolerance
@@ -1437,9 +1481,12 @@ function prior_from_dict(d::AbstractDict)
     elseif t == "WrappedUniform"
         return WrappedUniformPrior(d["lo"], d["hi"])
     elseif t == "WrappedSine"
-        return WrappedSinePrior()
+        # The chart (`lo`, `hi`): the samplers move it (src/circular.jl).
+        return haskey(d, "lo") ? WrappedSinePrior(d["lo"], d["hi"]) : WrappedSinePrior()
     elseif t == "PolarFold"
-        return PolarFoldPrior(prior_from_dict(d["base"]))
+        base = prior_from_dict(d["base"])
+        return haskey(d, "lo") ? PolarFoldPrior(base; lo = d["lo"], hi = d["hi"]) :
+                                 PolarFoldPrior(base)
     elseif t == "WrappedPushforward"
         k = d["kind"] == "normal" ? _PUSH_NORMAL : _PUSH_UNIFORM
         blo, bhi = Float64(d["blo"]), Float64(d["bhi"])
