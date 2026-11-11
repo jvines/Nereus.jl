@@ -113,6 +113,10 @@ function (prop::RWalk)(
     scale_init = prop.scale
     accept = reject = fail = nfail = nc = ncall = 0
     local du, u_prop, logl_prop, u, v, logl
+    # The walk's current position: each step proposes from where the last
+    # accepted one ended. Proposing every step from `point` would make the
+    # result one step from the live point it was copied from, whatever `walks`.
+    cur = point
 
     while nc < prop.walks || iszero(accept)
         # get proposed point
@@ -121,7 +125,7 @@ function (prop::RWalk)(
             prop.scale < 1e-15 * scale_init && error("Random walk sampling appears to be stuck.")
             # transform to proposal distribution
             du = randoffset(rng, bounds)
-            u_prop = @. point + prop.scale * du
+            u_prop = @. cur + prop.scale * du
             # inside unit-cube
             unitcheck(u_prop) && break
             
@@ -137,7 +141,7 @@ function (prop::RWalk)(
         # check proposed point
         v_prop, logl_prop = prior_transform_and_loglikelihood(model, u_prop)
         if logl_prop ≥ logl_star
-            u = u_prop
+            u = cur = u_prop
             v = v_prop
             logl = logl_prop
             accept += 1
@@ -209,6 +213,7 @@ function (prop::RStagger)(
     accept = reject = fail = nfail = nc = ncall = 0
     stagger = 1
     local du, u_prop, logl_prop, u, v, logl
+    cur = point   # the walk's current position (see RWalk)
     
     while nc < prop.walks || iszero(accept)
         # get proposed point
@@ -217,7 +222,7 @@ function (prop::RStagger)(
             prop.scale < 1e-15 * scale_init && error("Random walk sampling appears to be stuck.")
             # transform to proposal distribution
             du = randoffset(rng, bounds)
-            u_prop = @. point + prop.scale * stagger * du
+            u_prop = @. cur + prop.scale * stagger * du
             # inside unit-cube
             unitcheck(u_prop) && break
             
@@ -233,7 +238,7 @@ function (prop::RStagger)(
         # check proposed point
         v_prop, logl_prop = prior_transform_and_loglikelihood(model, u_prop)
         if logl_prop ≥ logl_star
-            u = u_prop
+            u = cur = u_prop
             v = v_prop
             logl = logl_prop
             accept += 1
@@ -296,7 +301,11 @@ function (prop::Slice)(
     # setup
     n = length(point)
     nc = nexpand = ncontract = 0
-    local u, v, logl 
+    local v, logl
+    # Each slice starts where the previous one ended; `slices` sweeps are a
+    # chain of n·slices univariate slices, not n·slices slices all through
+    # `point` (which left the result one slice from the live point it copied).
+    u = point
     
     # modifying axes and computing lengths
     axes = Bounds.axes(bounds)
@@ -314,7 +323,7 @@ function (prop::Slice)(
             axis = axes[idx, :]
             
             u, v, logl, nc, nexpand, ncontract = sample_slice(
-                rng, axis, point, logl_star,
+                rng, axis, u, logl_star,
                 model,
                 nc, nexpand, ncontract
             )
@@ -358,7 +367,13 @@ function (prop::RSlice)(
     # setup
     n = length(point)
     nc = nexpand = ncontract = 0
-    local u, v, logl
+    local v, logl
+    # Each slice starts where the previous one ended (PolyChord's chain of
+    # `num_repeats` slices; dynesty's `rslice`). Slicing every direction through
+    # `point` instead returned a point one slice from the live point it copied,
+    # whatever `slices` was: the live set descended from ever fewer ancestors
+    # and the posterior came out too narrow.
+    u = point
     # random slice sampling loop
     for it in 1:prop.slices
     
@@ -369,7 +384,7 @@ function (prop::RSlice)(
         # transform and scale into parameter space
         axis = prop.scale .* (Bounds.axes(bounds) * drhat)
         u, v, logl, nc, nexpand, ncontract = sample_slice(
-            rng, axis, point, logl_star,
+            rng, axis, u, logl_star,
             model,
             nc, nexpand, ncontract
         )
