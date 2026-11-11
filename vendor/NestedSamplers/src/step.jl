@@ -59,6 +59,23 @@ fit_bounds(rng, sampler::Nested, B, us, pointvol) =
 # points sit in it rather than by its volume, so a small ellipsoid holding many
 # live points was drawn denser than the rest of the constrained region. The
 # walks start at that live point and take only their steps' shape from it.
+# The live point a walk starts from: uniformly among those above the threshold
+# `logl_star`, as dynesty picks it. The dead point lies on the threshold, not
+# inside the region a new point is drawn from, and a walk from it ends nearer
+# the contour than such a draw; it used to be picked as often as any other.
+# Any live point if none is above the threshold.
+function start_index(rng::AbstractRNG, logl, logl_star)
+    n = count(>(logl_star), logl)
+    n == 0 && return rand(rng, eachindex(logl))
+    k = rand(rng, 1:n)
+    for i in eachindex(logl)
+        if logl[i] > logl_star
+            k -= 1
+            k == 0 && return i
+        end
+    end
+end
+
 proposal_bound(::Proposals.Rejection, active_bound, bound) = active_bound
 proposal_bound(_, active_bound, bound) = bound
 
@@ -119,7 +136,8 @@ function step(rng, model, sampler, state; kwargs...)
 
     # sample a new live point using bounds and proposal
     if has_bounds
-        point, bound = rand_live(rng, active_bound, state.us)
+        point = state.us[:, start_index(rng, state.logl, logl_dead)]
+        bound = Bounds.bound_containing(rng, active_bound, point)
         if isnothing(bound)
             # live point not inside active bounds: refit them to the live
             # points, this one among them, and keep it. Drawing another point

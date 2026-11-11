@@ -177,8 +177,8 @@ end
     @test Nested(2, 50; proposal = _NSP.RSlice()).bootstrap == 0
 end
 
-# A proposal that counts the starts it is handed below the likelihood threshold,
-# then draws by rejection. Counted in a global: `sample_parallel` deep-copies
+# A proposal that counts the starts it is handed at or below the likelihood
+# threshold, then draws by rejection. Counted in a global: `sample_parallel` deep-copies
 # the proposal for each thread.
 const _NSP_STARTS = Ref((0, 0))
 struct _NSPRecordStart <: _NSP.AbstractProposal end
@@ -186,23 +186,47 @@ NestedSamplers.default_update_interval(::_NSPRecordStart, ndims) = 1.5
 function (::_NSPRecordStart)(rng, point, logl_star, bound, model; kwargs...)
     _, l = NestedSamplers.prior_transform_and_loglikelihood(model, point)
     n, below = _NSP_STARTS[]
-    _NSP_STARTS[] = (n + 1, below + (l < logl_star))
+    _NSP_STARTS[] = (n + 1, below + (l <= logl_star))
     return _NSP.Rejection()(rng, point, logl_star, bound, model)
 end
 
-@testset "batch nested starts its walks inside the constraint" begin
+@testset "nested starts its walks inside the constraint" begin
     # Each batch replaces the K lowest live points with K walks constrained
-    # above the K-th; a walk must start at a live point inside that constraint.
-    # The batch path drew starts among all live points, the K-1 below the
-    # threshold included: (K-1)/N of the walks, 14% here, started outside.
+    # above the K-th; a walk must start at a live point inside that constraint,
+    # not at one of the dead points. The batch path drew starts among all live
+    # points, the K-1 below the threshold included: (K-1)/N of the walks, 14%
+    # here, started outside; and both paths could start at the dead point on
+    # the threshold, which dynesty never picks.
     model = NestedModel(x -> -sum(abs2, (x .- 0.5) ./ 0.01) / 2, fill(Uniform(0, 1), 2))
-    spl = Nested(2, 50; bounds = _NSB.MultiEllipsoid, proposal = _NSPRecordStart())
-    _NSP_STARTS[] = (0, 0)
-    with_logger(NullLogger()) do
-        NestedSamplers.sample_parallel(MersenneTwister(3), model, spl; batch_size = 8,
-                                       parallel = false, dlogz = 0.5)
+    for K in (1, 8)
+        spl = Nested(2, 50; bounds = _NSB.MultiEllipsoid, proposal = _NSPRecordStart())
+        _NSP_STARTS[] = (0, 0)
+        with_logger(NullLogger()) do
+            NestedSamplers.sample_parallel(MersenneTwister(3), model, spl; batch_size = K,
+                                           parallel = false, dlogz = 0.5)
+        end
+        n, below = _NSP_STARTS[]
+        @test n > 200
+        @test below == 0
     end
-    n, below = _NSP_STARTS[]
-    @test n > 200
-    @test below == 0
+end
+
+@testset "batch nested credits each dead point its volume" begin
+    # Removing the K lowest of N live points, the j-th is the lowest of the
+    # N - j + 1 left, so the prior volume shrinks by that count. Shrinking it
+    # by N for each, as when every point is replaced before the next goes,
+    # put log Z (K - 1) H / (2N) high: +0.58 here (K = 16, N = 100, H = 6.5)
+    # over 40 seeds, against +0.01 now. A 2-d Gaussian in the unit square,
+    # log Z = 0; one run's error is 0.29.
+    mvn = MvNormal(fill(0.5, 2), 0.01^2 * [1 0.5; 0.5 1])
+    model = NestedModel(x -> logpdf(mvn, x), fill(Uniform(0, 1), 2))
+    zs = map(1:20) do s
+        spl = Nested(2, 100; bounds = _NSB.MultiEllipsoid, proposal = _NSP.Rejection())
+        _, st = with_logger(NullLogger()) do
+            NestedSamplers.sample_parallel(MersenneTwister(s), model, spl; batch_size = 16,
+                                           parallel = false, dlogz = 0.01)
+        end
+        st.logz
+    end
+    @test abs(mean(zs)) < 0.2          # 3 standard errors
 end
