@@ -123,7 +123,7 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
         is_fixed(ps) && continue
         i in circ && continue
         # A cyclic inclination has no bound to rail against: 0 and π are
-        # points it passes through, its chart's edges the mirror of i = 90°.
+        # points it passes through, its chart's edges a seam (src/circular.jl).
         is_cyclic_inclination(ps) && continue
         lo, hi = bounds(ps)
         (isfinite(lo) && isfinite(hi)) || continue   # only fully-bounded params
@@ -276,7 +276,9 @@ Move the window of every circular parameter whose value in `x` (bounded space,
 current chart) lies within `_MAP_SEAM_FRAC` of the span of either bound, so that
 value sits at the centre of the new window. The value is first taken to its
 representative in the user's own window (`config.priors`), so the optimum stays
-readable in the user's convention. Returns the moved `(index, previous lo)`
+readable in the user's convention. A polar angle's seam goes to the pole
+farther from the optimum and its mirror image ([`polar_centre_lo`](@ref)), and
+the value is folded to `[0, π]`. Returns the moved `(index, previous lo)`
 pairs, for undoing, and `x` with those dims relabelled into their new windows.
 The layout and `target.transform` are moved in place.
 """
@@ -285,12 +287,20 @@ function _centre_circular_seams!(target::NereusTarget, x::AbstractVector{<:Real}
     L = params.layout
     moved = Tuple{Int,Float64}[]
     xc = Float64.(x)
-    for i in circular_indices(params)
-        lo, hi = bounds(L.unfrozen_priors[i])
+    for i in seam_indices(params)
+        ps = L.unfrozen_priors[i]
+        lo, hi = bounds(ps)
         span = hi - lo
         xi = xc[i]
         isfinite(xi) || continue
         min(xi - lo, hi - xi) <= _MAP_SEAM_FRAC * span || continue
+        if is_cyclic_inclination(ps)
+            push!(moved, (i, Float64(lo)))
+            set_circular_window!(params, i, polar_centre_lo(xi);
+                                 transforms = (target.transform,))
+            xc[i] = fold_inclination(xi)
+            continue
+        end
         lo_ref = circular_ref_lo(params, i)
         xr = lo_ref + mod(xi - lo_ref, CIRCULAR_PERIOD)
         push!(moved, (i, Float64(lo)))
@@ -319,6 +329,9 @@ function _circular_to_user_window!(target::NereusTarget,
     has_transform = target.transform !== nothing
     xb = has_transform ? transform_inverse(x_opt, target.transform) : x_opt
     for (i, _) in moved
+        # A polar angle keeps the chart it was centred in, which holds [0, π]:
+        # its value is reported folded.
+        is_cyclic_inclination(L.unfrozen_priors[i]) && continue
         lo_ref = circular_ref_lo(params, i)
         k = floor((xb[i] - lo_ref) / CIRCULAR_PERIOD)
         (isfinite(k) && k != 0) || continue
@@ -705,7 +718,7 @@ function sample_map(
     # rejects anything outside. transform_inverse guarantees that; a
     # bounded-space optimiser does not. A no-op (bit for bit) when inside.
     x_bounded = copy(xs_bounded[best])
-    for i in circular_indices(params)
+    for i in seam_indices(params)
         lo, hi = bounds(layout.unfrozen_priors[i])
         x_bounded[i] = circular_relabel(x_bounded[i], lo, hi)
     end

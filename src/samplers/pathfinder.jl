@@ -144,13 +144,14 @@ function pathfinder_init(target::NereusTarget;
     result = run(nothing)
 
     # Angles. A full-circle angle is charted on one walled period, a polar
-    # angle on [-π/2, 3π/2], whose seam is the far image of the equator.
-    # L-BFGS started on one side of a mode across a seam climbs into the wall
-    # (its logit coordinate runs off to ±∞) and fits half a mode. So the first
-    # pass is a pilot: its draws place each circular seam in their emptiest
-    # arc and fold the polar angles (`recut_walkers!`, which moves the target's
-    # windows), and if a seam moved or a polar angle railed, Pathfinder runs
-    # again in the new charts, each run started from the pilot run's draw.
+    # angle on one too, first [-π/2, 3π/2], whose seam is the far image of the
+    # equator. L-BFGS started on one side of a mode across a seam climbs into
+    # the wall (its logit coordinate runs off to ±∞) and fits half a mode. So
+    # the first pass is a pilot: its draws place each seam in their emptiest
+    # arc (a polar one's, of the draws and their mirror images) and fold the
+    # polar angles (`recut_walkers!`, which moves the target's windows), and if
+    # a seam moved or a polar angle railed, Pathfinder runs again in the new
+    # charts, each run started from the pilot run's draw.
     init2 = _pathfinder_recut!(result, target, n_runs)
     init2 === nothing || (result = run(init2))
 
@@ -205,8 +206,9 @@ end
 
 The angle check after a Pathfinder pilot `result`. Pools the draws (the
 importance-resampled ones and every run's own), folds the polar angles and
-moves each circular seam to the emptiest arc of the pool ([`recut_walkers!`](@ref),
-which moves `target`'s windows and transform). Returns `nothing` when nothing
+moves each full-circle or polar seam to the emptiest arc of the pool (a polar
+one's of the pool and its mirror image; [`recut_walkers!`](@ref), which moves
+`target`'s windows and transform). Returns `nothing` when nothing
 needs a second pass, else one start per run for it: each run's first draw (the
 resampled draws stand in for a failed run), in the new charts. A second pass is
 needed when a seam moved, or when more than 10 % of the draws of a polar angle
@@ -264,13 +266,14 @@ has run to a phase boundary (`_hmc_recut!`). They walk in the logit chart,
 where a seam is a wall at ±∞, and a mode across it is two slivers, one per
 wall, that no chain crosses
 (NUTS on Mo ≈ 0 without a moved chart: 358° ± 2° against the true 7° ± 5°).
-Only full-circle angles need it: a polar angle's draws are folded into
-`[0, π]`, clear of its chart's seam. Returns whether a window moved. A pilot
-that fails leaves the charts as they were, with a warning.
+A polar angle's chart is placed the same way: its first chart's seam is the
+mirror image of i = 90°, which an edge-on posterior's mirror copy straddles.
+Returns whether a window moved. A pilot that fails leaves the charts as they
+were, with a warning.
 """
 function _seam_pilot!(target::NereusTarget, seed::Integer)
     params = target.params
-    (target.transform === nothing || isempty(circular_indices(params))) && return false
+    (target.transform === nothing || isempty(seam_indices(params))) && return false
     w0 = circular_windows(params)
     try
         pathfinder_init(target; n_runs = 4, n_draws = 200, seed = Int(seed))
@@ -287,14 +290,17 @@ end
     _center_windows_on!(params, x; transforms = ()) -> x
 
 Every full-circle angle's window moved to be centred on `x`'s value (bounded
-coordinates), the seam opposite it, and `x` relabelled into the new windows. For
-a sampler started from a caller's `init` with no re-cut of its own: the start
-is the one point known to be in the posterior.
+coordinates), the seam opposite it, and `x` relabelled into the new windows. A
+polar angle's seam goes to the pole farther from `x` and its mirror image
+([`polar_centre_lo`](@ref)): opposite `x` would be the mirror of an edge-on
+value. For a sampler started from a caller's `init`: the start is the one
+point known to be in the posterior.
 """
 function _center_windows_on!(params::Params, x::AbstractVector; transforms = ())
-    for d in circular_indices(params)
+    for d in seam_indices(params)
         ps = params.layout.unfrozen_priors[d]
-        set_circular_window!(params, d, x[d] - (ps.hi - ps.lo) / 2; transforms)
+        lo = is_cyclic_inclination(ps) ? polar_centre_lo(x[d]) : x[d] - (ps.hi - ps.lo) / 2
+        set_circular_window!(params, d, lo; transforms)
     end
     return circular_relabel_point!(x, params)
 end
