@@ -498,11 +498,11 @@ to serial under juliacall (Julia threads can deadlock on the Python GIL).
 
 ### `sample_nested_ins` — `name: "nested_ins"`
 
-Importance Nested Sampling
-([Feroz+ 2019](https://ui.adsabs.harvard.edu/abs/2019OJAp....2E..10F/abstract)).
-Operates in **unit-cube space**; every likelihood eval (incl. rejected)
-contributes to the importance estimator `log Z_INS`, giving a second NS
-log Z value beyond standard `log Z_NS`.
+Nested sampling with Nereus's own loop and kernels, in **unit-cube space**.
+It records every likelihood evaluation, rejected ones included, for an
+importance sum after
+[Feroz+ 2019](https://ui.adsabs.harvard.edu/abs/2019OJAp....2E..10F/abstract),
+`log_z_ins`, but that sum is not an evidence (below); `log_z_ns` is.
 
 ```julia
 res = sample_nested_ins(target, data;
