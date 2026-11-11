@@ -59,12 +59,14 @@ end
 
 """
     sample_daedalus(target, data; td, kwargs...)
-        -> (chains::MCMCChains.Chains, log_evidence, strategy::MoMSBirth)
+        -> (chains::MCMCChains.Chains, log_evidence, strategy::MoMSBirth,
+            log_evidence_err)
 
 Trans-dimensional nested sampler operating on the joint (β, γ)
 spike-and-slab parameterisation. Returns posterior samples (importance-
-resampled to equal weights), the log-evidence estimate, and the
-adapted MoMS strategy carrying off-values + scales.
+resampled to equal weights), the log-evidence estimate, the
+adapted MoMS strategy carrying off-values + scales, and the log-evidence's
+standard error √(H / n_live) (Skilling 2006; H the information).
 
 # Required
 - `target::NereusTarget` — bounded (`unconstrained=false`) target.
@@ -342,17 +344,26 @@ function sample_daedalus(
         push!(log_L_dead, p.log_L)
     end
 
+    # Skilling's (2006) error: H the information, nats from prior to
+    # posterior, and σ(log Z) = √(H / n_live).
+    H = 0.0
+    for (lL, lw) in zip(log_L_dead, log_w_dead)
+        isfinite(lL) || continue
+        H += exp(lL + lw - log_Z) * lL
+    end
+    log_Z_err = sqrt(max(H - log_Z, 0.0) / n_live)
+
     if show_progress
         @printf("Daedalus finished: %d iterations, %d total points (%d dead + %d live).\n",
                 iter, length(dead_pts), iter, n_live)
-        @printf("log Z = %+.4f\n", log_Z)
+        @printf("log Z = %+.4f ± %.4f\n", log_Z, log_Z_err)
     end
 
     # ---- 4. Importance-resample to get equally-weighted posterior --
     log_post_w = log_L_dead .+ log_w_dead .- log_Z
     chain = _daedalus_resample_chain(dead_pts, log_post_w, params, td, rng)
 
-    return chain, log_Z, strategy
+    return chain, log_Z, strategy, log_Z_err
 end
 
 # Within-model steps of the next walk: enough that its accepted steps' squared
