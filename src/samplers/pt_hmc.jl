@@ -13,9 +13,10 @@
 # The core (`_pt_hmc_core`) is target-agnostic: it takes a `parts(y) ->
 # (prior+jac, loglike)` closure + ForwardDiff, so it runs on a `NereusTarget`
 # AND on an analytic Gaussian (the logZ regression gate). `sample_pt_hmc` is the
-# NereusTarget wrapper. An ADAPTIVE ladder (pilot run → re-grid β by
-# path-sampling thermodynamic length ∝ √Var(logL)) minimises the TI
-# discretisation error that a fixed power-law ladder leaves near β=1.
+# NereusTarget wrapper. The ladder is β = 0 and a geometric run on
+# [beta_min, 1]; an ADAPTIVE re-grid (pilot run → β placed by path-sampling
+# thermodynamic length ∝ √Var(logL)) then minimises the TI discretisation
+# error left on it.
 
 using AdvancedHMC
 using ForwardDiff
@@ -115,6 +116,14 @@ function _warmup_temp(rng, ℓ_fn, ∂ℓ_fn, θ0::Vector{Float64}, n_warmup::In
     ε = Float64(AdvancedHMC.nom_step_size(κw.τ.integrator))
     h, κ = _frozen_nuts(ℓ_fn, ∂ℓ_fn, M⁻¹, ε)
     return h, κ, θ_final, M⁻¹, ε
+end
+
+# The default ladder: β = 0, then `n_temps - 1` rungs geometric on
+# [beta_min, 1] (see `beta_min` in `sample_pt_hmc`).
+function _pt_hmc_ladder(n_temps::Int, beta_min::Float64)
+    n_temps >= 2 || throw(ArgumentError("n_temps must be ≥ 2"))
+    return vcat(0.0, Float64[beta_min^((n_temps - 1 - i) / max(1, n_temps - 2))
+                             for i in 1:(n_temps - 1)])
 end
 
 # Path-sampling-optimal ladder re-grid: place β to equalise thermodynamic length
@@ -326,6 +335,16 @@ and the `EvidenceReport`.
   `max(100, n_sweeps ÷ 4)`. The pilot sets the ladder, so it is part of the run
   `resume` checks: extending a run to an `n_sweeps` that moves the default is
   refused until `n_pilot` is given the original run's value.
+- `beta_min=1e-4` : the default ladder is β = 0 and `n_temps - 1` rungs
+  geometric on `[beta_min, 1]`. It used to be quadratic from β = 0,
+  `((i - 1)/(n_temps - 1))²`: on an RV + IAD companion ⟨log L⟩ is −5.6e4 at
+  β = 0 and −236 at the second of 12 rungs (β = 0.008), and the TI+ segment
+  between them, where the integrand climbs through four decades, put log Z at
+  −5 (4 rungs: −624 to −1329) where bridge sampling and nested INS give 164 to
+  166. Geometric from 1e-4 without the β = 0 rung, as pt_emcee's ladder is,
+  the integrals start at 1e-4 and leave out a head worth −1.3 nats at i = 5°
+  and −4.5 at i = 89.5° (TI+ 166.9 and 168.4 against bridge 165.5 and 163.9);
+  with it, SS+ gives 165.5 and 163.9.
 - `betas=nothing` : custom β-ladder (overrides default + disables adaptation)
 - `warm_start=true` : start from a short pt_emcee pre-search. With it off the
   starts are scouted prior draws (`n_scouts`), and the seams of the
@@ -383,8 +402,10 @@ function sample_pt_hmc(
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
     n_scouts::Int = 16,
+    beta_min::Real = 1e-4,
 )
     n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
+    0 < beta_min < 1 || throw(ArgumentError("beta_min must be in (0, 1); got $beta_min"))
     target_accept = Float64(target_accept)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
@@ -404,8 +425,7 @@ function sample_pt_hmc(
         y -> _logdensity_parts(target, y)
     end
 
-    βs = betas === nothing ?
-         Float64[((i - 1) / (n_temps - 1))^2 for i in 1:n_temps] :
+    βs = betas === nothing ? _pt_hmc_ladder(n_temps, Float64(beta_min)) :
          collect(Float64, betas)
     βs[end] = 1.0
     n_temps = length(βs)
