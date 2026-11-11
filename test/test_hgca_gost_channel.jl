@@ -34,7 +34,11 @@ fields(s) = Dict{String,Any}(String(f) => getfield(s, f) for f in fieldnames(typ
                                                      rv = [0.0, 1.0, 2.0], rv_err = [1.0, 1.0, 1.0])))
     priors = Dict("plx" => Dict("type" => "normal", "mu" => 50.0, "sigma" => 0.05),
                   "M_pri" => Dict("type" => "normal", "mu" => 1.0, "sigma" => 0.05))
-    as(; kw...) = Dict{String,Any}("source" => "AS", (String(k) => v for (k, v) in kw)...)
+    # `hip_scans = false`: an HGCA row with a Hipparcos ID otherwise fetches
+    # that star's Hipparcos scans (a 350 MB bundle on first use), which the
+    # HGCA Hipparcos epoch is fitted through. Not what these tests are about.
+    as(; kw...) = Dict{String,Any}("source" => "AS", "hip_scans" => false,
+                                   (String(k) => v for (k, v) in kw)...)
 
     @testset "loader field dicts round-trip into Data" begin
         # The struct carries `hip_id`; the values must win over an auto-fetch.

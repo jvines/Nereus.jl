@@ -348,6 +348,65 @@ end
         @test pr[3] == Nereus.star_reflex_pm(orb, HE_GRA[3], Ms)[1]
     end
 
+    @testset "run_job / fit_* obtain the scans by hip_id" begin
+        hg = _he_hgca()
+        calls = Int[]
+        fake(h) = (push!(calls, h); HE_HIP)
+        # Automatic: an HGCA row with a Hipparcos ID and no Hipparcos IAD.
+        @test Nereus._hip_scans_for(nothing, nothing, hg, nothing; fetch = fake) === HE_HIP
+        @test calls == [1]
+        @test Nereus._hip_scans_for(true, nothing, nothing, _he_g23h(); fetch = fake) === HE_HIP
+        # Nothing to fetch: the IAD has the scans, there is no row, or `false`.
+        @test Nereus._hip_scans_for(nothing, HE_HIP, hg, nothing; fetch = fake) === nothing
+        @test Nereus._hip_scans_for(nothing, nothing, nothing, nothing; fetch = fake) === nothing
+        @test Nereus._hip_scans_for(false, nothing, hg, nothing; fetch = fake) === nothing
+        @test length(calls) == 2
+        # Explicit forms.
+        @test Nereus._hip_scans_for(HE_HIP, nothing, hg, nothing; fetch = fake) === HE_HIP
+        @test Nereus._hip_scans_for(Dict("hip_id" => 7), nothing, hg, nothing;
+                                fetch = fake) === HE_HIP
+        @test calls[end] == 7
+        v = Nereus._hip_scans_for(Dict("values" => Dict("t" => HE_HIP.t, "psi" => HE_HIP.psi,
+                                                    "parallax_factor" => HE_HIP.parallax_factor,
+                                                    "abscissa_err" => HE_HIP.abscissa_err)),
+                              nothing, hg, nothing; fetch = fake)
+        @test v.t == HE_HIP.t && v.sinpsi == HE_HIP.sinpsi && v.weight == HE_HIP.weight
+        # A failed fetch is an error that says how to proceed, not a fallback.
+        boom(h) = error("offline")
+        err = try Nereus._hip_scans_for(nothing, nothing, hg, nothing; fetch = boom); nothing
+              catch e; e end
+        @test err isa ErrorException && occursin("hip_scans: false", err.msg)
+
+        # fit_* channels: `"hip_scans"` reaches Data.
+        rv = Dict("source" => "RV", "data" => Dict("RV" => (t = [58000.0, 58100.0, 58200.0],
+                  rv = [0.0, 1.0, 2.0], rv_err = [1.0, 1.0, 1.0])))
+        pri = Dict("plx" => Dict("type" => "normal", "mu" => 25.0, "sigma" => 0.05),
+                   "M_pri" => Dict("type" => "normal", "mu" => 1.0, "sigma" => 0.05))
+        as(; kw...) = Dict{String, Any}("source" => "AS", (String(k) => v for (k, v) in kw)...)
+        tgt = _he_quiet(() -> Nereus._target_from([rv, as(hgca = hg, hip_scans = HE_HIP)], 1; priors = pri))
+        @test tgt.data.hip_scans === HE_HIP
+        tgt = _he_quiet(() -> Nereus._target_from([rv, as(hgca = hg, hip_scans = false)], 1; priors = pri))
+        @test tgt.data.hip_scans === nothing
+        @test_throws ArgumentError Nereus._target_from(
+            [rv, as(hgca = hg, hip_scans = HE_HIP), as(hip_scans = false)], 1; priors = pri)
+        # run_job: `data.hip_scans`.
+        cfg = Dict{String, Any}(
+            "hgca" => Dict("values" => Dict("t" => collect(hg.epochs),
+                "epochs_ra" => collect(hg.epochs_ra), "epochs_dec" => collect(hg.epochs_dec),
+                "pmra" => collect(hg.pmra), "pmdec" => collect(hg.pmdec),
+                "cov_ep" => [[c[1, :], c[2, :]] for c in hg.cov_ep],
+                "plx" => hg.plx, "plx_err" => hg.plx_err, "hip_id" => hg.hip_id)),
+            "hip_scans" => Dict("values" => Dict("t" => HE_HIP.t, "psi" => HE_HIP.psi,
+                "parallax_factor" => HE_HIP.parallax_factor, "abscissa_err" => HE_HIP.abscissa_err)),
+            "rv" => Dict("values" => Dict("bjd" => [58000.0, 58100.0], "rv" => [0.0, 1.0],
+                                          "rv_err" => [1.0, 1.0], "instrument" => ["X", "X"])))
+        data = _he_quiet(() -> first(Nereus._build_data(cfg)))
+        @test data.hip_scans.t == HE_HIP.t
+        @test data.hgca.epochs_ra == hg.epochs_ra && data.hgca.epochs_dec == hg.epochs_dec
+        cfg["hip_scans"] = false
+        @test _he_quiet(() -> first(Nereus._build_data(cfg))).hip_scans === nothing
+    end
+
     @testset "the catalogue's per-coordinate epochs are carried" begin
         # load_hgca_row on a one-row HGCA table with distinct RA / Dec epochs.
         mktempdir() do dir

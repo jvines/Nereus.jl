@@ -27,7 +27,10 @@ using Nereus, Test, Distributions
                 rv = Dict("source" => "RV", "data" => Dict("RV" => (
                     t = [58000.0, 58100.0, 58200.0], rv = [0.0, 1.0, 2.0],
                     rv_err = [1.0, 1.0, 1.0])))
-                as = Dict{String,Any}("source" => "AS", "hgca" => hgca)
+                # `hip_scans = false`: otherwise the row's hip_id fetches the
+                # Hipparcos scans its Hipparcos epoch is fitted through, over the
+                # network into this empty cache.
+                as = Dict{String,Any}("source" => "AS", "hgca" => hgca, "hip_scans" => false)
                 rep = Any[]
                 tgt = Nereus._target_from([rv, as], 1; gaia_id = "Gaia DR3 55", gaia_report = rep)
                 @test normal_of(tgt.params.config.priors["plx"])[1] == 8.5

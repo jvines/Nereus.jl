@@ -676,6 +676,12 @@ function _build_data(data_cfg; obliquity = nothing)
     if _has(data_cfg, :hgca)
         kw[:hgca] = _parse_hgca_block(_get(data_cfg, :hgca))
     end
+    # The Hipparcos scans the HGCA Hipparcos epoch is fitted through: the IAD's
+    # own when there is Hipparcos IAD, else fetched by the row's hip_id unless
+    # `data.hip_scans` says otherwise (`_hip_scans_for`).
+    hs = _hip_scans_for(_get(data_cfg, :hip_scans; default = nothing),
+                        get(kw, :iad, nothing), get(kw, :hgca, nothing), nothing)
+    hs === nothing || (kw[:hip_scans] = hs)
     if _has(data_cfg, :relastrom)
         ra_block = _get(data_cfg, :relastrom)
         if ra_block isa AbstractVector
@@ -985,6 +991,70 @@ function _parse_hgca_block(block)
     else
         error("hgca block needs `hip_id` (auto-fetch), `{fits, hip_id}` or `values`")
     end
+end
+
+"""
+    _hip_scans_for(spec, iad, hgca, g23h; fetch) -> IADData or nothing
+
+The Hipparcos scan geometry `Data(; hip_scans)` gets on the `run_job` and
+`fit_*` paths, from a `hip_scans` entry (`data.hip_scans` in a job config, the
+`"hip_scans"` key of an astrometry channel):
+
+- absent / `nothing` / `true`: automatic. When an HGCA or G23H row is present
+  and `iad` holds no Hipparcos scans, fetch them by the row's `hip_id`
+  (`fetch_hip_iad`, cached; ~350 MB bundle on first use). The HGCA/G23H
+  Hipparcos epoch is a fit through those scans, so a catalogue row with a
+  Hipparcos ID is enough to model it as measured. With Hipparcos IAD in the
+  fit there is nothing to fetch: `Data` uses the IAD's own scans.
+- `false`: none; `Data` then warns that the Hipparcos epoch is instantaneous.
+- `{hip_id}`: fetch that source's scans.
+- `{values: {t, psi, parallax_factor, abscissa_err}}` (or those fields at the
+  top level, as the client's `load_iad` returns them): the scans themselves.
+- an `IADData`: used as given.
+
+A failed fetch is an error, not a silent fall back to the instantaneous model.
+"""
+function _hip_scans_for(spec, iad, hgca, g23h;
+                        fetch = h -> fetch_hip_iad(h; verbose = false))
+    spec === false && return nothing
+    spec isa IADData && return spec
+    (spec === nothing || spec === true) ||
+        return _parse_hip_scans_block(spec; fetch = fetch)
+    (hgca === nothing && g23h === nothing) && return nothing
+    iad !== nothing && _n_in_window(iad.t, HIPPARCOS_WINDOW) >= 5 && return nothing
+    hip = hgca !== nothing ? hgca.hip_id : g23h.hip_id
+    1 <= hip <= 120_416 || return nothing     # no usable Hipparcos ID: Data warns
+    return _fetch_hip_scans(fetch, hip)
+end
+
+function _fetch_hip_scans(fetch, hip::Integer)
+    try
+        return fetch(Int(hip))
+    catch err
+        throw(ErrorException(
+            "could not obtain the Hipparcos scans of HIP $hip, which the HGCA/G23H " *
+            "Hipparcos epoch is fitted through: $(sprint(showerror, err)). Give them " *
+            "as `hip_scans: {values: ...}`, or set `hip_scans: false` to model the " *
+            "Hipparcos epoch as the instantaneous reflex instead."))
+    end
+end
+
+function _parse_hip_scans_block(block; fetch = h -> fetch_hip_iad(h; verbose = false))
+    if _has(block, :values) || _has(block, :t)
+        vals = _has(block, :values) ? _get(block, :values) : block
+        t = Float64.(collect(_get(vals, :t; required = true)))
+        return IADData(
+            t               = t,
+            abscissa        = zeros(length(t)),     # never read: geometry only
+            abscissa_err    = Float64.(collect(_get(vals, :abscissa_err; required = true))),
+            psi             = Float64.(collect(_get(vals, :psi; required = true))),
+            parallax_factor = Float64.(collect(_get(vals, :parallax_factor; required = true))),
+        )
+    elseif _has(block, :hip_id)
+        return _fetch_hip_scans(fetch, Int(_get(block, :hip_id)))
+    end
+    error("hip_scans needs `false`, `{hip_id}` or `{values: {t, psi, " *
+          "parallax_factor, abscissa_err}}`")
 end
 
 # Three-epoch HGCA arrays (Hipparcos, HG, Gaia), built with the positional
