@@ -437,10 +437,11 @@ function sample_nuts(
         seed = seed === nothing ? nothing : Int(seed),
         rng = _rng_fingerprint(rng),
         advancedhmc = string(pkgversion(AdvancedHMC)),
-        # The seams re-cut at the adaptation's phase boundaries (`_hmc_recut!`),
-        # polar charts too: a checkpoint from before either is another run,
-        # and holds no trace or a trace of another layout.
-        seam_recut = :adaptation_phases_polar)
+        # The seams re-cut at the adaptation's phase boundaries (`_hmc_recut!`):
+        # a checkpoint from before that is another run, and holds no trace;
+        # with polar angles, one from before their charts moved holds a trace
+        # of another layout.
+        seam_recut = :adaptation_phases, polar_chart_key(params)...)
     ck = resume ? read_checkpoint(ck_path, "nuts", ck_fp) : nothing
     if ck !== nothing
         for (c, s) in enumerate(ck.chains)

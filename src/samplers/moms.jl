@@ -269,7 +269,7 @@ end
 # structs need not. The rest of the model, the data and the informed-birth
 # switches are in `run_fingerprint` itself (src/checkpoint.jl).
 function _moms_fingerprint(params::Params, data::Data, td::TransDimConfig; settings...)
-    return run_fingerprint(params, data; settings...,
+    return run_fingerprint(params, data; settings..., polar_chart_key(params)...,
         planets = td.planets, max_kplanet = td.max_kplanet, noise = td.noise,
         toggleable = content_hash(td.toggleable),
         transdim_fraction = td.transdim_fraction,

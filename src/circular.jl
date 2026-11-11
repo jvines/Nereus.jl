@@ -207,6 +207,18 @@ seam_indices(params::Params) =
     sort!(vcat(circular_indices(params), cyclic_inclination_indices(params)))
 
 """
+    polar_chart_key(params) -> NamedTuple
+
+The checkpoint-fingerprint entry of a model with polar angles, whose charts
+move ([`polar_window`](@ref)): a checkpoint written before they did holds a
+re-cut history and windows without them, which a sampler that indexes its
+saved history by group, or by seam angle, would misread. Empty for a model
+without one, whose checkpoints stay valid.
+"""
+polar_chart_key(params::Params) =
+    isempty(cyclic_inclination_indices(params)) ? (;) : (; polar_charts = :moving)
+
+"""
     circular_names(params) -> Set{String}
 """
 circular_names(params::Params) =

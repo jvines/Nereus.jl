@@ -142,7 +142,8 @@ function sample_rjmcmc(
     ck = nothing
     if ck_path !== nothing
         ck_fp = run_fingerprint(target.params, data; n_warmup, seed, n_chains,
-                                within_model, noise_swap_rate, _td_fingerprint(td)...)
+                                within_model, noise_swap_rate, _td_fingerprint(td)...,
+                                polar_chart_key(target.params)...)
         saved = resume ? read_checkpoint(ck_path, "rjmcmc", ck_fp).chains::Vector{Any} :
                          Any[nothing for _ in 1:n_chains]
         for st in saved

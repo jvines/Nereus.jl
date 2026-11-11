@@ -412,9 +412,10 @@ function sample_pt_hmc(
     ck_fp = run_fingerprint(target.params, target.data; n_temps, ladder = copy(βs),
         adapt_ladder = do_pilot, n_pilot = pilot_sweeps, n_warmup,
         n_walkers_per_temp = W, swap_interval, target_accept, warm_start, seed,
-        # The seams re-cut during each warm-up (`_hmc_recut!`), polar charts
-        # too: a checkpoint from before either is another run.
-        seam_recut = :adaptation_phases_polar)
+        # The seams re-cut during each warm-up (`_hmc_recut!`): a checkpoint
+        # from before that is another run, as is one from before polar
+        # charts moved.
+        seam_recut = :adaptation_phases, polar_chart_key(target.params)...)
     ck = nothing
     if resume
         ck = try
