@@ -701,11 +701,13 @@ function tomogram_logpost(θ::AbstractVector, nights::Vector{TomoNight},
                           α_max::Real = 20.0, shared_α::Bool = false,
                           σline_lo::Real = 2.0, σline_hi::Real = 25.0,
                           use_gp::Bool = true)
-    # λ is PERIODIC, so it is wrapped and never rejected. A hard bound at ±π is a
-    # wall on a circle: a walker that steps across it is rejected and parks at
+    # λ is PERIODIC, so it is wrapped and never rejected here. A fixed bound at ±π
+    # is a wall on a circle: a walker that steps across it is rejected and parks at
     # the edge, which on real data produced a spurious population near ±180° and a
-    # 3σ interval that wrapped the whole circle. Wrapping lets the ensemble cross
-    # freely; `circular_summary` wraps again at analysis time.
+    # 3σ interval that wrapped the whole circle. The sampler (`_ensemble_on_circle`)
+    # charts λ on one period whose seam it moves to the emptiest arc during
+    # burn-in, so walkers neither pile up at a wall nor drift into other periods;
+    # `circular_summary` wraps again at analysis time.
     λ = mod(θ[1] + π, 2π) - π
     vsini, b, a_Rs = θ[2], θ[3], θ[4]
     (vsini > 0 && a_Rs > 1 && 0 <= b < a_Rs) || return -Inf
@@ -740,6 +742,45 @@ function tomogram_logpost(θ::AbstractVector, nights::Vector{TomoNight},
         isfinite(lp) || return -Inf
     end
     return lp
+end
+
+"""
+    _ensemble_on_circle(lp, x0, n_steps, n_burn, thin, rng; ic = 1) -> (chain, logp)
+
+The affine-invariant ensemble on a posterior `lp` that is periodic in coordinate
+`ic` (λ), run without letting that coordinate drift. A periodic `lp` alone has
+no wall, so walkers diffuse into other periods: a stretch move between two
+copies of one mode a period apart proposes the empty arc between them, and the
+ensemble slows to a crawl. The coordinate is instead charted on one period
+`[lo, lo + 2π]`, walled there, and during burn-in the seam is moved to the
+emptiest arc of the walkers (`circular_cut`) with each walker relabelled into
+the new chart -- the same treatment the framework samplers give an angle. A
+relabel by a whole period leaves `lp` unchanged, so no density is recomputed.
+Returns the post-burn-in chain (`thin`ned) and its log-densities; the chart
+starts at `[-π, π]`, where `x0` must lie.
+"""
+function _ensemble_on_circle(lp, x0::AbstractMatrix, n_steps::Int, n_burn::Int,
+                             thin::Int, rng::AbstractRNG; ic::Int = 1)
+    nw = size(x0, 2)
+    lo = Ref(-Float64(π))
+    lpw(θ) = lo[] <= θ[ic] <= lo[] + 2π ? lp(θ) : -Inf
+    x = Matrix{Float64}(x0)
+    nb = clamp(n_burn, 0, n_steps)
+    nchunk = clamp(nb ÷ 50, 1, 10)
+    done = 0
+    for c in 1:nchunk
+        L = (nb - done) ÷ (nchunk - c + 1)
+        L >= 2 || continue
+        ch, _ = AffineInvariantMCMC.sample(lpw, nw, x, L, L; rng = rng)
+        x = ch[:, :, end]
+        done += L
+        lo[] = circular_cut(view(x, ic, :), lo[])
+        for w in 1:nw
+            x[ic, w] = circular_relabel(x[ic, w], lo[], lo[] + 2π)
+        end
+    end
+    return AffineInvariantMCMC.sample(lpw, nw, x, max(n_steps - done, 2), thin;
+                                      rng = rng)
 end
 
 """
@@ -802,9 +843,8 @@ function tomogram_bayes(nights::Vector{TomoNight};
         ok || error("could not initialise walker $w with a finite posterior")
     end
 
-    chain, lls = AffineInvariantMCMC.sample(lp, n_walkers, x0, n_steps, thin;
-                                            rng = rng)
-    keep = (n_burn ÷ thin + 1):size(chain, 3)
+    chain, lls = _ensemble_on_circle(lp, x0, n_steps, n_burn, thin, rng)
+    keep = 1:size(chain, 3)
     flat = reshape(chain[:, :, keep], ndim, :)
     lpv  = vec(lls[:, keep])
     λdeg = rad2deg.(vec(flat[1, :]))

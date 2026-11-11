@@ -110,6 +110,29 @@ using Random, Statistics
         end
     end
 
+    # ---- lambda on the starting chart's seam -------------------------------
+    # λ = 180° sits on the seam of the [-π, π] chart the walkers start in. The
+    # sampler moves the seam to the emptiest arc during burn-in, so the chain
+    # neither drifts into other periods (all draws inside one window) nor parks
+    # walkers at a wall, and the whole mode is recovered.
+    @testset "lambda at 180 deg: one window, no wall" begin
+        λs = deg2rad(180.0)
+        tn = let
+            M = shadow_map(t, Tc, P, aRs, inc, λs, 25.9, grid, 8.0; rr = rr)
+            TomoNight("SEAM", t, 6.0 .* M .+ 0.004 .* randn(rng, length(t), length(grid)),
+                      grid, Tc)
+        end
+        r = joint_obliquity_fit([tn], RMNight[]; use_tomogram = true, common...)
+        v = vec(r.chain[1, :])
+        # One contiguous mode, not two halves at ±π a period apart.
+        @test maximum(v) - minimum(v) < π
+        c = circular_summary(r.λ)
+        @test abs(mod(c.mode - 180 + 180, 360) - 180) < 25
+        # No pile-up at a chart edge: the extreme 1% of draws spread out.
+        lo, hi = extrema(v)
+        @test count(x -> x - lo < 1e-3 || hi - x < 1e-3, v) <= 0.01 * length(v)
+    end
+
     # ---- the three configurations share one parameter space ---------------
     # Otherwise a difference between them confounds likelihood with
     # parameterisation, which is the whole point of being able to compare them.
