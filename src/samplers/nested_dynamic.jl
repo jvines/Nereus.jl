@@ -87,9 +87,13 @@ importance likelihood window.
 - `pad::Int=1` — extra dead points to include each side of that band.
 - `max_iter::Int=50_000` per pass.
 - `bound_update_interval::Int=50`
-- `n_walks::Union{Int,Nothing}=nothing` — Metropolis steps / slice sweeps per
-  replacement. `nothing` → dimension-scaled `max(25, 2·n_dim)` (a fixed count
-  under-decorrelates as n_dim grows → logZ biased low). Explicit honored.
+- `n_walks::Union{Int,Nothing}=nothing` — walk steps / slices per
+  replacement. `nothing` → `max(25, 10·n_dim)` for `:rwalk` and
+  `max(25, 5·n_dim)` for `:slice`. Too few leave each new point near the
+  live point its chain started from and put log Z high: with
+  `max(25, 2·n_dim)` it came out 0.6 nats above pt_emcee's on an RM obliquity
+  fit and its scatter between seeds was three times the NS error. An
+  explicit value is honored verbatim.
 - `walk_scale::Real=1.0` — initial proposal scale (see `sample_nested_ins`).
 - `proposal::Symbol=:rwalk` — within-shell move (`:rwalk`, `:slice`,
   `:unif`); shares Nereus's INS kernels (see `sample_nested_ins`).
@@ -139,12 +143,14 @@ function sample_nested_dynamic(
     walk_scale  = Float64(walk_scale)
     pfrac       = Float64(pfrac)
     maxfrac     = Float64(maxfrac)
-    # Dimension-scaled within-shell decorrelation (see sample_nested): a fixed
-    # step count under-decorrelates as n_dim grows → logZ biased low. `nothing`
-    # → max(25, 2·n_dim) (PolyChord num_repeats ∝ nDims); explicit honored.
-    # Flows to both _ns_inner passes below. See project_ns_rslice_undermixing.
+    # Steps per replacement, for both passes. Chosen as sample_nested's are
+    # (the decorrelation note there): the smallest multiple of n_dim whose
+    # log Z, averaged over six seeds, came within the NS error (0.20-0.35
+    # with 200 live points in the baseline) of pt_emcee's on all four test
+    # fits. At 5·n_dim the walk's came out 0.37 low on the RM fit at λ = 0°.
     n_walks = n_walks === nothing ?
-              max(25, 2 * length(target.params.layout.unfrozen_idx)) : n_walks
+              max(25, (proposal === :rwalk ? 10 : 5) *
+                      length(target.params.layout.unfrozen_idx)) : n_walks
     # === Pass 1: baseline NS ===
     verbose && @info "Dynamic NS: baseline pass (n_live=$n_live_init, dlogz=$dlogz_init)"
     base = _ns_inner(target, data;
