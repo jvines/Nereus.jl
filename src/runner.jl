@@ -1681,9 +1681,12 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                  n_evals = n_ev)
     elseif name == "pt_hmc"
         # Hamiltonian parallel tempering (fixed-dim, differentiable). Returns
-        # (chains, log_ev, report).
-        chains, log_z, _ = sample_pt_hmc(target; kw...)
+        # (chains, log_ev, report, evidence): the tempered stack and bridge /
+        # mode-Laplace go to summary.json's evidence block as pt_emcee's do.
+        chains, log_z, report, ev = sample_pt_hmc(target; kw...)
         return (chains = chains, log_evidence = log_z,
+                 log_evidence_bridge = ev.bridge, log_evidence_laplace = ev.laplace,
+                 evidence = report,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = 0)
     elseif name == "rjmcmc"
@@ -2894,7 +2897,7 @@ function _populate_summary!(summary, result, params, chains)
         # Name the headline by matching the reported value, so a reader knows
         # which estimator `log_z` came from without re-deriving the selection logic.
         lz = Float64(getfield(result, :log_evidence))
-        which = "tempered"
+        which = isfinite(lz) ? "tempered" : "none"
         for (k, v) in ev
             val = v isa Dict ? get(v, "log_z", NaN) : v
             (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)

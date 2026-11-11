@@ -164,18 +164,19 @@ end
 # the cold draws kept so far. A function, not a closure: `nL` is rebound every
 # sweep and a closure capturing it would box it.
 _pt_hmc_snapshot(sweep, βs, states, sweep_rng, sumL, sumL2, nL, evidence_acc,
-                 cold_ys) =
+                 cold_ys, swap_acc) =
     (; sweep, betas = βs, θ = map(st -> st.θ, states),
        logL = map(st -> st.logL, states), Minv = map(st -> st.Minv, states),
        ε = map(st -> st.ε, states), sweep_rng, sumL, sumL2, nL,
-       evidence = evidence_acc, cold_ys)
+       evidence = evidence_acc, cold_ys, swap_acc)
 
 """
     _pt_hmc_core(parts, dim, init_ys, βs; kwargs...) -> NamedTuple
 
 Target-agnostic Hamiltonian-PT engine. `parts(y) -> (prior+jac, loglike)` (must
 be ForwardDiff-differentiable); `init_ys` = one start per (temp×walker) in
-sampler space. Returns `(cold_ys, report, meanlogL, varlogL)`.
+sampler space. Returns `(cold_ys, report, meanlogL, varlogL, swap_acc)`,
+`swap_acc[i]` the fraction of swaps accepted between rungs `i` and `i + 1`.
 
 Checkpointing: `save(state)`, when given, receives the `_pt_hmc_snapshot` after
 warm-up, every `checkpoint_interval` seconds and after the last sweep. A
@@ -257,12 +258,15 @@ function _pt_hmc_core(parts, dim::Int,
     sumL = saved === nothing ? zeros(n_temps) : copy(saved.sumL::Vector{Float64})
     sumL2 = saved === nothing ? zeros(n_temps) : copy(saved.sumL2::Vector{Float64})
     nL = saved === nothing ? 0 : saved.nL::Int
+    # Swaps accepted per adjacent pair, over the sweeps so far (W per sweep).
+    swap_acc = saved === nothing || !haskey(saved, :swap_acc) ? zeros(Int, n_temps - 1) :
+               copy(saved.swap_acc::Vector{Int})
     pb = ProgressBar(label; total = n_sweeps, enabled = progress, start = sweep0)
 
     # The warm-up is the expensive part of a short run: keep it.
     save !== nothing && saved === nothing &&
         save(_pt_hmc_snapshot(0, βs, states, sweep_rng, sumL, sumL2, nL,
-                              evidence_acc, cold_ys))
+                              evidence_acc, cold_ys, swap_acc))
     last_ck = time()
 
     for sweep in (sweep0 + 1):n_sweeps
@@ -283,6 +287,7 @@ function _pt_hmc_core(parts, dim::Int,
             logα = (βs[i + 1] - βs[i]) * (a.logL - b.logL)
             if log(rand(srng)) < logα
                 a.θ, b.θ = b.θ, a.θ; a.logL, b.logL = b.logL, a.logL
+                swap_acc[i] += 1
             end
         end
         @inbounds for i in 1:n_temps
@@ -306,7 +311,7 @@ function _pt_hmc_core(parts, dim::Int,
         if save !== nothing &&
            (sweep == n_sweeps || time() - last_ck >= checkpoint_interval)
             save(_pt_hmc_snapshot(sweep, βs, states, sweep_rng, sumL, sumL2, nL,
-                                  evidence_acc, cold_ys))
+                                  evidence_acc, cold_ys, swap_acc))
             last_ck = time()
         end
     end
@@ -315,15 +320,27 @@ function _pt_hmc_core(parts, dim::Int,
     meanL = sumL ./ max(nL, 1)
     varL = max.(sumL2 ./ max(nL, 1) .- meanL .^ 2, 0.0)
     report = evidence_report(evidence_acc, βs)
-    return (cold_ys = cold_ys, report = report, meanlogL = meanL, varlogL = varL)
+    return (cold_ys = cold_ys, report = report, meanlogL = meanL, varlogL = varL,
+            swap_acc = swap_acc ./ max(1, nL * W))
 end
 
 """
-    sample_pt_hmc(target::NereusTarget; kwargs...) -> (chains, log_evidence, report)
+    sample_pt_hmc(target::NereusTarget; kwargs...)
+        -> (chains, log_evidence, report, evidence)
 
 Hamiltonian parallel tempering for fixed-dim, ForwardDiff-differentiable models.
-Returns the cold-chain `MCMCChains.Chains` (with `:lp`), the TI⁺ log-evidence,
-and the `EvidenceReport`.
+Returns the cold-chain `MCMCChains.Chains` (with `:lp`), the log-evidence, the
+tempered `EvidenceReport` (TI, TI+, SS+, H+) and a named tuple `evidence` of
+`(; bridge, laplace, tempered, tempered_ok, tempered_why, reported, betas,
+swap_acc)`.
+
+The log-evidence is chosen as pt_emcee chooses it: bridge sampling on the cold
+chain when its reference has the effective samples it needs, else the tempered
+SS+ when it can be trusted (`tempered_ok`), else `NaN`, with a warning saying
+why: a number is not printed for an evidence the run cannot support. SS+ is
+trusted when the ladder starts at β = 0 and every adjacent pair of rungs
+swapped at least `swap_min` of the time; `tempered_why` gives the reason it is
+not. A quotable SS+ more than `evidence_tol` nats from bridge is warned about.
 
 # Keywords
 - `n_temps=12`, `n_sweeps=1500`, `n_warmup=400`
@@ -346,6 +363,11 @@ and the `EvidenceReport`.
   and −4.5 at i = 89.5° (TI+ 166.9 and 168.4 against bridge 165.5 and 163.9);
   with it, SS+ gives 165.5 and 163.9.
 - `betas=nothing` : custom β-ladder (overrides default + disables adaptation)
+- `swap_min=0.05` : the least swap acceptance between adjacent rungs at which
+  the tempered SS+ is quoted (above).
+- `evidence_tol=2.0` : nats; a quotable SS+ this far from bridge is warned
+  about.
+- `bridge_n=20_000` : proposal draws of the bridge estimate; `0` skips it.
 - `warm_start=true` : start from a short pt_emcee pre-search. With it off the
   starts are scouted prior draws (`n_scouts`), and the seams of the
   full-circle angles are placed first by a short pathfinder pilot
@@ -403,6 +425,9 @@ function sample_pt_hmc(
     resume::Bool = false,
     n_scouts::Int = 16,
     beta_min::Real = 1e-4,
+    swap_min::Real = 0.05,
+    evidence_tol::Real = 2.0,
+    bridge_n::Int = 20_000,
 )
     n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     0 < beta_min < 1 || throw(ArgumentError("beta_min must be in (0, 1); got $beta_min"))
@@ -533,12 +558,109 @@ function sample_pt_hmc(
     end
     chains = MCMCChains.Chains(mat, pnames)
     report = res.report
+    ev = _pt_hmc_evidence(target, chains, report, βs, res.swap_acc, Float64(swap_min),
+                          Float64(evidence_tol), bridge_n, seed)
     if progress
         @info "PT-HMC: $(n_post) cold samples, $(n_temps) temps × $(W) walkers" *
               (adapt_ladder && betas === nothing ? " (adaptive ladder)" : "")
         @info "  TI+ = $(round(report.ti_plus[1], digits=2)) ± $(round(report.ti_plus[2], digits=3))  " *
               "SS+ = $(round(report.ss_plus[1], digits=2))  " *
-              "H+ = $(round(report.hybrid[1], digits=2))"
+              "H+ = $(round(report.hybrid[1], digits=2))" *
+              (ev.tempered_ok ? "" : "  (not quotable: $(ev.tempered_why))")
+        @info "  swap acceptance: " * join(string.(round.(res.swap_acc, digits = 2)), " ")
+        @info "  bridge = $(round(ev.bridge, digits=2))  log Z reported: " *
+              (isfinite(ev.log_z) ? "$(round(ev.log_z, digits=2)) ($(ev.reported))" : "none")
     end
-    return chains, report.ti_plus[1], report
+    return chains, ev.log_z, report,
+           (; bridge = ev.bridge, laplace = ev.laplace, tempered = report.ss_plus[1],
+              ev.tempered_ok, ev.tempered_why, ev.reported, betas = copy(βs),
+              swap_acc = res.swap_acc)
+end
+
+# Whether the tempered SS+ can be quoted: `(ok, why)`, `why` empty when it can.
+# The ladder must start at β = 0, or the [0, β₁] head is not in the integral
+# (it was worth −1.3 to −4.5 nats on the RV + IAD companion from β₁ = 1e-4); and
+# every adjacent pair of rungs must overlap, which a stepping-stone ratio needs
+# and the swaps between them measure: at least `swap_min` of them accepted.
+# SS+ rather than TI+: from β = 0 the integrand climbs through four decades in
+# the first segment, which PCHIP does not resolve -- TI+ came out 1.1 to 3.6
+# nats low at 8 and 12 rungs, its error 6.6 to 42 nats, where SS+ matched
+# bridge sampling to 0.1.
+function _pt_hmc_tempered_ok(report::EvidenceReport, βs::AbstractVector,
+                             swap_acc::AbstractVector, swap_min::Float64)
+    n = length(βs)
+    βs[1] == 0 || return (false, "the ladder starts at β = $(βs[1]), so the " *
+                                 "[0, $(βs[1])] head is not in the integral")
+    isfinite(report.ss_plus[1]) || return (false, "SS+ is not finite")
+    k = argmin(swap_acc)
+    swap_acc[k] >= swap_min ||
+        return (false, "rungs β = $(round(βs[k], sigdigits = 3)) and " *
+                       "$(round(βs[k + 1], sigdigits = 3)) swapped " *
+                       "$(round(100 * swap_acc[k], digits = 1))% of the time " *
+                       "(< $(100 * swap_min)%): too little overlap for their ratio")
+    return (true, "")
+end
+
+# The log-evidence pt_hmc reports, as pt_emcee picks its own: bridge sampling
+# on the cold chain when its reference `q` has the effective samples it needs
+# (d + d(d+1)/2; with fewer it is biased low and no diagnostic shows it), else
+# SS+ when `_pt_hmc_tempered_ok`, else NaN. A warning says why whenever the
+# tempered value is not quotable, and when bridge and a quotable SS+ disagree
+# by more than `tol` nats.
+function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
+                          report::EvidenceReport, βs::AbstractVector,
+                          swap_acc::AbstractVector, swap_min::Float64, tol::Float64,
+                          bridge_n::Int, seed::Int)
+    ok, why = _pt_hmc_tempered_ok(report, βs, swap_acc, swap_min)
+    lz_bridge = NaN
+    if bridge_n > 0 && target.transform !== nothing
+        try
+            b = bridge_evidence(target, chains; n_proposal = bridge_n, seed = seed)
+            b.converged && isfinite(b.log_z) && (lz_bridge = b.log_z)
+        catch err
+            @debug "sample_pt_hmc: bridge evidence unavailable" exception = err
+        end
+    end
+    if isfinite(lz_bridge)
+        d = LogDensityProblems.dimension(target)
+        need = d + d * (d + 1) ÷ 2
+        n_eff = try
+            minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
+        catch err
+            @debug "sample_pt_hmc: ESS unavailable for the bridge guard" exception = err
+            NaN
+        end
+        if !(isfinite(n_eff) && n_eff >= need)
+            @warn "sample_pt_hmc: bridge is not reported — its reference is " *
+                  "fitted from too few effective samples (min ESS " *
+                  "$(isfinite(n_eff) ? round(Int, n_eff) : "?") < $need free " *
+                  "parameters in q), where it is biased low." bridge = lz_bridge
+            lz_bridge = NaN
+        end
+    end
+    laplace = try
+        mode_laplace_evidence(target, chains)
+    catch err
+        @debug "sample_pt_hmc: mode-Laplace evidence unavailable" exception = err
+        NaN
+    end
+    ssp = report.ss_plus[1]
+    if isfinite(lz_bridge)
+        ok || @warn "sample_pt_hmc: the tempered evidence (TI/TI+/SS+/H+) is not " *
+                    "quotable: $why. Reporting bridge." bridge = lz_bridge ss_plus = ssp ti_plus = report.ti_plus[1]
+        ok && abs(ssp - lz_bridge) > tol &&
+            @warn "sample_pt_hmc: bridge and the tempered SS+ differ by " *
+                  "$(round(abs(ssp - lz_bridge), digits=1)) nats. Reporting bridge; " *
+                  "check that the posterior is not multimodal." bridge = lz_bridge ss_plus = ssp
+        return (; log_z = lz_bridge, bridge = lz_bridge, laplace, tempered_ok = ok,
+                  tempered_why = why, reported = "bridge")
+    elseif ok
+        return (; log_z = ssp, bridge = NaN, laplace, tempered_ok = ok, tempered_why = why,
+                  reported = "ss_plus")
+    end
+    @warn "sample_pt_hmc: no quotable log-evidence for this run. The tempered " *
+          "stack is not ($why) and bridge sampling is unavailable. log_evidence " *
+          "is NaN; add rungs (n_temps) or sweeps." ss_plus = ssp ti_plus = report.ti_plus[1] laplace = laplace
+    return (; log_z = NaN, bridge = NaN, laplace, tempered_ok = ok, tempered_why = why,
+              reported = "none")
 end
