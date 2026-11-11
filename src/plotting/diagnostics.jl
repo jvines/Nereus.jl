@@ -156,7 +156,13 @@ function _lnp_density!(ax, x::AbstractVector, y::AbstractVector)
         return scatter!(ax, x, y; color = NEREUS_COLORS.post, markersize = 4,
                         strokewidth = 0)
     end
-    return hexbin!(ax, x, y; bins = (100, 50), colormap = :cool, colorscale = log10)
+    # One weighted point per hexagon: the same figure (`_hexbin_reduce`), without
+    # the figure holding every draw.
+    red = _hexbin_reduce(x, y, (100, 50))
+    red === nothing &&
+        return hexbin!(ax, x, y; bins = (100, 50), colormap = :cool, colorscale = log10)
+    return hexbin!(ax, red[1]; weights = red[2], bins = (100, 50), colormap = :cool,
+                   colorscale = log10)
 end
 
 """
@@ -228,6 +234,206 @@ function plot_posteriors(chains, params;
         end
     end
     return figs
+end
+
+
+"""
+    _CompactHexBin(; kwargs...)
+
+`PairPlots.HexBin`, drawn from one weighted point per occupied hexagon instead
+of every draw. The figure is the same: the same hexagons, counts, colours and
+drawing order (see `_hexbin_reduce`), from the same bin counts.
+
+A Makie `hexbin` keeps its input points for as long as the figure lives, one
+`Point2d` per draw per panel: 3 MB for each of the 253 panels of a 23-parameter,
+200,000-draw corner, 0.8 GB held until the PNG is written. Reduced, a panel
+holds a few hundred points. `nbins` keeps each column's bin count, which
+PairPlots computes from the column's effective sample size twice per PANEL, an
+FFT over all the draws each time.
+"""
+struct _CompactHexBin <: PairPlots.VizTypeBody
+    kwargs
+    nbins::Dict{Symbol, Int}
+end
+_CompactHexBin(; kwargs...) = _CompactHexBin(kwargs, Dict{Symbol, Int}())
+
+# One axis's hexbin bin count, as PairPlots' `bodyplot(::HexBin)` sets it: from
+# `series.bins` under `key` (the ROW's name for x, as PairPlots has it), else the
+# `bins` keyword, else from the effective sample size of the column `col` drawn
+# on that axis.
+function _hexbin_nbins(viz::_CompactHexBin, series, key, col, data)
+    haskey(series.bins, key) && series.bins[key] isa Number && return series.bins[key]
+    haskey(viz.kwargs, :bins) && return viz.kwargs[:bins]
+    haskey(series.kwargs, :bins) && return series.kwargs[:bins]
+    return get!(viz.nbins, Symbol(col)) do
+        n_ess = PairPlots.MCMCDiagnosticTools.ess(data)
+        isfinite(n_ess) || (n_ess = length(data))
+        max(7, ceil(Int, 1.8log2(n_ess)) + 1)
+    end
+end
+
+"""
+    _hexbin_reduce(x, y, bins) -> (points, weights) or nothing
+
+The draws `(x, y)` as Makie's `hexbin(x, y; bins)` bins them, reduced to one
+point per occupied hexagon -- the first draw that falls in it, weighted by the
+hexagon's count -- followed by the draws at the four extremes, weighted zero.
+
+`hexbin(points; weights, bins)` then draws what `hexbin(x, y; bins)` draws:
+
+  - the extremes give the same data limits, and so the same hexagon grid;
+  - each hexagon gets its count back, as the same `Float64`;
+  - the hexagons come out in the same order: Makie collects them in a `Dict`
+    keyed by hexagon, and a `Dict`'s layout follows the order in which its keys
+    first arrive, which the first-draw order keeps. The extremes arrive last,
+    in hexagons already present, and add zero.
+
+The binning is Makie's own (`_spacings_offsets_nbins`, `_nearest_center` and the
+distance test of `plot!(::Hexbin)`), so it bins as the hexbin it replaces; the
+corner tests compare the two. `nothing` when a coordinate is not finite, for the
+caller to draw the draws themselves.
+"""
+function _hexbin_reduce(x::AbstractVector{<:Real}, y::AbstractVector{<:Real}, bins)
+    n = length(x)
+    (n == 0 || n != length(y)) && return nothing
+    (all(isfinite, x) && all(isfinite, y)) || return nothing
+    # The recipe's limits, from the extreme points.
+    ixlo, ixhi = argmin(x), argmax(x)
+    iylo, iyhi = argmin(y), argmax(y)
+    r = Makie.Rect2(Makie.Point2d[(x[ixlo], y[iylo]), (x[ixhi], y[iyhi])])
+    low = prevfloat.(minimum(r))
+    high = nextfloat.(maximum(r))
+    lims = Makie.Rect2d(low, high - low)
+    spacing, offset, _ = Makie._spacings_offsets_nbins(bins, nothing, lims)
+    sz = spacing .* Makie._hexbin_size_fact()
+    yweight = sz[1] / sz[2]
+
+    slot = Dict{NTuple{2, Int}, Int}()
+    first_draw = Int[]
+    count = Float64[]
+    @inbounds for i in 1:n
+        txy = Makie.Point2d(x[i], y[i])
+        tx, ty = txy
+        (nx, ny), (nxs, nys), (dvx, dvy) = Makie._nearest_center(txy, spacing, offset)
+        d1 = (tx - nx)^2 + (yweight * (ty - ny))^2
+        d2 = (tx - nxs)^2 + (yweight * (ty - nys))^2
+        id = d1 < d2 ? (cld(dvx, 2), ifelse(iseven(dvy), dvy, dvy + 1)) :
+                       (fld(dvx, 2), ifelse(iseven(dvy), dvy + 1, dvy))
+        k = get(slot, id, 0)
+        if k == 0
+            push!(first_draw, i)
+            push!(count, 1.0)
+            slot[id] = length(first_draw)
+        else
+            count[k] += 1.0
+        end
+    end
+    idx = vcat(first_draw, [ixlo, ixhi, iylo, iyhi])
+    points = [Makie.Point2d(x[i], y[i]) for i in idx]
+    return points, vcat(count, zeros(4))
+end
+
+function PairPlots.bodyplot(ax::Makie.Axis, viz::_CompactHexBin,
+                            series::PairPlots.AbstractSeries, colname_row, colname_col)
+    cn = PairPlots.columnnames(series)
+    (colname_row in cn && colname_col in cn) || return nothing
+    X = PairPlots.getcolumn(series, colname_col)
+    Y = PairPlots.getcolumn(series, colname_row)
+    try
+        bins = (_hexbin_nbins(viz, series, colname_row, colname_col, X),
+                _hexbin_nbins(viz, series, colname_col, colname_row, Y))
+        kw = PairPlots.remove_attrs(Makie.hexbin; series.kwargs..., viz.kwargs...)
+        red = _hexbin_reduce(X, Y, bins)
+        if red === nothing
+            Makie.hexbin!(ax, X, Y; colormap = Makie.cgrad([:transparent, :black]),
+                          bins, kw...)
+        else
+            Makie.hexbin!(ax, red[1]; weights = red[2],
+                          colormap = Makie.cgrad([:transparent, :black]), bins, kw...)
+        end
+    catch err
+        err isa InexactError || rethrow(err)
+        @warn "InexactError encountered in `hexbin`" colname_row colname_col
+    end
+    return nothing
+end
+
+"""
+    _CornerContour(; sigmas = 0.5:0.5:2, bandwidth = 1.0, kwargs...)
+
+`PairPlots.Contour`, with each column's KDE bandwidth computed once per figure.
+PairPlots computes it in every panel for both axes, and each time it is an
+effective sample size and a quantile copy over all the drawn draws: 19 of the
+23 MB a panel allocated at 200,000 draws, 4.8 GB of garbage over a
+23-parameter corner. The contours are PairPlots' own (`_corner_contours`).
+"""
+struct _CornerContour <: PairPlots.VizTypeBody
+    sigmas
+    bandwidth
+    kwargs
+    bw::Dict{Symbol, Float64}
+end
+_CornerContour(; sigmas = 0.5:0.5:2, bandwidth = 1.0, kwargs...) =
+    _CornerContour(sigmas, bandwidth, kwargs, Dict{Symbol, Float64}())
+
+# PairPlots' `prep_contours`, line for line, with the bandwidths of
+# `default_bandwidth_ess` looked up in `viz.bw`.
+function _corner_contours(viz::_CornerContour, series, colname_row, colname_col;
+                          bandwidth = 1.0)
+    PP = PairPlots
+    xdat = PP.ustrip(PP.disallowmissing(PP.getcolumn(series, colname_col)))
+    ydat = PP.ustrip(PP.disallowmissing(PP.getcolumn(series, colname_row)))
+    bw(col, d) = get!(() -> PP.default_bandwidth_ess(d), viz.bw, Symbol(col))
+    k = PP.KernelDensity.kde((xdat, ydat),
+                             bandwidth = (bw(colname_col, xdat), bw(colname_row, ydat)) .* bandwidth)
+    ik = PP.KernelDensity.InterpKDE(k)
+
+    exx = extrema(xdat)
+    exy = extrema(ydat)
+    N = 100
+    x = range(first(exx), last(exx), length = N)
+    y = range(first(exy), last(exy), length = N)
+    h = PP.pdf.(Ref(ik), x, y')
+
+    levels = 1 .- exp.(-0.5 .* (1 ./ viz.sigmas) .^ 2)
+    ii = sortperm(reshape(h, :))
+    h2flat = h[ii]
+    sm = cumsum(h2flat)
+    sm /= sm[end]
+    if all(isnan, sm) || length(h) <= 1
+        @warn "Could not compute valid contours between $colname_col and $colname_row"
+        V = [0]
+    else
+        V = sort(map(v0 -> h2flat[sm .≤ v0][end], levels))
+        any(==(0), diff(V)) && @warn "Too few points to create valid contours"
+    end
+
+    pad_x = [first(x) - step(x); x; last(x) + step(x)]
+    pad_y = [first(y) - step(y); y; last(y) + step(y)]
+    pad_h = [
+        zeros(size(h, 2))' 0 0
+        zeros(size(h, 1)) h zeros(size(h, 1))
+        zeros(size(h, 2))' 0 0
+    ]
+    return PP.ContourLib.contours(pad_x, pad_y, pad_h, V)
+end
+
+function PairPlots.bodyplot(ax::Makie.Axis, viz::_CornerContour, series,
+                            colname_row, colname_col)
+    cn = PairPlots.columnnames(series)
+    (colname_row in cn && colname_col in cn) || return nothing
+    bandwidth = viz.bandwidth
+    if bandwidth isa AbstractDict
+        bandwidth = get(bandwidth, (colname_row, colname_col), 1.0)
+    end
+    c = _corner_contours(viz, series, colname_row, colname_col; bandwidth)
+    CL = PairPlots.ContourLib
+    for level in CL.levels(c), poly in CL.lines(level)
+        xs, ys = CL.coordinates(poly)
+        Makie.lines!(ax, xs, ys;
+                     PairPlots.remove_attrs(Makie.lines; series.kwargs..., viz.kwargs...)...)
+    end
+    return nothing
 end
 
 
@@ -331,10 +537,10 @@ function plot_corner(chains, params;
         # core holds thousands, and on a linear scale everything outside the core
         # saturates to one shade.
         layers = density === :hexbin ?
-            (PairPlots.HexBin(colormap = :cool, colorscale = log10),
-             PairPlots.Contour(color = :black)) :
+            (_CompactHexBin(colormap = :cool, colorscale = log10),   # = PairPlots.HexBin
+             _CornerContour(color = :black)) :     # = PairPlots.Contour
             (PairPlots.Scatter(markersize = 1, color = (NEREUS_COLORS.post, 0.1)),
-             PairPlots.Contour())
+             _CornerContour())
         fig = Base.invokelatest(pairplot, data_nt => layers; pin...)
 
         if output !== nothing
