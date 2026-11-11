@@ -65,7 +65,8 @@ This is version `0.2.0`.
   composable, all toggleable under trans-dim, all scopable to a
   subset of instruments. → [Noise models](noise_models.md)
 - **Multiple parametrisations** for eccentricity (`sesinw`/`secosw`,
-  `esinw`/`ecosw`, `ecc`/`w`), time anchor (`Mo` / `Tp` / `Tc`),
+  `esinw`/`ecosw`, `ecc`/`w`), time anchor (`phic`, the default /
+  `Mo` / `Tp` / `Tc`),
   transit geometry (`b`/`rr` vs `r1`/`r2`), and the stellar-density
   vs Kepler-III scale choice via `use_rho_s`. Planets carry
   per-planet `PlanetDataSources` so RV-only, transit-only, and joint

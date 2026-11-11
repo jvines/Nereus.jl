@@ -91,9 +91,13 @@ trans-dim engine (`transdim_pt_emcee`, `rjmcmc`, `moms`) to mean anything.
 baselines, and the semi-amplitude from 0.1 m/s to ten times the RV scatter:
 
 ```julia
-default_rv_planet(t, rv)      # -> (P, K, sesinw, secosw, Mo) priors
-default_astrom_planet()       # -> (a, M_sec, sesinw, secosw, Mo, inc, Omega)
+default_rv_planet(t, rv)      # -> (P, K, sesinw, secosw) priors
+default_astrom_planet()       # -> (a, M_sec, sesinw, secosw, inc, Omega)
 ```
+
+Neither names a time anchor: the fit's `time_anchor` does (default the
+transit phase `phic`, on `U(−π, π)`; `"Mo"`, `"Tp"` or `"Tc"` on request), and
+its default prior comes with it.
 
 You should still look at them. A data-derived prior is a sane starting point,
 not a considered one — and on a short baseline the upper period bound is
@@ -107,7 +111,7 @@ fit_rv(rv; planets = (k1 = (P = NormalPrior(4.1375, 0.001),
                             K = LogUniformPrior(1.0, 30.0),
                             sesinw = UniformPrior(-1, 1),
                             secosw = UniformPrior(-1, 1),
-                            Mo     = UniformPrior(0, 2pi)),))
+                            phic   = UniformPrior(-pi, pi)),))
 ```
 
 ---

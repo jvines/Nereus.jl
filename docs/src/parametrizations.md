@@ -114,7 +114,7 @@ RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB
 ```julia
 ParametrizationConfig(;
     ew                = :sesinw,
-    time              = :Mo,
+    time              = :phic,       # :Mo when obs_prior = true
     geom              = :b_rr,
     use_rho_s         = false,
     mass              = :K_driven,
@@ -161,12 +161,53 @@ clamp never changes the `e` a likelihood evaluates.
 ### `time::Symbol` — orbital time anchor
 
 The single time slot (`t`) is named and decoded per this choice
-(`src/model.jl:1505`; conversions `src/orbit.jl:175`–`236`):
+(`src/model.jl:1505`; conversions `src/orbit.jl:175`–`236`). The default,
+in `ParametrizationConfig`, `build_target`, the `fit_*` functions and
+run_job alike, is `:phic`.
 
-- `:Mo` (the default, in the Julia API and run_job) — sample mean anomaly `M₀` at the
-  reference epoch `t_ref` (= `data.t_ref`, the data median). Best
-  conditioning for poorly-constrained periods (mid-baseline anchor
-  reduces P–Tp covariance). `mo_to_tp` (`src/orbit.jl:193`).
+!!! note "Why the transit phase is the default"
+    At low `e` the data pin the mean longitude `λ = M₀ + ω`, not `M₀` and
+    `ω` apart. Sampled as `(M₀, √e sin ω, √e cos ω)` that is a thin ridge,
+    a helix in the sampler's coordinates; chains mix badly along it, each
+    holding its own `ω`, and that biases `e`. On an RV + Hipparcos IAD target
+    with a circular orbit, `pt_emcee` in `M₀` gave a median `e` of 0.0097
+    against 0.0081 in `φ_c` at `i = 45°`, and `rjmcmc` 0.0019 against
+    0.0061 at 89.5°. `φ_c` has no such ridge: at `e = 0` it is `π/2 − λ`.
+    For fixed `(P, e, ω)` the map `M₀ → φ_c` is a shift, so a uniform `φ_c`
+    is the same prior as a uniform `M₀` and the posterior is unchanged; only
+    the geometry the sampler sees differs. It is also the natural anchor of a
+    transit fit. `M₀`, `Tp` and `Tc` are reported per draw in the derived
+    table (`Mo_deg`, `Tp`, `Tc`). The one exception is the O'Neil `obs_prior`
+    (below), which keeps `:Mo`.
+
+- `:phic` (the default) — sample the transit phase `φ_c = 2π (Tc − t_ref_c) / P`
+  (`phic_k<k>`, rad, default prior `U(−π, π)`). It is `Tc` measured in
+  phase: it has no `e` or `ω` in it, so the transit pins it directly, as it
+  does `Tc`, and it lives on a circle, so its window is one period at every
+  `P` (`Tc ∈ [t_ref_c − P/2, t_ref_c + P/2)`). A uniform `φ_c` is uniform
+  transit phase, `p(Tc | P) = 1/P`. Without a transit it is still defined
+  (`Tc` is the inferior conjunction, `f = π/2 − ω`) and is the mean
+  longitude in disguise, which is why it suits RV and astrometric orbits too.
+  `Tc` is reported per draw as the derived `Tc` (`phic_to_tc`), so its
+  covariance with `P` is exact, and `Tp` and `M₀` (`Mo_deg`, at `data.t_ref`)
+  alongside it.
+  `t_ref_c` (`ParametrizationConfig(t_ref_c = …)`, run_job
+  `parametrization.t_ref_c`) defaults to the median photometric time, where
+  `Tc` is least correlated with `P`; without photometry it is `data.t_ref`.
+  `Params` fixes it with the parametrization, so every draw means the same
+  `Tc` whatever subset of the data a likelihood later sees; a `Params` built
+  without `data` needs `t_ref_c` (or another anchor) and says so.
+  `chains.nc` records the anchor and this epoch (attributes `time_anchor`
+  and `t_ref_c`), so a sampled `phic_k<k>` decodes without the data.
+  Like `Mo`, `φ_c` is not treated as circular when TTVs or the O'Neil
+  `obs_prior` are on: a 2π shift relabels the transit epochs there.
+- `:Mo` — sample mean anomaly `M₀` at the
+  reference epoch `t_ref` (= `data.t_ref`, the data median). The default
+  until the transit phase replaced it, and still the default under
+  `obs_prior = true`: the O'Neil prior is a density over one fixed period of
+  `Tp`, which `M₀ ∈ [0, 2π)` spans (`Tp ∈ (t_ref − P, t_ref]`) and the
+  `φ_c` window, which moves with `(e, ω)`, does not. `mo_to_tp`
+  (`src/orbit.jl:193`).
 - `:Tp` — sample time of periastron passage. Natural for visual orbits
   where Tp has direct geometric meaning. `tp_to_mo` (`src/orbit.jl:202`).
 - `:Tc` — sample time of transit centre (inferior conjunction). Right
@@ -174,22 +215,6 @@ The single time slot (`t`) is named and decoded per this choice
   `Tc` directly, and `Tp` becomes derived via `tc_to_tp`
   (`src/orbit.jl:212`, transit at `f = π/2 − ω`). The `ttv_oc` plot and
   the per-transit Tc measurements need `:Tc` or `:phic`.
-- `:phic` — sample the transit phase `φ_c = 2π (Tc − t_ref_c) / P`
-  (`phic_k<k>`, rad, default prior `U(−π, π)`). It is `Tc` measured in
-  phase: it has no `e` or `ω` in it, so the transit pins it directly, as it
-  does `Tc`, and it lives on a circle, so its window is one period at every
-  `P` (`Tc ∈ [t_ref_c − P/2, t_ref_c + P/2)`). A uniform `φ_c` is uniform
-  transit phase, `p(Tc | P) = 1/P`. Use it for a transiting planet whose `P`
-  prior is wider than a fixed `Tc` window can follow: single transits, RV
-  plus a weak transit, automated configs. `Tc` is reported per draw as the
-  derived `Tc` (`phic_to_tc`), so its covariance with `P` is exact.
-  `t_ref_c` (`ParametrizationConfig(t_ref_c = …)`, run_job
-  `parametrization.t_ref_c`) defaults to the median photometric time, where
-  `Tc` is least correlated with `P`; without photometry it is `data.t_ref`.
-  `Params` fixes it with the parametrization, so every draw means the same
-  `Tc` whatever subset of the data a likelihood later sees.
-  Like `Mo`, `φ_c` is not treated as circular when TTVs or the O'Neil
-  `obs_prior` are on: a 2π shift relabels the transit epochs there.
 
 !!! warning "Keep a Tp or Tc prior within one period"
     The likelihood repeats every period, so a `Tp`/`Tc` prior wider than
@@ -198,7 +223,7 @@ The single time slot (`t`) is named and decoded per this choice
     copies: on a 12.3 d RV target with a 929 d window the walkers spread
     over 46 copies and R-hat stayed at 1.9–5 with every walker in the mode.
     `Params` warns when a window is wider than the shortest period the `P`
-    prior allows. Use `Mo`, `phic` for a transiting planet, or a prior no
+    prior allows. Use `phic` (the default) or `Mo`, or a prior no
     wider than one period around a known epoch. The `Tc` window also fails
     the other way: when `P` is longer than the baseline, `U(t_min, t_max)`
     forbids transit times outside the data, which `phic` does not.
@@ -364,7 +389,7 @@ maps only these keys, with these accepted string values:
 | run_job key | accepted strings | maps to | default |
 |---|---|---|---|
 | `mass` | `K_driven`, `M_sec_driven`, `a_driven` | `:K_driven` / `:M_sec_driven` / `:a_driven` | `K_driven` |
-| `time` | `Tp`, `Tc`, `Mo`, `phic` | `:Tp` / `:Tc` / `:Mo` / `:phic` | `Mo` |
+| `time` | `Tp`, `Tc`, `Mo`, `phic` | `:Tp` / `:Tc` / `:Mo` / `:phic` | `phic` |
 | `t_ref_c` | a time (`phic` only) | `t_ref_c` | median photometric time |
 | `ew` | `sesinw`, `ew` | `:sesinw` / `:ew` | `sesinw` |
 | `geom` | `b_rr` | `:b_rr` | `b_rr` |

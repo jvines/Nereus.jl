@@ -66,7 +66,7 @@ target = build_target(
             K      = ModJeffreysPrior(0.1, 200.0),  # m/s
             sesinw = UniformPrior(-1.0, 1.0),
             secosw = UniformPrior(-1.0, 1.0),
-            Mo     = UniformPrior(0.0, 2π),
+            phic   = UniformPrior(-π, π),       # transit phase (the default anchor)
         ),
     ),
     rv = (
@@ -103,7 +103,8 @@ TI / TI+ / SS+ / H+ stack is in `res.evidence`.
       `M_sec`, `:M_sec_driven` if `P` + `M_sec` (no `K`), else
       `:K_driven` (`P` + `K`).
     - The time anchor from the first planet's params: `:Tc` if `Tc`
-      declared, `:Tp` if `Tp`, else `:Mo`.
+      declared, `:phic` if `phic`, `:Tp` if `Tp`, `:Mo` if `Mo`, else the
+      default `:phic` (see [Parametrizations](parametrizations.md)).
     - Per-key namespacing: planet params get `_kN`, instrument params
       get `_NAME`.
 
@@ -143,7 +144,7 @@ cfg = Dict(
   "model" => Dict(
      "max_kplanet"  => 1,
      "planet_modes" => ["RV_ONLY"],
-     "parametrization" => Dict("mass" => "K_driven", "time" => "Mo",
+     "parametrization" => Dict("mass" => "K_driven", "time" => "phic",
                                "ew" => "sesinw", "geom" => "b_rr")),
 
   # Optional — auto-generated priors are used for any key you omit.

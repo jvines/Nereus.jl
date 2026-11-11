@@ -247,9 +247,12 @@ rather than a single number trusted.
 
     "parametrization": {                   // src/runner.jl:287-292,419-427,1089-1113, _KNOWN_PARAMETRIZATIONS
       "mass": "K_driven",                  // K_driven | M_sec_driven | a_driven
-      "time": "Mo",                        // Mo (default) | Tp | Tc | phic. Tp/Tc: keep the prior within one period.
+      "time": "phic",                      // phic (default) | Mo | Tp | Tc. Tp/Tc: keep the prior within one period.
                                            //   phic: transit phase 2π(Tc − t_ref_c)/P, one period at
-                                           //   every P; Tc is reported as a derived quantity
+                                           //   every P; Tc, Tp and Mo (Mo_deg) are reported as derived
+                                           //   quantities. The default because Mo has a low-e ridge
+                                           //   with ω (the data pin λ = Mo + ω) that biases e; φ_c is
+                                           //   π/2 − λ there. Same posterior: uniform φ_c ≡ uniform Mo.
       "t_ref_c": 2459000.0,                // phic only: the epoch φ_c is measured from. Omit it to
                                            //   use the median photometric time (else data t_ref)
       "ew":   "sesinw",                    // sesinw | ew

@@ -90,7 +90,8 @@ collated error message if any is wrong — see `_validate_config` in
 ### The parameter naming convention
 
 Per-planet parameters are suffixed `_k<k>` (1-indexed):
-`P_k1`, `K_k1`, `Tc_k1`, `Tp_k1`, `Mo_k1`, `sesinw_k1`, `secosw_k1`,
+`P_k1`, `K_k1`, `phic_k1` (the default anchor), `Tc_k1`, `Tp_k1`, `Mo_k1`,
+`sesinw_k1`, `secosw_k1`,
 `ecc_k1`/`omega_k1` (with `ew=:ew`), `b_k1`, `rr_k1`, `inc_k1`,
 `Omega_k1`, `a_k1`, `M_sec_k1`, `lambda_k1` (RM obliquity),
 `ttv_k1_t<i>` (per-transit offsets). Per-instrument parameters are
@@ -125,7 +126,7 @@ cfg = Dict(
   "model" => Dict(
      "max_kplanet"     => 1,
      "planet_modes"    => ["RV_ONLY"],
-     "parametrization" => Dict("mass" => "K_driven", "time" => "Mo",
+     "parametrization" => Dict("mass" => "K_driven", "time" => "phic",
                                "ew" => "sesinw", "marginalize_gamma" => true),
      "stability"       => "none",
      "trend_order"     => 0),
