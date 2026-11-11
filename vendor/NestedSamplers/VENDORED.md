@@ -47,5 +47,11 @@ Changed here since the commit above, so carry them over on an update:
   The commit above sliced along directions built from the likelihood gradient
   at the current point, which depend on the state, so the move was not
   reversible.
+- `RWalk` and `RStagger` take exactly `walks` steps of one size, changed
+  between chains only; a chain with no step accepted stays at its start. The
+  commit above walked on until a step was accepted, shrank the step inside a
+  chain that kept failing, and RStagger rescaled its step after every step, so
+  the moves did not leave the constrained distribution unchanged. RStagger's
+  walk is now RWalk's.
 
 License: MIT (see LICENSE) — original authors retained.

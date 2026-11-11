@@ -87,7 +87,7 @@ Propose a new live point by random walking away from an existing live point. Thi
 
 ## Parameters
 - `ratio` is the target acceptance ratio
-- `walks` is the minimum number of steps to take
+- `walks` is the number of steps to take
 - `scale` is the proposal distribution scale, which will update _between_ proposals.
 """
 @with_kw mutable struct RWalk <: AbstractProposal
@@ -108,56 +108,48 @@ function (prop::RWalk)(
     model;
     kwargs...
 )
-    # setup
-    n = length(point)
-    scale_init = prop.scale
-    accept = reject = fail = nfail = nc = ncall = 0
-    local du, u_prop, logl_prop, u, v, logl
+    u, v, logl, ncall, accept, reject = _walk(rng, prop.walks, prop.scale, point, logl_star, bounds, model)
+    update_scale!(prop, accept, reject, length(point))
+    return u, v, logl, ncall
+end
+
+# A chain of exactly `walks` Metropolis steps of one size, `scale` times an
+# offset drawn from `bounds`; the size changes between chains only
+# (`update_scale!`). The chain used to walk on past `walks` until a step was
+# accepted, and to shrink its step when it had failed for 50·`walks` steps:
+# where it ended then depended on its own acceptances, and it no longer left
+# the uniform distribution inside the constraint unchanged. A chain with no
+# step accepted stays at its start, as dynesty's does.
+function _walk(rng, walks, scale, point, logl_star, bounds, model)
+    accept = reject = ncall = 0
+    local v, logl
     # The walk's current position: each step proposes from where the last
     # accepted one ended. Proposing every step from `point` would make the
     # result one step from the live point it was copied from, whatever `walks`.
-    cur = point
-
-    while nc < prop.walks || iszero(accept)
-        # check scale factor to avoid over-shrinking
-        prop.scale < 1e-15 * scale_init && error("Random walk sampling appears to be stuck.")
-        # get proposed point
-        du = randoffset(rng, bounds)
-        u_prop = @. cur + prop.scale * du
+    u = point
+    for _ in 1:walks
+        u_prop = @. u + scale * $randoffset(rng, bounds)
         # A step out of the unit cube is a rejected step, as one out of the
         # constraint is. Drawing again until a step lands inside made the
         # proposal depend on how much of it the cube holds, which favours the
         # cube's middle: a posterior against a prior edge came out short of it.
-        logl_prop = if unitcheck(u_prop)
+        if unitcheck(u_prop)
             ncall += 1
-            v_prop, l = prior_transform_and_loglikelihood(model, u_prop)
-            l
-        else
-            nfail += 1
-            -Inf
+            v_prop, logl_prop = prior_transform_and_loglikelihood(model, u_prop)
+            if logl_prop ≥ logl_star
+                u, v, logl = u_prop, v_prop, logl_prop
+                accept += 1
+                continue
+            end
         end
-        if logl_prop ≥ logl_star
-            u = cur = u_prop
-            v = v_prop
-            logl = logl_prop
-            accept += 1
-        else
-            reject += 1
-        end
-        nc += 1
-        
-        # check if stuck generating bad points
-        if nc > 50 * prop.walks
-            @warn "Random walk proposals appear to be extremely inefficient. Adjusting the scale-factor accordingly"
-            prop.scale *= exp(-1/n)
-            nc = accept = reject = 0
-        end
+        reject += 1
     end
-    
-    # update proposal scale using acceptance ratio
-    update_scale!(prop, accept, reject, n)
-
-    return u, v, logl, ncall
+    if iszero(accept)
+        v, logl = prior_transform_and_loglikelihood(model, point)
+        ncall += 1
+        u = copy(point)
+    end
+    return u, v, logl, ncall, accept, reject
 end
 
 # update proposal scale using target acceptance ratio
@@ -172,16 +164,19 @@ end
 """
     Proposals.RStagger(;ratio=0.5, walks=25, scale=1)
 
-Propose a new live point by random staggering away from an existing live point. 
-This differs from the random walk proposal in that the step size here is exponentially adjusted
-to reach a target acceptance rate _during_ each proposal, in addition to _between_
-proposals. This follows the algorithm outlined in Skilling (2006).[^5]
+Propose a new live point by random staggering away from an existing live point (Skilling 2006).[^5]
+
+Skilling's staggering adjusts the step size _during_ each proposal, toward a
+target acceptance rate. A chain whose step depends on its own acceptances does
+not leave the uniform distribution inside the constraint unchanged, so the
+step here changes _between_ proposals only, as [`Proposals.RWalk`](@ref)'s
+does, and the walk is RWalk's.
 
 [^5]: Skilling, 2006, Bayesian Anal. 1(4), ["Nested sampling for general Bayesian computation"](https://projecteuclid.org/journals/bayesian-analysis/volume-1/issue-4/Nested-sampling-for-general-Bayesian-computation/10.1214/06-BA127.full)
 
 ## Parameters
 - `ratio` is the target acceptance ratio
-- `walks` is the minimum number of steps to take
+- `walks` is the number of steps to take
 - `scale` is the proposal distribution scale, which will update _between_ proposals.
 """
 @with_kw mutable struct RStagger <: AbstractProposal
@@ -202,61 +197,11 @@ function (prop::RStagger)(
     model;
     kwargs...
 )
-    #setup
-    n = length(point)
-    scale_init = prop.scale
-    accept = reject = fail = nfail = nc = ncall = 0
-    stagger = 1
-    local du, u_prop, logl_prop, u, v, logl
-    cur = point   # the walk's current position (see RWalk)
-    
-    while nc < prop.walks || iszero(accept)
-        # check scale factor to avoid over-shrinking
-        prop.scale < 1e-15 * scale_init && error("Random walk sampling appears to be stuck.")
-        # get proposed point
-        du = randoffset(rng, bounds)
-        u_prop = @. cur + prop.scale * stagger * du
-        # out of the unit cube is a rejected step (see RWalk)
-        logl_prop = if unitcheck(u_prop)
-            ncall += 1
-            v_prop, l = prior_transform_and_loglikelihood(model, u_prop)
-            l
-        else
-            nfail += 1
-            -Inf
-        end
-        if logl_prop ≥ logl_star
-            u = cur = u_prop
-            v = v_prop
-            logl = logl_prop
-            accept += 1
-        else
-            reject += 1
-        end
-        nc += 1
-        
-        # adjust _stagger_ to target an acceptance ratio of `prop.ratio`
-        ratio = accept / (accept + reject)
-        if ratio > prop.ratio
-            stagger *= exp(1 / accept)
-        elseif ratio < prop.ratio
-            stagger /= exp(1 / reject)
-        end
-        
-        # check if stuck generating bad points
-        if nc > 50 * prop.walks
-            @warn "Random walk proposals appear to be extremely inefficient. Adjusting the scale-factor accordingly"
-            prop.scale *= exp(-1 / n)
-            nc = accept = reject = 0
-        end
-    end
-            
-    # update proposal scale using acceptance ratio
-    update_scale!(prop, accept, reject, n)
-            
+    u, v, logl, ncall, accept, reject = _walk(rng, prop.walks, prop.scale, point, logl_star, bounds, model)
+    update_scale!(prop, accept, reject, length(point))
     return u, v, logl, ncall
 end
-      
+
 """
     Proposals.Slice(;slices=5, scale=1)
 

@@ -98,7 +98,7 @@ end
     end
 end
 
-@testset "HSlice leaves the constrained uniform distribution unchanged" begin
+@testset "proposals leave the constrained uniform distribution unchanged" begin
     # Points drawn uniformly inside a curved region (a banana in the unit
     # square) must stay uniform after one move, whatever the move does, if the
     # move is valid. The region is curved so reflections off it happen at
@@ -107,6 +107,9 @@ end
     # likelihood contour at the current point, a direction that depends on the
     # state: after one move from 6000 such points the mean of u2 moved by 6
     # standard errors and the sd of u1 by +0.018 (+0.025 after three slices).
+    # RWalk walked on past `walks` until a step was accepted, which narrowed
+    # the sds by 10-14 standard errors at walks = 2 and 5 at walks = 5, and
+    # RStagger adapted its step inside the chain, which widened them by 6-8.
     banana(u) = -(((u[1] - 0.5) / 0.3)^2 + ((u[2] - 0.3 - 1.5 * (u[1] - 0.5)^2) / 0.08)^2)
     model = NestedModel(banana, [Uniform(0, 1), Uniform(0, 1)])
     lstar = -1.0
@@ -124,16 +127,25 @@ end
     ell = _NSB.scale!(_NSB.fit(_NSB.Ellipsoid, reduce(hcat, inside(MersenneTwister(2), 500))), 1.25)
     M = length(starts)
     col(xs, j) = getindex.(xs, j)
-    for slices in (1, 3)
-        prop = _NSP.HSlice(slices = slices)
-        out = [prop(MersenneTwister(1000 + i), copy(starts[i]), lstar, ell, model)[1] for i in 1:M]
-        @test all(u -> banana(u) ≥ lstar, out)
-        for j in 1:2
-            sref = std(col(ref, j))
-            @test abs(mean(col(out, j)) - mean(col(ref, j))) < 4 * sref / sqrt(M)
-            @test abs(std(col(out, j)) - sref) < 4 * sref / sqrt(2M)
+    for (name, mk) in (("HSlice, 1 slice", () -> _NSP.HSlice(slices = 1)),
+                       ("HSlice, 3 slices", () -> _NSP.HSlice(slices = 3)),
+                       ("RWalk, 2 walks", () -> _NSP.RWalk(walks = 2)),
+                       ("RWalk, 5 walks", () -> _NSP.RWalk(walks = 5)),
+                       ("RStagger, 5 walks", () -> _NSP.RStagger(walks = 5)),
+                       ("RStagger, 25 walks", () -> _NSP.RStagger(walks = 25)),
+                       ("RSlice, 1 slice", () -> _NSP.RSlice(slices = 1)),
+                       ("Slice, 1 slice", () -> _NSP.Slice(slices = 1)))
+        @testset "$name" begin
+            prop = mk()
+            out = [prop(MersenneTwister(1000 + i), copy(starts[i]), lstar, ell, model)[1] for i in 1:M]
+            @test all(u -> banana(u) ≥ lstar, out)
+            for j in 1:2
+                sref = std(col(ref, j))
+                @test abs(mean(col(out, j)) - mean(col(ref, j))) < 4 * sref / sqrt(M)
+                @test abs(std(col(out, j)) - sref) < 4 * sref / sqrt(2M)
+            end
+            @test abs(cor(col(out, 1), col(out, 2)) - cor(col(ref, 1), col(ref, 2))) < 4 / sqrt(M)
         end
-        @test abs(cor(col(out, 1), col(out, 2)) - cor(col(ref, 1), col(ref, 2))) < 4 / sqrt(M)
     end
 end
 
