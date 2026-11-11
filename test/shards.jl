@@ -127,6 +127,12 @@ const TEST_UNITS = [
     (name = "test_circular.jl", seconds = 149, files = ["test_circular.jl"]),
     (name = "test_node_flip.jl", seconds = 90, files = ["test_node_flip.jl"]),
     (name = "test_cyclic_inclination.jl", seconds = 45, files = ["test_cyclic_inclination.jl"]),
+    # measured: 49 s, one process, 8 threads (2026-11-11)
+    (name = "test_angles_never_rail.jl", seconds = 49, files = ["test_angles_never_rail.jl"]),
+    # measured: 2 s, one process, 8 threads (2026-11-11)
+    (name = "test_packed_normalisation.jl", seconds = 2, files = ["test_packed_normalisation.jl"]),
+    # measured: 63 s, one process, 8 threads (2026-11-11)
+    (name = "test_seam_samplers.jl", seconds = 63, files = ["test_seam_samplers.jl"]),
     (name = "test_lambda_slide.jl", seconds = 1, files = ["test_lambda_slide.jl"]),
     (name = "test_label_switching.jl", seconds = 6, files = ["test_label_switching.jl"]),
     (name = "test_pt_donor_buffer.jl", seconds = 1, files = ["test_pt_donor_buffer.jl"]),

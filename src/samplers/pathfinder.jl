@@ -120,11 +120,12 @@ function pathfinder_init(target::NereusTarget;
     # its per-temperature ensemble.
     exec = SequentialEx()
 
-    result = if quiet
+    run(init) = if quiet
         Logging.with_logger(Logging.NullLogger()) do
             multipathfinder(
                 target, n_draws;
                 nruns = n_runs,
+                init = init,
                 rng = rng,
                 optimizer = optimizer,
                 executor = exec,
@@ -134,11 +135,24 @@ function pathfinder_init(target::NereusTarget;
         multipathfinder(
             target, n_draws;
             nruns = n_runs,
+            init = init,
             rng = rng,
             optimizer = optimizer,
             executor = exec,
         )
     end
+    result = run(nothing)
+
+    # Angles. A full-circle angle is charted on one walled period, a polar
+    # angle on [-π/2, 3π/2], whose seam is the far image of the equator.
+    # L-BFGS started on one side of a mode across a seam climbs into the wall
+    # (its logit coordinate runs off to ±∞) and fits half a mode. So the first
+    # pass is a pilot: its draws place each circular seam in their emptiest
+    # arc and fold the polar angles (`recut_walkers!`, which moves the target's
+    # windows), and if a seam moved or a polar angle railed, Pathfinder runs
+    # again in the new charts, each run started from the pilot run's draw.
+    init2 = _pathfinder_recut!(result, target, n_runs)
+    init2 === nothing || (result = run(init2))
 
     # Per-L-BFGS-run draws: one column per independent run, sampled
     # from that run's MVN approximation. Preserves basin diversity
@@ -184,4 +198,101 @@ function pathfinder_init(target::NereusTarget;
         psis_result      = result.psis_result,
         pathfinder_result = result,
     )
+end
+
+"""
+    _pathfinder_recut!(result, target, n_runs) -> Union{Nothing,Vector{Vector{Float64}}}
+
+The angle check after a Pathfinder pilot `result`. Pools the draws (the
+importance-resampled ones and every run's own), folds the polar angles and
+moves each circular seam to the emptiest arc of the pool ([`recut_walkers!`](@ref),
+which moves `target`'s windows and transform). Returns `nothing` when nothing
+needs a second pass, else one start per run for it: each run's first draw (the
+resampled draws stand in for a failed run), in the new charts. A second pass is
+needed when a seam moved, or when more than 10 % of the draws of a polar angle
+sit within 0.05 rad of its chart's walls (railed; about 1.6 % would for draws
+spread over the whole circle).
+"""
+function _pathfinder_recut!(result, target::NereusTarget, n_runs::Int)
+    params, tr = target.params, target.transform
+    cinc = cyclic_inclination_indices(params)
+    isempty(cinc) && isempty(circular_indices(params)) && return nothing
+    blocks = Matrix{Float64}[Matrix{Float64}(result.draws)]
+    first_col = Int[]
+    o = size(blocks[1], 2)
+    for pr in result.pathfinder_results
+        if pr === nothing || size(pr.draws, 2) == 0
+            push!(first_col, 0)
+            continue
+        end
+        push!(blocks, Matrix{Float64}(pr.draws))
+        push!(first_col, o + 1)
+        o += size(pr.draws, 2)
+    end
+    D = reduce(hcat, blocks)
+    size(D, 2) == 0 && return nothing
+    L = params.layout
+    railed = false
+    if !isempty(cinc)
+        near = zeros(Int, length(cinc))
+        for j in axes(D, 2)
+            x = tr === nothing ? D[:, j] : transform_inverse(D[:, j], tr)
+            for (m, d) in enumerate(cinc)
+                lo, hi = bounds(L.unfrozen_priors[d])
+                (x[d] - lo < 0.05 || hi - x[d] < 0.05) && (near[m] += 1)
+            end
+        end
+        railed = any(>(0.1 * size(D, 2)), near)
+    end
+    w0 = circular_windows(params)
+    recut_walkers!(D, params, tr)
+    (railed || circular_windows(params) != w0) || return nothing
+    n_res = size(blocks[1], 2)
+    return [Vector{Float64}(D[:, first_col[i] > 0 ? first_col[i] :
+                                 (n_res > 0 ? mod1(i, n_res) : 1)])
+            for i in 1:min(n_runs, length(first_col))]
+end
+
+"""
+    _seam_pilot!(target, seed) -> Bool
+
+The circular windows placed by a pathfinder pilot ([`pathfinder_init`](@ref),
+which re-cuts the seams from its own draws), for a sampler that would start in
+the layout's charts and never move a seam itself: NUTS and pt_hmc without their
+pt_emcee warm start. They walk in the logit chart, where a seam is a wall at
+±∞, and a mode across it is two slivers, one per wall, that no chain crosses
+(NUTS on Mo ≈ 0 without a moved chart: 358° ± 2° against the true 7° ± 5°).
+Only full-circle angles need it: a polar angle's draws are folded into
+`[0, π]`, clear of its chart's seam. Returns whether a window moved. A pilot
+that fails leaves the charts as they were, with a warning.
+"""
+function _seam_pilot!(target::NereusTarget, seed::Integer)
+    params = target.params
+    (target.transform === nothing || isempty(circular_indices(params))) && return false
+    w0 = circular_windows(params)
+    try
+        pathfinder_init(target; n_runs = 4, n_draws = 200, seed = Int(seed))
+    catch err
+        err isa InterruptException && rethrow()
+        @warn "the seam pilot (pathfinder) failed: the circular windows stay " *
+              "where they were, and a posterior across a seam will be cut by it" exception = err
+        return false
+    end
+    return circular_windows(params) != w0
+end
+
+"""
+    _center_windows_on!(params, x; transforms = ()) -> x
+
+Every full-circle angle's window moved to be centred on `x`'s value (bounded
+coordinates), the seam opposite it, and `x` relabelled into the new windows. For
+a sampler started from a caller's `init` with no re-cut of its own: the start
+is the one point known to be in the posterior.
+"""
+function _center_windows_on!(params::Params, x::AbstractVector; transforms = ())
+    for d in circular_indices(params)
+        ps = params.layout.unfrozen_priors[d]
+        set_circular_window!(params, d, x[d] - (ps.hi - ps.lo) / 2; transforms)
+    end
+    return circular_relabel_point!(x, params)
 end

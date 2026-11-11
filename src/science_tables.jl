@@ -213,6 +213,7 @@ function science_fitted(chains, params::Params)
     circ = circular_names(params)
     cinc = cyclic_inclination_names(params)
     jit = jitter_names(params)
+    restr = restricted_angles(params)
     # The winning model's live SLOTS, not `1:modal_np`: after a death in the
     # middle of the slot list the live planet sits in a later slot, and the
     # count-based cut dropped it from the table (see `_winning_planet_slots`).
@@ -246,6 +247,11 @@ function science_fitted(chains, params::Params)
                                  floor_ok = name in jit)
             d["railed"] = rail
             rail && (d["railed_bound"] = side)
+            # An angle whose prior covers only part of its range: the rail is
+            # that restriction, which the user may have meant.
+            rail && haskey(restr, name) && (d["railed_note"] =
+                "the prior restricts this angle to part of its full range " *
+                "$(restr[name]); the bound is the prior's, not the data's")
         end
         push!(entries, name => d)
     end
@@ -257,7 +263,23 @@ function science_fitted(chains, params::Params)
         "note" => "stats conditioned on each component being active; " *
                   "occupancy field = P(component active | data)",
     )
+    _spin_sense_notes!(entries, conditioning, params,
+                       name -> name == "i_star" || startswith(name, "lambda_k"))
     return entries, conditioning
+end
+
+# The rotation-sense note (`SPIN_SENSE_NOTE`) on the rows it concerns and in
+# the table's conditioning, when the data leave the sense open (`spin_flip`).
+function _spin_sense_notes!(entries, conditioning, params::Params, concerns)
+    spin_flip(params) === nothing && return nothing
+    hit = false
+    for (k, d) in entries
+        concerns(k) || continue
+        d["spin_sense_note"] = SPIN_SENSE_NOTE
+        hit = true
+    end
+    hit && (conditioning["spin_sense"] = SPIN_SENSE_NOTE)
+    return nothing
 end
 
 # --- derived-parameter table (with stellar-uncertainty propagation) ----
@@ -372,6 +394,12 @@ function science_derived(chains, params::Params;
                                      "stellar" => stellar,
         "note" => "derived per-draw with stellar (M★/R★/T_eff) uncertainty " *
                   "propagated; conditioned on planet active")
+    # ψ is folded to the axis angle by compute_derived; i★ and λ (and |λ|,
+    # which the flip sends to 180° - |λ|) are the sampler's representative.
+    _spin_sense_notes!(entries, conditioning, params,
+                       k -> any(p -> startswith(k, p),
+                                ("psi_deg_k", "i_star_deg_k", "lambda_deg_k",
+                                 "lambda_abs_deg_k")))
     return entries, conditioning
 end
 
@@ -544,22 +572,31 @@ end
 _yamlval(v) = v isa AbstractString ? "\"$v\"" :
               v isa AbstractVector ? "[" * join(string.(v), ", ") * "]" : string(v)
 
-function _write_dat(path, entries, title)
+function _write_dat(path, entries, title; note = nothing)
     open(path, "w") do io
         println(io, "# ", title)
+        note === nothing || println(io, "# * ", note)
         @printf(io, "# %-22s %16s %14s %16s %-8s %8s\n",
                 "parameter", "value", "err_lo", "err_hi", "unit", "occ")
         for (k, v) in entries
             vs, lo, hi = _fmt3(v["value"], v["err_lo"], v["err_hi"])
-            rail = get(v, "railed", false) ? "  railed" : ""
+            rail = (get(v, "railed", false) ? "  railed" : "") *
+                   (haskey(v, "spin_sense_note") ? "  *" : "")
             @printf(io, "%-24s %16s %14s %16s %-8s %8.3f%s\n",
                     k, vs, "-"*lo, "+"*hi, v["unit"], v["occupancy"], rail)
         end
     end
 end
 
-function _write_tex(path, entries, caption)
+# `SPIN_SENSE_NOTE` in TeX; any other note as it is.
+_texnote(note) = note == SPIN_SENSE_NOTE ?
+    "rotation sense not constrained by the data: " *
+    "\$(i_\\star, \\lambda) \\equiv (180^\\circ - i_\\star, \\lambda + 180^\\circ)\$, " *
+    "\$\\psi \\equiv 180^\\circ - \\psi\$" : note
+
+function _write_tex(path, entries, caption; note = nothing)
     any_rail = any(get(v, "railed", false) for (_, v) in entries)
+    any_spin = note !== nothing && any(haskey(v, "spin_sense_note") for (_, v) in entries)
     open(path, "w") do io
         println(io, "\\begin{table}")
         println(io, "\\centering")
@@ -571,6 +608,8 @@ function _write_tex(path, entries, caption)
         for (k, v) in entries
             vs, lo, hi = _fmt3(v["value"], v["err_lo"], v["err_hi"])
             dag = get(v, "railed", false) ? "\\textsuperscript{\$\\dagger\$}" : ""
+            any_spin && haskey(v, "spin_sense_note") &&
+                (dag *= "\\textsuperscript{\$\\ddagger\$}")
             println(io, _texsym(k), " & ",
                     "\$$(vs)^{+$(hi)}_{-$(lo)}\$", dag, " & ", _texunit(v["unit"]), " \\\\")
         end
@@ -579,6 +618,8 @@ function _write_tex(path, entries, caption)
         any_rail && println(io, "{\\footnotesize \$^{\\dagger}\$ prior-dominated: " *
                                 "the 3\$\\sigma\$ CI rails against a prior bound; " *
                                 "treat as a limit, not a measurement.}")
+        any_spin && println(io, "{\\footnotesize \$^{\\ddagger}\$ ",
+                            _texnote(note), ".}")
         println(io, "\\end{table}")
     end
 end
@@ -603,8 +644,8 @@ function write_science_table(dir::AbstractString, name::AbstractString,
             open(p, "w") do io; JSON3.write(io, obj; allow_inf=true); end
         elseif fmt === :csv;  _write_csv(p, entries)
         elseif fmt === :ecsv; _write_ecsv(p, entries, meta)
-        elseif fmt === :dat;  _write_dat(p, entries, title)
-        elseif fmt === :tex;  _write_tex(p, entries, title)
+        elseif fmt === :dat;  _write_dat(p, entries, title; note = get(meta, "spin_sense", nothing))
+        elseif fmt === :tex;  _write_tex(p, entries, title; note = get(meta, "spin_sense", nothing))
         else; continue
         end
         paths[String(fmt)] = p
@@ -667,13 +708,17 @@ end
 function _prior_block(params::Params)
     out = Dict{String, Any}()
     circ = circular_names(params)
+    cinc = cyclic_inclination_names(params)
     for name in params.layout.unfrozen_names
         pr = params.config.priors[name]
         lo, hi = bounds(pr)
         d = Dict{String, Any}(
             "type" => string(nameof(typeof(pr))),
             "lower" => lo, "upper" => hi)
+        # The topology it was sampled on (src/circular.jl): a full circle
+        # (its window a chart), or a polar angle reflected at its poles.
         name in circ && (d["circular"] = true)
+        name in cinc && (d["polar"] = true)
         out[name] = d
     end
     return out

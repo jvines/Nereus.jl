@@ -37,9 +37,20 @@ Works in unconstrained space (with transforms) by default.
 - `init::Union{Nothing, Vector{Float64}}=nothing` — if provided, walkers scatter around this point; otherwise drawn from prior (EMPEROR-style)
 - `seed::Int=1`
 - `n_chains::Int=1` — independent ensembles run on Julia threads, chain `c`
-  seeded with `seed + c - 1`.
+  seeded with `seed + c - 1`. They share the circular windows: the burn-in
+  re-cut is taken from the walkers of all of them, at a point where each has
+  stopped at the same step.
 - `show_progress::Bool=true` — progress bar (the first chain's, when
   `n_chains > 1`).
+- `prune_stranded::Bool=true` — every 50 steps through the first three quarters
+  of burn-in, move walkers stranded where the posterior cannot carry mass onto
+  the ones that found it, as `sample_pt_emcee` does for each rung (see
+  `_pt_prune_stranded!`, which also gives the mass bound that makes it safe).
+  A stretch move cannot bring a walker into a narrow mode from far away, and
+  without this one stranded walker in 32 recorded 3 % of the draws 90° or more
+  from an RM λ constrained to ±2°, or at the seam of its window, where the
+  logit's plateau holds it for good. Burn-in only: every recorded step is
+  ordinary MCMC.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (the walkers, their log-densities, the RNG, the step reached and
   the draws kept so far) at the end of the run and every `checkpoint_interval`
@@ -68,6 +79,7 @@ function sample_ensemble(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    prune_stranded::Bool = true,
 )
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
@@ -76,22 +88,42 @@ function sample_ensemble(
 
     # Multi-chain: fan out `n_chains` independent ensemble runs on
     # Julia threads. Each chain re-draws its walker init and runs
-    # the stretch move on its own state, so concurrent execution
-    # is race-free. Useful both for wall-clock speed (Goodman-Weare
-    # within-chain walker stepping is single-threaded here)
+    # the stretch move on its own state. Useful both for wall-clock speed
+    # (Goodman-Weare within-chain walker stepping is single-threaded here)
     # and for between-chain R-hat convergence diagnostics.
+    #
+    # The chains share ONE Params, so the burn-in re-cut of the circular
+    # seams (which moves the layout's windows) is taken at a rendezvous
+    # (src/circular.jl): on each due step every chain stops, the last to arrive
+    # re-cuts from all their walkers and relabels every chain's, and all carry
+    # on. Their checkpoints are read here, before any starts, so a resume puts
+    # the shared windows back once (`_ensemble_multichain_setup!`).
     if n_chains > 1
+        n_dim = length(target.params.layout.unfrozen_idx)
+        nw = max(n_walkers, 2 * n_dim + 2)
+        fps = [_ensemble_fingerprint(target, nw, n_burnin, thinning, seed + c - 1,
+                                     n_chains, init, prune_stranded) for c in 1:n_chains]
+        cks = Any[resume ? read_checkpoint(_chain_checkpoint_path(ck_path, c),
+                                           "ensemble", fps[c]) : nothing
+                  for c in 1:n_chains]
+        rv = _ensemble_multichain_setup!(target, cks, max(n_steps, 2),
+                                         n_burnin * thinning)
         tasks = Vector{Task}(undef, n_chains)
         for c in 1:n_chains
             ck_c = ck_path === nothing ? nothing : _chain_checkpoint_path(ck_path, c)
-            tasks[c] = Threads.@spawn _ensemble_chain(target, n_walkers, n_steps,
-                n_burnin, thinning, init, seed + c - 1, n_chains,
-                show_progress && c == 1, ck_c, ck_every, resume)
+            tasks[c] = Threads.@spawn try
+                _ensemble_chain(target, n_walkers, n_steps,
+                    n_burnin, thinning, init, seed + c - 1, n_chains,
+                    show_progress && c == 1, ck_c, ck_every, resume;
+                    pre = (fp = fps[c], ck = cks[c]), rendezvous = rv, prune_stranded)
+            finally
+                rv === nothing || _rendezvous_leave!(rv)
+            end
         end
         return MCMCChains.chainscat([fetch(t) for t in tasks]...)
     end
     return _ensemble_chain(target, n_walkers, n_steps, n_burnin, thinning, init,
-                           seed, n_chains, show_progress, ck_path, ck_every, resume)
+                           seed, n_chains, show_progress, ck_path, ck_every, resume; prune_stranded)
 end
 
 # Chain `c`'s state file in a multi-chain run: "dir/ensemble_state.jls" ->
@@ -99,6 +131,109 @@ end
 function _chain_checkpoint_path(path::AbstractString, c::Int)
     base, ext = splitext(path)
     return string(base, "_chain", c, ext)
+end
+
+# What an ensemble checkpoint must match (src/checkpoint.jl). The walkers are
+# stored in the sampling coordinates, so the circular windows and whether the
+# target is unconstrained are part of it. So is turning the stranded-walker
+# pruning off; on, the default, it leaves the fingerprint as it was before the
+# pruning existed.
+_ensemble_fingerprint(target::NereusTarget, n_walkers, n_burnin, thinning, seed,
+                      n_chains, init, prune_stranded::Bool = true) =
+    run_fingerprint(target.params, target.data; n_walkers, n_burnin, thinning,
+        seed, n_chains, init = init === nothing ? nothing : copy(init),
+        unconstrained = target.transform !== nothing,
+        windows = circular_windows(target.params),
+        (prune_stranded ? (;) : (; prune_stranded = false))...)
+
+"""
+    _ensemble_recut!(x, params, transform, rv) -> Bool
+
+The burn-in re-cut of one chain's walkers `x` ([`recut_walkers!`](@ref)). With
+a rendezvous `rv` (several chains over one `Params`) the chains re-cut
+together: the last to arrive pools every chain's walkers, re-cuts from all of
+them and writes each chain's back. Returns whether any walker moved (then the
+caller redoes its log-densities).
+"""
+function _ensemble_recut!(x::Matrix{Float64}, params::Params, transform,
+                          rv::Union{Nothing,_Rendezvous})
+    rv === nothing && return recut_walkers!(x, params, transform)
+    return _rendezvous!(rv, x) do xs
+        X = reduce(hcat, xs)
+        recut_walkers!(X, params, transform) || return false
+        o = 0
+        for xc in xs
+            xc .= view(X, :, (o + 1):(o + size(xc, 2)))
+            o += size(xc, 2)
+        end
+        return true
+    end
+end
+
+"""
+    _ensemble_multichain_setup!(target, cks, n_steps, n_burn_steps)
+        -> Union{Nothing,_Rendezvous}
+
+Before the chains of a multi-chain ensemble start: put back the shared windows
+of a resumed run (those of the furthest chain; any chain saved in older charts
+is relabelled into them, `_ensemble_rechart_checkpoint!`), and return the
+rendezvous for the burn-in re-cuts still to come -- `nothing` when there are
+none, or when the resumed chains are out of step (different numbers of re-cuts
+left), in which case the windows stay as they are: a chain still re-cutting
+would move them under one that is not.
+"""
+function _ensemble_multichain_setup!(target::NereusTarget, cks, n_steps::Int,
+                                     n_burn_steps::Int)
+    params = target.params
+    isempty(circular_indices(params)) && isempty(cyclic_inclination_indices(params)) &&
+        return nothing
+    trs = target.transform === nothing ? () : (target.transform,)
+    steps = Int[ck === nothing ? 0 : ck.step::Int for ck in cks]
+    have = Bool[ck !== nothing && hasproperty(ck, :windows) for ck in cks]
+    if any(have)
+        ref = argmax([have[c] ? steps[c] : -1 for c in eachindex(cks)])
+        wref = cks[ref].windows
+        for c in eachindex(cks)
+            have[c] && cks[c].windows != wref || continue
+            _ensemble_rechart_checkpoint!(target, cks[c], wref)
+        end
+        _restore_shared_windows!(params, wref, trs)
+        params.layout.spin_axis .= cks[ref].spin_axis
+    end
+    B = n_burn_steps
+    left = [count(s -> _pt_recut_due(s, B), (st + 1):min(B, n_steps)) for st in steps]
+    return allequal(left) && first(left) > 0 ? _Rendezvous(length(cks)) : nothing
+end
+
+# A chain's checkpointed walkers and kept draws, saved in the charts
+# `ck.windows`, moved into the charts `wref`: through the bounded coordinates,
+# relabelled by whole periods. Through a logit that changes the walkers'
+# coordinates and Jacobians, so their log-densities are redone. Serial: called
+# before any chain runs.
+function _ensemble_rechart_checkpoint!(target::NereusTarget, ck, wref)
+    params, tr = target.params, target.transform
+    trs = tr === nothing ? () : (tr,)
+    L = params.layout
+    circ = circular_indices(params)
+    kept = ck.kept::Array{Float64, 3}
+    cols = [view(ck.x, :, j) for j in axes(ck.x, 2)]
+    append!(cols, view(kept, :, j, s) for j in axes(kept, 2), s in axes(kept, 3))
+    _restore_shared_windows!(params, ck.windows, trs)
+    W = [tr === nothing ? Vector{Float64}(y) : transform_inverse(Vector{Float64}(y), tr)
+         for y in cols]
+    _restore_shared_windows!(params, wref, trs)
+    for (y, w) in zip(cols, W)
+        for i in circ
+            lo, hi = bounds(L.unfrozen_priors[i])
+            w[i] = circular_relabel(w[i], lo, hi)
+        end
+        y .= tr === nothing ? w : transform_forward(w, tr)
+    end
+    for j in axes(ck.x, 2)
+        lp = LogDensityProblems.logdensity(target, ck.x[:, j])
+        ck.lastll[j] = isfinite(lp) ? lp : -1e300
+    end
+    return ck
 end
 
 # One stretch-move step of the whole ensemble, in place: each half of the
@@ -140,7 +275,9 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
                          init::Union{Nothing, Vector{Float64}}, seed::Int,
                          n_chains::Int, show_progress::Bool,
                          ck_path::Union{Nothing, String}, ck_every::Float64,
-                         resume::Bool)
+                         resume::Bool; pre = nothing,
+                         rendezvous::Union{Nothing,_Rendezvous} = nothing,
+                         prune_stranded::Bool = true)
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -161,10 +298,12 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     # circular parameters and whether the target is unconstrained are part of
     # what the run depends on. On resume nothing is drawn: the saved state
     # replaces initialisation and the loop carries on from step `step0 + 1`.
-    ck_fp = run_fingerprint(params, target.data; n_walkers, n_burnin, thinning,
-        seed, n_chains, init = init === nothing ? nothing : copy(init),
-        unconstrained = has_transform, windows = circular_windows(params))
-    ck = resume ? read_checkpoint(ck_path, "ensemble", ck_fp) : nothing
+    # With several chains `sample_ensemble` has read the checkpoint (`pre`).
+    ck_fp = pre === nothing ?
+        _ensemble_fingerprint(target, n_walkers, n_burnin, thinning, seed,
+                              n_chains, init, prune_stranded) : pre.fp
+    ck = pre !== nothing ? pre.ck :
+         resume ? read_checkpoint(ck_path, "ensemble", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
         "the checkpoint is at step $step0; n_steps = $n_steps would end before it"))
@@ -175,6 +314,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     lastll = Vector{Float64}(undef, n_walkers)
     n_saved = div(n_steps, thinning)
     kept = Array{Float64}(undef, n_dim, n_walkers, max(n_saved - n_burnin, 0))
+    # Median log L at the last stranded-walker prune (`_pt_prune_stranded!`).
+    prune_med = [NaN]
 
     if ck === nothing
         # Initialize walkers
@@ -222,6 +363,16 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         copy!(rng, ck.rng::MersenneTwister)
         ck_kept = ck.kept::Array{Float64, 3}
         kept[:, :, 1:size(ck_kept, 3)] .= ck_kept
+        hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
+        # Windows (and spin axis) the saved walkers live in, moved by the re-cut;
+        # with several chains put back, once for all, by `sample_ensemble`.
+        if pre === nothing && hasproperty(ck, :windows)
+            for (nm, (lo, _)) in ck.windows
+                set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
+                                     lo; transforms = has_transform ? (target.transform,) : ())
+            end
+            params.layout.spin_axis .= ck.spin_axis
+        end
     end
 
     # --- Main loop ----------------------------------------------------
@@ -231,6 +382,27 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     last_ck = time()
     for step in (step0 + 1):n_steps
         _stretch_step!(logpost, x, lastll, rng, divisions)
+        # ---- Stranded walkers (burn-in only): sample_pt_emcee's pruning, one
+        # rung at β = 1. Before the re-cut, so the seam is cut from the cleaned
+        # walkers. On the unconstrained target the walkers' coordinates are the
+        # logit's, a line for every parameter: no angle is offset on a circle.
+        prune_stranded && step % 50 == 0 && step <= (3 * n_burnin * thinning) ÷ 4 &&
+            _ensemble_prune!(x, lastll, target, logpost, rng, prune_med)
+        # ---- Burn-in re-cut (src/circular.jl): on pt_emcee's schedule, the
+        # walkers folded, spin-flipped and every full-circle seam moved to the
+        # emptiest arc, so a mode across a seam is not split between two walls
+        # that stretch moves cannot carry walkers between. A move through the
+        # logit changes the walkers' Jacobians: their log-densities are redone.
+        # Concurrent chains share `params`, whose windows a re-cut moves: they
+        # re-cut together, at a rendezvous (`_ensemble_recut!`), or -- after a
+        # resume that left them out of step -- not at all.
+        if step <= n_burnin * thinning && _pt_recut_due(step, n_burnin * thinning) &&
+           (n_chains == 1 || rendezvous !== nothing) &&
+           _ensemble_recut!(x, params, target.transform, rendezvous)
+            for j in 1:n_walkers
+                lastll[j] = logpost(x[:, j])
+            end
+        end
         if step % thinning == 0
             k = div(step, thinning) - n_burnin
             k > 0 && (kept[:, :, k] .= x)
@@ -241,7 +413,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         if ck_path !== nothing && (step == n_steps || time() - last_ck >= ck_every)
             n_kept = max(div(step, thinning) - n_burnin, 0)
             write_checkpoint(ck_path, "ensemble", ck_fp, (; step, x, lastll, rng,
-                kept = kept[:, :, 1:n_kept]))
+                kept = kept[:, :, 1:n_kept], windows = circular_windows(params),
+                spin_axis = copy(params.layout.spin_axis), prune_med = copy(prune_med)))
             last_ck = time()
         end
     end
@@ -272,4 +445,35 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
 
     chains = MCMCChains.Chains(mat, param_names)
     return chains
+end
+
+# The ensemble's stranded walkers moved onto the ones that found the mode:
+# `_pt_prune_stranded!` on a one-rung ladder at β = 1, in the sampling
+# coordinates. Its mass bound needs the prior normalised there, which the
+# prior times the transform's Jacobian is. The split into (log prior + log
+# Jacobian, log L) is evaluated once per walker per call (`_logdensity_parts`);
+# a moved walker's log-density is then redone through `logpost`, so the walkers
+# left alone keep theirs bit for bit, and a call that moves none draws nothing
+# from `rng`. `med` is the record the pruning keeps between calls.
+function _ensemble_prune!(x::Matrix{Float64}, lastll::Vector{Float64},
+                          target::NereusTarget, logpost, rng, med::Vector{Float64})
+    nd, nw = size(x)
+    state = Array{Float64,3}(undef, 1, nw, nd)
+    lπ = Matrix{Float64}(undef, 1, nw)
+    lL = Matrix{Float64}(undef, 1, nw)
+    for w in 1:nw
+        state[1, w, :] .= view(x, :, w)
+        lπ[1, w], lL[1, w] = _logdensity_parts(target, view(x, :, w))
+    end
+    circ = target.transform === nothing ? circular_indices(target.params) : Int[]
+    moved = _pt_prune_stranded!(state, lπ, lL, [1.0], rng;
+                                evalf = y -> _logdensity_parts(target, y),
+                                circ, med_logL = med)
+    moved[1] == 0 && return 0
+    for w in 1:nw
+        any(j -> state[1, w, j] != x[j, w], 1:nd) || continue
+        x[:, w] .= view(state, 1, w, :)
+        lastll[w] = logpost(view(x, :, w))
+    end
+    return moved[1]
 end

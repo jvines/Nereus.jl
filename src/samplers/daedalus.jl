@@ -123,6 +123,11 @@ function sample_daedalus(
     rng    = MersenneTwister(seed)
     params = target.params
 
+    # Births re-sort planets between same-mode slots, so those slots share one
+    # window per circular angle before the off-values are built from them
+    # (src/circular.jl). Done once, here, while nothing evaluates the target.
+    circ_groups = circular_groups(params; permutable = td.planets)
+    unify_circular_groups!(params, circ_groups)
     strategy = MoMSBirth(params; init_scale = init_scale, rng = rng)
 
     # ---- 1. Initialize n_live points from the spike-and-slab prior --
@@ -143,6 +148,19 @@ function sample_daedalus(
         end
         out
     end
+
+    # Warm-start points come from another run's windows: relabelled into this
+    # layout's (by whole periods; their cached densities stay valid).
+    _daedalus_relabel!(live, params)
+
+    # The seams of the circular angles, re-cut from the live points every
+    # `recut_every` iterations (`_daedalus_recut!`): the constrained-MCMC
+    # replacement walks inside each angle's one-period window, walled at its
+    # seam, so a mode across a seam would be two pieces that a replacement
+    # walk cannot cross between. Exact for nested sampling: a relabel by
+    # whole periods leaves the constrained region, the live points' uniform
+    # distribution over it and every cached density unchanged.
+    recut_every = max(n_live ÷ 2, 25)
 
     # ---- 2. NS skeleton ---------------------------------------------
     # Skilling's recursion: at iteration i, the i-th dead point has
@@ -243,6 +261,8 @@ function sample_daedalus(
 
         log_X_prev = log_X_curr
         iter += batch_size
+        iter % recut_every < batch_size &&
+            _daedalus_recut!(live, params, circ_groups, strategy)
 
         # Progress bar — show iter (counting batched as `batch_size`
         # so totals are comparable to serial runs).
@@ -254,6 +274,10 @@ function sample_daedalus(
                            Symbol("⟨Np⟩") => n_active_med))
     end
     finish!(pb)
+
+    # Dead points kept the windows of their day; the output is in the last.
+    _daedalus_relabel!(dead_pts, params)
+    _daedalus_relabel!(live, params)
 
     # ---- 3. Add remaining live points (each gets an equal share of
     # the residual prior volume X_iter / n_live).
@@ -915,4 +939,60 @@ function pathfinder_warmstart_daedalus(
         )
     end
     return points
+end
+
+# =====================================================================
+# Circular seams and polar charts of the live points
+# =====================================================================
+
+# Every point's circular angles relabelled into the layout's windows and its
+# polar angles folded to [0, π], in place. Exact: the prior and likelihood are
+# periodic in the one and symmetric under the other, and the log-prior skips
+# inactive slots, so the cached densities stay valid.
+function _daedalus_relabel!(pts::AbstractVector{DaedalusPoint}, params::Params)
+    L = params.layout
+    circ = circular_indices(params)
+    for p in pts
+        for d in circ
+            lo, hi = bounds(L.unfrozen_priors[d])
+            s = L.unfrozen_idx[d]
+            p.values[s] = circular_relabel(p.values[s], lo, hi)
+        end
+        _fold_polar_slots!(p.values, params)
+    end
+    return pts
+end
+
+"""
+    _daedalus_recut!(live, params, groups, strategy)
+
+Move each circular group's seam to the emptiest arc of the live points' values
+(active planets only; [`recut_circular_group!`](@ref)), relabel every live point
+into the new windows and fold its polar angles. The MoMS off-values move with
+their windows, as at moms' warmup re-cut, so a blind birth keeps its centre
+relative to the window rather than landing on the new seam. Births and deaths
+read the same off-value, so the replacement kernel stays balanced; the inactive
+slots it governs carry no prior or likelihood.
+"""
+function _daedalus_recut!(live::Vector{DaedalusPoint}, params::Params, groups,
+                          strategy::MoMSBirth)
+    L = params.layout
+    for grp in groups
+        draws = Float64[]
+        for p in live, (d, k) in grp
+            1 <= k <= length(p.planet_active) && !p.planet_active[k] && continue
+            push!(draws, p.values[L.unfrozen_idx[d]])
+        end
+        isempty(draws) && continue
+        old = Float64[L.unfrozen_priors[d].lo for (d, _) in grp]
+        recut_circular_group!(params, grp, draws) === nothing && continue
+        for (j, (d, _)) in enumerate(grp)
+            shift = L.unfrozen_priors[d].lo - old[j]
+            for k in eachindex(strategy.slot_indices)
+                q = findfirst(==(d), strategy.slot_indices[k])
+                q === nothing || (strategy.off_values[k][q] += shift)
+            end
+        end
+    end
+    return _daedalus_relabel!(live, params)
 end

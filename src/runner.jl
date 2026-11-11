@@ -2623,7 +2623,8 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
                              circular = circular_names(params),
                              log_scale = log_scale,
                              active = active,
-                             jitter = jitter_names(params))
+                             jitter = jitter_names(params),
+                             angle_range = restricted_angles(params))
 
         summary["fit_health"] = Dict{String, Any}(
             "overall"  => String(report.overall),

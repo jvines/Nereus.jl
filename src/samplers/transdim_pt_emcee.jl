@@ -96,14 +96,20 @@ end
 # Slot parameters of a slot active in under 1 % of the draws are not assessed
 # (nothing to measure), and in under half of them gate on R̂ only: a disfavoured
 # model has to mix, not to reach an ESS. Noise-model parameters, γ, jitter and
-# offsets are not gated, as in `sample_pt_emcee`. `fold` are the columns that
-# are cyclic inclinations, read folded to [0, π] as in `_pt_convergence`: a
-# walker in the mirror representative holds the same inclination.
+# offsets are not gated, as in `sample_pt_emcee`. `canon` reads the cyclic
+# inclinations folded to [0, π] and the stellar spin in its reported
+# representative, as in `_pt_convergence` (`fold` alone only folds): a walker
+# in the mirror representative holds the same state. Full-circle angles are
+# NOT unwrapped here: `_convergence_stats` permutes planet slots by period,
+# and same-mode slots share one window (`unify_circular_groups!`), which a
+# per-column unwrap would split.
 # ------------------------------------------------------------------
 function _td_convergence(samples::AbstractMatrix, keep_idx::Int, n_walkers::Int,
                          col_names::Vector{Symbol}, gate::Vector{Symbol},
                          model_params; cap::Int = 2000,
-                         fold::AbstractVector{Int} = Int[])
+                         fold::AbstractVector{Int} = Int[],
+                         canon::Union{Nothing, AngleCanon} = nothing)
+    ac = canon === nothing ? AngleCanon(collect(Int, fold), nothing, Float64[], Int[]) : canon
     (n_walkers < 2 || keep_idx < 4 * n_walkers) && return nothing
     keep_idx % n_walkers == 0 || return nothing
     n_step = keep_idx ÷ n_walkers
@@ -120,9 +126,9 @@ function _td_convergence(samples::AbstractMatrix, keep_idx::Int, n_walkers::Int,
     @inbounds for (si, s) in enumerate(kept), w in 1:n_walkers
         row = (si - 1) * n_walkers + w
         src = (s - 1) * n_walkers + w
+        flip = canon_row_flips(ac, samples, src)
         for (j, c) in enumerate(cols)
-            v = samples[src, c]
-            M[row, j] = c in fold ? fold_inclination(v) : v
+            M[row, j] = canon_value(ac, samples, src, c, flip)
         end
     end
     st = try
@@ -2188,6 +2194,8 @@ function sample_transdim_pt_emcee(
                                  lo; transforms = (target.transform,))
         end
         merge!(recut_moved, ck.recut_moved)
+        # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
+        hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
         n_done = step0
         # Past the release, the saved walkers carry their own values.
@@ -2362,8 +2370,12 @@ function sample_transdim_pt_emcee(
         # the cached log-densities stay valid (src/circular.jl). A MoMS
         # off-value, the prior sample median (near π/2), is already its own
         # representative.
+        # Under the stellar spin flip (`spin_flip`) the walkers are also put in
+        # one representative of the spin, the axis chosen from the cold rung;
+        # before the re-cut, which then cuts λ's seam from the moved draws.
         !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
-            fold_cyclic_inclinations!(state, params; idx = cinc)
+            fold_cyclic_inclinations!(state, params; idx = cinc,
+                                      decide_from = view(state, 1, :, :))
 
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_td_prune_stranded!`. Same schedule as pt_emcee: every 50
@@ -2425,7 +2437,7 @@ function sample_transdim_pt_emcee(
         # ---- Periodic convergence diagnostic (β=1 gating set) ----
         if step > n_burnin && (step - n_burnin) % diag_cadence == 0
             diag = _td_convergence(samples, keep_idx, n_walkers_eff, diag_cols,
-                                   gate_set, params; fold = cinc)
+                                   gate_set, params; canon = AngleCanon(params))
             if diag !== nothing
                 meanr, maxr, meanb, mte = diag
                 rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))
@@ -2494,6 +2506,7 @@ function sample_transdim_pt_emcee(
                 smd_hist = smd_hist[1:step, :], keep_idx,
                 samples = samples[1:keep_idx, :], lp_samples = lp_samples[1:keep_idx],
                 evidence = evidence_acc, windows = circular_windows(params),
+                spin_axis = copy(params.layout.spin_axis),
                 recut_moved,
                 informed = _informed_cache_snapshot(rngs_td, informed_keys)))
             last_ck = time()

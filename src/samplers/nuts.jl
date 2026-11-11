@@ -335,11 +335,14 @@ size / tree depth are attached to `chains.info` (see
   pre-search. Disable only if you pass `init` or know the target is
   trivially unimodal; with it off, independent prior-draw inits will
   freeze NUTS in disjoint modes on multi-planet RV posteriors.
+  Without it, the seams of the full-circle angles are placed by a short
+  pathfinder pilot instead (`_seam_pilot!`): NUTS never moves one itself.
 - `warm_temps`, `warm_walkers`, `warm_steps`, `warm_burnin` : pt_emcee
   pre-search budget (defaults 6 / 40 / 400 / 200).
 - `init::Union{Nothing, Vector{Float64}}=nothing` : initial position in
   **bounded** space (overrides `warm_start`). Transformed to
   unconstrained internally if the target uses transforms.
+  Each full-circle angle's window is centred on it.
 - `seed::Union{Nothing,Integer}=nothing` : run on `MersenneTwister(seed)`.
   `run_job` passes the job's seed here. Give `seed` or `rng`, not both.
 - `rng::Union{Nothing,AbstractRNG}=nothing` : the generator to run on;
@@ -445,18 +448,25 @@ function sample_nuts(
         # Per-chain bounded-space init points. `init` (if given) pins every
         # chain at the same point; otherwise warm-start from a short pt_emcee
         # pre-search (the disjoint-mode fix), or fall back to independent
-        # prior draws when warm_start is off. A caller's `init` is relabelled
-        # into the layout's circular windows first (src/circular.jl): a target
-        # reused after a fit carries moved windows, and an angle written in the
-        # user's window would otherwise reach transform_forward outside its own,
-        # which clamps it onto the wall.
+        # prior draws when warm_start is off.
+        #
+        # NUTS never moves a seam itself (src/circular.jl), so without the warm
+        # start's re-chart the windows are placed here: centred on a caller's
+        # `init`, the one point known to be in the posterior (which also keeps
+        # an angle written in the user's window off a moved window's wall,
+        # where transform_forward would clamp it), or by a pathfinder pilot
+        # before prior draws (`_seam_pilot!`).
         init_points = if init !== nothing
-            [circular_relabel_point!(copy(init), params) for _ in 1:n_chains]
+            x0 = _center_windows_on!(params, copy(init);
+                                     transforms = (target.transform,))
+            [copy(x0) for _ in 1:n_chains]
         elseif warm_start
             _warmstart_points(target, n_chains, rng;
                               n_temps = warm_temps, n_walkers = warm_walkers,
                               n_steps = warm_steps, n_burnin = warm_burnin)
         else
+            isempty(circular_indices(params)) ||
+                _seam_pilot!(target, rand(rng, 1:typemax(Int32)))
             pts = Vector{Vector{Float64}}(undef, n_chains)
             for c in 1:n_chains
                 pts[c] = _draw_from_prior(target, rng)

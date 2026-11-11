@@ -645,13 +645,19 @@ function compute_derived(chains, params::Params;
         ld_u["u2_" * label] = last.(uu)
     end
 
+    # The data measure the stellar spin axis but not its sense (gravity
+    # darkening alone): ψ is folded to the axis angle below.
+    spin_axis_only = spin_flip(params) !== nothing
+
     # Where a derived angle's degrees window starts. One that IS a sampled
     # circular parameter takes the user's own window, like the fitted table:
     # U(0, 2π) reads ~350°, not ~-10°. An atan-derived ω (sesinw/secosw,
     # esinw/ecosw) has no window of its own and is reported in [-180, 180).
     circ = circular_names(params)
+    _circ_ref(name) = circular_ref_lo(params,
+        findfirst(==(name), params.layout.unfrozen_names))
     _deg_lo_ref(name) = name in circ && Symbol(name) in chain_param_syms ?
-                        rad2deg(config.priors[name].lo) : -180.0
+                        rad2deg(_circ_ref(name)) : -180.0
 
     for k in planets
         block = params.layout.planet_blocks[k]
@@ -770,7 +776,7 @@ function compute_derived(chains, params::Params;
             nm = "phic_k$k"
             ph = _col(nm)
             nm in circ && (ph = circular_contiguous(ph; period = 2π,
-                                                    lo_ref = config.priors[nm].lo,
+                                                    lo_ref = _circ_ref(nm),
                                                     mask = active))
             derived["Tc"] = phic_to_tc.(ph, P, parametrization.t_ref_c)
         end
@@ -990,7 +996,10 @@ function compute_derived(chains, params::Params;
                 # in a moved window where a bare abs() reads 200° for -160°.
                 derived["lambda_abs_deg"] = abs.(rad2deg.(rem2pi.(lam, RoundNearest)))
                 if :i_star in chain_param_syms
-                    ist = _draws(chains, :i_star)
+                    # Folded: i★ is a polar angle sampled on its circle, and
+                    # the raw draw may sit in the mirror representative -x,
+                    # where sin flips sign and ψ would read wrong.
+                    ist = fold_inclination.(_draws(chains, :i_star))
                     n_psi = min(length(lam), length(ist), length(inc_d))
                     psi = Vector{Float64}(undef, n_psi)
                     @inbounds for j in 1:n_psi
@@ -999,6 +1008,14 @@ function compute_derived(chains, params::Params;
                             sin(ist[j]) * sin(ip_r) * cos(lam[j])
                         psi[j] = rad2deg(acos(clamp(c, -1.0, 1.0)))
                     end
+                    # Gravity darkening alone measures the spin AXIS, not
+                    # its sense: (i★, λ) and (π - i★, λ + π) fit the data
+                    # alike and send ψ to 180° - ψ (`spin_flip`). i★ and λ
+                    # stay in the representative the sampler kept; ψ is the
+                    # axis's angle to the orbit normal, folded to [0°, 90°]
+                    # (SPIN_SENSE_NOTE). With RM or Doppler tomography the
+                    # sense is measured and nothing folds.
+                    spin_axis_only && (psi .= min.(psi, 180.0 .- psi))
                     derived["i_star_deg"] = rad2deg.(ist[1:n_psi])
                     derived["psi_deg"] = psi
                 end

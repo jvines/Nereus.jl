@@ -111,7 +111,11 @@ end
         data, rvn, pmn, _ = Nereus._build_data(cfg["data"]; obliquity = cfg["model"]["obliquity"])
         p, _, _ = Nereus._build_model(cfg, data, Nereus._build_star(Dict()), rvn, pmn)
         @test Nereus.bounds(p.config.priors["tomo_sigma_line_A"]) == (3.0, 9.0)
-        @test is_wrapped(p.config.priors["lambda_k1"]) && p.config.priors["lambda_k1"].lo == 0.0
+        # Re-pinned: a WrappedUniform is no longer `is_wrapped` (now: a polar
+        # angle folded at its poles); it is the circular Uniform, walled at its
+        # chart edges and re-cut by the samplers (src/circular.jl).
+        @test p.config.priors["lambda_k1"].dist isa Nereus.WrappedUniform &&
+              p.config.priors["lambda_k1"].lo == 0.0
     end
 
     @testset "end to end: chains.nc, summary.json, checkpoint and resume" begin

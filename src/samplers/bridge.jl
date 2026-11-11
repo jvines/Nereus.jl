@@ -262,7 +262,8 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
     # Cyclic inclinations are folded to [0, π] on the way (see
     # `_bridge_folded` for the density that goes with that).
     D = _BridgeDraws(chains, pnames, target.transform;
-                     cinc = cyclic_inclination_indices(target.params))
+                     cinc = cyclic_inclination_indices(target.params),
+                     sc = spin_canon(target.params))
     N = D.N
     mom = _bridge_stage!(() -> _bridge_moments(D), timings, "transform")
     keep, N1 = mom.keep, mom.n
@@ -406,7 +407,8 @@ into a buffer and maps it to the target's unconstrained space when `pt` is a
 transform, with `transform_forward!` -- the same numbers the `d × N` matrix
 this replaces held. `lp` is the variable index of the chain's `:lp`, or
 `nothing`. `cinc` are the positions of the cyclic inclinations, which
-`_bridge_draw!` folds to `[0, π]` (see `_bridge_folded`).
+`_bridge_draw!` folds to `[0, π]`, and `sc` the stellar spin flip
+([`spin_canon`](@ref)) it puts each draw through (see `_bridge_folded`).
 """
 struct _BridgeDraws{A<:AbstractArray, T}
     data::A
@@ -416,9 +418,11 @@ struct _BridgeDraws{A<:AbstractArray, T}
     n_iter::Int
     N::Int
     cinc::Vector{Int}
+    sc::Union{Nothing, SpinCanon}
 end
 
-function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt; cinc = Int[])
+function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt; cinc = Int[],
+                      sc::Union{Nothing, SpinCanon} = nothing)
     data = chains.value.data
     vars = Base.names(chains)
     cols = Int[]
@@ -429,7 +433,7 @@ function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt; cinc = Int[])
     end
     n_iter = size(data, 1)
     return _BridgeDraws(data, cols, findfirst(==(:lp), vars), pt, n_iter,
-                        n_iter * size(data, 3), collect(Int, cinc))
+                        n_iter * size(data, 3), collect(Int, cinc), sc)
 end
 
 """
@@ -446,6 +450,7 @@ inclinations folded to `[0, π]`.
     @inbounds for j in D.cinc
         y[j] = fold_inclination(y[j])
     end
+    spin_canon!(y, D.sc)
     D.pt === nothing || transform_forward!(y, y, D.pt)
     return y
 end
@@ -458,26 +463,30 @@ end
 # the same Z. With p* itself, [0, π] holds only half of Z per cyclic
 # inclination (log Z low by log 2 each), and a proposal draw past 0 or π would
 # count mirror mass the posterior side never sampled. The transform is the
-# identity on these coordinates (`build_transform`), so y = x there.
+# identity on these coordinates (`build_transform`), so y = x there. The
+# stellar spin flip (`spin_flip`) is one more such fold: each draw is put on
+# the positive side of the spin axis, the density there is doubled again, and
+# a proposal on the other side counts for nothing.
 """
     _bridge_fold_logc(D) -> Float64
 
-`log 2` per cyclic inclination of `D`: the folded posterior's density over
-p*'s on `[0, π]`.
+`log 2` per cyclic inclination of `D`, and one more under the spin flip:
+the folded posterior's density over p*'s where it has its mass.
 """
-_bridge_fold_logc(D::_BridgeDraws) = length(D.cinc) * log(2.0)
+_bridge_fold_logc(D::_BridgeDraws) = n_folds(D.sc, D.cinc) * log(2.0)
 
 """
     _bridge_folded(D, y) -> Bool
 
-Whether every cyclic inclination of the point `y` lies in `[0, π]`, where the
-folded posterior has its mass.
+Whether every cyclic inclination of the point `y` lies in `[0, π]` and its
+spin on the reported side (`spin_canon_ok`), where the folded posterior has
+its mass.
 """
 @inline function _bridge_folded(D::_BridgeDraws, y::AbstractVector)
     @inbounds for j in D.cinc
         0 <= y[j] <= π || return false
     end
-    return true
+    return spin_canon_ok(y, D.sc, D.pt)
 end
 
 """

@@ -146,14 +146,17 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         N = length(lp)
         N >= 2d + 2 || return NaN
         pt = target.transform
-        # Cyclic inclinations folded to [0, π] (src/circular.jl): one
-        # representative's mode, whose Laplace volume holds half of Z per
-        # cyclic inclination -- the mirror one holds the rest (`fc` below).
+        # Cyclic inclinations folded to [0, π] (src/circular.jl), and the
+        # stellar spin put in its reported representative (`spin_flip`): one
+        # representative's mode, whose Laplace volume holds half of Z per fold
+        # -- the mirror ones hold the rest (`n_folds` below).
         cinc = cyclic_inclination_indices(target.params)
+        sc = spin_canon(target.params)
         Y = Matrix{Float64}(undef, d, N)
         @inbounds for i in 1:N
             xi = Float64[cols[j][i] for j in 1:d]
-            fold_cyclic_inclinations!(xi, target.params; idx = cinc)
+            fold_cyclic_inclinations!(xi, target.params; idx = cinc, sf = nothing)
+            spin_canon!(xi, sc)
             Y[:, i] = transform_forward(xi, pt)
         end
         good = isfinite.(lp) .& vec(all(isfinite, Y; dims = 1))
@@ -167,7 +170,8 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         Yc = count(sel) >= 2d + 2 ? Y[:, sel] : Y
         Sc = cov(Yc; dims = 2) + 1e-8 * I(d)
         lz = lp[imax] + 0.5 * d * log(2π) + 0.5 * logdet(Symmetric(Sc))
-        return isempty(cinc) ? lz : lz + length(cinc) * log(2.0)
+        nf = n_folds(sc, cinc)
+        return nf == 0 ? lz : lz + nf * log(2.0)
     catch
         return NaN
     end
@@ -182,13 +186,19 @@ end
 # WORST science param (max R-hat, min tail-ESS); nuisances are excluded so a
 # poorly-constrained jitter/GP hyperparameter can never stall the run — and a
 # nuisance that's coupled to a science param surfaces in that param's R-hat.
-# `fold` are the columns that are cyclic inclinations (src/circular.jl), read
-# folded to [0, π]: a walker that passed through π sits in the mirror
-# representative, the same inclination, and must not count as another mode.
+# `canon` (an `AngleCanon`, src/circular.jl) reads every angle in its reported
+# representative: cyclic inclinations folded to [0, π] (a walker that passed
+# through π sits in the mirror representative, the same inclination), the
+# stellar spin flipped by the layout's axis, and each full-circle angle
+# relabelled into the window with its seam in the emptiest arc -- walkers one
+# representative apart must not count as separate modes. `fold` alone folds
+# those columns and nothing else.
 # ------------------------------------------------------------------
 function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
                           n_walkers::Int, science_cols::Vector{Int};
-                          cap::Int = 2000, fold::AbstractVector{Int} = Int[])
+                          cap::Int = 2000, fold::AbstractVector{Int} = Int[],
+                          canon::Union{Nothing, AngleCanon} = nothing)
+    ac = canon === nothing ? AngleCanon(collect(Int, fold), nothing, Float64[], Int[]) : canon
     (n_walkers < 2 || keep_idx < 4 * n_walkers) && return nothing
     keep_idx % n_walkers == 0 || return nothing
     n_step = keep_idx ÷ n_walkers
@@ -202,11 +212,14 @@ function _pt_convergence(samples::AbstractMatrix, keep_idx::Int,
     @inbounds for w in 1:n_walkers
         for (si, s) in enumerate(kept)
             base = (s - 1) * n_walkers + w
+            flip = canon_row_flips(ac, samples, base)
             for (ci, c) in enumerate(science_cols)
-                v = samples[base, c]
-                cube[si, ci, w] = c in fold ? fold_inclination(v) : v
+                cube[si, ci, w] = canon_value(ac, samples, base, c, flip)
             end
         end
+    end
+    for (ci, c) in enumerate(science_cols)
+        c in ac.circ && unwrap_circular!(view(cube, :, ci, :))
     end
     local rh, bess, tess
     try
@@ -1317,6 +1330,8 @@ function sample_pt_emcee(
                                  lo; transforms = (target.transform,))
         end
         merge!(recut_moved, ck.recut_moved)
+        # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
+        hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         n_done = step0
         # Past the release, the saved walkers carry their own values.
         if hasproperty(ck, :hold_on)
@@ -1428,8 +1443,12 @@ function sample_pt_emcee(
         # schedule, so the stretch moves pair walkers in one representative.
         # Before the pruning, which measures each rung's spread. Exact for the
         # cached logπ / logL, as the re-cut is.
+        # Under the stellar spin flip (`spin_flip`) the walkers are also put in
+        # one representative of the spin, the axis chosen from the cold rung;
+        # before the re-cut, which then cuts λ's seam from the moved draws.
         !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
-            fold_cyclic_inclinations!(state, params; idx = cinc)
+            fold_cyclic_inclinations!(state, params; idx = cinc,
+                                      decide_from = view(state, 1, :, :))
 
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_pt_prune_stranded!`. Stops at 3/4 of burn-in so the moved
@@ -1498,7 +1517,7 @@ function sample_pt_emcee(
         # the live readout and (optionally) the run-until-converged stop.
         if step > n_burnin && (step - n_burnin) % diag_cadence == 0
             diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols;
-                                   fold = cinc)
+                                   canon = AngleCanon(params))
             if diag !== nothing
                 meanr, maxr, meanb, mte = diag
                 rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))
@@ -1565,6 +1584,7 @@ function sample_pt_emcee(
                 keep_idx, samples = samples[1:keep_idx, :],
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
                 conv_run, rhat_str, ess_str, windows = circular_windows(params),
+                spin_axis = copy(params.layout.spin_axis),
                 recut_moved, hold_on = !isempty(held_x), hold_med = hold_med[]))
             last_ck = time()
         end

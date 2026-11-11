@@ -139,12 +139,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
             v = clamp(v, lo, hi)
             new_values[slot] = convert(T, v)
             # q_fwd density for this slot (= prior density since drawn from prior)
-            lp = eval_packed_logpdf(v,
-                layout.packed_priors.type_ids[uf_pos],
-                layout.packed_priors.params[uf_pos, 1],
-                layout.packed_priors.params[uf_pos, 2],
-                layout.packed_priors.lowers[uf_pos],
-                layout.packed_priors.uppers[uf_pos])
+            lp = eval_packed_logpdf(v, layout.packed_priors, uf_pos)
             log_q_fwd += lp
         end
         # If slot is frozen, it keeps its frozen value (already in new_values)
@@ -273,12 +268,7 @@ function propose_planet_death(theta::Theta{T}, rng::AbstractRNG,
     for slot in planet_slot_indices(block)
         uf_pos = findfirst(==(slot), layout.unfrozen_idx)
         uf_pos === nothing && continue
-        log_q_reverse += eval_packed_logpdf(Float64(theta.values[slot]),
-            layout.packed_priors.type_ids[uf_pos],
-            layout.packed_priors.params[uf_pos, 1],
-            layout.packed_priors.params[uf_pos, 2],
-            layout.packed_priors.lowers[uf_pos],
-            layout.packed_priors.uppers[uf_pos])
+        log_q_reverse += eval_packed_logpdf(Float64(theta.values[slot]), layout.packed_priors, uf_pos)
     end
 
     if scratch !== nothing

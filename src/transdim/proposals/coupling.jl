@@ -83,12 +83,7 @@ function propose_as_birth(theta::Theta{T}, rng::AbstractRNG;
         lo, hi = bounds(prior)
         v = clamp(rand(rng, prior.dist), lo, hi)
         new_values[slot] = convert(T, v)
-        log_q_fwd += eval_packed_logpdf(v,
-            layout.packed_priors.type_ids[uf],
-            layout.packed_priors.params[uf, 1],
-            layout.packed_priors.params[uf, 2],
-            layout.packed_priors.lowers[uf],
-            layout.packed_priors.uppers[uf])
+        log_q_fwd += eval_packed_logpdf(v, layout.packed_priors, uf)
     end
     activate_as!(new_td, k)
 
@@ -128,12 +123,7 @@ function propose_as_death(theta::Theta{T}, rng::AbstractRNG;
     for slot in _as_coupling_slots(theta, k)
         uf = findfirst(==(slot), layout.unfrozen_idx)
         uf === nothing && continue
-        log_q_rev += eval_packed_logpdf(theta.values[slot],
-            layout.packed_priors.type_ids[uf],
-            layout.packed_priors.params[uf, 1],
-            layout.packed_priors.params[uf, 2],
-            layout.packed_priors.lowers[uf],
-            layout.packed_priors.uppers[uf])
+        log_q_rev += eval_packed_logpdf(theta.values[slot], layout.packed_priors, uf)
     end
     n_off_after = length(_as_togglable(theta)) -
                   count(j -> is_as_active(new_td, j), _as_togglable(theta))

@@ -65,7 +65,10 @@ end
     @test same(P("type" => "modjeffreys", "knee" => 1.0, "upper" => 100.0),
                ModJeffreysPrior(1.0, 100.0))
     w = P("type" => "wrapped", "lo" => -π, "hi" => π)
-    @test Nereus.is_wrapped(w)
+    # Re-pinned: a WrappedUniform is no longer `is_wrapped` (that now means a
+    # polar angle folded at its poles); it is the circular Uniform, walled at
+    # its chart edges and re-cut (src/circular.jl).
+    @test w.dist isa Nereus.WrappedUniform && !Nereus.is_wrapped(w)
     @test P("type" => "isotropic").dist isa Nereus.Sine
     @test_throws ArgumentError P("type" => "lorentzian", "mu" => 0.0)
     @test_throws ArgumentError P("mu" => 0.0, "sigma" => 1.0)

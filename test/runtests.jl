@@ -1279,7 +1279,12 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
             -log(100.0 - 0.1) +     # K_k1
             -log(2.0) +             # sesinw_k1
             -log(2.0) +             # secosw_k1
-            -log(4π) +              # Mo_k1
+            # Mo_k1: re-pinned from -log(4π). U(-2π, 2π) is two periods of a
+            # periodic likelihood; the layout carries its pushforward onto one
+            # circle (`circular_lift`), density 2/(4π) = 1/(2π) on [-π, π):
+            # the same posterior over orbits and the same evidence, and no
+            # second copy of every mode a period away.
+            -log(2π) +
             -log(200.0) +           # gamma_HARPS
             -log(10.0 - 0.001)      # sigma_HARPS
         )
@@ -1378,10 +1383,18 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
         @test params.layout isa ParamsLayout
         @test params.layout.unfrozen_priors isa Vector{<:PriorSpec}
         @test length(params.layout.unfrozen_priors) == n_unfrozen(params)
-        # Parallel to unfrozen_names.
+        # Parallel to unfrozen_names. Re-pinned: a full-circle angle under a
+        # prior over more than one period (Mo_k1 here, U(-2π, 2π)) carries its
+        # pushforward onto the circle (`circular_lift`); every other prior is
+        # the user's own object. config.priors keeps it as written (above).
         for (name, ps) in zip(params.layout.unfrozen_names,
                                params.layout.unfrozen_priors)
-            @test ps === priors[name]
+            if name == "Mo_k1"
+                @test ps.dist isa Nereus.WrappedPushforward
+                @test all(bounds(ps) .≈ (-π, π))
+            else
+                @test ps === priors[name]
+            end
         end
 
         # n_p_idx is a typed field, not a magic number.
