@@ -200,20 +200,20 @@ function sample_moms(
         # backward compatibility — callers that need the strategies for
         # warm-starting a follow-up should call single-chain).
         #
-        # No warmup re-cut of circular angles here. The chains run
-        # concurrently over ONE shared Params, with no point at which they
-        # all stand still: a chain that moved a window at the end of its own
-        # warmup would move it under the others mid-sweep, and their states
-        # would be outside the new support (-Inf) on the next evaluation.
-        # run_job / fit_* re-cut the returned draws, which is what the
-        # summaries read.
+        # The circular seams are re-cut at the end of warmup from the pooled
+        # warmup draws of every chain, at a rendezvous where each has stopped
+        # at its own iteration `n_warmup` (the chains share ONE Params; see
+        # sample_rjmcmc, whose helpers these are). A resume with some chain
+        # already past that point takes its saved windows for all of them.
+        rv = _multichain_recut_setup!(target, Any[ck.state for ck in cks],
+                                      n_chains, n_warmup, td.planets)
         per_chain_samples = n_per_chain
         tasks = Vector{Task}(undef, n_chains)
         for c in 1:n_chains
             chain_seed = seed + 1000 * (c - 1)
             chain_show_progress = show_progress && (c == 1)
             ck_c = cks[c]
-            tasks[c] = Threads.@spawn _sample_moms_one(target, data;
+            tasks[c] = Threads.@spawn try _sample_moms_one(target, data;
                 td = td, n_samples = per_chain_samples,
                 n_warmup = n_warmup, seed = chain_seed,
                 init_scale = init_scale,
@@ -222,11 +222,14 @@ function sample_moms(
                 show_progress = chain_show_progress,
                 within_model = within_model,
                 informed_birth_fraction = informed_birth_fraction,
-                recut_circular = false,
+                recut_circular = rv !== nothing, rendezvous = rv,
+                shared_windows = true,
                 ck_path = ck_c.path, ck_fp = ck_c.fp, ck = ck_c.state,
                 checkpoint_interval = checkpoint_interval,
                 stop_after = _stop_after,
-            )
+            ) finally
+                rv === nothing || _rendezvous_leave!(rv)
+            end
         end
         results = [fetch(t) for t in tasks]
         chains = MCMCChains.chainscat((r[1] for r in results)...)
@@ -290,6 +293,8 @@ function _sample_moms_one(
     within_model::Symbol,
     informed_birth_fraction::Float64,
     recut_circular::Bool,
+    rendezvous::Union{Nothing,_Rendezvous} = nothing,  # other chains share `params`
+    shared_windows::Bool = false,  # windows restored by the caller (several chains)
     ck_path::Union{Nothing,String} = nothing,
     ck_fp::NamedTuple = NamedTuple(),
     ck::Union{Nothing,NamedTuple} = nothing,
@@ -437,12 +442,27 @@ function _sample_moms_one(
             circ.tick = ck.circ.tick::Int
         end
         # Windows the saved state lives in (moved by the re-cut). Only a moved
-        # one is written: with several chains the layout is shared and never
-        # moves, so this writes nothing there.
-        for (nm, (lo, _)) in ck.windows
-            i = findfirst(==(nm), layout.unfrozen_names)
-            layout.unfrozen_priors[i].lo == lo ||
-                set_circular_window!(params, i, lo; transforms = (target.transform,))
+        # one is written. With several chains `sample_moms` has already put the
+        # shared ones back, and a chain saved before the others re-cut is
+        # relabelled into them, its off-values moved with the windows as at
+        # the re-cut itself.
+        if shared_windows
+            sh = _relabel_into_windows!(theta.values, params, ck.windows)
+            for (pos, shift) in sh, k in eachindex(strategy.slot_indices)
+                q = findfirst(==(pos), strategy.slot_indices[k])
+                q === nothing && continue
+                strategy.off_values[k][q] += shift
+            end
+            if !isempty(sh)
+                log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
+                log_L  = _eval_ll(theta, data, ctr)
+            end
+        else
+            for (nm, (lo, _)) in ck.windows
+                i = findfirst(==(nm), layout.unfrozen_names)
+                layout.unfrozen_priors[i].lo == lo ||
+                    set_circular_window!(params, i, lo; transforms = (target.transform,))
+            end
         end
     end
     last_ck = time()
@@ -536,34 +556,38 @@ function _sample_moms_one(
             end
         end
 
-        if circ !== nothing && circ_from < iter <= n_warmup
+        circ !== nothing && circ_from < iter <= n_warmup &&
             _record_circular_warmup!(circ, theta)
-            if iter == n_warmup
-                moved = _recut_circular_warmup!(circ, params, (theta,);
-                                                transforms = (target.transform,))
-                # The off-values move WITH the window rather than being
-                # relabelled, as in transdim_pt_emcee: they are the prior's
-                # median by construction (`MoMSBirth`), i.e. the old window's
-                # midpoint, and a move is needed when the posterior straddles
-                # the old seam -- which tends to put the new seam near that
-                # midpoint. Relabelled, the off-value would then sit on the new
-                # seam and centre every blind birth on the emptiest arc of the
-                # posterior. Birth and death read the same off-value and the
-                # same bounds, so the kernel stays balanced; adapted here, in
-                # warmup, like the scales.
-                for m in moved, k in eachindex(strategy.slot_indices)
-                    q = findfirst(==(m.pos), strategy.slot_indices[k])
-                    q === nothing && continue
-                    strategy.off_values[k][q] += m.shift
-                end
-                # Same density in either chart; re-evaluated only so the
-                # cached values are those of the stored point, bit for bit.
-                if !isempty(moved)
-                    log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
-                    log_L  = _eval_ll(theta, data, ctr)
-                end
-                circ = nothing
+        if iter == n_warmup
+            # Warmup's end: the circular seams re-cut (pooled over the chains
+            # at their rendezvous when several share `params`) and every polar
+            # angle folded into its representative.
+            moved = circ === nothing ? () :
+                    _warmup_recut!(circ, params, theta, rendezvous,
+                                   (target.transform,))
+            # The off-values move WITH the window rather than being
+            # relabelled, as in transdim_pt_emcee: they are the prior's
+            # median by construction (`MoMSBirth`), i.e. the old window's
+            # midpoint, and a move is needed when the posterior straddles
+            # the old seam -- which tends to put the new seam near that
+            # midpoint. Relabelled, the off-value would then sit on the new
+            # seam and centre every blind birth on the emptiest arc of the
+            # posterior. Birth and death read the same off-value and the
+            # same bounds, so the kernel stays balanced; adapted here, in
+            # warmup, like the scales.
+            for m in moved, k in eachindex(strategy.slot_indices)
+                q = findfirst(==(m.pos), strategy.slot_indices[k])
+                q === nothing && continue
+                strategy.off_values[k][q] += m.shift
             end
+            folded = _fold_polar_slots!(theta.values, params)
+            # Same density in either chart; re-evaluated only so the
+            # cached values are those of the stored point, bit for bit.
+            if !isempty(moved) || folded
+                log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
+                log_L  = _eval_ll(theta, data, ctr)
+            end
+            circ = nothing
         end
 
         # Store sample
