@@ -866,13 +866,15 @@ function sample_pt_emcee(
     # `logπ_arr` holds the prior density on this scale (log p(x) + Σ y_j over
     # the log dimensions); draws and :lp are mapped back to x when recorded.
     #
-    # Full-circle angles are the exception: re-charted during burn-in by
-    # `_pt_ensemble_recut!`, on `_pt_recut_due`'s schedule. `circ` is
-    # computed once; `recut_moved` collects the final windows for the single
-    # end-of-run report.
+    # Full-circle and polar angles are the exception: re-charted during
+    # burn-in by `_pt_ensemble_recut!`, on `_pt_recut_due`'s schedule. `seam`
+    # (both kinds) and `circ` (full-circle, which the pruning measures on the
+    # circle) are computed once; `recut_moved` collects the final windows for
+    # the single end-of-run report.
     circ        = circular_indices(params)
+    seam        = seam_indices(params)
     recut_moved = Dict{String,NTuple{2,Float64}}()
-    # Cyclic inclinations: no window, folded to [0, π] on the same schedule.
+    # Cyclic inclinations: also folded to [0, π] on the same schedule.
     cinc        = cyclic_inclination_indices(params)
     # The move scale per dimension (see above), and the pruning tally per rung.
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
@@ -1438,9 +1440,10 @@ function sample_pt_emcee(
         n_done = step
 
         # ---- Cyclic inclinations (serial; burn-in only) -------------
-        # No seam to move: the walkers are folded back to [0, π] instead
-        # (src/circular.jl), every walker at every rung, on the re-cut
-        # schedule, so the stretch moves pair walkers in one representative.
+        # The walkers are folded back to [0, π] (src/circular.jl), every
+        # walker at every rung, on the re-cut schedule, so the stretch moves
+        # pair walkers in one representative; the re-cut below then moves the
+        # chart's seam clear of the folded draws and their mirror images.
         # Before the pruning, which measures each rung's spread. Exact for the
         # cached logπ / logL, as the re-cut is.
         # Under the stellar spin flip (`spin_flip`) the walkers are also put in
@@ -1472,8 +1475,8 @@ function sample_pt_emcee(
         # keeps the current seam unless another arc is clearly emptier).
         # Relabels `state` at every rung; logπ_arr and logL_arr stay valid,
         # see `_pt_ensemble_recut!`.
-        if !isempty(circ) && _pt_recut_due(step, n_burnin)
-            _pt_ensemble_recut!(state, params, circ, (target.transform,),
+        if !isempty(seam) && _pt_recut_due(step, n_burnin)
+            _pt_ensemble_recut!(state, params, seam, (target.transform,),
                                 recut_moved)
         end
 

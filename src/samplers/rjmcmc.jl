@@ -1443,7 +1443,8 @@ function _record_circular_warmup!(tr::_CircularWarmupTrace, theta::Theta)
     td = theta.td
     @inbounds for g in eachindex(tr.groups), (j, (_, k)) in enumerate(tr.groups[g])
         if td !== nothing
-            k <= length(td.planet_active) && !td.planet_active[k] && continue
+            # Owner 0 is the star's (i★): always there.
+            1 <= k <= length(td.planet_active) && !td.planet_active[k] && continue
             tr.node[g][j] && !is_as_active(td, k) && continue
         end
         push!(tr.draws[g], Float64(theta.values[tr.slots[g][j]]))

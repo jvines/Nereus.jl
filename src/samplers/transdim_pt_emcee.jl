@@ -230,12 +230,15 @@ end
 # Serial, between steps, no randomness. The cached logπ / logL stay valid: the
 # prior is uniform over one period in either window and the likelihood is
 # periodic in these angles, so each walker's physical state and log-density are
-# unchanged up to rounding. The MoMS off-values move WITH the window rather than
-# being relabelled: they are the prior's median by construction (`MoMSBirth`),
+# unchanged up to rounding. A full-circle angle's MoMS off-values move WITH the
+# window rather than being relabelled: they are the prior's median by
+# construction (`MoMSBirth`),
 # i.e. the old window's midpoint, and a move is needed when the posterior
 # straddles the old seam -- which tends to put the new seam near that midpoint.
 # Relabelled, the off-value would then sit on the new seam and centre every
-# blind birth on the emptiest arc of the posterior. Birth and death read the
+# blind birth on the emptiest arc of the posterior. A polar angle's off-value is
+# relabelled instead (`moved_off_value`): it is π/2, and a fixed place in the
+# chart would land on a pole, where a Sine prior vanishes. Birth and death read the
 # same off-value and the same bounds, so the kernel stays balanced; it is
 # adapted here like the Robbins-Monro scales, during burn-in only. Every other
 # birth draws from, or wraps into, the layout's bounds and so follows the window
@@ -255,7 +258,9 @@ function _td_ensemble_recut!(state::Array{Float64,3},
             is_node = startswith(L.unfrozen_names[d], "Omega_")
             @inbounds for w in 1:n_w
                 tds = td_states[1, w]
-                (k > length(tds.planet_active) || tds.planet_active[k]) || continue
+                # Owner 0 is the star's (i★): always there.
+                (k == 0 || k > length(tds.planet_active) || tds.planet_active[k]) ||
+                    continue
                 is_node && !is_as_active(tds, k) && continue
                 push!(draws, state[1, w, d])
             end
@@ -274,9 +279,12 @@ function _td_ensemble_recut!(state::Array{Float64,3},
             @inbounds for w in 1:n_w, t in 1:n_t
                 state[t, w, d] = circular_relabel(state[t, w, d], lo, hi)
             end
-            if k <= length(strategy.slot_indices)
+            if 1 <= k <= length(strategy.slot_indices)
                 i = findfirst(==(d), strategy.slot_indices[k])
-                i === nothing || (strategy.off_values[k][i] += lo - old_lo[m])
+                i === nothing ||
+                    (strategy.off_values[k][i] = moved_off_value(strategy.off_values[k][i],
+                                                                 L.unfrozen_priors[d],
+                                                                 lo - old_lo[m]))
             end
             moved[L.unfrozen_names[d]] = (Float64(lo), Float64(hi))
         end
@@ -1030,7 +1038,7 @@ function sample_transdim_pt_emcee(
     noise_refine_budget = fill(n_birth_refine, n_noise_slots)
     if ck === nothing && n_birth_refine > 1 && do_noise
         min_refine = max(3, n_birth_refine ÷ 6)
-        x_med = Float64[clamp(quantile(layout.unfrozen_priors[j], 0.5),
+        x_med = Float64[clamp(prior_centre(layout.unfrozen_priors[j]),
                               bounds(layout.unfrozen_priors[j])...)
                         for j in 1:n_dim]
         tds_c = TransDimState(; max_planets = max_k, n_noise = n_noise_slots)

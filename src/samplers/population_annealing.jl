@@ -333,8 +333,9 @@ function sample_pa(
         # two pieces that no stretch, random-walk or covariance move carries a
         # replica between, and whose 2π split wrecks the adaptive covariance.
         # Every β step the seam is moved to the emptiest arc of the population,
-        # polar angles folded and the spin put in one representative
-        # (`recut_walkers!`, as in pt_emcee's burn-in). The density is periodic,
+        # polar angles folded and their charts' seams moved clear of the
+        # population and its mirror image, and the spin put in one
+        # representative (`recut_walkers!`, as in pt_emcee's burn-in). The density is periodic,
         # so a relabel by whole periods (or a fold) leaves each replica's cached
         # log-prior and log-likelihood as they were (to rounding) and the
         # importance weights untouched: the population still targets π_β.

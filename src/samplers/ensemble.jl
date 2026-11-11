@@ -185,8 +185,7 @@ would move them under one that is not.
 function _ensemble_multichain_setup!(target::NereusTarget, cks, n_steps::Int,
                                      n_burn_steps::Int)
     params = target.params
-    isempty(circular_indices(params)) && isempty(cyclic_inclination_indices(params)) &&
-        return nothing
+    isempty(seam_indices(params)) && return nothing
     trs = target.transform === nothing ? () : (target.transform,)
     steps = Int[ck === nothing ? 0 : ck.step::Int for ck in cks]
     have = Bool[ck !== nothing && hasproperty(ck, :windows) for ck in cks]
@@ -214,7 +213,7 @@ function _ensemble_rechart_checkpoint!(target::NereusTarget, ck, wref)
     params, tr = target.params, target.transform
     trs = tr === nothing ? () : (tr,)
     L = params.layout
-    circ = circular_indices(params)
+    circ = seam_indices(params)
     kept = ck.kept::Array{Float64, 3}
     cols = [view(ck.x, :, j) for j in axes(ck.x, 2)]
     append!(cols, view(kept, :, j, s) for j in axes(kept, 2), s in axes(kept, 3))
