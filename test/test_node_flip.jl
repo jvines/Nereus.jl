@@ -75,6 +75,14 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
                                                         "w_k1" => UniformPrior(0.0, 2π)))
     circ_target() = _reparam(set = Dict{String,PriorSpec}("sesinw_k1" => FixedPrior(0.0),
                                                           "secosw_k1" => FixedPrior(0.0)))
+    # The same three under the transit-phase anchor, the default: the flip
+    # holds Tp, so it moves φ_c by M_c(e, ω + π) − M_c(e, ω).
+    phic_target(; drop = ["Mo_k1"], kw...) = _reparam(; time = :phic, drop, kw...)
+    ew_phic_target() = phic_target(ew = :ew, drop = ["Mo_k1", "sesinw_k1", "secosw_k1"],
+                                   set = Dict{String,PriorSpec}("ecc_k1" => UniformPrior(0.0, 0.95),
+                                                                "w_k1" => UniformPrior(0.0, 2π)))
+    circ_phic_target() = phic_target(set = Dict{String,PriorSpec}("sesinw_k1" => FixedPrior(0.0),
+                                                                  "secosw_k1" => FixedPrior(0.0)))
 
     pos(tg, nm) = findfirst(==(nm), tg.params.layout.unfrozen_names)
     in_mode(ch) = (O = vec(Array(ch[:, :Omega_k1, :]));
@@ -108,6 +116,46 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
         tt = _reparam(time = :Tc, drop = ["Mo_k1"],
                       set = Dict{String,PriorSpec}("Tc_k1" => UniformPrior(57500.0, 58500.0)))
         @test isempty(node_flips(tt.params, tt.data))
+
+        # The transit phase: offered, with φ_c moved along.
+        tp = phic_target()
+        fp = only(node_flips(tp.params, tp.data))
+        @test fp.shift == [pos(tp, "Omega_k1")]
+        @test fp.negate == [pos(tp, "sesinw_k1"), pos(tp, "secosw_k1")]
+        @test fp.phase == pos(tp, "phic_k1") && fp.ew === :sesinw
+        tpe = ew_phic_target()
+        fpe = only(node_flips(tpe.params, tpe.data))
+        @test fpe.shift == [pos(tpe, "Omega_k1"), pos(tpe, "w_k1")]
+        @test fpe.phase == pos(tpe, "phic_k1") && fpe.i1 == pos(tpe, "ecc_k1")
+        # e ≡ 0: φ_c = π/2 − ω − Mo + const, so φ_c carries the flip by π.
+        tpc = circ_phic_target()
+        fpc = only(node_flips(tpc.params, tpc.data))
+        @test fpc.shift == [pos(tpc, "Omega_k1"), pos(tpc, "phic_k1")] && fpc.phase == 0
+        # φ_c held fixed cannot follow ω, so the image would not hold Tp: refused.
+        tpw = phic_target(set = Dict{String,PriorSpec}("phic_k1" => FixedPrior(0.3)))
+        @test isempty(node_flips(tpw.params, tpw.data))
+    end
+
+    @testset "under φ_c the flip holds Tp" begin
+        tp = phic_target()
+        f = only(node_flips(tp.params, tp.data))
+        pc = tp.params.config.parametrization
+        rng = MersenneTwister(3)
+        for _ in 1:50
+            x = Nereus._draw_from_prior(tp, rng)
+            y = node_flip!(copy(x), f, tp.params)
+            function tp_of(v)
+                th = Theta{Float64}(tp.params)
+                Nereus.set_unfrozen!(th, v)
+                P = Nereus.planet_P(th, 1)
+                e, ω = Nereus.planet_e_w(th, 1)
+                return (Nereus.anchor_to_tp(:phic, get_param(th, "phic_k1"), P, e, ω,
+                                            tp.data.t_ref, pc.t_ref_c), P)
+            end
+            (Tx, P), (Ty, _) = tp_of(x), tp_of(y)
+            # Tp is held up to whole periods (φ_c wraps round its circle).
+            @test abs(rem(Ty - Tx, P, RoundNearest)) < 1e-8 * P
+        end
     end
 
     # Worst |log π(Tx) − log π(x)| and |T(Tx) − x| over prior draws. Prior
@@ -137,7 +185,8 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
         # KEPLER_YEAR_DAYS fixed it (test/astrometry/test_projection.jl pins
         # the round trip). Prior draws fit the data terribly (log L ~ −2e4),
         # which is what makes an asymmetry that size visible at all.
-        for tg in (as_target(), ew_target(), circ_target())
+        for tg in (as_target(), ew_target(), circ_target(),
+                   phic_target(), ew_phic_target(), circ_phic_target())
             Δ, inv, n_ok = _mirror_error(tg)
             @test n_ok > 50
             @test Δ < 1e-8           # measured 4e-12 (sesinw), 3e-11 (:ew)
@@ -189,6 +238,14 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
 
     @testset "pt_emcee weights the two modes equally" begin
         tg = as_target()
+        res = sample_pt_emcee(tg, tg.data; n_temps = 8, n_walkers = 32,
+                              n_steps = 1200, n_burnin = 600, seed = 1,
+                              show_progress = false)
+        @test abs(in_mode(res.chains) - 0.5) < 0.08
+    end
+
+    @testset "pt_emcee weights the two modes equally under φ_c" begin
+        tg = phic_target()
         res = sample_pt_emcee(tg, tg.data; n_temps = 8, n_walkers = 32,
                               n_steps = 1200, n_burnin = 600, seed = 1,
                               show_progress = false)
