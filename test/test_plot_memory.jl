@@ -137,6 +137,24 @@ _plotmem_stage(chains, params, data) = Nereus._make_plots(
         @test a == b
     end
 
+    @testset "a planet's band computed in grid slices is the same band" begin
+        # `compute_ci_bands` keeps a slice of the grid at a time (two passes
+        # over the draws), not the draws x grid matrix: the same values, bit
+        # for bit, whatever the slice.
+        ch = _plotmem_chain(params, vals, 8_000, 4)
+        ph = collect(range(-0.5, 0.5; length = 301))
+        tg = collect(range(0.0, 300.0; length = 257))
+        fold(c) = (Random.seed!(4); Nereus.compute_ci_bands(ch, params, data, ph;
+                   planet = 1, n_draws = 3_000, fold_phase = ph, grid_chunk = c))
+        time_(c) = (Random.seed!(4); Nereus.compute_ci_bands(ch, params, data, tg;
+                    planet = 1, n_draws = 3_000, grid_chunk = c))
+        whole_f, whole_t = fold(typemax(Int)), time_(typemax(Int))
+        for c in (1, 7, 128, 300)
+            @test isequal(fold(c), whole_f)
+            @test isequal(time_(c), whole_t)
+        end
+    end
+
     @testset "a PNG written from the Cairo surface is Makie's PNG" begin
         # `_save_png` encodes the Cairo surface itself instead of Makie's
         # converted copies: the same pixels and the same metadata chunks.

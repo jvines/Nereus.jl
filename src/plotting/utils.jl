@@ -783,25 +783,33 @@ compute_rv_model_planet(theta, data, t_grid, planet_k::Int; comp::Int=1) =
 # caller that evaluates many draws on one grid.
 function compute_rv_model_planet!(model, theta, data, t_grid, planet_k::Int;
                                   comp::Int=1)
+    fill!(model, 0.0)
+    el = _rv_planet_elements(theta, data, planet_k)
+    el === nothing && return model
+    return _add_keplerian!(model, t_grid, el..., comp)
+end
+
+# The elements planet `planet_k`'s RV curve is computed from in draw `theta`:
+# `(Tp, P, e, ω, K_A, -K_B)`, or `nothing` when it adds no signal (no K, or e
+# outside [0, 1)).
+function _rv_planet_elements(theta, data, planet_k::Int)
     parametrization = theta.params.config.parametrization
     t_ref = data.t_ref
-    fill!(model, 0.0)
-
     block = theta.params.layout.planet_blocks[planet_k]
-    has_K(block) || return model
+    has_K(block) || return nothing
 
     P = planet_P(theta, planet_k)
     KA, cB = block isa SB2Block ?
         (planet_K_A(theta, planet_k), -planet_K_B(theta, planet_k)) :
         (planet_K(theta, planet_k), 0.0)
     e, w = planet_e_w(theta, planet_k)
-    (e < 0 || e >= 1) && return model
+    (e < 0 || e >= 1) && return nothing
 
     ta = planet_time_anchor(theta, planet_k)
     Tp = anchor_to_tp(parametrization.time, ta, P, e, w, t_ref,
                       parametrization.t_ref_c)
 
-    return _add_keplerian!(model, t_grid, Tp, P, e, w, KA, cB, comp)
+    return (Tp, P, e, w, KA, cB)
 end
 
 # The curve loop of `compute_rv_model_planet`, behind a function barrier. The
@@ -1166,17 +1174,28 @@ every column seven times -- 2.6 GB of transient copies for a 60,000-draw fold.
 function _band_quantiles(models::Matrix{Float64}, n::Int)
     ng = size(models, 2)
     q = [Vector{Float64}(undef, ng) for _ in _BAND_PROBS]
+    return _band_nt(_band_quantiles!(q, models, n, ng, 0))
+end
+
+# The percentiles of the first `ng` columns (first `n` rows) of `models`, into
+# `q[k][j0 + j]`.
+function _band_quantiles!(q, models::Matrix{Float64}, n::Int, ng::Int, j0::Int)
     buf = Vector{Float64}(undef, n)
     for j in 1:ng
         copyto!(buf, 1, models, (j - 1) * size(models, 1) + 1, n)
         v = quantile!(buf, _BAND_PROBS)
         for k in eachindex(q)
-            q[k][j] = v[k]
+            q[k][j0 + j] = v[k]
         end
     end
-    return (; median = q[1], lo1 = q[2], hi1 = q[3], lo2 = q[4], hi2 = q[5],
-              lo3 = q[6], hi3 = q[7])
+    return q
 end
+
+_band_nt(q) = (; median = q[1], lo1 = q[2], hi1 = q[3], lo2 = q[4], hi2 = q[5],
+                 lo3 = q[6], hi3 = q[7])
+
+# Grid points per pass over the draws in a planet's band (`compute_ci_bands`).
+const _BAND_GRID_CHUNK = 128
 
 """
     _given_band_pool(chains, params, planet, pool) -> Vector{Int}
@@ -1248,6 +1267,10 @@ If `planet` is specified, computes single-planet Keplerian only.
 credible region does: the band samples those of its draws with a finite
 `:lp` in which `planet` exists (`_given_band_pool`), and `bf_cutoff` is not
 used.
+
+For a planet's curve the draws are evaluated `grid_chunk` grid points at a
+time, in two passes, rather than held as a draws x grid matrix; the band is
+the same, to the bit, for any `grid_chunk`.
 """
 function compute_ci_bands(chains, params, data, t_grid;
                            planet::Union{Nothing, Int}=nothing,
@@ -1255,7 +1278,8 @@ function compute_ci_bands(chains, params, data, t_grid;
                            bf_cutoff::Real=10.0,
                            fold_phase::Union{Nothing, AbstractVector}=nothing,
                            fold_t0::Real=0.0,
-                           pool::Union{Nothing, AbstractVector{<:Integer}}=nothing)
+                           pool::Union{Nothing, AbstractVector{<:Integer}}=nothing,
+                           grid_chunk::Int=_BAND_GRID_CHUNK)
     pool = pool === nothing ? _band_pool(chains, params, planet, bf_cutoff) :
                               _given_band_pool(chains, params, planet, pool)
     n_grid0 = fold_phase !== nothing && planet !== nothing ? length(fold_phase) : length(t_grid)
@@ -1273,20 +1297,16 @@ function compute_ci_bands(chains, params, data, t_grid;
     fold = fold_phase !== nothing && planet !== nothing
     n_grid = fold ? length(fold_phase) : length(t_grid)
 
-    # Valid draws only, in the order drawn: a draw with a non-finite model is
-    # skipped rather than stored and then copied out (`models[valid, :]` was a
-    # second matrix the size of the first).
-    models = Matrix{Float64}(undef, length(draw_idx), n_grid)
-    n_ok = 0
     # One grid and one curve, reused by every draw: per draw they were three
     # fresh vectors of the grid, 1.4 GB of garbage over a 60,000-draw band.
     t_eval = fold ? Vector{Float64}(undef, n_grid) : nothing
     mbuf = Vector{Float64}(undef, n_grid)
-
-    for idx in draw_idx
-        # Each draw with its own trans-dim active set: parked slots out.
+    # Draw `idx`'s curve on the grid points `r`, in the first `length(r)` of
+    # `mbuf`. Each point is computed on its own, so a part of the grid gives
+    # the same values as the whole of it.
+    function curve!(idx, r)
         theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
-
+        mb = view(mbuf, 1:length(r))
         if fold
             # Reference each draw to ITS OWN inferior-CONJUNCTION epoch (the
             # constrained orbital phase λ = Mo + ω), NOT periastron. Periastron
@@ -1297,20 +1317,15 @@ function compute_ci_bands(chains, params, data, t_grid;
             # baseline phase smear, since each draw uses its own P.)
             P_draw  = planet_P(theta, planet)
             Tc_draw = _planet_Tc(theta, data, planet)
-            t_eval .= Tc_draw .+ fold_phase .* P_draw
-            m = compute_rv_model_planet!(mbuf, theta, data, t_eval, planet)
+            te = view(t_eval, r)
+            te .= Tc_draw .+ view(fold_phase, r) .* P_draw
+            return compute_rv_model_planet!(mb, theta, data, te, planet)
         elseif planet === nothing
-            m = compute_rv_model_on_grid(theta, data, t_grid)
+            return compute_rv_model_on_grid(theta, data, t_grid)   # whole grid only
         else
-            m = compute_rv_model_planet!(mbuf, theta, data, t_grid, planet)
+            return compute_rv_model_planet!(mb, theta, data, view(t_grid, r), planet)
         end
-        # Reject samples with NaN/Inf model values
-        all(isfinite, m) || continue
-        n_ok += 1
-        models[n_ok, :] = m
     end
-    # every draw non-finite → NaN bands (band! skips NaN) rather than erroring
-    n_ok == 0 && return _nan_bands(n_grid)
 
     # Nested 1/2/3σ bands = EMPIRICAL percentiles of the actual computed curves
     # (Gaussian-equivalent 15.87/84.13, 2.28/97.72, 0.13/99.87 %). This is the
@@ -1319,7 +1334,63 @@ function compute_ci_bands(chains, params, data, t_grid;
     # from enough draws (the caller passes a large `n_draws` on a coarse phase
     # grid), NOT from a Gaussian assumption — the outer percentile is MC-noisy
     # only when undersampled.
-    return _band_quantiles(models, n_ok)
+    #
+    # A draw with a non-finite point anywhere is left out of the whole band.
+    chunk = planet === nothing ? n_grid : clamp(grid_chunk, 1, n_grid)
+    if chunk == n_grid
+        # One pass: every valid curve stored, in the order drawn.
+        models = Matrix{Float64}(undef, length(draw_idx), n_grid)
+        n_ok = 0
+        for idx in draw_idx
+            m = curve!(idx, 1:n_grid)
+            all(isfinite, m) || continue
+            n_ok += 1
+            models[n_ok, :] = m
+        end
+        n_ok == 0 && return _nan_bands(n_grid)
+        return _band_quantiles(models, n_ok)
+    end
+    # Two passes, for a planet's curve (each point on its own). Stored whole,
+    # the curves are a draws x grid matrix -- 458 MB for the 60,000-draw,
+    # 1000-point fold. The first pass finds the valid draws; the second
+    # computes them a slice of the grid at a time and takes that slice's
+    # percentiles: the same values from a matrix `grid_chunk` points wide.
+    # A draw's curve on the grid points `r` from its elements (as
+    # `compute_rv_model_planet!` computes it), in the first `length(r)` of `mbuf`.
+    function slice!(el, Tc_draw, P_draw, r)
+        mb = view(mbuf, 1:length(r))
+        te = fold ? (view(t_eval, r) .= Tc_draw .+ view(fold_phase, r) .* P_draw) :
+                    view(t_grid, r)
+        fill!(mb, 0.0)
+        el === nothing || _add_keplerian!(mb, te, el..., 1)
+        return mb
+    end
+    # Pass 1: each draw's elements, kept if its whole curve is finite.
+    els = Tuple{Union{Nothing, NTuple{6, Float64}}, Float64, Float64}[]
+    for idx in draw_idx
+        theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
+        el = _rv_planet_elements(theta, data, planet)
+        Tc_draw = fold ? Float64(_planet_Tc(theta, data, planet)) : 0.0
+        P_draw  = fold ? Float64(planet_P(theta, planet)) : 0.0
+        all(isfinite, slice!(el, Tc_draw, P_draw, 1:n_grid)) || continue
+        push!(els, (el, Tc_draw, P_draw))
+    end
+    n_ok = length(els)
+    n_ok == 0 && return _nan_bands(n_grid)
+    # Pass 2: the curves a slice of the grid at a time, and that slice's percentiles.
+    q = [Vector{Float64}(undef, n_grid) for _ in _BAND_PROBS]
+    models = Matrix{Float64}(undef, n_ok, chunk)
+    for lo in 1:chunk:n_grid
+        r = lo:min(lo + chunk - 1, n_grid)
+        for (k, (el, Tc_draw, P_draw)) in enumerate(els)
+            mb = slice!(el, Tc_draw, P_draw, r)
+            @inbounds for j in eachindex(mb)
+                models[k, j] = mb[j]
+            end
+        end
+        _band_quantiles!(q, models, n_ok, length(r), lo - 1)
+    end
+    return _band_nt(q)
 end
 
 """
