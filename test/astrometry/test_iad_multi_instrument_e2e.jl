@@ -112,7 +112,7 @@ using Printf: @printf, @sprintf
         params = Params(max_kplanet = 1, planet_modes = [RVAS],
             instruments = InstrumentConfig(rv = ["X"]), data = data,
             stability = :none, M_s = M_pri,
-            parametrization = ParametrizationConfig(mass = :a_driven),
+            parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
             priors = Dict{String, PriorSpec}(
                 "n_p" => FixedPrior(1.0), "a_k1" => LogUniformPrior(0.5, 200.0),
                 "M_sec_k1" => LogUniformPrior(0.0005, 1.0),
@@ -245,7 +245,7 @@ end
                     iad = iad, relastrom = relast)
         params = Params(max_kplanet = 1, planet_modes = [RVAS],
             instruments = instruments, data = data, stability = :none, M_s = M_pri,
-            parametrization = ParametrizationConfig(mass = :a_driven), priors = PR)
+            parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven), priors = PR)
         th = Theta(params)
         set_param!(th,"n_p",1); set_param!(th,"a_k1",a_true)
         set_param!(th,"M_sec_k1",M_sec)

@@ -27,7 +27,7 @@ using Random: MersenneTwister
     data0 = Data(; t_rv = t, rv = zeros(n_obs), rv_err = rv_err,
                    rv_inst = ones(Int, n_obs))
     ic   = InstrumentConfig(rv = ["SIM"])
-    params = Params(;
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo),
         max_kplanet  = 1,
         planet_modes = [RV_ONLY],
         instruments  = ic, data = data0,
@@ -137,7 +137,7 @@ end
     data0 = Data(; t_rv = t, rv = zeros(n_obs), rv_err = rv_err,
                    rv_inst = ones(Int, n_obs))
     ic   = InstrumentConfig(rv = ["SIM"])
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                      instruments = ic, data = data0, M_s = 1.0)
 
     # Build truly circular data (e = 0, ω = 0). The signal is

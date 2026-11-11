@@ -24,7 +24,7 @@ function _sparse_jittery_fold()
     t = sort(500.0 .* rand(rng, 33))
     data = Data(; t_rv = t, rv = zeros(length(t)), rv_err = fill(30.0, length(t)),
                   rv_inst = ones(Int, length(t)))
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                       instruments = InstrumentConfig(rv = ["I1"]),
                       data = data, M_s = 1.0)
     vals = Dict("P_k1" => 2.83, "K_k1" => 350.0, "sesinw_k1" => 0.0,

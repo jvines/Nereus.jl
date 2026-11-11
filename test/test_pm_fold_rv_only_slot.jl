@@ -16,7 +16,7 @@ function _rv_only_plus_transit()
                   rv_inst = ones(Int, length(t_rv)),
                   t_phot = t_ph, flux = ones(length(t_ph)), flux_err = fill(1e-3, length(t_ph)),
                   phot_inst = ones(Int, length(t_ph)))
-    params = Params(; max_kplanet = 2, planet_modes = [RV_ONLY, RVPM],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 2, planet_modes = [RV_ONLY, RVPM],
                       instruments = InstrumentConfig(rv = ["I1"], pm = ["TESS"]),
                       data = data, M_s = 1.0, R_s = 1.0)
     vals = Dict("P_k1" => 1.39, "K_k1" => 20.0, "sesinw_k1" => 0.0, "secosw_k1" => 0.0,

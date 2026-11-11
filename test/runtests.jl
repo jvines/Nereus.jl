@@ -771,7 +771,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
     @testset "ParametrizationConfig" begin
         pc = ParametrizationConfig()
         @test pc.ew === :sesinw
-        @test pc.time === :Mo
+        @test pc.time === :phic          # the transit phase; Mo before
         @test pc.geom === :b_rr
         @test pc.use_rho_s == false
 
@@ -1872,7 +1872,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
             "Mo_k1"=>UniformPrior(-2π,2π),
             "sigma_HARPS"=>LogUniformPrior(1e-3,10.0),
             "sigma_ESPRESSO"=>LogUniformPrior(1e-3,10.0))
-        pc=ParametrizationConfig(marginalize_gamma=true)
+        pc=ParametrizationConfig(time=:Mo, marginalize_gamma=true)
         params_m=Params(; priors=priors_m, max_kplanet=1,
                         planet_modes=[RV_ONLY], instruments=ic,
                         stability=:none, data=data, parametrization=pc)

@@ -79,7 +79,7 @@ function _he_setup(; P_yr = 4.0, M_sec = 0.02, data_kw...)
     params = Params(max_kplanet = 1, planet_modes = [RVAS],
                     instruments = InstrumentConfig(rv = ["X"]), data = data,
                     stability = :none, M_s = 1.0,
-                    parametrization = ParametrizationConfig(mass = :M_sec_driven))
+                    parametrization = ParametrizationConfig(time = :Mo, mass = :M_sec_driven))
     θ = Theta(params)
     set_param!(θ, "n_p", 1)
     set_param!(θ, "P_k1", P_yr * HE_YR)

@@ -54,7 +54,7 @@ const GAIA = GaiaDR3Data(params = (0.0, 0.0, 25.0, 0.3, -0.2),
 function _gw_setup(; gost, kw...)
     data = Data(; t_rv = [57000.0, 57300.0], rv = [10.0, -10.0], rv_err = [1.0, 1.0],
                 gost = gost, kw...)
-    params = Params(max_kplanet = 1, planet_modes = [RVAS],
+    params = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
                     instruments = InstrumentConfig(rv = ["X"]), data = data,
                     stability = :none, M_s = 1.0)
     theta = Theta(params)

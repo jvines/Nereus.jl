@@ -66,7 +66,7 @@ function _jit_params(iad; iad_names = String[], gaia = false)
     params = Params(max_kplanet = 1, planet_modes = [RVAS],
         instruments = InstrumentConfig(rv = ["X"], iad = iad_names), data = data,
         stability = :none, M_s = _JIT_ORB.M,
-        parametrization = ParametrizationConfig(mass = :a_driven),
+        parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
         priors = Dict{String, PriorSpec}(
             "n_p" => FixedPrior(1.0), "a_k1" => LogUniformPrior(0.5, 100.0),
             "M_sec_k1" => LogUniformPrior(0.001, 0.5),

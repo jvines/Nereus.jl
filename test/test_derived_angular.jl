@@ -26,7 +26,7 @@ function _da_setup(mass::Symbol; planet_modes = [RVAS])
     params = Params(max_kplanet = 1, planet_modes = planet_modes,
                     instruments = instruments, data = data, stability = :none,
                     M_s = 1.0, priors = pri,
-                    parametrization = ParametrizationConfig(mass = mass))
+                    parametrization = ParametrizationConfig(time = :Mo, mass = mass))
     return params
 end
 
