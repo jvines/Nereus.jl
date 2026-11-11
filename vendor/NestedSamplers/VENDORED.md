@@ -33,5 +33,13 @@ Changed here since the commit above, so carry them over on an update:
 - A live point found outside the bound refits the bound and stays the walk's
   start (`Bounds.bound_containing`); the commit above drew another live point,
   so points outside a stale bound were chosen less often than the rest.
+- `sample_parallel` chooses the K walks' start points itself, serially, among
+  the live points at or above the batch's threshold L_(K), and keeps the
+  refit and the start when a start is outside the bound. The commit above
+  refit inside each walk for that walk alone and drew another start, so the
+  live points outside the bound were chosen less often for as long as the
+  bound lasted, which with the refit check above was the whole run: log Z
+  came out 1.5–2.7 below pt_emcee's on an RM obliquity fit. Either fix alone
+  removes that.
 
 License: MIT (see LICENSE) — original authors retained.

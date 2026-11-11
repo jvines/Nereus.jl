@@ -95,3 +95,33 @@ end
         end
     end
 end
+
+# A proposal that counts the starts it is handed below the likelihood threshold,
+# then draws by rejection. Counted in a global: `sample_parallel` deep-copies
+# the proposal for each thread.
+const _NSP_STARTS = Ref((0, 0))
+struct _NSPRecordStart <: _NSP.AbstractProposal end
+NestedSamplers.default_update_interval(::_NSPRecordStart, ndims) = 1.5
+function (::_NSPRecordStart)(rng, point, logl_star, bound, model; kwargs...)
+    _, l = NestedSamplers.prior_transform_and_loglikelihood(model, point)
+    n, below = _NSP_STARTS[]
+    _NSP_STARTS[] = (n + 1, below + (l < logl_star))
+    return _NSP.Rejection()(rng, point, logl_star, bound, model)
+end
+
+@testset "batch nested starts its walks inside the constraint" begin
+    # Each batch replaces the K lowest live points with K walks constrained
+    # above the K-th; a walk must start at a live point inside that constraint.
+    # The batch path drew starts among all live points, the K-1 below the
+    # threshold included: (K-1)/N of the walks, 14% here, started outside.
+    model = NestedModel(x -> -sum(abs2, (x .- 0.5) ./ 0.01) / 2, fill(Uniform(0, 1), 2))
+    spl = Nested(2, 50; bounds = _NSB.MultiEllipsoid, proposal = _NSPRecordStart())
+    _NSP_STARTS[] = (0, 0)
+    with_logger(NullLogger()) do
+        NestedSamplers.sample_parallel(MersenneTwister(3), model, spl; batch_size = 8,
+                                       parallel = false, dlogz = 0.5)
+    end
+    n, below = _NSP_STARTS[]
+    @test n > 200
+    @test below == 0
+end

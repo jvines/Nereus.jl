@@ -116,18 +116,45 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
     order = partialsortperm(state.logl, 1:K)
     Lstar = state.logl[order[K]]
 
+    # --- where the K walks start, chosen here, serially ---
+    # A start outside the bound refits the bound, the refit is kept, as `step`
+    # keeps it, and the start stays. Each walk used to refit for itself alone
+    # and draw another start, which chose the live points outside the bound
+    # less often than the rest for as long as that bound lasted; when it
+    # lasted the whole run, log Z came out 1.5-2.7 below pt_emcee's on an RM
+    # obliquity fit. The walks start at live points at or above the threshold
+    # L_(K), not at the K-1 below it, outside the constraint they sample.
+    starts = Vector{Any}(undef, K)
+    if has_bounds
+        below = Set(view(order, 1:K-1))
+        alive = [i for i in 1:N if !(i in below)]
+        for j in 1:K
+            point = state.us[:, rand(rng, alive)]
+            bound = Bounds.bound_containing(rng, active_bound, point)
+            if isnothing(bound)
+                active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us; pointvol=pointvol), sampler.enlarge)
+                since_update = 0
+                bound = Bounds.bound_containing(rng, active_bound, point)
+            end
+            if isnothing(bound)
+                bound = Bounds.scale!(Bounds.fit(Bounds.Ellipsoid, state.us; pointvol=pointvol), sampler.enlarge)
+            end
+            starts[j] = (point, bound)
+        end
+    end
+
     # --- draw K replacements above Lstar (concurrent constrained walks) ---
     reps = Vector{Tuple{Vector{Float64},Any,Float64,Int}}(undef, K)
     if parallel && K > 1
         Threads.@threads :static for j in 1:K
             tid = Threads.threadid()
             reps[j] = _draw_replacement(rngs[tid], props[tid], sampler, model,
-                                         active_bound, has_bounds, Lstar, state.us, pointvol)
+                                         has_bounds ? starts[j] : nothing, Lstar, state.us)
         end
     else
         for j in 1:K
             reps[j] = _draw_replacement(rng, props[1], sampler, model,
-                                         active_bound, has_bounds, Lstar, state.us, pointvol)
+                                         has_bounds ? starts[j] : nothing, Lstar, state.us)
         end
     end
 
@@ -169,19 +196,12 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
     return batch, new_state
 end
 
-# Draw one new point with L > Lstar via the sampler's proposal (bounded path
-# mirrors step.jl, including the live-point/ellipsoid fallbacks).
-function _draw_replacement(rng, proposal, sampler, model, active_bound, has_bounds, Lstar, us, pointvol)
-    if has_bounds
-        point, bound = rand_live(rng, active_bound, us)
-        if isnothing(bound)
-            active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, us; pointvol=pointvol), sampler.enlarge)
-            point, bound = rand_live(rng, active_bound, us)
-        end
-        if isnothing(bound)
-            bound = Bounds.scale!(Bounds.fit(Bounds.Ellipsoid, us; pointvol=pointvol), sampler.enlarge)
-            point = rand_live(rng, bound, us)[1]
-        end
+# Draw one new point with L ≥ Lstar via the sampler's proposal, from the start
+# point and bound chosen in `step_batch`; uniform rejection from the cube before
+# the first bound (`start === nothing`).
+function _draw_replacement(rng, proposal, sampler, model, start, Lstar, us)
+    if start !== nothing
+        point, bound = start
         u, v, logl, nc = proposal(rng, point, Lstar, bound, model)
     else
         point = rand(rng, eltype(us), sampler.ndims)
