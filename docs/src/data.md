@@ -338,7 +338,11 @@ data = Data(; iad = iad)
 ```
 
 **Auto-fetch** the van Leeuwen 2007 IAD for a HIP source — downloads
-the 350 MB ESA bundle once, then caches per-source (instant on repeat):
+the 350 MB ESA bundle once, then caches per-source (instant on repeat).
+The bundle is fetched from an unmodified copy attached to the Nereus GitHub
+release `data-hipparcos2-iad` first and from ESA second (ESA's server neither
+resumes nor reliably finishes the transfer); either copy is accepted only if
+its SHA-256 matches:
 
 ```julia
 iad = fetch_hip_iad(27321; verbose = false)
