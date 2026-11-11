@@ -461,7 +461,16 @@ function _daedalus_evolve(start::DaedalusPoint, target::NereusTarget,
     has_toggleable_noise = td.noise && !isempty(td.toggleable)
 
     for step in 1:n_mcmc
-        if rand(rng) < td.transdim_fraction
+        # td.planets = false: the planet set is fixed, so a between-model
+        # move can only toggle noise, and with no toggleable noise there is
+        # none to make (as in rjmcmc, moms and the trans-dimensional PT). The
+        # planet branch below used to fire regardless: a death switched the
+        # fixed planet off whenever the planet-less likelihood cleared L_thr.
+        # On an RV + IAD companion at i = 5° (150 live points) one run in five
+        # with e fixed, and the run with e free, ended planet-less: every
+        # posterior draw on the flat planet-less likelihood, 1,800 nats below
+        # the mode (log Z = -1650 against +150 to +169).
+        if (td.planets || has_toggleable_noise) && rand(rng) < td.transdim_fraction
             # Between-model: with toggleable noise, split between planet
             # flips and noise flips 50/50; otherwise always planet flip.
             do_noise = has_toggleable_noise && (td.planets ?
