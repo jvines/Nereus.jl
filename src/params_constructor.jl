@@ -45,7 +45,10 @@ fallback bounds are used.
 
 # Optional
 - `priors::Dict{String, PriorSpec}` — override any auto-generated prior
-- `parametrization::ParametrizationConfig` — eccentricity, time anchor, geometry
+- `parametrization::ParametrizationConfig` — eccentricity, time anchor, geometry.
+  Omitted: the defaults, with the time anchor `priors` name if they name one
+  (`Mo_k1` → `:Mo`, see `time_anchor_named`), else the transit phase `:phic`,
+  which needs `data` to fix its epoch.
 - `trend_order::Int` — 0 (none), 1 (linear), 2 (quadratic)
 - `noise_models::Vector{NoiseModel}` — noise models to include
 - `stability::Symbol` — `:none`, `:amd`, `:gladman`; hard prior on orbital stability
@@ -77,7 +80,7 @@ function Params(;
     max_kplanet::Int,
     planet_modes::AbstractVector{PlanetDataSources},
     instruments::InstrumentConfig = InstrumentConfig(),
-    parametrization::ParametrizationConfig = ParametrizationConfig(),
+    parametrization::Union{Nothing, ParametrizationConfig} = nothing,
     priors::Union{Nothing, Dict{String, <:PriorSpec}} = nothing,
     data::Union{Nothing, Data} = nothing,
     trend_order::Int = 0,
@@ -94,6 +97,10 @@ function Params(;
     obliquity::ObliquityConfig = ObliquityConfig(),
     gaia_plx = nothing,
 )
+    # No parametrization: the defaults, with the time anchor the priors name
+    # if they name one (`time_anchor_named`), else the default anchor.
+    parametrization === nothing && (parametrization = ParametrizationConfig(
+        time = priors === nothing ? nothing : time_anchor_named(keys(priors))))
     max_kplanet >= 0 || throw(ArgumentError("max_kplanet must be ≥ 0"))
     trend_order in (0, 1, 2) || throw(ArgumentError(
         "trend_order must be 0, 1, or 2; got $trend_order"))

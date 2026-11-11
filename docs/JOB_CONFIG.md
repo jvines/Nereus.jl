@@ -253,6 +253,7 @@ rather than a single number trusted.
                                            //   quantities. The default because Mo has a low-e ridge
                                            //   with ω (the data pin λ = Mo + ω) that biases e; φ_c is
                                            //   π/2 − λ there. Same posterior: uniform φ_c ≡ uniform Mo.
+                                           //   Omitted with priors on one anchor (e.g. Mo_k1): that anchor.
       "t_ref_c": 2459000.0,                // phic only: the epoch φ_c is measured from. Omit it to
                                            //   use the median photometric time (else data t_ref)
       "ew":   "sesinw",                    // sesinw | ew

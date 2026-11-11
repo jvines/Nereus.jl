@@ -1239,10 +1239,13 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     # baseline/P copies of the orbit; the ensemble cannot mix across them (see
     # `_warn_repeating_time_window`), and a default job on an easy 12.3 d
     # target never converged. Then Mo, whose low-e ridge with ω biased e.
+    # A config whose priors name an anchor (`Mo_k1`, ...) and no `time` samples
+    # that anchor, as build_target does with a planet block's names.
     time_str = _get(par, :time; default = nothing)
     parametrization = ParametrizationConfig(
         mass = _MASS_MODE[String(_get(par, :mass; default = "K_driven"))],
-        time = time_str === nothing ? nothing : _TIME_ANCHOR[String(time_str)],
+        time = time_str !== nothing ? _TIME_ANCHOR[String(time_str)] :
+               time_anchor_named(String.(keys(_get(cfg, :priors; default = Dict())))),
         ew   = _EW_PARAM[String(_get(par, :ew; default = "sesinw"))],
         geom = _GEOM_PARAM[String(_get(par, :geom; default = "b_rr"))],
         marginalize_gamma = Bool(_get(par, :marginalize_gamma; default = false)),

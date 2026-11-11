@@ -163,7 +163,12 @@ clamp never changes the `e` a likelihood evaluates.
 The single time slot (`t`) is named and decoded per this choice
 (`src/model.jl:1505`; conversions `src/orbit.jl:175`–`236`). The default,
 in `ParametrizationConfig`, `build_target`, the `fit_*` functions and
-run_job alike, is `:phic`.
+run_job alike, is `:phic`. Where no anchor is given but the priors name one
+(`Mo_k1`, `Tp_k1`, ...; in `build_target` also the planet block), that anchor
+is sampled (`time_anchor_named`), so a setup written for the old default with
+an `Mo_k1` prior still samples `Mo`. An explicit `ParametrizationConfig`
+without `time` is the default anchor, and a prior left on another anchor's
+slot is reported as such.
 
 !!! note "Why the transit phase is the default"
     At low `e` the data pin the mean longitude `λ = M₀ + ω`, not `M₀` and

@@ -119,6 +119,32 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         @test tgM.params.config.parametrization.time === :Mo
         @test build_target(planets = (b = blk,), rv = rvn,
                            time_anchor = :Mo).params.config.parametrization.time === :Mo
+        # Priors that name an anchor, and no anchor given: that anchor.
+        tgP = build_target(planets = (b = blk,), rv = rvn,
+                           priors = Dict{String, PriorSpec}("Tp_k1" => UniformPrior(TG_BJD0, TG_BJD0 + 3.9)))
+        @test tgP.params.config.parametrization.time === :Tp
+        moP = Dict{String, PriorSpec}("Mo_k1" => UniformPrior(0.0, 2π))
+        pnd = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+                       instruments = InstrumentConfig(rv = ["HARPS"]), priors = moP)
+        @test pnd.config.parametrization.time === :Mo        # and needs no data
+        @test Nereus.time_anchor_named(["P_k1", "Mo_k1", "Mo_k2"]) === :Mo
+        @test Nereus.time_anchor_named(["P_k1", "ttv_k1_t1"]) === nothing
+        @test_throws ArgumentError Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+            instruments = InstrumentConfig(rv = ["HARPS"]),
+            priors = merge(moP, Dict{String, PriorSpec}("Tc_k1" => UniformPrior(0.0, 1.0))))
+        # An explicit parametrization without `time` is the default anchor; a
+        # prior left on Mo is then named as another anchor's, not as a typo.
+        msg = try
+            Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+                     data = Data(; t_rv = t_rv, rv = data.rv, rv_err = data.rv_err),
+                     instruments = InstrumentConfig(rv = ["HARPS"]),
+                     parametrization = ParametrizationConfig(ew = :sesinw), priors = moP)
+            ""
+        catch err
+            sprint(showerror, err)
+        end
+        @test occursin("Mo_k1 belongs to another time anchor", msg)
+        @test occursin("time = :phic", msg)
         # fit_*'s default blocks name no anchor: the fit's time_anchor picks it.
         @test !any(k -> k in (:Mo, :phic, :Tp, :Tc), keys(Nereus.default_rv_planet(t_rv, data.rv)))
         @test !any(k -> k in (:Mo, :phic, :Tp, :Tc), keys(Nereus.default_astrom_planet()))
@@ -251,6 +277,13 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         par["time"] = "Mo"
         p, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
         @test p.config.parametrization.time === :Mo && "Mo_k1" in p.layout.unfrozen_names
+        # No `time`, but a prior on an anchor: that anchor, as before the default
+        # changed for a config written with an Mo_k1 prior.
+        delete!(par, "time")
+        cfg["priors"]["Mo_k1"] = Dict{String, Any}("type" => "UniformPrior", "args" => [0.0, 2π])
+        p, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+        @test p.config.parametrization.time === :Mo && "Mo_k1" in p.layout.unfrozen_names
+        delete!(cfg["priors"], "Mo_k1")
         par["time"] = "phase"
         @test occursin("unknown parametrization.time=`phase`", verrs(cfg))
     end

@@ -183,8 +183,9 @@ function build_target(;
                                              require_mass = has_rv) :
                 parametrization
 
-    # Auto-detect time anchor from the first planet's declared params; with
-    # none declared, the default (`default_time_anchor`: the transit phase).
+    # Auto-detect time anchor from the first planet's declared params, then
+    # from the names in `priors` (`time_anchor_named`); with none declared, the
+    # default (`default_time_anchor`: the transit phase).
     time_kind = if time_anchor !== nothing
         time_anchor
     else
@@ -194,7 +195,10 @@ function build_target(;
         elseif  :phic in ks; :phic
         elseif  :Tp in ks; :Tp
         elseif  :Mo in ks; :Mo
-        else                default_time_anchor()
+        else
+            # none in the block: the anchor the priors name, else the default
+            named = priors === nothing ? nothing : time_anchor_named(keys(priors))
+            named === nothing ? default_time_anchor() : named
         end
     end
 

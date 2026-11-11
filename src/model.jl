@@ -698,6 +698,30 @@ See `ParametrizationConfig` for why.
 default_time_anchor(; obs_prior::Bool = false) = obs_prior ? :Mo : :phic
 
 """
+    time_anchor_named(names) -> Union{Symbol, Nothing}
+
+The time anchor a set of parameter names declares: `:Mo`, `:Tp`, `:Tc` or
+`:phic` when the names carry `<anchor>_k<n>` for exactly one of them, `nothing`
+when none does. Where no `time` is given, a model whose priors name an anchor
+samples that anchor, as `build_target` does with a planet block's names, so a
+setup written with `Mo_k1` priors keeps sampling Mo. Names of two anchors
+throw: one model samples one.
+"""
+function time_anchor_named(names)
+    found = Set{Symbol}()
+    for n in names
+        m = match(r"^(Mo|Tp|Tc|phic)_k\d+$", String(n))
+        m === nothing || push!(found, Symbol(m.captures[1]))
+    end
+    isempty(found) && return nothing
+    length(found) == 1 && return only(found)
+    throw(ArgumentError(
+        "the priors name more than one time anchor (" *
+        join(sort!(String.(collect(found))), ", ") * "); a model samples one. " *
+        "Set the parametrization's `time`, and give priors to that anchor only."))
+end
+
+"""
     phic_reference_epoch(data) -> Float64
 
 The epoch the transit phase φ_c (`time = :phic`) is measured from when
@@ -2134,9 +2158,18 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         haskey(name_to_idx, k) || push!(extra_priors, k)
     end
     if !isempty(extra_priors)
+        # A prior on another time anchor's slot is not a typo: say which anchor
+        # this model samples, now that the default is not the one it names.
+        anchors = filter(k -> occursin(r"^(Mo|Tp|Tc|phic)_k\d+$", k), extra_priors)
+        hint = isempty(anchors) ? "" :
+            ". " * join(anchors, ", ") * " belong" * (length(anchors) == 1 ? "s" : "") *
+            " to another time anchor: this model samples time = " *
+            ":$(config.parametrization.time). Set the parametrization's `time` to " *
+            "the anchor the priors name, or give the prior to " *
+            "$(config.parametrization.time)_k<n>"
         throw(ArgumentError(
             "Unknown parameter names in priors dict (typos?): " *
-            join(extra_priors, ", ")))
+            join(extra_priors, ", ") * hint))
     end
 
     # --- Physical validation for each prior --------------------------
