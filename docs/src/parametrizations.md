@@ -114,7 +114,7 @@ RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB
 ```julia
 ParametrizationConfig(;
     ew                = :sesinw,
-    time              = :phic,       # :Mo when obs_prior = true
+    time              = :auto,       # resolved by Params: see below
     geom              = :b_rr,
     use_rho_s         = false,
     mass              = :K_driven,
@@ -161,14 +161,18 @@ clamp never changes the `e` a likelihood evaluates.
 ### `time::Symbol` — orbital time anchor
 
 The single time slot (`t`) is named and decoded per this choice
-(`src/model.jl:1505`; conversions `src/orbit.jl:175`–`236`). The default,
-in `ParametrizationConfig`, `build_target`, the `fit_*` functions and
-run_job alike, is `:phic`. Where no anchor is given but the priors name one
-(`Mo_k1`, `Tp_k1`, ...; in `build_target` also the planet block), that anchor
-is sampled (`time_anchor_named`), so a setup written for the old default with
-an `Mo_k1` prior still samples `Mo`. An explicit `ParametrizationConfig`
-without `time` is the default anchor, and a prior left on another anchor's
-slot is reported as such.
+(`src/model.jl:1505`; conversions `src/orbit.jl:175`–`236`). With no
+anchor given, `ParametrizationConfig` holds `:auto`, and `Params` resolves it
+when it is built (`resolve_time_anchor`), the same way in `build_target`, the
+`fit_*` functions and run_job: the anchor the priors name (`Mo_k1`, `Tp_k1`,
+...; in `build_target` also the planet blocks), else `:phic`, the default
+(`:Mo` under `obs_prior`). So a setup written for the old default with an
+`Mo_k1` prior still samples `Mo`, with or without a `ParametrizationConfig`
+of its own. Priors naming two anchors are an error: a model samples one. A
+`Params` never holds `:auto`: it stores the resolved anchor, so a checkpoint
+written by a fit whose anchor was resolved to `:Mo` resumes into one given
+`time = :Mo` explicitly, and refuses a `:phic` one. With an explicit anchor, a
+prior left on another anchor's slot is reported as such.
 
 !!! note "Why the transit phase is the default"
     At low `e` the data pin the mean longitude `λ = M₀ + ω`, not `M₀` and

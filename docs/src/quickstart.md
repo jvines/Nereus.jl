@@ -104,7 +104,8 @@ TI / TI+ / SS+ / H+ stack is in `res.evidence`.
       `:K_driven` (`P` + `K`).
     - The time anchor from the first planet's params: `:Tc` if `Tc`
       declared, `:phic` if `phic`, `:Tp` if `Tp`, `:Mo` if `Mo`, else the
-      default `:phic` (see [Parametrizations](parametrizations.md)).
+      anchor the other planets' params or `priors` name, else the default
+      `:phic` (see [Parametrizations](parametrizations.md)).
     - Per-key namespacing: planet params get `_kN`, instrument params
       get `_NAME`.
 
