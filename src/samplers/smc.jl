@@ -21,10 +21,16 @@ export sample_smc
 """
     sample_smc(target, data; betas, kwargs...) -> PAResult
 
-Sequential Monte Carlo sampler with an explicit user-supplied
-inverse-temperature sequence `betas::Vector{Float64}`. Must start
-at 0 and end at 1. All other kwargs are forwarded to `sample_pa`
-(see its docstring for `mutation_kernel`, `n_replicas`, `n_mcmc`, etc).
+Sequential Monte Carlo sampler routed through `sample_pa`'s adaptive
+schedule. `betas`, when given, must start at 0 and end at 1, and only its
+length is used: `length(betas) - 1` caps the annealing steps (`max_steps`).
+Without it the cap is `sample_pa`'s. All other kwargs are forwarded to
+`sample_pa` (see its docstring for `mutation_kernel`, `n_replicas`, `n_mcmc`,
+etc).
+
+The default used to be a 51-point ladder, so a 50-step cap: on an RV + IAD
+companion with free e the crawl at ESS/N = 0.9 was at β = 0.42 after 50
+steps, and the last step's jump to β = 1 left an ESS/N of 0.22.
 
 For ESS-adaptive β scheduling, use `sample_pa` directly — it's the
 SMC case Nereus uses most often and has the adaptive logic baked in.
@@ -38,14 +44,18 @@ res = sample_smc(target, data; betas = βs, n_replicas = 300)
 ```
 """
 function sample_smc(target::NereusTarget, data::Data;
-                   betas::AbstractVector = range(0.0, 1.0; length = 51),
+                   betas::Union{Nothing,AbstractVector} = nothing,
                    kwargs...)
     # Only `length(betas)` is used (as a step count) — the ladder values
     # are ignored because we route through sample_pa's adaptive ESS
-    # scheduler (see below). So `betas` defaults to a 50-step linear
-    # ladder; users only need to pass it to change the step count.
+    # scheduler (see below). Users only need to pass it to cap the step
+    # count.
     # JSON config delivers `[0.0, 0.5, 1.0]` as a JSON3.Array, not a
     # Vector{Float64}; accept any vector and normalize.
+    if betas === nothing
+        @info "sample_smc: routing through sample_pa with adaptive ESS β-scheduling."
+        return sample_pa(target, data; kwargs...)
+    end
     betas = collect(Float64, betas)
     isempty(betas)        && throw(ArgumentError("betas must be non-empty"))
     betas[1] != 0.0       && throw(ArgumentError("betas must start at 0.0"))
