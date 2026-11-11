@@ -120,11 +120,12 @@ function pathfinder_init(target::NereusTarget;
     # its per-temperature ensemble.
     exec = SequentialEx()
 
-    result = if quiet
+    run(init) = if quiet
         Logging.with_logger(Logging.NullLogger()) do
             multipathfinder(
                 target, n_draws;
                 nruns = n_runs,
+                init = init,
                 rng = rng,
                 optimizer = optimizer,
                 executor = exec,
@@ -134,11 +135,24 @@ function pathfinder_init(target::NereusTarget;
         multipathfinder(
             target, n_draws;
             nruns = n_runs,
+            init = init,
             rng = rng,
             optimizer = optimizer,
             executor = exec,
         )
     end
+    result = run(nothing)
+
+    # Angles. A full-circle angle is charted on one walled period, a polar
+    # angle on [-π/2, 3π/2], whose seam is the far image of the equator.
+    # L-BFGS started on one side of a mode across a seam climbs into the wall
+    # (its logit coordinate runs off to ±∞) and fits half a mode. So the first
+    # pass is a pilot: its draws place each circular seam in their emptiest
+    # arc and fold the polar angles (`recut_walkers!`, which moves the target's
+    # windows), and if a seam moved or a polar angle railed, Pathfinder runs
+    # again in the new charts, each run started from the pilot run's draw.
+    init2 = _pathfinder_recut!(result, target, n_runs)
+    init2 === nothing || (result = run(init2))
 
     # Per-L-BFGS-run draws: one column per independent run, sampled
     # from that run's MVN approximation. Preserves basin diversity
@@ -184,4 +198,57 @@ function pathfinder_init(target::NereusTarget;
         psis_result      = result.psis_result,
         pathfinder_result = result,
     )
+end
+
+"""
+    _pathfinder_recut!(result, target, n_runs) -> Union{Nothing,Vector{Vector{Float64}}}
+
+The angle check after a Pathfinder pilot `result`. Pools the draws (the
+importance-resampled ones and every run's own), folds the polar angles and
+moves each circular seam to the emptiest arc of the pool ([`recut_walkers!`](@ref),
+which moves `target`'s windows and transform). Returns `nothing` when nothing
+needs a second pass, else one start per run for it: each run's first draw (the
+resampled draws stand in for a failed run), in the new charts. A second pass is
+needed when a seam moved, or when more than 10 % of the draws of a polar angle
+sit within 0.05 rad of its chart's walls (railed; about 1.6 % would for draws
+spread over the whole circle).
+"""
+function _pathfinder_recut!(result, target::NereusTarget, n_runs::Int)
+    params, tr = target.params, target.transform
+    cinc = cyclic_inclination_indices(params)
+    isempty(cinc) && isempty(circular_indices(params)) && return nothing
+    blocks = Matrix{Float64}[Matrix{Float64}(result.draws)]
+    first_col = Int[]
+    o = size(blocks[1], 2)
+    for pr in result.pathfinder_results
+        if pr === nothing || size(pr.draws, 2) == 0
+            push!(first_col, 0)
+            continue
+        end
+        push!(blocks, Matrix{Float64}(pr.draws))
+        push!(first_col, o + 1)
+        o += size(pr.draws, 2)
+    end
+    D = reduce(hcat, blocks)
+    size(D, 2) == 0 && return nothing
+    L = params.layout
+    railed = false
+    if !isempty(cinc)
+        near = zeros(Int, length(cinc))
+        for j in axes(D, 2)
+            x = tr === nothing ? D[:, j] : transform_inverse(D[:, j], tr)
+            for (m, d) in enumerate(cinc)
+                lo, hi = bounds(L.unfrozen_priors[d])
+                (x[d] - lo < 0.05 || hi - x[d] < 0.05) && (near[m] += 1)
+            end
+        end
+        railed = any(>(0.1 * size(D, 2)), near)
+    end
+    w0 = circular_windows(params)
+    recut_walkers!(D, params, tr)
+    (railed || circular_windows(params) != w0) || return nothing
+    n_res = size(blocks[1], 2)
+    return [Vector{Float64}(D[:, first_col[i] > 0 ? first_col[i] :
+                                 (n_res > 0 ? mod1(i, n_res) : 1)])
+            for i in 1:min(n_runs, length(first_col))]
 end
