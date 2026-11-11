@@ -433,6 +433,13 @@ what the jitter and offset terms are keyed on, so there is no unnamed form:
 `planets` is an integer for a fixed-dimension fit or a range for
 trans-dimensional model selection over planet count.
 
+The orbital phase is sampled as the transit phase `phic_k<k>` =
+2π (Tc − t_ref_c) / P, on U(−π, π), unless `time_anchor` asks for `"Mo"`,
+`"Tp"` or `"Tc"` (see `ParametrizationConfig` for why phic is the default:
+it removes the low-e ridge between Mo and ω). Mo, Tp and Tc are reported per
+draw in the derived table. `fit_transit`, `fit_astrometry` and `fit_joint`
+take `time_anchor` the same way.
+
 Stellar keywords are those of a `run_job` star block. `M_s` and `R_s` (M☉, R☉)
 are model keywords. `T_eff` (K), `J_mag`, `K_mag`, `Ab` (Bond albedo, default
 0.3) and the 1σ uncertainties `sigma_M_s`, `sigma_R_s` and `sigma_T_eff` feed
@@ -714,7 +721,7 @@ among `channels` and throws otherwise. The prior on ρ★ is `priors["rho_s"]`
 
     fit_joint(rv_channel, phot_channel; use_rho_s = true,
               priors = Dict("rho_s" => NormalPrior(1.79, 0.11, 0.1, 10.0)),
-              time_anchor = :phic, M_s = 0.767, R_s = 0.754)
+              M_s = 0.767, R_s = 0.754)
 """
 function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
                 engine = nothing, transdim = nothing,
@@ -830,6 +837,12 @@ than hard-coded: period from twice the median cadence to three baselines,
 semi-amplitude from 0.1 m/s to ten times the RV scatter. A user who wants
 something else passes `priors`; a user who just wants a fit should not have to
 invent numbers to get one.
+
+It names no time anchor: the fit's `time_anchor` (default the transit phase
+`phic`, see `ParametrizationConfig`) picks the slot, and `default_priors` gives
+it its one-period prior, `phic_k` on U(−π, π) or `Mo_k` on U(0, 2π). A block
+that named one would leave a prior on a slot the model does not have whenever
+another anchor is asked for.
 """
 function default_rv_planet(t::AbstractVector, rv::AbstractVector)
     base   = maximum(t) - minimum(t)
@@ -840,17 +853,18 @@ function default_rv_planet(t::AbstractVector, rv::AbstractVector)
     return (P      = LogUniformPrior(P_lo, P_hi),
             K      = LogUniformPrior(0.1, K_hi),
             sesinw = UniformPrior(-1.0, 1.0),
-            secosw = UniformPrior(-1.0, 1.0),
-            Mo     = UniformPrior(0.0, 2pi))
+            secosw = UniformPrior(-1.0, 1.0))
 end
 
-"""Default a+M_sec block for an astrometric companion."""
+"""
+Default a+M_sec block for an astrometric companion. Like `default_rv_planet`
+it names no time anchor: the fit's `time_anchor` picks it.
+"""
 default_astrom_planet(; a_lo = 0.1, a_hi = 100.0, m_lo = 1e-4, m_hi = 1.0) =
     (a      = LogUniformPrior(a_lo, a_hi),
      M_sec  = LogUniformPrior(m_lo, m_hi),
      sesinw = UniformPrior(-1.0, 1.0),
      secosw = UniformPrior(-1.0, 1.0),
-     Mo     = UniformPrior(0.0, 2pi),
      inc    = SinePrior(),
      Omega  = UniformPrior(0.0, 2pi))
 

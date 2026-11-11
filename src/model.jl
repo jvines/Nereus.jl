@@ -575,17 +575,34 @@ combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
 # =====================================================================
 
 """
-    ParametrizationConfig(; ew=:sesinw, time=:Mo, geom=:b_rr, use_rho_s=false,
+    ParametrizationConfig(; ew=:sesinw, time=:phic, geom=:b_rr, use_rho_s=false,
                             mass=:K_driven, t_ref_c=NaN)
 
 Choices for how orbital parameters are parametrized in the sampler.
 
 # Fields
 - `ew::Symbol`        : one of `:sesinw`, `:esinw`, `:ew`
-- `time::Symbol`      : one of `:Mo`, `:Tp`, `:Tc`, `:phic`. `:phic` samples the
-                         transit phase φ_c = 2π (Tc − t_ref_c) / P, Tc on a
-                         circle: one period wide at every P, and pinned by the
-                         transit like Tc (see `phic_to_tc`).
+- `time::Symbol`      : one of `:phic` (the default), `:Mo`, `:Tp`, `:Tc`.
+                         `:phic` samples the transit phase
+                         φ_c = 2π (Tc − t_ref_c) / P, Tc on a circle: one
+                         period wide at every P, and pinned by the transit like
+                         Tc (see `phic_to_tc`). It is the default because at
+                         low e it is the mean longitude (φ_c = π/2 − λ at
+                         e = 0), which the data pin; Mo is λ − ω, and ω is
+                         free there, so (Mo, √e sin ω, √e cos ω) is a thin
+                         ridge the samplers mix along badly, biasing e. For
+                         fixed (P, e, ω) the map Mo → φ_c is a shift, so a
+                         uniform φ_c is the same prior as a uniform Mo.
+                         With `obs_prior = true` the default is `:Mo` (see
+                         `obs_prior`).
+- `obs_prior::Bool`   : the O'Neil (2019) observation-based prior for
+                         relative astrometry. It is a density in
+                         (P, e, Tp) over ONE fixed period of Tp (orbitize!'s
+                         τ ∈ [0, 1)) and is not periodic in Tp. `:Mo` spans
+                         such a window, Tp ∈ (t_ref − P, t_ref]; the `:phic`
+                         window in Tp moves with (e, ω), which would reweight
+                         the prior by ω. So when `time` is not given and
+                         `obs_prior` is on, `time` is `:Mo`.
 - `t_ref_c::Float64`  : the epoch φ_c is measured from. `NaN` (the default)
                          is filled in by `Params` from the data: the median
                          photometric time, else `data.t_ref` (see
@@ -644,13 +661,15 @@ struct ParametrizationConfig
     t_ref_c::Float64
 end
 
-function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
+function ParametrizationConfig(; ew::Symbol=:sesinw,
+                                time::Union{Symbol,Nothing}=nothing,
                                 geom::Symbol=:b_rr, use_rho_s::Bool=false,
                                 mass::Symbol=:K_driven,
                                 obs_prior::Bool=false,
                                 marginalize_gamma::Bool=false,
                                 sample_a_Rs::Bool=false,
                                 t_ref_c::Real=NaN)
+    time === nothing && (time = default_time_anchor(; obs_prior))
     ew in (:sesinw, :esinw, :ew) ||
         throw(ArgumentError("ew must be :sesinw, :esinw, or :ew; got :$ew"))
     time in (:Mo, :Tp, :Tc, :phic) ||
@@ -667,6 +686,16 @@ function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
     return ParametrizationConfig(ew, time, geom, use_rho_s, mass, obs_prior,
                                  marginalize_gamma, sample_a_Rs, Float64(t_ref_c))
 end
+
+"""
+    default_time_anchor(; obs_prior=false) -> Symbol
+
+The time anchor a fit gets when none is given: `:phic`, the transit phase,
+except `:Mo` under the O'Neil `obs_prior`. `ParametrizationConfig`,
+`build_target`, the `fit_*` functions and run_job all take it from here.
+See `ParametrizationConfig` for why.
+"""
+default_time_anchor(; obs_prior::Bool = false) = obs_prior ? :Mo : :phic
 
 """
     phic_reference_epoch(data) -> Float64
@@ -813,10 +842,10 @@ and applying the appropriate conversion (see the hot-path accessors
              - `:ew`     → `ω` (argument of periastron)
 - **`t`**  — **time-anchor slot.** Its meaning depends on
              `parametrization.time`:
+             - `:phic` (default) → transit phase `2π (Tc − t_ref_c) / P` (rad)
              - `:Mo` → `M₀`, mean anomaly at the reference epoch (rad)
              - `:Tp` → time of periastron passage (same units as data)
              - `:Tc` → time of transit center
-             - `:phic` → transit phase `2π (Tc − t_ref_c) / P` (rad)
 - **`b`**  — **transit geometry slot 1.** Present on `PMOnlyBlock` and
              `RVPMBlock`; absent on `RVOnlyBlock` (no transit to fit).
              Meaning depends on `parametrization.geom`:

@@ -8,7 +8,7 @@
 # R-hat fails on every parameter however long the run. Measured on an easy
 # 12.3 d RV target with the old run_job default (Tp over the 929 d baseline):
 # 100 walkers spread over 46 copies, R-hat 1.9-5 with every walker in the mode.
-# Mo covers exactly one period and has no copies.
+# φ_c (the default) and Mo cover exactly one period and have no copies.
 function _warn_repeating_time_window(priors, max_kplanet::Int, time::Symbol)
     time in (:Tp, :Tc) || return nothing
     for k in 1:max_kplanet
@@ -22,8 +22,8 @@ function _warn_repeating_time_window(priors, max_kplanet::Int, time::Symbol)
               "likelihood repeats every period, so that window holds up to " *
               "$(floor(Int, (hi - lo) / P_min)) identical copies of the orbit; an " *
               "ensemble sampler cannot move between them and will not converge. " *
-              "Use time = \"Mo\" (the default), time = \"phic\" for a transiting " *
-              "planet, or give $tname a prior no wider than one period."
+              "Use time = \"phic\" (the default) or time = \"Mo\", or give " *
+              "$tname a prior no wider than one period."
     end
     return nothing
 end
@@ -166,10 +166,13 @@ function Params(;
     # φ_c is measured from an epoch of the data being fitted. It is fixed here,
     # with the parametrization, so it travels with every Theta: a likelihood
     # evaluated on a subset of the data (LOO, PPC) reads φ_c the same way.
-    if parametrization.time === :phic && isnan(parametrization.t_ref_c)
+    # Without planets there is no φ_c to measure.
+    if parametrization.time === :phic && isnan(parametrization.t_ref_c) &&
+       max_kplanet > 0
         data === nothing && throw(ArgumentError(
-            "time = :phic measures the transit phase from an epoch of the data; " *
-            "pass `data`, or set `t_ref_c` in the ParametrizationConfig"))
+            "time = :phic (the default time anchor) measures the transit phase " *
+            "from an epoch of the data; pass `data`, set `t_ref_c` in the " *
+            "ParametrizationConfig, or choose another anchor (time = :Mo)"))
         parametrization = _with_t_ref_c(parametrization, phic_reference_epoch(data))
     end
 

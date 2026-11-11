@@ -40,6 +40,15 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         @test pc.time === :phic && isnan(pc.t_ref_c)
         @test ParametrizationConfig(time = :phic, t_ref_c = 5.0).t_ref_c == 5.0
         @test isnan(ParametrizationConfig().t_ref_c)
+        # The default anchor: the transit phase, except under the O'Neil prior,
+        # whose density is over one fixed period of Tp (which Mo spans).
+        @test ParametrizationConfig().time === :phic
+        @test Nereus.default_time_anchor() === :phic
+        @test ParametrizationConfig(obs_prior = true).time === :Mo
+        @test ParametrizationConfig(obs_prior = true, time = :phic).time === :phic
+        for t in (:Mo, :Tp, :Tc)
+            @test ParametrizationConfig(time = t).time === t
+        end
         @test_throws ArgumentError ParametrizationConfig(time = :phase)
         @test_throws ArgumentError ParametrizationConfig(time = :phic, t_ref_c = Inf)
     end
@@ -82,10 +91,48 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
                        instruments = InstrumentConfig(rv = ["HARPS"]), data = rvd,
                        parametrization = ParametrizationConfig(time = :phic))
         @test prv.config.parametrization.t_ref_c == rvd.t_ref
-        # Measured from the data being fitted, so it cannot be guessed without.
+        # Measured from the data being fitted, so it cannot be guessed without --
+        # the default anchor included.
         @test_throws ArgumentError Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
             instruments = InstrumentConfig(rv = ["HARPS"]),
             parametrization = ParametrizationConfig(time = :phic))
+        @test_throws ArgumentError Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+            instruments = InstrumentConfig(rv = ["HARPS"]))
+        # No planet, no phase to measure.
+        @test Params(; max_kplanet = 0, planet_modes = Nereus.PlanetDataSources[],
+                       instruments = InstrumentConfig(rv = ["HARPS"])) isa Params
+    end
+
+    @testset "the default everywhere" begin
+        # build_target: no anchor declared → the transit phase; a declared one
+        # wins; `time_anchor` wins over both.
+        blk = (P = UniformPrior(3.9, 4.4), K = UniformPrior(1.0, 100.0),
+               sesinw = UniformPrior(-0.5, 0.5), secosw = UniformPrior(-0.5, 0.5))
+        rvn = (HARPS = (data = (t = t_rv, rv = data.rv, rv_err = data.rv_err),),)
+        tg = build_target(planets = (b = blk,), rv = rvn)
+        @test tg.params.config.parametrization.time === :phic
+        @test "phic_k1" in tg.params.layout.unfrozen_names
+        @test !("Mo_k1" in tg.params.layout.unfrozen_names)
+        @test tg.params.config.parametrization.t_ref_c == tg.data.t_ref
+        @test Nereus.bounds(tg.params.config.priors["phic_k1"]) == (-Float64(π), Float64(π))
+        tgM = build_target(planets = (b = merge(blk, (Mo = UniformPrior(0.0, 2π),)),), rv = rvn)
+        @test tgM.params.config.parametrization.time === :Mo
+        @test build_target(planets = (b = blk,), rv = rvn,
+                           time_anchor = :Mo).params.config.parametrization.time === :Mo
+        # fit_*'s default blocks name no anchor: the fit's time_anchor picks it.
+        @test !any(k -> k in (:Mo, :phic, :Tp, :Tc), keys(Nereus.default_rv_planet(t_rv, data.rv)))
+        @test !any(k -> k in (:Mo, :phic, :Tp, :Tc), keys(Nereus.default_astrom_planet()))
+        ch = Dict("source" => "RV",
+                  "data" => Dict("HARPS" => (t = t_rv, rv = data.rv, rv_err = data.rv_err)))
+        for (ta, want) in ((nothing, :phic), ("Mo", :Mo), ("Tp", :Tp))
+            kw = ta === nothing ? (;) : (; time_anchor = ta)
+            pt = Nereus._target_from([ch], Nereus._planet_spec(1;
+                     block = Nereus.default_rv_planet(t_rv, data.rv)); kw...).params
+            @test pt.config.parametrization.time === want
+            @test "$(want)_k1" in pt.layout.unfrozen_names
+            # no prior left on a slot the model does not have
+            @test all(k -> !startswith(k, "Mo_k") || want === :Mo, keys(pt.config.priors))
+        end
     end
 
     @testset "circular where Mo is" begin
@@ -196,6 +243,14 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
             @test p.config.parametrization.t_ref_c == want
             @test "phic_k1" in p.layout.unfrozen_names
         end
+        # No `time` at all: the default, the transit phase.
+        delete!(par, "time"); delete!(par, "t_ref_c")
+        p, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+        @test p.config.parametrization.time === :phic
+        @test p.config.parametrization.t_ref_c == median(d.t_phot)
+        par["time"] = "Mo"
+        p, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+        @test p.config.parametrization.time === :Mo && "Mo_k1" in p.layout.unfrozen_names
         par["time"] = "phase"
         @test occursin("unknown parametrization.time=`phase`", verrs(cfg))
     end
