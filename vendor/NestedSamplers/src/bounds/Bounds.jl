@@ -120,11 +120,10 @@ include("mlfriends.jl")
 Fit bounds of type `B` to `points` (one per column) and enlarge their volume by
 `enlarge`, or, with `bootstrap > 0`, by the larger of `enlarge` and the
 bootstrap expansion (dynesty's; Buchner 2016) as a volume factor: see
-[`Bounds.bootstrap_expansion`](@ref). A `MultiEllipsoid` is then split by
-dynesty's rule (`bic = true`, see its extended help).
+[`Bounds.bootstrap_expansion`](@ref).
 """
 function fit(rng::AbstractRNG, B, points::AbstractMatrix; pointvol = 0, enlarge = 1, bootstrap = 0)
-    b = _fit(B, points, pointvol, bootstrap > 0)
+    b = fit(B, points; pointvol = pointvol)
     factor = Float64(enlarge)
     if bootstrap > 0
         f = bootstrap_expansion(rng, B, points; pointvol = pointvol, nboot = bootstrap)
@@ -153,14 +152,6 @@ for those the factor is 1.
 """
 bootstrap_expansion(rng::AbstractRNG, B, points::AbstractMatrix; pointvol = 0, nboot = 5) = 1.0
 
-# Bounds that must cover the region the points came from split by dynesty's
-# rule. The volume-halving rule splits a MultiEllipsoid into ellipsoids of
-# 2d+ points each, which the expansion cannot make cover: on a 10-d ball with
-# 100 points, 1.0% of it stayed outside after a 5-resample expansion (13% in
-# the worst of 20 fits), against 0.04% (0.6%) split by dynesty's rule, and the
-# bound was 50 times the ball's volume against 14.
-_fit(B, points, pointvol, bic) = fit(B, points; pointvol = pointvol)
-_fit(B::Type{<:MultiEllipsoid}, points, pointvol, bic) = fit(B, points; pointvol = pointvol, bic = bic)
 
 function bootstrap_expansion(rng::AbstractRNG, B::Type{<:Union{Ellipsoid,MultiEllipsoid}},
                              points::AbstractMatrix; pointvol = 0, nboot = 5)
@@ -174,7 +165,7 @@ function bootstrap_expansion(rng::AbstractRNG, B::Type{<:Union{Ellipsoid,MultiEl
         end
         all(drawn) && continue
         b = try
-            _fit(B, points[:, drawn], pointvol, true)
+            fit(B, points[:, drawn]; pointvol = pointvol)
         catch err
             # k-means on near-duplicate points; the caller's own fit falls
             # back to one ellipsoid for the same reason

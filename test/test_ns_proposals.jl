@@ -171,6 +171,19 @@ end
         end
         @test mean(outs) < 0.005
     end
+    # A curved, connected region stays in few ellipsoids, as dynesty splits
+    # it: 500 points in a 10-d half annulus came in 2-3 (seeds 1-3), against
+    # 8-14 by the volume-halving rule. Two separate copies still come apart.
+    arc(rng) = (r = sqrt(0.64 + 0.36rand(rng)); θ = π * rand(rng);
+                vcat(r * cos(θ), r * sin(θ), 0.2 .* rand(rng, 8) .- 0.1))
+    for s in 1:3
+        rng = MersenneTwister(s)
+        x = reduce(hcat, [arc(rng) for _ in 1:500])
+        @test length(_NSB.fit(_NSB.MultiEllipsoid, x).ellipsoids) <= 3
+        @test length(_NSB.fit(_NSB.MultiEllipsoid, x; bic = false).ellipsoids) >= 8
+        y = hcat(x .* 0.1 .- 1, x .* 0.1 .+ 1)
+        @test length(_NSB.fit(_NSB.MultiEllipsoid, y).ellipsoids) >= 2
+    end
     # the cube needs none, and only Rejection expands by default
     @test _NSB.bootstrap_expansion(MersenneTwister(1), _NSB.NoBounds, rand(2, 10)) == 1.0
     @test Nested(2, 50; proposal = _NSP.Rejection()).bootstrap == 5

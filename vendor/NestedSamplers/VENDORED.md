@@ -60,9 +60,7 @@ Changed here since the commit above, so carry them over on an update:
 - `Nested(...; bootstrap)` expands the bounds by dynesty's bootstrap rule
   (`Bounds.fit(rng, B, points; enlarge, bootstrap)`,
   `Bounds.bootstrap_expansion`), by default 5 resamples for `Rejection` and
-  none for the walks and slices, and splits an expanded MultiEllipsoid by
-  dynesty's BIC rule (`bic = true`): on the volume-halving split the expansion
-  left 1% of a 10-d ball outside. A MultiEllipsoid fitted to the live points and
+  none for the walks and slices. A MultiEllipsoid fitted to the live points and
   enlarged 1.25 in volume missed 12–22% of the constrained region of an RM
   obliquity fit, and `:unif` put log Z 2 nats high. `Rejection` counts only its
   likelihood calls against `maxiter`: the expanded bounds can lie mostly
@@ -70,5 +68,12 @@ Changed here since the commit above, so carry them over on an update:
   point it refits the bounds every `update_interval` calls (`draw_uniform`), as
   dynesty does, so an expansion that came out far too large is not drawn from
   until `maxiter` runs out.
+- A MultiEllipsoid is split by dynesty's BIC rule (`bic = true`, the default
+  now) rather than when its children halve its volume. The volume-halving rule
+  cut a connected region into many ellipsoids of 2d+ points each: the
+  bootstrap expansion could not make those cover it (1% of a 10-d ball stayed
+  outside, against 0.04%), and a walk or slice, whose metric is the ellipsoid
+  holding its start, depended on where it started; on a 10-d RM obliquity fit
+  (15 ellipsoids against 1–5) log Z came out 0.35–0.5 nats above pt_emcee's.
 
 License: MIT (see LICENSE) — original authors retained.

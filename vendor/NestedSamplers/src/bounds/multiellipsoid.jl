@@ -16,15 +16,25 @@ The multiple-ellipsoidal implementation is defined as follows:
 2. Perform K-means clustering (here using [Clustering.jl](https://github.com/JuliaStats/Clustering.jl)) centered at the endpoints of the bounding ellipsoid. This defines two clusters within the sample.
 3. If either cluster has fewer than two points, consider it ill-defined and end any recursion.
 4. Fit [`Bounds.Ellipsoid`](@ref) to each of the clusters assigned in (2).
-5. If the volume of the parent ellipsoid is more than twice the volume of the two child ellipsoids, recurse (1-5) to each child.
+5. Split when the children's volume is below the parent's by more than the BIC
+   penalty for an ellipsoid's `d(d+3)/2` parameters, `exp(-d(d+3)/2 · log(n)/n)`
+   for `n` points in `d` dimensions, or when recursing into the children brings
+   `k` ellipsoids below `exp(-(k-1) d(d+3)/2 · log(n)/n)` of it (dynesty's rule;
+   Pelleg & Moore 2000; Feroz et al. 2008), and recurse (1-5) to each child.
 
-With `bic = true`, (5) is dynesty's rule instead: split when the children's
-volume is below the parent's by more than the BIC penalty for an ellipsoid's
-`d(d+3)/2` parameters, `exp(-d(d+3)/2 · log(n)/n)` for `n` points in `d`
-dimensions, or when recursing into the children brings `k` ellipsoids below
-`exp(-(k-1) d(d+3)/2 · log(n)/n)` of it (Pelleg & Moore 2000; Feroz et al.
-2008). It splits far less on few points, and bounds expanded by
-[`Bounds.bootstrap_expansion`](@ref) use it.
+`bic = false` gives the rule this package had: split when the children hold
+less than half the parent's volume, or when the parent is more than twice the
+volume `2n · pointvol` expected of the points. That rule splits a connected
+region into many ellipsoids of 2d+ points each. The bootstrap expansion cannot
+make those cover the region: on a 10-d ball with 100 points, 1.0% of it stayed
+outside after a 5-resample expansion (13% in the worst of 20 fits), against
+0.04% (0.6%) split by dynesty's rule. And a walk or slice takes its metric from
+the ellipsoid that holds its start, so on a region cut into many it depends on
+where it starts and no longer leaves the uniform distribution in the region
+unchanged: on a 10-d RM obliquity fit the region came in 15 ellipsoids against
+1–5 by dynesty's rule, and log Z came out 0.35–0.5 nats above pt_emcee's with
+`RSlice(slices = 50)` or `RWalk(walks = 200)`, against 0.04–0.17 by dynesty's
+rule.
 
 To sample from this distribution, a random ellipsoid is selected, and a random sample is sampled from that ellipsoid. We then reverse this and find all of the ellipsoids which enclose the sampled point, and select one of those randomly for the enclosing bound.
 """
@@ -46,7 +56,7 @@ function scale!(me::MultiEllipsoid, factor)
     return me
 end
 
-function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix; pointvol = 0, bic = false)
+function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix; pointvol = 0, bic = true)
     parent = fit(Ellipsoid, x, pointvol = pointvol)
     ells = fit(MultiEllipsoid, x, parent, pointvol = pointvol, depth = 0, bic = bic)
     return MultiEllipsoid(ells)
@@ -55,7 +65,7 @@ end
 const _MAX_SPLIT_DEPTH = 32
 
 function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix, parent::Ellipsoid; pointvol = 0, depth = 0,
-             bic = false)
+             bic = true)
     ndim, npoints = size(x)
 
     # Clustering will fail with fewer than k=2 points
@@ -93,15 +103,15 @@ function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix, parent::Ellipsoid; poi
 
     # If total volume decreased by over half, recurse
     if volume(ell1) + volume(ell2) < 0.5volume(parent)
-        return vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1),
-                    fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1))
+        return vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1, bic = false),
+                    fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1, bic = false))
     end
 
     # Otherwise see if total volume is much larger than expected
     # and split into more than 2 clusters
     if volume(parent) > 2npoints * pointvol
-        out = vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1),
-                    fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1))
+        out = vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1, bic = false),
+                    fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1, bic = false))
         sum(volume, out) < 0.5volume(parent) && return out
     end
 
