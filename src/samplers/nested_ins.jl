@@ -615,16 +615,23 @@ end
                           scratch_cur, scratch_prop, scratch_noise)
     -> (new_u, new_logL) or (nothing, -Inf)
 
-Within-shell random-direction slice sampling (dynesty `rslice` style).
-From a random viable live point, perform `n_walks` slice updates: each
-draws an isotropic unit direction, brackets a slice interval by stepping
-out while `L > logL_worst`, then shrinks the interval until a point
-satisfying the constraint is found. More robust than the random walk in
-high dimensions / strongly-correlated posteriors because the slice
-interval auto-scales to the local constraint geometry along each
-direction. Every likelihood probe feeds the INS accumulator.
+Within-shell random-direction slice sampling (dynesty's `rslice`, the
+vendored `RSlice`). From a random viable live point, a chain of `n_walks`
+slices: each takes a random unit vector through the axes of the bound's
+ellipsoid holding the start (`_walk_ellipsoid`, as the random walk does),
+brackets a slice interval along it by stepping out while
+`L > logL_worst`, then shrinks the interval until a point satisfying the
+constraint is found. Every likelihood probe feeds the INS accumulator.
 
-`walk_scale` sets the initial slice half-width (`walk_scale / √n_dim`).
+`walk_scale` sets the initial bracket, in units of that axis vector.
+
+The directions used to be isotropic in the unit cube, with a bracket of
+`walk_scale / √n_dim`. Where the constrained region is much narrower along
+some parameters than others such a slice moves about its narrowest width
+along every direction: on an RM obliquity fit the posterior widths of
+`sample_nested_ins` and `sample_nested_dynamic` scattered by 15–25% between
+seeds (b's sd 0.019–0.037 against pt_emcee's 0.027–0.028, the walk's
+0.026–0.028).
 """
 function _slice_within_shell!(live_u::AbstractMatrix{Float64},
                                live_logL::AbstractVector{Float64},
@@ -647,14 +654,16 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
         scratch_cur[d] = live_u[d, start_idx]
     end
     cur_logL = live_logL[start_idx]
+    A = _walk_ellipsoid(rng, bound, scratch_cur).axes
 
-    w = walk_scale / sqrt(n_dim)   # initial slice half-width
+    w = walk_scale   # initial bracket, in units of the direction vector
     max_expand = 20
     max_shrink = 50
     n_done = 0
 
     for _sweep in 1:n_walks
-        # Isotropic unit direction in `scratch_noise`.
+        # A random unit vector through the ellipsoid's axes, in
+        # `scratch_noise` (`scratch_prop` is overwritten by every probe).
         Random.randn!(rng, scratch_noise)
         nrm = 0.0
         @inbounds for d in 1:n_dim
@@ -665,6 +674,8 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
         @inbounds for d in 1:n_dim
             scratch_noise[d] /= nrm
         end
+        mul!(scratch_prop, A, scratch_noise)
+        copyto!(scratch_noise, scratch_prop)
 
         # Random initial bracket [lo, hi] straddling t = 0.
         r  = rand(rng)
