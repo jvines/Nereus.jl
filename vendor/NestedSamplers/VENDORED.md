@@ -19,5 +19,11 @@ Changed here since the commit above, so carry them over on an update:
 
 - `sample_parallel` takes `callback`, called after the bootstrap step and after
   each batch; Nereus's `sample_nested` uses it for its progress bar.
+- `Slice`, `RSlice`, `RWalk` and `RStagger` chain their steps: each slice or
+  walk step starts where the previous one ended. The commit above starts every
+  step from the copied live point, so the new point is one step from it
+  whatever `slices`/`walks` say.
+- `RWalk` and `RStagger` count a step out of the unit cube as a rejected step
+  instead of drawing again until one lands inside.
 
 License: MIT (see LICENSE) — original authors retained.
