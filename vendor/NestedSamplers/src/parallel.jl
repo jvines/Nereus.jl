@@ -103,7 +103,7 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
        state.it / state.ncall < sampler.min_eff
         active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us; pointvol=pointvol), sampler.enlarge)
         since_update = 0; has_bounds = true
-    elseif state.has_bounds && iszero(state.since_update % sampler.update_interval)
+    elseif state.has_bounds && state.since_update >= sampler.update_interval  # see step.jl
         active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us; pointvol=pointvol), sampler.enlarge)
         since_update = 0; has_bounds = true
     else

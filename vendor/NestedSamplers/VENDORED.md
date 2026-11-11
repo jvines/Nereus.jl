@@ -25,5 +25,13 @@ Changed here since the commit above, so carry them over on an update:
   whatever `slices`/`walks` say.
 - `RWalk` and `RStagger` count a step out of the unit cube as a rejected step
   instead of drawing again until one lands inside.
+- The bounds are refit once `since_update` (likelihood calls since the last
+  fit) reaches `update_interval`, as in dynesty. The commit above refits only
+  when `since_update` is an exact multiple of it, which a count that grows by a
+  whole proposal at a time almost never is, so the first bound stayed for the
+  whole run.
+- A live point found outside the bound refits the bound and stays the walk's
+  start (`Bounds.bound_containing`); the commit above drew another live point,
+  so points outside a stale bound were chosen less often than the rest.
 
 License: MIT (see LICENSE) — original authors retained.

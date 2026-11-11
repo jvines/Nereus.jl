@@ -63,3 +63,35 @@ const _NSB = NestedSamplers.Bounds
         end
     end
 end
+
+@testset "nested refits its bounds as it goes" begin
+    # The bounds are refit once `update_interval` likelihood calls have passed
+    # since the last fit. The check used to ask for an exact multiple of the
+    # interval, which a count that grows by a whole proposal at a time almost
+    # never hits: a run on this Gaussian refit 10 times with RWalk and twice
+    # with RSlice, each time because a live point fell outside the stale bound,
+    # and an RSlice run could stop with "Slice sampling appears to be stuck".
+    # Now about 110 refits with RWalk and 40 with RSlice.
+    d = 6
+    Σ = [0.03^2 * 0.8^abs(i - j) for i in 1:d, j in 1:d]
+    mvn = MvNormal(fill(0.5, d), Σ)
+    model = NestedModel(x -> logpdf(mvn, x), fill(Uniform(0, 1), d))
+    for (name, mk, atleast) in (("RWalk", () -> _NSP.RWalk(walks = 25), 60),
+                                ("RSlice", () -> _NSP.RSlice(slices = 2d), 25))
+        @testset "$name" begin
+            nfit = Ref(0)
+            seen = Ref{Any}(nothing)
+            cb = (rng, m, spl, smp, st, i; kw...) -> begin
+                b = st.active_bound
+                b !== nothing && b !== seen[] && (nfit[] += 1)
+                seen[] = b
+            end
+            spl = Nested(d, 300; bounds = _NSB.MultiEllipsoid, proposal = mk())
+            ch, st = with_logger(NullLogger()) do
+                sample(MersenneTwister(1), model, spl; dlogz = 0.1, progress = false, callback = cb)
+            end
+            @test nfit[] ≥ atleast
+            @test abs(st.logz) < 0.6
+        end
+    end
+end

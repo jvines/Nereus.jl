@@ -55,15 +55,19 @@ function step(rng, model, sampler, state; kwargs...)
         active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us, pointvol=pointvol), sampler.enlarge)
         since_update = 0
         has_bounds = true
-    # if accepted first update, is it time to update again?
-    elseif iszero(state.since_update % sampler.update_interval)
+    # if accepted first update, is it time to update again? `since_update`
+    # counts likelihood calls and grows by a whole proposal's worth at a time,
+    # so it is compared, as in dynesty: testing it for an exact multiple of
+    # `update_interval` refit the bounds almost never, and every proposal kept
+    # drawing its steps and directions from the first bound.
+    elseif state.has_bounds && state.since_update >= sampler.update_interval
         @debug "Updating bounds: it=$(state.it), ncall=$(state.ncall), eff=$(state.it / state.ncall)"
         active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us, pointvol=pointvol), sampler.enlarge)
         since_update = 0
         has_bounds = true
     else
         active_bound = state.active_bound
-        since_update = state.since_update + 1
+        since_update = state.since_update
         has_bounds = state.has_bounds
     end
 
@@ -77,10 +81,13 @@ function step(rng, model, sampler, state; kwargs...)
     if has_bounds
         point, bound = rand_live(rng, active_bound, state.us)
         if isnothing(bound)
-            # live point not inside active bounds: refit them
+            # live point not inside active bounds: refit them to the live
+            # points, this one among them, and keep it. Drawing another point
+            # instead chose the points a stale bound misses less often than
+            # the rest, and a walk ends near where it starts.
             active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us, pointvol=pointvol), sampler.enlarge)
             since_update = 0
-            point, bound = rand_live(rng, active_bound, state.us)
+            bound = Bounds.bound_containing(rng, active_bound, point)
         end
         if isnothing(bound)
             # still not bounded: fall back to single ellipsoid around all live points

@@ -122,16 +122,13 @@ valid transformation axes
 function rand_live(rng::AbstractRNG, me::MultiEllipsoid, us)
     idx = rand(rng, Base.axes(us, 2))
     u = us[:, idx]
+    return u, bound_containing(rng, me, u)
+end
 
-    # find which Ellipsoid/s it overlaps with
+# A random one of the ellipsoids that contain `u`; `nothing` if none does, and
+# the caller (step.jl) refits the bounds.
+function bound_containing(rng::AbstractRNG, me::MultiEllipsoid, u)
     idxs = findall(ell -> u ∈ ell, me.ellipsoids)
-    # If point isn't bounded, caller (step.jl) refits bounds
-    if isempty(idxs)
-        return u, nothing
-    end
-
-    # pick random encompassing ellipsoid
-    idx = rand(rng, idxs)
-
-    return u, me.ellipsoids[idx]
+    isempty(idxs) && return nothing
+    return me.ellipsoids[rand(rng, idxs)]
 end

@@ -63,9 +63,18 @@ Returns a random live point and the bounds associated with it.
 function rand_live(rng::AbstractRNG, B::AbstractBoundingSpace, us)
     idx = rand(rng, Base.axes(us, 2))
     u = us[:, idx]
-    return u, u ∈ B ? B : nothing
+    return u, bound_containing(rng, B, u)
 end
 rand_live(B::AbstractBoundingSpace, us) = rand_live(GLOBAL_RNG, B, us)
+
+"""
+    bound_containing([rng], ::AbstractBoundingSpace, u) -> bound or nothing
+
+The bound to propose from for a walk starting at `u`: the bound itself if it
+contains `u` (for a `MultiEllipsoid`, one of the ellipsoids that do, at random),
+`nothing` if `u` is outside it.
+"""
+bound_containing(rng::AbstractRNG, B::AbstractBoundingSpace, u) = u ∈ B ? B : nothing
 
 function Base.show(io::IO, bound::B) where {T,B <: AbstractBoundingSpace{T}}
     base = nameof(B) |> string
