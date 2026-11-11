@@ -26,7 +26,7 @@
 using NestedSamplers
 using Random
 using MCMCChains
-using LinearAlgebra: det
+using LinearAlgebra: det, dot, mul!
 
 export sample_nested_ins, INSResult
 
@@ -73,7 +73,9 @@ machinery use the same draws.
   (`:rwalk`) or slice sweeps (`:slice`). `nothing` → dimension-scaled
   `max(25, 2·n_dim)` (a fixed count under-decorrelates as n_dim grows → logZ
   biased low). Explicit value honored verbatim.
-- `walk_scale::Real=1.0` — initial proposal scale.
+- `walk_scale::Real=1.0` — initial proposal scale: for `:rwalk` the step in
+  units of the bounding ellipsoid's axes, adapted between chains toward 50 %
+  acceptance and fixed within each; for `:slice` the initial slice width.
 - `proposal::Symbol=:rwalk` — within-shell move: `:rwalk` (random walk),
   `:slice` (random-direction slice), or `:unif` (rejection; low-d only).
   These are Nereus's own accumulator-aware kernels — NestedSamplers'
@@ -224,6 +226,10 @@ function sample_nested_ins(
     scratch_noise = Vector{Float64}(undef, n_dim)
     worst_save    = Vector{Float64}(undef, n_dim)
 
+    # The random walk's step size, in units of the bound's axes: fixed within
+    # each chain, adapted between them (`_rwalk_within_shell!`).
+    walk_scale_now = Ref(walk_scale)
+
     log_z_ns = -Inf
     log_X = 0.0  # log(prior volume contained)
     iter = 0
@@ -267,7 +273,7 @@ function sample_nested_ins(
         new_u, new_logL = if proposal === :rwalk
             _rwalk_within_shell!(live_u, live_logL, rng, eval_loglike,
                                   n_dim, n_live, idx_worst, logL_worst,
-                                  bound, log_V_cur, n_walks, walk_scale,
+                                  bound, log_V_cur, n_walks, walk_scale_now,
                                   ins_log_L, ins_log_V,
                                   scratch_cur, scratch_prop, scratch_noise)
         elseif proposal === :slice
@@ -420,19 +426,30 @@ end
 """
     _rwalk_within_shell!(live_u, live_logL, rng, eval_loglike, n_dim,
                           n_live, idx_worst, logL_worst, bound, log_V_cur,
-                          n_walks, walk_scale, ins_log_L, ins_log_V)
+                          n_walks, scale, ins_log_L, ins_log_V)
     -> (new_u, new_logL) or (nothing, -Inf)
 
-Within-shell RWalk: pick a random live point as the starting state,
-take `n_walks` Gaussian random-walk Metropolis steps inside the
-[0,1]^n_dim unit cube subject to the constraint `L > logL_worst`.
-Step size adapts toward ~50% acceptance over the chain. Each proposal
-feeds the INS accumulator (we don't distinguish accepted from rejected
-for the importance estimator — all evaluations contribute the same way).
+Within-shell random walk: from a live point inside the constraint, chosen at
+random among those other than the one being replaced, exactly `n_walks`
+Metropolis steps `u + σ·A·z` inside the unit cube and the constraint
+`L > logL_worst`, with `z` uniform in the unit ball and `A` the axes of a
+bounding ellipsoid around the start (`_walk_ellipsoid`). The step size
+`σ = scale[]` is the same for every step of the chain; after it, `scale[]`
+moves toward 50 % acceptance, as the vendored `Proposals.RWalk`'s does
+(dynesty's rule). A chain with no step accepted returns its start. Every
+proposal feeds the INS accumulator (accepted or not, the importance estimator
+counts all evaluations the same way).
 
-Returns the final accepted state. Falls back to `(nothing, -Inf)` if no
-proposal is accepted across all `n_walks` steps (extremely unlikely if
-the starting state already satisfies the constraint).
+The walk used to adapt its step inside the chain: growing it when the running
+acceptance was low and shrinking it when high, halving it after five
+rejections in a row, and counting `n_walks` accepted steps rather than steps.
+Where such a chain ends depends on its own acceptances, so the kernel does not
+leave the uniform distribution inside the constraint unchanged; on an RM
+obliquity fit `sample_nested_ins` and `sample_nested_dynamic` put log Z about
+2 nats above pt_emcee's.
+
+Returns `(nothing, -Inf)` only if no live point lies strictly above
+`logL_worst`.
 """
 function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
                                live_logL::AbstractVector{Float64},
@@ -440,7 +457,7 @@ function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
                                n_dim::Int, n_live::Int, idx_worst::Int,
                                logL_worst::Float64, bound,
                                log_V_cur::Float64, n_walks::Int,
-                               walk_scale::Float64,
+                               scale::Base.RefValue{Float64},
                                ins_log_L::Vector{Float64},
                                ins_log_V::Vector{Float64},
                                # Pre-allocated scratch (caller owns;
@@ -452,50 +469,29 @@ function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
                                scratch_prop::Vector{Float64},
                                scratch_noise::Vector{Float64};
                                slot::Int = 1)
-    # Start state: pick a random viable live point that's NOT the one
-    # being replaced. Standard NS rule. Random offset + first-viable
-    # scan avoids the `filter` allocation that the old code did per
-    # call.
-    rand_offset = rand(rng, 0:(n_live - 1))
-    start_idx = 0
-    @inbounds for offset in 0:(n_live - 1)
-        cand = ((rand_offset + offset) % n_live) + 1
-        if cand != idx_worst && live_logL[cand] > logL_worst
-            start_idx = cand
-            break
-        end
-    end
+    start_idx = _pick_start(rng, live_logL, idx_worst, logL_worst)
     start_idx == 0 && return (nothing, -Inf)
     @inbounds for d in 1:n_dim
         scratch_cur[d] = live_u[d, start_idx]
     end
     cur_logL = live_logL[start_idx]
+    A = _walk_ellipsoid(rng, bound, scratch_cur).axes
 
-    # Initial step scale. Adapted below toward the in-band acceptance.
-    σ = walk_scale / sqrt(n_dim)
-
-    max_attempts = max(5 * n_walks, 100)
+    σ = scale[]
     n_accept = 0
-    attempt = 0
-    n_reject_streak = 0
-    while n_accept < n_walks && attempt < max_attempts
-        attempt += 1
-        Random.randn!(rng, scratch_noise)
+    for _ in 1:n_walks
+        _rand_ball!(rng, scratch_noise)
+        mul!(scratch_prop, A, scratch_noise)
         in_cube = true
         @inbounds for d in 1:n_dim
-            scratch_prop[d] = scratch_cur[d] + σ * scratch_noise[d]
-            if scratch_prop[d] < 0.0 || scratch_prop[d] > 1.0
-                in_cube = false
-            end
+            x = scratch_cur[d] + σ * scratch_prop[d]
+            scratch_prop[d] = x
+            (x < 0.0 || x > 1.0) && (in_cube = false)
         end
         if !in_cube
+            # out of the cube: a rejected step
             push!(ins_log_L, -Inf)
             push!(ins_log_V, log_V_cur)
-            n_reject_streak += 1
-            if n_reject_streak >= 5
-                σ *= 0.5
-                n_reject_streak = 0
-            end
             continue
         end
         logL_prop = eval_loglike(scratch_prop, slot)
@@ -507,36 +503,60 @@ function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
             end
             cur_logL = logL_prop
             n_accept += 1
-            n_reject_streak = 0
-            acc = n_accept / attempt
-            # NOTE: this looks inverted against the usual acceptance-targeting
-            # law (and against the vendored dynesty-style `update_scale!`), and
-            # it does make per-call displacement saturate — an 80-walk chain
-            # travels no further than a 10-walk one. But flipping it to the
-            # "correct" direction MEASURABLY DEGRADES FITS: on an injected
-            # 1-planet RV recovery (P=8 d, 8 seeds, n_live=100, dlogz=0.5) the
-            # flipped version recovers 5/8 instead of 8/8, rails three seeds to
-            # P ≈ 660-810 d, drops median logZ_ns from -77.4 to -94.0, and
-            # widens the NS-vs-INS estimator gap from 2.0 to 8.3 nats.
-            # With walk_scale=1.0 the initial σ = 1/√n_dim is a large fraction
-            # of the unit cube, and the shrink-on-high-acceptance behaviour is
-            # what pulls it down to a workable scale; removing that leaves the
-            # walk diffusing into junk long-period modes. Do not "fix" the sign
-            # without re-running that benchmark — the real suspects are the
-            # bang-bang controller shape and the walk_scale default, not this
-            # line alone.
-            σ *= acc < 0.2 ? 1.2 : (acc > 0.7 ? 0.8 : 1.0)
-        else
-            n_reject_streak += 1
-            if n_reject_streak >= 5
-                σ *= 0.7
-                n_reject_streak = 0
-            end
         end
     end
-
-    n_accept == 0 && return (nothing, -Inf)
+    # between chains only (vendored `update_scale!`)
+    ratio = n_accept / n_walks
+    scale[] = min(σ * exp((ratio - 0.5) / (0.5 * n_dim)), sqrt(n_dim))
     return (scratch_cur, cur_logL)
+end
+
+# A live point other than `idx_worst` strictly above `logL_worst`, uniformly
+# at random; 0 if there is none. (The walks used to take the first such point
+# after a random offset, which favoured the point after `idx_worst`.)
+function _pick_start(rng::AbstractRNG, live_logL::AbstractVector{Float64},
+                     idx_worst::Int, logL_worst::Float64)
+    n = 0
+    @inbounds for i in eachindex(live_logL)
+        (i != idx_worst && live_logL[i] > logL_worst) && (n += 1)
+    end
+    n == 0 && return 0
+    k = rand(rng, 1:n)
+    @inbounds for i in eachindex(live_logL)
+        if i != idx_worst && live_logL[i] > logL_worst
+            k -= 1
+            k == 0 && return i
+        end
+    end
+    return 0
+end
+
+# The ellipsoid whose axes shape a walk or slice chain starting at `u`: one
+# of the bound's ellipsoids holding `u`, at random, as the vendored samplers
+# choose (`Bounds.bound_containing`); if none holds it (the bound is refit
+# only every `bound_update_interval` iterations), the nearest in its own
+# metric. The shape depends on the start only, never on the chain after it.
+function _walk_ellipsoid(rng::AbstractRNG, bound, u::AbstractVector{Float64})
+    e = NestedSamplers.Bounds.bound_containing(rng, bound, u)
+    e === nothing || return e
+    ells = bound isa NestedSamplers.Bounds.MultiEllipsoid ? bound.ellipsoids : (bound,)
+    best = first(ells)
+    dbest = Inf
+    for ell in ells
+        δ = u .- ell.center
+        dd = dot(δ, ell.A * δ)
+        dd < dbest && (best = ell; dbest = dd)
+    end
+    return best
+end
+
+# `z` in place: uniform in the unit ball.
+function _rand_ball!(rng::AbstractRNG, z::Vector{Float64})
+    Random.randn!(rng, z)
+    n = length(z)
+    r = rand(rng)^(1 / n) / sqrt(sum(abs2, z))
+    z .*= r
+    return z
 end
 
 # Evaluate the constrained log-likelihood at `scratch_cur + t·dir`,

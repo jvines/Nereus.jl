@@ -17,6 +17,8 @@ using Test
 using Random
 using Nereus
 using MCMCChains
+using Statistics
+using NestedSamplers
 
 # ---- Shared synthetic single-planet RV target ------------------------
 function _make_rv_target(seed::Int = 2027; n_obs::Int = 30,
@@ -143,6 +145,56 @@ end
         end
         @test_throws ArgumentError sample_nested_ins(target, data;
             n_live = 40, proposal = :banana, seed = 1)
+    end
+
+    @testset "the random walk leaves the constrained uniform distribution unchanged" begin
+        # The replacement drawn from a live set that is uniform inside a curved
+        # constraint (a banana in the unit square) must be uniform inside it
+        # too. The walk sample_nested_ins and sample_nested_dynamic share used
+        # to grow or shrink its step inside the chain with the running
+        # acceptance and to count accepted steps: the sds came out 6-13
+        # standard errors narrow at n_walks = 2, 5 and 25.
+        banana(u) = -(((u[1] - 0.5) / 0.3)^2 + ((u[2] - 0.3 - 1.5 * (u[1] - 0.5)^2) / 0.08)^2)
+        lstar = -1.0
+        function inside(rng, m)
+            out = zeros(2, m); k = 0
+            while k < m
+                u = rand(rng, 2)
+                banana(u) ≥ lstar && (k += 1; out[:, k] = u)
+            end
+            return out
+        end
+        rng = MersenneTwister(11)
+        ref = inside(rng, 200_000)
+        N = 2000
+        live = inside(rng, N)
+        liveL = [banana(c) for c in eachcol(live)]
+        bound = NestedSamplers.Bounds.scale!(NestedSamplers.Bounds.fit(NestedSamplers.Bounds.Ellipsoid, live), 1.25)
+        evl(u, slot = 1) = (0 <= u[1] <= 1 && 0 <= u[2] <= 1) ? banana(u) : -Inf
+        M = 20_000
+        for n_walks in (2, 25)
+            out = zeros(2, M)
+            scale = Ref(1.0)
+            r = MersenneTwister(5)
+            a, b, c = zeros(2), zeros(2), zeros(2)
+            for i in 1:M
+                u, _ = Nereus._rwalk_within_shell!(live, liveL, r, evl, 2, N, 0, lstar, bound, 0.0,
+                                                   n_walks, scale, Float64[], Float64[], a, b, c)
+                out[:, i] = u
+                # a fresh live set now and then, so starts are not reused often
+                if i % 2000 == 0
+                    live .= inside(r, N)
+                    liveL .= [banana(cc) for cc in eachcol(live)]
+                end
+            end
+            @test all(cc -> banana(cc) ≥ lstar, eachcol(out))
+            for j in 1:2
+                sref = std(ref[j, :])
+                @test abs(mean(out[j, :]) - mean(ref[j, :])) < 4 * sref / sqrt(M)
+                @test abs(std(out[j, :]) - sref) < 4 * sref / sqrt(2M)
+            end
+            @test abs(cor(out[1, :], out[2, :]) - cor(ref[1, :], ref[2, :])) < 4 / sqrt(M)
+        end
     end
 end
 

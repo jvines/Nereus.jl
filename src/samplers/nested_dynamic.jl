@@ -90,7 +90,7 @@ importance likelihood window.
 - `n_walks::Union{Int,Nothing}=nothing` — Metropolis steps / slice sweeps per
   replacement. `nothing` → dimension-scaled `max(25, 2·n_dim)` (a fixed count
   under-decorrelates as n_dim grows → logZ biased low). Explicit honored.
-- `walk_scale::Real=1.0` — initial proposal scale.
+- `walk_scale::Real=1.0` — initial proposal scale (see `sample_nested_ins`).
 - `proposal::Symbol=:rwalk` — within-shell move (`:rwalk`, `:slice`,
   `:unif`); shares Nereus's INS kernels (see `sample_nested_ins`).
 - `seed::Int=1`
@@ -426,6 +426,9 @@ function _ns_inner(target::NereusTarget, data::Data;
     sizehint!(_scratch_L, 200)
     sizehint!(_scratch_V, 200)
 
+    # the random walk's step, fixed within each chain (sample_nested_ins)
+    walk_scale_now = Ref(walk_scale)
+
     log_z = -Inf
     log_X = 0.0
     iter = 0
@@ -465,7 +468,7 @@ function _ns_inner(target::NereusTarget, data::Data;
             _rwalk_within_shell!(live_u, live_logL, rng, eval_loglike,
                                   n_dim, n_live, idx_worst,
                                   max(logL_worst, L_min), bound,
-                                  log_V_cur, n_walks, walk_scale,
+                                  log_V_cur, n_walks, walk_scale_now,
                                   _scratch_L, _scratch_V,
                                   scratch_cur, scratch_prop, scratch_noise)
         elseif proposal === :slice
