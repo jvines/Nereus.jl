@@ -594,16 +594,21 @@ Stellar projected rotation. Returns `0.0` if no planet has RM enabled
 end
 
 """
-    system_i_star(theta) -> i_* (rad)
+    system_i_star(theta) -> i_* (rad), in [0, π]
 
-Stellar inclination, 90° = equator-on. Returns `π/2` when the slot is
-absent, which makes the gravity-darkened model reduce to the standard one
-for any code path that asks without a `:GD` planet present.
+Stellar inclination, 90° = equator-on: the sampled `i_star` slot folded with
+[`fold_inclination`](@ref), `|x|` reduced through `x ≡ x + 2π`. The slot is a
+polar angle sampled on its circle under a prior on the whole of `[0, π]`
+(`polar_lift`), so `x`, `-x` and `x + 2π` must be one star for every model;
+this accessor, the only reader of the slot, is what makes them one. A value
+in `[0, π]` is returned bit for bit. Returns `π/2` when the slot is absent,
+which makes the gravity-darkened model reduce to the standard one for any
+code path that asks without a `:GD` planet present.
 """
 @inline function system_i_star(theta::Theta{T}) where {T}
     idx = theta.params.layout.systemic.i_star
     idx == 0 && return T(π / 2)
-    return theta.values[idx]
+    return fold_inclination(theta.values[idx])
 end
 
 """

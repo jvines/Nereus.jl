@@ -291,7 +291,7 @@ function _centre_circular_seams!(target::NereusTarget, x::AbstractVector{<:Real}
         xi = xc[i]
         isfinite(xi) || continue
         min(xi - lo, hi - xi) <= _MAP_SEAM_FRAC * span || continue
-        lo_ref = params.config.priors[L.unfrozen_names[i]].lo
+        lo_ref = circular_ref_lo(params, i)
         xr = lo_ref + mod(xi - lo_ref, CIRCULAR_PERIOD)
         push!(moved, (i, Float64(lo)))
         set_circular_window!(params, i, xr - span / 2;
@@ -319,7 +319,7 @@ function _circular_to_user_window!(target::NereusTarget,
     has_transform = target.transform !== nothing
     xb = has_transform ? transform_inverse(x_opt, target.transform) : x_opt
     for (i, _) in moved
-        lo_ref = params.config.priors[L.unfrozen_names[i]].lo
+        lo_ref = circular_ref_lo(params, i)
         k = floor((xb[i] - lo_ref) / CIRCULAR_PERIOD)
         (isfinite(k) && k != 0) || continue
         lo, _ = bounds(L.unfrozen_priors[i])

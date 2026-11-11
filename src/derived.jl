@@ -657,8 +657,10 @@ function compute_derived(chains, params::Params;
     # U(0, 2π) reads ~350°, not ~-10°. An atan-derived ω (sesinw/secosw,
     # esinw/ecosw) has no window of its own and is reported in [-180, 180).
     circ = circular_names(params)
+    _circ_ref(name) = circular_ref_lo(params,
+        findfirst(==(name), params.layout.unfrozen_names))
     _deg_lo_ref(name) = name in circ && Symbol(name) in chain_param_syms ?
-                        rad2deg(config.priors[name].lo) : -180.0
+                        rad2deg(_circ_ref(name)) : -180.0
 
     for k in planets
         block = params.layout.planet_blocks[k]
@@ -777,7 +779,7 @@ function compute_derived(chains, params::Params;
             nm = "phic_k$k"
             ph = _col(nm)
             nm in circ && (ph = circular_contiguous(ph; period = 2π,
-                                                    lo_ref = config.priors[nm].lo,
+                                                    lo_ref = _circ_ref(nm),
                                                     mask = active))
             derived["Tc"] = phic_to_tc.(ph, P, parametrization.t_ref_c)
         end
@@ -940,7 +942,10 @@ function compute_derived(chains, params::Params;
                 # in a moved window where a bare abs() reads 200° for -160°.
                 derived["lambda_abs_deg"] = abs.(rad2deg.(rem2pi.(lam, RoundNearest)))
                 if :i_star in chain_param_syms
-                    ist = _draws(chains, :i_star)
+                    # Folded: i★ is a polar angle sampled on its circle, and
+                    # the raw draw may sit in the mirror representative -x,
+                    # where sin flips sign and ψ would read wrong.
+                    ist = fold_inclination.(_draws(chains, :i_star))
                     n_psi = min(length(lam), length(ist), length(inc_d))
                     psi = Vector{Float64}(undef, n_psi)
                     @inbounds for j in 1:n_psi

@@ -2118,10 +2118,17 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
     frozen_idx      = Int[]
     frozen_values   = Float64[]
 
-    # Orbital inclinations, the slots `planet_inc` reads. A Sine prior on one
-    # is sampled on the circle (`WrappedSinePrior`, see src/circular.jl);
-    # `config.priors` keeps the prior as the user wrote it.
-    orbital_inc = _orbital_inclination_slots(planet_blocks)
+    # Angles are sampled on their circles (src/circular.jl); `config.priors`
+    # keeps every prior as the user wrote it.
+    #   * Polar angles -- the orbital inclinations `planet_inc` reads and the
+    #     stellar inclination `system_i_star` reads, both through
+    #     `fold_inclination` -- under a prior on the whole of [0, π] are lifted
+    #     to their circle (`polar_lift`): 0 and π are poles, not walls.
+    #   * Full-circle angles the likelihood reads periodically (`periodic_angle`)
+    #     under a prior covering a period or more are pushed forward onto one
+    #     period (`circular_lift`), a chart whose seam the samplers move.
+    # A prior on a narrower range keeps its walls: those are the user's.
+    polar = _polar_angle_slots(planet_blocks, systemic)
 
     for (i, name) in enumerate(names)
         ps = config.priors[name]
@@ -2132,7 +2139,8 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
             push!(unfrozen_idx, i)
             push!(unfrozen_names, name)
             push!(unfrozen_priors,
-                  i in orbital_inc && ps.dist isa Sine ? WrappedSinePrior() : ps)
+                  i in polar ? polar_lift(ps) :
+                  periodic_angle(name, config) ? circular_lift(ps) : ps)
         end
     end
 
@@ -2158,6 +2166,19 @@ stellar inclination `i_star` is not a planet slot.
 _orbital_inclination_slots(planet_blocks) =
     Set{Int}(b.inc for b in planet_blocks
              if (b isa RVASBlock || b isa SB2Block) && b.inc > 0)
+
+"""
+    _polar_angle_slots(planet_blocks, systemic) -> Set{Int}
+
+Theta slots of the polar angles read through `fold_inclination`: the orbital
+inclinations (`_orbital_inclination_slots`) and the stellar inclination
+`i_star`, read by `system_i_star` (gravity darkening; the only reader).
+"""
+function _polar_angle_slots(planet_blocks, systemic)
+    s = _orbital_inclination_slots(planet_blocks)
+    systemic.i_star > 0 && push!(s, systemic.i_star)
+    return s
+end
 
 # Public Params constructor is in params_constructor.jl (loaded after
 # data.jl and default_priors.jl to resolve dependencies).

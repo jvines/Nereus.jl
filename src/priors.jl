@@ -806,17 +806,16 @@ a sampled parameter — without it the chain can escape into face-on
 (i ≈ 0) modes where huge M_sec × tiny sin i degenerately satisfies
 the RV mass function.
 
-On an orbital inclination (`inc_k<N>`) the samplers do not see the bounded
-`[0, π]` version: the layout carries the same prior on a circle,
+On an inclination -- orbital (`inc_k<N>`) or stellar (`i_star`) -- the
+samplers do not see the bounded `[0, π]` version: the layout carries the same prior on a circle,
 [`WrappedSinePrior`](@ref), with density `|sin x|/4` and no wall at `0` or
 `π`. The inclination is periodic there because every likelihood reads it
 through [`fold_inclination`](@ref) -- `x`, `-x` and `x + 2π` are one orbit --
 and folded to `[0, π]` it is exactly `sin(i)/2` again. The draws are folded
 before anything reads them, so chains, tables and plots report
 `i ∈ [0, π]`, and a posterior near `0` or `π` (face-on, retrograde) is not a
-rail. `config.priors` keeps `SinePrior()` as written. A Sine prior on any
-other parameter (the stellar inclination `i_star`) stays bounded on
-`[0, π]`.
+rail. `config.priors` keeps `SinePrior()` as written. A Uniform or truncated
+Normal on all of `[0, π]` is lifted the same way (`PolarFoldPrior`).
 """
 SinePrior() = PriorSpec(Sine(), 0.0, π)
 
@@ -1328,6 +1327,14 @@ function validate_physical(param_name::AbstractString, ps::PriorSpec)
                 "(base '$base') is outside physical range " *
                 "[$phys_lo, $phys_hi]"))
         end
+        return nothing
+    end
+
+    # A Normal on a full-circle angle is a density on the circle (its
+    # pushforward, `circular_lift`): the likelihood is periodic, so its
+    # infinite tails reach no state outside the circle. Only a hard bound
+    # beyond the range -- a window in degrees, say -- is an error.
+    if base in ("w", "Mo", "phic") && ps.dist isa Distributions.Normal
         return nothing
     end
 

@@ -48,16 +48,41 @@
 # re-chart them (prior draws, `circular_relabel_point!`, the samplers' burn-in
 # re-cuts), which keeps an ensemble in one representative. Both are exact: the
 # likelihood is the same at x and at fold(x), to the bit, and the prior up to
-# the rounding of sin(2π - x) against sin(x). Only an ORBITAL inclination under a Sine prior
-# is cyclic: a user's Uniform(0, π) or Normal on it keeps its walls, and a Sine
-# prior on the stellar inclination i★ stays bounded, since x → -x is not shown
-# to be a symmetry of the gravity-darkening and RM models.
+# the rounding of sin(2π - x) against sin(x).
+#
+# Every polar angle is cyclic this way, whatever prior covers [0, π]: the
+# orbital inclination and the stellar inclination i★ (which gravity darkening
+# reads through `system_i_star`, folded like `planet_inc`). A Sine prior becomes
+# `WrappedSinePrior`; a Uniform(0, π) or a Normal truncated to [0, π] becomes
+# `PolarFoldPrior` -- the user's density reflected at both poles onto the same
+# chart, `p(fold(x))/2`, so it folds back to exactly what was written
+# (`polar_lift` in `_build_layout`). A prior on part of [0, π] keeps its walls.
+#
+# Gravity darkening has one more exact symmetry: (i★, λ) and (π - i★, λ + π),
+# the spin vector and its reverse, are one light curve. Without RM velocities
+# or a tomogram to measure the sense of rotation, both representatives are
+# sampled and the draws put in one by `spin_flip` (see there), at the same
+# places the inclinations are folded.
+#
+# A full-circle angle under a prior that is not a uniform over one period is
+# still a full circle: the likelihood is periodic, so a Normal on the line, or a
+# Uniform over several periods, induces on the circle its pushforward
+# p̃(θ) = Σ_n p(θ + 2πn) -- the same posterior over orbits, the same evidence.
+# `circular_lift` replaces such a prior with `WrappedPushforward`, that density
+# on a one-period chart, and from then on it is charted and re-cut like the
+# uniform. `config.priors` keeps the prior as written. WrappedUniform, once a
+# chart with no walls, is now the circular Uniform: on the whole line its
+# density is improper, and the affine stretch moves spread the ensemble
+# geometrically over it (measured: every cold walker of an RM fit outside
+# [-π, π] by the end of the run, hot rungs at |λ| ~ 1e12 rad). A wall at the
+# chart edge and a re-cut that moves the seam off the posterior is exact; a
+# walker re-wrapped mid-run is not a valid stretch move.
 #
 # Deliberately NOT circular:
-#   * priors that are not Uniform over exactly one period. A narrow arc, a
-#     truncated Normal on Mo, a two-period U(-2π, 2π): those walls are the
-#     user's, and a density that is not periodic cannot be relabelled exactly.
-#   * the inclination, which is folded instead (above).
+#   * priors that cover only an arc of the circle. A narrow arc, a Normal
+#     truncated inside one period: those walls are the user's, and the
+#     reporters say a rail against them is the prior's (`restricted_angles`).
+#   * the inclinations, which are folded instead (above).
 #   * Mo and φ_c whenever TTVs are modelled. TTV epoch numbering hangs off the
 #     transit time Tc = tp_to_tc(Tp) with Tp = t_ref − Mo·P/2π (under φ_c,
 #     Tc = t_ref_c + φ_c·P/2π), so a 2π shift relabels every transit and the
@@ -84,23 +109,53 @@ _ttv_modelled(config) =
     any(m -> has_ttv(m) || has_ttv_nb(m), config.planet_modes)
 
 """
-    is_circular(name, ps::PriorSpec, config::ParamsConfig) -> Bool
+    periodic_angle(name, config::ParamsConfig) -> Bool
 
-`true` when the parameter is an angle whose prior is Uniform over exactly one
-period, so its prior window is a chart of the circle and the seam may be moved.
-See the header of `src/circular.jl` for what is excluded and why.
+`true` when the likelihood reads the parameter `name` only periodically, so
+`x` and `x + 2π` are one state: Mo, φ_c, Ω, λ and (under `:ew`) ω of a planet,
+except Mo and φ_c under TTVs or the O'Neil observation-based prior (see the
+header of `src/circular.jl`).
 """
-function is_circular(name::AbstractString, ps::PriorSpec, config)
+function periodic_angle(name::AbstractString, config)
     m = match(_CIRCULAR_NAME, name)
     m === nothing && return false
-    (ps.dist isa Distributions.Uniform || ps.dist isa WrappedUniform) || return false
-    abs((ps.hi - ps.lo) - CIRCULAR_PERIOD) <=
-        _CIRCULAR_SPAN_RTOL * CIRCULAR_PERIOD || return false
     if m.captures[1] == "Mo" || m.captures[1] == "phic"
         _ttv_modelled(config) && return false
         _obs_prior_on(config) && return false
     end
     return true
+end
+
+"""
+    is_circular(name, ps::PriorSpec, config::ParamsConfig) -> Bool
+
+`true` when the parameter is a [`periodic_angle`](@ref) whose prior is a chart
+of exactly one period -- a Uniform over one period, a `WrappedUniformPrior`,
+or the [`WrappedPushforward`](@ref) the layout builds from any other prior
+covering a period or more (`circular_lift`) -- so the seam may be moved.
+See the header of `src/circular.jl` for what is excluded and why.
+"""
+function is_circular(name::AbstractString, ps::PriorSpec, config)
+    periodic_angle(name, config) || return false
+    ps.dist isa WrappedPushforward && return true
+    (ps.dist isa Distributions.Uniform || ps.dist isa WrappedUniform) || return false
+    return abs((ps.hi - ps.lo) - CIRCULAR_PERIOD) <=
+           _CIRCULAR_SPAN_RTOL * CIRCULAR_PERIOD
+end
+
+"""
+    circular_ref_lo(params, i) -> Float64
+
+Lower edge of the window the user's convention puts circular unfrozen
+parameter `i` in: its prior's own `lo` when that prior was one period, else
+the reference edge its [`WrappedPushforward`](@ref) carries (`μ - π` for a
+Normal, `blo` for a Uniform over several periods). Reported medians land in
+`[ref, ref + 2π)`.
+"""
+function circular_ref_lo(params::Params, i::Int)
+    ps = params.layout.unfrozen_priors[i]
+    ps.dist isa WrappedPushforward && return ps.dist.ref
+    return params.config.priors[params.layout.unfrozen_names[i]].lo
 end
 
 _obs_prior_on(config) = hasproperty(config, :parametrization) &&
@@ -219,11 +274,14 @@ function circular_window(x::AbstractVector{<:Real}, lo::Real, lo_ref::Real;
     return k == 0 ? Float64(c) : Float64(c - k * period)
 end
 
-# The same prior over a moved chart: Uniform stays Uniform, a wrapped prior
-# stays wrapped (it must not regain the wall it exists to remove). Only ever
-# called for an `is_circular` parameter, whose prior is one of the two.
-_rewindow(ps::PriorSpec, lo::Real, hi::Real) =
-    ps.dist isa WrappedUniform ? PriorSpec(WrappedUniform(lo, hi), lo, hi) : UniformPrior(lo, hi)
+# The same prior over a moved chart: Uniform stays Uniform, a WrappedUniform
+# stays one, a pushforward keeps its density (it is periodic) on the new chart.
+# Only ever called for an `is_circular` parameter, whose prior is one of these.
+function _rewindow(ps::PriorSpec, lo::Real, hi::Real)
+    ps.dist isa WrappedUniform && return PriorSpec(WrappedUniform(lo, hi), lo, hi)
+    ps.dist isa WrappedPushforward && return PriorSpec(_rechart(ps.dist, lo, hi), lo, hi)
+    return UniformPrior(lo, hi)
+end
 
 """
     set_circular_window!(params, i, lo; transforms = ()) -> (lo, hi)
@@ -231,8 +289,8 @@ _rewindow(ps::PriorSpec, lo::Real, hi::Real) =
 Move circular unfrozen parameter `i` to the window `[lo, lo + span)` everywhere
 the samplers read its bounds: the layout's `PriorSpec`, the packed priors, and
 every `PackedTransforms` in `transforms`. `config.priors` keeps what the user
-wrote. Exact: the prior is still Uniform over one period, so its density does
-not change.
+wrote. Exact: the prior is periodic and still covers one period (Uniform, or a
+pushforward evaluated on the circle), so its density does not change.
 
 The caller must then move every stored value of the parameter into the new
 window with [`circular_relabel`](@ref) -- hot rungs, ring buffers, cached
@@ -270,7 +328,7 @@ relabel all of its own state into `(lo, hi)`.
 function recut_circular_param!(params::Params, i::Int,
                                draws::AbstractVector{<:Real}; transforms = ())
     ps = params.layout.unfrozen_priors[i]
-    lo_ref = params.config.priors[params.layout.unfrozen_names[i]].lo
+    lo_ref = circular_ref_lo(params, i)
     new_lo = circular_window(draws, ps.lo, lo_ref)
     new_lo == ps.lo && return nothing
     return set_circular_window!(params, i, new_lo; transforms)
@@ -445,7 +503,7 @@ function unify_circular_groups!(params::Params, groups; transforms = ())
     L = params.layout
     for grp in groups
         length(grp) > 1 || continue
-        lo = params.config.priors[L.unfrozen_names[first(first(grp))]].lo
+        lo = circular_ref_lo(params, first(first(grp)))
         for (d, _) in grp
             L.unfrozen_priors[d].lo == lo ||
                 set_circular_window!(params, d, lo; transforms)

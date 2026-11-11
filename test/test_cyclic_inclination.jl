@@ -10,8 +10,8 @@
 # on a circle x, density |sin x|/4, where x, -x and x + 2π are one orbit, and
 # the physical inclination is fold(x) = |rem2pi(x, RoundNearest)| in [0, π].
 #
-# The assertions pin: the distribution on its chart; that only an orbital
-# inclination with a Sine prior is converted, in the layout and nowhere else;
+# The assertions pin: the distribution on its chart; that a prior over all of
+# [0, π] on an inclination is converted, in the layout and nowhere else;
 # that every likelihood sees the folded value; that the induced prior on i is
 # still sin(i)/2; and that a fit near i = 180° samples across π, comes back
 # folded, recovers the inclination and is not reported railed.
@@ -181,7 +181,7 @@ end
         Params(max_kplanet = 1, planet_modes = [RVAS], instruments = instruments,
                data = data, stability = :none, M_s = 1.0, priors = priors)
 
-    @testset "layout: only an orbital inclination with a Sine prior" begin
+    @testset "layout: a prior over all of [0, π] makes the inclination cyclic" begin
         p = _params()
         i = findfirst(==("inc_k1"), p.layout.unfrozen_names)
         @test p.config.priors["inc_k1"].dist isa Nereus.Sine      # as written
@@ -194,15 +194,24 @@ end
         # Not a full-circle angle: it is folded, not re-charted.
         @test !(i in Nereus.circular_indices(p))
 
-        # Any other prior on the inclination is left exactly as it was.
-        for other in (UniformPrior(0.0, π), UniformPrior(1.0, 2.0),
-                      NormalPrior(2.0, 0.2, 0.0, π))
+        # Re-pinned: a Uniform or a Normal covering all of [0, π] is lifted too
+        # (`PolarFoldPrior`: the density reflected at both poles onto the same
+        # chart, identity transform), so an inclination at 0 or π is never
+        # against a wall whichever prior was written. A prior on part of
+        # [0, π] keeps its walls.
+        for other in (UniformPrior(0.0, π), NormalPrior(2.0, 0.2, 0.0, π))
             q = _params(Dict{String,PriorSpec}("inc_k1" => other))
             j = findfirst(==("inc_k1"), q.layout.unfrozen_names)
-            @test q.layout.unfrozen_priors[j] === q.config.priors["inc_k1"]
-            @test isempty(Nereus.cyclic_inclination_indices(q))
-            @test NereusTarget(q, data).transform.type_ids[j] != 0
+            @test q.layout.unfrozen_priors[j].dist isa Nereus.PolarFold
+            @test q.layout.unfrozen_priors[j].dist.base === q.config.priors["inc_k1"]
+            @test Nereus.cyclic_inclination_indices(q) == [j]
+            @test NereusTarget(q, data).transform.type_ids[j] == 0
         end
+        q = _params(Dict{String,PriorSpec}("inc_k1" => UniformPrior(1.0, 2.0)))
+        j = findfirst(==("inc_k1"), q.layout.unfrozen_names)
+        @test q.layout.unfrozen_priors[j] === q.config.priors["inc_k1"]
+        @test isempty(Nereus.cyclic_inclination_indices(q))
+        @test NereusTarget(q, data).transform.type_ids[j] != 0
     end
 
     @testset "trans-dim convergence gate reads the inclination folded" begin
@@ -223,7 +232,12 @@ end
         @test Nereus._td_convergence(X, size(X, 1), n_w, cols, gate, p)[2] > 1.5
     end
 
-    @testset "Sine on the stellar inclination stays bounded" begin
+    # Re-pinned (was "stays bounded"): the stellar inclination is a polar angle
+    # too. Gravity darkening, its only reader, sees it through `system_i_star`,
+    # folded like `planet_inc` -- x, -x and x + 2π are one star (the GD map,
+    # disc mean and v_eq depend on i★ through sin² and cos² and the folded
+    # angle) -- so a Sine prior on it is sampled on the circle as well.
+    @testset "Sine on the stellar inclination is cyclic too" begin
         t_phot = collect(range(-0.1, 0.1; length = 60))
         d2 = Data(t_rv = t_rv, rv = zeros(length(t_rv)), rv_err = ones(length(t_rv)),
                   t_phot = t_phot, flux = ones(60), flux_err = fill(1e-3, 60),
@@ -233,11 +247,11 @@ end
                    data = d2, stability = :none, M_s = 1.6, R_s = 1.5,
                    priors = Dict{String,PriorSpec}("i_star" => SinePrior()))
         j = findfirst(==("i_star"), p.layout.unfrozen_names)
-        @test p.layout.unfrozen_priors[j].dist isa Nereus.Sine
-        @test p.layout.unfrozen_priors[j] === p.config.priors["i_star"]
-        @test p.layout.packed_priors.type_ids[j] == Nereus.PACKED_SINE
-        @test isempty(Nereus.cyclic_inclination_indices(p))
-        @test NereusTarget(p, d2).transform.type_ids[j] != 0       # still a logit
+        @test p.config.priors["i_star"].dist isa Nereus.Sine         # as written
+        @test p.layout.unfrozen_priors[j].dist isa WrappedSine
+        @test p.layout.packed_priors.type_ids[j] == Nereus.PACKED_WRAPPED_SINE
+        @test Nereus.cyclic_inclination_indices(p) == [j]
+        @test NereusTarget(p, d2).transform.type_ids[j] == 0       # identity: no wall
     end
 
     @testset "planet_inc and every likelihood see the folded value" begin
