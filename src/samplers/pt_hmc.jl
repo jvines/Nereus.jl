@@ -395,7 +395,7 @@ function sample_pt_hmc(
     function fresh_inits(n)
         # Without the warm start's re-chart, nothing here moves a seam: a
         # pathfinder pilot places the windows first (`_seam_pilot!`).
-        warm_start || isempty(circular_indices(target.params)) ||
+        warm_start || isempty(seam_indices(target.params)) ||
             _seam_pilot!(target, rand(rng, 1:typemax(Int32)))
         b = warm_start ? _warmstart_points(target, n, rng) :
                          [_draw_from_prior(target, rng) for _ in 1:n]
@@ -412,9 +412,9 @@ function sample_pt_hmc(
     ck_fp = run_fingerprint(target.params, target.data; n_temps, ladder = copy(βs),
         adapt_ladder = do_pilot, n_pilot = pilot_sweeps, n_warmup,
         n_walkers_per_temp = W, swap_interval, target_accept, warm_start, seed,
-        # The seams re-cut during each warm-up (`_hmc_recut!`): a checkpoint
-        # from before that is another run.
-        seam_recut = :adaptation_phases)
+        # The seams re-cut during each warm-up (`_hmc_recut!`), polar charts
+        # too: a checkpoint from before either is another run.
+        seam_recut = :adaptation_phases_polar)
     ck = nothing
     if resume
         ck = try
