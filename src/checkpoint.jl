@@ -108,6 +108,9 @@ _hash_skip(x::ParamsConfig, f::Symbol) =
     f === :obliquity && is_default_obliquity(x.obliquity)
 _hash_skip(x::ParametrizationConfig, f::Symbol) =
     f === :sample_a_Rs && !x.sample_a_Rs
+# No Hipparcos scan geometry: the HGCA/G23H Hipparcos epoch is instantaneous,
+# as it was in every run before the field existed.
+_hash_skip(x::Data, f::Symbol) = f === :hip_scans && x.hip_scans === nothing
 # Per-coordinate epochs equal to `epochs`: the epochs every HGCA had before.
 _hash_skip(x::HGCAData, f::Symbol) =
     (f === :epochs_ra && x.epochs_ra == x.epochs) ||
