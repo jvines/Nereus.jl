@@ -281,7 +281,10 @@ and the `EvidenceReport`.
   `resume` checks: extending a run to an `n_sweeps` that moves the default is
   refused until `n_pilot` is given the original run's value.
 - `betas=nothing` : custom β-ladder (overrides default + disables adaptation)
-- `warm_start=true`, `seed=1`, `progress=true`
+- `warm_start=true` : start from a short pt_emcee pre-search. With it off the
+  starts are prior draws, and the seams of the full-circle angles are placed
+  first by a short pathfinder pilot (`_seam_pilot!`).
+- `seed=1`, `progress=true`
 - `checkpoint=nothing` : path of a state file. The sampler writes its whole
   state there (the ladder; every temperature's positions, logL, mass matrix and
   step size; the master and per-sweep RNG streams; the evidence accumulator and
@@ -350,6 +353,10 @@ function sample_pt_hmc(
     pilot_sweeps = do_pilot ? something(n_pilot, max(100, n_sweeps ÷ 4)) : 0
 
     function fresh_inits(n)
+        # Without the warm start's re-chart, nothing here moves a seam: a
+        # pathfinder pilot places the windows first (`_seam_pilot!`).
+        warm_start || isempty(circular_indices(target.params)) ||
+            _seam_pilot!(target, rand(rng, 1:typemax(Int32)))
         b = warm_start ? _warmstart_points(target, n, rng) :
                          [_draw_from_prior(target, rng) for _ in 1:n]
         [transform_forward(x, target.transform) for x in b]

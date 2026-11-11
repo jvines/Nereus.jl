@@ -252,3 +252,47 @@ function _pathfinder_recut!(result, target::NereusTarget, n_runs::Int)
                                  (n_res > 0 ? mod1(i, n_res) : 1)])
             for i in 1:min(n_runs, length(first_col))]
 end
+
+"""
+    _seam_pilot!(target, seed) -> Bool
+
+The circular windows placed by a pathfinder pilot ([`pathfinder_init`](@ref),
+which re-cuts the seams from its own draws), for a sampler that would start in
+the layout's charts and never move a seam itself: NUTS and pt_hmc without their
+pt_emcee warm start. They walk in the logit chart, where a seam is a wall at
+±∞, and a mode across it is two slivers, one per wall, that no chain crosses
+(NUTS on Mo ≈ 0 without a moved chart: 358° ± 2° against the true 7° ± 5°).
+Only full-circle angles need it: a polar angle's draws are folded into
+`[0, π]`, clear of its chart's seam. Returns whether a window moved. A pilot
+that fails leaves the charts as they were, with a warning.
+"""
+function _seam_pilot!(target::NereusTarget, seed::Integer)
+    params = target.params
+    (target.transform === nothing || isempty(circular_indices(params))) && return false
+    w0 = circular_windows(params)
+    try
+        pathfinder_init(target; n_runs = 4, n_draws = 200, seed = Int(seed))
+    catch err
+        err isa InterruptException && rethrow()
+        @warn "the seam pilot (pathfinder) failed: the circular windows stay " *
+              "where they were, and a posterior across a seam will be cut by it" exception = err
+        return false
+    end
+    return circular_windows(params) != w0
+end
+
+"""
+    _center_windows_on!(params, x; transforms = ()) -> x
+
+Every full-circle angle's window moved to be centred on `x`'s value (bounded
+coordinates), the seam opposite it, and `x` relabelled into the new windows. For
+a sampler started from a caller's `init` with no re-cut of its own: the start
+is the one point known to be in the posterior.
+"""
+function _center_windows_on!(params::Params, x::AbstractVector; transforms = ())
+    for d in circular_indices(params)
+        ps = params.layout.unfrozen_priors[d]
+        set_circular_window!(params, d, x[d] - (ps.hi - ps.lo) / 2; transforms)
+    end
+    return circular_relabel_point!(x, params)
+end
