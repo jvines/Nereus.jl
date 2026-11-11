@@ -133,6 +133,8 @@ const TEST_UNITS = [
     (name = "test_packed_normalisation.jl", seconds = 2, files = ["test_packed_normalisation.jl"]),
     # measured: 63 s, one process, 8 threads (2026-11-11)
     (name = "test_seam_samplers.jl", seconds = 63, files = ["test_seam_samplers.jl"]),
+    # measured: 24 s, one process, 8 threads (2026-11-11)
+    (name = "test_within_model_scales.jl", seconds = 24, files = ["test_within_model_scales.jl"]),
     (name = "test_lambda_slide.jl", seconds = 1, files = ["test_lambda_slide.jl"]),
     (name = "test_label_switching.jl", seconds = 6, files = ["test_label_switching.jl"]),
     (name = "test_pt_donor_buffer.jl", seconds = 1, files = ["test_pt_donor_buffer.jl"]),
