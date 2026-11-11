@@ -82,6 +82,7 @@ include("checkpoint.jl")        # sampler checkpoints: write, read, resume (need
 include("juliacall_compat.jl") # _is_under_juliacall + @maybe_threaded — gate every Julia threading construct so production workers don't deadlock under the Python GIL
 include("samplers/nuts.jl")
 include("samplers/rjmcmc.jl")
+include("samplers/scouts.jl")   # scouted starts for the local samplers (rjmcmc, moms, cold NUTS)
 include("samplers/moms.jl")     # MoMS sampler — needs rjmcmc helpers
 include("samplers/daedalus.jl")  # Daedalus — MoMS-within-nested-sampling
 include("samplers/evidence.jl")  # reddemcee-style TI+/SS+/H+ — used by PT
