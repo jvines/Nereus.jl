@@ -1006,3 +1006,26 @@ function recut_walkers!(X::AbstractMatrix{Float64}, params::Params, transform)
     end
     return true
 end
+
+"""
+    restricted_angles(params) -> Dict{String, String}
+
+The unfrozen angles whose prior covers only part of their range, each mapped
+to that full range: a full-circle angle ([`periodic_angle`](@ref)) whose prior
+is not a full period (`"[0, 2π)"`), or an inclination whose prior does not
+span `[0, π]` (`"[0, π]"`). A user's deliberate sub-range is kept as written;
+the reporters use this to say that a rail there is the prior's restriction
+(`assess_fit`'s `angle_range`, the science tables' rail note).
+"""
+function restricted_angles(params::Params)
+    L = params.layout
+    out = Dict{String, String}()
+    for (nm, ps) in zip(L.unfrozen_names, L.unfrozen_priors)
+        if periodic_angle(nm, params.config)
+            is_circular(nm, ps, params.config) || (out[nm] = "[0, 2π)")
+        elseif occursin(r"^inc_k\d+$", nm) || nm == "i_star"
+            is_cyclic_inclination(ps) || (out[nm] = "[0, π]")
+        end
+    end
+    return out
+end

@@ -213,6 +213,7 @@ function science_fitted(chains, params::Params)
     circ = circular_names(params)
     cinc = cyclic_inclination_names(params)
     jit = jitter_names(params)
+    restr = restricted_angles(params)
     # The winning model's live SLOTS, not `1:modal_np`: after a death in the
     # middle of the slot list the live planet sits in a later slot, and the
     # count-based cut dropped it from the table (see `_winning_planet_slots`).
@@ -246,6 +247,11 @@ function science_fitted(chains, params::Params)
                                  floor_ok = name in jit)
             d["railed"] = rail
             rail && (d["railed_bound"] = side)
+            # An angle whose prior covers only part of its range: the rail is
+            # that restriction, which the user may have meant.
+            rail && haskey(restr, name) && (d["railed_note"] =
+                "the prior restricts this angle to part of its full range " *
+                "$(restr[name]); the bound is the prior's, not the data's")
         end
         push!(entries, name => d)
     end
@@ -667,13 +673,17 @@ end
 function _prior_block(params::Params)
     out = Dict{String, Any}()
     circ = circular_names(params)
+    cinc = cyclic_inclination_names(params)
     for name in params.layout.unfrozen_names
         pr = params.config.priors[name]
         lo, hi = bounds(pr)
         d = Dict{String, Any}(
             "type" => string(nameof(typeof(pr))),
             "lower" => lo, "upper" => hi)
+        # The topology it was sampled on (src/circular.jl): a full circle
+        # (its window a chart), or a polar angle reflected at its poles.
         name in circ && (d["circular"] = true)
+        name in cinc && (d["polar"] = true)
         out[name] = d
     end
     return out
