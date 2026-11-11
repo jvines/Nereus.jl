@@ -144,7 +144,7 @@ end
             n_live = 40, proposal = :banana, seed = 1)
     end
 
-    @testset "the random walk leaves the constrained uniform distribution unchanged" begin
+    @testset "the walk and slice kernels leave the constrained uniform distribution unchanged" begin
         # The replacement drawn from a live set that is uniform inside a curved
         # constraint (a banana in the unit square) must be uniform inside it
         # too. The walk sample_nested_ins and sample_nested_dynamic share used
@@ -169,14 +169,15 @@ end
         bound = NestedSamplers.Bounds.scale!(NestedSamplers.Bounds.fit(NestedSamplers.Bounds.Ellipsoid, live), 1.25)
         evl(u, slot = 1) = (0 <= u[1] <= 1 && 0 <= u[2] <= 1) ? banana(u) : -Inf
         M = 20_000
-        for n_walks in (2, 25)
+        for (kernel, n_walks) in ((Nereus._rwalk_within_shell!, 2), (Nereus._rwalk_within_shell!, 25),
+                                  (Nereus._slice_within_shell!, 1), (Nereus._slice_within_shell!, 3))
             out = zeros(2, M)
-            scale = Ref(1.0)
+            scale = kernel === Nereus._rwalk_within_shell! ? Ref(1.0) : 1.0
             r = MersenneTwister(5)
             a, b, c = zeros(2), zeros(2), zeros(2)
             for i in 1:M
-                u, _ = Nereus._rwalk_within_shell!(live, liveL, r, evl, 2, N, 0, lstar, bound, 0.0,
-                                                   n_walks, scale, Float64[], Float64[], a, b, c)
+                u, _ = kernel(live, liveL, r, evl, 2, N, 0, lstar, bound, 0.0,
+                              n_walks, scale, Float64[], Float64[], a, b, c)
                 out[:, i] = u
                 # a fresh live set now and then, so starts are not reused often
                 if i % 2000 == 0
