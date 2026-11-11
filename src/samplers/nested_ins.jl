@@ -90,9 +90,12 @@ machinery use the same draws.
   acceptance and fixed within each; for `:slice` the initial bracket, in
   units of an ellipsoid axis vector.
 - `proposal::Symbol=:rwalk` — within-shell move: `:rwalk` (random walk),
-  `:slice` (random-direction slice), or `:unif` (rejection; low-d only).
-  These are Nereus's own kernels: every likelihood call they make is
-  recorded for `log_z_ins`.
+  `:slice` (random-direction slice), or `:unif` (draws from the bound; low
+  dimension only: on 7- and 10-parameter RV and RM fits a run, here or in
+  `sample_nested_dynamic`, stops within two minutes with an error when no
+  draw in 100 000 likelihood calls reaches the threshold; on a 2-parameter
+  gravity-darkening fit it matches pt_emcee). These are Nereus's own
+  kernels: every likelihood call they make is recorded for `log_z_ins`.
 - `min_X_shrinkage::Real=10.0` — min log prior-volume shrinkage before
   the dlogz stop can trigger.
 - `seed::Int=1`
