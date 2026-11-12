@@ -147,6 +147,7 @@ end
             n_live = 40, dlogz = 2.0, max_iter = 1500, seed = 1)
         @test res isa INSResult
         @test isfinite(res.log_z_ns)
+        @test 0 < res.log_z_ns_err < 2
         # the default walk does not draw from the bound (INSResult)
         @test isnan(res.log_z_ins)
         @test res.n_iters > 0

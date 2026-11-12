@@ -38,6 +38,10 @@ Container for a `sample_nested_ins` run.
 # Fields
 - `chains::MCMCChains.Chains` — posterior samples (importance-resampled).
 - `log_z_ns::Float64` — Skilling-style NS log Z (iso-likelihood shells).
+- `log_z_ns_err::Float64` — its error: the spread of log Z over realisations
+  of the run, its threads resampled and its prior volumes drawn afresh
+  (dynesty's; src/samplers/ns_error.jl). sqrt(H / n_live) counts the volumes
+  alone.
 - `log_z_ins::Float64` — the sum of `L·V` over every evaluation, divided by
   their number, `V` the volume of the bound it was drawn from. `NaN` unless
   `proposal = :unif`: the walk and slice kernels do not draw from the bound.
@@ -51,6 +55,7 @@ Container for a `sample_nested_ins` run.
 struct INSResult
     chains::MCMCChains.Chains
     log_z_ns::Float64
+    log_z_ns_err::Float64
     log_z_ins::Float64
     n_iters::Int
     n_evals::Int
@@ -205,6 +210,10 @@ function sample_nested_ins(
         end
     end
     n_evals = n_live
+    # The bound each live point was drawn above, for the log Z error
+    # (src/samplers/ns_error.jl): the prior's for the first ones.
+    live_birth = fill(-Inf, n_live)
+    trace = _NSTrace()
 
     # Fit initial bound (with MultiEllipsoid fallback to single Ellipsoid
     # when k-means clustering fails on near-duplicate live points).
@@ -285,6 +294,7 @@ function sample_nested_ins(
             worst_save[d] = live_u[d, idx_worst]
         end
         push!(dead_u, copy(worst_save))
+        _ns_trace_push!(trace, logL_worst, live_birth[idx_worst], idx_worst)
 
         log_X = log_X_new
 
@@ -331,6 +341,7 @@ function sample_nested_ins(
             live_u[d, idx_worst] = new_u[d]
         end
         live_logL[idx_worst] = new_logL
+        live_birth[idx_worst] = _ns_floor(logL_worst)
 
         # Refit bound periodically (after several live points have
         # turned over, the bound needs to track the shrinking support).
@@ -387,7 +398,9 @@ function sample_nested_ins(
         push!(dead_logL, live_logL[i])
         push!(dead_logwt, log_wt)
         push!(dead_u, copy(live_u[:, i]))
+        _ns_trace_push!(trace, live_logL[i], live_birth[i], i)
     end
+    log_z_ns_err = _ns_logz_err(trace; seed = seed)
 
     # --- log(Σ L_i · V_i) − log(N_total_evals), see INSResult -----
     # Defined only for draws from the bound: the walk and slice kernels move
@@ -456,7 +469,7 @@ function sample_nested_ins(
 
     param_names = Symbol.(layout.unfrozen_names)
     chains = MCMCChains.Chains(samples, param_names)
-    return INSResult(chains, log_z_ns, log_z_ins, iter, n_evals)
+    return INSResult(chains, log_z_ns, log_z_ns_err, log_z_ins, iter, n_evals)
 end
 
 
