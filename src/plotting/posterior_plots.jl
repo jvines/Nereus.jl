@@ -99,7 +99,7 @@ function plot_posteriors_lp(chains, params;
                      label = "mean = $(round(vmean, sigdigits = 7))")
             axislegend(ax; position = _best_legend_corner(v, lps),
                         framevisible = false, labelsize = 12)
-            figs[nm] = fig
+            _keep_fig!(figs, nm, fig)
             if outdir !== nothing
                 _save_plot(joinpath(outdir, "lp_$(nm).$fmt"), fig;
                             save_pdf = save_pdf, px_per_unit = 2)

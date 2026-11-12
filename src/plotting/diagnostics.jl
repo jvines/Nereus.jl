@@ -64,7 +64,7 @@ function plot_trace(chains, params;
                 _save_plot(joinpath(output, "traces", "$name.$fmt"), fig;
                             save_pdf=save_pdf)
             end
-            figs[name] = fig
+            _keep_fig!(figs, name, fig)
         end
     end
     return figs
@@ -212,7 +212,7 @@ function plot_posteriors(chains, params;
             fig = Figure(; size=figsize)
             ax = Axis(fig[1, 1]; xlabel=name, ylabel="Posterior")
             _lnp_density!(ax, samp, lp)
-            figs[name] = fig
+            _keep_fig!(figs, name, fig)
             if output !== nothing
                 mkpath(joinpath(output, "posteriors"))
                 _save_plot(joinpath(output, "posteriors", "$name.$fmt"), fig;

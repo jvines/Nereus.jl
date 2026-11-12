@@ -215,6 +215,20 @@ _plotmem_stage(chains, params, data) = Nereus._make_plots(
         @test Base.gc_live_bytes() - live0 < 3 * 4 * 1600 * 1200   # 3 of the 10 surfaces
     end
 
+    @testset "a batch render does not keep its figures in the returned Dict" begin
+        figs = Dict{String, Any}()
+        Nereus._keep_fig!(figs, "a", 1)
+        @test haskey(figs, "a")                  # interactive: kept
+        prev = Nereus._RELEASE_SCENES[]
+        Nereus._RELEASE_SCENES[] = true
+        try
+            Nereus._keep_fig!(figs, "b", 2)
+        finally
+            Nereus._RELEASE_SCENES[] = prev
+        end
+        @test !haskey(figs, "b")
+    end
+
     @testset "a large chain's figures collect once enough is allocated" begin
         # `_save_plot` collects (when `_make_plots` turns it on) only once
         # `_RELEASE_EVERY` bytes have been allocated since the last collection.

@@ -53,6 +53,13 @@ duration of a batch render, where the figures are written and discarded.
 """
 const _RELEASE_SCENES = Ref(false)
 
+# A plot function that returns its figures in a Dict keeps every one of them
+# alive until it returns, however many it writes: for a grid of a few dozen
+# parameters that is tens of MB of scene and draws apiece. In a batch render
+# (`_RELEASE_SCENES`) the figures are written and torn down, nobody reads the
+# Dict, so each is let go as soon as it is saved.
+_keep_fig!(figs, key, fig) = (_RELEASE_SCENES[] || (figs[key] = fig); nothing)
+
 """
 Whether `_save_plot` collects after writing a figure, once `_RELEASE_EVERY`
 bytes have been allocated since the last collection. `_make_plots` turns it on
@@ -68,7 +75,7 @@ for figures that allocated next to nothing.
 """
 const _RELEASE_MEMORY = Ref(false)
 const _RELEASED_AT = Ref{Int64}(0)            # `Base.gc_bytes()` at the last one
-const _RELEASE_EVERY = 256 * 2^20
+const _RELEASE_EVERY = 64 * 2^20
 
 function _release_memory_if_due()
     Base.gc_bytes() - _RELEASED_AT[] < _RELEASE_EVERY && return nothing

@@ -304,7 +304,7 @@ function plot_posteriors_raw(chains, params; credmass::Real=0.85,
             vlines!(ax, [med];  color=_TAB.purple, linewidth=1.8, label="median")
             vlines!(ax, [vmax]; color=_TAB.red,    linewidth=1.8, label="max")
             axislegend(ax; position=:rb, framevisible=false, labelsize=11)
-            figs[nm] = fig
+            _keep_fig!(figs, nm, fig)
             if outdir !== nothing
                 gd = joinpath(outdir, _param_group(nm, owner, noise_set)); mkpath(gd)
                 _save_plot(joinpath(gd, "raw_$(nm).$fmt"), fig; save_pdf=save_pdf, px_per_unit=2)
@@ -347,7 +347,7 @@ function plot_posteriors_parameters(chains, params; credmass::Real=0.85,
             vlines!(ax, [med];  color=_TAB.purple, linewidth=1.8, label="median")
             vlines!(ax, [vmax]; color=_TAB.red,    linewidth=1.8, label="max")
             axislegend(ax; position=:rb, framevisible=false, labelsize=11)
-            figs[nm] = fig
+            _keep_fig!(figs, nm, fig)
             if outdir !== nothing
                 gd = joinpath(outdir, _param_group(nm, owner, noise_set)); mkpath(gd)
                 _save_plot(joinpath(gd, "param_$(nm).$fmt"), fig; save_pdf=save_pdf, px_per_unit=2)
@@ -397,7 +397,7 @@ function plot_posteriors_histograms(chains, params; credmass::Real=0.85,
                   "skew = $(round(skew,sigdigits=3))\nkurt = $(round(kurt,sigdigits=3))"
             text!(ax, 0.97, 0.97; text=txt, align=(:right,:top), space=:relative,
                   fontsize=13, color=:black)
-            figs[nm] = fig
+            _keep_fig!(figs, nm, fig)
             if outdir !== nothing
                 gd = joinpath(outdir, _param_group(nm, owner, noise_set)); mkpath(gd)
                 _save_plot(joinpath(gd, "hist_$(nm).$fmt"), fig; save_pdf=save_pdf, px_per_unit=2)
@@ -491,7 +491,7 @@ function plot_traces_grouped(chains, params; output::Union{Nothing,String}=nothi
             end
             linkxaxes!(axs...)               # shared iteration axis
             rowgap!(fig.layout, 0)           # glued panels, no vertical space
-            figs[g] = fig
+            _keep_fig!(figs, g, fig)
             outdir !== nothing && _save_plot(joinpath(outdir, "trace_$(g).$fmt"), fig;
                                              save_pdf=save_pdf, px_per_unit=2)
         end
