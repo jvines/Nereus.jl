@@ -24,7 +24,27 @@ struct NereusTarget{T}
     transform::T   # PackedTransforms or Nothing
 end
 
+"""
+    with_phic_epoch(params, data) -> Params
+
+`params` with the epoch the transit phase φ_c is measured from taken from
+`data` ([`phic_reference_epoch`](@ref)), when it was built without data and
+still has none. Otherwise `params` itself. Layout and priors are untouched.
+"""
+function with_phic_epoch(params::Params, data::Data)
+    c = params.config
+    pc = c.parametrization
+    (pc.time === :phic && isnan(pc.t_ref_c) && c.max_kplanet > 0) || return params
+    cfg = ParamsConfig(c.max_kplanet, _with_t_ref_c(pc, phic_reference_epoch(data)),
+                       c.planet_modes, c.instruments, c.priors, c.trend_order,
+                       c.phot_trend_order, c.noise_models, c.stability, c.M_s, c.R_s,
+                       c.external_priors, c.sharing, c.ttv_n_transits,
+                       c.ttv_backend, c.obliquity)
+    return Params(cfg, params.layout)
+end
+
 function NereusTarget(params::Params, data::Data; unconstrained::Bool=true)
+    params = with_phic_epoch(params, data)
     if unconstrained
         t = build_transform(params)
         return NereusTarget(params, data, t)

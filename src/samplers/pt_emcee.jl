@@ -577,7 +577,10 @@ end
 # at a time, from the drop to the steeper side:
 #     D(h) = ℓ0 - min(ℓ(y0 + h e_j), ℓ(y0 - h e_j)),    σ_j = h / √(2D)
 # with h rescaled by 4 from `h0` until D lies in [1/8, 2] nats, the quadratic
-# core clear of rounding. At the mode of a Gaussian that is the conditional
+# core clear of rounding; once an h below and one above the window are known,
+# bisected geometrically between them (a wall or support edge makes D jump by
+# more than the factor 16 a ×4 step allows), and if none lands in it, taken at
+# the narrowest h that overshot (a smaller σ). At the mode of a Gaussian that is the conditional
 # width 1/√H_jj. Away from it the gradient g_j steepens one side,
 # D = |g_j| h + ½ H_jj h², so σ_j only comes out smaller: a walker still
 # climbing (Gaia-4 b's had its jitters 15 nats per m/s uphill) gets a smaller
@@ -585,32 +588,56 @@ end
 # half the width (half a Gaussian). `nothing` if an axis never settles. Only
 # the axes `dims` (h0 and the widths returned are theirs, in that order).
 function _pt_axis_widths(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
-                         h0::AbstractVector{Float64}; max_iter::Int = 16,
+                         h0::AbstractVector{Float64}; max_iter::Int = 24,
                          dims = eachindex(y0))
     σ = Vector{Float64}(undef, length(dims))
     y = collect(Float64, y0)
     for (i, j) in enumerate(dims)
         h = h0[i]
         ok = false
+        lo = 0.0          # the widest h seen with the drop under 1/8 nat
+        hi = Inf          # the narrowest h seen with the drop over 2 nats (or off the support)
+        up = nothing      # σ read at `hi`, when its drop was finite
         for _ in 1:max_iter
             y[j] = y0[j] + h; ℓp = ℓat(y)
             y[j] = y0[j] - h; ℓm = ℓat(y)
             y[j] = y0[j]
             if !isfinite(ℓp) && !isfinite(ℓm)
-                h /= 4
+                hi = min(hi, h)
+                h = lo > 0 ? sqrt(lo * hi) : h / 4
                 continue
             end
             half = isfinite(ℓp) && isfinite(ℓm) ? 1.0 : 0.5
             drop = ℓ0 - min(isfinite(ℓp) ? ℓp : Inf, isfinite(ℓm) ? ℓm : Inf)
             if drop > 2
-                h /= 4
+                # Too steep. The drop need not grow as h²: a wall (a support
+                # edge, a prior that diverges) makes it jump by more than the
+                # factor 16 a ×4 step allows, so once a flat h is known, bisect
+                # between the two instead of stepping back and forth.
+                if h < hi
+                    hi = h
+                    up = half * h / sqrt(2 * drop)
+                end
+                h = lo > 0 ? sqrt(lo * hi) : h / 4
             elseif drop >= 0.125
                 σ[i] = half * h / sqrt(2 * drop)
                 ok = true
                 break
             else
-                h *= 4      # flat at this scale, or uphill both ways: look wider
+                lo = max(lo, h)
+                h = isfinite(hi) ? sqrt(lo * hi) : h * 4   # flat, or uphill both ways
             end
+            # The bracket has closed on a jump: no h gives a drop in the window.
+            if lo > 0 && hi < Inf && hi <= lo * (1 + 1e-6)
+                break
+            end
+        end
+        if !ok && up !== nothing
+            # No h put the drop in the window: take the width at the narrowest h
+            # that overshot it. A larger drop gives a smaller σ, so this only
+            # underestimates the volume.
+            σ[i] = up
+            ok = true
         end
         ok || return nothing
     end
