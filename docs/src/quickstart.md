@@ -461,14 +461,14 @@ params = Params(;
 )
 target = NereusTarget(params, data; unconstrained = true)
 
-# pt_emcee is the default engine, and the right one here. Its stretch move
-# is built from the difference between two walkers, so it follows the local
-# correlation — which is what a joint RV+phot+GP posterior needs.
+# pt_emcee is the default engine, and the right one here. Its stretch and
+# DE moves are built from differences between walkers, so they follow the
+# local correlation — which is what a joint RV+phot+GP posterior needs.
 res = sample_pt_emcee(target, target.data;
     n_temps       = 16,       # 24 for joint absolute astrometry
     n_walkers     = 100,
-    n_steps       = 3000,
-    n_burnin      = 1500,
+    n_steps       = 12000,    # at 6000, one seed in two short of R-hat 1.1
+    n_burnin      = 6000,
     init_strategy = :prior,
     seed          = 42,
 )
