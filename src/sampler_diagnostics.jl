@@ -36,8 +36,8 @@ an engine that grows a field gets it persisted without touching this list
 twice."""
 const _DIAG_FIELDS = (
     # evidence
-    :log_evidence, :log_evidence_laplace, :log_evidence_bridge,
-    :log_z, :log_z_ns, :log_z_ins, :log_z_baseline, :log_z_batch,
+    :log_evidence, :log_evidence_err, :log_evidence_laplace, :log_evidence_bridge,
+    :log_z, :log_z_err, :log_z_ns, :log_z_ns_err, :log_z_ins, :log_z_baseline, :log_z_batch,
     :log_evidence_history,
     # effort
     :n_evals, :n_iters, :n_iters_baseline, :n_iters_batch,
@@ -144,7 +144,7 @@ reporting a count as their evidence.
 const _TUPLE_SLOTS = Dict{String, Tuple{Vararg{Symbol}}}(
     "pt"        => (:log_evidence, :n_evals),      # slot 3 only on the trans-dim path
     "pt_hmc"    => (:log_evidence, :evidence),
-    "nested"    => (:log_evidence,),
+    "nested"    => (:log_evidence, :log_evidence_err),
     "daedalus"  => (:log_evidence, :_strategy),    # slot 3 is adaptation state
     "moms"      => (:n_evals, :_strategy),         # NOT evidence
     "rjmcmc"    => (:n_evals,),                    # NOT evidence

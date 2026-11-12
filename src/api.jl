@@ -902,7 +902,9 @@ function _normalize(raw)
     # diagnostics, from a run that had sampled perfectly well.
     raw isa MCMCChains.Chains && return raw, NaN, extra
     ch = hasproperty(raw, :chains) ? raw.chains : nothing
-    lz = hasproperty(raw, :log_evidence) ? raw.log_evidence : NaN
+    lz = _ns_evidence("", raw)
+    lz = lz !== nothing ? lz[1] :
+         hasproperty(raw, :log_evidence) ? raw.log_evidence : NaN
     for f in (:acceptance_within, :acceptance_swap, :betas, :n_evals)
         hasproperty(raw, f) && (extra[String(f)] = getproperty(raw, f))
     end
@@ -1264,7 +1266,7 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                 # A bare log_z is not quotable: the tempered stack shares one
                 # mean_logL array, so its four variants agreeing is not a
                 # cross-check and they can sit >100 nats low together.
-                _evidence_block!(summary, raw)
+                _evidence_block!(summary, raw; engine = spec_name)
                 # The tempered stack sits >100 nats low on a signal-locked
                 # posterior while its four variants agree with each other to a
                 # decimal, so a bridge cross-check is not optional.
@@ -1327,9 +1329,24 @@ end
 # does support them. The signature stays technique-shaped; the config is an
 # implementation detail the caller never sees.
 
+"""
+    _ns_evidence(engine, raw) -> Union{Nothing, Tuple{Float64, Float64}}
+
+A nested engine's log Z and its error (src/samplers/ns_error.jl), from what
+`sample_nested` (a tuple), `sample_nested_ins` or `sample_nested_dynamic`
+returned; `nothing` for any other engine.
+"""
+function _ns_evidence(engine::AbstractString, raw)
+    raw isa INSResult && return (raw.log_z_ns, raw.log_z_ns_err)
+    raw isa DynamicNSResult && return (raw.log_z, raw.log_z_err)
+    engine == "nested" && raw isa Tuple && length(raw) >= 3 &&
+        return (Float64(raw[2]), Float64(raw[3]))
+    return nothing
+end
+
 """Every evidence estimate the sampler produced, with its error, and which one
 `log_z` reports. Mirrors the block `_populate_summary!` builds for run_job."""
-function _evidence_block!(summary::AbstractDict, result)
+function _evidence_block!(summary::AbstractDict, result; engine::AbstractString = "")
     result === nothing && return
     ev = Dict{String,Any}()
     for (key, fld) in ("bridge" => :log_evidence_bridge,
@@ -1338,6 +1355,9 @@ function _evidence_block!(summary::AbstractDict, result)
         v = getproperty(result, fld)
         v isa Real && isfinite(v) && (ev[key] = Float64(v))
     end
+    ns = _ns_evidence(engine, result)
+    (ns === nothing || !isfinite(ns[1])) ||
+        (ev["nested"] = Dict("log_z" => ns[1], "se" => ns[2]))
     for rf in (:evidence, :evidence_report)
         hasproperty(result, rf) || continue
         rep = getproperty(result, rf)

@@ -18,14 +18,14 @@
 #     targeted; same shape for our purposes). Smooth and locate the
 #     bulk of the importance distribution.
 #  3. **Dynamic batches** — pick a target likelihood range
-#     [L_lo, L_hi] covering the high-importance region. Initialize
-#     `n_live_batch` new live points uniformly in that range (sampled
-#     from the dead-point cloud), run NS just within that range until
-#     the lowest live point exits at L_hi, accumulating new dead
-#     points.
+#     [L_lo, L_hi] covering the high-importance region. Draw
+#     `n_live_batch` new live points uniformly inside L > L_lo (chains of
+#     the proposal from the baseline's points above L_lo), run NS from
+#     there until the lowest live point exits at L_hi, accumulating new
+#     dead points.
 #  4. **Combine** via Higson's iso-likelihood interleaving: merge all
-#     dead-point sequences by L, recompute log X for each step as if
-#     the union were one effective n_live(L) schedule.
+#     dead-point sequences by L, recompute log X for each step with the
+#     number of live points of every pass alive at that L.
 #
 # This implementation is a single-loop, single-batch reduction of the
 # full Higson algorithm: it runs a baseline pass, identifies where the
@@ -37,7 +37,7 @@ using NestedSamplers
 using Random
 using MCMCChains
 using Statistics: median
-using LogExpFunctions: logsumexp, logsubexp
+using LogExpFunctions: logsumexp, logsubexp, logaddexp
 
 export sample_nested_dynamic, DynamicNSResult
 
@@ -47,6 +47,9 @@ export sample_nested_dynamic, DynamicNSResult
 # Fields
 - `chains::MCMCChains.Chains` — resampled posterior, bounded space.
 - `log_z::Float64` — combined log Z from baseline + targeted batch.
+- `log_z_err::Float64` — its error: the spread of log Z over realisations of
+  the merged run, each pass's threads resampled and the prior volumes drawn
+  afresh (dynesty's; src/samplers/ns_error.jl).
 - `log_z_baseline::Float64`, `log_z_batch::Float64` — per-pass log Z.
 - `n_iters_baseline::Int`, `n_iters_batch::Int`
 - `n_evals::Int` — total likelihood evaluations.
@@ -55,6 +58,7 @@ export sample_nested_dynamic, DynamicNSResult
 struct DynamicNSResult
     chains::MCMCChains.Chains
     log_z::Float64
+    log_z_err::Float64
     log_z_baseline::Float64
     log_z_batch::Float64
     n_iters_baseline::Int
@@ -87,10 +91,14 @@ importance likelihood window.
 - `pad::Int=1` — extra dead points to include each side of that band.
 - `max_iter::Int=50_000` per pass.
 - `bound_update_interval::Int=50`
-- `n_walks::Union{Int,Nothing}=nothing` — Metropolis steps / slice sweeps per
-  replacement. `nothing` → dimension-scaled `max(25, 2·n_dim)` (a fixed count
-  under-decorrelates as n_dim grows → logZ biased low). Explicit honored.
-- `walk_scale::Real=1.0` — initial proposal scale.
+- `n_walks::Union{Int,Nothing}=nothing` — walk steps / slices per
+  replacement. `nothing` → `max(25, 10·n_dim)` for `:rwalk` and
+  `max(25, 5·n_dim)` for `:slice`. Too few leave each new point near the
+  live point its chain started from and put log Z high: with
+  `max(25, 2·n_dim)` it came out 0.6 nats above pt_emcee's on an RM obliquity
+  fit and its scatter between seeds was three times the NS error. An
+  explicit value is honored verbatim.
+- `walk_scale::Real=1.0` — initial proposal scale (see `sample_nested_ins`).
 - `proposal::Symbol=:rwalk` — within-shell move (`:rwalk`, `:slice`,
   `:unif`); shares Nereus's INS kernels (see `sample_nested_ins`).
 - `seed::Int=1`
@@ -139,12 +147,18 @@ function sample_nested_dynamic(
     walk_scale  = Float64(walk_scale)
     pfrac       = Float64(pfrac)
     maxfrac     = Float64(maxfrac)
-    # Dimension-scaled within-shell decorrelation (see sample_nested): a fixed
-    # step count under-decorrelates as n_dim grows → logZ biased low. `nothing`
-    # → max(25, 2·n_dim) (PolyChord num_repeats ∝ nDims); explicit honored.
-    # Flows to both _ns_inner passes below. See project_ns_rslice_undermixing.
+    # Steps per replacement, for both passes. Chosen as sample_nested's are
+    # (the decorrelation note there): the smallest multiple of n_dim whose
+    # log Z, averaged over six seeds, came within the NS error (0.20-0.35
+    # with 200 live points in the baseline) of pt_emcee's on all four test
+    # fits. At 5·n_dim the walk's came out 0.37 low on the RM fit at λ = 0°.
     n_walks = n_walks === nothing ?
-              max(25, 2 * length(target.params.layout.unfrozen_idx)) : n_walks
+              max(25, (proposal === :rwalk ? 10 : 5) *
+                      length(target.params.layout.unfrozen_idx)) : n_walks
+    # Every run starts from the same charts, so a seed repeats it; the passes
+    # move them as they go (`_ns_recut!`).
+    _ns_home_charts!(target.params;
+                     transforms = target.transform === nothing ? () : (target.transform,))
     # === Pass 1: baseline NS ===
     verbose && @info "Dynamic NS: baseline pass (n_live=$n_live_init, dlogz=$dlogz_init)"
     base = _ns_inner(target, data;
@@ -215,53 +229,33 @@ function sample_nested_dynamic(
         L_lo, L_hi, idx_lo, idx_hi, n_dead)
 
     # === Pass 2: targeted batch ===
-    # Initialize `n_live_batch` live points by drawing from the baseline
-    # dead points with log L ≥ L_lo (uniformly). This seeds the batch
-    # in the target region without re-evaluating the likelihood.
-    elig = findall(>=(L_lo), base.dead_logL)
+    # `n_live_batch` live points uniform inside L > L_lo, drawn by the
+    # proposal from the baseline's points above L_lo (`_ns_inner`, seed_u).
+    elig = findall(>(L_lo), base.dead_logL)
+    seed_u = reduce(hcat, base.dead_u[elig])
+    seed_logL = base.dead_logL[elig]
+    log_X_lo = -idx_lo / n_live_init   # the baseline's prior volume above L_lo
     rng = MersenneTwister(seed + 1)
-    init_idx = rand(rng, elig, n_live_batch)
-    init_u = hcat([copy(base.dead_u[i]) for i in init_idx]...)
-    init_logL = base.dead_logL[init_idx]
 
     batch = _ns_inner(target, data;
                       n_live = n_live_batch, bounds = bounds, enlarge = enlarge,
                       dlogz = dlogz_batch, max_iter = max_iter,
                       bound_update_interval = bound_update_interval,
                       L_min = L_lo, L_max = L_hi,
-                      init_u = init_u, init_logL = init_logL,
+                      seed_u = seed_u, seed_logL = seed_logL, log_X0 = log_X_lo,
                       extra_dead = (base.dead_u,),
                       n_walks = n_walks, walk_scale = walk_scale,
                       proposal = proposal,
                       seed = seed + 2, verbose = verbose,
                       label = "nested batch 1", show_progress = show_progress)
 
-    # === Combine: Higson interleaving (simplified) ===
-    # Concatenate dead-point streams and recompute log_X with an
-    # effective n_live that is the sum of baseline + batch in the
-    # batch's L range. For L outside the batch range, n_live = baseline
-    # only.
-    all_logL = vcat(base.dead_logL, batch.dead_logL)
-    all_u    = vcat(base.dead_u, batch.dead_u)
-    ord = sortperm(all_logL)
-    all_logL = all_logL[ord]
-    all_u    = all_u[ord]
-
-    n_total = length(all_logL)
-    log_X = 0.0
-    log_z = -Inf
-    log_wts = Vector{Float64}(undef, n_total)
-    for k in 1:n_total
-        in_batch_range = all_logL[k] >= L_lo && all_logL[k] <= L_hi
-        n_live_eff = in_batch_range ? (n_live_init + n_live_batch) : n_live_init
-        log_X_new = log_X - 1.0 / n_live_eff
-        log_dV = log_X + log1p(-exp(log_X_new - log_X))
-        log_wt = log_dV + all_logL[k]
-        log_wts[k] = log_wt
-        log_z = log_z == -Inf ? log_wt :
-                max(log_z, log_wt) + log1p(exp(-abs(log_z - log_wt)))
-        log_X = log_X_new
-    end
+    # === Combine ===
+    all_logL, all_u, log_wts, log_z = _merge_passes(base, batch, L_lo)
+    # The batch's threads numbered after the baseline's, and resampled apart.
+    trace = _NSTrace(vcat(base.dead_logL, batch.dead_logL),
+                     vcat(base.dead_birth, batch.dead_birth),
+                     vcat(base.dead_thread, batch.dead_thread .+ n_live_init))
+    log_z_err = _ns_logz_err(trace; group = t -> t > n_live_init ? 2 : 1, seed = seed)
 
     # Posterior chain construction — same n_eff-aware fallback as
     # sample_nested_ins. When n_eff < 200 a resample collapses to the MAP;
@@ -303,20 +297,75 @@ function sample_nested_dynamic(
 
     return DynamicNSResult(
         chains,
-        log_z, base.log_z, batch.log_z,
+        log_z, log_z_err, base.log_z, batch.log_z,
         base.n_iters, batch.n_iters, base.n_evals + batch.n_evals,
         L_lo, L_hi)
 end
 
 # Inner NS loop shared by baseline + batch passes. Accepts L_min /
 # L_max so the batch can restrict to a likelihood window.
+# `dead_n[i]` is the number of live points the pass had when it removed point
+# i: `n_live` for a dead point, n_live, n_live - 1, …, 1 for the live points it
+# ends with, which come last in increasing likelihood. `dead_birth[i]` is the
+# bound point i was drawn above and `dead_thread[i]` the live-point slot it
+# filled (`_NSTrace`).
 struct _NSPassResult
     dead_logL::Vector{Float64}
     dead_logwt::Vector{Float64}
     dead_u::Vector{Vector{Float64}}
+    dead_n::Vector{Int}
+    dead_birth::Vector{Float64}
+    dead_thread::Vector{Int}
     log_z::Float64
     n_iters::Int
     n_evals::Int
+end
+
+"""
+    _merge_passes(base, batch, L_lo) -> (logL, u, log_wt, log_z)
+
+The baseline pass and a batch started at `L_lo` merged into one run (Higson
+et al. 2019; dynesty merges its batches so): every point in increasing
+likelihood, its log weight and the log evidence. Each point leaves its pass
+with `dead_n` live points in it. In the merged run the live points at a
+likelihood L are those of both passes alive there: the baseline's, and the
+batch's for L above L_lo, where it starts; each pass's count at L is the one
+its first point at or above L was removed with. The prior volume shrinks by
+n / (n + 1) at a point removed with n live points.
+
+The merge used to count n_live_init + n_live_batch live points inside the
+batch's window [L_lo, L_hi] and n_live_init elsewhere, which miscounted the
+batch's live points above L_hi, removed one by one at its end, and the
+baseline's own.
+"""
+function _merge_passes(base::_NSPassResult, batch::_NSPassResult, L_lo::Float64)
+    function alive(r, birth, L)
+        L > birth || return 0
+        i = searchsortedfirst(r.dead_logL, L)
+        return i > length(r.dead_logL) ? 0 : r.dead_n[i]
+    end
+    issorted(base.dead_logL) && issorted(batch.dead_logL) ||
+        error("sample_nested_dynamic: a pass removed its points out of likelihood order")
+    all_logL = vcat(base.dead_logL, batch.dead_logL)
+    all_u    = vcat(base.dead_u, batch.dead_u)
+    all_n    = vcat([n + alive(batch, L_lo, L) for (L, n) in zip(base.dead_logL, base.dead_n)],
+                    [n + alive(base, -Inf, L) for (L, n) in zip(batch.dead_logL, batch.dead_n)])
+    ord = sortperm(all_logL)
+    all_logL = all_logL[ord]
+    all_u    = all_u[ord]
+    all_n    = all_n[ord]
+
+    log_X = 0.0
+    log_z = -Inf
+    log_wts = Vector{Float64}(undef, length(all_logL))
+    for k in eachindex(all_logL)
+        log_X_new = log_X - log1p(1 / all_n[k])
+        log_wt = log_X + log1p(-exp(log_X_new - log_X)) + all_logL[k]
+        log_wts[k] = log_wt
+        log_z = logaddexp(log_z, log_wt)
+        log_X = log_X_new
+    end
+    return all_logL, all_u, log_wts, log_z
 end
 
 function _ns_inner(target::NereusTarget, data::Data;
@@ -324,8 +373,9 @@ function _ns_inner(target::NereusTarget, data::Data;
                    dlogz::Float64, max_iter::Int,
                    bound_update_interval::Int,
                    L_min::Float64, L_max::Float64,
-                   init_u::Union{Nothing,Matrix{Float64}} = nothing,
-                   init_logL::Union{Nothing,Vector{Float64}} = nothing,
+                   seed_u::Union{Nothing,Matrix{Float64}} = nothing,
+                   seed_logL::Union{Nothing,Vector{Float64}} = nothing,
+                   log_X0::Float64 = 0.0,   # log prior volume above L_min
                    extra_dead = (),   # earlier passes' dead points, rotated by a re-cut too
                    n_walks::Int = 25,
                    walk_scale::Float64 = 1.0,
@@ -373,10 +423,84 @@ function _ns_inner(target::NereusTarget, data::Data;
     BoundT = bounds === :multi ? NestedSamplers.Bounds.MultiEllipsoid :
                                   NestedSamplers.Bounds.Ellipsoid
 
-    # Init live points (threaded eval when init_u not provided)
-    if init_u !== nothing
-        live_u = copy(init_u)
-        live_logL = copy(init_logL)
+    # :unif draws its points from the bound, which must then cover the
+    # constrained region: bootstrap-expand it, as sample_nested does
+    # (`Bounds.bootstrap_expansion`). The walks take only their shape from it.
+    n_boot = proposal === :unif ? 5 : 0
+
+    # Reused RWalk scratch — see sample_nested_ins for rationale.
+    scratch_cur   = Vector{Float64}(undef, n_dim)
+    scratch_prop  = Vector{Float64}(undef, n_dim)
+    scratch_noise = Vector{Float64}(undef, n_dim)
+    worst_save    = Vector{Float64}(undef, n_dim)
+    # Throw-away INS-style accumulators (dynamic NS doesn't compute
+    # INS evidence). Pre-allocate and reuse with empty!() each iter;
+    # `length(_scratch_V)` after a draw is its likelihood calls.
+    _scratch_L = Float64[]
+    _scratch_V = Float64[]
+    sizehint!(_scratch_L, 200)
+    sizehint!(_scratch_V, 200)
+
+    # the random walk's step, fixed within each chain (sample_nested_ins)
+    walk_scale_now = Ref(walk_scale)
+
+    # A new point inside L > `Lthr` from the proposal, its chain started at a
+    # point of `pool_u` above `Lthr` other than column `skip`. Returns the
+    # point (a copy; `nothing` if no point of the pool is above `Lthr`), its
+    # log L and the bound, which :unif refits as it searches.
+    function draw(pool_u, pool_logL, skip, Lthr, bnd, log_X)
+        empty!(_scratch_L); empty!(_scratch_V)
+        log_V_cur = log(NestedSamplers.Bounds.volume(bnd))
+        n_pool = size(pool_u, 2)
+        u, l = if proposal === :rwalk
+            _rwalk_within_shell!(pool_u, pool_logL, rng, eval_loglike,
+                                  n_dim, n_pool, skip, Lthr, bnd,
+                                  log_V_cur, n_walks, walk_scale_now,
+                                  _scratch_L, _scratch_V,
+                                  scratch_cur, scratch_prop, scratch_noise)
+        elseif proposal === :slice
+            _slice_within_shell!(pool_u, pool_logL, rng, eval_loglike,
+                                  n_dim, n_pool, skip, Lthr, bnd,
+                                  log_V_cur, n_walks, walk_scale,
+                                  _scratch_L, _scratch_V,
+                                  scratch_cur, scratch_prop, scratch_noise)
+        else  # :unif
+            u_r, l_r, bnd = _rejection_within_bound!(rng, eval_loglike, n_dim,
+                                      Lthr, bnd, log_V_cur,
+                                      _scratch_L, _scratch_V;
+                                      refit = let pv = exp(log_X) / n_pool
+                                          () -> _fit_ins_bound(rng, BoundT, pool_u, pv,
+                                                               enlarge, n_boot)
+                                      end,
+                                      refit_every = round(Int, 1.5 * n_pool))
+            (u_r, l_r)
+        end
+        return (u === nothing ? nothing : copy(u)), l, bnd
+    end
+
+    # Init live points (threaded eval when there is no seed pool)
+    n_evals = 0
+    if seed_u !== nothing
+        # A batch's live points must be uniform inside L > L_min, as a run's
+        # live points are when its threshold reaches L_min. The earlier
+        # pass's points above L_min are not: its dead points are spread
+        # evenly in log X, not in X, so they crowd toward high L, and drawing
+        # the batch's live points from them, with repeats, gave a batch whose
+        # lowest live point could already be above L_max. Each live point is
+        # drawn as a new point is (dynesty seeds a batch so): a chain of the
+        # proposal from one of those points, inside L > L_min.
+        pool_bound = _fit_ins_bound(rng, BoundT, seed_u, exp(log_X0) / size(seed_u, 2),
+                                    enlarge, n_boot)
+        live_u = Matrix{Float64}(undef, n_dim, n_live)
+        live_logL = Vector{Float64}(undef, n_live)
+        for i in 1:n_live
+            u, l, pool_bound = draw(seed_u, seed_logL, 0, L_min, pool_bound, log_X0)
+            n_evals += length(_scratch_V)
+            u === nothing && proposal === :unif && _rejection_failed(0)
+            u === nothing && throw(ArgumentError("no point above L_min to seed the batch from"))
+            live_u[:, i] = u
+            live_logL[i] = l
+        end
     else
         live_u = rand(rng, n_dim, n_live)
         live_logL = Vector{Float64}(undef, n_live)
@@ -390,48 +514,36 @@ function _ns_inner(target::NereusTarget, data::Data;
                 live_logL[i] = eval_loglike(@view(live_u[:, i]), slot)
             end
         end
+        n_evals += n_live
     end
-    n_evals = init_u === nothing ? n_live : 0
 
-    pointvol = 1.0 / n_live
+    pointvol = exp(log_X0) / n_live
     bound = try
-        NestedSamplers.Bounds.scale!(
-            NestedSamplers.Bounds.fit(BoundT, live_u; pointvol=pointvol),
-            enlarge)
+        NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     catch err
         err isa ArgumentError || rethrow(err)
         # Initial live points are too clustered for MultiEllipsoid
         # k-means (e.g. baseline-pass live points already convergence-
         # tight when passed to the batch pass). Fall back to a single
         # Ellipsoid for the starting bound.
-        NestedSamplers.Bounds.scale!(
-            NestedSamplers.Bounds.fit(
-                NestedSamplers.Bounds.Ellipsoid,
-                live_u; pointvol = pointvol),
-            enlarge)
+        NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     end
 
     dead_logL    = Float64[]
     dead_logwt   = Float64[]
     dead_u       = Vector{Vector{Float64}}()
+    dead_birth   = Float64[]
+    dead_thread  = Int[]
+    # A batch's live points are drawn inside L > L_min, a baseline's from the prior.
+    live_birth   = fill(L_min, n_live)
     sizehint!(dead_logL,  max_iter + n_live)
     sizehint!(dead_logwt, max_iter + n_live)
     sizehint!(dead_u,     max_iter + n_live)
 
-    # Reused RWalk scratch — see sample_nested_ins for rationale.
-    scratch_cur   = Vector{Float64}(undef, n_dim)
-    scratch_prop  = Vector{Float64}(undef, n_dim)
-    scratch_noise = Vector{Float64}(undef, n_dim)
-    worst_save    = Vector{Float64}(undef, n_dim)
-    # Throw-away INS-style accumulators (dynamic NS doesn't compute
-    # INS evidence). Pre-allocate and reuse with empty!() each iter.
-    _scratch_L = Float64[]
-    _scratch_V = Float64[]
-    sizehint!(_scratch_L, 200)
-    sizehint!(_scratch_V, 200)
-
     log_z = -Inf
-    log_X = 0.0
+    log_X = log_X0
     iter = 0
     pb = ProgressBar(label; total = 0, print_every = 10.0, enabled = show_progress)
     stage = _NestedStage(dlogz)
@@ -446,7 +558,7 @@ function _ns_inner(target::NereusTarget, data::Data;
             break
         end
 
-        log_X_new = -iter / n_live
+        log_X_new = log_X0 - iter / n_live
         log_dV = log_X + log1p(-exp(log_X_new - log_X))
         log_wt = log_dV + logL_worst
         log_z = log_z == -Inf ? log_wt :
@@ -457,40 +569,23 @@ function _ns_inner(target::NereusTarget, data::Data;
             worst_save[d] = live_u[d, idx_worst]
         end
         push!(dead_u, copy(worst_save))
+        push!(dead_birth, live_birth[idx_worst])
+        push!(dead_thread, idx_worst)
         log_X = log_X_new
 
         # Replace worst via the selected within-shell proposal (:rwalk /
-        # :slice / :unif). Reuses pre-allocated scratch buffers; the INS
-        # accumulators here are discarded (Dynamic NS doesn't compute
-        # INS) but are emptied & reused.
-        empty!(_scratch_L); empty!(_scratch_V)
-        log_V_cur = log(NestedSamplers.Bounds.volume(bound))
-        new_u, new_logL = if proposal === :rwalk
-            _rwalk_within_shell!(live_u, live_logL, rng, eval_loglike,
-                                  n_dim, n_live, idx_worst,
-                                  max(logL_worst, L_min), bound,
-                                  log_V_cur, n_walks, walk_scale,
-                                  _scratch_L, _scratch_V,
-                                  scratch_cur, scratch_prop, scratch_noise)
-        elseif proposal === :slice
-            _slice_within_shell!(live_u, live_logL, rng, eval_loglike,
-                                  n_dim, n_live, idx_worst,
-                                  max(logL_worst, L_min), bound,
-                                  log_V_cur, n_walks, walk_scale,
-                                  _scratch_L, _scratch_V,
-                                  scratch_cur, scratch_prop, scratch_noise)
-        else  # :unif
-            _rejection_within_bound!(rng, eval_loglike, n_dim,
-                                      max(logL_worst, L_min), bound,
-                                      log_V_cur,
-                                      _scratch_L, _scratch_V)
-        end
+        # :slice / :unif).
+        new_u, new_logL, bound = draw(live_u, live_logL, idx_worst,
+                                      max(logL_worst, L_min), bound, log_X)
         n_evals += length(_scratch_V)
+        # stopping would return a truncated run's evidence (sample_nested_ins)
+        new_u === nothing && proposal === :unif && _rejection_failed(iter)
         new_u === nothing && break
         @inbounds for d in 1:n_dim
             live_u[d, idx_worst] = new_u[d]
         end
         live_logL[idx_worst] = new_logL
+        live_birth[idx_worst] = _ns_floor(max(logL_worst, L_min))
 
         if iter % bound_update_interval == 0
             # Seams of the circular angles moved off the live points first
@@ -503,18 +598,12 @@ function _ns_inner(target::NereusTarget, data::Data;
             # case — slightly less efficient bound geometry but never
             # fails.
             try
-                bound = NestedSamplers.Bounds.scale!(
-                    NestedSamplers.Bounds.fit(BoundT, live_u;
-                                               pointvol = exp(log_X) / n_live),
-                    enlarge)
+                bound = NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = exp(log_X) / n_live, enlarge = enlarge, bootstrap = n_boot)
             catch err
                 err isa ArgumentError || rethrow(err)
-                bound = NestedSamplers.Bounds.scale!(
-                    NestedSamplers.Bounds.fit(
-                        NestedSamplers.Bounds.Ellipsoid,
-                        live_u;
-                        pointvol = exp(log_X) / n_live),
-                    enlarge)
+                bound = NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = exp(log_X) / n_live, enlarge = enlarge, bootstrap = n_boot)
             end
         end
 
@@ -533,15 +622,20 @@ function _ns_inner(target::NereusTarget, data::Data;
     end
     finish!(pb)
 
-    # Add final live points
-    for i in 1:n_live
+    # Add final live points, in increasing likelihood (see `_NSPassResult`)
+    dead_n = fill(n_live, length(dead_logL))
+    for (j, i) in enumerate(sortperm(live_logL))
         log_wt = log_X - log(n_live) + live_logL[i]
         log_z = log_z == -Inf ? log_wt :
                 max(log_z, log_wt) + log1p(exp(-abs(log_z - log_wt)))
         push!(dead_logL, live_logL[i])
         push!(dead_logwt, log_wt)
         push!(dead_u, copy(live_u[:, i]))
+        push!(dead_n, n_live - j + 1)
+        push!(dead_birth, live_birth[i])
+        push!(dead_thread, i)
     end
 
-    return _NSPassResult(dead_logL, dead_logwt, dead_u, log_z, iter, n_evals)
+    return _NSPassResult(dead_logL, dead_logwt, dead_u, dead_n, dead_birth, dead_thread,
+                         log_z, iter, n_evals)
 end

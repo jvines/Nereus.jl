@@ -5,6 +5,24 @@
 # (and mirrored in parallel.jl step_batch).
 @inline xlogx(x) = iszero(x) ? zero(x) : x * log(x)
 
+# The run's trace, for an error on log Z from resampling it (Higson et al. 2018;
+# Nereus's src/samplers/ns_error.jl): every removed point's log L, its birth
+# (the bound it was drawn above, -Inf from the prior) and the live-point slot
+# it filled, a thread being the points one slot held. `live_birth` is each live
+# point's birth.
+new_trace(nactive) = (logl = Float64[], birth = Float64[], id = Int[],
+                      live_birth = fill(-Inf, nactive))
+
+# The point in slot `idx` leaves at `logl_dead`; its replacement is drawn above
+# `bound` (`nothing`: none, the live points the run ends with).
+function trace_remove!(trace, logl_dead, idx, bound)
+    push!(trace.logl, logl_dead)
+    push!(trace.birth, trace.live_birth[idx])
+    push!(trace.id, idx)
+    bound === nothing || (trace.live_birth[idx] = bound)
+    return trace
+end
+
 function step(rng, model, sampler::Nested; kwargs...)
     # Initialize particles
     # us are in unit space, vs are in prior space
@@ -28,6 +46,7 @@ function step(rng, model, sampler::Nested; kwargs...)
     us[:, idx_dead] .= u
     vs[:, idx_dead] .= v
     logl[idx_dead] = ll
+    trace = trace_remove!(new_trace(sampler.nactive), logl_dead, idx_dead, logl_dead)
 
     ncall = since_update = nc
 
@@ -41,9 +60,67 @@ function step(rng, model, sampler::Nested; kwargs...)
     sample = (u = u_dead, v = v_dead, logwt = logwt, logl = logl_dead)
     state = (it = 1, ncall = ncall, us = us, vs = vs, logl = logl,
              logl_dead = logl_dead, logz = logz, logzerr = logzerr, h = h, logvol = logvol,
-             since_update = since_update, has_bounds = false, active_bound = nothing)
+             since_update = since_update, has_bounds = false, active_bound = nothing,
+             trace = trace)
 
     return sample, state
+end
+
+# Fit bounds of type `B` to the live points `us`, enlarged by the sampler's
+# `enlarge` or its bootstrap expansion (`Bounds.fit`).
+fit_bounds(rng, sampler::Nested, B, us, pointvol) =
+    Bounds.fit(rng, B, us; pointvol = pointvol, enlarge = sampler.enlarge,
+               bootstrap = sampler.bootstrap)
+
+# The region a proposal is handed. `Rejection` draws uniformly from the whole
+# bound: every ellipsoid weighted by its volume, a point in k of them kept with
+# probability 1/k (`rand(::MultiEllipsoid)`). Handed the one ellipsoid around a
+# random live point, as the walks are, it drew each ellipsoid as often as live
+# points sit in it rather than by its volume, so a small ellipsoid holding many
+# live points was drawn denser than the rest of the constrained region. The
+# walks start at that live point and take only their steps' shape from it.
+# The live point a walk starts from: uniformly among those above the threshold
+# `logl_star`, as dynesty picks it. The dead point lies on the threshold, not
+# inside the region a new point is drawn from, and a walk from it ends nearer
+# the contour than such a draw; it used to be picked as often as any other.
+# Any live point if none is above the threshold.
+function start_index(rng::AbstractRNG, logl, logl_star)
+    n = count(>(logl_star), logl)
+    n == 0 && return rand(rng, eachindex(logl))
+    k = rand(rng, 1:n)
+    for i in eachindex(logl)
+        if logl[i] > logl_star
+            k -= 1
+            k == 0 && return i
+        end
+    end
+end
+
+proposal_bound(::Proposals.Rejection, active_bound, bound) = active_bound
+proposal_bound(_, active_bound, bound) = bound
+
+# `Rejection`'s draw. dynesty refits the bound every `update_interval`
+# likelihood calls while it searches for a point, not only between points,
+# each refit with a fresh bootstrap expansion. Drawing from one bound until
+# `maxiter` ran out instead: on an RM obliquity fit an expansion came out so
+# large that 100 000 calls found no point. The refits are fitted to `us`, the
+# live points this draw replaces one of. Returns the point, its calls, the
+# bound it ended on and the calls since that bound was fitted, counting
+# `since_update` made before this draw if there was no refit.
+function draw_uniform(rng, sampler, prop::Proposals.Rejection, logl_star, bound, model, us,
+                      pointvol, since_update)
+    ncall = nout = 0
+    since = since_update
+    while true
+        budget = clamp(sampler.update_interval - since, 1, prop.maxiter - ncall)
+        u, v, logl, nc, no = Proposals.draw_rejection(rng, logl_star, bound, model, budget)
+        ncall += nc; nout += no; since += nc
+        u === nothing || return u, v, logl, ncall, bound, since
+        (ncall ≥ prop.maxiter || nout ≥ 100 * prop.maxiter) &&
+            throw(ErrorException("Couldn't generate a proper point after $ncall likelihood calls and $nout draws outside the unit cube, refitting the bounds every $(sampler.update_interval) calls: ellipsoids that cover this constrained region are too loose for uniform draws, so use a slice or walk proposal. Bounds=$bound, logl_star=$logl_star."))
+        bound = fit_bounds(rng, sampler, sampler.bounds, us, pointvol)
+        since = 0
+    end
 end
 
 function step(rng, model, sampler, state; kwargs...)
@@ -52,18 +129,22 @@ function step(rng, model, sampler, state; kwargs...)
     # check if ready for first update
     if !state.has_bounds && state.ncall > sampler.min_ncall && state.it / state.ncall < sampler.min_eff
         @debug "First update: it=$(state.it), ncall=$(state.ncall), eff=$(state.it / state.ncall)"
-        active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us, pointvol=pointvol), sampler.enlarge)
+        active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
         since_update = 0
         has_bounds = true
-    # if accepted first update, is it time to update again?
-    elseif iszero(state.since_update % sampler.update_interval)
+    # if accepted first update, is it time to update again? `since_update`
+    # counts likelihood calls and grows by a whole proposal's worth at a time,
+    # so it is compared, as in dynesty: testing it for an exact multiple of
+    # `update_interval` refit the bounds almost never, and every proposal kept
+    # drawing its steps and directions from the first bound.
+    elseif state.has_bounds && state.since_update >= sampler.update_interval
         @debug "Updating bounds: it=$(state.it), ncall=$(state.ncall), eff=$(state.it / state.ncall)"
-        active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us, pointvol=pointvol), sampler.enlarge)
+        active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
         since_update = 0
         has_bounds = true
     else
         active_bound = state.active_bound
-        since_update = state.since_update + 1
+        since_update = state.since_update
         has_bounds = state.has_bounds
     end
 
@@ -75,32 +156,44 @@ function step(rng, model, sampler, state; kwargs...)
 
     # sample a new live point using bounds and proposal
     if has_bounds
-        point, bound = rand_live(rng, active_bound, state.us)
+        point = state.us[:, start_index(rng, state.logl, logl_dead)]
+        bound = Bounds.bound_containing(rng, active_bound, point)
         if isnothing(bound)
-            # live point not inside active bounds: refit them
-            active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us, pointvol=pointvol), sampler.enlarge)
+            # live point not inside active bounds: refit them to the live
+            # points, this one among them, and keep it. Drawing another point
+            # instead chose the points a stale bound misses less often than
+            # the rest, and a walk ends near where it starts.
+            active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
             since_update = 0
-            point, bound = rand_live(rng, active_bound, state.us)
+            bound = Bounds.bound_containing(rng, active_bound, point)
         end
         if isnothing(bound)
             # still not bounded: fall back to single ellipsoid around all live points
-            bound = Bounds.scale!(Bounds.fit(Bounds.Ellipsoid, state.us, pointvol=pointvol), sampler.enlarge)
+            bound = fit_bounds(rng, sampler, Bounds.Ellipsoid, state.us, pointvol)
         end
-        u, v, logl, nc = sampler.proposal(rng, point, logl_dead, bound, model)
+        if sampler.proposal isa Proposals.Rejection
+            u, v, logl, nc, active_bound, since_update =
+                draw_uniform(rng, sampler, sampler.proposal, logl_dead, active_bound, model,
+                             state.us, pointvol, since_update)
+        else
+            u, v, logl, nc = sampler.proposal(rng, point, logl_dead, bound, model)
+            since_update += nc
+        end
     else
         point = rand(rng, eltype(state.us), sampler.ndims)
         bound = Bounds.fit(Bounds.NoBounds, state.us)
         proposal = Proposals.Rejection()
         u, v, logl, nc = proposal(rng, point, logl_dead, bound, model)
+        since_update += nc
     end
 
     state.us[:, idx_dead] .= u
     state.vs[:, idx_dead] .= v
     state.logl[idx_dead] = logl
+    trace_remove!(state.trace, logl_dead, idx_dead, logl_dead)
 
     it = state.it + 1
     ncall = state.ncall + nc
-    since_update += nc
 
     # update weight using quadratic trapezoidal rule (PR #80)
     logvol = state.logvol - sampler.dlv
@@ -124,7 +217,8 @@ function step(rng, model, sampler, state; kwargs...)
     sample = (u = u_dead, v = v_dead, logwt = logwt, logl = logl_dead)
     state = (it = it, ncall = ncall, us = state.us, vs = state.vs, logl = state.logl,
              logl_dead = logl_dead, logz = logz, logzerr = logzerr, h = h, logvol = logvol,
-             since_update = since_update, has_bounds = has_bounds, active_bound = active_bound)
+             since_update = since_update, has_bounds = has_bounds, active_bound = active_bound,
+             trace = state.trace)
 
     return sample, state
 end
@@ -264,10 +358,12 @@ function add_live_points(samples, model, sampler, state)
 
         sample = (u = u, v = v, logwt = logwt, logl = logl_dead)
         save!!(samples, sample, N + i, model, sampler)
+        trace_remove!(state.trace, logl_dead, idx, nothing)
     end
 
     state = (it = state.it + sampler.nactive, us = state.us, vs = state.vs, logl = state.logl,
              logl_dead = logl_dead, logz = logz, logzerr = logzerr, h = h, logvol = logvol,
-             since_update = state.since_update, has_bounds = state.has_bounds, active_bound = state.active_bound)
+             since_update = state.since_update, has_bounds = state.has_bounds, active_bound = state.active_bound,
+             trace = state.trace)
     return samples, state
 end

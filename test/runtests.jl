@@ -4433,6 +4433,38 @@ end  # _in_shard
 
 if _in_shard("inline: Daedalus sampler")
 @testset "Daedalus sampler" begin
+    @testset "a batch credits each killed point its volume" begin
+        # Nested sampling simulated in X, L(X) = exp(-X/0.01): the b lowest of
+        # n live points go together and come back uniform below the highest
+        # of them. Shrinking log X by b/n per batch and sharing that evenly
+        # put log Z 0.53 high here (300 runs; 0.005 now).
+        logL(X) = -X / 0.01
+        lz_true = log(0.01 * (1 - exp(-100)))
+        function run(rng, n, b)
+            X = rand(rng, n); lx = 0.0; lz = -Inf
+            while true
+                killed = sortperm(X; rev = true)[1:b]   # lowest L first
+                lw, lx_after = Nereus._daedalus_batch_volumes(lx, n, b)
+                for (j, i) in enumerate(killed)
+                    lz = Nereus._logaddexp(lz, lw[j] + logL(X[i]))
+                end
+                lx = lx_after
+                X[killed] .= X[killed[end]] .* rand(rng, b)
+                lx + logL(minimum(X)) - lz < log(0.01) && break
+            end
+            for x in X
+                lz = Nereus._logaddexp(lz, lx - log(n) + logL(x))
+            end
+            return lz - lz_true
+        end
+        rng = MersenneTwister(1)
+        zs = [run(rng, 100, 25) for _ in 1:300]
+        @test abs(mean(zs)) < 0.05
+        # one at a time is Skilling's step
+        lw, lx = Nereus._daedalus_batch_volumes(-2.0, 50, 1)
+        @test lx ≈ -2.02 && lw[1] ≈ -2.0 + log1p(-exp(-1 / 50))
+    end
+
     @testset "sample_daedalus runs end-to-end" begin
         # Tight WASP-47-style priors so random-walk proposals can mix
         # within the constrained-likelihood region. The NS algorithm
