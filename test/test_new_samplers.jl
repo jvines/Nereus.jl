@@ -405,7 +405,11 @@ end
             seed           = 1,
             show_progress  = false)
         @test res isa WhiteningPTResult
-        @test isfinite(res.log_evidence)
+        # Its log Z is the tempered one, quoted only from a ladder that reaches
+        # β = 0 with every pair swapping (`_tempered_quotable`); the default
+        # ladder, (1/√5)^i, stops short of it.
+        @test isnan(res.log_evidence)
+        @test isfinite(res.evidence.ti_plus[1])
         @test length(res.acceptance_within) == 4
         @test length(res.acceptance_swap)   == 3
         @test all(0.0 .<= res.acceptance_within .<= 1.0)
