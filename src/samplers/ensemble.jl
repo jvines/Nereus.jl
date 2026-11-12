@@ -28,7 +28,8 @@ using MCMCChains
 Affine-invariant ensemble MCMC (Goodman & Weare 2010): the stretch move (scale
 a = 2) mixed with a differential-evolution move (`de_move`). At `de_move = 0` it
 is, step for step, the algorithm of AffineInvariantMCMC.jl. Returns posterior as
-`MCMCChains.Chains`.
+`MCMCChains.Chains`, with the collective-drift check of each chain's walkers
+([`ensemble_drift`](@ref)) in `chains.info.drift`.
 
 Works in unconstrained space (with transforms) by default.
 
@@ -139,12 +140,18 @@ function sample_ensemble(
                     n_burnin, thinning, init, seed + c - 1, n_chains,
                     show_progress && c == 1, ck_c, ck_every, resume;
                     pre = (fp = fps[c], ck = cks[c]), rendezvous = rv, prune_stranded,
-                    n_scouts, de_move = p_de)
+                    n_scouts, de_move = p_de, check_drift = false)
             finally
                 rv === nothing || _rendezvous_leave!(rv)
             end
         end
-        return MCMCChains.chainscat([fetch(t) for t in tasks]...)
+        chs = [fetch(t) for t in tasks]
+        # The drift check runs on each chain's walkers (one ensemble each) and
+        # reports them together, once.
+        drift = _ensemble_drift_chains([c.info.walker_cube for c in chs],
+                                       target.params; sampler = "ensemble")
+        out = MCMCChains.chainscat([_strip_walker_cube(c) for c in chs]...)
+        return MCMCChains.setinfo(out, (; drift))
     end
     return _ensemble_chain(target, n_walkers, n_steps, n_burnin, thinning, init,
                            seed, n_chains, show_progress, ck_path, ck_every, resume;
@@ -363,7 +370,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
                          resume::Bool; pre = nothing,
                          rendezvous::Union{Nothing,_Rendezvous} = nothing,
                          prune_stranded::Bool = true, n_scouts::Int = 16,
-                         de_move::Float64 = DE_MOVE_DEFAULT)
+                         de_move::Float64 = DE_MOVE_DEFAULT, check_drift::Bool = true)
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -548,9 +555,18 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         end
     end
 
-    chains = MCMCChains.Chains(mat, param_names)
-    return chains
+    # The drift check reads each walker's own sequence: (step, param, walker).
+    cube = permutedims(reshape(mat, n_walkers, n_keep, n_dim), (2, 3, 1))
+    if check_drift
+        drift = _ensemble_drift_chains([cube], params; sampler = "ensemble")
+        return MCMCChains.Chains(mat, param_names; info = (; drift))
+    end
+    # Several chains: `sample_ensemble` checks them together, and drops this.
+    return MCMCChains.Chains(mat, param_names; info = (; walker_cube = cube))
 end
+
+# A chain without the walker cube `_ensemble_chain` hands `sample_ensemble`.
+_strip_walker_cube(c::MCMCChains.Chains) = MCMCChains.setinfo(c, NamedTuple())
 
 # The ensemble's stranded walkers moved onto the ones that found the mode:
 # `_pt_prune_stranded!` on a one-rung ladder at β = 1, in the sampling

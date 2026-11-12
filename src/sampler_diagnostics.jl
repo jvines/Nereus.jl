@@ -45,6 +45,8 @@ const _DIAG_FIELDS = (
     :acceptance, :acceptance_within, :acceptance_swap, :acceptance_transdim,
     :acceptance_de,
     :betas, :beta_history, :ess_history, :whitening_active_after,
+    # collective drift of the β = 1 ensemble (src/diagnostics/drift.jl)
+    :drift,
     # trans-dim move bookkeeping
     :td_proposed, :td_accepted, :noise_td_proposed, :noise_td_accepted,
     :planet_birth_proposed, :planet_birth_accepted,
@@ -209,12 +211,13 @@ function sampler_diagnostics(engine::AbstractString, raw, chains)
         end
     end
 
-    # nuts hangs its diagnostics off chains.info rather than a struct field.
+    # nuts hangs its diagnostics off chains.info rather than a struct field,
+    # and the `ensemble` engine its drift check.
     if chains !== nothing
         try
             info = chains.info
             for k in (:n_divergent, :step_size, :mean_tree_depth,
-                      :max_tree_depth, :mean_accept)
+                      :max_tree_depth, :mean_accept, :drift)
                 haskey(info, k) && (d[String(k)] = getproperty(info, k))
             end
         catch

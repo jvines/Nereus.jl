@@ -103,6 +103,8 @@ export sample_pt_whitening, WhiteningPTResult
 - `betas::Vector{Float64}`
 - `n_evals::Int`
 - `whitening_active_after::Int` — iteration after which whitening swaps started
+- `drift` — the collective-drift check of the β=1 ensemble
+  ([`ensemble_drift`](@ref)), or `nothing` when the run was too short to test
 """
 struct WhiteningPTResult
     chains::MCMCChains.Chains
@@ -114,6 +116,7 @@ struct WhiteningPTResult
     betas::Vector{Float64}
     n_evals::Int
     whitening_active_after::Int
+    drift::Union{Nothing, Dict{String, Any}}
 end
 
 """
@@ -923,9 +926,12 @@ function sample_pt_whitening(
 
     acc_within = accept_within ./ max.(propose_within, 1)
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)
+    # Collective drift of the cold ensemble, which R-hat cannot see (see
+    # `ensemble_drift`); warns when it finds one.
+    drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_whitening")
     return WhiteningPTResult(
         chains, log_z, ev_report, acc_within,
         _de_acceptance(de_accepted, de_proposed), acc_swap, βs,
-        n_evals_atomic[], whitening_active_after,
+        n_evals_atomic[], whitening_active_after, drift,
     )
 end

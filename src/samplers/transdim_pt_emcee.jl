@@ -74,6 +74,9 @@ struct TransDimPTemceeResult
     # Within-rung acceptance of the differential-evolution move (`de_move`),
     # per temp; NaN where none was proposed. `acceptance_within` is the stretch's.
     acceptance_de::Vector{Float64}
+    # The collective-drift check of the β = 1 ensemble (`ensemble_drift`), or
+    # `nothing` when the run was too short to test.
+    drift::Union{Nothing, Dict{String, Any}}
 end
 
 # ------------------------------------------------------------------
@@ -2717,6 +2720,10 @@ function sample_transdim_pt_emcee(
             @warn "convergence_report failed (chain may be too short)" exception=e
         end
     end
+    # Collective drift of the cold ensemble, which R-hat cannot see (see
+    # `ensemble_drift`); warns when it finds one.
+    drift = _td_drift(samples, keep_idx, n_walkers_eff, param_names, params;
+                      sampler = "transdim_pt_emcee")
 
     return TransDimPTemceeResult(
         chains, log_z, ev_report,
@@ -2728,6 +2735,6 @@ function sample_transdim_pt_emcee(
         copy(planet_death_proposed), copy(planet_death_accepted),
         _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
         _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc),
-        _de_acceptance(de_accepted, de_proposed),
+        _de_acceptance(de_accepted, de_proposed), drift,
     )
 end

@@ -104,6 +104,11 @@ Container for a `sample_pt_emcee` run.
   steps).
 - `acceptance_de::Vector{Float64}` — within-temp acceptance of the
   differential-evolution move per temp (`de_move`); NaN where none was proposed.
+- `drift` — the collective-drift check of the β=1 ensemble
+  ([`ensemble_drift`](@ref)): a `Dict` with each parameter's z for a trend of
+  the walkers' mean through the recorded steps and the parameters over the
+  threshold -- a drift every walker shares, which R-hat and ESS cannot see --
+  or `nothing` when the run was too short to test.
 """
 struct PTemceeResult
     chains::MCMCChains.Chains
@@ -118,6 +123,7 @@ struct PTemceeResult
     n_evals::Int
     ladder::LadderHistory
     stop::NamedTuple
+    drift::Union{Nothing, Dict{String, Any}}
 end
 
 """
@@ -1892,11 +1898,15 @@ function sample_pt_emcee(
               "check." tempered = log_z_tempered reported = log_z
     end
 
+    # Collective drift of the cold ensemble, which R-hat cannot see (see
+    # `ensemble_drift`); warns when it finds one.
+    drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_emcee")
+
     return PTemceeResult(
         chains, log_z, log_z_laplace, log_z_bridge, ev_report, acc_within,
         _de_acceptance(de_accepted, de_proposed), acc_swap,
         βs, n_evals_atomic[],
         _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
-        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc)
+        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc), drift
     )
 end
