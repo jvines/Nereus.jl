@@ -89,7 +89,10 @@ Container for a `sample_pt_emcee` run.
   further from bridge than bridge's standard error + 1 nat.
 - `log_evidence_bridge::Float64` — bridge-sampling evidence from the same cold
   chain (Meng & Wong optimal bridge). This is the HEADLINE when it is usable:
-  it never touches the prior end and makes no Gaussianity assumption. It costs
+  it never touches the prior end and makes no Gaussianity assumption. Usable
+  means `_bridge_guard` passes: the chain has converged (worst R-hat ≤ 1.1)
+  and the least ESS is at least `q`'s d + d(d+1)/2 parameters; otherwise it
+  is biased low, and the value here is NaN with a warning saying which. It costs
   `bridge_n` likelihood evaluations: the posterior at the kept draws is read
   off their `:lp`, after a check against a full evaluation at a few of them
   (`bridge_evidence`). NaN if not computable.
@@ -1823,31 +1826,30 @@ function sample_pt_emcee(
         end
     end
 
-    # Bridge is biased LOW when its reference `q` is estimated from too few
-    # INDEPENDENT points. `q` carries n_dim + n_dim(n_dim+1)/2 free parameters,
-    # and on a curved 15-D target with exactly known log Z bridge fell to -3.2
-    # nats at n_eff ~ 22 while reference-path held to +0.17. Splitting the
-    # sample does not rescue it (-2.8), so it is the ESTIMATE of q that is bad,
-    # not re-use of the draws -- and no diagnostic bridge returns will say so
-    # (`overlap` reads ~1 throughout). Refuse the headline rather than report a
-    # silently-low number. Well-mixed chains are unaffected: 51 Peg runs at
-    # n_eff ~ 8000 against 135 parameters.
+    # Bridge is reported only from draws it can be trusted on (`_bridge_guard`):
+    # a chain that has converged (worst R-hat at most 1.1), and a reference `q`
+    # fitted from enough INDEPENDENT points (least ESS at least the
+    # n_dim + n_dim(n_dim+1)/2 parameters of q). Either way it fails silently
+    # LOW -- `overlap` reads ~1 throughout -- by fractions of a nat to tens:
+    # on a curved 15-D target with exactly known log Z bridge fell to -3.2 nats
+    # at n_eff ~ 22 while reference-path held to +0.17, and 32 walkers that had
+    # not found an easy RV planet's mode read 70 to 90 nats low at n_eff above
+    # the bound. Well-mixed chains are unaffected: 51 Peg runs at n_eff ~ 8000
+    # against 135 parameters.
+    bridge_refused = ""
     if isfinite(log_z_bridge)
-        n_eff_min = try
-            _bridge_min_ess(chains, target.params)   # folded, as bridge reads them
-        catch err
-            @debug "sample_pt_emcee: ESS unavailable for the bridge guard" exception = err
-            NaN
-        end
-        n_par_q = n_dim + n_dim * (n_dim + 1) ÷ 2
-        if isfinite(n_eff_min) && n_eff_min < n_par_q
-            @warn "sample_pt_emcee: dropping bridge as the headline — its " *
-                  "reference is fitted from too few effective samples " *
-                  "(min ESS $(round(Int, n_eff_min)) < $n_par_q free parameters " *
-                  "in q). Bridge is biased LOW in this regime and none of its " *
-                  "diagnostics detect it. Sample longer, or use " *
-                  "`reference_path_evidence`, which anneals away from q and is " *
-                  "unaffected." min_ess = n_eff_min n_params_in_q = n_par_q
+        g = _bridge_guard(chains, target.params)
+        if !g.ok
+            # reference-path recovers from a poorly estimated q (within 0.11
+            # nats on stationary chains at d <= 15 where bridge was 0.2 to 2
+            # low), but not from draws that never reached the posterior.
+            alt = occursin("R-hat", g.why) ? "Sample longer." :
+                  "Sample longer, or use `reference_path_evidence`, which " *
+                  "anneals away from q and holds where bridge does not."
+            @warn "sample_pt_emcee: dropping bridge as the headline: $(g.why). " *
+                  "Bridge is biased LOW here and none of its diagnostics detect " *
+                  "it. $alt" bridge = log_z_bridge min_ess = g.n_eff rhat = g.rhat n_params_in_q = g.need
+            bridge_refused = g.why
             log_z_bridge = NaN
         end
     end
@@ -1886,6 +1888,7 @@ function sample_pt_emcee(
     why_bridge = !bridge_headline ? "bridge_headline = false" :
                  target.transform === nothing ? "the target is bounded " *
                      "(unconstrained = false); run_job computes bridge after the fit" :
+                 !isempty(bridge_refused) ? "refused, $bridge_refused" :
                  "bridge sampling did not give a usable value"
     switched = false
 

@@ -68,9 +68,74 @@ const _BRIDGE_BOOT_MEMORY = 2^31
 # (i = 5°) had 28% of its draws in the mirror copy, an inclination ESS of 14
 # against 1251 folded, and bridge refused for it.
 function _bridge_min_ess(chains::MCMCChains.Chains, params::Params)
+    return _bridge_guard_stats(chains, params).n_eff
+end
+
+# The worst rank-normalised split R-hat at which bridge is reported. Above it
+# the walkers (or the halves of one chain) have not agreed on a distribution,
+# so the draws are not from the posterior, whatever their ESS. See
+# `_bridge_guard`.
+const _BRIDGE_RHAT_MAX = 1.1
+
+# The folded draws' least bulk ESS and worst rank-normalised split R-hat over
+# parameters (`_diag_by_param`; NaN for a constant column, which is skipped).
+function _bridge_guard_stats(chains::MCMCChains.Chains, params::Params)
     c = isempty(cyclic_inclination_indices(params)) ? chains :
         fold_cyclic_inclinations!(deepcopy(chains), params)
-    return minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, c)[:, :ess])))
+    ess = filter(isfinite, vec(_diag_by_param(MCMCChains.ess, c)[:, :ess]))
+    rh = filter(isfinite, vec(_diag_by_param(MCMCChains.rhat, c)[:, :rhat]))
+    return (; n_eff = isempty(ess) ? NaN : minimum(ess),
+              rhat = isempty(rh) ? NaN : maximum(rh))
+end
+
+"""
+    _bridge_guard(chains, params) -> (; ok, why, n_eff, rhat, need)
+
+Whether bridge sampling on `chains` can be reported, and if not, why. Two
+conditions, each measured against a log Z known exactly:
+
+1. The draws are from the posterior: the worst rank-normalised split R-hat
+   (folded, as bridge reads them) is at most `_BRIDGE_RHAT_MAX` (1.1). On the
+   easy RV fixture of the tests, 32 walkers on two rungs had not found the
+   12.3 d mode in 60 to 3000 steps (R-hat 2.2 to 6.5) and bridge read -242 to
+   -223 where it is -153.75; the ESS guard alone passed every one of them, at
+   n_eff 36 to 110 against 35, because walkers that do not move still count
+   as about one effective draw each. 51 Peg at 3000 steps (R-hat 1.7 to 2.0,
+   n_eff 215 against 135) read -8720 and -8776 for two seeds where 15 000
+   steps give -5893.9. On Gaussians started overdispersed, chains still
+   moving in sat 23 to 37 nats low at d = 7 with n_eff above the bound; the
+   worst error at R-hat at most 1.1 was 0.26 nats. Converged production runs
+   sit at 1.001 to 1.02.
+2. q is fitted from enough independent draws: the least ESS is at least its
+   `d + d(d+1)/2` free parameters. From stationary chains of d = 5 to 30,
+   bridge's error follows that ratio: about -0.2 to -0.3 nats at 1, -0.5 to
+   -1 at 0.5, -1 to -2 at 0.25, -6 to -13 at 0.07 to 0.14, and under 0.08
+   from 3.5 up. Reference-path held to 0.11 at d <= 15 on the same chains.
+
+The worst error either condition lets through, over every chain measured, is
+0.36 nats (d = 30 at 1.15 times the ESS bound). See docs/src/evidence.md.
+
+An ESS or R-hat that cannot be computed refuses.
+"""
+function _bridge_guard(chains::MCMCChains.Chains, params::Params)
+    d = length(params.layout.unfrozen_names)
+    need = d + d * (d + 1) ÷ 2
+    st = try
+        _bridge_guard_stats(chains, params)
+    catch err
+        @debug "bridge guard: ESS / R-hat unavailable" exception = err
+        (; n_eff = NaN, rhat = NaN)
+    end
+    why = String[]
+    (isfinite(st.rhat) && st.rhat <= _BRIDGE_RHAT_MAX) ||
+        push!(why, "worst R-hat $(isfinite(st.rhat) ? round(st.rhat, digits = 3) : "?") > " *
+                   "$(_BRIDGE_RHAT_MAX): the chain has not converged, so its draws are " *
+                   "not the posterior's")
+    (isfinite(st.n_eff) && st.n_eff >= need) ||
+        push!(why, "min ESS $(isfinite(st.n_eff) ? round(Int, st.n_eff) : "?") < $need " *
+                   "parameters in the reference; bridge is biased low here")
+    return (; ok = isempty(why), why = join(why, "; "), n_eff = st.n_eff, rhat = st.rhat,
+              need)
 end
 
 """
