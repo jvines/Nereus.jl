@@ -756,8 +756,12 @@ function sample_transdim_pt_emcee(
                              occursin("jitter", String(layout.unfrozen_names[j]))]
 
     # Goodman-Weare: each half needs ≥ n_dim+1 walkers
-    n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
-    n_walkers_eff % 2 == 1 && (n_walkers_eff += 1)
+    # One assignment: the half-step closures capture it, and a variable
+    # assigned twice is boxed there, so every walker's partner range was
+    # typed Any.
+    n_walkers_eff = let nw = max(n_walkers, 2 * n_dim + 2)
+        nw + isodd(nw)
+    end
 
     # Geometric ladder DENSIFIED at fixed β_min: β_i = β_min^(i/(N-1)), spanning
     # [β_min, 1]. Adding temps closes the cold-end gap (raises cold swap acceptance)

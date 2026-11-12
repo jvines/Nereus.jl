@@ -898,8 +898,12 @@ function sample_pt_emcee(
     hold_med = Ref(NaN)                 # the β = 1 median log L at the last pass
 
     # Goodman-Weare: each half ≥ n_dim+1 walkers, total even.
-    n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
-    n_walkers_eff % 2 == 1 && (n_walkers_eff += 1)
+    # One assignment: the half-step closures capture it, and a variable
+    # assigned twice is boxed there, so every walker's partner range was
+    # typed Any.
+    n_walkers_eff = let nw = max(n_walkers, 2 * n_dim + 2)
+        nw + isodd(nw)
+    end
 
     # Geometric ladder across [beta_min, 1], matching sample_transdim_pt_emcee.
     #
