@@ -108,9 +108,13 @@ conditions, each measured against a log Z known exactly:
    sit at 1.001 to 1.02.
 2. q is fitted from enough independent draws: the least ESS is at least its
    `d + d(d+1)/2` free parameters. From stationary chains of d = 5 to 30,
-   bridge's error follows that ratio: about -0.2 to -0.3 nats at 1, -0.5 to
-   -1 at 0.5, -1 to -2 at 0.25, -6 to -13 at 0.07 to 0.14, and under 0.08
-   from 3.5 up. Reference-path held to 0.11 at d <= 15 on the same chains.
+   bridge's error grows as that ratio falls: about -0.2 to -0.3 nats near 1
+   (chains at R-hat under 2), -0.5 to -2.5 near 0.5, -1.1 to -1.9 near 0.25,
+   -5.6 to -12.6 at 0.07 to 0.14, and under 0.08 from 3.5 up. Walkers that
+   barely move have an ESS floor near the walker count: at d = 5 such chains
+   sat at 3.3 times the bound and erred by 0.37 to 0.56, at R-hat 3.4 to 7.6,
+   which condition 1 refuses. Reference-path's mean error held to 0.11 at
+   d <= 15 on the same chains.
 
 The worst error either condition lets through, over every chain measured, is
 0.36 nats (d = 30 at 1.15 times the ESS bound). See docs/src/evidence.md.
