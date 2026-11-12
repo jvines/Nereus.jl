@@ -118,11 +118,26 @@ function _release_scene!(fig)
              hasproperty(fig, :figure) ? getfield(getfield(fig, :figure), :scene) :
              nothing
         sc === nothing && return nothing
+        _drop_screens!(sc)
         CairoMakie.Makie.empty!(sc; reset_theme = false)
     catch
         # Deterministic teardown is a cleanup optimisation. It must never be
         # the reason a figure that is already on disk reports a failure.
     end
+    return nothing
+end
+
+# Every scene of a rendered figure, the root and each block's, keeps the screen
+# it was drawn on, and the screen its image surface: 13 MB for a posterior
+# figure at 2 px per unit, 235 MB for the corner. Makie's finalizer keeps the
+# root scene until the teardown task it schedules runs, which is not before the
+# plotting task yields, and the blocks' scenes stay reachable from it through
+# their callbacks; a plot set seldom yields, so every figure's surface stayed
+# alive, 1.4 GB by the 76th of 96. Makie's `free` lets the screens go; so does
+# this, for the whole tree, before `empty!` detaches the children.
+function _drop_screens!(sc)
+    foreach(_drop_screens!, sc.children)
+    empty!(sc.current_screens)
     return nothing
 end
 

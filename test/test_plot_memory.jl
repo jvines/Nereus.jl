@@ -192,6 +192,29 @@ _plotmem_stage(chains, params, data) = Nereus._make_plots(
         @test @allocated(Nereus._png_idat(surface.data)) < 4 * 640 * 480 / 2
     end
 
+    @testset "a released figure lets its image go" begin
+        # Makie's finalizer keeps a figure's scene until the teardown task it
+        # schedules runs, which is not before this task yields. The scene kept
+        # the screen it was drawn on and the screen its image surface, so a
+        # plot set held every figure's. `_release_scene!` lets the screens go.
+        M = _PLOTMEM_MAKIE
+        d = mktempdir()
+        mk() = (f = M.Figure(size = (800, 600));
+                M.lines!(M.Axis(f[1, 1]), 1:10, (1:10) .^ 2; color = M.to_colormap(:cool)[end]);
+                f)
+        f = mk()
+        Nereus._save_plot(joinpath(d, "one.png"), f; release = true, px_per_unit = 2)
+        @test isempty(M.get_scene(f).current_screens)
+        f = nothing
+        GC.gc(); GC.gc()
+        live0 = Base.gc_live_bytes()
+        for i in 1:10
+            Nereus._save_plot(joinpath(d, "f$i.png"), mk(); release = true, px_per_unit = 2)
+        end
+        GC.gc(); GC.gc()        # the finalizers queue their tasks; nothing has yielded
+        @test Base.gc_live_bytes() - live0 < 3 * 4 * 1600 * 1200   # 3 of the 10 surfaces
+    end
+
     @testset "a large chain's figures collect once enough is allocated" begin
         # `_save_plot` collects (when `_make_plots` turns it on) only once
         # `_RELEASE_EVERY` bytes have been allocated since the last collection.
