@@ -135,6 +135,7 @@ const TEST_UNITS = [
     (name = "test_seam_samplers.jl", seconds = 63, files = ["test_seam_samplers.jl"]),
     # measured: 165 s, one process, 4 threads (2026-11-11)
     (name = "test_scouted_starts.jl", seconds = 165, files = ["test_scouted_starts.jl"]),
+    (name = "test_evidence_engines.jl", seconds = 240, files = ["test_evidence_engines.jl"]),
     # measured: 31 s, one process, 8 threads (2026-11-11)
     (name = "test_polar_recut.jl", seconds = 31, files = ["test_polar_recut.jl"]),
     # measured: 24 s, one process, 8 threads (2026-11-11)

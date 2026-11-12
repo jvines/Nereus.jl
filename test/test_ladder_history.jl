@@ -135,11 +135,13 @@ using Test, Nereus, Random, Statistics
         @test Nereus.ti_trapezoidal(L.mean_logL, res.betas) ≈ res.evidence_report.ti[1]
 
         # Both figures draw from this result too. Its evidence report sits
-        # under a different field name (`evidence_report`, not `evidence`) and
-        # the evidence it reports IS one of the tempered estimators.
+        # under a different field name (`evidence_report`, not `evidence`). Its
+        # only log Z is tempered, and the default ladder (no β = 0 rung) cannot
+        # carry it, so it reports none.
         rep = Nereus._evidence_report_of(res)
         @test rep === res.evidence_report
-        @test Nereus._reported_evidence_name(res, rep) in ("H+", "TI+", "TI")
+        @test isnan(res.log_evidence)
+        @test Nereus._reported_evidence_name(res, rep) === nothing
         out = mktempdir()
         plot_ladder_rates(res; output = out)
         plot_beta_ladder(res; output = out)

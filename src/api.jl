@@ -892,7 +892,8 @@ function _normalize(raw)
                             "railed" => raw.railed,
                             "railed_params" => raw.railed_params,
                             "n_basins" => raw.n_basins,
-                            "log_posterior" => raw.log_posterior)
+                            "log_posterior" => raw.log_posterior,
+                            "log_z" => "Laplace approximation at the MAP")
         return nothing, getproperty(raw, :log_evidence_laplace), extra
     end
     # nuts, ensemble, ess and ofti return a BARE MCMCChains.Chains rather than
@@ -1271,7 +1272,8 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                 # posterior while its four variants agree with each other to a
                 # decimal, so a bridge cross-check is not optional.
                 _augment_evidence!(summary, target.params, target.data, chains;
-                                   show_progress = show_pf, timings = bridge_t)
+                                   show_progress = show_pf, timings = bridge_t,
+                                   _postfit_rule_kw(spec_opts, target.data)...)
                 _postfit_stage!(pf, "science")
                 # Conditioned, unit-tagged fitted/derived + model_selection +
                 # run_info, and tables/ in json, csv, ecsv, dat and TEX.
@@ -1348,41 +1350,9 @@ end
 `log_z` reports. Mirrors the block `_populate_summary!` builds for run_job."""
 function _evidence_block!(summary::AbstractDict, result; engine::AbstractString = "")
     result === nothing && return
-    ev = Dict{String,Any}()
-    for (key, fld) in ("bridge" => :log_evidence_bridge,
-                       "mode_laplace" => :log_evidence_laplace)
-        hasproperty(result, fld) || continue
-        v = getproperty(result, fld)
-        v isa Real && isfinite(v) && (ev[key] = Float64(v))
-    end
-    ns = _ns_evidence(engine, result)
-    (ns === nothing || !isfinite(ns[1])) ||
-        (ev["nested"] = Dict("log_z" => ns[1], "se" => ns[2]))
-    for rf in (:evidence, :evidence_report)
-        hasproperty(result, rf) || continue
-        rep = getproperty(result, rf)
-        for (key, fld) in ("ti" => :ti, "ti_plus" => :ti_plus,
-                           "ss_plus" => :ss_plus, "hybrid" => :hybrid)
-            hasproperty(rep, fld) || continue
-            t = getproperty(rep, fld)
-            (t isa Tuple && length(t) == 2 && isfinite(t[1])) || continue
-            ev[key] = Dict("log_z" => Float64(t[1]), "se" => Float64(t[2]))
-        end
-        hasproperty(rep, :hybrid_beta_star) &&
-            (ev["hybrid_beta_star"] = Float64(getproperty(rep, :hybrid_beta_star)))
-        break
-    end
-    isempty(ev) && return
-    lz = get(summary, "log_z", NaN)
-    which = "tempered"
-    if lz isa Real && isfinite(lz)
-        for (k, v) in ev
-            val = v isa Dict ? get(v, "log_z", NaN) : v
-            (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)
-        end
-    end
-    ev["reported"] = which
-    summary["evidence"] = ev
+    ev = _evidence_summary(result, get(summary, "log_z", NaN);
+                           nested = _ns_evidence(engine, result))
+    ev === nothing || (summary["evidence"] = ev)
     return
 end
 

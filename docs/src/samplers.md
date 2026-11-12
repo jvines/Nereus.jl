@@ -18,10 +18,10 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 
 | `sampler.name` | function | fixed/trans-dim | needs `transdim` block | gives log Z |
 |---|---|:---:|:---:|:---:|
-| `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (TI⁺/SS⁺/H⁺) |
+| `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (bridge / H⁺ / mode-Laplace) |
 | `transdim_pt_emcee` | `sample_transdim_pt_emcee` | trans | **required** | occupancy |
-| `pt`               | `sample_pt`               | both  | optional (`td`) | yes (TI⁺) |
-| `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (TI⁺) |
+| `pt`               | `sample_pt`               | both  | optional (`td`) | quotable TI⁺ |
+| `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (bridge / SS⁺ / mode-Laplace) |
 | `pt_whitening`     | `sample_pt_whitening`     | fixed | — | yes |
 | `rjmcmc`           | `sample_rjmcmc`           | trans | **required** | — (NaN) |
 | `moms`             | `sample_moms`             | trans | **required** | — (NaN) |
@@ -69,7 +69,7 @@ directly.
 | Problem | Use |
 |---|---|
 | Characterise a known planet, fixed N\_p, multimodal/weak signal | `sample_pt_emcee` |
-| Same, with gradients available, want clean TI⁺ evidence | `sample_pt_hmc` |
+| Same, with gradients available, tempered evidence checked against bridge | `sample_pt_hmc` |
 | Same, smooth/unimodal, gradients available | `sample_nuts` |
 | Same, GP-heavy nuisance, Gaussian-ish prior | `sample_ess` |
 | Same, emcee-style single-temperature ensemble | `sample_ensemble` |
@@ -190,8 +190,12 @@ res = sample_pt_emcee(target, data;
 
 Any other value is an `ArgumentError`.
 
-Returns a `PTemceeResult` with fields `chains`, `log_evidence` (best of
-TI/TI⁺/SS⁺/H⁺), `evidence::EvidenceReport`, `acceptance_within`,
+Returns a `PTemceeResult` with fields `chains`, `log_evidence` (bridge
+sampling on the cold chain when usable; else H⁺ when its ladder is quotable —
+β = 0 reached and every adjacent pair swapping at least `swap_min`, 5% — and
+it agrees with mode-Laplace within `laplace_switch_tol`; else
+`log_evidence_laplace`, with a warning), `evidence::EvidenceReport` (raw),
+`acceptance_within`,
 `acceptance_swap`, `n_evals`, and `ladder::LadderHistory` — the ladder, swap
 acceptance and swap mean distance at every step, plus `⟨log L⟩` per rung,
 which `plot_ladder_rates` and `plot_beta_ladder` draw. Bump `n_temps` to 15+ when log-likelihood
@@ -355,7 +359,9 @@ adaptation). The β-ladder is fixed and quadratic (β₁ = 0, β_i =
 `sample_pt` struggles on ultra-sharp curved ridges where `sample_pt_emcee`'s
 affine-invariant ensemble does not. Returned log Z is the TI⁺ (PCHIP) estimate
 from the reddemcee-style accumulator, which starts after `n_rounds ÷ 2` warmup
-rounds; TI, SS⁺ and H⁺ are logged alongside it — see [Evidence](evidence.md).
+rounds, and only when every adjacent pair of chains swapped at least `swap_min`
+(5%) of the time after the warmup; otherwise `NaN`, with a warning. TI, SS⁺
+and H⁺ are logged alongside it — see [Evidence](evidence.md).
 Run with `julia -t auto` — PT parallelises chains over threads;
 single-threaded it runs the chains serially (`sample_pt` warns).
 
@@ -379,10 +385,20 @@ standard result tuple, surfacing `(chains, log_evidence)`.
 
 Hamiltonian parallel tempering: NUTS-within-parallel-tempering for
 fixed-dim, ForwardDiff-differentiable models. Returns the cold-chain
-`Chains` (with `:lp`), the TI⁺ log-evidence, and the `EvidenceReport`.
+`Chains` (with `:lp`), the log-evidence, the `EvidenceReport`, and a named
+tuple of the evidence estimates (`bridge`, `laplace`, `tempered`,
+`tempered_ok`, `tempered_why`, `reported`, `betas`, `swap_acc`).
+
+The log-evidence is chosen as `sample_pt_emcee` chooses it (Jose's rule):
+bridge sampling on the cold chain when its reference has the effective
+samples it needs; else SS⁺ when the ladder starts at β = 0, every adjacent
+pair of rungs swapped at least `swap_min` of the time and it is within
+`laplace_switch_tol` of mode-Laplace; else mode-Laplace, with a warning;
+`NaN`, with a warning that says why, only when none of them is available.
+See [Evidence](evidence.md).
 
 ```julia
-chains, log_ev, report = sample_pt_hmc(target;
+chains, log_ev, report, ev = sample_pt_hmc(target;
     n_temps            = 12,
     n_sweeps           = 1500,
     n_warmup           = 400,
@@ -391,6 +407,11 @@ chains, log_ev, report = sample_pt_hmc(target;
     target_accept      = 0.8,
     adapt_ladder       = true,          # pilot → re-grid β by √Var(logL) → final
     betas              = nothing,       # custom ladder; disables adaptation
+    beta_min           = 1e-4,          # default ladder: β = 0, then geometric on [beta_min, 1]
+    swap_min           = 0.05,          # least adjacent swap rate at which SS⁺ is quoted
+    evidence_tol       = 2.0,           # nats; warn when a quotable SS⁺ disagrees with bridge
+    laplace_switch_tol = 50.0,          # nats; a quotable SS⁺ further from mode-Laplace is broken
+    bridge_n           = 20_000,        # bridge proposal draws; 0 skips bridge
     warm_start         = true,
     n_scouts           = 16,            # warm_start = false: scouted prior draws
     seed               = 1,
@@ -404,10 +425,12 @@ warm-up run on a plateau far below the mode leaves the β = 1 chain unable to
 move once a swap brings it there.
 
 `adapt_ladder` runs a short pilot, re-grids β by thermodynamic length
-(√Var logL), then the final run — minimising TI discretisation error.
+(√Var logL), keeping β = 0, then the final run — minimising TI discretisation
+error.
 **The target is internally forced to `unconstrained = true`** (it rebuilds
 the target with `PackedTransforms` if needed), so you can pass either.
-`run_job` surfaces `(chains, log_evidence)`.
+`run_job` surfaces the chains, the log-evidence, bridge, Laplace and the
+`EvidenceReport` (summary.json's evidence block).
 
 ### `sample_pt_whitening` — `name: "pt_whitening"`
 
@@ -438,8 +461,9 @@ res = sample_pt_whitening(target, data;
 )
 ```
 
-Returns a `WhiteningPTResult` (`chains`, `log_evidence`, `acceptance_within`,
-`acceptance_swap`, `n_evals`). The whitening flow gives a 2–5× swap-
+Returns a `WhiteningPTResult` (`chains`, `log_evidence` — H⁺ only from a
+quotable ladder, which the default (1/√5)^i one is not, else `NaN` —
+`acceptance_within`, `acceptance_swap`, `n_evals`). The whitening flow gives a 2–5× swap-
 acceptance bump on multimodal posteriors with differently-scaled β
 distributions. Experimental: the diagonal flow doesn't capture full
 posterior correlation, so for paper-grade fits prefer `sample_pt_emcee` /
@@ -680,27 +704,35 @@ Same peaked-posterior resampling caveats as INS.
 
 Population annealing
 ([Hukushima & Iba 2003](https://ui.adsabs.harvard.edu/abs/2003AIPC..690..200H/abstract)).
-Tempered sequential Monte Carlo: at each β-step the population is reweighted,
-resampled, and MCMC-mutated. Adaptive β-schedule via an ESS target.
+Tempered sequential Monte Carlo: at each β-step the population is reweighted
+and MCMC-mutated, and resampled when the ESS of its weights falls below
+`resample_ess` × N (and at β = 1). The β-schedule targets the conditional ESS
+of each reweighting; the mutation sweeps until the replicas have decorrelated
+from where they started.
 
 ```julia
 res = sample_pa(target, data;
-    n_replicas        = 500,
+    n_replicas        = 2000,          # biased high at small N across a phase transition
     n_mcmc            = 10,             # MINIMUM mutation sweeps per anneal step
     ess_target        = 0.9,           # adaptive β picks ESS/N = this (conservative crawl)
     max_steps         = 200,
     step_scale        = 0.05,          # :rwm only — RWM step as fraction of prior
     mutation_kernel   = :stretch,      # :stretch | :rwm | :adaptive_cov
     stretch_a         = 2.0,           # :stretch only
-    mcmc_target_moves = 5.0,           # adaptive: sweep until each replica has ≥ this accepts
-    max_mcmc_mult     = 12,            # cap: ≤ max_mcmc_mult × n_mcmc sweeps per β
+    mcmc_target_moves = 5.0,           # floor: sweep until each replica has ≥ this accepts
+    decorrelation     = 0.2,           # then until no parameter keeps a rank correlation above this
+    max_mcmc_mult     = 30,            # cap: ≤ max_mcmc_mult × n_mcmc sweeps per β
+    resample_ess      = 0.5,           # resample when ESS/N of the weights falls below this
     seed              = 1,
     show_progress     = true,
 )
 ```
 
 Returns `PAResult(chains, log_evidence, log_evidence_history, beta_history,
-ess_history, acceptance, n_evals)`.
+ess_history, acceptance, n_evals, sweep_history, corr_history, resampled)`.
+
+A free e near 0 leaves the e-ω-M₀ ridge undecorrelated by the stretch move,
+and every step there runs to the `max_mcmc_mult` cap.
 
 | `mutation_kernel` | Best for |
 |---|---|
@@ -720,15 +752,15 @@ lets the gradient-free mutation re-diversify the resampled population.
 
 SMC family interface
 ([Del Moral, Doucet & Jasra 2006](https://ui.adsabs.harvard.edu/abs/2006JRSSB..68..411D/abstract)).
-Currently a thin wrapper over `sample_pa` that takes an explicit β sequence
-and delegates. Only `length(betas)` is used (as a step count); the values
-themselves are ignored because PA's ESS-adaptive scheduler picks the
-β-spacing (the function `@info`-logs this). The `betas` must start at 0.0,
-end at 1.0, and be sorted ascending.
+A thin wrapper over `sample_pa`. Without `betas` (the default) it is
+`sample_pa`. With `betas`, only `length(betas)` is used, as the step count;
+the values themselves are ignored because PA's ESS-adaptive scheduler picks
+the β-spacing (the function `@info`-logs this). The `betas` must start at
+0.0, end at 1.0, and be sorted ascending.
 
 ```julia
 res = sample_smc(target, data;
-    betas           = range(0.0, 1.0; length = 51),  # default; only its length matters
+    betas           = nothing,          # default; a vector caps the steps at its length − 1
     n_replicas      = 200,
     mutation_kernel = :adaptive_cov,
     seed            = 1,
@@ -785,10 +817,11 @@ sampling. NS bridging over the joint parameter+activation space gives
 construction).
 
 ```julia
-chains, log_z, strategy = sample_daedalus(target, data; td = td,
+chains, log_z, strategy, log_z_err = sample_daedalus(target, data; td = td,
     n_live                  = 200,
     dlogz                   = 0.5,
-    n_mcmc                  = 25,       # constrained-MCMC steps per dead-point replace
+    n_mcmc                  = 25,       # least constrained-walk steps per dead-point replace
+    decorrelation           = 16.0,     # walk length: squared jumps summing to this × d
     init_scale              = 1.0,      # × IQR-stddev
     inclusion_prior         = 0.5,      # spike-and-slab γ-prior (log-Z normalisation)
     seed                    = 1,
@@ -800,6 +833,11 @@ chains, log_z, strategy = sample_daedalus(target, data; td = td,
     warm_start_points       = nothing,  # e.g. from pathfinder_warmstart_daedalus
 )
 ```
+
+Each replacement walk moves every active coordinate at once, shaped by the
+live points' covariance, at a scale adapted between walks toward half the
+steps accepted, for as many steps as decorrelate it from its donor.
+`log_z_err` is Skilling's √(H / n_live).
 
 Slower than `sample_moms` on a single fit (NS overhead), but the output is a
 calibrated Bayes-factor matrix over candidate models. Noise toggling is

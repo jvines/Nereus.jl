@@ -28,7 +28,8 @@
 # _eval_ll, _init_systemics_from_prior!) and adds only the NS skeleton.
 
 using Random
-using Statistics: mean, std
+using Statistics: mean, std, cov
+using LinearAlgebra: cholesky, Symmetric, LowerTriangular, Diagonal, diag, issuccess
 using Printf
 using MCMCChains
 
@@ -58,12 +59,14 @@ end
 
 """
     sample_daedalus(target, data; td, kwargs...)
-        -> (chains::MCMCChains.Chains, log_evidence, strategy::MoMSBirth)
+        -> (chains::MCMCChains.Chains, log_evidence, strategy::MoMSBirth,
+            log_evidence_err)
 
 Trans-dimensional nested sampler operating on the joint (β, γ)
 spike-and-slab parameterisation. Returns posterior samples (importance-
-resampled to equal weights), the log-evidence estimate, and the
-adapted MoMS strategy carrying off-values + scales.
+resampled to equal weights), the log-evidence estimate, the
+adapted MoMS strategy carrying off-values + scales, and the log-evidence's
+standard error √(H / n_live) (Skilling 2006; H the information).
 
 # Required
 - `target::NereusTarget` — bounded (`unconstrained=false`) target.
@@ -74,7 +77,22 @@ adapted MoMS strategy carrying off-values + scales.
 # Keywords
 - `n_live::Int = 200` — number of live points.
 - `dlogz::Float64 = 0.5` — termination criterion on remaining log-Z.
-- `n_mcmc::Int = 25` — constrained-MCMC steps when replacing a dead point.
+- `n_mcmc::Int = 25` — the fewest within-model steps of the constrained walk
+  that replaces a dead point (it also continues until one is accepted). Each
+  step moves every active coordinate at once by a Gaussian step shaped by the
+  live points' covariance, its scale adapting between replacements toward
+  half the steps accepted and fixed within each.
+- `decorrelation::Real = 16.0` — the walk's length: enough steps, at the
+  squared jump per step measured on the walks before it, that its accepted
+  steps travel `decorrelation × d` in squared units of the live points'
+  covariance (two independent live points are `2d` apart), up to
+  `40 × n_mcmc` steps; fixed for each walk. `0` walks `n_mcmc` steps. A walk
+  of 25 steps, one coordinate at a time at a fixed 1/50 of its prior width,
+  left the replacements close to their donors: on an RV + IAD companion with
+  i = 5° log Z spread over 150-169 across 8 seeds, where bridge sampling gives
+  165.5 (now 165.6-166.0 over four). With i = 89.5°, 25 steps of the
+  covariance-shaped walk put it at 155, against 163.9 at 16 (163.5-164.3 over
+  three seeds; 32 and 64 give the same) and bridge sampling's 163.9.
 - `init_scale::Float64 = 1.0` — initial MoMS proposal scale (× IQR-stddev).
 - `inclusion_prior::Float64 = 0.5` — Bernoulli prior on each γ_k at init,
   also used as the spike-and-slab γ-prior in the corrected log-prior so
@@ -101,9 +119,11 @@ function sample_daedalus(
     informed_birth_fraction::Real = 0.0,
     batch_size::Int        = 1,
     warm_start_points::Union{Vector{DaedalusPoint}, Nothing} = nothing,
+    decorrelation::Real    = 16.0,
 )
     # JSON may deliver these floats as Int; normalize.
     dlogz                   = Float64(dlogz)
+    decorrelation           = Float64(decorrelation)
     init_scale              = Float64(init_scale)
     inclusion_prior         = Float64(inclusion_prior)
     informed_birth_fraction = Float64(informed_birth_fraction)
@@ -174,6 +194,16 @@ function sample_daedalus(
 
     iter = 0
     last_report = 0
+    # The within-model walk's step, in units of the live points' covariance
+    # (`_daedalus_proposal`): adapted after every replacement toward half the
+    # proposals accepted, as the vendored NestedSamplers RWalk adapts its
+    # scale, and frozen within each walk. Started at 2.38/√d.
+    n_dim_walk = max(1, length(params.layout.unfrozen_idx))
+    walk_scale = Ref(2.38 / sqrt(n_dim_walk))
+    # Its length: the squared distance a walk is expected to travel, the
+    # squared jumps of its accepted steps summed (`_daedalus_walk_length`),
+    # measured on the walks before it and fixed for each.
+    walk_jump = Ref(NaN)
     pb = ProgressBar("Daedalus";
                        total = max_iter, enabled = show_progress)
     while iter < max_iter
@@ -221,6 +251,12 @@ function sample_daedalus(
         # --- Replace killed points (parallel via @spawn) -----------------
         # Donors are random survivors (excluding all killed indices).
         survivor_pool = setdiff(1:n_live, dead_indices)
+        # The walks' proposals are built from the live points as they stand
+        # (the survivors: the killed ones are below L_thr), and `scale` is
+        # frozen for them; it adapts between replacements (below).
+        donors_live = live[survivor_pool]
+        counts = Ref((0, 0, 0.0))
+        nw = _daedalus_walk_length(walk_jump, n_mcmc, n_dim_walk, decorrelation)
         if batch_size == 1
             # Serial path: avoid @spawn overhead for the common b=1 case.
             donor = survivor_pool[rand(rng, 1:length(survivor_pool))]
@@ -229,9 +265,13 @@ function sample_daedalus(
                                                       L_thr, n_mcmc,
                                                       inclusion_prior, rng;
                                                       informed_birth_fraction =
-                                                          informed_birth_fraction)
+                                                          informed_birth_fraction,
+                                                      live = donors_live,
+                                                      scale = walk_scale[], n_walk = nw,
+                                                      counts)
         else
             tasks = Vector{Task}(undef, batch_size)
+            task_counts = [Ref((0, 0, 0.0)) for _ in 1:batch_size]
             for j in 1:batch_size
                 donor = survivor_pool[rand(rng, 1:length(survivor_pool))]
                 # Each task gets its own seeded RNG so the evolutions are
@@ -239,16 +279,31 @@ function sample_daedalus(
                 # used to draw the seeds + donor indices.
                 child_rng = MersenneTwister(rand(rng, UInt64))
                 start_pt = live[donor]
+                tc = task_counts[j]
+                sc = walk_scale[]
                 tasks[j] = Threads.@spawn _daedalus_evolve(start_pt, target,
                                                             data, strategy, td,
                                                             L_thr, n_mcmc,
                                                             inclusion_prior, child_rng;
                                                             informed_birth_fraction =
-                                                                informed_birth_fraction)
+                                                                informed_birth_fraction,
+                                                            live = donors_live,
+                                                            scale = sc, n_walk = nw,
+                                                            counts = tc)
             end
             for (j, idx) in enumerate(dead_indices)
                 live[idx] = fetch(tasks[j])
             end
+            counts[] = (sum(c[][1] for c in task_counts), sum(c[][2] for c in task_counts),
+                        sum(c[][3] for c in task_counts))
+        end
+        acc_, rej_, jump_ = counts[]
+        _daedalus_update_scale!(walk_scale, acc_, rej_, n_dim_walk)
+        # Squared jump per within-model step, smoothed over ~n_live walks.
+        if acc_ + rej_ > 0
+            j = jump_ / (acc_ + rej_)
+            w = 1 / min(n_live, iter)
+            walk_jump[] = isfinite(walk_jump[]) ? (1 - w) * walk_jump[] + w * j : j
         end
 
         log_X_prev = log_X_curr
@@ -281,17 +336,49 @@ function sample_daedalus(
         push!(log_L_dead, p.log_L)
     end
 
+    # Skilling's (2006) error: H the information, nats from prior to
+    # posterior, and σ(log Z) = √(H / n_live).
+    H = 0.0
+    for (lL, lw) in zip(log_L_dead, log_w_dead)
+        isfinite(lL) || continue
+        H += exp(lL + lw - log_Z) * lL
+    end
+    log_Z_err = sqrt(max(H - log_Z, 0.0) / n_live)
+
     if show_progress
         @printf("Daedalus finished: %d iterations, %d total points (%d dead + %d live).\n",
                 iter, length(dead_pts), iter, n_live)
-        @printf("log Z = %+.4f\n", log_Z)
+        @printf("log Z = %+.4f ± %.4f\n", log_Z, log_Z_err)
     end
 
     # ---- 4. Importance-resample to get equally-weighted posterior --
     log_post_w = log_L_dead .+ log_w_dead .- log_Z
     chain = _daedalus_resample_chain(dead_pts, log_post_w, params, td, rng)
 
-    return chain, log_Z, strategy
+    return chain, log_Z, strategy, log_Z_err
+end
+
+# Within-model steps of the next walk: enough that its accepted steps' squared
+# jumps, at `jump` per step (measured on the walks so far), sum to
+# `decorrelation × d` in units of the live points' covariance -- where two
+# independent live points are 2d apart on average. At least `n_mcmc`, at most
+# 40 × n_mcmc; `n_mcmc` until there is a measurement, or with
+# `decorrelation = 0`.
+function _daedalus_walk_length(jump::Base.RefValue{Float64}, n_mcmc::Int, d::Int,
+                               decorrelation::Float64)
+    (decorrelation > 0 && isfinite(jump[]) && jump[] > 0) || return n_mcmc
+    n = decorrelation * d / jump[]
+    return clamp(isfinite(n) ? ceil(Int, n) : 40n_mcmc, n_mcmc, 40 * max(n_mcmc, 1))
+end
+
+# The walk's scale after a replacement that accepted `acc` of `acc + rej`
+# within-model proposals: the vendored NestedSamplers RWalk's `update_scale!`
+# toward 1/2, capped at √d.
+function _daedalus_update_scale!(scale::Base.RefValue{Float64}, acc::Int, rej::Int, d::Int)
+    acc + rej == 0 && return scale
+    ratio = acc / (acc + rej)
+    scale[] = min(scale[] * exp((ratio - 0.5) / (0.5 * d)), sqrt(d))
+    return scale
 end
 
 # The prior volume credited to each of the `b` lowest live points killed
@@ -337,17 +424,15 @@ function _daedalus_init_point(target::NereusTarget, data::Data,
     end
     theta = Theta{Float64}(params; td = td_state)
 
+    # Every coordinate a prior draw, γ included: nested sampling's volumes
+    # count from live points drawn from the prior. γ used to be set to each
+    # instrument's median RV (`_seed_gammas_from_data!`, as the MCMC samplers
+    # start their chains): every live point then had the same γ, the live
+    # points' covariance none in γ, and the replacement walks left γ where it
+    # was until about a quarter of the run had gone (RV + IAD companion,
+    # i = 5°). The evidence counted the prior's γ volume as if the data's γ
+    # filled it.
     _init_systemics_from_prior!(theta, rng)
-
-    # Override γ values with per-instrument median(rv_i). The default
-    # init_systemics draws γ from broad priors — for multi-instrument
-    # data those random γ are far from the right zero-points and dominate
-    # the residual chi², which forces the constrained log_L threshold
-    # to absorb large γ swings before the chain can ever consider planet
-    # signals. Seeding γ at the per-instrument median puts each live
-    # point on a sane starting calibration; the MCMC still walks γ
-    # afterwards if the data prefers something different.
-    _seed_gammas_from_data!(theta, data)
 
     # All planets start inactive (β at off-value). We then attempt to
     # activate each planet independently with probability inclusion_prior.
@@ -448,7 +533,11 @@ function _daedalus_evolve(start::DaedalusPoint, target::NereusTarget,
                           td::TransDimConfig, L_thr::Float64,
                           n_mcmc::Int, inclusion_prior::Float64,
                           rng::AbstractRNG;
-                          informed_birth_fraction::Float64 = 0.0)
+                          informed_birth_fraction::Float64 = 0.0,
+                          live::Union{Nothing,Vector{DaedalusPoint}} = nothing,
+                          scale::Float64 = 1.0,
+                          n_walk::Int = n_mcmc,
+                          counts::Union{Nothing,Base.RefValue{Tuple{Int,Int,Float64}}} = nothing)
     params = target.params
     layout = params.layout
 
@@ -469,7 +558,18 @@ function _daedalus_evolve(start::DaedalusPoint, target::NereusTarget,
 
     has_toggleable_noise = td.noise && !isempty(td.toggleable)
 
-    for step in 1:n_mcmc
+    # The within-model proposal of each configuration (`_daedalus_proposal`),
+    # built once from `live` and frozen for the walk: a fixed symmetric
+    # proposal, so each step leaves the constrained prior invariant.
+    props = Dict{Tuple{Vector{Bool},Vector{Bool}},Any}()
+    n_within = n_acc = n_rej = steps = 0
+    sq_jump = 0.0
+    # `n_walk` within-model steps (fixed for the walk; `sample_daedalus` sets
+    # it between walks) and at least one accepted: a walk that accepts nothing
+    # returns a copy of its donor, two live points where the constrained prior
+    # has one (the vendored NestedSamplers RWalk). Capped at 50 × n_walk steps.
+    while (n_within < n_walk || n_acc == 0) && steps < 50 * max(n_walk, 1)
+        steps += 1
         # td.planets = false: the planet set is fixed, so a between-model
         # move can only toggle noise, and with no toggleable noise there is
         # none to make (as in rjmcmc, moms and the trans-dimensional PT). The
@@ -568,18 +668,26 @@ function _daedalus_evolve(start::DaedalusPoint, target::NereusTarget,
                 log_L  = new_log_L
             end
         else
-            # Within-model: single-coord Gaussian random walk. The within
-            # step uses Nereus log_prior internally for its M-H ratio
-            # (correct, since the spike-and-slab correction is constant
-            # at fixed γ); we re-evaluate via spike_slab_log_prior on
-            # accept so log_pi stays consistent for the next γ flip.
-            res = _daedalus_within_step!(theta, data, L_thr, log_pi, log_L,
+            # Within-model: a Gaussian step in all active coordinates at once,
+            # its covariance the live points' (`_daedalus_proposal`) times
+            # `scale`. The M-H ratio is the spike-and-slab prior's, constant in
+            # γ here, with the likelihood replaced by the constraint.
+            n_within += 1
+            key = (copy(theta.td.planet_active), copy(theta.td.noise_active))
+            prop = get!(() -> _daedalus_proposal(theta, live), props, key)
+            res = _daedalus_within_step!(theta, data, L_thr, log_pi, prop, scale,
                                           strategy, inclusion_prior, rng)
-            if res !== nothing
-                log_pi, log_L = res
+            if res === nothing
+                n_rej += 1
+            else
+                log_pi, log_L, jump = res
+                n_acc += 1
+                sq_jump += jump
             end
         end
     end
+    counts === nothing ||
+        (counts[] = (counts[][1] + n_acc, counts[][2] + n_rej, counts[][3] + sq_jump))
 
     return DaedalusPoint(
         copy(theta.values),
@@ -590,67 +698,105 @@ function _daedalus_evolve(start::DaedalusPoint, target::NereusTarget,
     )
 end
 
-"""Pick a random active unfrozen coordinate, propose a Gaussian step,
-accept iff prior allows and L > L_thr. Returns the new (log_pi, log_L)
-on accept (with `log_pi` in spike-and-slab units), `nothing` on reject."""
-function _daedalus_within_step!(theta::Theta, data::Data, L_thr::Float64,
-                                  log_pi::Float64, log_L::Float64,
-                                  strategy::MoMSBirth, inclusion_prior::Float64,
-                                  rng::AbstractRNG)
+# The within-model proposal for the configuration `theta` is in: its active
+# unfrozen slots and a lower-triangular factor `L`, a step being `scale · L z`
+# with z standard normal. `L` is the Cholesky factor of the covariance of the
+# live points in the same configuration -- the shape of the constrained region,
+# as dynesty's and the vendored NestedSamplers' bounding ellipsoids are -- when
+# there are enough of them (d + 2) and it factorises; otherwise a diagonal of
+# each slot's sd over the live points where it is active, or, with fewer than
+# two of those (or no `live`), 1/50 of its prior width, the fixed step this
+# kernel used to take one coordinate at a time. A slot whose live points share
+# one value (to rounding) takes that 1/50 step too: its covariance factorised
+# with a pivot of ~1e-16 and froze the slot (γ, when the live points all
+# started at the data's).
+function _daedalus_proposal(theta::Theta, live::Union{Nothing,Vector{DaedalusPoint}})
     params = theta.params
     layout = params.layout
-    n_unfrozen = length(layout.unfrozen_idx)
-    isempty(layout.unfrozen_idx) && return nothing
-
-    # Build active mask: skip unfrozen slots that belong to inactive planets
-    skip = falses(n_unfrozen)
-    for k in 1:length(theta.td.planet_active)
-        theta.td.planet_active[k] && continue
-        for slot in planet_slot_indices(layout.planet_blocks[k])
-            uf_pos = findfirst(==(slot), layout.unfrozen_idx)
-            uf_pos === nothing && continue
-            skip[uf_pos] = true
+    act, pos = _active_unfrozen(params, theta.td)
+    d = length(act)
+    sd = Vector{Float64}(undef, d)
+    for (k, p) in enumerate(pos)
+        lo, hi = bounds(layout.unfrozen_priors[p])
+        sd[k] = isfinite(lo) && isfinite(hi) ? (hi - lo) / 50 :
+                0.05 * abs(theta.values[act[k]]) + 1e-3
+    end
+    live === nothing && return (act = act, pos = pos, L = LowerTriangular(Matrix(Diagonal(sd))))
+    same = [q for q in live if q.planet_active == theta.td.planet_active &&
+                               q.noise_active == theta.td.noise_active]
+    spread(s, m, k) = s > 1e-12 * (abs(m) + sd[k])
+    if length(same) >= d + 2
+        X = [q.values[a] for q in same, a in act]
+        C = cov(X)
+        m = vec(mean(X; dims = 1))
+        if all(k -> spread(sqrt(max(C[k, k], 0.0)), m[k], k), 1:d)
+            F = cholesky(Symmetric(C); check = false)
+            issuccess(F) && all(>(0), diag(F.L)) && return (act = act, pos = pos, L = F.L)
         end
     end
-    active_pos = findall(.!skip)
-    isempty(active_pos) && return nothing
-
-    j     = active_pos[rand(rng, 1:length(active_pos))]
-    slot  = layout.unfrozen_idx[j]
-    prior = layout.unfrozen_priors[j]
-    lo, hi = bounds(prior)
-
-    # Step scale: ~2% of finite prior width, fallback to current-value-based.
-    σ = if isfinite(lo) && isfinite(hi)
-        (hi - lo) / 50
-    else
-        0.05 * abs(theta.values[slot]) + 1e-3
+    for k in 1:d
+        v = Float64[q.values[act[k]] for q in live if _slot_active(q, act[k], params)]
+        length(v) >= 2 && spread(std(v), mean(v), k) && (sd[k] = std(v))
     end
+    return (act = act, pos = pos, L = LowerTriangular(Matrix(Diagonal(sd))))
+end
 
-    old_val = theta.values[slot]
-    new_val = old_val + σ * randn(rng)
-    if (isfinite(lo) && new_val < lo) || (isfinite(hi) && new_val > hi)
-        return nothing
+# Whether theta slot `s` is active at the live point `q` (its planet on, or
+# its noise model on).
+function _slot_active(q::DaedalusPoint, s::Int, params::Params)
+    L = params.layout
+    for k in eachindex(q.planet_active)
+        s in planet_slot_indices(L.planet_blocks[k]) && return q.planet_active[k]
     end
+    for (nm_idx, nm) in enumerate(params.config.noise_models)
+        nm_idx <= length(q.noise_active) || continue
+        for name in noise_param_names(nm, params.config.instruments)
+            get(L.name_to_idx, name, 0) == s && return q.noise_active[nm_idx]
+        end
+    end
+    return true
+end
 
-    theta.values[slot] = new_val
+"""Propose `scale · L z` in the active coordinates of `prop`
+(`_daedalus_proposal`), accept iff every coordinate stays inside its prior's
+bounds, L > L_thr and the prior ratio passes. Returns the new (log_pi, log_L,
+squared jump) on accept (with `log_pi` in spike-and-slab units and the jump
+`scale² |z|²` in units of the proposal's covariance), `nothing` on reject,
+with `theta` restored."""
+function _daedalus_within_step!(theta::Theta, data::Data, L_thr::Float64,
+                                  log_pi::Float64, prop, scale::Float64,
+                                  strategy::MoMSBirth, inclusion_prior::Float64,
+                                  rng::AbstractRNG)
+    act = prop.act
+    isempty(act) && return nothing
+    layout = theta.params.layout
+    old = theta.values[act]
+    z = randn(rng, length(act))
+    step = prop.L * z
+    for (k, a) in enumerate(act)
+        v = old[k] + scale * step[k]
+        lo, hi = bounds(layout.unfrozen_priors[prop.pos[k]])
+        if (isfinite(lo) && v < lo) || (isfinite(hi) && v > hi)
+            theta.values[act] .= old
+            return nothing
+        end
+        theta.values[a] = v
+    end
     new_log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
     if !isfinite(new_log_pi)
-        theta.values[slot] = old_val
+        theta.values[act] .= old
         return nothing
     end
     new_log_L = _eval_ll(theta, data, nothing)
     if !isfinite(new_log_L) || new_log_L <= L_thr
-        theta.values[slot] = old_val
+        theta.values[act] .= old
         return nothing
     end
-
     # Symmetric Gaussian proposal cancels — M-H reduces to prior ratio
-    log_α = new_log_pi - log_pi
-    if log(rand(rng)) < log_α
-        return (new_log_pi, new_log_L)
+    if log(rand(rng)) < new_log_pi - log_pi
+        return (new_log_pi, new_log_L, scale^2 * sum(abs2, z))
     end
-    theta.values[slot] = old_val
+    theta.values[act] .= old
     return nothing
 end
 

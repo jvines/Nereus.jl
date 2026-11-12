@@ -101,6 +101,9 @@ estimate.
   the evidence accumulates only after them. `nothing` is `max(1, n_rounds ÷ 2)`,
   or, with `resume = true`, the warmup of the run being continued, so extending
   a run does not move its warmup.
+- `swap_min::Real=0.05` : the log-evidence (TI+) is returned only when every
+  adjacent pair of chains swapped at least this often after the warmup (the
+  ladder starts at β = 0); otherwise it is `NaN`, with a warning saying why.
 - `checkpoint=nothing` : path of a state file. The sampler writes its whole
   state there (every replica's position, model state and cached log-densities,
   every RNG stream, the RWM step sizes and their counters, the likelihood
@@ -149,6 +152,7 @@ function sample_pt(
     n_pathfinder_runs::Int = 16,
     n_pathfinder_draws::Int = 0,
     n_warmup_rounds::Union{Nothing,Int} = nothing,
+    swap_min::Real = 0.05,
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
@@ -216,7 +220,7 @@ function sample_pt(
         early_stop_min_rounds=early_stop_min_rounds,
         init=init_mat,
         within_model=within_model,
-        n_warmup_rounds, checkpoint, checkpoint_interval, resume, init_key)
+        n_warmup_rounds, swap_min, checkpoint, checkpoint_interval, resume, init_key)
     # Preserve historical return shapes: 2-tuple for fixed-dim
     # (matches the old Pigeons-backed path); 3-tuple for trans-dim
     # (matches the old in-house path). Test scripts depend on this.
@@ -275,6 +279,7 @@ function _sample_pt_transdim(
     init::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
     within_model::Symbol = :slice,
     n_warmup_rounds::Union{Nothing,Int} = nothing,
+    swap_min::Real = 0.05,
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
@@ -482,6 +487,10 @@ function _sample_pt_transdim(
     # `evidence_warmup_rounds` is set above, with the fingerprint.
     evidence_acc = EvidenceAccumulator(n_chains)
     logL_buf = Vector{Float64}(undef, n_chains)
+    # Swaps proposed and accepted per adjacent pair, counted where the evidence
+    # is (after the warmup rounds): `_tempered_quotable` reads their rates.
+    swap_n = zeros(Int, n_chains - 1)
+    swap_a = zeros(Int, n_chains - 1)
 
     # Circular angles (src/circular.jl): the cold replica's ACTIVE values over
     # the second half of the warmup iterations, pooled per window group,
@@ -525,6 +534,12 @@ function _sample_pt_transdim(
         append!(cold_planet_active, ck.cold_planet_active)
         for f in fieldnames(EvidenceAccumulator)
             setfield!(evidence_acc, f, getfield(ck.evidence, f))
+        end
+        # Checkpoints written before the swap counts were kept resume with the
+        # counts from the resume on.
+        if hasproperty(ck, :swap_n)
+            swap_n .= ck.swap_n
+            swap_a .= ck.swap_a
         end
         prev_np_post = ck.prev_np_post::Vector{Float64}
         # Windows the saved replicas live in (moved by the warmup re-cut).
@@ -634,7 +649,11 @@ function _sample_pt_transdim(
 
             # --- Replica swaps (serial) ----------------------------------
             for c in 1:(n_chains - 1)
-                _try_swap!(replicas, betas, c, c + 1, rng)
+                acc = _try_swap!(replicas, betas, c, c + 1, rng)
+                if round > evidence_warmup_rounds
+                    swap_n[c] += 1
+                    swap_a[c] += acc
+                end
             end
 
             # Reddemcee evidence accumulator update (post-warmup only).
@@ -690,7 +709,7 @@ function _sample_pt_transdim(
                 _pt_write_checkpoint(ck_path, ck_fp, iter, replicas, rng,
                     chain_rngs, chain_ctrs, chain_ws, cold_samples,
                     cold_n_planets, cold_noise, cold_planet_active,
-                    evidence_acc, prev_np_post, circ, params)
+                    evidence_acc, prev_np_post, circ, params; swap_n, swap_a)
                 last_ck = time()
                 iter == halt_after && throw(InterruptException())
             end
@@ -747,7 +766,7 @@ function _sample_pt_transdim(
             _pt_write_checkpoint(ck_path, ck_fp, iter, replicas, rng,
                 chain_rngs, chain_ctrs, chain_ws, cold_samples,
                 cold_n_planets, cold_noise, cold_planet_active,
-                evidence_acc, prev_np_post, circ, params)
+                evidence_acc, prev_np_post, circ, params; swap_n, swap_a)
             last_ck = time()
             iter == halt_after && throw(InterruptException())
         end
@@ -790,6 +809,17 @@ function _sample_pt_transdim(
                   (NaN, NaN), (NaN, NaN), NaN,
               )
     log_ev = report.ti_plus[1]
+    # TI+ is quoted only when the ladder can carry it (`_tempered_quotable`,
+    # src/samplers/evidence.jl, as for sample_pt_emcee and sample_pt_hmc). This
+    # ladder starts at β = 0, but its quadratic spacing leaves the second rung
+    # at 1/(n_chains - 1)² of the cold one, which pt_hmc's identical ladder
+    # never swapped with β = 0 on an RV + Hipparcos-IAD companion (TI+ at -624
+    # where log Z is 164).
+    swap_rate = swap_a ./ max.(swap_n, 1)
+    tq_ok, tq_why = _tempered_quotable(betas, swap_rate; swap_min)
+    if tq_ok && !isfinite(log_ev)
+        tq_ok, tq_why = false, "TI+ is not finite"
+    end
 
     if show_report
         total_evals = sum(c.count for c in chain_ctrs)
@@ -799,6 +829,13 @@ function _sample_pt_transdim(
         @info "  TI+ (PCHIP)       = $(round(report.ti_plus[1], digits=2)) ± $(round(report.ti_plus[2], digits=3))"
         @info "  SS+ (geom-bridge) = $(round(report.ss_plus[1], digits=2)) ± $(round(report.ss_plus[2], digits=3))"
         @info "  H+  (β*=$(round(report.hybrid_beta_star, digits=3))) = $(round(report.hybrid[1], digits=2)) ± $(round(report.hybrid[2], digits=3))"
+        @info "  swap acceptance per pair (β = 0 first): $(join(round.(swap_rate, digits = 3), " "))"
+    end
+    if !tq_ok
+        @warn "sample_pt: no quotable log-evidence for this run: the tempered " *
+              "stack is not quotable ($tq_why). log Z is NaN; the TI/TI+/SS+/H+ " *
+              "values above are not quotable either. Add chains (n_chains)." ti_plus = log_ev
+        log_ev = NaN
     end
 
     total_evals = sum(c.count for c in chain_ctrs)
@@ -870,7 +907,7 @@ end
 function _pt_write_checkpoint(path, fp, iter, replicas, rng, chain_rngs,
                               chain_ctrs, chain_ws, cold_samples, cold_n_planets,
                               cold_noise, cold_planet_active, evidence_acc,
-                              prev_np_post, circ, params)
+                              prev_np_post, circ, params; swap_n, swap_a)
     write_checkpoint(path, "pt", fp, (; iter,
         values = [r.theta.values for r in replicas],
         td_states = [r.theta.td for r in replicas],
@@ -881,7 +918,7 @@ function _pt_write_checkpoint(path, fp, iter, replicas, rng, chain_rngs,
         rwm_attempts = [ws.rwm_attempts for ws in chain_ws],
         rwm_accepts = [ws.rwm_accepts for ws in chain_ws],
         cold_samples, cold_n_planets, cold_noise, cold_planet_active,
-        evidence = evidence_acc, prev_np_post,
+        evidence = evidence_acc, prev_np_post, swap_n, swap_a,
         circ_draws = circ === nothing ? nothing : circ.draws,
         circ_tick = circ === nothing ? 0 : circ.tick,
         windows = circular_windows(params)))
@@ -1064,7 +1101,9 @@ function _try_swap!(replicas::Vector{TransDimPTState},
     log_α = (betas[j] - betas[i]) * (replicas[i].log_L - replicas[j].log_L)
     if log(rand(rng)) < log_α
         replicas[i], replicas[j] = replicas[j], replicas[i]
+        return true
     end
+    return false
 end
 
 function _thermodynamic_integration(replicas::Vector{TransDimPTState},

@@ -262,7 +262,10 @@ present.
 | `seed` / `thin` / `show_progress` | `1` / `1` / `true` | |
 
 The result `TransDimPTemceeResult` carries `chains`, `log_evidence`
-(hybrid → TI⁺ → TI fallback), `evidence_report`, within/swap/transdim
+(H⁺ → TI⁺ → TI, quoted only when the ladder reaches β = 0 and every adjacent
+pair swapped at least `swap_min`, 5%, of the time — the default ladder stops at
+`beta_min`, so it is `NaN` unless `betas` has a 0 rung; the occupancies do not
+depend on it), `evidence_report` (raw), within/swap/transdim
 acceptance, the β ladder, `n_evals`, the per-step `ladder::LadderHistory`
 (drawn by `plot_ladder_rates` / `plot_beta_ladder`), plus **raw** per-planet
 (`td_proposed`, `td_accepted`) and per-temp noise

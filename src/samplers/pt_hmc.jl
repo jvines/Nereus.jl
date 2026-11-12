@@ -13,9 +13,10 @@
 # The core (`_pt_hmc_core`) is target-agnostic: it takes a `parts(y) ->
 # (prior+jac, loglike)` closure + ForwardDiff, so it runs on a `NereusTarget`
 # AND on an analytic Gaussian (the logZ regression gate). `sample_pt_hmc` is the
-# NereusTarget wrapper. An ADAPTIVE ladder (pilot run → re-grid β by
-# path-sampling thermodynamic length ∝ √Var(logL)) minimises the TI
-# discretisation error that a fixed power-law ladder leaves near β=1.
+# NereusTarget wrapper. The ladder is β = 0 and a geometric run on
+# [beta_min, 1]; an ADAPTIVE re-grid (pilot run → β placed by path-sampling
+# thermodynamic length ∝ √Var(logL)) then minimises the TI discretisation
+# error left on it.
 
 using AdvancedHMC
 using ForwardDiff
@@ -117,6 +118,14 @@ function _warmup_temp(rng, ℓ_fn, ∂ℓ_fn, θ0::Vector{Float64}, n_warmup::In
     return h, κ, θ_final, M⁻¹, ε
 end
 
+# The default ladder: β = 0, then `n_temps - 1` rungs geometric on
+# [beta_min, 1] (see `beta_min` in `sample_pt_hmc`).
+function _pt_hmc_ladder(n_temps::Int, beta_min::Float64)
+    n_temps >= 2 || throw(ArgumentError("n_temps must be ≥ 2"))
+    return vcat(0.0, Float64[beta_min^((n_temps - 1 - i) / max(1, n_temps - 2))
+                             for i in 1:(n_temps - 1)])
+end
+
 # Path-sampling-optimal ladder re-grid: place β to equalise thermodynamic length
 # ∫√Var(logL) dβ. Keeps β[1]=0, β[end]=1. `varlogL` is per-temp Var(logL) on the
 # current `βs`.
@@ -155,18 +164,19 @@ end
 # the cold draws kept so far. A function, not a closure: `nL` is rebound every
 # sweep and a closure capturing it would box it.
 _pt_hmc_snapshot(sweep, βs, states, sweep_rng, sumL, sumL2, nL, evidence_acc,
-                 cold_ys) =
+                 cold_ys, swap_acc) =
     (; sweep, betas = βs, θ = map(st -> st.θ, states),
        logL = map(st -> st.logL, states), Minv = map(st -> st.Minv, states),
        ε = map(st -> st.ε, states), sweep_rng, sumL, sumL2, nL,
-       evidence = evidence_acc, cold_ys)
+       evidence = evidence_acc, cold_ys, swap_acc)
 
 """
     _pt_hmc_core(parts, dim, init_ys, βs; kwargs...) -> NamedTuple
 
 Target-agnostic Hamiltonian-PT engine. `parts(y) -> (prior+jac, loglike)` (must
 be ForwardDiff-differentiable); `init_ys` = one start per (temp×walker) in
-sampler space. Returns `(cold_ys, report, meanlogL, varlogL)`.
+sampler space. Returns `(cold_ys, report, meanlogL, varlogL, swap_acc)`,
+`swap_acc[i]` the fraction of swaps accepted between rungs `i` and `i + 1`.
 
 Checkpointing: `save(state)`, when given, receives the `_pt_hmc_snapshot` after
 warm-up, every `checkpoint_interval` seconds and after the last sweep. A
@@ -248,12 +258,15 @@ function _pt_hmc_core(parts, dim::Int,
     sumL = saved === nothing ? zeros(n_temps) : copy(saved.sumL::Vector{Float64})
     sumL2 = saved === nothing ? zeros(n_temps) : copy(saved.sumL2::Vector{Float64})
     nL = saved === nothing ? 0 : saved.nL::Int
+    # Swaps accepted per adjacent pair, over the sweeps so far (W per sweep).
+    swap_acc = saved === nothing || !haskey(saved, :swap_acc) ? zeros(Int, n_temps - 1) :
+               copy(saved.swap_acc::Vector{Int})
     pb = ProgressBar(label; total = n_sweeps, enabled = progress, start = sweep0)
 
     # The warm-up is the expensive part of a short run: keep it.
     save !== nothing && saved === nothing &&
         save(_pt_hmc_snapshot(0, βs, states, sweep_rng, sumL, sumL2, nL,
-                              evidence_acc, cold_ys))
+                              evidence_acc, cold_ys, swap_acc))
     last_ck = time()
 
     for sweep in (sweep0 + 1):n_sweeps
@@ -274,22 +287,31 @@ function _pt_hmc_core(parts, dim::Int,
             logα = (βs[i + 1] - βs[i]) * (a.logL - b.logL)
             if log(rand(srng)) < logα
                 a.θ, b.θ = b.θ, a.θ; a.logL, b.logL = b.logL, a.logL
+                swap_acc[i] += 1
             end
         end
         @inbounds for i in 1:n_temps
             s = 0.0; for w in 1:W; s += states[i, w].logL; end
-            logL_buf[i] = s / W
-            sumL[i] += logL_buf[i]; sumL2[i] += logL_buf[i]^2
+            sumL[i] += s / W; sumL2[i] += (s / W)^2
         end
         nL += 1
-        update_evidence!(evidence_acc, logL_buf, βs)
+        # One update per walker. The walker-averaged log L went in instead,
+        # which TI does not mind but SS+ does: its terms are averages of
+        # L^(±Δβ/2), and exp of a mean is not a mean of exp (Jensen), so with
+        # more than one walker per rung every SS+ ratio was biased.
+        for w in 1:W
+            @inbounds for i in 1:n_temps
+                logL_buf[i] = states[i, w].logL
+            end
+            update_evidence!(evidence_acc, logL_buf, βs)
+        end
         for w in 1:W; push!(cold_ys, copy(states[n_temps, w].θ)); end
         update!(pb; n_done = sweep,
                 fields = (:logL => round(states[n_temps, 1].logL, digits = 2),))
         if save !== nothing &&
            (sweep == n_sweeps || time() - last_ck >= checkpoint_interval)
             save(_pt_hmc_snapshot(sweep, βs, states, sweep_rng, sumL, sumL2, nL,
-                                  evidence_acc, cold_ys))
+                                  evidence_acc, cold_ys, swap_acc))
             last_ck = time()
         end
     end
@@ -298,15 +320,28 @@ function _pt_hmc_core(parts, dim::Int,
     meanL = sumL ./ max(nL, 1)
     varL = max.(sumL2 ./ max(nL, 1) .- meanL .^ 2, 0.0)
     report = evidence_report(evidence_acc, βs)
-    return (cold_ys = cold_ys, report = report, meanlogL = meanL, varlogL = varL)
+    return (cold_ys = cold_ys, report = report, meanlogL = meanL, varlogL = varL,
+            swap_acc = swap_acc ./ max(1, nL * W))
 end
 
 """
-    sample_pt_hmc(target::NereusTarget; kwargs...) -> (chains, log_evidence, report)
+    sample_pt_hmc(target::NereusTarget; kwargs...)
+        -> (chains, log_evidence, report, evidence)
 
 Hamiltonian parallel tempering for fixed-dim, ForwardDiff-differentiable models.
-Returns the cold-chain `MCMCChains.Chains` (with `:lp`), the TI⁺ log-evidence,
-and the `EvidenceReport`.
+Returns the cold-chain `MCMCChains.Chains` (with `:lp`), the log-evidence, the
+tempered `EvidenceReport` (TI, TI+, SS+, H+) and a named tuple `evidence` of
+`(; bridge, laplace, tempered, tempered_ok, tempered_why, reported, betas,
+swap_acc)`.
+
+The log-evidence is chosen as pt_emcee chooses it: bridge sampling on the cold
+chain when its reference has the effective samples it needs; else the tempered
+SS+ when it can be trusted (`tempered_ok`) and agrees with mode-Laplace within
+`laplace_switch_tol`; else mode-Laplace, with a warning (Jose's rule); `NaN`,
+with a warning, only when none of them is available. SS+ is trusted when the
+ladder starts at β = 0 and every adjacent pair of rungs swapped at least
+`swap_min` of the time; `tempered_why` gives the reason it is not. A quotable
+SS+ more than `evidence_tol` nats from bridge is warned about.
 
 # Keywords
 - `n_temps=12`, `n_sweeps=1500`, `n_warmup=400`
@@ -318,7 +353,25 @@ and the `EvidenceReport`.
   `max(100, n_sweeps ÷ 4)`. The pilot sets the ladder, so it is part of the run
   `resume` checks: extending a run to an `n_sweeps` that moves the default is
   refused until `n_pilot` is given the original run's value.
+- `beta_min=1e-4` : the default ladder is β = 0 and `n_temps - 1` rungs
+  geometric on `[beta_min, 1]`. It used to be quadratic from β = 0,
+  `((i - 1)/(n_temps - 1))²`: on an RV + IAD companion ⟨log L⟩ is −5.6e4 at
+  β = 0 and −236 at the second of 12 rungs (β = 0.008), and the TI+ segment
+  between them, where the integrand climbs through four decades, put log Z at
+  −5 (4 rungs: −624 to −1329) where bridge sampling and nested INS give 164 to
+  166. Geometric from 1e-4 without the β = 0 rung, as pt_emcee's ladder is,
+  the integrals start at 1e-4 and leave out a head worth −1.3 nats at i = 5°
+  and −4.5 at i = 89.5° (TI+ 166.9 and 168.4 against bridge 165.5 and 163.9);
+  with it, SS+ gives 165.5 and 163.9.
 - `betas=nothing` : custom β-ladder (overrides default + disables adaptation)
+- `swap_min=0.05` : the least swap acceptance between adjacent rungs at which
+  the tempered SS+ is quoted (above).
+- `evidence_tol=2.0` : nats; a quotable SS+ this far from bridge is warned
+  about.
+- `laplace_switch_tol=50.0` : nats, the Laplace non-Gaussian bias; without a
+  usable bridge, a quotable SS+ further than this from mode-Laplace is broken
+  and mode-Laplace is reported.
+- `bridge_n=20_000` : proposal draws of the bridge estimate; `0` skips it.
 - `warm_start=true` : start from a short pt_emcee pre-search. With it off the
   starts are scouted prior draws (`n_scouts`), and the seams of the
   full-circle angles are placed first by a short pathfinder pilot
@@ -375,8 +428,14 @@ function sample_pt_hmc(
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
     n_scouts::Int = 16,
+    beta_min::Real = 1e-4,
+    swap_min::Real = 0.05,
+    evidence_tol::Real = 2.0,
+    laplace_switch_tol::Real = 50.0,
+    bridge_n::Int = 20_000,
 )
     n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
+    0 < beta_min < 1 || throw(ArgumentError("beta_min must be in (0, 1); got $beta_min"))
     target_accept = Float64(target_accept)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
@@ -396,8 +455,7 @@ function sample_pt_hmc(
         y -> _logdensity_parts(target, y)
     end
 
-    βs = betas === nothing ?
-         Float64[((i - 1) / (n_temps - 1))^2 for i in 1:n_temps] :
+    βs = betas === nothing ? _pt_hmc_ladder(n_temps, Float64(beta_min)) :
          collect(Float64, betas)
     βs[end] = 1.0
     n_temps = length(βs)
@@ -505,12 +563,123 @@ function sample_pt_hmc(
     end
     chains = MCMCChains.Chains(mat, pnames)
     report = res.report
+    ev = _pt_hmc_evidence(target, chains, report, βs, res.swap_acc, Float64(swap_min),
+                          Float64(evidence_tol), bridge_n, seed;
+                          laplace_switch_tol = Float64(laplace_switch_tol))
     if progress
         @info "PT-HMC: $(n_post) cold samples, $(n_temps) temps × $(W) walkers" *
               (adapt_ladder && betas === nothing ? " (adaptive ladder)" : "")
         @info "  TI+ = $(round(report.ti_plus[1], digits=2)) ± $(round(report.ti_plus[2], digits=3))  " *
               "SS+ = $(round(report.ss_plus[1], digits=2))  " *
-              "H+ = $(round(report.hybrid[1], digits=2))"
+              "H+ = $(round(report.hybrid[1], digits=2))" *
+              (ev.tempered_ok ? "" : "  (not quotable: $(ev.tempered_why))")
+        @info "  swap acceptance: " * join(string.(round.(res.swap_acc, digits = 2)), " ")
+        @info "  bridge = $(round(ev.bridge, digits=2))  log Z reported: " *
+              (isfinite(ev.log_z) ? "$(round(ev.log_z, digits=2)) ($(ev.reported))" : "none")
     end
-    return chains, report.ti_plus[1], report
+    return chains, ev.log_z, report,
+           (; bridge = ev.bridge, laplace = ev.laplace, tempered = report.ss_plus[1],
+              ev.tempered_ok, ev.tempered_why, ev.reported, betas = copy(βs),
+              swap_acc = res.swap_acc)
+end
+
+# Whether the tempered SS+ can be quoted: `(ok, why)`, `why` empty when it can:
+# `_tempered_quotable` (src/samplers/evidence.jl), which pt_emcee and the
+# summary writers share, and SS+ finite. The ladder must reach β = 0, or the
+# [0, β₁] head is not in the integral
+# (it was worth −1.3 to −4.5 nats on the RV + IAD companion from β₁ = 1e-4); and
+# every adjacent pair of rungs must overlap, which a stepping-stone ratio needs
+# and the swaps between them measure: at least `swap_min` of them accepted.
+# SS+ rather than TI+: from β = 0 the integrand climbs through four decades in
+# the first segment, which PCHIP does not resolve -- TI+ came out 1.1 to 3.6
+# nats low at 8 and 12 rungs, its error 6.6 to 42 nats, where SS+ matched
+# bridge sampling to 0.1.
+function _pt_hmc_tempered_ok(report::EvidenceReport, βs::AbstractVector,
+                             swap_acc::AbstractVector, swap_min::Float64)
+    ok, why = _tempered_quotable(βs, swap_acc; swap_min)
+    ok || return (ok, why)
+    isfinite(report.ss_plus[1]) || return (false, "SS+ is not finite")
+    return (true, "")
+end
+
+# The log-evidence pt_hmc reports, as pt_emcee picks its own: bridge sampling
+# on the cold chain when its reference `q` has the effective samples it needs
+# (d + d(d+1)/2; with fewer it is biased low and no diagnostic shows it), else
+# SS+ when `_pt_hmc_tempered_ok` and within `laplace_switch_tol` of mode-Laplace,
+# else mode-Laplace (Jose's rule), else NaN. A warning says why whenever the
+# tempered value is not quotable, and when bridge and a quotable SS+ disagree
+# by more than `tol` nats.
+function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
+                          report::EvidenceReport, βs::AbstractVector,
+                          swap_acc::AbstractVector, swap_min::Float64, tol::Float64,
+                          bridge_n::Int, seed::Int; laplace_switch_tol::Float64 = 50.0)
+    ok, why = _pt_hmc_tempered_ok(report, βs, swap_acc, swap_min)
+    lz_bridge = NaN
+    if bridge_n > 0 && target.transform !== nothing
+        try
+            b = bridge_evidence(target, chains; n_proposal = bridge_n, seed = seed)
+            b.converged && isfinite(b.log_z) && (lz_bridge = b.log_z)
+        catch err
+            @debug "sample_pt_hmc: bridge evidence unavailable" exception = err
+        end
+    end
+    if isfinite(lz_bridge)
+        d = LogDensityProblems.dimension(target)
+        need = d + d * (d + 1) ÷ 2
+        n_eff = try
+            _bridge_min_ess(chains, target.params)   # folded, as bridge reads them
+        catch err
+            @debug "sample_pt_hmc: ESS unavailable for the bridge guard" exception = err
+            NaN
+        end
+        if !(isfinite(n_eff) && n_eff >= need)
+            @warn "sample_pt_hmc: bridge is not reported — its reference is " *
+                  "fitted from too few effective samples (min ESS " *
+                  "$(isfinite(n_eff) ? round(Int, n_eff) : "?") < $need free " *
+                  "parameters in q), where it is biased low." bridge = lz_bridge
+            lz_bridge = NaN
+        end
+    end
+    laplace = try
+        mode_laplace_evidence(target, chains)
+    catch err
+        @debug "sample_pt_hmc: mode-Laplace evidence unavailable" exception = err
+        NaN
+    end
+    ssp = report.ss_plus[1]
+    if isfinite(lz_bridge)
+        ok || @warn "sample_pt_hmc: the tempered evidence (TI/TI+/SS+/H+) is not " *
+                    "quotable: $why. Reporting bridge." bridge = lz_bridge ss_plus = ssp ti_plus = report.ti_plus[1]
+        ok && abs(ssp - lz_bridge) > tol &&
+            @warn "sample_pt_hmc: bridge and the tempered SS+ differ by " *
+                  "$(round(abs(ssp - lz_bridge), digits=1)) nats. Reporting bridge; " *
+                  "check that the posterior is not multimodal." bridge = lz_bridge ss_plus = ssp
+        return (; log_z = lz_bridge, bridge = lz_bridge, laplace, tempered_ok = ok,
+                  tempered_why = why, reported = "bridge")
+    elseif ok && isfinite(laplace) && abs(ssp - laplace) <= laplace_switch_tol
+        return (; log_z = ssp, bridge = NaN, laplace, tempered_ok = ok, tempered_why = why,
+                  reported = "ss_plus")
+    elseif isfinite(laplace)
+        # Jose's rule: a tempered value that is not quotable, or that is
+        # further from mode-Laplace than its non-Gaussian bias, is broken.
+        why_t = ok ? "it is $(round(abs(ssp - laplace), digits = 1)) nats from " *
+                     "mode-Laplace, beyond laplace_switch_tol = $laplace_switch_tol" :
+                     "it is not quotable: $why"
+        @warn "sample_pt_hmc: log_evidence is mode-Laplace, a Gaussian " *
+              "approximation at the posterior mode: bridge sampling is unavailable " *
+              "and the tempered SS+ is broken ($why_t)." laplace = laplace ss_plus = ssp
+        return (; log_z = laplace, bridge = NaN, laplace, tempered_ok = ok,
+                  tempered_why = why, reported = "mode_laplace")
+    elseif ok
+        @warn "sample_pt_hmc: neither bridge nor mode-Laplace is available. " *
+              "log_evidence is the tempered SS+; its ladder can carry it, but " *
+              "nothing corroborates it." ss_plus = ssp
+        return (; log_z = ssp, bridge = NaN, laplace, tempered_ok = ok, tempered_why = why,
+                  reported = "ss_plus")
+    end
+    @warn "sample_pt_hmc: no quotable log-evidence for this run. The tempered " *
+          "stack is not ($why), and neither bridge sampling nor mode-Laplace is " *
+          "available. log_evidence is NaN; add rungs (n_temps) or sweeps." ss_plus = ssp ti_plus = report.ti_plus[1]
+    return (; log_z = NaN, bridge = NaN, laplace, tempered_ok = ok, tempered_why = why,
+              reported = "none")
 end
