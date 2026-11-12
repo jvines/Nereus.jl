@@ -13,13 +13,24 @@
 # Geyer's initial positive sequence), so the walkers' own autocorrelation and
 # the slow collective modes every ensemble has are allowed for.
 #
-# Calibration (default transit-only fit, six seeds; three RV + Hipparcos ridge
-# fits on pt_emcee, the trans-dim sampler and four `ensemble` chains; a
-# converged two-planet RV fit): runs whose posterior agreed with nested sampling
-# reach |z| = 7.1 at most over all parameters, the one seed that kept 47 % of
-# its draws on the constant-duration ridge (nested: 1.4 %) reaches 15.4. The
-# threshold sits between, at 10. A run flagged here is not stationary; one not
-# flagged may still be wrong in ways no single run shows (a mode never found).
+# Calibration, read folded (default transit-only fit, six seeds; three RV +
+# Hipparcos ridge fits on pt_emcee, the trans-dim sampler and four `ensemble`
+# chains; a two-planet RV fit; joint RV + transit; a period alias; each with the
+# stretch move alone and with the DE move at several shares and settings, 100+
+# runs). Two runs, both stretch alone, were off the nested-sampling posterior
+# and moving: the seed that kept 47 % of its draws on the constant-duration
+# ridge (nested: 1.4 %) reaches |z| = 15.4, and a joint fit whose first 1,000
+# recorded steps held the TESS q1 at 0.308 ± 0.005 (nested: 0.297), and whose
+# next 3,000 sat stationary about 0.297, 12.3. Every other run reaches 9.4 at
+# most over all parameters (7.2 with the stretch move alone, 5.5 at the default
+# DE share). The threshold sits between, at 10. Read unfolded, a cyclic
+# inclination whose walkers cross its fold reached 17.3 with the posterior
+# unmoved (8 of 22 ridge runs over 10); folded, 2.4. A run flagged here is not
+# stationary; one not flagged may still be wrong in ways no single run shows: a
+# mode never found, a share of walkers held on a ridge that does not drain
+# within the recorded steps (transit fits with 13-16 % of their draws above
+# e = 0.5, against 1.4 %, reached 5.5), or walkers that do not mix with each
+# other, which is R-hat's to see.
 
 """
     DRIFT_Z
