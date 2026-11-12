@@ -140,7 +140,7 @@ end
     @test !Nereus._warn_laplace_vs_bridge("x", NaN, 161.81, 0.05)
 end
 
-@testset "pt_emcee: bridge, else a quotable tempered value, else no number" begin
+@testset "pt_emcee: bridge, else a corroborated tempered value, else mode-Laplace" begin
     tg, data = _ee_rv()
     tu = NereusTarget(tg.params, data; unconstrained = true)
     kw = (; n_temps = 6, n_walkers = 16, n_steps = 800, n_burnin = 400, seed = 3,
@@ -152,25 +152,49 @@ end
     @test minimum(r.betas) > 0 && isfinite(r.evidence.ss_plus[1])
     ev = Nereus._evidence_summary(r, r.log_evidence)
     @test ev["reported"] == "bridge"
-    @test !any(haskey(ev, k) for k in ("ti", "ti_plus", "ss_plus", "hybrid"))
-    @test ev["tempered"]["quotable"] == false && occursin("head", ev["tempered"]["why"])
-    @test occursin("approximation", ev["mode_laplace"]["note"])
-    @test ev["mode_laplace"]["minus_bridge"] ≈ r.log_evidence_laplace - r.log_evidence_bridge
-    # Bounded: no bridge, and no tempered value from this ladder.
-    rb = @test_logs (:warn, r"no quotable log-evidence") match_mode = :any sample_pt_emcee(
+    @test !any(haskey(ev, k) for k in ("ti", "ti_plus", "ss_plus", "hybrid", "tempered"))
+    @test ev["tempered_check"]["quotable"] == false &&
+          occursin("head", ev["tempered_check"]["why"])
+    # mode-Laplace a plain number, as summary.json readers know it; its label
+    # and its distance from bridge in a key of their own
+    @test ev["mode_laplace"] === r.log_evidence_laplace
+    @test occursin("approximation", ev["mode_laplace_check"]["note"])
+    @test ev["mode_laplace_check"]["minus_bridge"] ≈ r.log_evidence_laplace - r.log_evidence_bridge
+    # No bridge (opted out), and a tempered value from a ladder that cannot
+    # carry it is broken, so mode-Laplace takes over (Jose's rule), warned.
+    rl = @test_logs (:warn, r"log_evidence is mode-Laplace") match_mode = :any sample_pt_emcee(
+        tu, data; merge(kw, (; bridge_headline = false))...)
+    @test isfinite(rl.log_evidence_laplace) && rl.log_evidence == rl.log_evidence_laplace
+    @test isfinite(rl.evidence.ss_plus[1])
+    @test Nereus._evidence_summary(rl, rl.log_evidence)["reported"] == "mode_laplace"
+    # Bounded: neither bridge nor mode-Laplace (both need the unconstrained
+    # map; run_job computes bridge after the fit), and this ladder cannot carry
+    # the tempered value: no number, a warning, and summary.json says so.
+    rb = @test_logs (:warn, r"no usable evidence estimate") match_mode = :any sample_pt_emcee(
         tg, data; kw...)
-    @test isnan(rb.log_evidence) && isfinite(rb.evidence.ss_plus[1])
+    @test isnan(rb.log_evidence) && isnan(rb.log_evidence_laplace)
+    @test isfinite(rb.evidence.ss_plus[1])
     @test Nereus._evidence_summary(rb, rb.log_evidence)["reported"] == "none"
-    # A ladder with a β = 0 rung: the tempered value when its rungs swap.
+    # A ladder with a β = 0 rung, bridge withheld: the tempered value when its
+    # rungs swap and it agrees with mode-Laplace within laplace_switch_tol;
+    # mode-Laplace otherwise.
     βs = vcat(1e-3 .^ ((0:6) ./ 6), 0.0)
-    r0 = sample_pt_emcee(tg, data; merge(kw, (; n_temps = 8, betas = βs))...)
+    k0 = merge(kw, (; n_temps = 8, betas = βs, bridge_headline = false))
+    r0 = sample_pt_emcee(tu, data; k0...)
     ok, _ = Nereus._tempered_quotable(r0.betas, r0.acceptance_swap)
-    if ok
+    @test isfinite(r0.log_evidence_laplace)
+    if ok && abs(r0.evidence.hybrid[1] - r0.log_evidence_laplace) <= 50
         @test r0.log_evidence == r0.evidence.hybrid[1]
-        @test haskey(Nereus._evidence_summary(r0, r0.log_evidence), "ss_plus")
+        e0 = Nereus._evidence_summary(r0, r0.log_evidence)
+        @test haskey(e0, "ss_plus") && e0["reported"] == "hybrid"
     else
-        @test isnan(r0.log_evidence)
+        @test r0.log_evidence == r0.log_evidence_laplace
     end
+    # A quotable tempered value that disagrees with mode-Laplace by more than
+    # the Laplace non-Gaussian bias is broken too.
+    r1 = @test_logs (:warn, r"log_evidence is mode-Laplace") match_mode = :any sample_pt_emcee(
+        tu, data; merge(k0, (; laplace_switch_tol = 0.0))...)
+    @test r1.log_evidence == r1.log_evidence_laplace
 end
 
 @testset "transdim_pt_emcee: no tempered log Z from a ladder without β = 0" begin
@@ -180,7 +204,24 @@ end
         n_walkers = 16, n_steps = 300, n_burnin = 150, seed = 1, show_progress = false)
     @test isnan(r.log_evidence)
     @test isfinite(r.evidence_report.ss_plus[1])
-    @test Nereus._evidence_summary(r, r.log_evidence)["tempered"]["quotable"] == false
+    # No mode-Laplace here to take over: no number, and summary.json says why.
+    ev = Nereus._evidence_summary(r, r.log_evidence)
+    @test ev["tempered_check"]["quotable"] == false && ev["reported"] == "none"
+end
+
+@testset "summary.json: valid JSON, NaN written as null" begin
+    mktempdir() do dir
+        s = Dict{String, Any}("log_z" => NaN, "n" => 3, "inf" => Inf,
+                              "evidence" => Dict{String, Any}("mode_laplace" => 1.5,
+                                                              "v" => [1.0, NaN]))
+        Nereus._write_summary(dir, s)
+        txt = read(joinpath(dir, "summary.json"), String)
+        @test !occursin("NaN", txt)
+        j = Nereus.JSON3.read(txt; allow_inf = true)
+        @test j.log_z === nothing && j.n == 3 && j.evidence.mode_laplace == 1.5
+        @test j.evidence.v[1] == 1.0 && j.evidence.v[2] === nothing
+        @test isnan(s["log_z"])                      # the summary in memory keeps it
+    end
 end
 
 @testset "daedalus: a replacement walk forgets its donor" begin
