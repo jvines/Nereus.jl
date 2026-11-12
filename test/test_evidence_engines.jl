@@ -17,6 +17,7 @@
 #   conditional ESS, and mutates until the replicas have decorrelated.
 
 using Nereus, MCMCChains, Random, Test
+using Logging: Logging
 using Statistics: mean, std
 
 # A Gaussian prior and likelihood, so log Z is exact; the likelihood 200 times
@@ -100,6 +101,22 @@ end
         seed = 2, progress = false)
     @test isnan(lz)
     @test !ev.tempered_ok
+end
+
+@testset "pt_hmc: the warm-start pre-search reports no evidence of its own" begin
+    # The pre-search, a short pt_emcee, computed and warned about its own log Z,
+    # and pt_hmc's output on the companion carried "sample_pt_emcee: bridge and
+    # mode-Laplace disagree by 154.0 nats ... bridge = 13.74" beside the 165.51
+    # it reported. Two rungs make a pre-search's tempered stack disagree.
+    tg, data = _ee_rv()
+    tu = NereusTarget(tg.params, data; unconstrained = true)
+    tl = Test.TestLogger(min_level = Logging.Warn)
+    pts = Logging.with_logger(tl) do
+        Nereus._warmstart_points(tu, 4, MersenneTwister(1); n_temps = 2,
+                                 n_steps = 200, n_burnin = 100)
+    end
+    @test length(pts) == 4 && all(p -> all(isfinite, p), pts)
+    @test !any(r -> occursin("sample_pt_emcee", string(r.message)), tl.logs)
 end
 
 @testset "daedalus: a replacement walk forgets its donor" begin
