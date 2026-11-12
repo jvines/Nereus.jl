@@ -419,4 +419,6 @@ export sampler_diagnostics, chain_convergence,
     fit_ttv, fit_binary, fit_joint, run_engine, Stopping, ENGINES,
     FEATURE_ACTIONS, default_rv_planet, default_astrom_planet
 
+include("plotting/precompile.jl")   # the figures, for a release build (see the file)
+
 end # module Nereus

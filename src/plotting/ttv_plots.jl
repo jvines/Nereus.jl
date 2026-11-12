@@ -164,7 +164,7 @@ function plot_ttv_oc(chains, data::Data, params::Params;
         return Figure()
     end
     if planet_b_k > 0
-        pool_ab = intersect(pool, _planet_present_idx(chains, params, planet_b_k))
+        pool_ab = _sorted_intersect(pool, _planet_present_idx(chains, params, planet_b_k))
         if isempty(pool_ab)
             # No perturber to integrate -- the measured O−C against the linear
             # ephemeris is still the figure worth having.
