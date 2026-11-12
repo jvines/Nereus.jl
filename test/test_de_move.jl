@@ -198,4 +198,7 @@ end
     @test g["flagged"] && only(g["drifted"])["parameter"] == "moving"
     # A run with the check's warning names what drifted and what to do.
     @test_logs (:warn, r"moving.*run longer") match_mode = :any Nereus._drift_warn(d, "test")
+    # ... and, when the run had the DE move off, to turn it on.
+    @test_logs (:warn, r"de_move = 0.*DE move on") match_mode = :any Nereus._drift_warn(d, "test"; de_move = 0.0)
+    @test_logs (:warn, r"^(?!.*de_move = 0)") match_mode = :any Nereus._drift_warn(d, "test"; de_move = 0.5)
 end
