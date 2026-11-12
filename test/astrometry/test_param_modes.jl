@@ -21,7 +21,7 @@
         params = Params(
             max_kplanet=1, planet_modes=[RVAS],
             instruments=instruments, data=data, stability=:none, M_s=1.0,
-            parametrization = ParametrizationConfig(mass=mass_mode),
+            parametrization = ParametrizationConfig(time = :Mo, mass=mass_mode),
         )
         return data, params
     end
@@ -182,7 +182,7 @@ end
             max_kplanet=1, planet_modes=[RVPMAS],
             instruments=instruments, data=data, stability=:none,
             M_s=M_s, R_s=R_s,
-            parametrization = ParametrizationConfig(use_rho_s=use_rho_s),
+            parametrization = ParametrizationConfig(time = :Mo, use_rho_s=use_rho_s),
         )
         return data, params
     end
@@ -335,7 +335,7 @@ end
             plx=10.0, plx_err=0.1, hip_id=1)
         data = Data(t_rv=t_rv, rv=[0.0,0.0], rv_err=[1.0,1.0], hgca=hgca)
         params = Params(
-            max_kplanet=1, planet_modes=[RVAS],
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet=1, planet_modes=[RVAS],
             instruments=instruments, data=data, stability=:none, M_s=1.0,
         )
         @test "inc_k1" in params.layout.names

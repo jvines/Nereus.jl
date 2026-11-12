@@ -308,7 +308,7 @@ _settled(lL) = [median(filter(isfinite, lL[t, :])) for t in axes(lL, 1)]
         @test checks["prior_rail"]["status"] == "ok"
         @test s["fit_health"]["overall"] == "ok"
         ch, _ = Nereus.load_chains(joinpath(cfg["output_dir"], "chains.nc"))
-        @test :Mo_k1 in names(ch)                       # the default is Mo now
+        @test :phic_k1 in names(ch)                     # the default is the transit phase now
         Pd = vec(Array(ch[:P_k1]))
         @test mean(abs.(Pd .- 12.3) ./ 12.3 .< 0.01) == 1.0   # no stranded draws
     end

@@ -771,7 +771,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
     @testset "ParametrizationConfig" begin
         pc = ParametrizationConfig()
         @test pc.ew === :sesinw
-        @test pc.time === :Mo
+        @test pc.time === :auto          # resolved by Params: the transit phase unless the priors name another (Mo before)
         @test pc.geom === :b_rr
         @test pc.use_rho_s == false
 
@@ -816,7 +816,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
         params = Params(;
             priors=priors,
             max_kplanet=1,
-            parametrization=ParametrizationConfig(),
+            parametrization=ParametrizationConfig(time=:Mo),
             planet_modes=[RV_ONLY],
             instruments=ic,
         )
@@ -1872,7 +1872,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
             "Mo_k1"=>UniformPrior(-2π,2π),
             "sigma_HARPS"=>LogUniformPrior(1e-3,10.0),
             "sigma_ESPRESSO"=>LogUniformPrior(1e-3,10.0))
-        pc=ParametrizationConfig(marginalize_gamma=true)
+        pc=ParametrizationConfig(time=:Mo, marginalize_gamma=true)
         params_m=Params(; priors=priors_m, max_kplanet=1,
                         planet_modes=[RV_ONLY], instruments=ic,
                         stability=:none, data=data, parametrization=pc)
@@ -3212,10 +3212,12 @@ end
 
     # -----------------------------------------------------------------
     @testset "Validation — stability requires M_s for multi-planet" begin
-        # max_kplanet=1: stability irrelevant, no throw
+        # max_kplanet=1: stability irrelevant, no throw. No data, so an anchor
+        # that needs none (the default, phic, is measured from the data).
         @test Params(;
             max_kplanet=1, planet_modes=[RV_ONLY],
             instruments=InstrumentConfig(rv=["X"]),
+            parametrization=ParametrizationConfig(time=:Mo),
             stability=:amd,
         ) isa Params
         # max_kplanet≥2 without M_s: must throw

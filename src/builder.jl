@@ -17,7 +17,7 @@
 #               M_sec = LogUniformPrior(0.001, 0.5),
 #               sesinw = UniformPrior(-1.0, 1.0),
 #               secosw = UniformPrior(-1.0, 1.0),
-#               Mo     = UniformPrior(0.0, 2π),
+#               phic   = UniformPrior(-π, π),
 #               inc    = SinePrior(),
 #               Omega  = UniformPrior(0.0, 2π),
 #           ),
@@ -34,6 +34,10 @@
 #   * `parametrization.mass`  — `:a_driven` if `a` declared, else
 #                               `:M_sec_driven` if `M_sec` declared without
 #                               `K`, else `:K_driven`
+#   * `parametrization.time`  — `time_anchor`, else the anchor the first
+#                               planet declares (`Tc`, `phic`, `Tp`, `Mo`),
+#                               else the one the other planets or `priors`
+#                               name, else the transit phase `:phic`
 #   * `instruments.rv_names`  — keys of `rv` NamedTuple in order
 #   * per-key namespacing     — planet params get `_kN`, instrument
 #                               params get `_NAME`
@@ -92,6 +96,9 @@ docstring above for the full block grammar and example.
 - `parametrization` — `:K_driven`, `:M_sec_driven`, or `:a_driven`.
   When `nothing` (default), auto-detected from which params are
   declared.
+- `time_anchor` — `:phic`, `:Mo`, `:Tp` or `:Tc`. When `nothing` (default),
+  the anchor the first planet declares (`Tc`, `phic`, `Tp` or `Mo` key),
+  else the transit phase `:phic` (see `ParametrizationConfig`).
 - `use_rho_s` — sample the stellar density `rho_s` (solar units) and derive
   `a/R★` from it and the period, instead of from `M_s`/`R_s`. Needs transit
   photometry; an `ArgumentError` otherwise. Put a prior on it with
@@ -177,7 +184,10 @@ function build_target(;
                                              require_mass = has_rv) :
                 parametrization
 
-    # Auto-detect time anchor from the first planet's declared params.
+    # Auto-detect time anchor from the first planet's declared params; with
+    # none declared there, `:auto`, which Params resolves from the names in the
+    # priors (the planet blocks' and the user's, `resolve_time_anchor`), else
+    # the default (`default_time_anchor`: the transit phase).
     time_kind = if time_anchor !== nothing
         time_anchor
     else
@@ -186,7 +196,9 @@ function build_target(;
         if      :Tc in ks; :Tc
         elseif  :phic in ks; :phic
         elseif  :Tp in ks; :Tp
-        else                :Mo
+        elseif  :Mo in ks; :Mo
+        else
+            :auto
         end
     end
 

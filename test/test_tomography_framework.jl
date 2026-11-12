@@ -35,7 +35,7 @@ using Random, Statistics
     end
 
     function build(data)
-        Params(max_kplanet = 1, planet_modes = [RVPM_RM],
+        Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVPM_RM],
                instruments = InstrumentConfig(rv = ["I1"], pm = ["TESS"]),
                data = data, stability = :none, M_s = 1.0, R_s = 1.0)
     end

@@ -632,8 +632,10 @@ using ForwardDiff
     # 5. Default prior on i_star
     # ================================================================
     @testset "default i_star range follows what the data can tell" begin
+        # No data, so an anchor that needs none (phic is measured from the data).
         mk(mode; kw...) = Nereus.Params(; max_kplanet = 1, planet_modes = [mode],
             instruments = Nereus.InstrumentConfig(rv = ["HARPS"], pm = ["TESS"]),
+            parametrization = Nereus.ParametrizationConfig(time = :Mo),
             M_s = 1.60, R_s = 1.47, kw...)
         hi(p) = p.config.priors["i_star"].hi
 

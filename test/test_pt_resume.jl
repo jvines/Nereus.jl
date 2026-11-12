@@ -64,7 +64,7 @@ _raw(ch) = ch.value.data
 # checkpoint cannot hold, and are refused (last testset).
 function _td_target()
     data = Data(; t_rv = _PR_T, rv = _PR_RV, rv_err = fill(2.0, _PR_N))
-    params = Params(; max_kplanet = 2, planet_modes = [RV_ONLY, RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 2, planet_modes = [RV_ONLY, RV_ONLY],
                       instruments = InstrumentConfig(rv = ["HARPS"]), data = data,
                       M_s = 1.0)
     return NereusTarget(params, data; unconstrained = false)

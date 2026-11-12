@@ -19,7 +19,7 @@
                     relastrom=relast, hgca=hgca)
         params = Params(max_kplanet=1, planet_modes=[RVAS],
             instruments=instruments, data=data, stability=:none, M_s=1.0,
-            parametrization=ParametrizationConfig(mass=:a_driven, obs_prior=obs_prior_flag),
+            parametrization=ParametrizationConfig(time = :Mo, mass=:a_driven, obs_prior=obs_prior_flag),
             priors=Dict("a_k1" => LogUniformPrior(0.5, 1000.0)),
         )
         return data, params

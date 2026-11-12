@@ -14,7 +14,7 @@
             Dict("M_pri" => NormalPrior(M_s_val, 0.05, 0.5, 1.5)) :
             Dict{String, PriorSpec}()
         params = Params(
-            max_kplanet=1, planet_modes=[RVAS],
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet=1, planet_modes=[RVAS],
             instruments=instruments, data=data, stability=:none, M_s=M_s_val,
             priors=priors,
         )
@@ -65,7 +65,7 @@
             sigma_pmra=(0.5,0.02,0.03), sigma_pmdec=(0.4,0.02,0.03),
             plx=10.0, plx_err=0.1, hip_id=1)
         data = Data(t_rv=[55000.0,55100.0], rv=[0.0,0.0], rv_err=[1.0,1.0], hgca=hgca)
-        params = Params(max_kplanet=1, planet_modes=[RVAS],
+        params = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet=1, planet_modes=[RVAS],
             instruments=instruments, data=data, stability=:none, M_s=1.0,
             priors=Dict("M_pri" => NormalPrior(1.0, 0.05, 0.5, 1.5)))
         theta = Theta(params)

@@ -221,10 +221,10 @@ depend on the `parametrization` (see [Parametrizations](parametrizations.md)).
 | `sesinw_k1`, `secosw_k1` | √e·sin/cos ω (`ew = :sesinw`, default) | `UniformPrior(-1, 1)` |
 | `esinw_k1`, `ecosw_k1` | e·sin/cos ω (`ew = :esinw`) | `UniformPrior(-1, 1)` |
 | `ecc_k1`, `w_k1` | direct e, ω (`ew = :ew`) | `NormalPrior(0, 0.3, 0, 1)`, `UniformPrior(-π, π)` |
-| `Mo_k1` | Mean anomaly at `t_ref` (`time = :Mo`, default) | `UniformPrior(0, 2π)` |
+| `Mo_k1` | Mean anomaly at `t_ref` (`time = :Mo`) | `UniformPrior(0, 2π)` |
 | `Tp_k1` | Time of periastron (`time = :Tp`) | `UniformPrior(t_min, t_max)` |
 | `Tc_k1` | Time of transit centre (`time = :Tc`) | `UniformPrior(t_min, t_max)` |
-| `phic_k1` | Transit phase 2π(Tc − t_ref_c)/P (`time = :phic`) | `UniformPrior(-π, π)` |
+| `phic_k1` | Transit phase 2π(Tc − t_ref_c)/P (`time = :phic`, default) | `UniformPrior(-π, π)` |
 | `rr_k1`, `b_k1` | radius ratio, impact param (`geom = :b_rr`) | `UniformPrior(0.001, 1)`, `UniformPrior(0, 1)` |
 | `r1_k1`, `r2_k1` | Espinoza (2018) reparam (`geom = :b_r`) | `UniformPrior(0, 1)` each |
 | `inc_k1` | Inclination — AS planet, not RVPM+AS | `SinePrior()` |

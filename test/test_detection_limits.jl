@@ -10,7 +10,7 @@ using Random: MersenneTwister
     data = Data(; t_rv = collect(0.0:5.0:200.0), rv = randn(rng, 41),
                   rv_err = ones(41), rv_inst = ones(Int, 41))
     ic = InstrumentConfig(rv = ["SIM"])
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                      instruments = ic, data = data, M_s = 1.0)
 
     # Prior-seeded chain: log-uniform P in [1, 100] d (well inside the
@@ -76,7 +76,7 @@ end
     data = Data(; t_rv = collect(0.0:5.0:100.0), rv = randn(21),
                   rv_err = ones(21), rv_inst = ones(Int, 21))
     ic = InstrumentConfig(rv = ["SIM"])
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                      instruments = ic, data = data, M_s = 1.0)
     fitted_names = Symbol.(params.layout.unfrozen_names)
     arr = ones(Float64, 100, length(fitted_names), 1)
@@ -100,7 +100,7 @@ end
     data = Data(; t_rv = collect(0.0:5.0:200.0), rv = randn(rng, 41),
                   rv_err = ones(41), rv_inst = ones(Int, 41))
     ic = InstrumentConfig(rv = ["SIM"])
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                      instruments = ic, data = data, M_s = 1.0)
 
     fitted_names = Symbol.(params.layout.unfrozen_names)
@@ -147,7 +147,7 @@ end
     # share its phase convention instead of a hand-rolled sinusoid's.
     blank = Data(; t_rv = t, rv = zeros(n_obs), rv_err = ones(n_obs),
                    rv_inst = ones(Int, n_obs))
-    p0 = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    p0 = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                  instruments = ic, data = blank, M_s = 1.0)
     th0 = Theta(p0)
     for (nm, v) in ("P_k1" => P_true, "K_k1" => K_true, "Mo_k1" => Mo_true,
@@ -159,7 +159,7 @@ end
     rv = pred .+ randn(rng, n_obs)
     data = Data(; t_rv = t, rv = rv, rv_err = ones(n_obs),
                   rv_inst = ones(Int, n_obs))
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                      instruments = ic, data = data, M_s = 1.0)
 
     # Draws spanning K from negligible to well above the injected amplitude,
@@ -216,7 +216,7 @@ end
     t = collect(0.0:10.0:200.0)
     data = Data(; t_rv = t, rv = randn(rng, length(t)),
                   rv_err = ones(length(t)), rv_inst = ones(Int, length(t)))
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                      instruments = InstrumentConfig(rv = ["SIM"]),
                      data = data, M_s = 1.0)
     fitted = Symbol.(params.layout.unfrozen_names)

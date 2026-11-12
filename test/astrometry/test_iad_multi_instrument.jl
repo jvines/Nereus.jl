@@ -79,7 +79,7 @@ function _multi_iad_scenario(; with_gaia::Bool)
                 rv_err = [1.0, 1.0], kw...)
     params = Params(max_kplanet = 1, planet_modes = [RVAS],
         instruments = InstrumentConfig(rv = ["X"]), data = data, stability = :none,
-        M_s = M_pri, parametrization = ParametrizationConfig(mass = :a_driven),
+        M_s = M_pri, parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
         priors = Dict{String, PriorSpec}(
             "n_p" => FixedPrior(1.0), "a_k1" => LogUniformPrior(0.5, 100.0),
             "M_sec_k1" => LogUniformPrior(0.001, 0.5),
@@ -261,7 +261,7 @@ const JOINT_OMEGA = -3234.192242129348
                       psi = collect(range(0, 2π, length = 11)))
         data = Data(t_rv = [49000.0, 49300.0], rv = [1.0, -1.0],
                     rv_err = [1.0, 1.0], iad = iad)
-        params = Params(max_kplanet = 1, planet_modes = [RVAS],
+        params = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
             instruments = InstrumentConfig(rv = ["X"]), data = data,
             stability = :none, M_s = 1.0)
         theta = Theta(params)
@@ -441,7 +441,7 @@ const JOINT_OMEGA = -3234.192242129348
         params = Params(max_kplanet = 1, planet_modes = [RVAS],
             instruments = InstrumentConfig(rv = ["X"]), data = data_ref,
             stability = :none, M_s = 1.0,
-            parametrization = ParametrizationConfig(mass = :a_driven),
+            parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
             priors = theta0.params.config.priors)
         theta_ref = Theta(params)
         for nm in params.layout.unfrozen_names
@@ -491,7 +491,7 @@ const JOINT_OMEGA = -3234.192242129348
         function _ll(iad)
             data = Data(t_rv = [55000.0, 55100.0], rv = [0.0, 0.0],
                         rv_err = [1.0, 1.0], iad = iad)
-            params = Params(max_kplanet = 1, planet_modes = [RVAS],
+            params = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]), data = data,
                 stability = :none, M_s = 1.0)
             theta = Theta(params)
@@ -565,7 +565,7 @@ const JOINT_OMEGA = -3234.192242129348
             params = Params(max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]), data = data,
                 stability = :none, M_s = M_pri,
-                parametrization = ParametrizationConfig(mass = :a_driven),
+                parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
                 priors = Dict{String, PriorSpec}(
                     "n_p" => FixedPrior(1.0), "a_k1" => LogUniformPrior(0.5, 200.0),
                     "M_sec_k1" => LogUniformPrior(0.001, 1.0),
@@ -714,7 +714,7 @@ const JOINT_OMEGA = -3234.192242129348
                           ref_params = [ref], abscissa_kind = kind)
             data = Data(t_rv = [49000.0, 49300.0], rv = [0.0, 0.0],
                         rv_err = [1.0, 1.0], iad = iad, gost = gost, gaia_dr3 = gaia)
-            params = Params(max_kplanet = 1, planet_modes = [RVAS],
+            params = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]), data = data,
                 stability = :none, M_s = 1.0)
             theta = Theta(params)
@@ -753,7 +753,7 @@ const JOINT_OMEGA = -3234.192242129348
             data = Data(t_rv = [49000.0, 49300.0], rv = [0.0, 0.0],
                         rv_err = [1.0, 1.0], iad = iad, gost = gost,
                         gaia_dr3 = gaia_pos)
-            params = Params(max_kplanet = 1, planet_modes = [RVAS],
+            params = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]), data = data,
                 stability = :none, M_s = 1.0)
             theta = Theta(params)
@@ -798,7 +798,7 @@ const JOINT_OMEGA = -3234.192242129348
                     rv_err = [1.0, 1.0], relastrom = relast)
 
         function _params(as_names)
-            Params(max_kplanet = 1, planet_modes = [RVAS],
+            Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
                    instruments = InstrumentConfig(rv = ["X"], as = as_names),
                    data = data, stability = :none, M_s = 1.0)
         end
@@ -850,7 +850,7 @@ const JOINT_OMEGA = -3234.192242129348
         @test Nereus.sci_param_unit("sigma_X", p2) == ("m/s", false)
 
         # Sharing collapses them onto one slot.
-        p_sh = Params(max_kplanet = 1, planet_modes = [RVAS],
+        p_sh = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
                       instruments = InstrumentConfig(rv = ["X"],
                                                      as = ["GPI", "SPHERE"]),
                       data = data, stability = :none, M_s = 1.0,
@@ -870,7 +870,7 @@ const JOINT_OMEGA = -3234.192242129348
                       inst = [1, 1, 1, 2, 2, 2])
         data = Data(t_rv = [49000.0, 49300.0], rv = [1.0, -1.0],
                     rv_err = [1.0, 1.0], iad = iad)
-        params = Params(max_kplanet = 1, planet_modes = [RVAS],
+        params = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
             instruments = InstrumentConfig(rv = ["X"]), data = data,
             stability = :none, M_s = 1.0)
         theta = Theta(params)

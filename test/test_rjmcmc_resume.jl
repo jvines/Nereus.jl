@@ -37,6 +37,7 @@ function _rj_setup(rv; td_kw = (;), params_kw = (;), data_kw = (;))
     params = Params(; max_kplanet = 2, planet_modes = fill(RV_ONLY, 2),
                       instruments = InstrumentConfig(rv = ["I1"]), data = data,
                       M_s = 1.0, noise_models = NoiseModel[ad], transdim_noise = true,
+                      parametrization = ParametrizationConfig(time = :Mo),
                       priors = Dict{String,PriorSpec}(
                           "P_k1" => LogUniformPrior(2.0, 20.0),
                           "P_k2" => LogUniformPrior(2.0, 20.0),

@@ -565,7 +565,8 @@ end
 
 """
     compute_derived(chains, params; M_s=nothing, R_s=nothing,
-                     T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0)
+                     T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0,
+                     t_ref=nothing)
 
 Compute all derived parameters from posterior chains.
 Returns a vector of `DerivedParams`, one per planet.
@@ -580,6 +581,13 @@ radii, temperatures, transit observables) a planet reports:
   (`:a_driven`, `:M_sec_driven`), through `planet_K`. Under `:K_driven` it is the
   fitted `K_kN` and is not added. It lives in the derived table only, so the
   `K_kN` label of the derived and the fitted tables never meet.
+- under the transit-phase anchor (`time = :phic`, the default), the orbital
+  epochs the other anchors sample, per draw: `Tc` and `Tp` (BJD, each one
+  contiguous copy, every draw through its own P, e and ω), and `Mo_deg`, the
+  mean anomaly at `t_ref` (the data's `data.t_ref`, the epoch the `:Mo` anchor
+  uses) in degrees, median in [0, 360) like a sampled `Mo_k` on U(0, 2π).
+  `Mo_deg` needs `t_ref` and is left out without it. A fit that samples Mo, Tp
+  or Tc reports none of them here.
 - `a_mas` (mas) and `alpha_star_uas` (μas) for planets whose block carries
   absolute astrometry: the relative orbit's semi-major axis as an angle,
   `a·ϖ`, and the host's reflex orbit, `a·ϖ·M_sec/(M_pri+M_sec)`, the
@@ -604,7 +612,8 @@ function compute_derived(chains, params::Params;
                           M_s = nothing, R_s = nothing,
                           T_eff = nothing, J_mag = nothing,
                           K_mag = nothing, Ab = 0.0,
-                          planets = 1:params.config.max_kplanet)
+                          planets = 1:params.config.max_kplanet,
+                          t_ref = nothing)
     config = params.config
     parametrization = config.parametrization
     # `chains` may be 2-D (n_iter, n_param) for legacy samplers or 3-D
@@ -769,16 +778,31 @@ function compute_derived(chains, params::Params;
         derived["omega_deg"] = _contiguous_deg(w, active, _deg_lo_ref("w_k$k"))
 
         # Under :phic the sampled anchor is the transit phase at t_ref_c, and the
-        # transit time is what gets reported. Each draw maps through its own P,
-        # so Tc carries its covariance with P exactly. The phase is made
-        # contiguous first, so every draw lands in the same copy of the orbit.
+        # epochs the other anchors sample are reported instead. Each draw maps
+        # through its own P, so Tc carries its covariance with P exactly. The
+        # phase is made contiguous first, so every draw lands in the same copy
+        # of the orbit.
         if parametrization.time === :phic
             nm = "phic_k$k"
             ph = _col(nm)
             nm in circ && (ph = circular_contiguous(ph; period = 2π,
                                                     lo_ref = _circ_ref(nm),
                                                     mask = active))
-            derived["Tc"] = phic_to_tc.(ph, P, parametrization.t_ref_c)
+            Tc = phic_to_tc.(ph, P, parametrization.t_ref_c)
+            derived["Tc"] = Tc
+            # Tp = Tc − P·M_c/2π, M_c the mean anomaly of the conjunction
+            # (`tc_to_tp`). M_c lives on a circle: at low e, where ω is free, it
+            # covers it, and read in (−π, π] it would put Tp in two copies a
+            # period apart. Made contiguous, Tp is one copy next to Tc.
+            Mc = (Tc .- tc_to_tp.(Tc, P, e, w)) .* (2π) ./ P
+            Mc = circular_contiguous(Mc; period = 2π, lo_ref = -π, mask = active)
+            Tp = Tc .- P .* Mc ./ (2π)
+            derived["Tp"] = Tp
+            # Mo, the mean anomaly at the data's t_ref, as the :Mo anchor reads
+            # it: Tp = t_ref − Mo·P/2π. In the [0, 360) window of its U(0, 2π).
+            t_ref === nothing ||
+                (derived["Mo_deg"] = _contiguous_deg(tp_to_mo.(Tp, P, Float64(t_ref)),
+                                                     active, 0.0))
         end
 
         # Semi-amplitude (RV planets). Under :a_driven / :M_sec_driven the RV

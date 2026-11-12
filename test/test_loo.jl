@@ -35,7 +35,7 @@ end
     data0 = Data(; t_rv = t, rv = zeros(n_obs), rv_err = fill(σ_true, n_obs),
                    rv_inst = ones(Int, n_obs))
     ic = InstrumentConfig(rv = ["SIM"])
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                      instruments = ic, data = data0, M_s = 1.0)
 
     theta_t = Theta{Float64}(params)

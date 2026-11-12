@@ -89,7 +89,7 @@ target = build_target(
                     M_sec  = LogUniformPrior(0.001, 0.05),  # M_sun
                     sesinw = UniformPrior(-1.0, 1.0),
                     secosw = UniformPrior(-1.0, 1.0),
-                    Mo     = UniformPrior(0.0, 2π),
+                    phic   = UniformPrior(-π, π),   # transit phase, the default anchor
                     inc    = SinePrior(),
                     Omega  = UniformPrior(0.0, 2π)),),
     rv      = (HPF = (data = hpf,), NEID = (data = neid,)),

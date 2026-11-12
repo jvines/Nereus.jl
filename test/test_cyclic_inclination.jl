@@ -178,7 +178,7 @@ end
     data = Data(t_rv = t_rv, rv = 3.0 .* sin.(t_rv ./ 50), rv_err = ones(length(t_rv)),
                 relastrom = relast, hgca = hgca)
     _params(priors = Dict{String,PriorSpec}()) =
-        Params(max_kplanet = 1, planet_modes = [RVAS], instruments = instruments,
+        Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS], instruments = instruments,
                data = data, stability = :none, M_s = 1.0, priors = priors)
 
     @testset "layout: a prior over all of [0, π] makes the inclination cyclic" begin
@@ -242,7 +242,7 @@ end
         d2 = Data(t_rv = t_rv, rv = zeros(length(t_rv)), rv_err = ones(length(t_rv)),
                   t_phot = t_phot, flux = ones(60), flux_err = fill(1e-3, 60),
                   phot_inst = ones(Int, 60))
-        p = Params(max_kplanet = 1, planet_modes = [Nereus.RVPM_GD],
+        p = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [Nereus.RVPM_GD],
                    instruments = InstrumentConfig(rv = ["HARPS"], pm = ["TESS"]),
                    data = d2, stability = :none, M_s = 1.6, R_s = 1.5,
                    priors = Dict{String,PriorSpec}("i_star" => SinePrior()))
