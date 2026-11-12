@@ -92,6 +92,7 @@ include("samplers/pt.jl")
 include("samplers/pt_hmc.jl")  # Hamiltonian parallel tempering (fixed-dim, differentiable)
 include("samplers/ns_error.jl")       # the error of a nested run's log Z (thread bootstrap + volumes)
 include("samplers/nested.jl")
+include("samplers/de_move.jl")   # differential-evolution move mixed into the ensemble samplers
 include("samplers/ensemble.jl")
 include("samplers/map.jl")
 include("samplers/ess.jl")
