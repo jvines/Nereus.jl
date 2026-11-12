@@ -333,10 +333,11 @@ function _rewindow(ps::PriorSpec, lo::Real, hi::Real)
 end
 
 """
-    set_circular_window!(params, i, lo; transforms = ()) -> (lo, hi)
+    set_circular_window!(params, i, lo; transforms = (), hi = lo + span) -> (lo, hi)
 
 Move unfrozen parameter `i` (a full-circle or polar angle, [`seam_indices`](@ref))
-to the window `[lo, lo + span)` everywhere the samplers read its bounds: the
+to the window `[lo, lo + span)` (`[lo, hi)` given `hi`, to the bit) everywhere
+the samplers read its bounds: the
 layout's `PriorSpec`, the packed priors, and every `PackedTransforms` in
 `transforms`. `config.priors` keeps what the user wrote. Exact: the prior is
 periodic and still covers one period (Uniform, a pushforward evaluated on the
@@ -347,12 +348,13 @@ window with [`circular_relabel`](@ref) -- hot rungs, ring buffers, cached
 proposals -- before the next log-density evaluation, or those values sit
 outside the support.
 """
-function set_circular_window!(params::Params, i::Int, lo::Real; transforms = ())
+function set_circular_window!(params::Params, i::Int, lo::Real; transforms = (),
+                              hi::Union{Nothing,Real} = nothing)
     L = params.layout
     ps = L.unfrozen_priors[i]
     span = ps.hi - ps.lo
     lo = Float64(lo)
-    hi = lo + span
+    hi = hi === nothing ? lo + span : Float64(hi)
     L.unfrozen_priors[i] = _rewindow(ps, lo, hi)
     L.packed_priors.lowers[i] = lo
     L.packed_priors.uppers[i] = hi
@@ -1422,4 +1424,28 @@ function _ns_recut!(live_u::AbstractMatrix, dead_sets, params::Params;
         moved = true
     end
     return moved
+end
+
+"""
+    _ns_home_charts!(params; transforms = ()) -> params
+
+Every full-circle and polar angle back on the chart the layout gave it, before
+a nested run: its bounds as lifted from the user's prior (`circular_lift`,
+`polar_lift`), to the bit. A run moves the charts as it goes (`_ns_recut!`) and
+leaves them where it ended, with the draws it returns in them. A second run on
+the same target started from those charts, so the unit cube mapped onto other
+angles and the same seed gave another run; so did a chart moved back by its
+lower edge alone, whose upper edge, `lo + span` from a moved window, was a bit
+off.
+"""
+function _ns_home_charts!(params::Params; transforms = ())
+    L = params.layout
+    for d in seam_indices(params)
+        ps = L.unfrozen_priors[d]
+        ps0 = params.config.priors[L.unfrozen_names[d]]
+        lo, hi = bounds(is_cyclic_inclination(ps) ? polar_lift(ps0) : circular_lift(ps0))
+        bounds(ps) == (lo, hi) && continue
+        set_circular_window!(params, d, lo; transforms, hi)
+    end
+    return params
 end

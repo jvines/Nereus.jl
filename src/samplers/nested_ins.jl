@@ -149,6 +149,8 @@ function sample_nested_ins(
     unfrozen_priors = layout.unfrozen_priors
     rng = MersenneTwister(seed)
     ns_tr = target.transform === nothing ? () : (target.transform,)
+    # every run starts from the same charts, so a seed repeats it
+    _ns_home_charts!(params; transforms = ns_tr)
 
     # Per-slot Theta buffer. NS outer loop is sequential (one replacement
     # per iter, run on slot 1 by default) but the init pass threads over

@@ -151,6 +151,10 @@ function sample_nested_dynamic(
     n_walks = n_walks === nothing ?
               max(25, (proposal === :rwalk ? 10 : 5) *
                       length(target.params.layout.unfrozen_idx)) : n_walks
+    # Every run starts from the same charts, so a seed repeats it; the passes
+    # move them as they go (`_ns_recut!`).
+    _ns_home_charts!(target.params;
+                     transforms = target.transform === nothing ? () : (target.transform,))
     # === Pass 1: baseline NS ===
     verbose && @info "Dynamic NS: baseline pass (n_live=$n_live_init, dlogz=$dlogz_init)"
     base = _ns_inner(target, data;

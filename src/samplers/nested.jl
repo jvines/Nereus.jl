@@ -200,6 +200,11 @@ function sample_nested(
     # The pilot's posterior is discarded, and so is what it logs: its warning
     # of a thin posterior (n_eff 134-192 at 50 live points on an RV + IAD
     # companion, where the run itself had 3,000-11,000) read as this run's.
+    #
+    # Every run starts from the same charts, so a seed repeats it on the same
+    # target: an earlier run left them where it ended.
+    _ns_home_charts!(params;
+                     transforms = target.transform === nothing ? () : (target.transform,))
     if seam_pilot && !isempty(seam_indices(params))
         Logging.with_logger(Logging.NullLogger()) do
             sample_nested_ins(target, data; n_live = max(50, n_live ÷ 10), dlogz = 1.0,
