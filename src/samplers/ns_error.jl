@@ -7,14 +7,18 @@
 # chain of finite length from a live point) correlates. sqrt(H / n_live)
 # counts the first alone, under perfect sampling; on the four test fits (two RM
 # obliquity fits, an eccentric RV planet, a gravity-darkened transit) the
-# scatter between seeds was 1.2-1.5 times it, for every engine.
+# scatter between seeds was 1.06-1.31 times it with the random walks, 0.87-1.12
+# with the slices.
 #
 # The error quoted here is dynesty's (`simulate_run`): over many realisations,
 # resample the run's threads with replacement, recount the live points at
 # every point of the resampled run, draw every shrinkage afresh, and take the
 # spread of log Z. A thread is the sequence of points one live-point slot
 # held; each point is live from the likelihood bound it was drawn above (its
-# birth: -Inf for a draw from the prior) to its own likelihood.
+# birth: -Inf for a draw from the prior) to its own likelihood. The scatter
+# was 0.62-0.95 times this error: conservative for a near-perfect sampler,
+# where either source alone accounts for the scatter and the two together
+# count it twice, and never short (docs/src/samplers.md).
 
 using Random: AbstractRNG, MersenneTwister, randexp
 using LogExpFunctions: logaddexp
