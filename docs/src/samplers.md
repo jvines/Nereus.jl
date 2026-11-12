@@ -213,7 +213,8 @@ Every ensemble sampler also checks its β = 1 walkers for a drift they share
 walkers' mean rank, against its autocorrelation-corrected standard error. A
 drift every walker shares is what R-hat and ESS cannot see; the run warns,
 names the parameters, and records the test under `drift` in the summary's
-diagnostics. The remedy is a longer run or another start.
+diagnostics. The remedy is a longer run or another start, and the DE move
+when the run had it off.
 
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (bridge
 sampling on the cold chain when usable; else H⁺ when its ladder is quotable —
