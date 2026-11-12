@@ -154,6 +154,7 @@ res = sample_pt_emcee(target, data;
     prune_stranded = true,             # burn-in only; see the docstring
     betas          = nothing,          # default: Vines+ (1/√5)^i, descending β[1]=1
     stretch_a      = 2.0,
+    de_move        = 0.5,              # share of within-rung moves that are DE (below)
     init           = nothing,          # bounded-space point; else init_strategy
     init_strategy  = :prior,           # :prior | :pathfinder | :map_scatter
     pf_n_runs      = 2,                # only used by :pathfinder
@@ -190,9 +191,34 @@ res = sample_pt_emcee(target, data;
 
 Any other value is an `ArgumentError`.
 
+`de_move`: per walker and step, the probability of a differential-evolution
+move (ter Braak 2006), x' = x + γ(x_j − x_k) + ε with j ≠ k from the other half
+of the walkers at the same temperature, in place of the stretch move. The
+stretch move proposes along the chord through two walkers, which leaves a thin
+curved ridge almost always: walkers that burn-in left on the constant-duration
+ridge of a transit fit stayed there, all together, with R-hat at 1.0002. The
+difference of two walkers on the ridge points along it. The default share,
+0.5, gave 1.09 ± 0.02 times the stretch-only ESS per likelihood evaluation on
+transit-only, two-planet RV and RV + Hipparcos ridge fits (shares 0.1–0.3:
+1.01–1.03; tuning γ, or adding the DE-snooker, gained nothing), and a DE step
+costs no more than a stretch step. The move keeps the ridge from filling
+during burn-in; an ensemble already stranded on it drains only slowly (from
+48 % of the walkers to a quarter over 2000 more steps), which is what the
+drift check below is for. `0` is the stretch-only kernel, draw for draw. The same move, on each sampler's own
+coordinates, is in `sample_transdim_pt_emcee`, `sample_pt_whitening`,
+`sample_ensemble` and `sample_pa`'s stretch mutation.
+
+Every ensemble sampler also checks its β = 1 walkers for a drift they share
+(`ensemble_drift`): per parameter, the trend through the recorded steps of the
+walkers' mean rank, against its autocorrelation-corrected standard error. A
+drift every walker shares is what R-hat and ESS cannot see; the run warns,
+names the parameters, and records the test under `drift` in the summary's
+diagnostics. The remedy is a longer run or another start.
+
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (best of
 TI/TI⁺/SS⁺/H⁺), `evidence::EvidenceReport`, `acceptance_within`,
-`acceptance_swap`, `n_evals`, and `ladder::LadderHistory` — the ladder, swap
+`acceptance_de`, `acceptance_swap`, `n_evals`, `drift`, and
+`ladder::LadderHistory` — the ladder, swap
 acceptance and swap mean distance at every step, plus `⟨log L⟩` per rung,
 which `plot_ladder_rates` and `plot_beta_ladder` draw. Bump `n_temps` to 15+ when log-likelihood
 spans more than ~2000 log units between prior bulk and posterior peak
@@ -258,6 +284,7 @@ res = sample_transdim_pt_emcee(target, data; td = td,
     betas                   = nothing,
     beta_min                = 1e-4,     # geometric ladder β_i = beta_min^(i/(N-1))
     stretch_a               = 2.0,
+    de_move                 = 0.5,      # as in sample_pt_emcee
     seed                    = 1,
     thin                    = 1,
     show_progress           = true,
@@ -427,6 +454,7 @@ res = sample_pt_whitening(target, data;
     n_burnin       = 500,
     betas          = nothing,           # default: (1/√5)^i geometric (same as pt_emcee)
     stretch_a      = 2.0,
+    de_move        = 0.5,               # as in sample_pt_emcee
     proposal_scale = 0.05,              # accepted but UNUSED (ensemble stretch move)
     warmup_swaps   = 200,               # identity swap until whitening kicks in
     whiten_window  = 100,               # sliding window for the per-temp (μ,σ)
@@ -692,6 +720,7 @@ res = sample_pa(target, data;
     step_scale        = 0.05,          # :rwm only — RWM step as fraction of prior
     mutation_kernel   = :stretch,      # :stretch | :rwm | :adaptive_cov
     stretch_a         = 2.0,           # :stretch only
+    de_move           = 0.5,           # :stretch only; as in sample_pt_emcee
     mcmc_target_moves = 5.0,           # adaptive: sweep until each replica has ≥ this accepts
     max_mcmc_mult     = 12,            # cap: ≤ max_mcmc_mult × n_mcmc sweeps per β
     seed              = 1,
@@ -895,9 +924,12 @@ true`** (auto-rebuilt internally if needed).
 
 ### `sample_ensemble` *(library-only)*
 
-Affine-invariant ensemble MCMC (Goodman & Weare 2010) via
-AffineInvariantMCMC.jl. Single-temperature — won't break mode trapping; for
-multimodal use `sample_pt_emcee`. Works in unconstrained space.
+Affine-invariant ensemble MCMC (Goodman & Weare 2010): AffineInvariantMCMC.jl's
+stretch move, step for step, mixed with the differential-evolution move of
+`sample_pt_emcee` (`de_move`; `0` is the package's algorithm, draw for draw).
+Single-temperature — won't break mode trapping; for multimodal use
+`sample_pt_emcee`. Works in unconstrained space. The drift check of each
+chain's walkers is in `chains.info.drift`.
 
 ```julia
 chains = sample_ensemble(target;
@@ -907,6 +939,7 @@ chains = sample_ensemble(target;
     thinning  = 1,
     init      = nothing,               # else prior-draw walkers (EMPEROR-style)
     n_scouts  = 16,                    # scouts in place of up to half the prior-drawn walkers
+    de_move   = 0.5,                   # as in sample_pt_emcee
     seed      = 1,
     n_chains  = 1,                     # parallel chains via Threads.@spawn
 )
