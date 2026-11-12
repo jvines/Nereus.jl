@@ -517,8 +517,9 @@ end
 # beside bridge sampling, never in its place, and this warns when the two differ
 # by more than bridge's standard error plus 1 nat (and, past `multimodal_tol`,
 # that a single Gaussian reference may be missing modes). Returns whether it
-# warned. On an RV + Hipparcos-IAD companion Laplace sat 3.5 to 3.8 nats above
-# bridge with e free and 1.1 above with e fixed; on 51 Peg 24 below.
+# warned. Since mode-Laplace moved to the unconstrained density it sits within
+# 0.25 nats of bridge on an RV + Hipparcos-IAD companion (e fixed at i = 5
+# and 89.5 deg, and e free) and 5.5 above on 51 Peg (converged, 15 000 steps).
 function _warn_laplace_vs_bridge(who::AbstractString, laplace::Real, bridge::Real,
                                  bridge_se::Real; multimodal_tol::Real = 20.0)
     (isfinite(laplace) && isfinite(bridge)) || return false

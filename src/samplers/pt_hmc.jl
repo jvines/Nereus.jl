@@ -335,7 +335,8 @@ tempered `EvidenceReport` (TI, TI+, SS+, H+) and a named tuple `evidence` of
 swap_acc)`.
 
 The log-evidence is chosen as pt_emcee chooses it: bridge sampling on the cold
-chain when its reference has the effective samples it needs; else the tempered
+chain when the chain has converged and its reference has the effective samples
+it needs (`_bridge_guard`); else the tempered
 SS+ when it can be trusted (`tempered_ok`) and agrees with mode-Laplace within
 `laplace_switch_tol`; else mode-Laplace, with a warning (Jose's rule); `NaN`,
 with a warning, only when none of them is available. SS+ is trusted when the
@@ -603,8 +604,9 @@ function _pt_hmc_tempered_ok(report::EvidenceReport, βs::AbstractVector,
 end
 
 # The log-evidence pt_hmc reports, as pt_emcee picks its own: bridge sampling
-# on the cold chain when its reference `q` has the effective samples it needs
-# (d + d(d+1)/2; with fewer it is biased low and no diagnostic shows it), else
+# on the cold chain when `_bridge_guard` passes (the chain has converged and
+# `q`'s d + d(d+1)/2 parameters have the effective draws they need; otherwise
+# it is biased low and no diagnostic of its own shows it), else
 # SS+ when `_pt_hmc_tempered_ok` and within `laplace_switch_tol` of mode-Laplace,
 # else mode-Laplace (Jose's rule), else NaN. A warning says why whenever the
 # tempered value is not quotable, and when bridge and a quotable SS+ disagree
@@ -624,19 +626,11 @@ function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
         end
     end
     if isfinite(lz_bridge)
-        d = LogDensityProblems.dimension(target)
-        need = d + d * (d + 1) ÷ 2
-        n_eff = try
-            _bridge_min_ess(chains, target.params)   # folded, as bridge reads them
-        catch err
-            @debug "sample_pt_hmc: ESS unavailable for the bridge guard" exception = err
-            NaN
-        end
-        if !(isfinite(n_eff) && n_eff >= need)
-            @warn "sample_pt_hmc: bridge is not reported — its reference is " *
-                  "fitted from too few effective samples (min ESS " *
-                  "$(isfinite(n_eff) ? round(Int, n_eff) : "?") < $need free " *
-                  "parameters in q), where it is biased low." bridge = lz_bridge
+        g = _bridge_guard(chains, target.params)      # folded, as bridge reads them
+        if !g.ok
+            alt = occursin("R-hat", g.why) ? "Sample longer." :
+                  "Sample longer, or use `reference_path_evidence`."
+            @warn "sample_pt_hmc: bridge is not reported: $(g.why). $alt" bridge = lz_bridge min_ess = g.n_eff rhat = g.rhat
             lz_bridge = NaN
         end
     end
