@@ -19,7 +19,7 @@
 # stretch move alone and with the DE move at several shares and settings, 100+
 # runs). Two runs, both stretch alone, were off the nested-sampling posterior
 # and moving: the seed that kept 47 % of its draws on the constant-duration
-# ridge (nested: 1.4 %) reaches |z| = 15.4, and a joint fit whose first 1,000
+# ridge (nested: 7-9 %) reaches |z| = 15.4, and a joint fit whose first 1,000
 # recorded steps held the TESS q1 at 0.308 ± 0.005 (nested: 0.297), and whose
 # next 3,000 sat stationary about 0.297, 12.3. Every other run reaches 9.4 at
 # most over all parameters (7.2 with the stretch move alone, 5.5 at the default
@@ -27,10 +27,10 @@
 # inclination whose walkers cross its fold reached 17.3 with the posterior
 # unmoved (8 of 22 ridge runs over 10); folded, 2.4. A run flagged here is not
 # stationary; one not flagged may still be wrong in ways no single run shows: a
-# mode never found, a share of walkers held on a ridge that does not drain
-# within the recorded steps (transit fits with 13-16 % of their draws above
-# e = 0.5, against 1.4 %, reached 5.5), or walkers that do not mix with each
-# other, which is R-hat's to see.
+# mode never found or never filled (stretch-alone transit fits with 0.6 % of
+# their draws above e = 0.5, against nested sampling's 7-9 %, reached 6.0), a
+# share that moves too slowly to show in the recorded steps, or walkers that do
+# not mix with each other, which is R-hat's to see.
 
 """
     DRIFT_Z

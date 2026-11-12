@@ -19,8 +19,10 @@
 # left there: on the default transit-only fit (b = 0.3, e = 0, phic anchor) one
 # seed in six started half its walkers on the constant-duration ridge at
 # e > 0.5, ω ≈ -28°, and drained it from 51 % to 40 % over the 1000 recorded
-# steps (31 % to 14 % at four times the length), while nested sampling puts
-# 1.4 % there. R-hat stayed at 1.0002: the walkers drift together. The DE
+# steps (31 % to 14 % at four times the length), with R-hat at 1.0002: the
+# walkers drift together. Nested sampling puts 6.6-9.0 % there (five runs, 1500
+# to 10000 live points), and four of the other five seeds 0.6-1.1 %: the chord
+# that keeps walkers on the filament keeps the rest off it. The DE
 # difference x_j - x_k of two walkers in the filament points along it, so a
 # walker in it steps along the filament, and one in the bulk can be carried
 # by a bulk-to-filament difference (γ = 1) and back.
@@ -47,7 +49,7 @@
 # stretch-only burn-in with 48 % of its walkers on the filament, still kept 25 %
 # there on average over the second thousand steps (0.1: 29 %, 0.2: 28 %, 0.3:
 # 28 %; stretch only: 34 %). The move's work is done during burn-in, where it
-# keeps the filament from filling.
+# keeps the filament from filling past its share.
 #
 # Coordinates are the stretch move's, exactly. Each sampler proposes on the
 # scale its stretch move does (pt_emcee and transdim: a LogUniform /

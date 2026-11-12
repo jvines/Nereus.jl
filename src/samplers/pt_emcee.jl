@@ -791,8 +791,9 @@ in place.
   leaves a thin curved ridge almost always, so a share of walkers that burn-in
   leaves on such a ridge stays there: on the default transit-only fit one seed
   in six kept 47 % of its draws at e > 0.5 on the constant-duration ridge where
-  nested sampling puts 1.4 %, with R-hat 1.0002. `0` is the stretch-only
-  kernel, and draws exactly what it did.
+  nested sampling puts 7-9 %, with R-hat 1.0002; four of the other five kept
+  0.6-1.1 % there. `0` is the stretch-only kernel, and draws exactly what it
+  did.
 - `init::Union{Nothing,Vector{Float64}}=nothing` — bounded-space walker
   init point (Gaussian scatter around it).
 - `init_strategy::Symbol=:prior` — how walkers are initialized when
