@@ -135,24 +135,35 @@ makes tempered estimators (TI/SS/H+) fail on high-SNR / signal-locked posteriors
 (it never tempers), and **robust to railed MAPs** (uses the sample covariance in
 unconstrained space, not the Hessian, which goes singular at a rail).
 
-`logZ ≈ logq(mode) + d/2·log2π + ½·logdet(Σ_local)`, where the mode is the
-max-`lp` cold sample (NOT the mean — a multimodal mean sits in a density valley),
-and `Σ_local` is the covariance of the closest `mode_frac` of samples to the mode
-in unconstrained space (excludes multimodal spread). Carries a ~O(100)-nat
-non-Gaussian bias on pathological posteriors — negligible for strong detections,
-cross-check nested for marginal ones. Returns `NaN` if not computable (bounded
-target, missing `:lp`, or too few samples).
+`logZ ≈ logq(mode) + d/2·log2π + ½·logdet(Σ_local)`, all in the unconstrained
+space: `logq` is the log posterior density THERE, the bounded one plus the
+log-Jacobian of the map, the mode is the max-`logq` cold sample (NOT the mean —
+a multimodal mean sits in a density valley), and `Σ_local` is the covariance of
+the closest `mode_frac` of samples to the mode (excludes multimodal spread),
+divided by the factor a Gaussian's covariance shrinks by when cut to that
+inner fraction. Carries a ~O(100)-nat non-Gaussian bias on pathological
+posteriors — negligible for strong detections, cross-check nested for marginal
+ones. Returns `NaN` if not computable (bounded target, or too few samples).
+
+The chain's `:lp` is read as the log posterior in the bounded space (pt_emcee,
+pt, pt_whitening) or in the unconstrained one (pt_hmc, NUTS), whichever it
+matches at a few draws against a full evaluation (`_laplace_logq`); without
+`:lp`, or matching neither, the density is evaluated at every draw. Both
+corrections were missing: pt_emcee's `:lp`, read as `logq`, lacked the
+log-Jacobian, and the cut-down covariance was used as it came. On an RV +
+Hipparcos-IAD companion that put pt_emcee's value about 1.1 nats above bridge
+and pt_hmc's 2.6 to 3.1 below.
 """
 function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
                                mode_frac::Real = 0.3)
     try
         target.transform === nothing && return NaN
-        names = target.params.layout.unfrozen_names
-        d = length(names)
+        nms = target.params.layout.unfrozen_names
+        d = length(nms)
         d >= 1 || return NaN
-        lp = _draws(chains, :lp)
-        cols = [_draws(chains, Symbol(nm)) for nm in names]
-        N = length(lp)
+        cols = [_draws(chains, Symbol(nm)) for nm in nms]
+        N = length(cols[1])
+        lp = :lp in names(chains) ? Float64.(_draws(chains, :lp)) : fill(NaN, N)
         N >= 2d + 2 || return NaN
         pt = target.transform
         # Cyclic inclinations folded to [0, π] (src/circular.jl), and the
@@ -168,22 +179,63 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
             spin_canon!(xi, sc)
             Y[:, i] = transform_forward(xi, pt)
         end
-        good = isfinite.(lp) .& vec(all(isfinite, Y; dims = 1))
+        good = vec(all(isfinite, Y; dims = 1))
+        any(isfinite, lp) && (good .&= isfinite.(lp))
         count(good) >= 2d + 2 || return NaN
         Y = Y[:, good]; lp = lp[good]; Nk = length(lp)
-        imax = argmax(lp); mode = Y[:, imax]
+        logq = _laplace_logq(target, Y, lp)
+        logq === nothing && return NaN
+        imax = argmax(logq); mode = Y[:, imax]
         Σ  = cov(Y; dims = 2) + 1e-8 * I(d)
         Lc = cholesky(Symmetric(Σ)).L
         md = [norm(Lc \ (Y[:, i] .- mode)) for i in 1:Nk]
         sel = md .< quantile(md, mode_frac)
-        Yc = count(sel) >= 2d + 2 ? Y[:, sel] : Y
+        # The draws within a Mahalanobis radius √q of a Gaussian's centre have
+        # covariance c·Σ, c = F_{d+2}(q) / F_d(q) (F_k the χ²_k CDF): for d = 7
+        # and the inner 30%, c = 0.46 and ½·logdet is 2.7 nats short. Undo it.
+        local_ = count(sel) >= 2d + 2
+        Yc = local_ ? Y[:, sel] : Y
         Sc = cov(Yc; dims = 2) + 1e-8 * I(d)
-        lz = lp[imax] + 0.5 * d * log(2π) + 0.5 * logdet(Symmetric(Sc))
+        shrink = 0.0
+        if local_
+            f = count(sel) / Nk
+            c = cdf(Chisq(d + 2), quantile(Chisq(d), f)) / f
+            shrink = d * log(c)
+        end
+        lz = logq[imax] + 0.5 * d * log(2π) + 0.5 * (logdet(Symmetric(Sc)) - shrink)
         nf = n_folds(sc, cinc)
         return nf == 0 ? lz : lz + nf * log(2.0)
     catch
         return NaN
     end
+end
+
+# The log posterior density in the unconstrained space at each column of `Y`
+# (folded draws mapped forward), from the chain's `:lp` when it is one of the
+# two conventions Nereus chains carry: the bounded log posterior (pt_emcee, pt,
+# pt_whitening), to which the map's log-Jacobian is added, or the unconstrained
+# one (pt_hmc, NUTS), taken as it is. Which one is checked at a few draws
+# against a full evaluation; with neither (or no `:lp`) every draw is
+# evaluated. `nothing` if that leaves no finite value.
+function _laplace_logq(target::NereusTarget, Y::AbstractMatrix, lp::AbstractVector)
+    pt = target.transform
+    N = size(Y, 2)
+    # bridge's per-task evaluators: thread-safe scratch, and the same
+    # unconstrained log density (`_bridge_logdensity!`).
+    evs = [_BridgeEvaluator(target) for _ in 1:max(1, _bridge_ntasks(N))]
+    lj = [Float64(transform_logabsdetjac_inv(Y[:, i], pt)) for i in 1:N]
+    k = unique(round.(Int, range(1, N; length = min(N, 8))))
+    fk = [_bridge_logdensity!(evs[1], Y[:, i]) for i in k]
+    tol(v) = 1e-6 + 1e-10 * abs(v)
+    if all(isfinite, lp[k]) && all(isfinite, fk)
+        all(abs(lp[i] + lj[i] - f) <= tol(f) for (i, f) in zip(k, fk)) && return lp .+ lj
+        all(abs(lp[i] - f) <= tol(f) for (i, f) in zip(k, fk)) && return Vector{Float64}(lp)
+    end
+    q = Vector{Float64}(undef, N)
+    _bridge_eval!(q) do c, i
+        _bridge_logdensity!(evs[c], Y[:, i])
+    end
+    return any(isfinite, q) ? q : nothing
 end
 
 # ------------------------------------------------------------------

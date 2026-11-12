@@ -92,14 +92,17 @@ Notes for a production reader:
   summary.json as `mode_laplace` (a number), with `mode_laplace_check` beside
   it holding that label and its distance from bridge; a warning fires when it
   is further from bridge than bridge's standard error + 1 nat (1.1 to 1.2
-  nats above bridge on the companion). `transdim_pt_emcee` and `pt_whitening`
+  nats above bridge on the companion before the Laplace fix below, within
+  0.25 after it). `transdim_pt_emcee` and `pt_whitening`
   report **H+** and `sample_pt` **TI+**, each only when quotable: they have
   no mode-Laplace to fall back on, so otherwise `NaN` with a warning, written
-  as `null` in summary.json. `sample_pt_hmc` reports
-  bridge sampling on its cold chain when the reference has the effective
-  samples it needs, else SS+ when its ladder starts at β = 0 and every
-  adjacent pair of rungs swaps at least `swap_min` (5%) of the time, else
-  `NaN` with a warning saying why. Its ladder is β = 0 and a geometric run
+  as `null` in summary.json. `sample_pt_hmc` applies the same rule with SS+
+  as its tempered value: bridge sampling on its cold chain when the reference
+  has the effective samples it needs, else SS+ when its ladder starts at
+  β = 0, every adjacent pair of rungs swaps at least `swap_min` (5%) of the
+  time and it is within `laplace_switch_tol` of mode-Laplace, else
+  mode-Laplace with a warning, else `NaN` with a warning saying why. Its
+  ladder is β = 0 and a geometric run
   from `beta_min`: from β = 0 the integrand climbs through four decades in
   the first segment, which TI+ does not resolve (1 to 4 nats low at 8 to 12
   rungs) and SS+ does (within 0.3 of an exact log Z).
@@ -390,18 +393,33 @@ Worse for model selection, the bias is *model-dependent* — it lives on the
 model that contains the signal, not the noise-only null — so it does **not**
 cancel in a `Δ log Z` Bayes factor.
 
-`sample_pt_emcee` therefore also computes a **mode-anchored Laplace** estimate
-from its own cold chain:
+`sample_pt_emcee` and `sample_pt_hmc` therefore also compute a
+**mode-anchored Laplace** estimate from their own cold chain (and run_job
+after the fit):
 
 ```
 log Z ≈ log q(mode) + (d/2)·log 2π + ½·logdet Σ_local
 ```
 
-anchored on the max-`lp` cold sample (the *mode*, not the mean — a multimodal
-mean falls in a density valley), with `Σ_local` the sample covariance of the
-closest fraction of draws in unconstrained space. It **never tempers** (immune
-to the phase transition) and uses the *sample* covariance rather than the
-Hessian (robust to railed MAPs, where a Hessian Laplace goes singular / NaN).
+all in the unconstrained space: `log q` is the log posterior density there,
+the bounded one plus the log-Jacobian of the map, anchored on the max-`log q`
+cold sample (the *mode*, not the mean — a multimodal mean falls in a density
+valley), with `Σ_local` the sample covariance of the closest 30% of draws,
+divided by the factor `c = F_{d+2}(q)/F_d(q)` (`F_k` the χ²_k CDF, `q` the cut's
+squared Mahalanobis radius) by which that cut shrinks a Gaussian's
+covariance. It **never tempers** (immune to the phase transition) and uses
+the *sample* covariance rather than the Hessian (robust to railed MAPs, where
+a Hessian Laplace goes singular / NaN). The chain's `:lp` may hold either
+density (pt_emcee's is the bounded one, pt_hmc's and NUTS's the unconstrained
+one); which is checked against a full evaluation at a few draws, and without
+`:lp` every draw is evaluated.
+
+Until 2026-11-12 both corrections were missing. On an RV + Hipparcos-IAD
+companion (bridge 163.88 at i = 89.5°, 165.51 at 5°, 162.08 with e free)
+pt_emcee's value sat 1.1 nats above bridge — the missing Jacobian (−3.7
+nats at the mode) less the shrunk covariance (−2.6 nats for d = 6) — and
+pt_hmc's, whose `:lp` carries the Jacobian, 2.6 to 3.1 below; with both
+corrected the two sit within 0.25 nats of bridge.
 It carries an `O(100)`-log-unit non-Gaussian bias on pathological (railed,
 multimodal) posteriors — negligible for a strong detection, worth a nested
 cross-check for a marginal one.
