@@ -37,7 +37,7 @@ using Random, Statistics, LinearAlgebra
              rv_err = fill(3.0, 3), rv_inst = [1,1,1],
              tomo = [TomoNight("HARPS", tt, M .+ N, grid, Tc)])
     end
-    build(d, nms) = Params(max_kplanet = 1, planet_modes = [RVPM_RM],
+    build(d, nms) = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVPM_RM],
         instruments = InstrumentConfig(rv = ["I1"], pm = String[]),
         data = d, stability = :none, M_s = 1.0, R_s = 1.0,
         noise_models = Vector{NoiseModel}(nms))

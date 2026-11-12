@@ -64,7 +64,7 @@ function _sparse_multi_inst_rv_fixture()
     inst_names = ["FEROS", "CORALIE", "HARPS"]
     inst = [((i - 1) % 3) + 1 for i in 1:n]        # round-robin across 3 instruments
     data = Data(; t_rv = t, rv = zeros(n), rv_err = fill(3.0, n), rv_inst = inst)
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                        instruments = InstrumentConfig(rv = inst_names),
                        data = data, M_s = 1.0,
                        noise_models = NoiseModel[CeleriteRotation()])
@@ -100,7 +100,7 @@ function _sb2_fixture()
     comp = [isodd(i) ? 1 : 2 for i in 1:n]
     data = Data(; t_rv = t, rv = zeros(n), rv_err = fill(50.0, n),
                   rv_inst = ones(Int, n), rv_comp = comp)
-    params = Params(; max_kplanet = 1, planet_modes = [Nereus.BINARY_RV],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [Nereus.BINARY_RV],
                        instruments = InstrumentConfig(rv = ["I1"]),
                        data = data, M_s = 1.0)
     value(nm) = startswith(nm, "P_")      ? 37.0     :

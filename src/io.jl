@@ -61,6 +61,11 @@ function save_chains(path::String, chains, params::Params;
         ds.attrib["log_evidence"] = isnan(log_evidence) ? -1e300 : log_evidence
         ds.attrib["instrument_rv"] = join(params.config.instruments.rv_names, ",")
         ds.attrib["instrument_pm"] = join(params.config.instruments.pm_names, ",")
+        # The time anchor, and under :phic the epoch φ_c is measured from: what
+        # it takes to turn a sampled phic_k<n> into Tc = t_ref_c + φ_c·P/2π.
+        pc = params.config.parametrization
+        ds.attrib["time_anchor"] = String(pc.time)
+        pc.time === :phic && (ds.attrib["t_ref_c"] = pc.t_ref_c)
 
         # Posterior samples — one variable per parameter
         for name in layout.unfrozen_names

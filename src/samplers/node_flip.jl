@@ -53,23 +53,66 @@
 #     pair frozen at e = 0, the in-plane phase at fixed t is ω + M, and the same
 #     degeneracy is realised as (Ω + π, Mo + π), so Mo is flipped instead,
 #     when it is the sampled, full-circle time anchor;
-#   * the time anchor is Mo or Tp, which T holds fixed, so M(t) is unchanged.
-#     Tc is defined through ω, and holding it fixed moves Tp: the image of a
-#     walker would not be its mirror, and the move would only be rejected.
-#     An astrometry-only planet with a Tc anchor is not offered the move.
+#   * the time anchor is Mo or Tp, which T holds fixed, so M(t) is unchanged,
+#     or the transit phase φ_c (the default), which T moves so that Tp stays
+#     where it was. φ_c is Tc in phase, and Tc is defined through ω: the
+#     conjunction sits at f = π/2 − ω, a mean anomaly M_c(e, ω) after
+#     periastron, so φ_c = 2π (Tp − t_ref_c)/P + M_c(e, ω). With ω → ω + π,
+#         φ_c → φ_c + M_c(e, ω + π) − M_c(e, ω)          (mod 2π),
+#     the other conjunction. The shift reads only (e, ω), which T maps to
+#     (e, ω + π), and M_c is 2π-periodic in ω, so the second application
+#     shifts back by exactly as much: T∘T = id still. The Jacobian is
+#     triangular -- ∂φ_c'/∂φ_c = 1, and the shift does not depend on φ_c --
+#     so |det ∂T| = 1 too. φ_c's window must be at most one period (the wrap
+#     below is then injective); it need not be periodic in the likelihood, as
+#     the ratio covers that.
+#     Tc itself is not offered the move: its window is fixed in days and the
+#     shift, δ·P/2π, would carry walkers between copies of the orbit.
 
 """
     NodeFlip
 
 One planet's node flip: the unfrozen positions `shift` move by π around their
-circle (Ω, plus ω under `:ew` or Mo for a frozen e = 0 orbit), and the positions
-in `negate` change sign (the eccentricity-vector pair). See the header of
+circle (Ω, plus ω under `:ew` or the Mo / φ_c anchor for a frozen e = 0 orbit),
+and the positions in `negate` change sign (the eccentricity-vector pair).
+Under the `:phic` anchor `phase` is φ_c's position, moved by
+M_c(e, ω + π) − M_c(e, ω) so that Tp is held; `ew`, `i1`, `i2` and `e_fixed`
+say where (e, ω) are read from (0 = none). See the header of
 `src/samplers/node_flip.jl`.
 """
 struct NodeFlip
     planet::Int
     shift::Vector{Int}
     negate::Vector{Int}
+    phase::Int        # φ_c's unfrozen position; 0 when the flip holds the anchor
+    ew::Symbol        # :sesinw / :esinw: (i1, i2) the pair; :ew: i1 = e, i2 = ω
+    i1::Int           # 0 under :ew when e is frozen (then e = e_fixed)
+    i2::Int
+    e_fixed::Float64
+end
+
+NodeFlip(planet::Int, shift::Vector{Int}, negate::Vector{Int}) =
+    NodeFlip(planet, shift, negate, 0, :sesinw, 0, 0, 0.0)
+
+# The mean anomaly of the conjunction (f = π/2 − ω) after periastron, in
+# (−π, π]: Tc − Tp in phase (`tc_to_tp`). 2π-periodic in ω.
+@inline function _conjunction_mean_anomaly(e::Real, ω::Real)
+    ec = clamp(e, zero(e), oftype(e, 1) - eps(oftype(e, 1)))
+    E = 2 * atan(tan((oftype(ω, π) / 2 - ω) / 2) * sqrt((1 - ec) / (1 + ec)))
+    return E - ec * sin(E)
+end
+
+# (e, ω) of the flip's planet at the point `x`, before the flip.
+@inline function _flip_e_w(x::AbstractVector, f::NodeFlip)
+    if f.ew === :sesinw
+        s, c = x[f.i1], x[f.i2]
+        return s^2 + c^2, atan(s, c)
+    elseif f.ew === :esinw
+        s, c = x[f.i1], x[f.i2]
+        return hypot(s, c), atan(s, c)
+    else
+        return (f.i1 == 0 ? f.e_fixed : x[f.i1]), x[f.i2]
+    end
 end
 
 """
@@ -116,41 +159,70 @@ function node_flips(params::Params, data::Data; flat_shift = nothing)
     circ(d) = d !== nothing &&
               is_circular(L.unfrozen_names[d], L.unfrozen_priors[d], cfg) &&
               _one_period(d)
+    # φ_c, moved by the flip under :phic: a sampled window of at most one
+    # period, so the wrap in `node_flip!` is injective (see the header).
+    function phase_slot(sfx)
+        a = free("phic" * sfx)
+        a === nothing && return nothing
+        lo, hi = bounds(L.unfrozen_priors[a])
+        return isfinite(lo) && isfinite(hi) && _one_period(a) ? a : nothing
+    end
     for (k, modes) in enumerate(cfg.planet_modes)
         astrometry_only(modes) || continue
-        pc.time in (:Mo, :Tp) || continue
+        pc.time in (:Mo, :Tp, :phic) || continue
         sfx  = "_k$k"
         node = free("Omega" * sfx)
         circ(node) || continue
+        anchor = free(String(pc.time) * sfx)
         f = nothing
         if pc.ew === :ew
             w = free("w" * sfx)
             if circ(w)
-                f = NodeFlip(k, [node, w], Int[])
+                f = if pc.time !== :phic
+                    NodeFlip(k, [node, w], Int[])
+                else
+                    a = phase_slot(sfx)
+                    ie = free("ecc" * sfx)
+                    ef = ie === nothing ? frozen("ecc" * sfx) : 0.0
+                    a === nothing || (ie === nothing && ef === nothing) ? nothing :
+                        NodeFlip(k, [node, w], Int[], a, :ew,
+                                 something(ie, 0), w, Float64(something(ef, 0.0)))
+                end
             elseif frozen("ecc" * sfx) == 0 && w === nothing
-                f = _circular_orbit_flip(k, node, free("Mo" * sfx), pc, circ)
+                f = _circular_orbit_flip(k, node, anchor, pc, circ)
             end
         else
             n1, n2 = pc.ew === :sesinw ? ("sesinw", "secosw") : ("esinw", "ecosw")
             d1, d2 = free(n1 * sfx), free(n2 * sfx)
             if d1 !== nothing && d2 !== nothing
-                f = NodeFlip(k, [node], [d1, d2])
+                f = if pc.time !== :phic
+                    NodeFlip(k, [node], [d1, d2])
+                else
+                    a = phase_slot(sfx)
+                    a === nothing ? nothing :
+                        NodeFlip(k, [node], [d1, d2], a, pc.ew, d1, d2, 0.0)
+                end
             elseif d1 === nothing && d2 === nothing &&
                    frozen(n1 * sfx) == 0 && frozen(n2 * sfx) == 0
-                f = _circular_orbit_flip(k, node, free("Mo" * sfx), pc, circ)
+                f = _circular_orbit_flip(k, node, anchor, pc, circ)
             end
         end
         f === nothing && continue
         if flat_shift !== nothing
-            any(d -> flat_shift[d] !== nothing, vcat(f.shift, f.negate)) && continue
+            moved = vcat(f.shift, f.negate, f.phase == 0 ? Int[] : [f.phase])
+            any(d -> flat_shift[d] !== nothing, moved) && continue
         end
         push!(flips, f)
     end
     return flips
 end
 
-_circular_orbit_flip(k, node, mo, pc, circ) =
-    pc.time === :Mo && circ(mo) ? NodeFlip(k, [node, mo], Int[]) : nothing
+# A frozen e = 0 orbit: ω is not sampled, and the degeneracy is realised as
+# (Ω + π, Mo + π), which under the transit phase is φ_c + π (φ_c = π/2 − ω − Mo
+# + const at e = 0). Either anchor moves by π round its circle.
+_circular_orbit_flip(k, node, anchor, pc, circ) =
+    pc.time in (:Mo, :phic) && circ(anchor) ? NodeFlip(k, [node, anchor], Int[]) :
+                                               nothing
 
 """
     node_flip!(x, f::NodeFlip, params) -> x
@@ -161,6 +233,13 @@ circular re-cut is respected. An involution up to rounding.
 """
 @inline function node_flip!(x::AbstractVector, f::NodeFlip, params::Params)
     L = params.layout
+    # φ_c first: its shift reads (e, ω) before they flip.
+    if f.phase != 0
+        e, ω = _flip_e_w(x, f)
+        δ = _conjunction_mean_anomaly(e, ω + π) - _conjunction_mean_anomaly(e, ω)
+        lo, _ = bounds(L.unfrozen_priors[f.phase])
+        x[f.phase] = lo + mod(x[f.phase] + δ - lo, CIRCULAR_PERIOD)
+    end
     @inbounds for d in f.shift
         lo, _ = bounds(L.unfrozen_priors[d])
         # `mod` by the period, NOT `circular_relabel`. The latter pins a value

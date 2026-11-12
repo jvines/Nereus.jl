@@ -38,7 +38,7 @@
         )
 
         params = Params(
-            max_kplanet = 1,
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
             planet_modes = [RVAS],
             instruments = instruments,
             data = data,
@@ -111,7 +111,7 @@
         t_rv = [55000.0, 55100.0]
         data = Data(t_rv=t_rv, rv=[1.0, -1.0], rv_err=[1.0, 1.0])
         params = Params(
-            max_kplanet = 1,
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
             planet_modes = [RV_ONLY],
             instruments = instruments,
             data = data,

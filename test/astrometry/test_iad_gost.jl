@@ -214,7 +214,7 @@
         )
 
         params = Params(
-            max_kplanet = 1,
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
             planet_modes = [RVAS],
             instruments = instruments,
             data = data,
@@ -312,7 +312,7 @@
                       rv_err = [1.0, 1.0],
                       relastrom = relast, hgca = hgca, gost = gost)
         params = Params(
-            max_kplanet = 1, planet_modes = [RVAS],
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
             instruments = instruments,
             data = data_A, stability = :none, M_s = 1.0,
         )
@@ -342,7 +342,7 @@
         t_rv = [55000.0, 55100.0]
         data = Data(t_rv = t_rv, rv = [1.0, -1.0], rv_err = [1.0, 1.0])
         params = Params(
-            max_kplanet = 1,
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
             planet_modes = [RV_ONLY],
             instruments = instruments,
             data = data,
@@ -421,7 +421,7 @@
             data = Data(t_rv = [55000.0, 55100.0], rv = [0.0, 0.0],
                         rv_err = [1.0, 1.0], g23h = g23h)
             params = Params(
-                max_kplanet = 1, planet_modes = [RVAS],
+                parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]),
                 data = data, stability = :none, M_s = 1.0,
             )
@@ -480,7 +480,7 @@
                 max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]),
                 data = data, stability = :none, M_s = M_pri,
-                parametrization = ParametrizationConfig(mass = :a_driven),
+                parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
                 priors = Dict{String, PriorSpec}(
                     "n_p"=>FixedPrior(1.0),
                     "a_k1"=>LogUniformPrior(0.5, 100.0),
@@ -584,7 +584,7 @@
             max_kplanet = 1, planet_modes = [RVAS],
             instruments = InstrumentConfig(rv = ["X"]),
             data = data, stability = :none, M_s = M_pri,
-            parametrization = ParametrizationConfig(mass = :a_driven),
+            parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
             priors = Dict{String, PriorSpec}(
                 "n_p"        => FixedPrior(1.0),
                 "a_k1"       => LogUniformPrior(0.5, 100.0),
@@ -665,7 +665,7 @@
             max_kplanet = 1, planet_modes = [RVAS],
             instruments = InstrumentConfig(rv = ["X"]),
             data = data_short, stability = :none, M_s = M_pri,
-            parametrization = ParametrizationConfig(mass = :a_driven),
+            parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
             priors = Dict{String, PriorSpec}(
                 "n_p"=>FixedPrior(1.0),
                 "a_k1"=>LogUniformPrior(0.5, 100.0),
