@@ -127,8 +127,8 @@ end
 
 # The scouts that may carry posterior mass: those whose log L is at least
 # log Z_A - tau (the cut of `_pt_prune_stranded!` at β = 1, over the active
-# coordinates `act`, theta slots, at unfrozen positions `pos`). All of them
-# when no volume can be measured.
+# coordinates `act`, theta slots, at unfrozen positions `pos`). When no volume
+# can be measured, those within the margin of the best by log posterior.
 function _scouts_supported(sc::Theta, data::Data, vals, lps, lls, act, pos,
                            widths, tau, ctr)
     n = length(vals)
@@ -160,7 +160,10 @@ function _scouts_supported(sc::Theta, data::Data, vals, lps, lls, act, pos,
         end
         h0 = Float64[0.1 * widths[p] for p in pos]
         σ = _pt_axis_widths(ℓat, yb, best, h0)
-        σ === nothing && return collect(1:n)
+        # No width to be had: no volume, so no bound. Keep the scouts that sit
+        # within the mass-bound margin of the best, never all of them: a scout
+        # that settled on a plateau would then start a chain that stays there.
+        σ === nothing && return A
         yc, ℓc = _pt_climb(ℓat, yb, best, σ)
         if ℓc > best
             σc = _pt_axis_widths(ℓat, yc, ℓc, h0)
