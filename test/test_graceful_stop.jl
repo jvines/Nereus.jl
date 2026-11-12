@@ -85,7 +85,9 @@ end
         @test a.stop.stopped == "steps" && a.stop.step == _GS_STEPS
         @test b.stop.stopped == "steps"
         @test a.chains.value.data == b.chains.value.data       # bit for bit
-        @test a.log_evidence == b.log_evidence
+        # NaN on this bounded target (no bridge, a ladder without β = 0)
+        @test isequal(a.log_evidence, b.log_evidence)
+        @test a.log_evidence_laplace == b.log_evidence_laplace
         @test a.stop.n_draws == 20 * (_GS_STEPS - _GS_BURNIN)
     end
 
@@ -100,7 +102,9 @@ end
         @test r.stop.n_draws == 20 * (r.stop.step - _GS_BURNIN)
         _gs_consistent(r, 20)
         @test size(r.chains.value.data, 1) == r.stop.step - _GS_BURNIN
-        @test isfinite(r.log_evidence)
+        # The evidence is still computed from the draws kept; log_evidence is
+        # NaN here (bounded target: no bridge; no β = 0 rung: no tempered value).
+        @test isfinite(r.log_evidence_laplace) && isfinite(r.evidence.ti_plus[1])
         @test size(r.ladder.betas, 1) == r.stop.step
     end
 

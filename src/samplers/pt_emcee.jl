@@ -69,28 +69,32 @@ Container for a `sample_pt_emcee` run.
 # Fields
 - `chains::MCMCChains.Chains` — β=1 walkers, post-burnin, flattened, in bounded space
   (circular angles in the window re-charted at the end of burn-in, so contiguous).
-- `log_evidence::Float64` — evidence to USE: the TI/SS/H+ best when it agrees with
-  the mode-Laplace cross-check, otherwise `log_evidence_laplace` (the tempered
-  estimators fail catastrophically on phase-transition / signal-locked posteriors;
-  mode-Laplace does not). See [`mode_laplace_evidence`](@ref).
+- `log_evidence::Float64` — evidence to USE: `log_evidence_bridge` when it is
+  usable; otherwise the tempered value (H+) only when its ladder can carry it —
+  the ladder reaches β = 0 and every adjacent pair swapped at least `swap_min`
+  (0.05) of the time, which the default ladder (geometric down to `beta_min`)
+  never does; otherwise `NaN`, with a warning saying why. mode-Laplace is never
+  the headline.
 - `log_evidence_laplace::Float64` — mode-anchored Laplace evidence from the cold
-  chain; phase-transition-immune. NaN if not computable. **Reported, not
-  headlined**: measured on 51 Peg (unimodal, tightly determined — the friendliest
-  case it will ever see) it sat 24 nats from bridge and reference-path, which
-  agree with each other to 4 and are validated against exact truth on a curved
-  15-D target. It also assumes local Gaussianity about the mode, which is exactly
-  what fails on the posteriors that break the tempered path.
+  chain: **a Gaussian approximation at the mode, reported, not headlined**.
+  NaN if not computable. Measured on 51 Peg (unimodal, tightly determined) it sat
+  24 nats from bridge and reference-path, which agree with each other to 4 and
+  are validated against exact truth on a curved 15-D target; on an RV +
+  Hipparcos-IAD companion 1.1 nats above bridge with e fixed and 3.5 to 3.8
+  above with e free. A warning says when it is further from bridge than
+  bridge's standard error + 1 nat. See [`mode_laplace_evidence`](@ref).
 - `log_evidence_bridge::Float64` — bridge-sampling evidence from the same cold
   chain (Meng & Wong optimal bridge). This is the HEADLINE when it is usable:
   it never touches the prior end and makes no Gaussianity assumption. It costs
   `bridge_n` likelihood evaluations: the posterior at the kept draws is read
   off their `:lp`, after a check against a full evaluation at a few of them
   (`bridge_evidence`). NaN if not computable.
-- `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ tempered stack (raw).
+- `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ tempered stack (raw,
+  whether or not it is quotable; summary.json carries it only when it is).
 - `acceptance_within::Vector{Float64}` — within-temp stretch acceptance per temp.
 - `acceptance_swap::Vector{Float64}` — swap acceptance between (k, k+1). A tiny
   `minimum(acceptance_swap)` (≪0.1) that won't rise with more temps signals a
-  phase transition → the tempered evidence is untrustworthy (use the Laplace one).
+  phase transition; below `swap_min` the tempered evidence is not quotable.
 - `betas::Vector{Float64}` — β ladder used.
 - `n_evals::Int` — total likelihood evaluations.
 - `ladder::LadderHistory` — the ladder, the swap acceptance and the swap mean
@@ -704,6 +708,9 @@ in place.
 - `seed::Int=1`
 - `thin::Int=1` — thinning factor on β=1 posterior output.
 - `show_progress::Bool=true` — display the per-step progress bar.
+- `swap_min::Real=0.05` — the least swap acceptance between adjacent rungs for
+  the tempered evidence to be quotable (with a ladder that reaches β = 0);
+  see `log_evidence` under [`PTemceeResult`](@ref).
 - `prune_stranded::Bool=true` — every 50 steps through the first three quarters
   of burn-in, move walkers stranded far below their rung's mode onto walkers in
   it. Only walkers whose likelihood is so low that the whole region below it
@@ -790,6 +797,7 @@ function sample_pt_emcee(
     ladder_adapt_ν0::Real = 10.0,
     ladder_adapt_K::Real = 1.0,
     laplace_switch_tol::Real = 50.0,
+    swap_min::Real = 0.05,
     bridge_headline::Bool = true,
     bridge_n::Int = 20_000,
     bridge_warn_tol::Real = 20.0,
@@ -1673,22 +1681,19 @@ function sample_pt_emcee(
     acc_within = accept_within ./ max.(propose_within, 1)
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)
 
-    # --- mode-Laplace cross-check + evidence selection (Jose's rule) --------
+    # --- mode-Laplace, bridge, and the evidence selection --------------------
     # The tempered estimators (TI/SS/H+) fail catastrophically on phase-transition
     # posteriors — a signature is a tiny minimum swap acceptance that won't rise
-    # with more temps. The mode-Laplace estimator is immune (it never tempers).
-    # Rule: if they agree, keep the tempered best (exact when it works); if they
-    # disagree by ≫ the Laplace non-Gaussian bias, the tempered one is broken —
-    # use Laplace, and warn.
+    # with more temps. mode-Laplace never tempers, but it is a Gaussian
+    # approximation at the mode: it used to replace a tempered value that
+    # disagreed with it, and now is only reported, and compared with bridge
+    # (HEADLINE SELECTION below).
     # Under untemper_transit (+photometry) the two estimators live on DIFFERENT
     # scales: mode-Laplace (built from :lp = full posterior) is ABSOLUTE logZ,
     # while the tempered TI/SS/H+ integrate only L_RV and return logZ RELATIVE
     # to the transit-conditioned reference. Their difference then contains
-    # Z_ref (~1e4-1e5 nats for a 16k-pt transit) — the cross-check would fire
-    # on EVERY run, silently replace the relative evidence with the absolute
-    # one (breaking the Bayes-factor cancellation the flag exists for), and
-    # emit a spurious phase-transition warning. Skip the switch; keep both
-    # numbers in the result (log_z relative, log_z_laplace absolute).
+    # Z_ref (~1e4-1e5 nats for a 16k-pt transit), so the phase-transition
+    # warning below, which compares them, is skipped there.
     laplace_check = !(untemper_transit && !isempty(data.t_phot))
     log_z_laplace = mode_laplace_evidence(target, chains)
 
@@ -1711,12 +1716,14 @@ function sample_pt_emcee(
     # still two passes over the posterior.
     log_z_bridge = NaN
     bridge_overlap = NaN
+    bridge_se = NaN
     if bridge_headline && target.transform !== nothing
         try
             b = bridge_evidence(target, chains; n_proposal = bridge_n, seed = seed)
             if b.converged && isfinite(b.log_z)
                 log_z_bridge = b.log_z
                 bridge_overlap = b.overlap
+                bridge_se = b.se
             end
         catch err
             @debug "sample_pt_emcee: bridge evidence unavailable" exception = err
@@ -1752,11 +1759,6 @@ function sample_pt_emcee(
         end
     end
 
-    # A NON-FINITE tempered evidence is the loudest possible failure and used to
-    # be the quietest: the switch below is gated on isfinite(log_z), so -Inf or
-    # NaN skipped the check entirely and propagated into res.log_evidence with no
-    # warning at all. One -Inf log-likelihood on any rung is enough to produce it
-    # (see the guard in update_evidence!). Handle it first and explicitly.
     # HEADLINE SELECTION.
     #
     # Ordered by what each estimator has actually been measured to do, not by
@@ -1768,49 +1770,52 @@ function sample_pt_emcee(
     #   bridge    -5897.0                         validated pair
     #   refpath   -5893.1
     #
-    # The beta-path stack fails at the phase transition and cannot detect it --
-    # TI+ and H+ agreed to the second decimal while both were 178 nats out. So
-    # bridge is the headline when it is usable, Laplace only as a fallback, and
-    # the tempered value only when it is corroborated.
-    tempered_ok = isfinite(log_z)
-    bridge_ok   = isfinite(log_z_bridge)
+    # and on an RV + Hipparcos-IAD companion (bridge 163.88, matched by
+    # pt_hmc's bridge, Daedalus and population annealing) SS+ read 157.85 from
+    # 8 rungs and
+    # mode-Laplace 1.1 high with e fixed, 3.5 to 3.8 high with e free.
+    #
+    # So: bridge when it is usable. Otherwise the tempered value only when its
+    # ladder can carry it (`_tempered_quotable`: the ladder reaches β = 0 and
+    # every adjacent pair swapped at least `swap_min` of the time), which the
+    # default ladder, geometric down to beta_min, never does. Otherwise no
+    # number. mode-Laplace, a Gaussian approximation at the mode, is reported
+    # beside them and is never the headline; it used to stand in whenever
+    # bridge was unavailable, which is every run_job fit before the post-fit
+    # bridge (`_augment_evidence!`).
+    tempered_ok, tempered_why = _tempered_quotable(βs, acc_swap; swap_min)
+    if tempered_ok && !isfinite(log_z)
+        tempered_ok, tempered_why = false, "it is not finite"
+    end
     log_z_tempered = log_z
 
-    if bridge_ok
+    if isfinite(log_z_bridge)
         # Corroborate rather than assume. Bridge cannot self-detect a posterior
         # its single reference fails to cover -- `overlap` counts draws landing
         # in SUPPORT, not mode coverage, and read 0.99 on a posterior with 23
-        # period modes. A large bridge/Laplace gap is the cheapest available
-        # signal that something is off; say so rather than picking silently.
-        if isfinite(log_z_laplace) && abs(log_z_bridge - log_z_laplace) > bridge_warn_tol
-            @warn "sample_pt_emcee: bridge and mode-Laplace disagree by " *
-                  "$(round(abs(log_z_bridge - log_z_laplace), digits=1)) nats. " *
-                  "Reporting bridge (it is the validated one), but CHECK THE " *
-                  "POSTERIOR IS NOT MULTIMODAL before quoting it — a single " *
-                  "Gaussian reference cannot cover multiple modes and overlap " *
-                  "will not tell you so." bridge = log_z_bridge laplace = log_z_laplace overlap = bridge_overlap
-        end
+        # period modes. A large bridge/Laplace gap is the cheapest signal that
+        # something is off; past `bridge_warn_tol` the warning says so.
+        _warn_laplace_vs_bridge("sample_pt_emcee", log_z_laplace, log_z_bridge,
+                                bridge_se; multimodal_tol = bridge_warn_tol)
         log_z = log_z_bridge
-    elseif isfinite(log_z_laplace)
-        @warn "sample_pt_emcee: bridge evidence unavailable; falling back to " *
-              "mode-Laplace. Treat it as indicative: on a clean unimodal target " *
-              "it measured 24 nats from bridge, and it has no validation against " *
-              "a known log Z." laplace = log_z_laplace
-        log_z = log_z_laplace
     elseif tempered_ok
-        @warn "sample_pt_emcee: neither bridge nor mode-Laplace is available. " *
-              "log_evidence is the TEMPERED value, which is biased low by " *
-              "10^2-10^4 nats on a signal-locked posterior and cannot detect " *
-              "that it is. Do not quote it without an independent check." tempered = log_z
+        log_z = log_z_tempered
     else
-        @warn "sample_pt_emcee: no usable evidence estimate for this run. " *
-              "log_evidence is not quotable."
+        why_bridge = !bridge_headline ? "bridge_headline = false" :
+                     target.transform === nothing ? "the target is bounded " *
+                         "(unconstrained = false); run_job computes bridge after the fit" :
+                     "bridge sampling did not give a usable value"
+        @warn "sample_pt_emcee: no quotable log-evidence for this run. Bridge: " *
+              "$why_bridge. The tempered stack is not quotable: $tempered_why. " *
+              "log_evidence is NaN. mode-Laplace, a Gaussian approximation, is in " *
+              "log_evidence_laplace and is not quotable either." laplace = log_z_laplace
+        log_z = NaN
     end
 
     # Independent of which was chosen: a large tempered/headline gap is the
     # phase-transition signature and worth surfacing, because the tempered
     # numbers are still in `evidence` and someone will read them.
-    if tempered_ok && isfinite(log_z) && laplace_check &&
+    if isfinite(log_z_tempered) && isfinite(log_z) && laplace_check &&
        abs(log_z_tempered - log_z) > laplace_switch_tol
         min_swap = isempty(acc_swap) ? NaN : minimum(acc_swap)
         @warn "sample_pt_emcee: the TEMPERED stack (TI/TI+/SS+/H+ in `evidence`) " *
