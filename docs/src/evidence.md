@@ -427,7 +427,9 @@ companion (bridge 163.88 at i = 89.5°, 165.51 at 5°, 162.08 with e free)
 pt_emcee's value sat 1.1 nats above bridge — the missing Jacobian (−3.7
 nats at the mode) less the shrunk covariance (−2.6 nats for d = 6) — and
 pt_hmc's, whose `:lp` carries the Jacobian, 2.6 to 3.1 below; with both
-corrected the two sit within 0.25 nats of bridge.
+corrected the two sit within 0.25 nats of bridge. On 51 Peg (d = 15,
+converged at 15 000 steps) it sits 5.5 nats above bridge and
+reference-path, which agree to 0.07.
 It carries an `O(100)`-log-unit non-Gaussian bias on pathological (railed,
 multimodal) posteriors — negligible for a strong detection, worth a nested
 cross-check for a marginal one.
@@ -771,7 +773,12 @@ nats and reference-path is stable in particle count (ESS 1929/2048).
 That residual 3.8 nats between bridge and reference-path is unexplained: both
 report sigma ~ 0.03 and both are stable, so it is not sampling noise. Treat a
 Bayes factor resting on less than ~5 nats from either of them with suspicion
-until it is resolved.
+until it is resolved. Two converged runs of the quickstart configuration
+(15 000 steps, R-hat 1.016 and 1.014) put them within 0.07 (bridge −5893.86
+and −5893.91, reference-path −5893.79 and −5893.88), which points at that
+run rather than the estimators; its R-hat was not recorded. On them
+mode-Laplace sits 5.5 nats above both, and the tempered stack, on the
+quickstart's 8 rungs, 93 to 112 nats (TI+, H+) and 55 to 66 (SS+) below.
 
 ## Practical guidance
 

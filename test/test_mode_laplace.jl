@@ -12,8 +12,9 @@
 # bridge, which is validated against exact truth on curved 15-D targets.
 #
 # Measured on 51 Peg -- unimodal, tightly determined, its friendliest real case
-# -- it sat 24 nats from bridge. That is why it is reported, and headlined only
-# when there is neither a usable bridge nor a corroborated tempered value.
+# -- converged, it sits 5.5 nats above bridge (an earlier run, before the fixes
+# below, put it 24 below). That is why it is reported, and headlined only when
+# there is neither a usable bridge nor a corroborated tempered value.
 #
 # On an RV + Hipparcos-IAD companion pt_emcee's value sat about 1.1 nats above
 # bridge and pt_hmc's 2.6 to 3.1 below, on the same target: pt_emcee's `:lp`, the

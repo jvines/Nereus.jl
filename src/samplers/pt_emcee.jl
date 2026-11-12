@@ -82,11 +82,11 @@ Container for a `sample_pt_emcee` run.
   [`mode_laplace_evidence`](@ref).
 - `log_evidence_laplace::Float64` — mode-anchored Laplace evidence from the cold
   chain, a Gaussian approximation at the mode; phase-transition-immune. NaN if
-  not computable. Measured on 51 Peg (unimodal, tightly determined) it sat 24
-  nats from bridge and reference-path, which agree with each other to 4 and are
-  validated against exact truth on a curved 15-D target; on an RV +
-  Hipparcos-IAD companion within 0.25 of bridge. A warning says when it is
-  further from bridge than bridge's standard error + 1 nat.
+  not computable. On 51 Peg (unimodal, tightly determined), converged, it sits
+  5.5 nats above bridge and reference-path, which agree with each other to
+  0.07 and are validated against exact truth on a curved 15-D target; on an
+  RV + Hipparcos-IAD companion within 0.25 of bridge. A warning says when it
+  is further from bridge than bridge's standard error + 1 nat.
 - `log_evidence_bridge::Float64` — bridge-sampling evidence from the same cold
   chain (Meng & Wong optimal bridge). This is the HEADLINE when it is usable:
   it never touches the prior end and makes no Gaussianity assumption. Usable
@@ -1858,16 +1858,20 @@ function sample_pt_emcee(
     #
     # Ordered by what each estimator has actually been measured to do, not by
     # what is cheapest. On 51 Peg (1691 RVs, 15 params, unimodal, P determined
-    # to 5 decimals) the spread was:
+    # to 5 decimals), converged (two seeds of 15 000 steps on the quickstart's
+    # 8 rungs, R-hat 1.016 and 1.014), the spread was:
     #
-    #   TI+ / H+  -6073.24     SS+  -6097.41     ~178 nats low
-    #   Laplace   -5920.97                        ~24 nats low
-    #   bridge    -5897.0                         validated pair
-    #   refpath   -5893.1
+    #   TI+ / H+  -6005.59 / -5986.97              93 to 112 nats low
+    #   SS+       -5959.52 / -5948.62              55 to 66 nats low
+    #   Laplace   -5888.33 / -5888.39              5.5 nats high
+    #   bridge    -5893.86 / -5893.91              validated pair
+    #   refpath   -5893.79 / -5893.88
     #
     # The beta-path stack fails at the phase transition and cannot detect it --
-    # TI+ and H+ agreed to the second decimal while both were 178 nats out --
-    # and on an RV + Hipparcos-IAD companion (bridge 163.88, matched by pt_hmc's
+    # TI+ and H+ agreed exactly (H+ is TI+ when it finds no crossover) while
+    # both were ~100 nats out (that ladder stops at beta_min, and the
+    # [0, beta_min] head it leaves out would only lower them further) -- and on
+    # an RV + Hipparcos-IAD companion (bridge 163.88, matched by pt_hmc's
     # bridge, Daedalus and population annealing) SS+ read 157.85 from 8 rungs.
     #
     # So, in order: bridge when it is usable. Else the tempered value when its
@@ -1920,8 +1924,8 @@ function sample_pt_emcee(
             "it is not quotable: $tempered_why"
         @warn "sample_pt_emcee: log_evidence is mode-Laplace, a Gaussian " *
               "approximation at the posterior mode. Bridge: $why_bridge. The " *
-              "tempered value is broken: $why_t. Treat it as indicative: on a " *
-              "clean unimodal target it measured 24 nats from bridge." laplace = log_z_laplace tempered = log_z_tempered
+              "tempered value is broken: $why_t. Treat it as indicative: on 51 " *
+              "Peg, unimodal and converged, it sits 5.5 nats above bridge." laplace = log_z_laplace tempered = log_z_tempered
         log_z = log_z_laplace
         switched = true
     elseif tempered_ok
