@@ -2713,12 +2713,15 @@ function _augment_evidence!(summary, params, data, chains;
         (b.converged && isfinite(b.log_z)) || return
         ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
                             "overlap" => Float64(b.overlap))
-        # mode-Laplace beside the bridge it never replaces: its distance, and a
-        # warning past bridge's standard error + 1 nat.
+        # mode-Laplace beside the bridge that comes before it: its distance (in
+        # `mode_laplace_check`; `mode_laplace` stays a number), and a warning
+        # past bridge's standard error + 1 nat.
         lap = get(ev, "mode_laplace", nothing)
-        if lap isa AbstractDict && get(lap, "log_z", nothing) isa Real
-            lap["minus_bridge"] = Float64(lap["log_z"] - b.log_z)
-            _warn_laplace_vs_bridge("run_job", lap["log_z"], b.log_z, b.se)
+        if lap isa Real && isfinite(lap)
+            chk = get!(() -> Dict{String, Any}("note" => _LAPLACE_LABEL), ev,
+                       "mode_laplace_check")
+            chk["minus_bridge"] = Float64(lap - b.log_z)
+            _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
         end
         # Bridge is biased LOW when its reference is fitted from too few
         # INDEPENDENT draws (see docs/src/evidence.md); q carries
@@ -2922,15 +2925,32 @@ function _populate_summary!(summary, result, params, chains)
 end
 
 function _write_summary(out_dir, summary)
-    # `allow_inf=true` is needed because samplers without evidence
-    # estimators (NUTS, OFTI, rjmcmc, moms, daedalus) write
-    # `log_z = NaN` into the summary. The JSON spec forbids NaN, but
-    # most parsers (Python json.loads with `parse_constant`,
-    # JavaScript) handle it fine.
+    # JSON has no NaN, and strict parsers (JavaScript's JSON.parse, jq) reject
+    # the bare token. A value that is not a number -- `log_z` of an engine with
+    # no evidence estimator (NUTS, OFTI, rjmcmc, moms), or of a tempered stack
+    # that cannot be quoted -- is written as null (`_json_nan_to_null`); the
+    # summary returned in memory keeps its NaN. `allow_inf = true` still lets
+    # ±Inf through, as before.
     open(joinpath(out_dir, "summary.json"), "w") do io
-        JSON3.pretty(io, summary; allow_inf = true)
+        JSON3.pretty(io, _json_nan_to_null(summary); allow_inf = true)
     end
 end
+
+# A copy of `x` with every NaN replaced by `nothing` (JSON null), through
+# dictionaries, vectors, tuples and named tuples.
+_json_nan_to_null(x::AbstractFloat) = isnan(x) ? nothing : x
+function _json_nan_to_null(x::AbstractDict)
+    y = empty(x, keytype(x), Any)          # the same kind of dictionary, in order
+    for (k, v) in x
+        y[k] = _json_nan_to_null(v)
+    end
+    return y
+end
+_json_nan_to_null(x::AbstractArray{<:Union{AbstractFloat, Integer, AbstractString, Bool, Nothing}}) =
+    any(v -> v isa AbstractFloat && isnan(v), x) ? Any[_json_nan_to_null(v) for v in x] : x
+_json_nan_to_null(x::AbstractArray) = Any[_json_nan_to_null(v) for v in x]
+_json_nan_to_null(x::Union{Tuple, NamedTuple}) = map(_json_nan_to_null, x)
+_json_nan_to_null(x) = x
 
 
 """
