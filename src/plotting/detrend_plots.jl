@@ -145,7 +145,7 @@ function _save_fig(fig, base::String, fmt::Symbol; save_pdf::Bool=false)
     # toggle to additionally save a `.pdf` companion when fmt isn't
     # already PDF. Default behavior: PNG only.
     if fmt === :png || fmt === :both
-        save(base * ".png", fig; px_per_unit=3)
+        _save_png(base * ".png", fig; px_per_unit=3)
     end
     if fmt === :pdf || fmt === :both || save_pdf
         save(base * ".pdf", fig)

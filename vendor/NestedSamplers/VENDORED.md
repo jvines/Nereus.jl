@@ -79,5 +79,13 @@ Changed here since the commit above, so carry them over on an update:
   a batch removes as N - j + 1 live points do (log Z was (K - 1) H / (2N)
   high), and walks start only at live points above the threshold, never at a
   dead point, as dynesty's do.
+- The state carries the run's `trace` (`new_trace`, `trace_remove!`): every
+  removed point's log L, its birth (the bound it was drawn above) and the
+  live-point slot it filled. Nereus's error on log Z resamples the run by its
+  threads from it (src/samplers/ns_error.jl).
+- A bound fit draws from the run's generator (`Bounds.fit_rng`): k-means,
+  splitting a MultiEllipsoid, draws a new centre for a cluster left empty, and
+  MLFriends bootstraps its radius, both from the global generator before, so a
+  seeded run depended on what the process had drawn from it.
 
 License: MIT (see LICENSE) — original authors retained.

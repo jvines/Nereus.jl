@@ -479,7 +479,7 @@ The production single-run NS path for fixed-dim log Z. Importance-resampled
 posterior from dead points.
 
 ```julia
-chains, log_evidence = sample_nested(target, data;
+chains, log_evidence, log_evidence_err = sample_nested(target, data;
     n_live     = 1500,                  # deliberately large; small n_live mis-resolves
     bounds     = :multi,                # :multi | :single | :none | :mlfriends
     proposal   = :rslice,               # :rwalk | :rstagger | :slice | :rslice | :unif | :hslice
@@ -524,19 +524,46 @@ gravity-darkening fit (2), with the mean known to better than that error:
 | `:rslice` | `max(5, 5·n_dim)` | +0.02, +0.13, +0.06, +0.02 (at `2·n_dim` and `3·n_dim`: +0.35 and +0.23 on RM 180°) |
 | `:slice` | 5 | +0.13, +0.09, −0.01, −0.04 |
 | `:hslice` | `max(5, 2·n_dim)` | +0.13, +0.06, +0.06, −0.08 |
-| `:rwalk`, `:rstagger` | `max(25, 10·n_dim)` | +0.07, +0.04, +0.18, −0.04 (at `5·n_dim`: +0.26 on RM 0° and RV, −0.21 on GD) |
+| `:rwalk`, `:rstagger` | `max(25, 10·n_dim)` | +0.07, +0.04, +0.05, −0.04 (at `5·n_dim`: +0.26 on RM 0° and RV, −0.21 on GD) |
 | `sample_nested_ins` `:rwalk` | `max(25, 5·n_dim)` | +0.15, −0.12, +0.15, −0.05 (at `2·n_dim` the mean passed but runs on RM 0° ranged from −1.5 to +1.1) |
 | `sample_nested_ins` `:slice` | `max(25, 2·n_dim)` | +0.09, −0.03, +0.08, +0.03 |
 | `sample_nested_dynamic` `:rwalk` | `max(25, 10·n_dim)` | −0.17, +0.22, −0.04, −0.11 (at `5·n_dim`: −0.37 on RM 0°) |
 | `sample_nested_dynamic` `:slice` | `max(25, 5·n_dim)` | +0.03, +0.10, −0.11, −0.01 (at `2·n_dim`: −0.39 and −0.49 on RM 0° and 180°) |
 
-The NS error was 0.17–0.22 for `sample_nested` (500 live points, 300 on the
-GD fit), 0.17–0.24 for `sample_nested_ins` (400) and 0.20–0.35 for
-`sample_nested_dynamic` (200 then 400), whose log Z carries the baseline's
-error: at the defaults its batch refines only the top of the likelihood. `:rwalk`'s RV value
-is the largest of the defaults; with the walks run one at a time
-(`parallel = false`) it was −0.02 over six seeds, a difference of 1.5
-standard errors that is not resolved.
+The NS error in that choice is sqrt(H/n_live): 0.17–0.22 for `sample_nested`
+(500 live points, 300 on the GD fit), 0.17–0.24 for `sample_nested_ins` (400)
+and 0.20–0.35 for `sample_nested_dynamic` (200 then 400), whose log Z carries
+the baseline's error: at the defaults its batch refines only the top of the
+likelihood. `:rwalk`'s RV value is over 25 seeds, its walks threaded (three
+at a time); with them run one at a time (`parallel = false`) it was +0.06
+over 20 seeds, a difference of −0.01 ± 0.07.
+
+Each engine quotes the error of its log Z: `sample_nested`'s third value,
+`log_z_ns_err`, `log_z_err`, and `evidence.nested.se` in a run's summary.
+It is dynesty's: the spread of log Z over 200 realisations of the run, its
+threads resampled and its prior volumes drawn afresh (`src/samplers/ns_error.jl`).
+sqrt(H/n_live) counts the volumes alone, under perfect sampling, which a
+chain of walks or slices is not. The scatter of log Z between seeds on the
+four fits above (5 seeds each, with the earlier ones at the same settings:
+34–57 degrees of freedom per engine), in units of each error:
+
+| engine | scatter / quoted error | scatter / sqrt(H/n_live) |
+|---|---|---|
+| `sample_nested` `:rslice` | 0.62 | 0.87 |
+| `sample_nested` `:rwalk` (threaded) | 0.75 | 1.06 |
+| `sample_nested_ins` `:rwalk` | 0.84 | 1.19 |
+| `sample_nested_ins` `:slice` | 0.80 | 1.12 |
+| `sample_nested_dynamic` `:rwalk` | 0.95 | 1.31 |
+| `sample_nested_dynamic` `:slice` | 0.78 | 1.12 |
+
+The quoted error is about 1.4 times sqrt(H/n_live) and covers every engine's
+scatter. Where the sampler is close to perfect it is conservative, `:rslice`'s
+by 1.6: there, as on passes simulated in the prior volume, either source alone
+accounts for the scatter, and the two together count it twice.
+
+A seed repeats a run on the same target. A run moves the angles' charts and
+leaves them moved, with its draws in them; each run starts again from the
+charts the layout gave them.
 
 The MultiEllipsoid bound is split by dynesty's rule. A walk or slice takes
 its metric from the ellipsoid holding its start, so with the constrained
@@ -597,7 +624,8 @@ res = sample_nested_ins(target, data;
 )
 ```
 
-Returns `INSResult(chains, log_z_ns, log_z_ins, n_iters, n_evals)`. The
+Returns `INSResult(chains, log_z_ns, log_z_ns_err, log_z_ins, n_iters,
+n_evals)`. The
 kernels are Nereus's own, not NestedSamplers'. `:slice` runs each slice along
 a random direction through the axes of the bound's ellipsoid holding the
 chain's start, as `sample_nested`'s `:rslice` does; its directions used to be
@@ -656,8 +684,9 @@ res = sample_nested_dynamic(target, data;
   log Z variance lives. **Use this when the run is for evidence.**
 - `pfrac = 0.8` — dynesty's posterior-leaning default.
 
-Returns `DynamicNSResult(chains, log_z, log_z_baseline, log_z_batch,
-n_iters_baseline, n_iters_batch, n_evals, target_L_lo, target_L_hi)`.
+Returns `DynamicNSResult(chains, log_z, log_z_err, log_z_baseline,
+log_z_batch, n_iters_baseline, n_iters_batch, n_evals, target_L_lo,
+target_L_hi)`.
 Same peaked-posterior resampling caveats as INS.
 
 **Target must be `unconstrained = false`.**

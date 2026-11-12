@@ -19,6 +19,7 @@ using Nereus
 using MCMCChains
 using Statistics
 using NestedSamplers
+using Distributions: Uniform
 
 # ---- Shared synthetic single-planet RV target ------------------------
 function _make_rv_target(seed::Int = 2027; n_obs::Int = 30,
@@ -76,13 +77,39 @@ end
 @testset "sample_nested (NestedSamplers.jl wrapper)" begin
     @testset "runs end-to-end on synthetic RV" begin
         target, data, _ = _make_rv_target(2027)
-        chains, log_z = sample_nested(target, data;
+        chains, log_z, log_z_err = sample_nested(target, data;
             n_live = 40, dlogz = 2.0, bounds = :multi,
             proposal = :rwalk, seed = 1)
         @test chains isa MCMCChains.Chains
         @test isfinite(log_z)
+        @test 0 < log_z_err < 2
         @test :K_k1 in names(chains, :parameters)
         @test size(chains, 1) > 0
+    end
+
+    @testset "the run's trace recounts its live points" begin
+        # The log Z error resamples a run by its threads (src/samplers/
+        # ns_error.jl), recounting the live points from each removed point's
+        # birth. From the trace NestedSamplers keeps they come back as the run
+        # counted them: N at every dead point, serially; N, N - 1, …, N - K + 1
+        # through each batch of K, whose replacements are drawn above its
+        # highest point; and N, …, 1 through the live points the run ends with.
+        model = NestedModel(x -> -sum(abs2, (x .- 0.5) ./ 0.05) / 2,
+                            [Uniform(0, 1), Uniform(0, 1)])
+        N, K = 100, 4
+        spl = Nested(2, N; proposal = NestedSamplers.Proposals.RWalk(),
+                     bounds = NestedSamplers.Bounds.Ellipsoid)
+        counts(tr) = Nereus._ns_live_counts(sort(tr.logl), sort(tr.birth))
+        ch, st = NestedSamplers.sample(MersenneTwister(1), model, spl;
+                                       dlogz = 0.5, progress = false)
+        n = counts(st.trace)
+        @test length(n) == size(ch, 1)
+        @test n == [fill(N, length(n) - N); N:-1:1]
+        ch, st = NestedSamplers.sample_parallel(MersenneTwister(1), model, spl;
+                                                batch_size = K, parallel = false, dlogz = 0.5)
+        n = counts(st.trace)
+        @test length(n) == size(ch, 1)
+        @test n == [N; repeat(N:-1:N-K+1, (length(n) - N - 1) ÷ K); N:-1:1]
     end
 
     @testset "all MCMC proposals + tuning pass-through" begin
@@ -120,6 +147,7 @@ end
             n_live = 40, dlogz = 2.0, max_iter = 1500, seed = 1)
         @test res isa INSResult
         @test isfinite(res.log_z_ns)
+        @test 0 < res.log_z_ns_err < 2
         # the default walk does not draw from the bound (INSResult)
         @test isnan(res.log_z_ins)
         @test res.n_iters > 0
@@ -163,18 +191,6 @@ end
             n_live = 40, proposal = :unif, dlogz = 2.0, max_iter = 2000, seed = 1)
         @test_throws ArgumentError sample_nested_ins(target, data;
             n_live = 40, proposal = :banana, seed = 1)
-    end
-
-    # The posterior rows are an i.i.d. draw from the weighted dead points:
-    # a systematic one came back in likelihood order, and the chain's R-hat
-    # and ESS measured the order.
-    @testset "posterior rows in no order" begin
-        target, data, _ = _make_rv_target(2027)
-        res = sample_nested_ins(target, data; n_live = 400, dlogz = 0.5, seed = 1,
-                                show_progress = false)
-        @test size(res.chains, 1) >= 200
-        fall, rise = _ns_row_order(target, res.chains)
-        @test fall > 0.3 && rise > 0.3
     end
 
     @testset "the walk and slice kernels leave the constrained uniform distribution unchanged" begin
@@ -227,6 +243,18 @@ end
             @test abs(cor(out[1, :], out[2, :]) - cor(ref[1, :], ref[2, :])) < 4 / sqrt(M)
         end
     end
+
+    # The posterior rows are an i.i.d. draw from the weighted dead points:
+    # a systematic one came back in likelihood order, and the chain's R-hat
+    # and ESS measured the order.
+    @testset "posterior rows in no order" begin
+        target, data, _ = _make_rv_target(2027)
+        res = sample_nested_ins(target, data; n_live = 400, dlogz = 0.5, seed = 1,
+                                show_progress = false)
+        @test size(res.chains, 1) >= 200
+        fall, rise = _ns_row_order(target, res.chains)
+        @test fall > 0.3 && rise > 0.3
+    end
 end
 
 
@@ -246,18 +274,22 @@ end
         # error 0.16).
         logL(X) = -X / 0.01
         lz_true = log(0.01 * (1 - exp(-100)))
+        # Each point carries its birth (the bound it was drawn above) and its
+        # slot, for the error's thread bootstrap (below).
         function pass(rng, n, X0, L_stop)
             X = X0 .* rand(rng, n); dl = Float64[]; dn = Int[]
+            born = fill(X0 < 1 ? logL(X0) : -Inf, n); db = Float64[]; dt = Int[]
             while true
                 i = argmax(X)
                 logL(X[i]) >= L_stop && break
-                push!(dl, logL(X[i])); push!(dn, n); X[i] *= rand(rng)
+                push!(dl, logL(X[i])); push!(dn, n); push!(db, born[i]); push!(dt, i)
+                born[i] = logL(X[i]); X[i] *= rand(rng)
             end
-            for (j, x) in enumerate(sort(X; rev = true))
-                push!(dl, logL(x)); push!(dn, n - j + 1)
+            for (j, i) in enumerate(sortperm(X; rev = true))
+                push!(dl, logL(X[i])); push!(dn, n - j + 1); push!(db, born[i]); push!(dt, i)
             end
             m = length(dl)
-            Nereus._NSPassResult(dl, zeros(m), [[x] for x in dl], dn, 0.0, m, m)
+            Nereus._NSPassResult(dl, zeros(m), [[x] for x in dl], dn, db, dt, 0.0, m, m)
         end
         rng = MersenneTwister(1)
         zs = map(1:300) do _
@@ -266,6 +298,35 @@ end
             Nereus._merge_passes(base, batch, logL(0.1))[4] - lz_true
         end
         @test abs(mean(zs)) < 0.06          # 6 standard errors
+
+        @testset "the error of its log Z" begin
+            # The error of a merged run's log Z (src/samplers/ns_error.jl). This
+            # sampler is perfect, so the scatter between runs is the volumes' and
+            # either source alone, the volumes drawn afresh or the threads
+            # resampled, accounts for it; the error quoted is both together, as
+            # dynesty's simulate_run, for the samplers that are not.
+            trace(b, t) = Nereus._NSTrace(vcat(b.dead_logL, t.dead_logL),
+                                          vcat(b.dead_birth, t.dead_birth),
+                                          vcat(b.dead_thread, t.dead_thread .+ 100))
+            grp = t -> t > 100 ? 2 : 1
+            runs = [(pass(rng, 100, 1.0, logL(1e-4)), pass(rng, 400, 0.1, logL(0.02)))
+                    for _ in 1:300]
+            # nothing drawn: the merge's own log Z, so the live points are counted
+            # as it counts them
+            for (b, t) in runs[1:5]
+                tr = trace(b, t)
+                m, bg = Nereus._ns_threads(tr, grp)
+                @test Nereus._ns_logz_sim(rng, tr, m, bg; resample = false, jitter = false) ≈
+                      Nereus._merge_passes(b, t, logL(0.1))[4]
+            end
+            sd = std([Nereus._merge_passes(b, t, logL(0.1))[4] for (b, t) in runs])
+            err(; kw...) = mean(Nereus._ns_logz_err(trace(b, t); group = grp, kw...)
+                                for (b, t) in runs[1:20])
+            e_vol, e_path, e = err(resample = false), err(jitter = false), err()
+            @test 0.85 < e_vol / sd < 1.15
+            @test 0.8 < e_path / sd < 1.2
+            @test e ≈ hypot(e_vol, e_path) rtol = 0.1
+        end
     end
 
     @testset "two-pass run completes and returns combined log Z" begin
@@ -283,6 +344,7 @@ end
             seed         = 1)
         @test res isa DynamicNSResult
         @test isfinite(res.log_z)
+        @test 0 < res.log_z_err < 2
         @test isfinite(res.log_z_baseline)
         @test isfinite(res.log_z_batch)
         @test res.n_iters_baseline > 0

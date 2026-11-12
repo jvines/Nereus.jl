@@ -36,8 +36,8 @@ an engine that grows a field gets it persisted without touching this list
 twice."""
 const _DIAG_FIELDS = (
     # evidence
-    :log_evidence, :log_evidence_laplace, :log_evidence_bridge,
-    :log_z, :log_z_ns, :log_z_ins, :log_z_baseline, :log_z_batch,
+    :log_evidence, :log_evidence_err, :log_evidence_laplace, :log_evidence_bridge,
+    :log_z, :log_z_err, :log_z_ns, :log_z_ns_err, :log_z_ins, :log_z_baseline, :log_z_batch,
     :log_evidence_history,
     # effort
     :n_evals, :n_iters, :n_iters_baseline, :n_iters_batch,
@@ -144,7 +144,7 @@ reporting a count as their evidence.
 const _TUPLE_SLOTS = Dict{String, Tuple{Vararg{Symbol}}}(
     "pt"        => (:log_evidence, :n_evals),      # slot 3 only on the trans-dim path
     "pt_hmc"    => (:log_evidence, :evidence),
-    "nested"    => (:log_evidence,),
+    "nested"    => (:log_evidence, :log_evidence_err),
     "daedalus"  => (:log_evidence, :_strategy),    # slot 3 is adaptation state
     "moms"      => (:n_evals, :_strategy),         # NOT evidence
     "rjmcmc"    => (:n_evals,),                    # NOT evidence
@@ -169,11 +169,15 @@ end
 # fit_* functions (`_evidence_block!`): bridge; mode-Laplace, labelled as the
 # approximation it is and with its distance from bridge; the tempered stack only
 # when its ladder can carry it, and otherwise why not; and which of them `lz`
-# (the reported log Z) is. `nothing` when the result carries none of them.
-function _evidence_summary(result, lz)
+# (the reported log Z) is; and a nested engine's log Z with its error, `nested`
+# = (log_z, se) (`_ns_evidence` on the fit_* path, `log_evidence_err` on
+# run_job's). `nothing` when the result carries none of them.
+function _evidence_summary(result, lz; nested = nothing)
     result === nothing && return nothing
     prop(f) = hasproperty(result, f) ? getproperty(result, f) : nothing
     ev = Dict{String, Any}()
+    (nested === nothing || !isfinite(nested[1])) ||
+        (ev["nested"] = Dict("log_z" => Float64(nested[1]), "se" => Float64(nested[2])))
     b = prop(:log_evidence_bridge)
     bridge_ok = b isa Real && isfinite(b)
     bridge_ok && (ev["bridge"] = Float64(b))

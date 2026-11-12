@@ -13,3 +13,18 @@ using Nereus
     @test fam.regular isa AbstractString
     @test !Nereus._font_available("No Such Font Family Nereus")
 end
+
+# The theme is built for every figure; the probe (and its warning, when there is
+# no serif family) runs once per session.
+@testset "font probe runs once" begin
+    Nereus._SERIF_FAMILY[] = nothing
+    first_logs, fam = Test.collect_test_logs(min_level = Logging.Warn) do
+        Nereus._serif_family()
+    end
+    logs, again = Test.collect_test_logs(min_level = Logging.Warn) do
+        Nereus.nereus_theme()
+        Nereus._serif_family()
+    end
+    @test isempty(logs)
+    @test again === fam
+end

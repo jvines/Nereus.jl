@@ -90,11 +90,12 @@ function _maxradiussq(apts::AbstractMatrix, bpts::AbstractMatrix)
 end
 
 # ---- fit --------------------------------------------------------------------
-fit(B::Type{<:MLFriends}, x::AbstractMatrix{S}; pointvol = 0, nbootstraps::Int = 30) where {S} =
-    fit(B{float(S)}, x; pointvol = pointvol, nbootstraps = nbootstraps)
+fit(B::Type{<:MLFriends}, x::AbstractMatrix{S}; pointvol = 0, nbootstraps::Int = 30,
+    rng::AbstractRNG = GLOBAL_RNG) where {S} =
+    fit(B{float(S)}, x; pointvol = pointvol, nbootstraps = nbootstraps, rng = rng)
 
 function fit(::Type{<:MLFriends{R}}, x::AbstractMatrix{S};
-             pointvol = 0, nbootstraps::Int = 30) where {R,S}
+             pointvol = 0, nbootstraps::Int = 30, rng::AbstractRNG = GLOBAL_RNG) where {R,S}
     T = float(promote_type(R, S))
     u = Matrix{T}(x)
     ndim, np = size(u)
@@ -111,7 +112,7 @@ function fit(::Type{<:MLFriends{R}}, x::AbstractMatrix{S};
         for _ in 1:nbootstraps
             fill!(sel, false)
             @inbounds for _ in 1:np
-                sel[rand(1:np)] = true
+                sel[rand(rng, 1:np)] = true
             end
             (all(sel) || !any(sel)) && continue
             inb = findall(sel); oob = findall(.!sel)

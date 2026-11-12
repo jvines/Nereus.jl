@@ -218,6 +218,9 @@ const TEST_UNITS = [
     (name = "test_pm_fold_rv_only_slot.jl", seconds = 30, files = ["test_pm_fold_rv_only_slot.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 3, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_posteriors_thinning.jl", seconds = 5, files = ["test_plot_posteriors_thinning.jl"]),
+    # The plotting stage's memory: two `auto` plot sets of 100k and 300k draws.
+    # Measured locally (arm64), on its own in a fresh process.
+    (name = "test_plot_memory.jl", seconds = 150, files = ["test_plot_memory.jl"]),
     (name = "test_plot_labels.jl", seconds = 2, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 15, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 1, files = ["test_plot_patterns.jl"]),

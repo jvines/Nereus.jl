@@ -30,7 +30,7 @@ function plot_posteriors_lp(chains, params;
     cn = Set(names(chains, :parameters))
     (:lp in cn) || throw(ArgumentError(
         "plot_posteriors_lp requires an :lp column in the chains"))
-    lp = _draws(chains, :lp)
+    lp = _draws_view(chains, :lp)
     finite_idx = findall(isfinite, lp)
     isempty(finite_idx) && throw(ArgumentError("no finite-lp samples"))
 
@@ -83,7 +83,7 @@ function plot_posteriors_lp(chains, params;
             if length(idx) > max_points
                 idx = idx[round.(Int, range(1, length(idx); length = max_points))]
             end
-            v   = _draws(chains, Symbol(nm))[idx]
+            v   = _draws_view(chains, Symbol(nm))[idx]
             lps = lp[idx]
             ibest = argmax(lps)
 
@@ -99,7 +99,7 @@ function plot_posteriors_lp(chains, params;
                      label = "mean = $(round(vmean, sigdigits = 7))")
             axislegend(ax; position = _best_legend_corner(v, lps),
                         framevisible = false, labelsize = 12)
-            figs[nm] = fig
+            _keep_fig!(figs, nm, fig)
             if outdir !== nothing
                 _save_plot(joinpath(outdir, "lp_$(nm).$fmt"), fig;
                             save_pdf = save_pdf, px_per_unit = 2)

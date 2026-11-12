@@ -70,18 +70,6 @@ const FIG_HIST  = (1200, 800)   # 12×8
 # Theme
 # =====================================================================
 
-"""
-    _serif_family() -> NamedTuple
-
-Pick the first serif family actually present on this machine.
-
-Times New Roman is a Microsoft font and is NOT installed on most Linux systems.
-When CairoMakie cannot resolve the requested family it silently drops the text,
-so every axis label and tick label vanishes — which is what happened to the
-transit plots generated on the compute node. Liberation Serif is
-metrically compatible with Times New Roman and ships with essentially every
-Linux distribution, so it is the first fallback.
-"""
 function _font_available(name::AbstractString)
     # Makie.to_font does NOT throw for a missing family -- it silently substitutes
     # whatever FreeType hands back. So asking "did it succeed?" always says yes,
@@ -102,7 +90,32 @@ function _font_available(name::AbstractString)
     end
 end
 
+# The probe's answer, kept for the session: `nereus_theme` is built for every
+# figure, and a probe scans the system's fonts (and, with no serif family at
+# all, warned) each time -- a hundred warnings in one plot set.
+const _SERIF_FAMILY = Ref{Any}(nothing)
+
+"""
+    _serif_family() -> NamedTuple
+
+Pick the first serif family actually present on this machine.
+
+Times New Roman is a Microsoft font and is NOT installed on most Linux systems.
+When CairoMakie cannot resolve the requested family it silently drops the text,
+so every axis label and tick label vanishes — which is what happened to the
+transit plots generated on the compute node. Liberation Serif is
+metrically compatible with Times New Roman and ships with essentially every
+Linux distribution, so it is the first fallback.
+
+The probe runs once per session; its answer is kept in `_SERIF_FAMILY`.
+"""
 function _serif_family()
+    fam = _SERIF_FAMILY[]
+    fam === nothing || return fam
+    return _SERIF_FAMILY[] = _probe_serif_family()
+end
+
+function _probe_serif_family()
     candidates = (("Times New Roman", "Times New Roman Bold", "Times New Roman Italic"),
                   ("Liberation Serif", "Liberation Serif Bold", "Liberation Serif Italic"),
                   ("DejaVu Serif", "DejaVu Serif Bold", "DejaVu Serif Italic"),

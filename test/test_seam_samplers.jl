@@ -95,6 +95,33 @@ end
     end
 end
 
+@testset "nested samplers: a seed repeats its run on the same target" begin
+    # A run moves the charts and leaves them moved (`_ns_recut!`; sample_nested's
+    # seam pilot). The second run started from them, so the same seed gave
+    # another run; each now starts from the first charts (`_ns_home_charts!`).
+    # And the k-means splitting a MultiEllipsoid bound drew from the global
+    # generator, which the process may have drawn from in between.
+    runs = [
+        "nested" => tg -> Nereus.sample_nested(tg, tg.data; n_live = 100, dlogz = 1.0,
+            seed = 5, show_progress = false)[2],
+        "nested (INS)" => tg -> Nereus.sample_nested_ins(tg, tg.data; n_live = 100,
+            dlogz = 1.0, seed = 5, show_progress = false).log_z_ns,
+        "nested (dynamic)" => tg -> Nereus.sample_nested_dynamic(tg, tg.data;
+            n_live_init = 100, n_live_batch = 50, seed = 5, show_progress = false).log_z,
+    ]
+    for (label, run) in runs
+        @testset "$label" begin
+            tg = _ss_target(; unconstrained = false)
+            los() = [first(Nereus.bounds(ps)) for ps in tg.params.layout.unfrozen_priors]
+            lo0 = los()
+            z1 = run(tg)
+            @test los() != lo0               # the run moved a chart
+            rand(10)
+            @test run(tg) == z1
+        end
+    end
+end
+
 @testset "ensemble: stranded walkers pruned in burn-in" begin
     P, Tc = 3.5, 2459000.0
     rng = MersenneTwister(11)

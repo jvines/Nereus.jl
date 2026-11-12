@@ -47,6 +47,9 @@ export sample_nested_dynamic, DynamicNSResult
 # Fields
 - `chains::MCMCChains.Chains` — resampled posterior, bounded space.
 - `log_z::Float64` — combined log Z from baseline + targeted batch.
+- `log_z_err::Float64` — its error: the spread of log Z over realisations of
+  the merged run, each pass's threads resampled and the prior volumes drawn
+  afresh (dynesty's; src/samplers/ns_error.jl).
 - `log_z_baseline::Float64`, `log_z_batch::Float64` — per-pass log Z.
 - `n_iters_baseline::Int`, `n_iters_batch::Int`
 - `n_evals::Int` — total likelihood evaluations.
@@ -55,6 +58,7 @@ export sample_nested_dynamic, DynamicNSResult
 struct DynamicNSResult
     chains::MCMCChains.Chains
     log_z::Float64
+    log_z_err::Float64
     log_z_baseline::Float64
     log_z_batch::Float64
     n_iters_baseline::Int
@@ -151,6 +155,10 @@ function sample_nested_dynamic(
     n_walks = n_walks === nothing ?
               max(25, (proposal === :rwalk ? 10 : 5) *
                       length(target.params.layout.unfrozen_idx)) : n_walks
+    # Every run starts from the same charts, so a seed repeats it; the passes
+    # move them as they go (`_ns_recut!`).
+    _ns_home_charts!(target.params;
+                     transforms = target.transform === nothing ? () : (target.transform,))
     # === Pass 1: baseline NS ===
     verbose && @info "Dynamic NS: baseline pass (n_live=$n_live_init, dlogz=$dlogz_init)"
     base = _ns_inner(target, data;
@@ -243,6 +251,11 @@ function sample_nested_dynamic(
 
     # === Combine ===
     all_logL, all_u, log_wts, log_z = _merge_passes(base, batch, L_lo)
+    # The batch's threads numbered after the baseline's, and resampled apart.
+    trace = _NSTrace(vcat(base.dead_logL, batch.dead_logL),
+                     vcat(base.dead_birth, batch.dead_birth),
+                     vcat(base.dead_thread, batch.dead_thread .+ n_live_init))
+    log_z_err = _ns_logz_err(trace; group = t -> t > n_live_init ? 2 : 1, seed = seed)
 
     # Posterior chain construction — same n_eff-aware fallback as
     # sample_nested_ins. When n_eff < 200 a resample collapses to the MAP;
@@ -284,7 +297,7 @@ function sample_nested_dynamic(
 
     return DynamicNSResult(
         chains,
-        log_z, base.log_z, batch.log_z,
+        log_z, log_z_err, base.log_z, batch.log_z,
         base.n_iters, batch.n_iters, base.n_evals + batch.n_evals,
         L_lo, L_hi)
 end
@@ -293,12 +306,16 @@ end
 # L_max so the batch can restrict to a likelihood window.
 # `dead_n[i]` is the number of live points the pass had when it removed point
 # i: `n_live` for a dead point, n_live, n_live - 1, …, 1 for the live points it
-# ends with, which come last in increasing likelihood.
+# ends with, which come last in increasing likelihood. `dead_birth[i]` is the
+# bound point i was drawn above and `dead_thread[i]` the live-point slot it
+# filled (`_NSTrace`).
 struct _NSPassResult
     dead_logL::Vector{Float64}
     dead_logwt::Vector{Float64}
     dead_u::Vector{Vector{Float64}}
     dead_n::Vector{Int}
+    dead_birth::Vector{Float64}
+    dead_thread::Vector{Int}
     log_z::Float64
     n_iters::Int
     n_evals::Int
@@ -517,6 +534,10 @@ function _ns_inner(target::NereusTarget, data::Data;
     dead_logL    = Float64[]
     dead_logwt   = Float64[]
     dead_u       = Vector{Vector{Float64}}()
+    dead_birth   = Float64[]
+    dead_thread  = Int[]
+    # A batch's live points are drawn inside L > L_min, a baseline's from the prior.
+    live_birth   = fill(L_min, n_live)
     sizehint!(dead_logL,  max_iter + n_live)
     sizehint!(dead_logwt, max_iter + n_live)
     sizehint!(dead_u,     max_iter + n_live)
@@ -548,6 +569,8 @@ function _ns_inner(target::NereusTarget, data::Data;
             worst_save[d] = live_u[d, idx_worst]
         end
         push!(dead_u, copy(worst_save))
+        push!(dead_birth, live_birth[idx_worst])
+        push!(dead_thread, idx_worst)
         log_X = log_X_new
 
         # Replace worst via the selected within-shell proposal (:rwalk /
@@ -562,6 +585,7 @@ function _ns_inner(target::NereusTarget, data::Data;
             live_u[d, idx_worst] = new_u[d]
         end
         live_logL[idx_worst] = new_logL
+        live_birth[idx_worst] = _ns_floor(max(logL_worst, L_min))
 
         if iter % bound_update_interval == 0
             # Seams of the circular angles moved off the live points first
@@ -608,7 +632,10 @@ function _ns_inner(target::NereusTarget, data::Data;
         push!(dead_logwt, log_wt)
         push!(dead_u, copy(live_u[:, i]))
         push!(dead_n, n_live - j + 1)
+        push!(dead_birth, live_birth[i])
+        push!(dead_thread, i)
     end
 
-    return _NSPassResult(dead_logL, dead_logwt, dead_u, dead_n, log_z, iter, n_evals)
+    return _NSPassResult(dead_logL, dead_logwt, dead_u, dead_n, dead_birth, dead_thread,
+                         log_z, iter, n_evals)
 end

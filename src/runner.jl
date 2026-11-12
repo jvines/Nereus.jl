@@ -1707,8 +1707,8 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = n_evals)
     elseif name == "nested"
-        chains, log_z = sample_nested(target, data; kw...)
-        return (chains = chains, log_evidence = log_z,
+        chains, log_z, log_z_err = sample_nested(target, data; kw...)
+        return (chains = chains, log_evidence = log_z, log_evidence_err = log_z_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = 0)
     elseif name == "pa"
@@ -1732,11 +1732,13 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
         res = sample_nested_ins(target, data; kw...)
         # the NS estimate: log_z_ins is not an evidence (INSResult)
         return (chains = res.chains, log_evidence = res.log_z_ns,
+                 log_evidence_err = res.log_z_ns_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = res.n_evals)
     elseif name == "nested_dynamic"
         res = sample_nested_dynamic(target, data; kw...)
         return (chains = res.chains, log_evidence = res.log_z,
+                 log_evidence_err = res.log_z_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = res.n_evals)
     elseif name == "daedalus"
@@ -2004,6 +2006,9 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
     _RELEASE_SCENES[] = true
     _PLOT_KW_SEEN[] = Set{Symbol}()       # filled by `_kw_for`
     seen_kw = Set{Symbol}()
+    _prev_release_mem = _RELEASE_MEMORY[]
+    _RELEASE_MEMORY[] = _large_chain(chains)     # see `_RELEASE_MEMORY`
+    _RELEASED_AT[] = Base.gc_bytes()
     try
     for (i, plot_name) in enumerate(expanded)
         update!(pb; n_done = i - 1, fields = (:now => String(plot_name),))
@@ -2027,9 +2032,17 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
         catch err
             @warn "Plot `$plot_name` failed" exception = (err, catch_backtrace())
         end
+        # A figure's garbage (its scene, its draws, its band matrix) is dead once
+        # its file is written, but the collector runs on its own schedule, and
+        # across the set the heap grew by gigabytes of it before a collection.
+        # For a large chain, collect between figures once enough is allocated
+        # (`_save_plot` checks after each file, this after each kind), so the
+        # stage peaks near its largest figure instead of at a sum of several.
+        _RELEASE_MEMORY[] && _release_memory_if_due()
     end
     finally
         _RELEASE_SCENES[] = _prev_release
+        _RELEASE_MEMORY[] = _prev_release_mem
         seen_kw = something(_PLOT_KW_SEEN[], seen_kw)
         _PLOT_KW_SEEN[] = nothing
     end
@@ -2264,7 +2277,7 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         end
         if !haskey(ttv_kw, :planet_b_k)
             a = ttv_kw[:planet_a_k]
-            b = findfirst(k -> k != a && !isempty(intersect(present(k), present(a))),
+            b = findfirst(k -> k != a && !isempty(_sorted_intersect(present(k), present(a))),
                           1:max_k)
             ttv_kw[:planet_b_k] = b === nothing ? 0 : b
         end
@@ -2891,8 +2904,12 @@ function _populate_summary!(summary, result, params, chains)
     # The tempered stack goes in only when its ladder can carry it (the ladder
     # reaches β = 0 and every adjacent pair swapped at least 5% of the time),
     # and mode-Laplace is labelled as the approximation it is
-    # (`_evidence_summary`, src/sampler_diagnostics.jl).
-    ev = _evidence_summary(result, Float64(getfield(result, :log_evidence)))
+    # (`_evidence_summary`, src/sampler_diagnostics.jl). A nested engine's
+    # log Z goes in with its error (src/samplers/ns_error.jl).
+    nested = hasfield(typeof(result), :log_evidence_err) ?
+             (Float64(getfield(result, :log_evidence)),
+              Float64(getfield(result, :log_evidence_err))) : nothing
+    ev = _evidence_summary(result, Float64(getfield(result, :log_evidence)); nested)
     ev === nothing || (summary["evidence"] = ev)
 
     _n_planets_posterior!(summary, chains)

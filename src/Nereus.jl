@@ -90,6 +90,7 @@ include("samplers/bridge.jl")           # posterior-only evidence (bridge sampli
 include("samplers/reference_path.jl")   # evidence via a path from a fitted reference
 include("samplers/pt.jl")
 include("samplers/pt_hmc.jl")  # Hamiltonian parallel tempering (fixed-dim, differentiable)
+include("samplers/ns_error.jl")       # the error of a nested run's log Z (thread bootstrap + volumes)
 include("samplers/nested.jl")
 include("samplers/ensemble.jl")
 include("samplers/map.jl")
@@ -417,5 +418,7 @@ export sampler_diagnostics, chain_convergence,
        fit_rv, fit_transit, fit_astrometry, fit_rm, fit_tomography,
     fit_ttv, fit_binary, fit_joint, run_engine, Stopping, ENGINES,
     FEATURE_ACTIONS, default_rv_planet, default_astrom_planet
+
+include("plotting/precompile.jl")   # the figures, for a release build (see the file)
 
 end # module Nereus

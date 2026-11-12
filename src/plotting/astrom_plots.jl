@@ -45,9 +45,9 @@ function _theta_from_chain_row(chains, params, idx::Int;
 end
 
 """
-    _chain_cols(chains, params) -> Vector{Tuple{String,Vector{Float64}}}
+    _chain_cols(chains, params) -> Vector{Tuple{String, <:AbstractVector{Float64}}}
 
-Every unfrozen parameter's flat column, materialised ONCE.
+Every unfrozen parameter's flat column, looked up ONCE.
 
 `chains[sym]` is an AxisArray view, so `_draws(chains, sym)` COPIES the whole
 column. Doing that inside `_theta_from_chain_row` — which is called once per
@@ -59,16 +59,17 @@ getting there.
 
 Hoist it beside `tdc` and pass both when calling in a loop. The default argument
 keeps a bare single-row call working exactly as before.
+
+The columns are views into the chain (`_draws_view`), not copies. Copied, every
+call materialised the whole chain to read the rows it uses: through the default
+argument above, `_theta_best_lp` copied every column of a joint fit to read ONE
+row (23 columns x 5.8M draws = 1 GB), and `plot_orbit_skyplane` did the same
+with no fan to draw.
 """
 function _chain_cols(chains, params)
     chain_names = Set(names(chains, :parameters))
-    cols = Tuple{String,Vector{Float64}}[]
-    for name in params.layout.unfrozen_names
-        sym = Symbol(name)
-        sym in chain_names || continue
-        push!(cols, (name, _draws(chains, sym)))
-    end
-    return cols
+    return [(name, _draws_view(chains, Symbol(name)))
+            for name in params.layout.unfrozen_names if Symbol(name) in chain_names]
 end
 
 """
@@ -88,7 +89,7 @@ function _theta_median(chains, params; active_idx = nothing)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in chain_names || continue
-        vals = _draws(chains, sym)
+        vals = _draws_view(chains, sym)
         if active_idx !== nothing
             vals = vals[active_idx]
         end
@@ -105,10 +106,16 @@ The draw with the highest finite `:lp` among `idxs` (all draws when
 """
 function _best_lp_row(chains, idxs = nothing)
     (:lp in Set(names(chains, :parameters))) || return nothing
-    lp = _draws(chains, :lp)
-    cand = filter(i -> isfinite(lp[i]), idxs === nothing ? (1:length(lp)) : idxs)
-    isempty(cand) && return nothing
-    return cand[argmax(@view lp[cand])]
+    lp = _draws_view(chains, :lp)
+    # The first maximum, as `argmax` over the finite candidates picked it, without
+    # copying the column or collecting the candidates.
+    best = nothing
+    for i in (idxs === nothing ? (1:length(lp)) : idxs)
+        v = lp[i]
+        isfinite(v) || continue
+        (best === nothing || isless(lp[best], v)) && (best = i)
+    end
+    return best
 end
 
 """
@@ -158,7 +165,7 @@ function _planet_draw(chains, params, planet_idx::Int; bf_cutoff::Real)
     tdc = _td_cols(chains, params)
     present = _planet_present_idx(chains, params, planet_idx; tdc = tdc)
     isempty(present) && return nothing
-    pool = intersect(present, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
+    pool = _sorted_intersect(present, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
     isempty(pool) && (pool = present)
     return _theta_best_lp(chains, params; active_idx = pool), pool
 end
@@ -993,15 +1000,11 @@ function plot_rv_astrom_phasefold(chains, params, data;
         ph_fine = collect(range(-0.5, 0.5; length = 800))
         cred_idx = _credible_region_pool(chains, params, planet_idx;
                                           credmass = credmass)
-        band_idx = intersect(collect(active_idx), cred_idx)
+        band_idx = _sorted_intersect(active_idx, cred_idx)
         isempty(band_idx) && (band_idx = collect(active_idx))
         if !isempty(band_idx)
-            param_syms = names(chains, :parameters)
-            mat = Matrix{Float64}(undef, length(band_idx), length(param_syms))
-            for (j, sym) in enumerate(param_syms)
-                mat[:, j] = _draws(chains, sym)[band_idx]
-            end
-            ci_chains = MCMCChains.Chains(mat, param_syms)
+            # The band samples `band_idx` (`pool`), passed as indices rather
+            # than copied out as a sub-chain of every column.
             # PHASE ORIGIN. compute_ci_bands ignores fold_t0 and references
             # every draw to ITS OWN inferior conjunction Tc (deliberately — λ is
             # well determined where periastron is not). This panel, however,
@@ -1010,10 +1013,10 @@ function plot_rv_astrom_phasefold(chains, params, data;
             # back on the panel's periastron axis; without this the band sits a
             # constant ~Δ in phase away from the curve it is meant to bracket.
             Δφ = (_planet_Tc(theta_med, data, planet_idx) - tp_med) / P_med
-            ci = compute_ci_bands(ci_chains, params, data,
+            ci = compute_ci_bands(chains, params, data,
                                    tp_med .+ ph_fine .* P_med;
                                    planet = planet_idx, n_draws = n_draws,
-                                   bf_cutoff = Inf,
+                                   pool = band_idx,
                                    fold_phase = ph_fine .- Δφ, fold_t0 = tp_med)
             band!(ax_rv, ph_fine, ci.lo3, ci.hi3; color = (NEREUS_COLORS.ci, CI_ALPHA_3SIGMA))
             band!(ax_rv, ph_fine, ci.lo2, ci.hi2; color = (NEREUS_COLORS.ci, CI_ALPHA_2SIGMA))
