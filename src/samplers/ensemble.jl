@@ -52,8 +52,9 @@ Works in unconstrained space (with transforms) by default.
 - `show_progress::Bool=true` — progress bar (the first chain's, when
   `n_chains > 1`).
 - `prune_stranded::Bool=true` — every 50 steps through the first three quarters
-  of burn-in, move walkers stranded where the posterior cannot carry mass onto
-  the ones that found it, as `sample_pt_emcee` does for each rung (see
+  of burn-in, move walkers stranded where the posterior cannot carry mass, in
+  a separate mode that carries next to none, or far down the mode's own flank,
+  onto the ones that found it, as `sample_pt_emcee` does for each rung (see
   `_pt_prune_stranded!`, which also gives the mass bound that makes it safe).
   A stretch move cannot bring a walker into a narrow mode from far away, and
   without this one stranded walker in 32 recorded 3 % of the draws 90° or more
@@ -408,8 +409,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     lastll = Vector{Float64}(undef, n_walkers)
     n_saved = div(n_steps, thinning)
     kept = Array{Float64}(undef, n_dim, n_walkers, max(n_saved - n_burnin, 0))
-    # Median log L at the last stranded-walker prune (`_pt_prune_stranded!`).
-    prune_med = [NaN]
+    # The stranded-walker pruning's record of its last pass (`_pt_prune_stranded!`).
+    prune_mem = PruneMemory(1, n_walkers, n_dim)
 
     if ck === nothing
         # Initialize walkers
@@ -471,7 +472,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         copy!(rng, ck.rng::MersenneTwister)
         ck_kept = ck.kept::Array{Float64, 3}
         kept[:, :, 1:size(ck_kept, 3)] .= ck_kept
-        hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
+        _prune_restore!(prune_mem, ck)
         # Windows (and spin axis) the saved walkers live in, moved by the re-cut;
         # with several chains put back, once for all, by `sample_ensemble`.
         if pre === nothing && hasproperty(ck, :windows)
@@ -500,7 +501,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         # walkers. On the unconstrained target the walkers' coordinates are the
         # logit's, a line for every parameter: no angle is offset on a circle.
         prune_stranded && step % 50 == 0 && step <= (3 * n_burnin * thinning) ÷ 4 &&
-            _ensemble_prune!(x, lastll, target, logpost, rng, prune_med)
+            _ensemble_prune!(x, lastll, target, logpost, rng, prune_mem)
         # ---- Burn-in re-cut (src/circular.jl): on pt_emcee's schedule, the
         # walkers folded, spin-flipped and every full-circle seam moved to the
         # emptiest arc, so a mode across a seam is not split between two walls
@@ -527,7 +528,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
             n_kept = max(div(step, thinning) - n_burnin, 0)
             write_checkpoint(ck_path, "ensemble", ck_fp, (; step, x, lastll, rng,
                 kept = kept[:, :, 1:n_kept], windows = circular_windows(params),
-                spin_axis = copy(params.layout.spin_axis), prune_med = copy(prune_med)))
+                spin_axis = copy(params.layout.spin_axis),
+                prune_mem = _prune_saved(prune_mem)))
             last_ck = time()
         end
     end
@@ -569,16 +571,45 @@ end
 # A chain without the walker cube `_ensemble_chain` hands `sample_ensemble`.
 _strip_walker_cube(c::MCMCChains.Chains) = MCMCChains.setinfo(c, NamedTuple())
 
+# The pruning's recorded walker positions, moved into the windows the
+# transform has now. A burn-in re-cut between two passes moves a full-circle
+# angle's window, and through the logit every walker's coordinate in it, so
+# the positions of the last pass no longer say where those walkers were: on
+# the eccentric RV planet of test/test_angles_never_rail.jl a walker settled in
+# its circular-orbit mode was never found inside it at the previous pass, and
+# stayed for the whole run. Relabelled by whole periods, as `recut_walkers!`
+# relabels the walkers; a walker the re-cut also folded is not, and counts as
+# outside for one pass.
+function _prune_rechart!(mem, tr::PackedTransforms, circ)
+    mem.seen || return mem
+    moved = [i for i in circ if (mem.lo[i], mem.hi[i]) != (tr.lowers[i], tr.uppers[i])]
+    isempty(moved) && return mem
+    for w in axes(mem.x, 2)
+        u = mem.x[1, w, :]
+        all(isfinite, u) || continue
+        v = transform_inverse(u, tr.type_ids, mem.lo, mem.hi)
+        for i in moved
+            v[i] = circular_relabel(v[i], tr.lowers[i], tr.uppers[i])
+        end
+        transform_forward!(u, v, tr)
+        mem.x[1, w, :] .= u
+    end
+    return mem
+end
+
 # The ensemble's stranded walkers moved onto the ones that found the mode:
 # `_pt_prune_stranded!` on a one-rung ladder at β = 1, in the sampling
 # coordinates. Its mass bound needs the prior normalised there, which the
 # prior times the transform's Jacobian is. The split into (log prior + log
 # Jacobian, log L) is evaluated once per walker per call (`_logdensity_parts`);
 # a moved walker's log-density is then redone through `logpost`, so the walkers
-# left alone keep theirs bit for bit, and a call that moves none draws nothing
-# from `rng`. `med` is the record the pruning keeps between calls.
+# left alone keep theirs bit for bit. `mem` (`PruneMemory`) is the record the
+# pruning keeps between calls, its positions moved into the current charts
+# first (`_prune_rechart!`).
 function _ensemble_prune!(x::Matrix{Float64}, lastll::Vector{Float64},
-                          target::NereusTarget, logpost, rng, med::Vector{Float64})
+                          target::NereusTarget, logpost, rng, mem)
+    tr = target.transform
+    tr === nothing || _prune_rechart!(mem, tr, seam_indices(target.params))
     nd, nw = size(x)
     state = Array{Float64,3}(undef, 1, nw, nd)
     lπ = Matrix{Float64}(undef, 1, nw)
@@ -590,7 +621,8 @@ function _ensemble_prune!(x::Matrix{Float64}, lastll::Vector{Float64},
     circ = target.transform === nothing ? circular_indices(target.params) : Int[]
     moved = _pt_prune_stranded!(state, lπ, lL, [1.0], rng;
                                 evalf = y -> _logdensity_parts(target, y),
-                                circ, med_logL = med)
+                                circ, memory = mem)
+    tr === nothing || (copyto!(mem.lo, tr.lowers); copyto!(mem.hi, tr.uppers))
     moved[1] == 0 && return 0
     for w in 1:nw
         any(j -> state[1, w, j] != x[j, w], 1:nd) || continue
