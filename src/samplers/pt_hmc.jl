@@ -577,8 +577,10 @@ function sample_pt_hmc(
               swap_acc = res.swap_acc)
 end
 
-# Whether the tempered SS+ can be quoted: `(ok, why)`, `why` empty when it can.
-# The ladder must start at β = 0, or the [0, β₁] head is not in the integral
+# Whether the tempered SS+ can be quoted: `(ok, why)`, `why` empty when it can:
+# `_tempered_quotable` (src/samplers/evidence.jl), which pt_emcee and the
+# summary writers share, and SS+ finite. The ladder must reach β = 0, or the
+# [0, β₁] head is not in the integral
 # (it was worth −1.3 to −4.5 nats on the RV + IAD companion from β₁ = 1e-4); and
 # every adjacent pair of rungs must overlap, which a stepping-stone ratio needs
 # and the swaps between them measure: at least `swap_min` of them accepted.
@@ -588,16 +590,9 @@ end
 # bridge sampling to 0.1.
 function _pt_hmc_tempered_ok(report::EvidenceReport, βs::AbstractVector,
                              swap_acc::AbstractVector, swap_min::Float64)
-    n = length(βs)
-    βs[1] == 0 || return (false, "the ladder starts at β = $(βs[1]), so the " *
-                                 "[0, $(βs[1])] head is not in the integral")
+    ok, why = _tempered_quotable(βs, swap_acc; swap_min)
+    ok || return (ok, why)
     isfinite(report.ss_plus[1]) || return (false, "SS+ is not finite")
-    k = argmin(swap_acc)
-    swap_acc[k] >= swap_min ||
-        return (false, "rungs β = $(round(βs[k], sigdigits = 3)) and " *
-                       "$(round(βs[k + 1], sigdigits = 3)) swapped " *
-                       "$(round(100 * swap_acc[k], digits = 1))% of the time " *
-                       "(< $(100 * swap_min)%): too little overlap for their ratio")
     return (true, "")
 end
 
