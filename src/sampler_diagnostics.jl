@@ -150,6 +150,75 @@ const _TUPLE_SLOTS = Dict{String, Tuple{Vararg{Symbol}}}(
     "rjmcmc"    => (:n_evals,),                    # NOT evidence
 )
 
+# What summary.json says mode-Laplace is, wherever it carries the value.
+const _LAPLACE_LABEL = "approximation: a Gaussian at the posterior mode, reported " *
+                       "beside bridge sampling and never quoted in its place"
+
+# Whether a result's tempered evidence (TI, TI+, SS+, H+) can be quoted, from the
+# ladder and swap rates it records: `_tempered_quotable` (src/samplers/evidence.jl)
+# at the default `swap_min`.
+function _result_tempered_quotable(result)
+    βs = hasproperty(result, :betas) ? getproperty(result, :betas) : nothing
+    sw = hasproperty(result, :acceptance_swap) ? getproperty(result, :acceptance_swap) : nothing
+    (βs isa AbstractVector && sw isa AbstractVector && !isempty(βs)) ||
+        return (false, "the run does not record its ladder and swap rates")
+    return _tempered_quotable(βs, sw)
+end
+
+# The evidence block of summary.json, for run_job (`_populate_summary!`) and the
+# fit_* functions (`_evidence_block!`): bridge; mode-Laplace, labelled as the
+# approximation it is and with its distance from bridge; the tempered stack only
+# when its ladder can carry it, and otherwise why not; and which of them `lz`
+# (the reported log Z) is. `nothing` when the result carries none of them.
+function _evidence_summary(result, lz)
+    result === nothing && return nothing
+    prop(f) = hasproperty(result, f) ? getproperty(result, f) : nothing
+    ev = Dict{String, Any}()
+    b = prop(:log_evidence_bridge)
+    bridge_ok = b isa Real && isfinite(b)
+    bridge_ok && (ev["bridge"] = Float64(b))
+    l = prop(:log_evidence_laplace)
+    if l isa Real && isfinite(l)
+        lap = Dict{String, Any}("log_z" => Float64(l), "note" => _LAPLACE_LABEL)
+        bridge_ok && (lap["minus_bridge"] = Float64(l - b))
+        ev["mode_laplace"] = lap
+    end
+    rep = nothing
+    for rf in (:evidence, :evidence_report)
+        r = prop(rf)
+        (r !== nothing && hasproperty(r, :ti_plus)) && (rep = r; break)
+    end
+    if rep !== nothing
+        ok, why = _result_tempered_quotable(result)
+        if ok
+            for (key, fld) in ("ti" => :ti, "ti_plus" => :ti_plus,
+                               "ss_plus" => :ss_plus, "hybrid" => :hybrid)
+                hasproperty(rep, fld) || continue
+                t = getproperty(rep, fld)
+                (t isa Tuple && length(t) == 2 && isfinite(t[1])) || continue
+                ev[key] = Dict("log_z" => Float64(t[1]), "se" => Float64(t[2]))
+            end
+            hasproperty(rep, :hybrid_beta_star) &&
+                (ev["hybrid_beta_star"] = Float64(getproperty(rep, :hybrid_beta_star)))
+        else
+            ev["tempered"] = Dict{String, Any}("quotable" => false, "why" => why)
+        end
+    end
+    isempty(ev) && return nothing
+    # Name the headline by matching the reported value, so a reader knows which
+    # estimator `log_z` came from without re-deriving the selection logic.
+    which = lz isa Real && isfinite(lz) ? "tempered" : "none"
+    if which != "none"
+        for (k, v) in ev
+            k == "mode_laplace" && continue
+            val = v isa AbstractDict ? get(v, "log_z", NaN) : v
+            (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)
+        end
+    end
+    ev["reported"] = which
+    return ev
+end
+
 """
     sampler_diagnostics(engine, raw, chains) -> Dict
 
@@ -168,12 +237,29 @@ function sampler_diagnostics(engine::AbstractString, raw, chains)
             name === :_strategy && continue          # proposal state, not a diagnostic
             v = raw[idx]
             if name === :evidence && !(v isa Real)
-                hasproperty(v, :ti) && (d["evidence"] = Dict{String, Any}(
-                    "ti" => Dict("log_z" => v.ti[1], "sigma" => v.ti[2]),
-                    "ti_plus" => Dict("log_z" => v.ti_plus[1], "sigma" => v.ti_plus[2]),
-                    "ss_plus" => Dict("log_z" => v.ss_plus[1], "sigma" => v.ss_plus[2]),
-                    "hybrid" => Dict("log_z" => v.hybrid[1], "sigma" => v.hybrid[2]),
-                    "hybrid_beta_star" => v.hybrid_beta_star))
+                if hasproperty(v, :ti)
+                    # pt_hmc's next slot says whether its tempered stack is
+                    # quotable, and carries bridge and mode-Laplace.
+                    info = idx + 1 <= length(raw) ? raw[idx + 1] : nothing
+                    ok, why = info !== nothing && hasproperty(info, :tempered_ok) ?
+                              (info.tempered_ok, info.tempered_why) :
+                              (false, "the run does not record its ladder and swap rates")
+                    d["evidence"] = ok ? Dict{String, Any}(
+                        "ti" => Dict("log_z" => v.ti[1], "sigma" => v.ti[2]),
+                        "ti_plus" => Dict("log_z" => v.ti_plus[1], "sigma" => v.ti_plus[2]),
+                        "ss_plus" => Dict("log_z" => v.ss_plus[1], "sigma" => v.ss_plus[2]),
+                        "hybrid" => Dict("log_z" => v.hybrid[1], "sigma" => v.hybrid[2]),
+                        "hybrid_beta_star" => v.hybrid_beta_star) :
+                        Dict{String, Any}("tempered" => Dict{String, Any}(
+                            "quotable" => false, "why" => why))
+                    if info !== nothing && hasproperty(info, :bridge) && isfinite(info.bridge)
+                        d["log_evidence_bridge"] = info.bridge
+                    end
+                    if info !== nothing && hasproperty(info, :laplace) && isfinite(info.laplace)
+                        d["log_evidence_laplace"] = Dict{String, Any}(
+                            "log_z" => info.laplace, "note" => _LAPLACE_LABEL)
+                    end
+                end
             elseif v isa Real
                 d[String(name)] = v
             end
@@ -183,26 +269,38 @@ function sampler_diagnostics(engine::AbstractString, raw, chains)
     for f in _DIAG_FIELDS
         if raw !== nothing && hasproperty(raw, f)
             v = getproperty(raw, f)
-            v === nothing || (d[String(f)] = v)
+            v === nothing && continue
+            if f === :log_evidence_laplace && v isa Real
+                # labelled wherever summary.json carries it
+                d[String(f)] = Dict{String, Any}("log_z" => v, "note" => _LAPLACE_LABEL)
+            else
+                d[String(f)] = v
+            end
         end
     end
 
     # The four tempered evidence estimators, where the engine returns the
-    # report rather than just its chosen headline.
+    # report rather than just its chosen headline: only when the ladder can
+    # carry them (`_result_tempered_quotable`), and otherwise why not.
     for rf in (:evidence, :evidence_report)
         if raw !== nothing && hasproperty(raw, rf)
             rep = getproperty(raw, rf)
+            ok, why = _result_tempered_quotable(raw)
             ev = Dict{String, Any}()
-            for (k, f) in (("ti", :ti), ("ti_plus", :ti_plus),
-                           ("ss_plus", :ss_plus), ("hybrid", :hybrid))
-                if hasproperty(rep, f)
-                    t = getproperty(rep, f)
-                    ev[k] = t isa Tuple && length(t) >= 2 ?
-                        Dict("log_z" => t[1], "sigma" => t[2]) : t
+            if ok
+                for (k, f) in (("ti", :ti), ("ti_plus", :ti_plus),
+                               ("ss_plus", :ss_plus), ("hybrid", :hybrid))
+                    if hasproperty(rep, f)
+                        t = getproperty(rep, f)
+                        ev[k] = t isa Tuple && length(t) >= 2 ?
+                            Dict("log_z" => t[1], "sigma" => t[2]) : t
+                    end
                 end
+                hasproperty(rep, :hybrid_beta_star) &&
+                    (ev["hybrid_beta_star"] = rep.hybrid_beta_star)
+            elseif hasproperty(rep, :ti_plus)
+                ev["tempered"] = Dict{String, Any}("quotable" => false, "why" => why)
             end
-            hasproperty(rep, :hybrid_beta_star) &&
-                (ev["hybrid_beta_star"] = rep.hybrid_beta_star)
             isempty(ev) || (d["evidence"] = ev)
             break
         end

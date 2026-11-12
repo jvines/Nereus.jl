@@ -1686,11 +1686,13 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
         # Hamiltonian parallel tempering (fixed-dim, differentiable). Returns
         # (chains, log_ev, report, evidence): the tempered stack and bridge /
         # mode-Laplace go to summary.json's evidence block as pt_emcee's do.
+        # The ladder and its swap rates go too: they decide whether the tempered
+        # stack is quotable there.
         chains, log_z, report, ev = sample_pt_hmc(target; kw...)
         return (chains = chains, log_evidence = log_z,
                  log_evidence_bridge = ev.bridge, log_evidence_laplace = ev.laplace,
-                 evidence = report,
-                 acceptance_within = Float64[], acceptance_swap = Float64[],
+                 evidence = report, betas = ev.betas,
+                 acceptance_within = Float64[], acceptance_swap = ev.swap_acc,
                  n_evals = 0)
     elseif name == "rjmcmc"
         td === nothing && error("rjmcmc requires `transdim` block")
@@ -2698,6 +2700,13 @@ function _augment_evidence!(summary, params, data, chains;
         (b.converged && isfinite(b.log_z)) || return
         ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
                             "overlap" => Float64(b.overlap))
+        # mode-Laplace beside the bridge it never replaces: its distance, and a
+        # warning past bridge's standard error + 1 nat.
+        lap = get(ev, "mode_laplace", nothing)
+        if lap isa AbstractDict && get(lap, "log_z", nothing) isa Real
+            lap["minus_bridge"] = Float64(lap["log_z"] - b.log_z)
+            _warn_laplace_vs_bridge("run_job", lap["log_z"], b.log_z, b.se)
+        end
         # Bridge is biased LOW when its reference is fitted from too few
         # INDEPENDENT draws (see docs/src/evidence.md); q carries
         # d + d(d+1)/2 parameters. Only promote it above the tempered value
@@ -2878,37 +2887,13 @@ function _populate_summary!(summary, result, params, chains)
     # agreeing with each other is not a cross-check, and they can sit >100 nats
     # low on a signal-locked posterior while doing so. Recording the spread is
     # what makes a Bayes factor between two runs defensible.
-    ev = Dict{String, Any}()
-    for (key, fld) in ("bridge" => :log_evidence_bridge,
-                       "mode_laplace" => :log_evidence_laplace)
-        hasfield(typeof(result), fld) || continue
-        v = getfield(result, fld)
-        v isa Real && isfinite(v) && (ev[key] = Float64(v))
-    end
-    if hasfield(typeof(result), :evidence)
-        rep = getfield(result, :evidence)
-        for (key, fld) in ("ti" => :ti, "ti_plus" => :ti_plus,
-                           "ss_plus" => :ss_plus, "hybrid" => :hybrid)
-            hasfield(typeof(rep), fld) || continue
-            t = getfield(rep, fld)
-            (t isa Tuple && length(t) == 2 && isfinite(t[1])) || continue
-            ev[key] = Dict("log_z" => Float64(t[1]), "se" => Float64(t[2]))
-        end
-        hasfield(typeof(rep), :hybrid_beta_star) &&
-            (ev["hybrid_beta_star"] = Float64(getfield(rep, :hybrid_beta_star)))
-    end
-    if !isempty(ev)
-        # Name the headline by matching the reported value, so a reader knows
-        # which estimator `log_z` came from without re-deriving the selection logic.
-        lz = Float64(getfield(result, :log_evidence))
-        which = isfinite(lz) ? "tempered" : "none"
-        for (k, v) in ev
-            val = v isa Dict ? get(v, "log_z", NaN) : v
-            (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)
-        end
-        ev["reported"] = which
-        summary["evidence"] = ev
-    end
+    #
+    # The tempered stack goes in only when its ladder can carry it (the ladder
+    # reaches β = 0 and every adjacent pair swapped at least 5% of the time),
+    # and mode-Laplace is labelled as the approximation it is
+    # (`_evidence_summary`, src/sampler_diagnostics.jl).
+    ev = _evidence_summary(result, Float64(getfield(result, :log_evidence)))
+    ev === nothing || (summary["evidence"] = ev)
 
     _n_planets_posterior!(summary, chains)
     # No per-parameter or derived quantiles here. This built an unconditioned
