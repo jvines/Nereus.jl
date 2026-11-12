@@ -18,7 +18,7 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 
 | `sampler.name` | function | fixed/trans-dim | needs `transdim` block | gives log Z |
 |---|---|:---:|:---:|:---:|
-| `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (bridge / quotable H⁺) |
+| `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (bridge / H⁺ / mode-Laplace) |
 | `transdim_pt_emcee` | `sample_transdim_pt_emcee` | trans | **required** | occupancy |
 | `pt`               | `sample_pt`               | both  | optional (`td`) | quotable TI⁺ |
 | `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (bridge / SS⁺) |
@@ -191,10 +191,11 @@ res = sample_pt_emcee(target, data;
 Any other value is an `ArgumentError`.
 
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (bridge
-sampling on the cold chain when usable, else H⁺ when its ladder is quotable —
-β = 0 reached and every adjacent pair swapping at least `swap_min`, 5% — else
-`NaN` with a warning; never mode-Laplace, which is in `log_evidence_laplace`
-as an approximation), `evidence::EvidenceReport` (raw), `acceptance_within`,
+sampling on the cold chain when usable; else H⁺ when its ladder is quotable —
+β = 0 reached and every adjacent pair swapping at least `swap_min`, 5% — and
+it agrees with mode-Laplace within `laplace_switch_tol`; else
+`log_evidence_laplace`, with a warning), `evidence::EvidenceReport` (raw),
+`acceptance_within`,
 `acceptance_swap`, `n_evals`, and `ladder::LadderHistory` — the ladder, swap
 acceptance and swap mean distance at every step, plus `⟨log L⟩` per rung,
 which `plot_ladder_rates` and `plot_beta_ladder` draw. Bump `n_temps` to 15+ when log-likelihood

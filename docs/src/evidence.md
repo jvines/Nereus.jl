@@ -52,7 +52,7 @@ Every parallel-tempering sampler feeds the same
 | Sampler | Trans-dim? | log Z field | Full stack field | log Z headline |
 |---|---|---|---|---|
 | `sample_pt` | both | 2nd tuple element | — | TI+ if quotable, else `NaN` |
-| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | bridge if usable, else H+ if quotable, else `NaN`; never mode-Laplace |
+| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | bridge if usable, else H+ if quotable and within `laplace_switch_tol` of mode-Laplace, else mode-Laplace (warned); `NaN` only with none of them |
 | `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if quotable, else `NaN` |
 | `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if quotable, else `NaN` |
 | `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | bridge if usable, else SS+ if quotable, else `NaN` (`_pt_hmc_evidence`) |
@@ -72,22 +72,30 @@ Notes for a production reader:
   checks: the ladder reaches β = 0, or the `[0, β_min]` head is not in the
   integral, and every adjacent pair of rungs swapped at least `swap_min` (5%)
   of the time, or their ratio rests on too little overlap. Otherwise the
-  sampler returns `NaN` for a tempered headline, with a warning saying why;
-  the raw stack stays in the report, and summary.json carries it only when
-  it is quotable (`"tempered": {"quotable": false, "why": ...}` otherwise).
+  tempered value is not quoted: `sample_pt_emcee` falls back on mode-Laplace
+  (Jose's rule, below) and the samplers without one return `NaN`, each with a
+  warning saying why; the raw stack stays in the report, and summary.json
+  carries it only when
+  it is quotable (`"tempered_check": {"quotable": false, "why": ...}` otherwise).
   The default ladders of `pt_emcee`, `transdim_pt_emcee` and `pt_whitening`
   stop at `beta_min`, so their tempered values are quoted only from `betas`
   given with a 0 rung. On an RV + Hipparcos-IAD companion whose bridge log Z
   is 163.88, pt_emcee's SS+ read 157.85 from 8 rungs.
 - **Headline estimator differs.** `sample_pt_emcee` reports bridge sampling
-  on its cold chain when it is usable, else H+ when quotable, else `NaN`.
-  mode-Laplace, a Gaussian approximation at the mode, is never the headline:
-  it is reported beside bridge (labelled as an approximation in
-  summary.json, with its distance from bridge) and a warning fires when it
-  is further from bridge than bridge's standard error + 1 nat; on the
-  companion it sat 3.5 to 3.8 nats above bridge with e free.
-  `transdim_pt_emcee` and `pt_whitening` report **H+** and `sample_pt`
-  **TI+**, each only when quotable. `sample_pt_hmc` reports
+  on its cold chain when it is usable. Otherwise Jose's rule: H+ when it is
+  quotable and agrees with mode-Laplace within `laplace_switch_tol` (the
+  Laplace non-Gaussian bias), else mode-Laplace, with a warning — a tempered
+  value that is not quotable counts as broken. `NaN` only when none of them is
+  available. Under `untemper_transit` with photometry the tempered value is
+  relative and mode-Laplace absolute, so there is no switch and both are kept.
+  mode-Laplace, a Gaussian approximation at the mode, is written in
+  summary.json as `mode_laplace` (a number), with `mode_laplace_check` beside
+  it holding that label and its distance from bridge; a warning fires when it
+  is further from bridge than bridge's standard error + 1 nat (1.1 to 1.2
+  nats above bridge on the companion). `transdim_pt_emcee` and `pt_whitening`
+  report **H+** and `sample_pt` **TI+**, each only when quotable: they have
+  no mode-Laplace to fall back on, so otherwise `NaN` with a warning, written
+  as `null` in summary.json. `sample_pt_hmc` reports
   bridge sampling on its cold chain when the reference has the effective
   samples it needs, else SS+ when its ladder starts at β = 0 and every
   adjacent pair of rungs swaps at least `swap_min` (5%) of the time, else
@@ -408,15 +416,19 @@ res.log_evidence             # the one to USE (see rule below)
 mode_laplace_evidence(target, res.chains)   # standalone, any cold chain
 ```
 
-**It is not the headline.** `log_evidence` used to switch to it whenever the
-tempered value disagreed with it by more than `laplace_switch_tol`, and to fall
-back on it whenever bridge was unavailable. It is now only reported:
-`log_evidence` is bridge, else a quotable tempered value, else `NaN`, and a
-warning fires when Laplace is further from bridge than bridge's standard error
-+ 1 nat. `laplace_switch_tol` (50 log units) now only sets when a tempered
-value that far from the headline earns the phase-transition warning, which
-reports the minimum swap acceptance as the corroborating signature: a tiny
-`minimum(res.acceptance_swap)` that will not rise with more temperatures.
+**Selection rule** (Jose's rule; `laplace_switch_tol`, default 50 log units).
+Bridge comes first when it is usable. Otherwise, if the tempered best and the
+Laplace value **agree**, the tempered one is validated — keep it (it is exact
+when it works). If they **disagree** by more than the tolerance, the tempered
+estimator has hit a phase transition — `log_evidence` switches to
+`log_evidence_laplace` and a warning fires (reporting the minimum swap
+acceptance as the corroborating signature). A tempered value from a ladder
+that cannot carry it (no β = 0 rung, or a pair of rungs swapping less than
+`swap_min`) is broken in the same way, and Laplace takes over. A tiny
+`minimum(res.acceptance_swap)` that will not rise with more temperatures is
+the independent tell-tale of the phase transition. When bridge is the
+headline, a warning fires if Laplace is further from it than bridge's
+standard error + 1 nat.
 
 ## Bridge sampling — evidence from the posterior alone
 
@@ -652,8 +664,9 @@ until it is resolved.
 ## Practical guidance
 
 - **Fixed-dim PT on a single posterior**: take `res.log_evidence`, which is
-  bridge where the sampler computes it and a tempered value only when its
-  ladder is quotable (see the table above).
+  bridge where the sampler computes it, a tempered value only when its ladder
+  is quotable (and, for `sample_pt_emcee`, it agrees with mode-Laplace), and
+  otherwise mode-Laplace with a warning (see the table above).
 
   ⚠ **But mutual agreement between TI/TI+/SS+/H+ is NOT evidence that they are
   right.** All four read the same shared `mean_logL[k]` array, so a bias in
@@ -687,9 +700,10 @@ until it is resolved.
   SS+). Through `run_job`, compare the `log_z` summary keys. **If either
   run involves a high-SNR signal** (a strong planet vs. a noise-only null),
   the tempered estimators are biased *asymmetrically* and the factor is
-  wrong — use bridge (`res.log_evidence` from `sample_pt_emcee` and
-  `sample_pt_hmc`); mode-Laplace is an approximation, not a substitute; see
-  [Mode-Laplace](#mode-laplace--a-phase-transition-immune-cross-check).
+  wrong — use bridge (`res.log_evidence_bridge`, the headline of
+  `sample_pt_emcee` and `sample_pt_hmc` when usable) or, failing it,
+  `res.log_evidence` (which then switches to the mode-Laplace cross-check);
+  see [Mode-Laplace](#mode-laplace--a-phase-transition-immune-cross-check).
 
 For per-configuration evidence in trans-dim noise-model selection, see
 [Trans-dimensional](transdim.md) — the joint (N\_p, noise-config)

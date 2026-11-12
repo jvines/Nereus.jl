@@ -57,13 +57,13 @@ using LinearAlgebra, Statistics, Random, Distributions, MCMCChains
     @test res.log_evidence_bridge != res.log_evidence_laplace
     @test res.log_evidence_bridge != res.evidence.ti_plus[1]
 
-    # Opting out of bridge does not hand the headline to Laplace or to a
-    # tempered value this ladder (no β = 0 rung) cannot carry: no number, a
-    # warning, and the estimators still in the result.
-    res2 = @test_logs (:warn, r"no quotable log-evidence") match_mode = :any sample_pt_emcee(
+    # Opting out of bridge: a tempered value this ladder (no β = 0 rung)
+    # cannot carry is broken, so mode-Laplace is the headline, with a warning
+    # (Jose's rule), and the estimators stay in the result.
+    res2 = @test_logs (:warn, r"log_evidence is mode-Laplace") match_mode = :any sample_pt_emcee(
         target, target.data; n_temps = 12, n_walkers = 30, n_steps = 1500, n_burnin = 800,
         seed = 7, bridge_headline = false, show_progress = false)
     @test isnan(res2.log_evidence_bridge)
-    @test isnan(res2.log_evidence)
-    @test isfinite(res2.log_evidence_laplace) && isfinite(res2.evidence.ss_plus[1])
+    @test isfinite(res2.log_evidence) && res2.log_evidence == res2.log_evidence_laplace
+    @test isfinite(res2.evidence.ss_plus[1])
 end
