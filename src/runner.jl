@@ -1699,8 +1699,8 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = n_evals)
     elseif name == "nested"
-        chains, log_z = sample_nested(target, data; kw...)
-        return (chains = chains, log_evidence = log_z,
+        chains, log_z, log_z_err = sample_nested(target, data; kw...)
+        return (chains = chains, log_evidence = log_z, log_evidence_err = log_z_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = 0)
     elseif name == "pa"
@@ -1724,11 +1724,13 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
         res = sample_nested_ins(target, data; kw...)
         # the NS estimate: log_z_ins is not an evidence (INSResult)
         return (chains = res.chains, log_evidence = res.log_z_ns,
+                 log_evidence_err = res.log_z_ns_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = res.n_evals)
     elseif name == "nested_dynamic"
         res = sample_nested_dynamic(target, data; kw...)
         return (chains = res.chains, log_evidence = res.log_z,
+                 log_evidence_err = res.log_z_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = res.n_evals)
     elseif name == "daedalus"
@@ -2878,6 +2880,12 @@ function _populate_summary!(summary, result, params, chains)
         hasfield(typeof(result), fld) || continue
         v = getfield(result, fld)
         v isa Real && isfinite(v) && (ev[key] = Float64(v))
+    end
+    # A nested engine's log Z with its error (src/samplers/ns_error.jl).
+    if hasfield(typeof(result), :log_evidence_err)
+        lz = getfield(result, :log_evidence)
+        isfinite(lz) && (ev["nested"] = Dict("log_z" => Float64(lz),
+                                             "se" => Float64(getfield(result, :log_evidence_err))))
     end
     if hasfield(typeof(result), :evidence)
         rep = getfield(result, :evidence)
