@@ -1741,7 +1741,7 @@ function sample_pt_emcee(
     # n_eff ~ 8000 against 135 parameters.
     if isfinite(log_z_bridge)
         n_eff_min = try
-            minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
+            _bridge_min_ess(chains, target.params)   # folded, as bridge reads them
         catch err
             @debug "sample_pt_emcee: ESS unavailable for the bridge guard" exception = err
             NaN

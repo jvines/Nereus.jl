@@ -620,7 +620,7 @@ function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
         d = LogDensityProblems.dimension(target)
         need = d + d * (d + 1) ÷ 2
         n_eff = try
-            minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
+            _bridge_min_ess(chains, target.params)   # folded, as bridge reads them
         catch err
             @debug "sample_pt_hmc: ESS unavailable for the bridge guard" exception = err
             NaN

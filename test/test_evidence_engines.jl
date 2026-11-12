@@ -263,3 +263,35 @@ end
     @test r.beta_history[end] == 1.0
     @test isfinite(r.log_evidence)
 end
+
+@testset "bridge's ESS guard reads the draws folded, as bridge does" begin
+    # A cyclic inclination's posterior is the physical one twice over, at x and
+    # -x. A chain that sits in the mirror copy for stretches has a raw ESS on
+    # the inclination that says nothing about the folded draws q is fitted to.
+    t_rv = collect(55000.0:30.0:55360.0)
+    relast = RelAstromData(t = [55000.0, 55090.0, 55180.0, 55270.0],
+        ra_off = [10.0, 8.0, -5.0, -10.0], dec_off = [0.0, 6.0, 9.0, 0.0],
+        ra_err = ones(4), dec_err = ones(4))
+    hgca = HGCAData(epochs = mjd_epochs((1991.25, 2004.6, 2016.0)),
+        pmra = (5.0, 4.95, 4.9), pmdec = (-3.0, -3.05, -3.1),
+        sigma_pmra = (0.2, 0.2, 0.2), sigma_pmdec = (0.2, 0.2, 0.2),
+        plx = 25.0, plx_err = 0.05, hip_id = 1)
+    data = Data(t_rv = t_rv, rv = 3.0 .* sin.(t_rv ./ 50), rv_err = ones(length(t_rv)),
+                relastrom = relast, hgca = hgca)
+    p = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
+               planet_modes = [RVAS], instruments = InstrumentConfig(rv = ["HARPS"], pm = String[]),
+               data = data, stability = :none, M_s = 1.0)
+    names_ = p.layout.unfrozen_names
+    ii = findfirst(==("inc_k1"), names_)
+    @test Nereus.cyclic_inclination_indices(p) == [ii]
+    rng = MersenneTwister(3)
+    n = 2000
+    X = randn(rng, n, length(names_))
+    # i = 5° ± 0.2°, in the mirror copy for 6 stretches of the chain
+    X[:, ii] .= deg2rad.(5 .+ 0.2 .* randn(rng, n)) .* [isodd(k ÷ 170) ? -1 : 1 for k in 0:n-1]
+    ch = MCMCChains.Chains(reshape(X, n, :, 1), Symbol.(names_))
+    raw = minimum(Nereus._diag_by_param(MCMCChains.ess, ch)[:, :ess])
+    @test raw < 50
+    @test Nereus._bridge_min_ess(ch, p) > 1000
+    @test ch.value.data[:, ii, 1] == X[:, ii]          # the chains handed in are untouched
+end
