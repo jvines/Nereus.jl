@@ -55,7 +55,7 @@ Every parallel-tempering sampler feeds the same
 | `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | bridge if usable, else H+ if quotable and within `laplace_switch_tol` of mode-Laplace, else mode-Laplace (warned); `NaN` only with none of them |
 | `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if quotable, else `NaN` |
 | `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if quotable, else `NaN` |
-| `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | bridge if usable, else SS+ if quotable, else `NaN` (`_pt_hmc_evidence`) |
+| `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | bridge if usable, else SS+ if quotable and within `laplace_switch_tol` of mode-Laplace, else mode-Laplace (warned); `NaN` only with none of them (`_pt_hmc_evidence`) |
 
 Notes for a production reader:
 
@@ -72,9 +72,9 @@ Notes for a production reader:
   checks: the ladder reaches β = 0, or the `[0, β_min]` head is not in the
   integral, and every adjacent pair of rungs swapped at least `swap_min` (5%)
   of the time, or their ratio rests on too little overlap. Otherwise the
-  tempered value is not quoted: `sample_pt_emcee` falls back on mode-Laplace
-  (Jose's rule, below) and the samplers without one return `NaN`, each with a
-  warning saying why; the raw stack stays in the report, and summary.json
+  tempered value is not quoted: `sample_pt_emcee` and `sample_pt_hmc` fall
+  back on mode-Laplace (Jose's rule, below) and the samplers without one
+  return `NaN`, each with a warning saying why; the raw stack stays in the report, and summary.json
   carries it only when
   it is quotable (`"tempered_check": {"quotable": false, "why": ...}` otherwise).
   The default ladders of `pt_emcee`, `transdim_pt_emcee` and `pt_whitening`

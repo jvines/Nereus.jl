@@ -12,12 +12,13 @@
 #   ladder is now β = 0 and a geometric run from beta_min, the tempered value
 #   SS+, quoted only when its rungs overlap; and SS+ is fed every walker's
 #   log L, not their mean.
-# - pt_emcee's tempered SS+ read 157.85 where bridge gives 163.88, and its
-#   mode-Laplace sat 3.5 to 3.8 nats above bridge with e free and stood in for
-#   bridge when bridge was unavailable. The tempered stack is now quoted only
-#   from a ladder that reaches β = 0 with every pair swapping (in pt_emcee,
-#   transdim_pt_emcee, pt_whitening and sample_pt too), and Laplace is never the
-#   headline.
+# - pt_emcee's tempered SS+ read 157.85 where bridge gives 163.88. The
+#   tempered stack is now quoted only from a ladder that reaches β = 0 with
+#   every pair swapping (in pt_emcee, transdim_pt_emcee, pt_whitening and
+#   sample_pt too), and then only within `laplace_switch_tol` of mode-Laplace
+#   (Jose's rule; pt_emcee, pt_hmc and run_job's post-fit). Laplace is the
+#   headline only when there is neither a usable bridge nor such a tempered
+#   value.
 # - Population annealing resampled at every step and stopped mutating after a
 #   count of accepted moves; it now resamples on the ESS, steps β on the
 #   conditional ESS, and mutates until the replicas have decorrelated.
@@ -89,24 +90,41 @@ function _ee_rv(; P = NormalPrior(4.16, 0.05, 4.0, 4.3))
     return NereusTarget(params, data; unconstrained = false), data
 end
 
-@testset "pt_hmc: a number only when it can be quoted" begin
-    tg, _ = _ee_rv()
+@testset "pt_hmc: bridge, else a corroborated SS+, else mode-Laplace" begin
+    tg, data = _ee_rv()
     ch, lz, rep, ev = sample_pt_hmc(tg; n_temps = 5, n_sweeps = 60, n_warmup = 60,
                                     adapt_ladder = false, bridge_n = 0, seed = 2,
                                     progress = false)
     @test ev.betas == Nereus._pt_hmc_ladder(5, 1e-4)
     @test isnan(ev.bridge) && ev.reported != "bridge"
-    if ev.tempered_ok
+    @test isfinite(ev.laplace)
+    if ev.tempered_ok && abs(ev.tempered - ev.laplace) <= 50
         @test lz == ev.tempered == rep.ss_plus[1] && ev.reported == "ss_plus"
     else
-        @test isnan(lz) && ev.reported == "none" && !isempty(ev.tempered_why)
+        @test lz == ev.laplace && ev.reported == "mode_laplace"
     end
-    # Two rungs, 0 and 1, cannot overlap on this target: no number, and a warning.
-    ch, lz, rep, ev = @test_logs (:warn, r"no quotable log-evidence") match_mode = :any sample_pt_hmc(
+    # Two rungs, 0 and 1, cannot overlap on this target: the tempered SS+ is not
+    # quotable, and with no bridge mode-Laplace is reported, with a warning --
+    # never NaN while Laplace is finite.
+    ch, lz, rep, ev = @test_logs (:warn, r"log_evidence is mode-Laplace") match_mode = :any sample_pt_hmc(
         tg; n_temps = 2, n_sweeps = 60, n_warmup = 60, adapt_ladder = false, bridge_n = 0,
         seed = 2, progress = false)
-    @test isnan(lz)
     @test !ev.tempered_ok
+    @test isfinite(lz) && lz == ev.laplace && ev.reported == "mode_laplace"
+    # The selection itself, on a quotable SS+ (a β = 0 ladder whose rungs all
+    # swap): kept within laplace_switch_tol of Laplace, replaced by it beyond,
+    # NaN only with neither Laplace nor a quotable value.
+    βs = [0.0, 0.5, 1.0]; acc = [0.5, 0.5]
+    R = Nereus.EvidenceReport((10.0, 0.1), (10.0, 0.1), (10.0, 0.1), (10.0, 0.1), 1.0)
+    sel(tol; nolap = false) = Logging.with_logger(Logging.NullLogger()) do
+        Nereus._pt_hmc_evidence(NereusTarget(tg.params, data; unconstrained = !nolap),
+                                ch, R, βs, acc, 0.05, 2.0, 0, 1; laplace_switch_tol = tol)
+    end
+    lap = sel(Inf).laplace
+    @test sel(abs(10.0 - lap) + 1).reported == "ss_plus"
+    @test sel(abs(10.0 - lap) - 1).log_z == lap
+    e0 = sel(50.0; nolap = true)                     # bounded: no Laplace
+    @test isnan(e0.laplace) && e0.log_z == 10.0 && e0.reported == "ss_plus"
 end
 
 @testset "pt_hmc: the warm-start pre-search reports no evidence of its own" begin

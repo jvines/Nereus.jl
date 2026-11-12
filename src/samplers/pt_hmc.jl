@@ -335,12 +335,13 @@ tempered `EvidenceReport` (TI, TI+, SS+, H+) and a named tuple `evidence` of
 swap_acc)`.
 
 The log-evidence is chosen as pt_emcee chooses it: bridge sampling on the cold
-chain when its reference has the effective samples it needs, else the tempered
-SS+ when it can be trusted (`tempered_ok`), else `NaN`, with a warning saying
-why: a number is not printed for an evidence the run cannot support. SS+ is
-trusted when the ladder starts at β = 0 and every adjacent pair of rungs
-swapped at least `swap_min` of the time; `tempered_why` gives the reason it is
-not. A quotable SS+ more than `evidence_tol` nats from bridge is warned about.
+chain when its reference has the effective samples it needs; else the tempered
+SS+ when it can be trusted (`tempered_ok`) and agrees with mode-Laplace within
+`laplace_switch_tol`; else mode-Laplace, with a warning (Jose's rule); `NaN`,
+with a warning, only when none of them is available. SS+ is trusted when the
+ladder starts at β = 0 and every adjacent pair of rungs swapped at least
+`swap_min` of the time; `tempered_why` gives the reason it is not. A quotable
+SS+ more than `evidence_tol` nats from bridge is warned about.
 
 # Keywords
 - `n_temps=12`, `n_sweeps=1500`, `n_warmup=400`
@@ -367,6 +368,9 @@ not. A quotable SS+ more than `evidence_tol` nats from bridge is warned about.
   the tempered SS+ is quoted (above).
 - `evidence_tol=2.0` : nats; a quotable SS+ this far from bridge is warned
   about.
+- `laplace_switch_tol=50.0` : nats, the Laplace non-Gaussian bias; without a
+  usable bridge, a quotable SS+ further than this from mode-Laplace is broken
+  and mode-Laplace is reported.
 - `bridge_n=20_000` : proposal draws of the bridge estimate; `0` skips it.
 - `warm_start=true` : start from a short pt_emcee pre-search. With it off the
   starts are scouted prior draws (`n_scouts`), and the seams of the
@@ -427,6 +431,7 @@ function sample_pt_hmc(
     beta_min::Real = 1e-4,
     swap_min::Real = 0.05,
     evidence_tol::Real = 2.0,
+    laplace_switch_tol::Real = 50.0,
     bridge_n::Int = 20_000,
 )
     n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
@@ -559,7 +564,8 @@ function sample_pt_hmc(
     chains = MCMCChains.Chains(mat, pnames)
     report = res.report
     ev = _pt_hmc_evidence(target, chains, report, βs, res.swap_acc, Float64(swap_min),
-                          Float64(evidence_tol), bridge_n, seed)
+                          Float64(evidence_tol), bridge_n, seed;
+                          laplace_switch_tol = Float64(laplace_switch_tol))
     if progress
         @info "PT-HMC: $(n_post) cold samples, $(n_temps) temps × $(W) walkers" *
               (adapt_ladder && betas === nothing ? " (adaptive ladder)" : "")
@@ -599,13 +605,14 @@ end
 # The log-evidence pt_hmc reports, as pt_emcee picks its own: bridge sampling
 # on the cold chain when its reference `q` has the effective samples it needs
 # (d + d(d+1)/2; with fewer it is biased low and no diagnostic shows it), else
-# SS+ when `_pt_hmc_tempered_ok`, else NaN. A warning says why whenever the
+# SS+ when `_pt_hmc_tempered_ok` and within `laplace_switch_tol` of mode-Laplace,
+# else mode-Laplace (Jose's rule), else NaN. A warning says why whenever the
 # tempered value is not quotable, and when bridge and a quotable SS+ disagree
 # by more than `tol` nats.
 function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
                           report::EvidenceReport, βs::AbstractVector,
                           swap_acc::AbstractVector, swap_min::Float64, tol::Float64,
-                          bridge_n::Int, seed::Int)
+                          bridge_n::Int, seed::Int; laplace_switch_tol::Float64 = 50.0)
     ok, why = _pt_hmc_tempered_ok(report, βs, swap_acc, swap_min)
     lz_bridge = NaN
     if bridge_n > 0 && target.transform !== nothing
@@ -649,13 +656,30 @@ function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
                   "check that the posterior is not multimodal." bridge = lz_bridge ss_plus = ssp
         return (; log_z = lz_bridge, bridge = lz_bridge, laplace, tempered_ok = ok,
                   tempered_why = why, reported = "bridge")
+    elseif ok && isfinite(laplace) && abs(ssp - laplace) <= laplace_switch_tol
+        return (; log_z = ssp, bridge = NaN, laplace, tempered_ok = ok, tempered_why = why,
+                  reported = "ss_plus")
+    elseif isfinite(laplace)
+        # Jose's rule: a tempered value that is not quotable, or that is
+        # further from mode-Laplace than its non-Gaussian bias, is broken.
+        why_t = ok ? "it is $(round(abs(ssp - laplace), digits = 1)) nats from " *
+                     "mode-Laplace, beyond laplace_switch_tol = $laplace_switch_tol" :
+                     "it is not quotable: $why"
+        @warn "sample_pt_hmc: log_evidence is mode-Laplace, a Gaussian " *
+              "approximation at the posterior mode: bridge sampling is unavailable " *
+              "and the tempered SS+ is broken ($why_t)." laplace = laplace ss_plus = ssp
+        return (; log_z = laplace, bridge = NaN, laplace, tempered_ok = ok,
+                  tempered_why = why, reported = "mode_laplace")
     elseif ok
+        @warn "sample_pt_hmc: neither bridge nor mode-Laplace is available. " *
+              "log_evidence is the tempered SS+; its ladder can carry it, but " *
+              "nothing corroborates it." ss_plus = ssp
         return (; log_z = ssp, bridge = NaN, laplace, tempered_ok = ok, tempered_why = why,
                   reported = "ss_plus")
     end
     @warn "sample_pt_hmc: no quotable log-evidence for this run. The tempered " *
-          "stack is not ($why) and bridge sampling is unavailable. log_evidence " *
-          "is NaN; add rungs (n_temps) or sweeps." ss_plus = ssp ti_plus = report.ti_plus[1] laplace = laplace
+          "stack is not ($why), and neither bridge sampling nor mode-Laplace is " *
+          "available. log_evidence is NaN; add rungs (n_temps) or sweeps." ss_plus = ssp ti_plus = report.ti_plus[1]
     return (; log_z = NaN, bridge = NaN, laplace, tempered_ok = ok, tempered_why = why,
               reported = "none")
 end

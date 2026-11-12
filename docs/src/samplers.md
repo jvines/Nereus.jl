@@ -21,7 +21,7 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 | `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (bridge / H⁺ / mode-Laplace) |
 | `transdim_pt_emcee` | `sample_transdim_pt_emcee` | trans | **required** | occupancy |
 | `pt`               | `sample_pt`               | both  | optional (`td`) | quotable TI⁺ |
-| `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (bridge / SS⁺) |
+| `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (bridge / SS⁺ / mode-Laplace) |
 | `pt_whitening`     | `sample_pt_whitening`     | fixed | — | yes |
 | `rjmcmc`           | `sample_rjmcmc`           | trans | **required** | — (NaN) |
 | `moms`             | `sample_moms`             | trans | **required** | — (NaN) |
@@ -389,10 +389,13 @@ fixed-dim, ForwardDiff-differentiable models. Returns the cold-chain
 tuple of the evidence estimates (`bridge`, `laplace`, `tempered`,
 `tempered_ok`, `tempered_why`, `reported`, `betas`, `swap_acc`).
 
-The log-evidence is bridge sampling on the cold chain when its reference has
-the effective samples it needs; else SS⁺ when the ladder starts at β = 0 and
-every adjacent pair of rungs swapped at least `swap_min` of the time; else
-`NaN`, with a warning that says why. See [Evidence](evidence.md).
+The log-evidence is chosen as `sample_pt_emcee` chooses it (Jose's rule):
+bridge sampling on the cold chain when its reference has the effective
+samples it needs; else SS⁺ when the ladder starts at β = 0, every adjacent
+pair of rungs swapped at least `swap_min` of the time and it is within
+`laplace_switch_tol` of mode-Laplace; else mode-Laplace, with a warning;
+`NaN`, with a warning that says why, only when none of them is available.
+See [Evidence](evidence.md).
 
 ```julia
 chains, log_ev, report, ev = sample_pt_hmc(target;
@@ -407,6 +410,7 @@ chains, log_ev, report, ev = sample_pt_hmc(target;
     beta_min           = 1e-4,          # default ladder: β = 0, then geometric on [beta_min, 1]
     swap_min           = 0.05,          # least adjacent swap rate at which SS⁺ is quoted
     evidence_tol       = 2.0,           # nats; warn when a quotable SS⁺ disagrees with bridge
+    laplace_switch_tol = 50.0,          # nats; a quotable SS⁺ further from mode-Laplace is broken
     bridge_n           = 20_000,        # bridge proposal draws; 0 skips bridge
     warm_start         = true,
     n_scouts           = 16,            # warm_start = false: scouted prior draws
