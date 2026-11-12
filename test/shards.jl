@@ -126,6 +126,7 @@ const TEST_UNITS = [
     (name = "test_transdim_pt_emcee_defaults.jl", seconds = 641, files = ["test_transdim_pt_emcee_defaults.jl"]),
     (name = "test_circular.jl", seconds = 149, files = ["test_circular.jl"]),
     (name = "test_node_flip.jl", seconds = 90, files = ["test_node_flip.jl"]),
+    (name = "test_de_move.jl", seconds = 45, files = ["test_de_move.jl"]),
     (name = "test_cyclic_inclination.jl", seconds = 45, files = ["test_cyclic_inclination.jl"]),
     # measured: 49 s, one process, 8 threads (2026-11-11)
     (name = "test_angles_never_rail.jl", seconds = 49, files = ["test_angles_never_rail.jl"]),

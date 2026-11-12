@@ -114,6 +114,13 @@ Container for a `sample_pt_emcee` run.
   `"requested"` (the stop file appeared), `"max_seconds"` or `"max_evals"`;
   `step` is the last step recorded and `n_draws` the rows kept (walkers × kept
   steps).
+- `acceptance_de::Vector{Float64}` — within-temp acceptance of the
+  differential-evolution move per temp (`de_move`); NaN where none was proposed.
+- `drift` — the collective-drift check of the β=1 ensemble
+  ([`ensemble_drift`](@ref)): a `Dict` with each parameter's z for a trend of
+  the walkers' mean through the recorded steps and the parameters over the
+  threshold -- a drift every walker shares, which R-hat and ESS cannot see --
+  or `nothing` when the run was too short to test.
 """
 struct PTemceeResult
     chains::MCMCChains.Chains
@@ -122,11 +129,13 @@ struct PTemceeResult
     log_evidence_bridge::Float64
     evidence::EvidenceReport
     acceptance_within::Vector{Float64}
+    acceptance_de::Vector{Float64}
     acceptance_swap::Vector{Float64}
     betas::Vector{Float64}
     n_evals::Int
     ladder::LadderHistory
     stop::NamedTuple
+    drift::Union{Nothing, Dict{String, Any}}
 end
 
 """
@@ -772,6 +781,19 @@ in place.
 - `betas::Union{Nothing,Vector{Float64}}=nothing` — explicit β ladder
   (descending β[1]=1). Default: Vines+ 2023's `β_i = (1/√5)^i`.
 - `stretch_a::Float64=2.0` — Goodman-Weare stretch parameter.
+- `de_move::Real=DE_MOVE_DEFAULT` (0.5) — per walker and step, the probability
+  of a differential-evolution move, x' = x + γ(x_j − x_k) + ε with j ≠ k from
+  the half the stretch partner comes from, in place of the stretch move (ter
+  Braak 2006; src/samplers/de_move.jl). The proposal is symmetric, so it is
+  accepted on the tempered posterior ratio alone. γ is 2.38/√(2m) for the m
+  coordinates moved, jittered by 10 %, and 1 (a jump between modes) one time in
+  ten. The stretch move proposes along the chord through two walkers, which
+  leaves a thin curved ridge almost always, so a share of walkers that burn-in
+  leaves on such a ridge stays there: on the default transit-only fit one seed
+  in six kept 47 % of its draws at e > 0.5 on the constant-duration ridge where
+  nested sampling puts 7-9 %, with R-hat 1.0002; four of the other five kept
+  0.6-1.1 % there. `0` is the stretch-only kernel, and draws exactly what it
+  did.
 - `init::Union{Nothing,Vector{Float64}}=nothing` — bounded-space walker
   init point (Gaussian scatter around it).
 - `init_strategy::Symbol=:prior` — how walkers are initialized when
@@ -867,6 +889,7 @@ function sample_pt_emcee(
     betas::Union{Nothing,AbstractVector} = nothing,
     beta_min::Real = 1e-4,
     stretch_a::Real = 2.0,
+    de_move::Real = DE_MOVE_DEFAULT,
     init::Union{Nothing,Vector{Float64}} = nothing,
     init_strategy::Symbol = :prior,
     pf_n_runs::Int = 2,
@@ -903,6 +926,8 @@ function sample_pt_emcee(
 )
     # JSON delivers floats-as-Int and arrays-as-JSON3.Array; normalize.
     stretch_a       = Float64(stretch_a)
+    # The DE share (src/samplers/de_move.jl).
+    p_de            = _de_check(de_move)
     node_flip       = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
@@ -997,8 +1022,12 @@ function sample_pt_emcee(
     hold_med = Ref(NaN)                 # the β = 1 median log L at the last pass
 
     # Goodman-Weare: each half ≥ n_dim+1 walkers, total even.
-    n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
-    n_walkers_eff % 2 == 1 && (n_walkers_eff += 1)
+    # One assignment: the half-step closures capture it, and a variable
+    # assigned twice is boxed there, so every walker's partner range was
+    # typed Any.
+    n_walkers_eff = let nw = max(n_walkers, 2 * n_dim + 2)
+        nw + isodd(nw)
+    end
 
     # Geometric ladder across [beta_min, 1], matching sample_transdim_pt_emcee.
     #
@@ -1023,10 +1052,13 @@ function sample_pt_emcee(
     # The fingerprint takes the ladder as built, before any adaptation. On resume
     # the saved state replaces initialisation below and is put back just before
     # the main loop, which then carries on from step `step0 + 1`.
+    # `de_move` enters only when non-zero: a checkpoint written before the move
+    # existed ran the stretch-only kernel, which is `de_move = 0`.
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
         n_burnin, thin, seed, stretch_a, ladder = copy(βs), adapt_ladder,
         ladder_adapt_window, ladder_adapt_ν0, ladder_adapt_K, untemper_transit,
-        prune_stranded, node_flip, _burnin_hold_fp(hold, params)...)
+        prune_stranded, node_flip, _burnin_hold_fp(hold, params)...,
+        _de_fp(p_de)...)
     ck = resume ? read_checkpoint(ck_path, "pt_emcee", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -1241,6 +1273,18 @@ function sample_pt_emcee(
     propose_within = zeros(Int, n_temps)
     accept_swap    = zeros(Float64, n_temps - 1)
     propose_swap   = zeros(Int, n_temps - 1)
+    # The DE move's own tally per rung (`de_move`); the two above count the
+    # stretch move alone, as they always have.
+    de_proposed    = zeros(Int, n_temps)
+    de_accepted    = zeros(Int, n_temps)
+    de_prop_temp   = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_acc_temp    = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    # ε's scale along each coordinate, per rung: the spread of the half the
+    # partners come from, refreshed before each half-step (src/samplers/de_move.jl).
+    de_scale       = zeros(n_temps, n_dim)
+    is_held_dim    = falses(n_dim)
+    is_held_dim[hold.dims] .= true
+    no_held_dim    = falses(n_dim)
     # Ladder history (src/samplers/ladder_history.jl): the ladder, the swap
     # acceptance and the swap mean distance at every step, where the two
     # counters above only keep the run totals.
@@ -1277,9 +1321,11 @@ function sample_pt_emcee(
     # changes with `-t`, so drawing from a per-thread stream makes the
     # chain depend on the thread count at fixed seed (measured: K differs
     # in the 4th decimal between -t 2 and -t 4). Keying the stream on
-    # task_idx makes a run bit-identical across thread counts. Each task
-    # consumes exactly three draws per sweep (partner, stretch u, accept),
-    # so reusing the object across sweeps stays deterministic.
+    # task_idx makes a run bit-identical across thread counts. A stretch
+    # update consumes three draws (partner, stretch u, accept), a DE update
+    # its own fixed sequence, and the choice between them one more (none at
+    # `de_move` = 0); all from the walker's stream, so reusing the object
+    # across sweeps stays deterministic.
     rngs_h1 = [MersenneTwister(_walker_seed(seed, 1, i)) for i in 1:length(tasks_h1)]
     rngs_h2 = [MersenneTwister(_walker_seed(seed, 2, i)) for i in 1:length(tasks_h2)]
     # Node flip: one stream per (rung, walker), same reasoning. Built only when
@@ -1307,6 +1353,8 @@ function sample_pt_emcee(
         # The dimensions the stretch scales: a held coordinate is shared by the
         # whole ensemble, so the move leaves it and the Jacobian is z^(m - 1).
         n_move = n_dim - length(held_x)
+        held_dims = isempty(held_x) ? no_held_dim : is_held_dim
+        p_de > 0 && _de_spread!(de_scale, state, partner_lo, partner_hi)
         Threads.@threads :static for slot in 1:length(chunks)
             fills_threads && _serial_inner_loops!()
             # Each slot takes the next walker as it frees up, not a fixed block:
@@ -1322,6 +1370,29 @@ function sample_pt_emcee(
                 β = βs[t]
                 trng = task_rngs[task_idx]
                 buf  = thread_proposal[slot]
+
+                if _de_chosen(trng, p_de)
+                    # Differential evolution (src/samplers/de_move.jl): on the
+                    # same flat-scale, charted coordinates as the stretch, and
+                    # leaving the held ones as it does. Symmetric given the
+                    # other half: no Jacobian.
+                    j, k = _de_pair(trng, partner_lo, partner_hi)
+                    γ = _de_gamma(trng, _de_gamma0(n_move))
+                    _de_fill!(buf, state, t, w, j, k, γ, de_scale, held_dims, trng)
+                    lp_prop, ll_prop = eval_bounded!(buf, slot)
+                    log_ratio = β * (ll_prop - logL_arr[t, w]) +
+                                (lp_prop - logπ_arr[t, w])
+                    Threads.atomic_add!(de_prop_temp[t], 1)
+                    if log(rand(trng)) < log_ratio
+                        @inbounds for d in 1:n_dim
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp_prop
+                        logL_arr[t, w] = ll_prop
+                        Threads.atomic_add!(de_acc_temp[t], 1)
+                    end
+                    continue
+                end
 
                 w_partner = rand(trng, partner_lo:partner_hi)
                 u = rand(trng)
@@ -1413,6 +1484,8 @@ function sample_pt_emcee(
         accept_within .= ck.accept_within; propose_within .= ck.propose_within
         accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
+        hasproperty(ck, :de_proposed) && (de_proposed .= ck.de_proposed;
+                                          de_accepted .= ck.de_accepted)
         pruned .= ck.pruned
         hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
         n_evals_atomic[] = ck.n_evals::Int
@@ -1460,6 +1533,8 @@ function sample_pt_emcee(
         @inbounds for t in 1:n_temps
             propose_within[t] += Threads.atomic_xchg!(propose_temp[t], 0)
             accept_within[t]  += Threads.atomic_xchg!(accept_temp[t],  0)
+            de_proposed[t]    += Threads.atomic_xchg!(de_prop_temp[t], 0)
+            de_accepted[t]    += Threads.atomic_xchg!(de_acc_temp[t],  0)
         end
 
         # ---- Node flip (threaded; astrometry-only planets) -----------
@@ -1641,6 +1716,9 @@ function sample_pt_emcee(
             update!(pb; n_done = step,
                     fields = (:acc => round(acc_rate, digits = 3),
                               :β1_acc => round(accept_within[1] / max(propose_within[1], 1), digits = 3),
+                              # the DE move's at β = 1, when it is on
+                              (p_de > 0 ? (:β1_de => round(de_accepted[1] /
+                                  max(de_proposed[1], 1), digits = 3),) : ())...,
                               # The LADDER's health, not the move's. This is the
                               # half that fails silently: once the rungs stop
                               # exchanging, the cold chain is stuck in one mode
@@ -1680,7 +1758,7 @@ function sample_pt_emcee(
                 state, logπ = logπ_arr, logL = logL_arr, betas = βs, rng_master,
                 rngs_h1, rngs_h2, rngs_flip, accept_within, propose_within,
                 accept_swap, propose_swap, flip_proposed, flip_accepted, pruned,
-                prune_med,
+                prune_med, de_proposed, de_accepted,
                 n_evals = n_evals_atomic[], β_hist = β_hist[1:step, :],
                 swap_hist = swap_hist[1:step, :], smd_hist = smd_hist[1:step, :],
                 keep_idx, samples = samples[1:keep_idx, :],
@@ -1953,10 +2031,16 @@ function sample_pt_emcee(
               "check." tempered = log_z_tempered reported = log_z
     end
 
+    # Collective drift of the cold ensemble, which R-hat cannot see (see
+    # `ensemble_drift`); warns when it finds one.
+    drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_emcee",
+                      de_move = p_de)
+
     return PTemceeResult(
-        chains, log_z, log_z_laplace, log_z_bridge, ev_report, acc_within, acc_swap,
+        chains, log_z, log_z_laplace, log_z_bridge, ev_report, acc_within,
+        _de_acceptance(de_accepted, de_proposed), acc_swap,
         βs, n_evals_atomic[],
         _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
-        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc)
+        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc), drift
     )
 end

@@ -92,6 +92,8 @@ include("samplers/pt.jl")
 include("samplers/pt_hmc.jl")  # Hamiltonian parallel tempering (fixed-dim, differentiable)
 include("samplers/ns_error.jl")       # the error of a nested run's log Z (thread bootstrap + volumes)
 include("samplers/nested.jl")
+include("samplers/de_move.jl")   # differential-evolution move mixed into the ensemble samplers
+include("diagnostics/drift.jl")  # collective drift of an ensemble the R-hat cannot see
 include("samplers/ensemble.jl")
 include("samplers/map.jl")
 include("samplers/ess.jl")
@@ -414,7 +416,7 @@ end
 
 
 # Public API surface (api.jl / features.jl)
-export sampler_diagnostics, chain_convergence,
+export sampler_diagnostics, chain_convergence, ensemble_drift,
        fit_rv, fit_transit, fit_astrometry, fit_rm, fit_tomography,
     fit_ttv, fit_binary, fit_joint, run_engine, Stopping, ENGINES,
     FEATURE_ACTIONS, default_rv_planet, default_astrom_planet

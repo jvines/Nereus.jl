@@ -13,8 +13,10 @@
 # one call: it cannot be stopped part-way, and it recomputes the walkers'
 # log-densities on entry instead of taking them. `_stretch_step!` draws the same
 # random numbers in the same order and does the same arithmetic, so a seeded run
-# is bit-identical to what the package returned; test/test_ensemble_resume.jl
-# holds it to that.
+# at `de_move = 0` is bit-identical to what the package returned;
+# test/test_ensemble_resume.jl holds it to that. By default a share `de_move` of
+# the walker updates are differential-evolution moves instead
+# (src/samplers/de_move.jl, `_ensemble_step!`).
 
 using AffineInvariantMCMC
 using Random
@@ -23,9 +25,11 @@ using MCMCChains
 """
     sample_ensemble(target::NereusTarget; kwargs...) -> chains
 
-Affine-invariant ensemble MCMC (Goodman & Weare 2010), step for step the
-algorithm of AffineInvariantMCMC.jl (stretch scale a = 2). Returns posterior as
-`MCMCChains.Chains`.
+Affine-invariant ensemble MCMC (Goodman & Weare 2010): the stretch move (scale
+a = 2) mixed with a differential-evolution move (`de_move`). At `de_move = 0` it
+is, step for step, the algorithm of AffineInvariantMCMC.jl. Returns posterior as
+`MCMCChains.Chains`, with the collective-drift check of each chain's walkers
+([`ensemble_drift`](@ref)) in `chains.info.drift`.
 
 Works in unconstrained space (with transforms) by default.
 
@@ -36,6 +40,11 @@ Works in unconstrained space (with transforms) by default.
 - `thinning::Int=1` — thinning factor
 - `init::Union{Nothing, Vector{Float64}}=nothing` — if provided, walkers scatter around this point; otherwise drawn from prior (EMPEROR-style)
 - `seed::Int=1`
+- `de_move::Real=DE_MOVE_DEFAULT` — as in `sample_pt_emcee`: per walker and
+  step, the probability of a differential-evolution move, x' = x + γ(x_j − x_k)
+  + ε with j ≠ k from the other half of the walkers, in place of the stretch
+  move (src/samplers/de_move.jl). On the sampling coordinates, like the
+  stretch. `0` is AffineInvariantMCMC's stretch-only kernel, draw for draw.
 - `n_chains::Int=1` — independent ensembles run on Julia threads, chain `c`
   seeded with `seed + c - 1`. They share the circular windows: the burn-in
   re-cut is taken from the walkers of all of them, at a point where each has
@@ -73,7 +82,8 @@ Works in unconstrained space (with transforms) by default.
   kept stay, and the new ones are appended. The continuation is bit-identical to
   an uninterrupted run of `n_steps`. Refused, with the differences listed, if
   the checkpoint came from different data, priors, parameters, circular windows,
-  walkers, burn-in, thinning, seed, `init`, `n_chains` or parameterisation.
+  walkers, burn-in, thinning, seed, `init`, `n_chains`, `de_move` or
+  parameterisation.
 """
 function sample_ensemble(
     target::NereusTarget;
@@ -90,8 +100,10 @@ function sample_ensemble(
     resume::Bool = false,
     prune_stranded::Bool = true,
     n_scouts::Int = 16,
+    de_move::Real = DE_MOVE_DEFAULT,
 )
     n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
+    p_de = _de_check(de_move)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))
@@ -113,7 +125,7 @@ function sample_ensemble(
         n_dim = length(target.params.layout.unfrozen_idx)
         nw = max(n_walkers, 2 * n_dim + 2)
         fps = [_ensemble_fingerprint(target, nw, n_burnin, thinning, seed + c - 1,
-                                     n_chains, init, prune_stranded, n_scouts)
+                                     n_chains, init, prune_stranded, n_scouts, p_de)
                for c in 1:n_chains]
         cks = Any[resume ? read_checkpoint(_chain_checkpoint_path(ck_path, c),
                                            "ensemble", fps[c]) : nothing
@@ -128,16 +140,23 @@ function sample_ensemble(
                     n_burnin, thinning, init, seed + c - 1, n_chains,
                     show_progress && c == 1, ck_c, ck_every, resume;
                     pre = (fp = fps[c], ck = cks[c]), rendezvous = rv, prune_stranded,
-                    n_scouts)
+                    n_scouts, de_move = p_de, check_drift = false)
             finally
                 rv === nothing || _rendezvous_leave!(rv)
             end
         end
-        return MCMCChains.chainscat([fetch(t) for t in tasks]...)
+        chs = [fetch(t) for t in tasks]
+        # The drift check runs on each chain's walkers (one ensemble each) and
+        # reports them together, once.
+        drift = _ensemble_drift_chains([c.info.walker_cube for c in chs],
+                                       target.params; sampler = "ensemble",
+                                       de_move = p_de)
+        out = MCMCChains.chainscat([_strip_walker_cube(c) for c in chs]...)
+        return MCMCChains.setinfo(out, (; drift))
     end
     return _ensemble_chain(target, n_walkers, n_steps, n_burnin, thinning, init,
                            seed, n_chains, show_progress, ck_path, ck_every, resume;
-                           prune_stranded, n_scouts)
+                           prune_stranded, n_scouts, de_move = p_de)
 end
 
 # Chain `c`'s state file in a multi-chain run: "dir/ensemble_state.jls" ->
@@ -151,16 +170,17 @@ end
 # stored in the sampling coordinates, so the circular windows and whether the
 # target is unconstrained are part of it. So is turning the stranded-walker
 # pruning off, or scouting with other than 16; the defaults leave the
-# fingerprint as it was before either existed.
+# fingerprint as it was before either existed. `de_move` enters when it is not
+# 0, the stretch-only kernel every checkpoint before the move ran.
 _ensemble_fingerprint(target::NereusTarget, n_walkers, n_burnin, thinning, seed,
                       n_chains, init, prune_stranded::Bool = true,
-                      n_scouts::Int = 16) =
+                      n_scouts::Int = 16, de_move::Float64 = DE_MOVE_DEFAULT) =
     run_fingerprint(target.params, target.data; n_walkers, n_burnin, thinning,
         seed, n_chains, init = init === nothing ? nothing : copy(init),
         unconstrained = target.transform !== nothing,
         windows = circular_windows(target.params),
         (prune_stranded ? (;) : (; prune_stranded = false))...,
-        (n_scouts == 16 ? (;) : (; n_scouts))...)
+        (n_scouts == 16 ? (;) : (; n_scouts))..., _de_fp(de_move)...)
 
 """
     _ensemble_recut!(x, params, transform, rv) -> Bool
@@ -275,6 +295,64 @@ function _stretch_step!(logpost, x::Matrix{Float64}, lastll::Vector{Float64},
     return x
 end
 
+# One step of the whole ensemble with the DE move mixed in (`de_move` > 0): each
+# half moved in turn against the other, each walker by a DE move with
+# probability `p_de` and by the stretch move otherwise, all its proposals
+# evaluated, then accepted in walker order, as the stretch-only step does. A DE
+# proposal is symmetric given the other half (src/samplers/de_move.jl), so its
+# ratio is the posterior ratio alone; the stretch keeps its z^(d-1). ε's scale
+# is the other half's spread, γ's base 2.38/√(2d). Proposals are built in `ws`,
+# allocated once per chain.
+struct _EnsembleDEWork
+    P::Matrix{Float64}
+    lq::Vector{Float64}
+    newll::Vector{Float64}
+    scale::Vector{Float64}
+end
+_EnsembleDEWork(nd::Int, n_walkers::Int) =
+    _EnsembleDEWork(Matrix{Float64}(undef, nd, cld(n_walkers, 2)),
+                    zeros(cld(n_walkers, 2)), zeros(cld(n_walkers, 2)), zeros(nd))
+
+function _ensemble_step!(ws::_EnsembleDEWork, logpost, x::Matrix{Float64},
+                         lastll::Vector{Float64}, rng::AbstractRNG, divisions,
+                         p_de::Float64, a::Float64 = 2.0)
+    nd = size(x, 1)
+    base = _de_gamma0(nd)
+    for (active, inactive) in divisions
+        lo, hi = first(inactive), last(inactive)
+        @inbounds for d in 1:nd
+            ws.scale[d] = _de_spread(view(x, d, inactive))
+        end
+        for (i, w) in enumerate(active)
+            col = view(ws.P, :, i)
+            if _de_chosen(rng, p_de)
+                j, k = _de_pair(rng, lo, hi)
+                _de_fill!(col, x, w, j, k, _de_gamma(rng, base), ws.scale, rng)
+                ws.lq[i] = 0.0
+            else
+                z = ((a - 1) * rand(rng) + 1)^2 / a
+                p = rand(rng, inactive)
+                @inbounds for d in 1:nd
+                    col[d] = z * x[d, w] + (1 - z) * x[d, p]
+                end
+                ws.lq[i] = (nd - 1) * log(z)
+            end
+        end
+        for i in eachindex(active)
+            ws.newll[i] = logpost(view(ws.P, :, i))
+        end
+        for (i, w) in enumerate(active)
+            if log(rand(rng)) < ws.lq[i] + ws.newll[i] - lastll[w]
+                lastll[w] = ws.newll[i]
+                @inbounds for d in 1:nd
+                    x[d, w] = ws.P[d, i]
+                end
+            end
+        end
+    end
+    return x
+end
+
 # The two halves the stretch move alternates between, as AffineInvariantMCMC
 # splits them.
 function _stretch_divisions(n_walkers::Int)
@@ -292,7 +370,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
                          ck_path::Union{Nothing, String}, ck_every::Float64,
                          resume::Bool; pre = nothing,
                          rendezvous::Union{Nothing,_Rendezvous} = nothing,
-                         prune_stranded::Bool = true, n_scouts::Int = 16)
+                         prune_stranded::Bool = true, n_scouts::Int = 16,
+                         de_move::Float64 = DE_MOVE_DEFAULT, check_drift::Bool = true)
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -316,7 +395,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     # With several chains `sample_ensemble` has read the checkpoint (`pre`).
     ck_fp = pre === nothing ?
         _ensemble_fingerprint(target, n_walkers, n_burnin, thinning, seed,
-                              n_chains, init, prune_stranded, n_scouts) : pre.fp
+                              n_chains, init, prune_stranded, n_scouts, de_move) : pre.fp
     ck = pre !== nothing ? pre.ck :
          resume ? read_checkpoint(ck_path, "ensemble", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
@@ -406,11 +485,16 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
 
     # --- Main loop ----------------------------------------------------
     divisions = _stretch_divisions(n_walkers)
+    de_ws = _EnsembleDEWork(n_dim, n_walkers)
     pb = ProgressBar("ensemble"; total = n_steps, enabled = show_progress,
                      start = step0)
     last_ck = time()
     for step in (step0 + 1):n_steps
-        _stretch_step!(logpost, x, lastll, rng, divisions)
+        if de_move > 0
+            _ensemble_step!(de_ws, logpost, x, lastll, rng, divisions, de_move)
+        else
+            _stretch_step!(logpost, x, lastll, rng, divisions)
+        end
         # ---- Stranded walkers (burn-in only): sample_pt_emcee's pruning, one
         # rung at β = 1. Before the re-cut, so the seam is cut from the cleaned
         # walkers. On the unconstrained target the walkers' coordinates are the
@@ -472,9 +556,18 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         end
     end
 
-    chains = MCMCChains.Chains(mat, param_names)
-    return chains
+    # The drift check reads each walker's own sequence: (step, param, walker).
+    cube = permutedims(reshape(mat, n_walkers, n_keep, n_dim), (2, 3, 1))
+    if check_drift
+        drift = _ensemble_drift_chains([cube], params; sampler = "ensemble", de_move)
+        return MCMCChains.Chains(mat, param_names; info = (; drift))
+    end
+    # Several chains: `sample_ensemble` checks them together, and drops this.
+    return MCMCChains.Chains(mat, param_names; info = (; walker_cube = cube))
 end
+
+# A chain without the walker cube `_ensemble_chain` hands `sample_ensemble`.
+_strip_walker_cube(c::MCMCChains.Chains) = MCMCChains.setinfo(c, NamedTuple())
 
 # The ensemble's stranded walkers moved onto the ones that found the mode:
 # `_pt_prune_stranded!` on a one-rung ladder at β = 1, in the sampling

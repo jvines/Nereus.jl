@@ -154,6 +154,10 @@ Population Annealing sequential MC sampler.
   collapses on high-d correlated posteriors (HD 18599 22-d RVPM joint).
 - `stretch_a::Float64=2.0` — Goodman-Weare stretch parameter; only used when
   `mutation_kernel=:stretch`.
+- `de_move::Real=DE_MOVE_DEFAULT` — with `mutation_kernel=:stretch`, the
+  probability per replica and sweep of a differential-evolution move, x' = x +
+  γ(x_j − x_k) + ε with j ≠ k from the other half, in place of the stretch
+  (src/samplers/de_move.jl). `0` is the stretch-only mutation.
   - `:adaptive_cov` proposes from a Gaussian shaped like the *empirical
     covariance* of the population. Best for high-d (≥20) correlated
     posteriors where the partner-based stretch can't re-diversify a
@@ -175,6 +179,7 @@ function sample_pa(
     step_scale::Real = 0.05,
     mutation_kernel::Symbol = :stretch,
     stretch_a::Real = 2.0,
+    de_move::Real = DE_MOVE_DEFAULT,
     mcmc_target_moves::Real = 5.0,
     max_mcmc_mult::Int = 30,
     resample_ess::Real = 0.5,
@@ -187,6 +192,8 @@ function sample_pa(
     ess_target = Float64(ess_target)
     step_scale = Float64(step_scale)
     stretch_a  = Float64(stretch_a)
+    # The DE share of the stretch mutation (src/samplers/de_move.jl).
+    p_de       = _de_check(de_move)
     mcmc_target_moves = Float64(mcmc_target_moves)
     resample_ess = Float64(resample_ess)
     decorrelation = Float64(decorrelation)
@@ -298,6 +305,9 @@ function sample_pa(
     resampled     = Bool[]
     # Normalised log-weights of the replicas, carried between resamplings.
     log_Wt = fill(-log(n_replicas), n_replicas)
+    # DE (stretch mutation): ε's scale per coordinate, refreshed from the
+    # partner half before each half-sweep.
+    de_scale = zeros(n_dim)
 
     pb = ProgressBar("PA"; total = max_steps, enabled = show_progress)
     step = 0
@@ -486,9 +496,41 @@ function sample_pa(
                     (1,        half,        half + 1, n_replicas),
                     (half + 1, n_replicas,  1,        half))
                 active_chunks = _chunk_ranges(active_lo:active_hi, n_slots)
+                if p_de > 0
+                    @inbounds for d in 1:n_dim
+                        de_scale[d] = _de_spread(view(replicas, partner_lo:partner_hi, d))
+                    end
+                end
+                de_base = _de_gamma0(n_dim)
                 Threads.@threads :static for slot in 1:length(active_chunks)
                     for i in active_chunks[slot]
                         trng = replica_rngs[i]
+                        if _de_chosen(trng, p_de)
+                            # Differential evolution (src/samplers/de_move.jl):
+                            # symmetric given the other half, no Jacobian.
+                            # `jd`, `kd`: the resampling above has a `j` of its
+                            # own, which a `j` here would share across threads.
+                            jd, kd = _de_pair(trng, partner_lo, partner_hi)
+                            γ = _de_gamma(trng, de_base)
+                            y = thread_y[slot]
+                            @inbounds for d in 1:n_dim
+                                y[d] = replicas[i, d] +
+                                       γ * (replicas[jd, d] - replicas[kd, d]) +
+                                       _DE_EPS * de_scale[d] * randn(trng)
+                            end
+                            lp_y, ll_y = eval_bounded!(y, slot)
+                            Threads.atomic_add!(propose_count, 1)
+                            Threads.atomic_add!(n_evals, 1)
+                            isfinite(lp_y) || continue
+                            if log(rand(trng)) < β_new * (ll_y - logL[i]) + (lp_y - logπ[i])
+                                @inbounds for d in 1:n_dim
+                                    replicas[i, d] = y[d]
+                                end
+                                logL[i] = ll_y; logπ[i] = lp_y
+                                Threads.atomic_add!(accept_count, 1)
+                            end
+                            continue
+                        end
                         partner = rand(trng, partner_lo:partner_hi)
                         u = rand(trng)
                         z = ((stretch_a - 1) * u + 1)^2 / stretch_a

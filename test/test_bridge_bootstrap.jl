@@ -516,9 +516,13 @@ end
                         Mo = UniformPrior(0.0, 2π)),),
         rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(2.0, n)),
                      sigma = LogUniformPrior(0.5, 20.0)),))
+    # The stretch-only chain these bounds were set on (`de_move = 0`): how far
+    # the streamed proposal moments round from 0.8.8's matrix ones depends on
+    # the chain (4.3e-12 in l2 on the default DE chain at this seed, against
+    # the 1e-12 bound), and the chain is only the fixture here.
     res = sample_pt_emcee(tg, tg.data; n_temps = 4, n_walkers = 24, n_steps = 900,
                           n_burnin = 500, seed = 3, bridge_headline = false,
-                          show_progress = false)
+                          de_move = 0, show_progress = false)
     ch = res.chains
 
     @testset "draws streamed off the chain: no copy, the same numbers" begin
