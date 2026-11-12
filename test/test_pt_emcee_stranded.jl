@@ -48,9 +48,12 @@ function _passes!(state, lπ, lL, βs; n = 2, kw...)
     return [_pt_prune_stranded!(state, lπ, lL, βs, MersenneTwister(1 + i);
                                 memory = mem, kw...)[1] for i in 1:n]
 end
-# A record of each rung's median log L at the previous prune that says the rung
-# has stopped climbing: the same median as now.
-_settled(lL) = [median(filter(isfinite, lL[t, :])) for t in axes(lL, 1)]
+function _td_passes!(state, tds, lπ, lL, shift; n = 2, owner = [1, 1, 1], kw...)
+    mem = Nereus.PruneMemory(size(state)...)
+    return [Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift, owner, 0,
+                                       MersenneTwister(1 + i); memory = mem, kw...)[1]
+            for i in 1:n]
+end
 # Passes until one moves nothing. No pass moves more walkers than the rung's
 # survivors (A, and the climbed top), so none moves more than half the rung.
 function _settle!(f; n = 16)
@@ -183,6 +186,14 @@ end
         @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2); memory = mem,
                                   evalf = _mode_eval(60.0)) == [29]
         @test state[1, 71, :] == x
+        # The trans-dim prune, every walker with the planet.
+        state, lπ, lL = copy(s0), zeros(1, 100), copy(l0)
+        tds = [Nereus.TransDimState(1, BitVector([true]), BitVector(), BitVector([true]))
+               for _ in 1:1, w in 1:100]
+        tev = (y, td) -> _mode_eval(60.0)(y)
+        shift = Union{Nothing,Float64}[nothing, nothing, nothing]
+        @test _td_passes!(state, tds, lπ, lL, shift; evalf = tev) == [0, 30]
+        @test all(abs.(state[1, :, :] .- 0.5) .< 0.05)
     end
 
     @testset "a mode too new for a covariance: volume from the density" begin
@@ -284,10 +295,8 @@ end
                for _ in 1:1, w in 1:100]
         tev = (x, td) -> td.planet_active[1] ? ev(x) : (0.0, -gap)
         shift = Union{Nothing,Float64}[nothing, nothing, nothing]
-        moved = Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
-                                           [1, 1, 1], 0, MersenneTwister(2);
-                                           evalf = tev, med_logL = _settled(lL))
-        @test moved == [100]
+        h = _settle!(n -> _td_passes!(state, tds, lπ, lL, shift; n, evalf = tev))
+        @test sum(h) == 100
         @test all(w -> tds[1, w].planet_active[1], 1:100)
         @test all(abs.(state[1, :, :] .- 0.5) .< 5 * width)
         @test all(lL[1, :] .> -20)
@@ -326,9 +335,7 @@ end
                                     BitVector(), BitVector([true]))
                for _ in 1:1, w in 1:100]
         shift = Union{Nothing,Float64}[nothing, nothing, nothing]
-        moved = Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
-                                           [1, 1, 1], 0, MersenneTwister(2))
-        @test moved == [30]
+        @test _td_passes!(state, tds, lπ, lL, shift) == [0, 30]
         @test all(w -> tds[1, w].planet_active[1] && tds[1, w].n_planets_active == 1, 71:100)
         @test tds[1, 71].planet_active !== tds[1, 1].planet_active   # copied, not aliased
 
@@ -337,26 +344,21 @@ end
         tds = [Nereus.TransDimState(w <= 70 ? 1 : 0, BitVector([w <= 70]),
                                     BitVector(), BitVector([true]))
                for _ in 1:1, w in 1:100]
-        @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
-                                         [1, 1, 1], 0, MersenneTwister(2)) == [0]
+        @test _td_passes!(state, tds, lπ, lL, shift) == [0, 0]
         @test count(w -> tds[1, w].planet_active[1], 1:100) == 70
 
         # Four walkers have the planet: the volume comes from the density about
-        # the best one, and the 96 without it are drawn there, planet and all.
+        # the top of the best one's mode, and the 96 without it are drawn about
+        # the survivors, planet and all, the mode at most doubling per pass.
         state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 60.0)
         tds = [Nereus.TransDimState(w <= 4 ? 1 : 0, BitVector([w <= 4]),
                                     BitVector(), BitVector([true]))
                for _ in 1:1, w in 1:100]
         ev = (x, td) -> td.planet_active[1] ? _mode_eval(60.0)(x) : (0.0, -60.0)
-        @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
-                                         [1, 1, 1], 0, MersenneTwister(2)) == [0]
-        @test Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
-                                         [1, 1, 1], 0, MersenneTwister(2);
-                                         evalf = ev) == [0]
-        moved = Nereus._td_prune_stranded!(state, tds, lπ, lL, [1.0], shift,
-                                           [1, 1, 1], 0, MersenneTwister(2);
-                                           evalf = ev, med_logL = _settled(lL))
-        @test moved == [96]
+        @test _td_passes!(copy(state), deepcopy(tds), copy(lπ), copy(lL), shift) == [0, 0]
+        h = _settle!(n -> _td_passes!(state, tds, lπ, lL, shift; n, evalf = ev))
+        @test sum(h) == 96
+        @test h[2] <= 4 + 1
         @test all(w -> tds[1, w].planet_active[1], 1:100)
         @test length(unique(eachrow(state[1, :, :]))) == 100
         @test all(lL[1, 5:end] .> -30)

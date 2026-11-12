@@ -121,13 +121,17 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
             return state, fill(c, 1, 100), lL
         end
         ev(gap; c = 0.0) = x -> all(u -> 0 <= u <= 1, x) ? (c, mlogL(x, gap)) : (-Inf, -Inf)
-        settled(lL) = [median(lL[1, :])]
         # The prune as the samplers run it: passes sharing one record (see
         # test/test_pt_emcee_stranded.jl); each pass's count.
         passes!(state, lπ, lL; n = 12, kw...) =
             (mem = Nereus.PruneMemory(size(state)...);
              [_pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(1 + i);
                                   memory = mem, kw...)[1] for i in 1:n])
+        tdpasses!(state, td, lπ, lL; n = 12, kw...) =
+            (mem = Nereus.PruneMemory(size(state)...);
+             [Nereus._td_prune_stranded!(state, td, lπ, lL, [1.0], shift, [1, 1, 0], 0,
+                                         MersenneTwister(1 + i); memory = mem, kw...)[1]
+              for i in 1:n])
 
         ℓat = x -> (r = ev(50.0)(x); isfinite(r[1]) ? r[1] + r[2] : -Inf)
         σ = Nereus._pt_axis_widths(ℓat, x0, -28.0, fill(1e-3, 2); dims = [1, 2])
@@ -152,10 +156,8 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
         shift = Union{Nothing,Float64}[nothing, nothing, nothing]
         state, lπ, lL = rung(50.0)
         td = tds()
-        moved = Nereus._td_prune_stranded!(state, td, lπ, lL, [1.0], shift, [1, 1, 0], 0,
-                                           MersenneTwister(2); evalf = tev(50.0),
-                                           med_logL = settled(lL), held = [3])
-        @test moved == [100]
+        h = tdpasses!(state, td, lπ, lL; evalf = tev(50.0), held = [3])
+        @test h[end] == 0 && sum(h) == 100
         @test all(w -> td[1, w].planet_active[1], 1:100)
         @test all(==(v), state[1, :, 3])
         @test all(abs.(state[1, :, 1:2] .- 0.5) .< 5 * width)
@@ -170,10 +172,8 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
             @test sum(passes!(state, lπ, lL; evalf = ev(17.0; c), held = [3],
                                held_logπ = hl)) == n
             state, lπ, lL = rung(17.0; c, ll = -2.2)
-            @test Nereus._td_prune_stranded!(state, tds(), lπ, lL, [1.0], shift, [1, 1, 0],
-                                             0, MersenneTwister(2); evalf = tev(17.0; c),
-                                             med_logL = settled(lL), held = [3],
-                                             held_logπ = hl) == [n]
+            @test sum(tdpasses!(state, tds(), lπ, lL; evalf = tev(17.0; c), held = [3],
+                                 held_logπ = hl)) == n
         end
         # What the samplers pass: the held prior density on their own scale.
         p = _bh_iad_target().params

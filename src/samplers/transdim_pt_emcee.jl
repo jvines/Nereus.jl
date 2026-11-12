@@ -313,24 +313,33 @@ end
 #  - A is the best walker's MODEL only, and Laplace runs over that model's
 #    active dimensions (an inactive slot has no prior density to integrate).
 #    `owner[d]` is 0 for an always-on dimension, k > 0 for planet slot k and
-#    -j for noise model j.
+#    -j for noise model j. A walker outside A -- in another model, or more than
+#    `allow` below the best walker -- is a candidate.
 #  - The bound: the spike-slab prior over (planet indicators, active
 #    parameters) is normalised, but the noise indicators carry no prior, so the
 #    joint prior integrates to at most 2^n_noise_toggle. The cut is lowered by
 #    that factor.
-#  - A walker moved onto a donor takes the donor's whole TransDimState.
+#  - A walker moved onto a survivor takes the survivor's whole TransDimState.
 #  - Walkers live in x, not on the flat scale: Laplace, the axis widths and the
-#    draws about the best walker all work on the flat scale of its active
-#    dimensions, mapped back to x.
+#    draws about the survivors all work on the flat scale of the best model's
+#    active dimensions, mapped back to x.
+#  - A walker followed to its own mode is followed in its own model, over that
+#    model's active dimensions; the walkers that move with it are those of the
+#    same model, at this pass and the last, inside that mode at both. It is on
+#    the flank of A's own mode only if it is in A's model.
 # As there, a model a rung has only just found -- fewer than m + 2 walkers in
-# it, or a singular Σ_A -- takes its volume from the axis widths about the best
-# walker (`evalf(x, tds)` returns its (log π, log L)), and the walkers it gains
-# are drawn about that walker, in its model, rather than copied; and only once
-# the rung has stopped climbing, its median log L risen by less than m/2 since
-# the previous call (`med_logL`, updated in place). Coordinates `held` by
-# `burnin_hold` are left out of the active set: every walker shares them, the
-# climb and the draws leave them, and their share of the density (`held_logπ`)
-# comes out of the bound, as in `_pt_prune_stranded!`.
+# it, or a singular Σ_A -- takes its volume from the axis widths at the top the
+# best walker climbs to (`evalf(x, tds)` returns its (log π, log L)), and only
+# once the rung has stopped climbing; a walker moves only once it is stranded at
+# two passes running, and from below the cut only if it is not climbing fast
+# enough to clear it by the next pass; it is drawn about a survivor picked at
+# random (a walker in the upper half of A, or the climbed top), never copied
+# while an evaluator is given; and a pass moves at most as many walkers as A
+# holds (one more for the top). `memory` is the record of the previous pass,
+# its `key` each slot's model. Coordinates `held` by `burnin_hold` are left
+# out of the active set: every walker shares them, the climb and the draws leave
+# them, and their share of the density (`held_logπ`) comes out of the bound, as
+# in `_pt_prune_stranded!`.
 # ------------------------------------------------------------------
 function _td_prune_stranded!(state::Array{Float64,3},
                              td_states::AbstractMatrix{TransDimState},
@@ -340,71 +349,92 @@ function _td_prune_stranded!(state::Array{Float64,3},
                              owner::Vector{Int}, n_noise_toggle::Int, rng;
                              tau::Float64 = 10.0, evalf = nothing,
                              circ::AbstractVector{Int} = Int[],
-                             med_logL::Union{Nothing,AbstractVector{Float64}} = nothing,
+                             memory::Union{Nothing,PruneMemory} = nothing,
                              held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0)
     n_t, n_w, n_dim = size(state)
     moved = zeros(Int, n_t)
-    rise = med_logL === nothing ? fill(NaN, n_t) :
-           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - med_logL[t]) for t in 1:n_t]
+    mem = memory
+    known = mem !== nothing && mem.seen
+    rise = known ?
+           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - mem.med[t]) for t in 1:n_t] :
+           fill(NaN, n_t)
     _active(tds, o) = o == 0 || (o > 0 ? tds.planet_active[o] : tds.noise_active[-o])
     _same(a, b) = a.planet_active == b.planet_active &&
                   a.noise_active == b.noise_active && a.as_active == b.as_active
+    _key(a) = hash((a.planet_active, a.noise_active, a.as_active))
     _flat(x, s) = s === nothing ? x : (x + s > 0 ? log(x + s) : -Inf)
+    _dims(tds) = [d for d in 1:n_dim if _active(tds, owner[d]) && !(d in held)]
+    _allow(m) = quantile(Chisq(max(m, 1)), 1 - 1e-6) / 2
+    # A slot's log π on the flat scale of its own active dims.
+    function flatlπ(X, t, w)
+        v = logπ_arr[t, w]
+        @inbounds for d in 1:n_dim
+            s = flat_shift[d]
+            (s === nothing || !_active(td_states[t, w], owner[d])) && continue
+            v += _flat(X[t, w, d], s)
+        end
+        return v
+    end
+    # The active dims `dims` of slot (t, w) of `X` on the flat scale; a circular
+    # one as its offset from `ref` on the circle when given.
+    flatv(X, t, w, dims, ref = nothing) =
+        [(ref !== nothing && d in circ ? rem2pi(X[t, w, d] - ref[d], RoundNearest) :
+          _flat(X[t, w, d], flat_shift[d])) for d in dims]
     ℓ = Vector{Float64}(undef, n_w)
-    for t in 1:n_t
-        β = βs[t]
-        # Tempered density on the flat scale, over each walker's own active dims.
+    function tempered!(t, β)
         @inbounds for w in 1:n_w
-            v = logπ_arr[t, w] + β * logL_arr[t, w]
-            for d in 1:n_dim
-                s = flat_shift[d]
-                (s === nothing || !_active(td_states[t, w], owner[d])) && continue
-                v += _flat(state[t, w, d], s)
-            end
+            v = flatlπ(state, t, w) + β * logL_arr[t, w]
             ℓ[w] = isfinite(v) ? v : -Inf
         end
+    end
+    # From flat values `yd` of `dims` to x, the other coordinates from `base`.
+    function tox!(xbuf, base, dims, yd)
+        copyto!(xbuf, base)
+        @inbounds for (j, d) in enumerate(dims)
+            s = flat_shift[d]
+            xbuf[d] = s === nothing ? yd[j] : exp(yd[j]) - s
+        end
+        return xbuf
+    end
+    jac(dims, yd) = sum((yd[j] for (j, d) in enumerate(dims) if flat_shift[d] !== nothing);
+                        init = 0.0)
+    xbuf = Vector{Float64}(undef, n_dim)
+    for t in 1:n_t
+        known || break
+        β = βs[t]
+        tempered!(t, β)
         b = argmax(ℓ)
         isfinite(ℓ[b]) || continue
         tb = td_states[t, b]
-        dims = [d for d in 1:n_dim if _active(tb, owner[d]) && !(d in held)]
+        dims = _dims(tb)
         m = length(dims)
         m >= 1 || continue
-        allow = quantile(Chisq(m), 1 - 1e-6) / 2
+        allow = _allow(m)
         A = [w for w in 1:n_w if ℓ[w] >= ℓ[b] - allow && _same(td_states[t, w], tb)]
         inA = falses(n_w); inA[A] .= true
-        cand = [w for w in 1:n_w if !inA[w]]
+        # Stranded at this pass and the last.
+        cand = [w for w in 1:n_w if !inA[w] && mem.out[t, w]]
         isempty(cand) && continue
         # The best walker's active dims on the flat scale, a circular one as its
         # offset from the best walker on the circle (see `_pt_half_logdet_cov`).
-        yb = [_flat(state[t, b, d], flat_shift[d]) for d in dims]
-        Y(ws) = [(d in circ ? rem2pi(state[t, w, d] - state[t, b, d], RoundNearest) :
-                  _flat(state[t, w, d], flat_shift[d])) for w in ws, d in dims]
-        lv = length(A) >= m + 2 ? _td_half_logdet_cov(Y(A)) : nothing
-        σ = nothing
         xb = state[t, b, :]
-        xbuf = similar(xb)
-        function tox!(yd)
-            copyto!(xbuf, xb)
-            @inbounds for (j, d) in enumerate(dims)
-                s = flat_shift[d]
-                xbuf[d] = s === nothing ? yd[j] : exp(yd[j]) - s
-            end
-            return xbuf
-        end
-        evaly(yd) = evalf(tox!(yd), tb)
+        yb = flatv(state, t, b, dims)
+        Y(ws) = [(d in circ ? rem2pi(state[t, w, d] - xb[d], RoundNearest) :
+                  _flat(state[t, w, d], flat_shift[d])) for w in ws, d in dims]
+        cv = length(A) >= m + 2 ? _td_cov_volume(Y(A)) : nothing
+        evaly(base, yd) = evalf(tox!(xbuf, base, dims, yd), tb)
+        ℓat = yd -> (r = evaly(xb, yd); v = r[1] + β * r[2] + jac(dims, yd);
+                     isfinite(v) ? v : -Inf)
         ℓb = ℓ[b]
-        xc, lpb, llb = nothing, NaN, NaN     # the climbed point, if any
-        if lv === nothing
+        xc, lpb, llb = xb, logπ_arr[t, b], logL_arr[t, b]     # the best walker, or its top
+        top = false
+        if cv === nothing
             (evalf === nothing || !(rise[t] < m / 2)) && continue
             # A cost gate, not a bound (see `_pt_prune_stranded!`).
             gate = _td_half_logdet_cov(Y(findall(isfinite, ℓ)))
             gate === nothing && continue
             cg = (ℓb - held_logπ) + 0.5 * m * log(2π) + gate - tau - n_noise_toggle * log(2)
             any(w -> β * logL_arr[t, w] < cg, cand) || continue
-            jac(yd) = sum((yd[j] for (j, d) in enumerate(dims) if flat_shift[d] !== nothing);
-                          init = 0.0)
-            ℓat = yd -> (r = evaly(yd); v = r[1] + β * r[2] + jac(yd);
-                         isfinite(v) ? v : -Inf)
             Yall = Y(findall(isfinite, ℓ))
             h0 = [0.1 * max(std(view(Yall, :, j)), 1e-6 * max(1.0, abs(yb[j])))
                   for j in 1:m]
@@ -416,45 +446,92 @@ function _td_prune_stranded!(state::Array{Float64,3},
             σc = ℓc > ℓb ? _pt_axis_widths(ℓat, yc, ℓc, h0) : nothing
             if σc !== nothing
                 yb, ℓb, σ = yc, ℓc, σc
-                lpb, llb = evaly(yb); xc = copy(xbuf)
-                cand = [w for w in 1:n_w
-                        if !(ℓ[w] >= ℓb - allow && _same(td_states[t, w], tb))]
+                lpb, llb = evaly(xb, yb)
+                xc = copy(xbuf)
+                top = true
+                A = [w for w in 1:n_w
+                     if ℓ[w] >= ℓb - allow && _same(td_states[t, w], tb)]
             end
-            lv = sum(log, σ)
+            cv = (sum(log, σ), σ)
         end
-        cut = (ℓb - held_logπ) + 0.5 * m * log(2π) + lv - tau - n_noise_toggle * log(2)
-        S = [w for w in cand if !(β * logL_arr[t, w] >= cut)]
+        lv, s = cv
+        logza = ℓb + 0.5 * m * log(2π) + lv
+        cut = (logza - held_logπ) - tau - n_noise_toggle * log(2)
+        # Below the cut, and not climbing fast enough to clear it by the next pass.
+        S = [w for w in cand if !(β * logL_arr[t, w] >= cut) &&
+             !(β * (2 * logL_arr[t, w] - mem.lL[t, w]) >= cut)]
+        # The walkers the cut keeps: one followed to its own mode, in its own
+        # model, per pass.
+        U = [w for w in cand if β * logL_arr[t, w] >= cut]
+        if !isempty(U) && evalf !== nothing && rise[t] < m / 2
+            w0 = U[rand(rng, 1:length(U))]
+            t0 = td_states[t, w0]
+            d0 = _dims(t0)
+            if !isempty(d0)
+                x0 = state[t, w0, :]
+                ℓat0 = yd -> (r = evalf(tox!(xbuf, x0, d0, yd), t0);
+                              v = r[1] + β * r[2] + jac(d0, yd); isfinite(v) ? v : -Inf)
+                same0 = [w for w in 1:n_w if _same(td_states[t, w], t0)]
+                h0 = [0.1 * max(std([_flat(state[t, w, d], flat_shift[d]) for w in same0];
+                                    corrected = false),
+                                1e-6 * max(1.0, abs(_flat(x0[d], flat_shift[d]))))
+                      for d in d0]
+                mm = _pt_mode_mass(ℓat0, flatv(state, t, w0, d0), ℓ[w0], h0)
+                c0 = [j for (j, d) in enumerate(d0) if d in circ]
+                a0 = _allow(length(d0))
+                if mm === nothing
+                elseif mm.logz < logza - tau
+                    # A separate mode that weighs next to nothing: the walker
+                    # that climbed to it, and those inside it at both passes.
+                    push!(S, w0)
+                    k0 = _key(t0)
+                    for w in U
+                        w != w0 && _same(td_states[t, w], t0) && mem.key[t, w] == k0 &&
+                            _pt_in_mode(mm, flatv(state, t, w, d0), c0, a0) &&
+                            _pt_in_mode(mm, flatv(mem.x, t, w, d0), c0, a0) && push!(S, w)
+                    end
+                elseif _same(t0, tb) && _pt_in_mode(mm, flatv(state, t, b, d0), c0, a0) &&
+                       !_pt_in_mode(mm, flatv(state, t, w0, d0), c0, a0) &&
+                       !(ℓ[w0] + β * (logL_arr[t, w0] - mem.lL[t, w0]) >= ℓb - allow)
+                    # A's own mode, far down whose flank it sits.
+                    push!(S, w0)
+                end
+            end
+        end
         isempty(S) && continue
-        donors = σ === nothing ? A[ℓ[A] .>= median(ℓ[A])] : [b]
+        # Survivors, as in `_pt_prune_stranded!`: the upper half of A, and the top.
+        anchors = isempty(A) ? Int[] : A[ℓ[A] .>= median(ℓ[A])]
+        cap = length(A) + top
+        if length(S) > cap
+            sort!(S; by = w -> ℓ[w])
+            resize!(S, cap)
+        end
         yd = similar(yb)
-        @inbounds for w in S
-            a = donors[rand(rng, 1:length(donors))]
-            lp, ll = logπ_arr[t, a], logL_arr[t, a]
-            if σ === nothing
-                for d in 1:n_dim
-                    state[t, w, d] = state[t, a, d]
+        for w in S
+            k = rand(rng, 1:(length(anchors) + top))
+            a = k <= length(anchors) ? anchors[k] : 0
+            base, ya, lp, ll = a > 0 ?
+                (state[t, a, :], flatv(state, t, a, dims), logπ_arr[t, a],
+                 logL_arr[t, a]) :
+                (xc, yb, lpb, llb)
+            src = a > 0 ? td_states[t, a] : tb
+            lp2, ll2 = evalf === nothing ? (-Inf, -Inf) :
+                       _pt_scatter!(yd, y -> evaly(base, y), ya, s, rng;
+                                    ok = (lp, ll) -> β * ll >= cut)
+            if isfinite(lp2) && isfinite(ll2)
+                tox!(xbuf, base, dims, yd)
+                lp, ll = lp2, ll2
+                @inbounds for d in 1:n_dim
+                    state[t, w, d] = xbuf[d]
                 end
             else
-                lp2, ll2 = _pt_scatter!(yd, evaly, yb, σ, rng)
-                if isfinite(lp2) && isfinite(ll2)
-                    tox!(yd); lp, ll = lp2, ll2
-                    for d in 1:n_dim
-                        state[t, w, d] = xbuf[d]
-                    end
-                elseif xc !== nothing
-                    lp, ll = lpb, llb
-                    for d in 1:n_dim
-                        state[t, w, d] = xc[d]
-                    end
-                else
-                    for d in 1:n_dim
-                        state[t, w, d] = state[t, a, d]
-                    end
+                @inbounds for d in 1:n_dim
+                    state[t, w, d] = base[d]
                 end
             end
             logπ_arr[t, w] = lp
             logL_arr[t, w] = ll
-            src, dst = td_states[t, a], td_states[t, w]
+            dst = td_states[t, w]
             dst.n_planets_active = src.n_planets_active
             copyto!(dst.planet_active, src.planet_active)
             copyto!(dst.noise_active, src.noise_active)
@@ -462,19 +539,40 @@ function _td_prune_stranded!(state::Array{Float64,3},
         end
         moved[t] = length(S)
     end
-    if med_logL !== nothing
+    if mem !== nothing
+        out = fill(false, n_t, n_w)
+        key = zeros(UInt, n_t, n_w)
         for t in 1:n_t
-            med_logL[t] = _pt_finite_median(view(logL_arr, t, :))
+            for w in 1:n_w
+                key[t, w] = _key(td_states[t, w])
+            end
+            tempered!(t, βs[t])
+            b = argmax(ℓ)
+            isfinite(ℓ[b]) || continue
+            tb = td_states[t, b]
+            allow = _allow(length(_dims(tb)))
+            for w in 1:n_w
+                out[t, w] = !(ℓ[w] >= ℓ[b] - allow && _same(td_states[t, w], tb))
+            end
         end
+        _prune_record!(mem, state, logL_arr, out; key)
     end
     return moved
 end
 
-# ½ log det of the covariance of the rows of `Y`; `nothing` if singular.
-function _td_half_logdet_cov(Y::AbstractMatrix{Float64})
+# ½ log det of the covariance of the rows of `Y`, and the conditional widths
+# 1/√(Σ⁻¹)_jj; `nothing` if singular.
+function _td_cov_volume(Y::AbstractMatrix{Float64})
     all(isfinite, Y) || return nothing
     C = cholesky(Symmetric(cov(Y; dims = 1)); check = false)
-    return issuccess(C) ? 0.5 * logdet(C) : nothing
+    issuccess(C) || return nothing
+    return (0.5 * logdet(C), 1 ./ sqrt.(diag(inv(C))))
+end
+
+# The ½ log det alone.
+function _td_half_logdet_cov(Y::AbstractMatrix{Float64})
+    r = _td_cov_volume(Y)
+    return r === nothing ? nothing : r[1]
 end
 
 """
@@ -536,9 +634,10 @@ selection on planet count.
   after burn-in ends production the same way (`stop.stopped == "interrupted"`).
 - `n_burnin::Int = 2000` — was 2000/1000, see `sample_pt_emcee`.
 - `prune_stranded::Bool = true` — as in `sample_pt_emcee`, in the joint
-  (model, parameter) space: during burn-in a walker whose likelihood puts it
-  in a region of negligible total mass takes over a mode walker's parameters
-  AND model. See `_td_prune_stranded!`.
+  (model, parameter) space: during burn-in a walker stranded at two passes
+  running, in a region of negligible total mass, in a separate mode that
+  carries next to none, or far down the mode's own flank, is drawn about a
+  mode walker's parameters and takes its model. See `_td_prune_stranded!`.
 - `betas::Union{Nothing,Vector{Float64}} = nothing`
 - `swap_min::Real = 0.05` — `log_evidence` is the tempered value (H+), which
   is quoted only when the ladder reaches β = 0 and every adjacent pair swapped
@@ -866,7 +965,8 @@ function sample_transdim_pt_emcee(
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
-    prune_med = fill(NaN, n_temps)      # each rung's median log L at the last prune
+    # The pruning's record of its last pass (`_td_prune_stranded!`).
+    prune_mem = PruneMemory(n_temps, n_walkers_eff, n_dim)
     # Astrometry-only planets get the node flip (src/samplers/node_flip.jl).
     # Same-mode slots share Ω's window, and the flip reads it from the layout.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
@@ -1626,7 +1726,7 @@ function sample_transdim_pt_emcee(
                 end
             end
         end
-        prune_med .= NaN
+        _prune_forget!(prune_mem)
         return nothing
     end
 
@@ -2289,7 +2389,7 @@ function sample_transdim_pt_emcee(
         hasproperty(ck, :de_proposed) && (de_proposed .= ck.de_proposed;
                                           de_accepted .= ck.de_accepted)
         pruned .= ck.pruned
-        hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
+        _prune_restore!(prune_mem, ck)
         n_evals_atomic[] = ck.n_evals::Int
         for (a, v) in zip((pswap_prop, pswap_acc, pn_prop, pn_acc, np_prop, np_acc),
                           ck.swap_diag)
@@ -2501,7 +2601,7 @@ function sample_transdim_pt_emcee(
                                            βs, flat_shift, dim_owner,
                                            do_noise ? length(noise_toggle_idx) : 0,
                                            rng_master; evalf = prune_eval, circ,
-                                           med_logL = prune_med,
+                                           memory = prune_mem,
                                            held = any(is_held) ? hold.dims : Int[],
                                            held_logπ = any(is_held) ? held_lp : 0.0)
         end
@@ -2616,7 +2716,8 @@ function sample_transdim_pt_emcee(
                 accept_transdim, propose_transdim, accept_noise_transdim,
                 propose_noise_transdim, planet_birth_proposed, planet_birth_accepted,
                 planet_death_proposed, planet_death_accepted, flip_proposed,
-                flip_accepted, slide_proposed, slide_accepted, pruned, prune_med,
+                flip_accepted, slide_proposed, slide_accepted, pruned,
+                prune_mem = _prune_saved(prune_mem),
                 de_proposed, de_accepted,
                 hold_on = any(is_held), hold_med = hold_med[],
                 n_evals = n_evals_atomic[],
@@ -2666,9 +2767,9 @@ function sample_transdim_pt_emcee(
                                         slide_proposed, slide_accepted)
     show_progress && sum(pruned) > 0 && @info "td-pt_emcee: burn-in moved " *
         "$(sum(pruned)) stranded walker state(s), model included, onto their " *
-        "rung's mode ($(pruned[1]) at β = 1), all from a region whose total " *
-        "posterior mass is bounded below e⁻¹⁰ of the mode's. The recorded chain " *
-        "is ordinary MCMC."
+        "rung's mode ($(pruned[1]) at β = 1), each from a region whose total " *
+        "posterior mass is bounded, or a separate mode whose own is estimated, " *
+        "below e⁻¹⁰ of the mode's. The recorded chain is ordinary MCMC."
     @info "planet↔activity swap: proposed=$(pswap_prop[]) accepted=$(pswap_acc[])" *
           "  | PN(pl→AD) $(pn_acc[])/$(pn_prop[])  NP(AD→pl) $(np_acc[])/$(np_prop[])"
     # A silent move would leave the reader of a trace plot wondering why Mo now
