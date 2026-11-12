@@ -71,6 +71,9 @@ struct TransDimPTemceeResult
     # `stopped` one of "steps", "converged", "interrupted", "requested",
     # "max_seconds", "max_evals". See src/graceful_stop.jl.
     stop::NamedTuple
+    # Within-rung acceptance of the differential-evolution move (`de_move`),
+    # per temp; NaN where none was proposed. `acceptance_within` is the stretch's.
+    acceptance_de::Vector{Float64}
 end
 
 # ------------------------------------------------------------------
@@ -570,6 +573,12 @@ selection on planet count.
   -- the tell that some realisations fell into a badly mixing state for the
   whole run -- is now 2.4x, and the new floor sits above the old ceiling.
 - `stretch_a::Float64 = 2.0`
+- `de_move::Real = DE_MOVE_DEFAULT` — as in `sample_pt_emcee`: per walker and
+  step, the probability of a differential-evolution move in place of the
+  stretch move (src/samplers/de_move.jl). It moves the coordinates the stretch
+  moves -- the walker's active ones, on the same scales, with the same
+  Jacobian -- and leaves parked and held ones where they are. `0` is the
+  stretch-only kernel, and draws exactly what it did.
 - `seed::Int = 1`
 - `thin::Int = 1`
 - `show_progress::Bool = true`
@@ -657,6 +666,7 @@ function sample_transdim_pt_emcee(
     betas::Union{Nothing,AbstractVector} = nothing,
     beta_min::Real = 1e-4,
     stretch_a::Real = 2.0,
+    de_move::Real = DE_MOVE_DEFAULT,
     seed::Int = 1,
     thin::Int = 1,
     show_progress::Bool = true,
@@ -705,6 +715,7 @@ function sample_transdim_pt_emcee(
     informed_birth_fraction = Float64(informed_birth_fraction)
     target_birth_accept     = Float64(target_birth_accept)
     stretch_a               = Float64(stretch_a)
+    p_de                    = _de_check(de_move)
     ladder_adapt_ν0         = Float64(ladder_adapt_ν0)
     ladder_adapt_K          = Float64(ladder_adapt_K)
 
@@ -800,7 +811,7 @@ function sample_transdim_pt_emcee(
         inclusion_prior, moms_init_scale, informed_birth_fraction,
         target_birth_accept, n_birth_refine, n_birth_tries, n_noise_bridge,
         n_noise_relax, noise_swap, noise_swap_rate = Float64(noise_swap_rate),
-        _burnin_hold_fp(hold, params)...)
+        _burnin_hold_fp(hold, params)..., _de_fp(p_de)...)
     ck = resume ? read_checkpoint(ck_path, "transdim_pt_emcee", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -1330,6 +1341,15 @@ function sample_transdim_pt_emcee(
     propose_pb   = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
     accept_pd    = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
     propose_pd   = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    # The DE move's tally per rung (`de_move`; the two counters above count the
+    # stretch alone), and ε's scale along each coordinate per rung, refreshed
+    # from the partner half before each half-step (src/samplers/de_move.jl).
+    de_proposed  = zeros(Int, n_temps)
+    de_accepted  = zeros(Int, n_temps)
+    de_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_scale     = zeros(n_temps, n_dim)
+    de_col       = Vector{Float64}(undef, n_walkers_eff)
 
     half = n_walkers_eff ÷ 2
     tasks_h1 = Vector{Tuple{Int,Int}}(undef, n_temps * half)
@@ -1394,6 +1414,17 @@ function sample_transdim_pt_emcee(
         partner_hi = active_half === :h1 ? n_walkers_eff : half
         task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
         half_chunks = _chunk_ranges(length(tasks), n_slots)
+        # ε's scale for the DE move, on the scale the move takes each coordinate.
+        if p_de > 0
+            @inbounds for d in 1:n_dim, t in 1:n_temps
+                s = flat_shift[d]
+                for (i, w) in enumerate(partner_lo:partner_hi)
+                    x = state[t, w, d]
+                    de_col[i] = s === nothing ? x : (x + s > 0 ? log(x + s) : NaN)
+                end
+                de_scale[t, d] = _de_spread(view(de_col, 1:(partner_hi - partner_lo + 1)))
+            end
+        end
         Threads.@threads :static for slot in 1:length(half_chunks)
             for task_idx in half_chunks[slot]
                 halt[] && break
@@ -1401,6 +1432,62 @@ function sample_transdim_pt_emcee(
                 β = βs[t]
                 trng = task_rngs[task_idx]
                 buf  = thread_proposal[slot]
+
+                if _de_chosen(trng, p_de)
+                    # Differential evolution (src/samplers/de_move.jl) over the
+                    # coordinates the stretch below moves: active in this walker
+                    # and not held, linear or on log(x + s) as it takes them,
+                    # with the same Jacobian. j, k need not share the walker's
+                    # model; the move never changes it, so it stays symmetric.
+                    j, k = _de_pair(trng, partner_lo, partner_hi)
+                    tds_w = td_states[t, w]
+                    n_on = 0
+                    @inbounds for d in 1:n_dim
+                        o = dim_owner[d]
+                        on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
+                        (on && !is_held[d]) && (n_on += 1)
+                    end
+                    γ = _de_gamma(trng, _de_gamma0(n_on))
+                    log_jac = 0.0
+                    in_domain = true
+                    @inbounds for d in 1:n_dim
+                        xw = state[t, w, d]
+                        o = dim_owner[d]
+                        on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
+                        if !on || is_held[d]
+                            buf[d] = xw
+                            continue
+                        end
+                        ε = _DE_EPS * de_scale[t, d] * randn(trng)
+                        xj, xk = state[t, j, d], state[t, k, d]
+                        s = flat_shift[d]
+                        if s === nothing
+                            buf[d] = xw + γ * (xj - xk) + ε
+                        elseif xw + s > 0 && xj + s > 0 && xk + s > 0
+                            yw = log(xw + s)
+                            yn = yw + γ * (log(xj + s) - log(xk + s)) + ε
+                            buf[d] = exp(yn) - s
+                            log_jac += yn - yw
+                        else
+                            buf[d] = xw
+                            in_domain = false
+                        end
+                    end
+                    lp_prop, ll_prop = in_domain ?
+                        eval_bounded!(buf, td_states[t, w], slot) : (-Inf, -Inf)
+                    log_ratio = log_jac + β * (ll_prop - logL_arr[t, w]) +
+                                (lp_prop - logπ_arr[t, w])
+                    Threads.atomic_add!(de_prop_temp[t], 1)
+                    if log(rand(trng)) < log_ratio
+                        @inbounds for d in 1:n_dim
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp_prop
+                        logL_arr[t, w] = ll_prop
+                        Threads.atomic_add!(de_acc_temp[t], 1)
+                    end
+                    continue
+                end
 
                 w_partner = rand(trng, partner_lo:partner_hi)
                 u = rand(trng)
@@ -2190,6 +2277,8 @@ function sample_transdim_pt_emcee(
         planet_death_accepted .= ck.planet_death_accepted
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
         slide_proposed .= ck.slide_proposed; slide_accepted .= ck.slide_accepted
+        hasproperty(ck, :de_proposed) && (de_proposed .= ck.de_proposed;
+                                          de_accepted .= ck.de_accepted)
         pruned .= ck.pruned
         hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
         n_evals_atomic[] = ck.n_evals::Int
@@ -2264,6 +2353,8 @@ function sample_transdim_pt_emcee(
         @inbounds for t in 1:n_temps
             propose_within[t] += Threads.atomic_xchg!(propose_temp[t], 0)
             accept_within[t]  += Threads.atomic_xchg!(accept_temp[t],  0)
+            de_proposed[t]    += Threads.atomic_xchg!(de_prop_temp[t], 0)
+            de_accepted[t]    += Threads.atomic_xchg!(de_acc_temp[t],  0)
         end
         @inbounds for t in 1:n_temps
             propose_noise_transdim[t] += Threads.atomic_xchg!(propose_ntd[t], 0)
@@ -2480,6 +2571,9 @@ function sample_transdim_pt_emcee(
             # as "frozen" when it is in fact toggling.
             update!(pb; n_done = step,
                     fields = (:acc => round(acc_rate, digits=3),
+                              # the DE move's at β = 1, when it is on
+                              (p_de > 0 ? (:β1_de => round(de_accepted[1] /
+                                  max(de_proposed[1], 1), digits = 3),) : ())...,
                               :td_acc => round(td_rate, digits=3),
                               :td_n => td_acc,
                               :ntd_n => sum(accept_noise_transdim),
@@ -2514,6 +2608,7 @@ function sample_transdim_pt_emcee(
                 propose_noise_transdim, planet_birth_proposed, planet_birth_accepted,
                 planet_death_proposed, planet_death_accepted, flip_proposed,
                 flip_accepted, slide_proposed, slide_accepted, pruned, prune_med,
+                de_proposed, de_accepted,
                 hold_on = any(is_held), hold_med = hold_med[],
                 n_evals = n_evals_atomic[],
                 swap_diag = Int[a[] for a in (pswap_prop, pswap_acc, pn_prop, pn_acc,
@@ -2633,5 +2728,6 @@ function sample_transdim_pt_emcee(
         copy(planet_death_proposed), copy(planet_death_accepted),
         _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
         _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc),
+        _de_acceptance(de_accepted, de_proposed),
     )
 end
