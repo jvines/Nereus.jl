@@ -83,7 +83,20 @@ end
 Population Annealing sequential MC sampler.
 
 # Keywords
-- `n_replicas::Int=500` — population size. Larger N → tighter log Z + posterior.
+- `n_replicas::Int=2000` — population size. Larger N → tighter log Z + posterior,
+  and a smaller bias: where the population crosses a phase transition the
+  estimate is biased HIGH at small N. On an RV + Hipparcos-IAD companion near
+  face-on (i = 5°, e free) the population moves from the prior's inclinations
+  to the face-on corner and its mirror image between β ≈ 1e-3 and 5e-3 (the
+  inclination's median from 1.9 rad to 0.09), and up to there no parameter
+  decorrelates within `max_mcmc_mult × n_mcmc` sweeps. The few
+  replicas that seed the corner are cloned into an under-dispersed population
+  that over-weights the next increments: log Z was +0.44 and +0.51 nats from
+  bridge (σ 0.005) and reference-path at 500 replicas, +0.12 at 1000, +0.01 and
+  -0.05 at 2000. All of it accrues between β = 1e-3 and 1e-2, with each of the three
+  kernels; a slower schedule (`ess_target = 0.97`) or a stricter
+  `decorrelation` (0.05) leaves it. Away from face-on (i = 45°, 89.5°) 500
+  matched bridge to 0.2.
 - `n_mcmc::Int=10` — MINIMUM MCMC mutation sweeps per anneal step. The mutation
   loop is adaptive (see `decorrelation`): it always runs at least `n_mcmc`
   sweeps and then keeps sweeping until the population has decorrelated, so a
@@ -155,7 +168,7 @@ Population Annealing sequential MC sampler.
 function sample_pa(
     target::NereusTarget,
     data::Data;
-    n_replicas::Int = 500,
+    n_replicas::Int = 2000,
     n_mcmc::Int = 10,
     ess_target::Real = 0.9,
     max_steps::Int = 200,

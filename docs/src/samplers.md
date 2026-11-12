@@ -678,7 +678,7 @@ from where they started.
 
 ```julia
 res = sample_pa(target, data;
-    n_replicas        = 500,
+    n_replicas        = 2000,          # biased high at small N across a phase transition
     n_mcmc            = 10,             # MINIMUM mutation sweeps per anneal step
     ess_target        = 0.9,           # adaptive β picks ESS/N = this (conservative crawl)
     max_steps         = 200,
