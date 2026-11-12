@@ -10,10 +10,12 @@ using MCMCChains
 using LogExpFunctions: logaddexp
 
 """
-    sample_nested(target::NereusTarget, data::Data; kwargs...) -> (chains, log_evidence)
+    sample_nested(target::NereusTarget, data::Data; kwargs...) -> (chains, log_evidence, log_evidence_err)
 
 Ellipsoidal nested sampling via NestedSamplers.jl. Returns posterior
-samples as `MCMCChains.Chains` and a log-evidence estimate.
+samples as `MCMCChains.Chains`, a log-evidence estimate and its error: the
+spread of log Z over realisations of the run, its threads resampled and its
+prior volumes drawn afresh (dynesty's; src/samplers/ns_error.jl).
 
 The target must use `unconstrained=false` (bounded space).
 
@@ -371,6 +373,8 @@ function sample_nested(
     end
     finish!(pb)
     log_ev = ns_state.logz
+    tr = ns_state.trace
+    log_ev_err = _ns_logz_err(_NSTrace(tr.logl, tr.birth, tr.id); seed = seed)
 
     # NestedSamplers returns weighted samples. Resample to an unweighted
     # posterior with i.i.d. multinomial resampling on the importance weights
@@ -430,7 +434,7 @@ function sample_nested(
     end
 
     chains = MCMCChains.Chains(mat, param_names)
-    return chains, log_ev
+    return chains, log_ev, log_ev_err
 end
 
 

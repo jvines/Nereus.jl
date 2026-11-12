@@ -19,6 +19,7 @@ using Nereus
 using MCMCChains
 using Statistics
 using NestedSamplers
+using Distributions: Uniform
 
 # ---- Shared synthetic single-planet RV target ------------------------
 function _make_rv_target(seed::Int = 2027; n_obs::Int = 30,
@@ -76,13 +77,39 @@ end
 @testset "sample_nested (NestedSamplers.jl wrapper)" begin
     @testset "runs end-to-end on synthetic RV" begin
         target, data, _ = _make_rv_target(2027)
-        chains, log_z = sample_nested(target, data;
+        chains, log_z, log_z_err = sample_nested(target, data;
             n_live = 40, dlogz = 2.0, bounds = :multi,
             proposal = :rwalk, seed = 1)
         @test chains isa MCMCChains.Chains
         @test isfinite(log_z)
+        @test 0 < log_z_err < 2
         @test :K_k1 in names(chains, :parameters)
         @test size(chains, 1) > 0
+    end
+
+    @testset "the run's trace recounts its live points" begin
+        # The log Z error resamples a run by its threads (src/samplers/
+        # ns_error.jl), recounting the live points from each removed point's
+        # birth. From the trace NestedSamplers keeps they come back as the run
+        # counted them: N at every dead point, serially; N, N - 1, …, N - K + 1
+        # through each batch of K, whose replacements are drawn above its
+        # highest point; and N, …, 1 through the live points the run ends with.
+        model = NestedModel(x -> -sum(abs2, (x .- 0.5) ./ 0.05) / 2,
+                            [Uniform(0, 1), Uniform(0, 1)])
+        N, K = 100, 4
+        spl = Nested(2, N; proposal = NestedSamplers.Proposals.RWalk(),
+                     bounds = NestedSamplers.Bounds.Ellipsoid)
+        counts(tr) = Nereus._ns_live_counts(sort(tr.logl), sort(tr.birth))
+        ch, st = NestedSamplers.sample(MersenneTwister(1), model, spl;
+                                       dlogz = 0.5, progress = false)
+        n = counts(st.trace)
+        @test length(n) == size(ch, 1)
+        @test n == [fill(N, length(n) - N); N:-1:1]
+        ch, st = NestedSamplers.sample_parallel(MersenneTwister(1), model, spl;
+                                                batch_size = K, parallel = false, dlogz = 0.5)
+        n = counts(st.trace)
+        @test length(n) == size(ch, 1)
+        @test n == [N; repeat(N:-1:N-K+1, (length(n) - N - 1) ÷ K); N:-1:1]
     end
 
     @testset "all MCMC proposals + tuning pass-through" begin

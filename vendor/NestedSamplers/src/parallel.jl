@@ -190,6 +190,7 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
 
         u, v, ll, nc = reps[j]
         state.us[:, idx] .= u; state.vs[:, idx] .= v; state.logl[idx] = ll
+        trace_remove!(state.trace, ldead, idx, Lstar)
         ncall += nc; since_update += nc
         prev_ld = ldead; logz = logz_new; h = h_new
     end
@@ -198,7 +199,7 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
                  logl = state.logl, logl_dead = prev_ld, logz = logz,
                  logzerr = logzerr, h = h, logvol = logvol,
                  since_update = since_update, has_bounds = has_bounds,
-                 active_bound = active_bound)
+                 active_bound = active_bound, trace = state.trace)
     return batch, new_state
 end
 

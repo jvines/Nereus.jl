@@ -5,6 +5,24 @@
 # (and mirrored in parallel.jl step_batch).
 @inline xlogx(x) = iszero(x) ? zero(x) : x * log(x)
 
+# The run's trace, for an error on log Z from resampling it (Higson et al. 2018;
+# Nereus's src/samplers/ns_error.jl): every removed point's log L, its birth
+# (the bound it was drawn above, -Inf from the prior) and the live-point slot
+# it filled, a thread being the points one slot held. `live_birth` is each live
+# point's birth.
+new_trace(nactive) = (logl = Float64[], birth = Float64[], id = Int[],
+                      live_birth = fill(-Inf, nactive))
+
+# The point in slot `idx` leaves at `logl_dead`; its replacement is drawn above
+# `bound` (`nothing`: none, the live points the run ends with).
+function trace_remove!(trace, logl_dead, idx, bound)
+    push!(trace.logl, logl_dead)
+    push!(trace.birth, trace.live_birth[idx])
+    push!(trace.id, idx)
+    bound === nothing || (trace.live_birth[idx] = bound)
+    return trace
+end
+
 function step(rng, model, sampler::Nested; kwargs...)
     # Initialize particles
     # us are in unit space, vs are in prior space
@@ -28,6 +46,7 @@ function step(rng, model, sampler::Nested; kwargs...)
     us[:, idx_dead] .= u
     vs[:, idx_dead] .= v
     logl[idx_dead] = ll
+    trace = trace_remove!(new_trace(sampler.nactive), logl_dead, idx_dead, logl_dead)
 
     ncall = since_update = nc
 
@@ -41,7 +60,8 @@ function step(rng, model, sampler::Nested; kwargs...)
     sample = (u = u_dead, v = v_dead, logwt = logwt, logl = logl_dead)
     state = (it = 1, ncall = ncall, us = us, vs = vs, logl = logl,
              logl_dead = logl_dead, logz = logz, logzerr = logzerr, h = h, logvol = logvol,
-             since_update = since_update, has_bounds = false, active_bound = nothing)
+             since_update = since_update, has_bounds = false, active_bound = nothing,
+             trace = trace)
 
     return sample, state
 end
@@ -170,6 +190,7 @@ function step(rng, model, sampler, state; kwargs...)
     state.us[:, idx_dead] .= u
     state.vs[:, idx_dead] .= v
     state.logl[idx_dead] = logl
+    trace_remove!(state.trace, logl_dead, idx_dead, logl_dead)
 
     it = state.it + 1
     ncall = state.ncall + nc
@@ -196,7 +217,8 @@ function step(rng, model, sampler, state; kwargs...)
     sample = (u = u_dead, v = v_dead, logwt = logwt, logl = logl_dead)
     state = (it = it, ncall = ncall, us = state.us, vs = state.vs, logl = state.logl,
              logl_dead = logl_dead, logz = logz, logzerr = logzerr, h = h, logvol = logvol,
-             since_update = since_update, has_bounds = has_bounds, active_bound = active_bound)
+             since_update = since_update, has_bounds = has_bounds, active_bound = active_bound,
+             trace = state.trace)
 
     return sample, state
 end
@@ -336,10 +358,12 @@ function add_live_points(samples, model, sampler, state)
 
         sample = (u = u, v = v, logwt = logwt, logl = logl_dead)
         save!!(samples, sample, N + i, model, sampler)
+        trace_remove!(state.trace, logl_dead, idx, nothing)
     end
 
     state = (it = state.it + sampler.nactive, us = state.us, vs = state.vs, logl = state.logl,
              logl_dead = logl_dead, logz = logz, logzerr = logzerr, h = h, logvol = logvol,
-             since_update = state.since_update, has_bounds = state.has_bounds, active_bound = state.active_bound)
+             since_update = state.since_update, has_bounds = state.has_bounds, active_bound = state.active_bound,
+             trace = state.trace)
     return samples, state
 end
