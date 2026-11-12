@@ -1272,7 +1272,8 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                 # posterior while its four variants agree with each other to a
                 # decimal, so a bridge cross-check is not optional.
                 _augment_evidence!(summary, target.params, target.data, chains;
-                                   show_progress = show_pf, timings = bridge_t)
+                                   show_progress = show_pf, timings = bridge_t,
+                                   _postfit_rule_kw(spec_opts, target.data)...)
                 _postfit_stage!(pf, "science")
                 # Conditioned, unit-tagged fitted/derived + model_selection +
                 # run_info, and tables/ in json, csv, ecsv, dat and TEX.

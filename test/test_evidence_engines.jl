@@ -26,6 +26,7 @@
 using Nereus, MCMCChains, Random, Test
 using Logging: Logging
 using Statistics: mean, std
+include(joinpath(@__DIR__, "fixtures", "easy_rv_target.jl"))
 
 # A Gaussian prior and likelihood, so log Z is exact; the likelihood 200 times
 # narrower than the prior in each of 3 dimensions, so ⟨log L⟩ climbs from -6e4
@@ -353,4 +354,58 @@ end
     @test raw < 50
     @test Nereus._bridge_min_ess(ch, p) > 1000
     @test ch.value.data[:, ii, 1] == X[:, ii]          # the chains handed in are untouched
+end
+
+@testset "run_job post-fit: Jose's rule once the bridge is not usable" begin
+    # `_augment_evidence!` after a refused or failed post-fit bridge: the
+    # tempered headline is kept when it is within laplace_switch_tol of
+    # mode-Laplace, mode-Laplace replaces it beyond or when there is none, and
+    # NaN only with neither. A nested or bridge headline is the engine's own,
+    # and untemper_transit with photometry (laplace_check false) keeps the
+    # tempered value, as pt_emcee does.
+    sel(rep, lz, lap; lc = true) = Logging.with_logger(Logging.NullLogger()) do
+        s = Dict{String, Any}("log_z" => lz)
+        e = Dict{String, Any}("reported" => rep)
+        Nereus._postfit_select!(s, e, lap; why_bridge = "x", laplace_check = lc, tol = 50.0)
+        (s["log_z"], e["reported"])
+    end
+    @test sel("hybrid", 100.0, 120.0) == (100.0, "hybrid")
+    @test sel("ss_plus", 100.0, 160.0) == (160.0, "mode_laplace")
+    @test sel("none", NaN, 160.0) == (160.0, "mode_laplace")
+    @test sel("hybrid", 100.0, NaN) == (100.0, "hybrid")
+    r = sel("none", NaN, NaN)
+    @test isnan(r[1]) && r[2] == "none"
+    @test sel("hybrid", 100.0, 160.0; lc = false) == (100.0, "hybrid")
+    @test sel("bridge", 100.0, 160.0) == (100.0, "bridge")
+    @test sel("nested", 100.0, 160.0) == (100.0, "nested")
+    s1 = Dict{String, Any}("log_z" => NaN); e1 = Dict{String, Any}("reported" => "none")
+    @test_logs (:warn, r"log_z is mode-Laplace") Nereus._postfit_select!(
+        s1, e1, 160.0; why_bridge = "x", laplace_check = true, tol = 50.0)
+    # On run_job itself: a short pt_emcee on two rungs. The tempered stack is
+    # not quotable (no β = 0 rung), the run_job target is bounded so the
+    # sampler has neither bridge nor Laplace, and the post-fit bridge converges
+    # on fewer effective draws than its reference has parameters (min ESS 28
+    # < 35), so it is refused. log_z was NaN there; it is mode-Laplace,
+    # computed post-fit on the unconstrained target, with a warning.
+    cfg = _easy_rv_cfg()
+    cfg["sampler"]["kwargs"] = Dict("show_progress" => false, "n_temps" => 2,
+                                    "n_walkers" => 16, "n_steps" => 60, "n_burnin" => 40)
+    cfg["output"]["show_progress"] = false
+    res = @test_logs (:warn, r"log_z is mode-Laplace") match_mode = :any Nereus.run_job(cfg)
+    s = res isa AbstractDict ? res : res.summary
+    ev = s["evidence"]
+    @test haskey(ev, "bridge") && occursin("min ESS", get(ev, "bridge_not_reported", ""))
+    @test haskey(ev, "tempered_check")
+    @test isfinite(ev["mode_laplace"]) && s["log_z"] == ev["mode_laplace"]
+    @test ev["reported"] == "mode_laplace"
+    @test ev["mode_laplace_check"]["minus_bridge"] == ev["mode_laplace"] - ev["bridge"]["log_z"]
+    j = Nereus.JSON3.read(read(joinpath(cfg["output_dir"], "summary.json"), String))
+    @test j.log_z == s["log_z"] && j.evidence.reported == "mode_laplace"
+
+    # The options run_job and the fit_* route read off the engine's.
+    d_phot = (; t_phot = [1.0])
+    @test Nereus._postfit_rule_kw(Dict("untemper_transit" => true), d_phot) ==
+          (; laplace_check = false, laplace_switch_tol = 50.0)
+    @test Nereus._postfit_rule_kw(Dict(:laplace_switch_tol => 10), (; t_phot = Float64[])) ==
+          (; laplace_check = true, laplace_switch_tol = 10.0)
 end

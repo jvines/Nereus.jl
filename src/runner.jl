@@ -194,7 +194,9 @@ function run_job(cfg::AbstractDict)
         _postfit_stage!(pf, "evidence")
         bridge_t = Dict{String, Any}()
         _augment_evidence!(summary, params, data, chains;
-                           show_progress = show_pf, timings = bridge_t)
+                           show_progress = show_pf, timings = bridge_t,
+                           _postfit_rule_kw(_get(_get(cfg, :sampler; default = Dict()),
+                                                 :kwargs; default = Dict()), data)...)
         _postfit_stage!(pf, "science")
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
@@ -2686,15 +2688,31 @@ end
 #
 # Rather than change the sampling geometry for every user, recompute the
 # prior-free estimators AFTER the fit against an unconstrained target built
-# from the same params and data. The chains are unchanged; only the evidence
-# block gains `bridge` (and `reference_path`), and `reported` is upgraded to
-# bridge when it is usable.
+# from the same params and data: bridge sampling and mode-Laplace. The chains
+# are unchanged; the evidence block gains `bridge` and a numeric `mode_laplace`
+# (with `mode_laplace_check`), and `log_z` is chosen again by Jose's rule, as
+# pt_emcee chooses it in the sampler:
+#
+#   1. bridge, when its reference has the effective draws it needs;
+#   2. else the tempered value already reported, when it is quotable (its keys
+#      are in the block only then) and within `laplace_switch_tol` nats of
+#      mode-Laplace -- further than the Laplace non-Gaussian bias, it is broken;
+#   3. else mode-Laplace, with a warning;
+#   4. else the tempered value if quotable, else NaN.
+#
+# A headline from nested sampling, or a bridge the engine already reported,
+# is left as it is when the post-fit bridge is refused. With `laplace_check`
+# false (`untemper_transit` with photometry: the tempered likelihood is not the
+# one Laplace sees) the tempered value is kept and never switched, as in
+# pt_emcee.
 #
 # `show_progress` prints bridge_evidence's progress lines; `timings`, a
 # dictionary, receives its stage record (see `bridge_evidence`) and the time
 # the ESS guard took (`ess`).
 function _augment_evidence!(summary, params, data, chains;
-                            show_progress::Bool = false, timings = nothing)
+                            show_progress::Bool = false, timings = nothing,
+                            laplace_check::Bool = true,
+                            laplace_switch_tol::Real = 50.0)
     try
         ev = get(summary, "evidence", nothing)
         ev isa AbstractDict || return
@@ -2708,44 +2726,105 @@ function _augment_evidence!(summary, params, data, chains;
         end
         tgt = NereusTarget(params, data; unconstrained = true)
         tgt.transform === nothing && return
-        b = bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42,
+        # mode-Laplace on the chains as written, in this target's charts.
+        lap = mode_laplace_evidence(tgt, chains)
+        if !isfinite(lap)
+            l0 = get(ev, "mode_laplace", nothing)
+            lap = l0 isa Real ? Float64(l0) : NaN
+        end
+        if isfinite(lap)
+            ev["mode_laplace"] = Float64(lap)
+            chk = get!(() -> Dict{String, Any}(), ev, "mode_laplace_check")
+            chk["note"] = _LAPLACE_LABEL
+        end
+        b = try
+            bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42,
                             show_progress = show_progress, timings = timings)
-        (b.converged && isfinite(b.log_z)) || return
-        ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
-                            "overlap" => Float64(b.overlap))
-        # mode-Laplace beside the bridge that comes before it: its distance (in
-        # `mode_laplace_check`; `mode_laplace` stays a number), and a warning
-        # past bridge's standard error + 1 nat.
-        lap = get(ev, "mode_laplace", nothing)
-        if lap isa Real && isfinite(lap)
-            chk = get!(() -> Dict{String, Any}("note" => _LAPLACE_LABEL), ev,
-                       "mode_laplace_check")
-            chk["minus_bridge"] = Float64(lap - b.log_z)
-            _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
+        catch err
+            @debug "post-fit bridge failed" exception = err
+            nothing
         end
-        # Bridge is biased LOW when its reference is fitted from too few
-        # INDEPENDENT draws (see docs/src/evidence.md); q carries
-        # d + d(d+1)/2 parameters. Only promote it above the tempered value
-        # when the chain actually supports it.
-        d = length(params.layout.unfrozen_names)
-        need = d + d * (d + 1) ÷ 2
-        ess = _bridge_stage!(timings, "ess") do
-            try
-                minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
-            catch; NaN end
+        why_bridge = "bridge sampling did not converge"
+        if b !== nothing && b.converged && isfinite(b.log_z)
+            ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
+                                "overlap" => Float64(b.overlap))
+            # mode-Laplace beside the bridge that comes before it: its distance
+            # (in `mode_laplace_check`), and a warning past bridge's standard
+            # error + 1 nat.
+            if isfinite(lap)
+                ev["mode_laplace_check"]["minus_bridge"] = Float64(lap - b.log_z)
+                _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
+            end
+            # Bridge is biased LOW when its reference is fitted from too few
+            # INDEPENDENT draws (see docs/src/evidence.md); q carries
+            # d + d(d+1)/2 parameters. Only promote it when the chain actually
+            # supports it.
+            d = length(params.layout.unfrozen_names)
+            need = d + d * (d + 1) ÷ 2
+            ess = _bridge_stage!(timings, "ess") do
+                try
+                    minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
+                catch; NaN end
+            end
+            if isfinite(ess) && ess >= need
+                summary["log_z"] = Float64(b.log_z)
+                ev["reported"] = "bridge"
+                return
+            end
+            why_bridge = "min ESS $(isfinite(ess) ? round(Int, ess) : "?") < $need " *
+                         "parameters in the reference; bridge is biased low here"
+            ev["bridge_not_reported"] = why_bridge
         end
-        if isfinite(ess) && ess >= need
-            summary["log_z"] = Float64(b.log_z)
-            ev["reported"] = "bridge"
-        else
-            ev["bridge_not_reported"] =
-                "min ESS $(isfinite(ess) ? round(Int, ess) : "?") < $need " *
-                "parameters in the reference; bridge is biased low here"
-        end
+        _postfit_select!(summary, ev, lap; why_bridge, laplace_check,
+                         tol = Float64(laplace_switch_tol))
     catch err
         @debug "post-fit evidence augmentation failed" exception = err
     end
     return
+end
+
+# Steps 2-4 of the post-fit selection above, once the post-fit bridge is not
+# usable (`why_bridge` says why). `lap` is mode-Laplace or NaN.
+function _postfit_select!(summary, ev, lap::Float64; why_bridge::AbstractString,
+                          laplace_check::Bool, tol::Float64)
+    rep = String(get(ev, "reported", "none"))
+    rep in ("bridge", "nested") && return             # the engine's own, kept
+    laplace_check || return                           # untemper_transit + photometry
+    lz = get(summary, "log_z", NaN)
+    lz = lz isa Real ? Float64(lz) : NaN
+    tempered = rep in ("hybrid", "ti_plus", "ss_plus", "ti") && isfinite(lz)
+    if tempered && isfinite(lap) && abs(lz - lap) <= tol
+        # quotable and corroborated: kept
+    elseif isfinite(lap)
+        why_t = tempered ?
+            "the tempered $rep ($(round(lz, digits = 2))) is " *
+            "$(round(abs(lz - lap), digits = 1)) nats from it, beyond " *
+            "laplace_switch_tol = $tol" :
+            "there is no quotable tempered value"
+        @warn "Nereus: log_z is mode-Laplace, a Gaussian approximation at the " *
+              "posterior mode: bridge is not usable ($why_bridge) and $why_t." log_z = lap
+        lz = lap; rep = "mode_laplace"
+    elseif !tempered
+        @warn "Nereus: no usable evidence estimate: bridge is not usable " *
+              "($why_bridge), there is no quotable tempered value and mode-Laplace " *
+              "is unavailable. log_z is NaN."
+        lz = NaN; rep = "none"
+    end
+    summary["log_z"] = lz
+    ev["reported"] = rep
+    return
+end
+
+# The engine options `_augment_evidence!` applies Jose's rule with:
+# `laplace_switch_tol` as given, and `laplace_check` false for
+# `untemper_transit` with photometry, as pt_emcee sets it.
+function _postfit_rule_kw(opts, data)
+    o = opts isa AbstractDict ? opts : Dict()
+    untemper = _get(o, :untemper_transit; default = false) === true
+    phot = hasproperty(data, :t_phot) && !isempty(data.t_phot)
+    tol = _get(o, :laplace_switch_tol; default = 50.0)
+    return (; laplace_check = !(untemper && phot),
+              laplace_switch_tol = tol isa Real ? Float64(tol) : 50.0)
 end
 
 # =====================================================================

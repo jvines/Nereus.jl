@@ -337,9 +337,15 @@ while its four variants agree to a decimal. Bridge is now recomputed after the
 fit against an unconstrained target built from the same `params` and `data`
 (chains untouched), and `log_z` is promoted to it **only when the chain
 carries the effective sample size its reference needs**; otherwise bridge is
-recorded with `bridge_not_reported` saying why. Trans-dim chains are skipped —
-a single Gaussian reference over a fixed `R^n` is undefined across mixed
-dimensions.
+recorded with `bridge_not_reported` saying why. mode-Laplace is computed there
+too, on the same unconstrained target (the bounded target the sampler ran on
+has none), and `log_z` is then chosen by Jose's rule: the tempered value
+already reported if it is quotable and within `laplace_switch_tol` of
+mode-Laplace, else mode-Laplace with a warning, `NaN` only with neither. A
+nested headline, or a bridge the engine already reported, is kept; under
+`untemper_transit` with photometry the tempered value is kept, as in
+`sample_pt_emcee`. Trans-dim chains are skipped — a single Gaussian reference
+over a fixed `R^n` is undefined across mixed dimensions.
 
 Measured on five HD 18599 fixed configurations: four shift by ≤ 6 nats between
 tempered and bridge, and ActivityGP shifts by **59.9** (−1234.6 → −1174.7) —
