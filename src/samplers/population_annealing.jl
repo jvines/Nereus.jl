@@ -117,13 +117,13 @@ Population Annealing sequential MC sampler.
   correlation across the replicas, the largest over parameters). A clone and
   its parent start at one point; they are independent draws only once each has
   forgotten it. A count of accepted moves is not that: a stretch move accepts
-  short steps. On an RV + IAD companion (300 replicas) the population returned
-  at β = 1 had a least ESS of 179-182 with i = 89.5° and 16 with e free at
-  i = 45°; with this and `resample_ess` it has 236-291 and 163, for 10-30
-  times the likelihood evaluations. On a 1-planet RV with free e, log Z came
-  out 8-16 nats below nested INS and is now within 2. Where a parameter cannot
-  decorrelate (the e-ω-M₀ ridge of a free e near 0) each step runs to the
-  `max_mcmc_mult` cap. `0` disables it.
+  short steps. On an RV + IAD companion (300 replicas, two seeds) the
+  population returned at β = 1 had a least ESS of 179-182 with i = 89.5° and
+  16 with e free at i = 45°; with this and `resample_ess` it has 201-236 and
+  98-163, for 10-30 times the likelihood evaluations. On a 1-planet RV with
+  free e, log Z came out 10-17 nats below nested INS and is now within 2.
+  Where a parameter cannot decorrelate (the e-ω-M₀ ridge of a free e near 0)
+  each step runs to the `max_mcmc_mult` cap. `0` disables it.
 - `mcmc_target_moves::Float64=5.0` — a second floor: keep sweeping until each
   replica has, in expectation, this many ACCEPTED moves. With it and
   `decorrelation` both 0, exactly `n_mcmc` sweeps run.
