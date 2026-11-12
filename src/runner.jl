@@ -3004,32 +3004,33 @@ function _populate_summary!(summary, result, params, chains)
 end
 
 function _write_summary(out_dir, summary)
-    # JSON has no NaN, and strict parsers (JavaScript's JSON.parse, jq) reject
-    # the bare token. A value that is not a number -- `log_z` of an engine with
-    # no evidence estimator (NUTS, OFTI, rjmcmc, moms), or of a tempered stack
-    # that cannot be quoted -- is written as null (`_json_nan_to_null`); the
-    # summary returned in memory keeps its NaN. `allow_inf = true` still lets
-    # ±Inf through, as before.
+    # JSON has no NaN or Infinity, and strict parsers (JavaScript's JSON.parse,
+    # jq, Python's json with parse_constant) reject the bare tokens. A value
+    # that is not a finite number -- `log_z` of an engine with no evidence
+    # estimator (NUTS, OFTI, rjmcmc, moms), or of a tempered stack that cannot
+    # be quoted, an unbounded interval end -- is written as null
+    # (`_json_nonfinite_to_null`); the summary returned in memory keeps its
+    # NaN and ±Inf.
     open(joinpath(out_dir, "summary.json"), "w") do io
-        JSON3.pretty(io, _json_nan_to_null(summary); allow_inf = true)
+        JSON3.pretty(io, _json_nonfinite_to_null(summary))
     end
 end
 
-# A copy of `x` with every NaN replaced by `nothing` (JSON null), through
-# dictionaries, vectors, tuples and named tuples.
-_json_nan_to_null(x::AbstractFloat) = isnan(x) ? nothing : x
-function _json_nan_to_null(x::AbstractDict)
+# A copy of `x` with every NaN and ±Inf replaced by `nothing` (JSON null),
+# through dictionaries, arrays, tuples and named tuples.
+_json_nonfinite_to_null(x::AbstractFloat) = isfinite(x) ? x : nothing
+function _json_nonfinite_to_null(x::AbstractDict)
     y = empty(x, keytype(x), Any)          # the same kind of dictionary, in order
     for (k, v) in x
-        y[k] = _json_nan_to_null(v)
+        y[k] = _json_nonfinite_to_null(v)
     end
     return y
 end
-_json_nan_to_null(x::AbstractArray{<:Union{AbstractFloat, Integer, AbstractString, Bool, Nothing}}) =
-    any(v -> v isa AbstractFloat && isnan(v), x) ? Any[_json_nan_to_null(v) for v in x] : x
-_json_nan_to_null(x::AbstractArray) = Any[_json_nan_to_null(v) for v in x]
-_json_nan_to_null(x::Union{Tuple, NamedTuple}) = map(_json_nan_to_null, x)
-_json_nan_to_null(x) = x
+_json_nonfinite_to_null(x::AbstractArray{<:Union{AbstractFloat, Integer, AbstractString, Bool, Nothing}}) =
+    any(v -> v isa AbstractFloat && !isfinite(v), x) ? Any[_json_nonfinite_to_null(v) for v in x] : x
+_json_nonfinite_to_null(x::AbstractArray) = Any[_json_nonfinite_to_null(v) for v in x]
+_json_nonfinite_to_null(x::Union{Tuple, NamedTuple}) = map(_json_nonfinite_to_null, x)
+_json_nonfinite_to_null(x) = x
 
 
 """

@@ -228,18 +228,21 @@ end
     @test ev["tempered_check"]["quotable"] == false && ev["reported"] == "none"
 end
 
-@testset "summary.json: valid JSON, NaN written as null" begin
+@testset "summary.json: valid JSON, NaN and ±Inf written as null" begin
     mktempdir() do dir
         s = Dict{String, Any}("log_z" => NaN, "n" => 3, "inf" => Inf,
                               "evidence" => Dict{String, Any}("mode_laplace" => 1.5,
-                                                              "v" => [1.0, NaN]))
+                                                              "v" => [1.0, NaN, -Inf],
+                                                              "ci" => (-Inf, 2.0)))
         Nereus._write_summary(dir, s)
         txt = read(joinpath(dir, "summary.json"), String)
-        @test !occursin("NaN", txt)
-        j = Nereus.JSON3.read(txt; allow_inf = true)
-        @test j.log_z === nothing && j.n == 3 && j.evidence.mode_laplace == 1.5
-        @test j.evidence.v[1] == 1.0 && j.evidence.v[2] === nothing
-        @test isnan(s["log_z"])                      # the summary in memory keeps it
+        @test !occursin("NaN", txt) && !occursin("Infinity", txt)
+        j = Nereus.JSON3.read(txt)                   # strict: no NaN/Infinity allowed
+        @test j.log_z === nothing && j.inf === nothing && j.n == 3
+        @test j.evidence.mode_laplace == 1.5
+        @test j.evidence.v[1] == 1.0 && j.evidence.v[2] === nothing && j.evidence.v[3] === nothing
+        @test j.evidence.ci[1] === nothing && j.evidence.ci[2] == 2.0
+        @test isnan(s["log_z"]) && s["inf"] == Inf  # the summary in memory keeps them
     end
 end
 
