@@ -417,7 +417,7 @@ under a GP activity model.
 # Cleaned LC from a sidecar — see Preprocessing for the multi-sector
 # detrending pipeline.
 using DelimitedFiles
-lc = readdlm("HD18599_cleaned_lc.csv", ',', Float64; skipstart=15)
+lc = readdlm("HD18599_cleaned_lc.csv", ',', Float64; skipstart=16)  # 15 "#" lines + header
 t_phot   = lc[:, 1]
 flux     = lc[:, 2]
 flux_err = lc[:, 3]
