@@ -218,11 +218,18 @@ function _warmstart_points(target::NereusTarget, n_chains::Int,
     n_walkers_eff += isodd(n_walkers_eff) ? 1 : 0
     seed = rand(rng, 1:typemax(Int32))
     try
-        res = sample_pt_emcee(target, target.data;
-                             n_temps = n_temps, n_walkers = n_walkers_eff,
-                             n_steps = n_steps, n_burnin = n_burnin,
-                             init_strategy = :prior, seed = seed,
-                             show_progress = false)
+        # Only the draws are used. The pre-search's own log Z (a few hundred
+        # steps on a few rungs) is not computed, and its log is dropped: it
+        # warned about that log Z in the caller's output, e.g. "bridge =
+        # 13.74" beside the 165.51 pt_hmc reported. A failure still throws,
+        # and the catch below reports it.
+        res = Logging.with_logger(Logging.NullLogger()) do
+            sample_pt_emcee(target, target.data;
+                            n_temps = n_temps, n_walkers = n_walkers_eff,
+                            n_steps = n_steps, n_burnin = n_burnin,
+                            init_strategy = :prior, seed = seed,
+                            bridge_headline = false, show_progress = false)
+        end
         ch = res.chains
         # Re-chart every full-circle angle from the WHOLE post-burn-in
         # pre-search (src/circular.jl) before NUTS sees the target. NUTS

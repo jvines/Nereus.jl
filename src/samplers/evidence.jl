@@ -476,3 +476,62 @@ function Base.show(io::IO, r::EvidenceReport)
     @printf(io, "  H+  (β* = %.3f)   = %12.4f ± %.4f\n",
              r.hybrid_beta_star, r.hybrid[1], r.hybrid[2])
 end
+
+# Whether a ladder's tempered evidence (TI, TI+, SS+, H+) can be quoted, and if
+# not, why: `(ok, why)`. Two conditions, both necessary:
+#
+# - the ladder reaches β = 0. TI and TI+ integrate ⟨log L⟩ over the rungs and SS+
+#   telescopes Z(β_min) → Z(1); none adds the [0, β_min] head, where ⟨log L⟩
+#   climbs fastest.
+# - every adjacent pair swapped at least `swap_min` of the time. A pair that
+#   rarely swaps samples two distributions with too little overlap for the ratio
+#   of their normalisations.
+#
+# Shared by sample_pt_emcee, sample_transdim_pt_emcee, sample_pt_hmc and the
+# summary writers; `swap_acc[k]` is the rate between `βs[k]` and `βs[k + 1]`, in
+# whichever order the ladder runs. Measured on an RV + Hipparcos-IAD companion
+# whose bridge log Z is 163.88: pt_emcee's SS+ (8 rungs from β = 1e-4, no β = 0)
+# read 157.85, and pt_hmc's with the quadratic ladder from β = 0, whose second
+# rung never swapped with the first, read -624.
+function _tempered_quotable(βs::AbstractVector, swap_acc::AbstractVector;
+                            swap_min::Real = 0.05)
+    isempty(βs) && return (false, "there is no ladder")
+    lo = minimum(βs)
+    lo == 0 || return (false, "the ladder stops at β = $(round(lo, sigdigits = 3)), " *
+                              "so the [0, $(round(lo, sigdigits = 3))] head is not in " *
+                              "the integral")
+    length(βs) >= 2 || return (false, "the ladder has one rung")
+    length(swap_acc) == length(βs) - 1 ||
+        return (false, "there are no swap rates for the ladder")
+    k = argmin(swap_acc)
+    swap_acc[k] >= swap_min ||
+        return (false, "rungs β = $(round(βs[k], sigdigits = 3)) and " *
+                       "$(round(βs[k + 1], sigdigits = 3)) swapped " *
+                       "$(round(100 * swap_acc[k], digits = 1))% of the time " *
+                       "(< $(round(100 * swap_min, digits = 1))%): too little overlap " *
+                       "for their ratio")
+    return (true, "")
+end
+
+# mode-Laplace is a Gaussian approximation at the posterior mode. It is reported
+# beside bridge sampling, never in its place, and this warns when the two differ
+# by more than bridge's standard error plus 1 nat (and, past `multimodal_tol`,
+# that a single Gaussian reference may be missing modes). Returns whether it
+# warned. On an RV + Hipparcos-IAD companion Laplace sat 3.5 to 3.8 nats above
+# bridge with e free and 1.1 above with e fixed; on 51 Peg 24 below.
+function _warn_laplace_vs_bridge(who::AbstractString, laplace::Real, bridge::Real,
+                                 bridge_se::Real; multimodal_tol::Real = 20.0)
+    (isfinite(laplace) && isfinite(bridge)) || return false
+    tol = (isfinite(bridge_se) ? Float64(bridge_se) : 0.0) + 1.0
+    d = Float64(laplace - bridge)
+    abs(d) > tol || return false
+    extra = abs(d) > multimodal_tol ?
+        " A gap this large can also mean a multimodal posterior that a single " *
+        "Gaussian reference does not cover, and bridge's overlap will not say so: " *
+        "check the posterior before quoting bridge." : ""
+    @warn "$who: mode-Laplace, a Gaussian approximation at the posterior mode, is " *
+          "$(round(d, digits = 2)) nats from bridge sampling, more than bridge's " *
+          "standard error + 1 nat ($(round(tol, digits = 2))). log_evidence is the " *
+          "bridge value; the Laplace one is not quotable." * extra laplace bridge bridge_se
+    return true
+end

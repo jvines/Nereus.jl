@@ -152,3 +152,36 @@ end
         _sc_in_mode(ch, 4.9; tol = 1.5)
     end
 end
+
+# The width search behind the bound (`_pt_axis_widths`, shared with the pruning
+# of pt_emcee and transdim). Its step is ×4 until the drop lies in [1/8, 2]
+# nats and ÷4 when it overshoots; a drop that grows by more than 16 per ×4 (a
+# wall, a support edge) stepped back and forth until the iterations ran out and
+# returned `nothing`, and `_scouts_supported` then kept every scout. Two scouts
+# in four of an RV + Hipparcos run started on a plateau 24,000 nats down.
+@testset "axis widths: a drop that jumps over the window" begin
+    # |x|^6: a ×4 step multiplies the drop by 4096.
+    ℓ6 = y -> -abs(y[1])^6
+    h0 = 0.1^(1 / 6)                       # drop 0.1 at h0, 400 at 4 h0
+    σ = Nereus._pt_axis_widths(ℓ6, [0.0], 0.0, [h0])
+    @test σ !== nothing
+    @test 0.2 < σ[1] < 1.0
+
+    # Flat, then a wall at 0.3: the drop is 0 at 0.1 and 10 at 0.4.
+    ℓw = y -> -100 * max(abs(y[1]) - 0.3, 0.0)
+    σ = Nereus._pt_axis_widths(ℓw, [0.0], 0.0, [0.1])
+    @test σ !== nothing
+    @test 0.1 < σ[1] < 0.4
+
+    # A support edge inside 4h on one side: that side is dropped, the other
+    # (half the width) is used, and the search still settles.
+    ℓe = y -> y[1] < -0.05 ? -Inf : -50 * max(y[1], 0.0)^2 - 2000 * max(y[1] - 0.5, 0.0)
+    σ = Nereus._pt_axis_widths(ℓe, [0.0], 0.0, [0.02])
+    @test σ !== nothing && σ[1] > 0
+
+    # Where no h lands in the window (a jump from 0 to 50 nats at 0.3) the
+    # width at the narrowest overshoot is returned, not `nothing`.
+    ℓj = y -> abs(y[1]) > 0.3 ? -50.0 : 0.0
+    σ = Nereus._pt_axis_widths(ℓj, [0.0], 0.0, [0.1])
+    @test σ !== nothing && 0.0 < σ[1] < 0.31
+end

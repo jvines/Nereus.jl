@@ -194,7 +194,9 @@ function run_job(cfg::AbstractDict)
         _postfit_stage!(pf, "evidence")
         bridge_t = Dict{String, Any}()
         _augment_evidence!(summary, params, data, chains;
-                           show_progress = show_pf, timings = bridge_t)
+                           show_progress = show_pf, timings = bridge_t,
+                           _postfit_rule_kw(_get(_get(cfg, :sampler; default = Dict()),
+                                                 :kwargs; default = Dict()), data)...)
         _postfit_stage!(pf, "science")
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
@@ -1684,10 +1686,15 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                  n_evals = n_ev)
     elseif name == "pt_hmc"
         # Hamiltonian parallel tempering (fixed-dim, differentiable). Returns
-        # (chains, log_ev, report).
-        chains, log_z, _ = sample_pt_hmc(target; kw...)
+        # (chains, log_ev, report, evidence): the tempered stack and bridge /
+        # mode-Laplace go to summary.json's evidence block as pt_emcee's do.
+        # The ladder and its swap rates go too: they decide whether the tempered
+        # stack is quotable there.
+        chains, log_z, report, ev = sample_pt_hmc(target; kw...)
         return (chains = chains, log_evidence = log_z,
-                 acceptance_within = Float64[], acceptance_swap = Float64[],
+                 log_evidence_bridge = ev.bridge, log_evidence_laplace = ev.laplace,
+                 evidence = report, betas = ev.betas,
+                 acceptance_within = Float64[], acceptance_swap = ev.swap_acc,
                  n_evals = 0)
     elseif name == "rjmcmc"
         td === nothing && error("rjmcmc requires `transdim` block")
@@ -2681,15 +2688,31 @@ end
 #
 # Rather than change the sampling geometry for every user, recompute the
 # prior-free estimators AFTER the fit against an unconstrained target built
-# from the same params and data. The chains are unchanged; only the evidence
-# block gains `bridge` (and `reference_path`), and `reported` is upgraded to
-# bridge when it is usable.
+# from the same params and data: bridge sampling and mode-Laplace. The chains
+# are unchanged; the evidence block gains `bridge` and a numeric `mode_laplace`
+# (with `mode_laplace_check`), and `log_z` is chosen again by Jose's rule, as
+# pt_emcee chooses it in the sampler:
+#
+#   1. bridge, when its reference has the effective draws it needs;
+#   2. else the tempered value already reported, when it is quotable (its keys
+#      are in the block only then) and within `laplace_switch_tol` nats of
+#      mode-Laplace -- further than the Laplace non-Gaussian bias, it is broken;
+#   3. else mode-Laplace, with a warning;
+#   4. else the tempered value if quotable, else NaN.
+#
+# A headline from nested sampling, or a bridge the engine already reported,
+# is left as it is when the post-fit bridge is refused. With `laplace_check`
+# false (`untemper_transit` with photometry: the tempered likelihood is not the
+# one Laplace sees) the tempered value is kept and never switched, as in
+# pt_emcee.
 #
 # `show_progress` prints bridge_evidence's progress lines; `timings`, a
 # dictionary, receives its stage record (see `bridge_evidence`) and the time
 # the ESS guard took (`ess`).
 function _augment_evidence!(summary, params, data, chains;
-                            show_progress::Bool = false, timings = nothing)
+                            show_progress::Bool = false, timings = nothing,
+                            laplace_check::Bool = true,
+                            laplace_switch_tol::Real = 50.0)
     try
         ev = get(summary, "evidence", nothing)
         ev isa AbstractDict || return
@@ -2703,34 +2726,105 @@ function _augment_evidence!(summary, params, data, chains;
         end
         tgt = NereusTarget(params, data; unconstrained = true)
         tgt.transform === nothing && return
-        b = bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42,
+        # mode-Laplace on the chains as written, in this target's charts.
+        lap = mode_laplace_evidence(tgt, chains)
+        if !isfinite(lap)
+            l0 = get(ev, "mode_laplace", nothing)
+            lap = l0 isa Real ? Float64(l0) : NaN
+        end
+        if isfinite(lap)
+            ev["mode_laplace"] = Float64(lap)
+            chk = get!(() -> Dict{String, Any}(), ev, "mode_laplace_check")
+            chk["note"] = _LAPLACE_LABEL
+        end
+        b = try
+            bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42,
                             show_progress = show_progress, timings = timings)
-        (b.converged && isfinite(b.log_z)) || return
-        ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
-                            "overlap" => Float64(b.overlap))
-        # Bridge is biased LOW when its reference is fitted from too few
-        # INDEPENDENT draws (see docs/src/evidence.md); q carries
-        # d + d(d+1)/2 parameters. Only promote it above the tempered value
-        # when the chain actually supports it.
-        d = length(params.layout.unfrozen_names)
-        need = d + d * (d + 1) ÷ 2
-        ess = _bridge_stage!(timings, "ess") do
-            try
-                minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
-            catch; NaN end
+        catch err
+            @debug "post-fit bridge failed" exception = err
+            nothing
         end
-        if isfinite(ess) && ess >= need
-            summary["log_z"] = Float64(b.log_z)
-            ev["reported"] = "bridge"
-        else
-            ev["bridge_not_reported"] =
-                "min ESS $(isfinite(ess) ? round(Int, ess) : "?") < $need " *
-                "parameters in the reference; bridge is biased low here"
+        why_bridge = "bridge sampling did not converge"
+        if b !== nothing && b.converged && isfinite(b.log_z)
+            ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
+                                "overlap" => Float64(b.overlap))
+            # mode-Laplace beside the bridge that comes before it: its distance
+            # (in `mode_laplace_check`), and a warning past bridge's standard
+            # error + 1 nat.
+            if isfinite(lap)
+                ev["mode_laplace_check"]["minus_bridge"] = Float64(lap - b.log_z)
+                _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
+            end
+            # Bridge is biased LOW when its reference is fitted from too few
+            # INDEPENDENT draws (see docs/src/evidence.md); q carries
+            # d + d(d+1)/2 parameters. Only promote it when the chain actually
+            # supports it.
+            d = length(params.layout.unfrozen_names)
+            need = d + d * (d + 1) ÷ 2
+            ess = _bridge_stage!(timings, "ess") do
+                try
+                    minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
+                catch; NaN end
+            end
+            if isfinite(ess) && ess >= need
+                summary["log_z"] = Float64(b.log_z)
+                ev["reported"] = "bridge"
+                return
+            end
+            why_bridge = "min ESS $(isfinite(ess) ? round(Int, ess) : "?") < $need " *
+                         "parameters in the reference; bridge is biased low here"
+            ev["bridge_not_reported"] = why_bridge
         end
+        _postfit_select!(summary, ev, lap; why_bridge, laplace_check,
+                         tol = Float64(laplace_switch_tol))
     catch err
         @debug "post-fit evidence augmentation failed" exception = err
     end
     return
+end
+
+# Steps 2-4 of the post-fit selection above, once the post-fit bridge is not
+# usable (`why_bridge` says why). `lap` is mode-Laplace or NaN.
+function _postfit_select!(summary, ev, lap::Float64; why_bridge::AbstractString,
+                          laplace_check::Bool, tol::Float64)
+    rep = String(get(ev, "reported", "none"))
+    rep in ("bridge", "nested") && return             # the engine's own, kept
+    laplace_check || return                           # untemper_transit + photometry
+    lz = get(summary, "log_z", NaN)
+    lz = lz isa Real ? Float64(lz) : NaN
+    tempered = rep in ("hybrid", "ti_plus", "ss_plus", "ti") && isfinite(lz)
+    if tempered && isfinite(lap) && abs(lz - lap) <= tol
+        # quotable and corroborated: kept
+    elseif isfinite(lap)
+        why_t = tempered ?
+            "the tempered $rep ($(round(lz, digits = 2))) is " *
+            "$(round(abs(lz - lap), digits = 1)) nats from it, beyond " *
+            "laplace_switch_tol = $tol" :
+            "there is no quotable tempered value"
+        @warn "Nereus: log_z is mode-Laplace, a Gaussian approximation at the " *
+              "posterior mode: bridge is not usable ($why_bridge) and $why_t." log_z = lap
+        lz = lap; rep = "mode_laplace"
+    elseif !tempered
+        @warn "Nereus: no usable evidence estimate: bridge is not usable " *
+              "($why_bridge), there is no quotable tempered value and mode-Laplace " *
+              "is unavailable. log_z is NaN."
+        lz = NaN; rep = "none"
+    end
+    summary["log_z"] = lz
+    ev["reported"] = rep
+    return
+end
+
+# The engine options `_augment_evidence!` applies Jose's rule with:
+# `laplace_switch_tol` as given, and `laplace_check` false for
+# `untemper_transit` with photometry, as pt_emcee sets it.
+function _postfit_rule_kw(opts, data)
+    o = opts isa AbstractDict ? opts : Dict()
+    untemper = _get(o, :untemper_transit; default = false) === true
+    phot = hasproperty(data, :t_phot) && !isempty(data.t_phot)
+    tol = _get(o, :laplace_switch_tol; default = 50.0)
+    return (; laplace_check = !(untemper && phot),
+              laplace_switch_tol = tol isa Real ? Float64(tol) : 50.0)
 end
 
 # =====================================================================
@@ -2888,43 +2982,17 @@ function _populate_summary!(summary, result, params, chains)
     # agreeing with each other is not a cross-check, and they can sit >100 nats
     # low on a signal-locked posterior while doing so. Recording the spread is
     # what makes a Bayes factor between two runs defensible.
-    ev = Dict{String, Any}()
-    for (key, fld) in ("bridge" => :log_evidence_bridge,
-                       "mode_laplace" => :log_evidence_laplace)
-        hasfield(typeof(result), fld) || continue
-        v = getfield(result, fld)
-        v isa Real && isfinite(v) && (ev[key] = Float64(v))
-    end
-    # A nested engine's log Z with its error (src/samplers/ns_error.jl).
-    if hasfield(typeof(result), :log_evidence_err)
-        lz = getfield(result, :log_evidence)
-        isfinite(lz) && (ev["nested"] = Dict("log_z" => Float64(lz),
-                                             "se" => Float64(getfield(result, :log_evidence_err))))
-    end
-    if hasfield(typeof(result), :evidence)
-        rep = getfield(result, :evidence)
-        for (key, fld) in ("ti" => :ti, "ti_plus" => :ti_plus,
-                           "ss_plus" => :ss_plus, "hybrid" => :hybrid)
-            hasfield(typeof(rep), fld) || continue
-            t = getfield(rep, fld)
-            (t isa Tuple && length(t) == 2 && isfinite(t[1])) || continue
-            ev[key] = Dict("log_z" => Float64(t[1]), "se" => Float64(t[2]))
-        end
-        hasfield(typeof(rep), :hybrid_beta_star) &&
-            (ev["hybrid_beta_star"] = Float64(getfield(rep, :hybrid_beta_star)))
-    end
-    if !isempty(ev)
-        # Name the headline by matching the reported value, so a reader knows
-        # which estimator `log_z` came from without re-deriving the selection logic.
-        lz = Float64(getfield(result, :log_evidence))
-        which = "tempered"
-        for (k, v) in ev
-            val = v isa Dict ? get(v, "log_z", NaN) : v
-            (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)
-        end
-        ev["reported"] = which
-        summary["evidence"] = ev
-    end
+    #
+    # The tempered stack goes in only when its ladder can carry it (the ladder
+    # reaches β = 0 and every adjacent pair swapped at least 5% of the time),
+    # and mode-Laplace is labelled as the approximation it is
+    # (`_evidence_summary`, src/sampler_diagnostics.jl). A nested engine's
+    # log Z goes in with its error (src/samplers/ns_error.jl).
+    nested = hasfield(typeof(result), :log_evidence_err) ?
+             (Float64(getfield(result, :log_evidence)),
+              Float64(getfield(result, :log_evidence_err))) : nothing
+    ev = _evidence_summary(result, Float64(getfield(result, :log_evidence)); nested)
+    ev === nothing || (summary["evidence"] = ev)
 
     _n_planets_posterior!(summary, chains)
     # No per-parameter or derived quantiles here. This built an unconditioned
@@ -2936,15 +3004,33 @@ function _populate_summary!(summary, result, params, chains)
 end
 
 function _write_summary(out_dir, summary)
-    # `allow_inf=true` is needed because samplers without evidence
-    # estimators (NUTS, OFTI, rjmcmc, moms, daedalus) write
-    # `log_z = NaN` into the summary. The JSON spec forbids NaN, but
-    # most parsers (Python json.loads with `parse_constant`,
-    # JavaScript) handle it fine.
+    # JSON has no NaN or Infinity, and strict parsers (JavaScript's JSON.parse,
+    # jq, Python's json with parse_constant) reject the bare tokens. A value
+    # that is not a finite number -- `log_z` of an engine with no evidence
+    # estimator (NUTS, OFTI, rjmcmc, moms), or of a tempered stack that cannot
+    # be quoted, an unbounded interval end -- is written as null
+    # (`_json_nonfinite_to_null`); the summary returned in memory keeps its
+    # NaN and ±Inf.
     open(joinpath(out_dir, "summary.json"), "w") do io
-        JSON3.pretty(io, summary; allow_inf = true)
+        JSON3.pretty(io, _json_nonfinite_to_null(summary))
     end
 end
+
+# A copy of `x` with every NaN and ±Inf replaced by `nothing` (JSON null),
+# through dictionaries, arrays, tuples and named tuples.
+_json_nonfinite_to_null(x::AbstractFloat) = isfinite(x) ? x : nothing
+function _json_nonfinite_to_null(x::AbstractDict)
+    y = empty(x, keytype(x), Any)          # the same kind of dictionary, in order
+    for (k, v) in x
+        y[k] = _json_nonfinite_to_null(v)
+    end
+    return y
+end
+_json_nonfinite_to_null(x::AbstractArray{<:Union{AbstractFloat, Integer, AbstractString, Bool, Nothing}}) =
+    any(v -> v isa AbstractFloat && !isfinite(v), x) ? Any[_json_nonfinite_to_null(v) for v in x] : x
+_json_nonfinite_to_null(x::AbstractArray) = Any[_json_nonfinite_to_null(v) for v in x]
+_json_nonfinite_to_null(x::Union{Tuple, NamedTuple}) = map(_json_nonfinite_to_null, x)
+_json_nonfinite_to_null(x) = x
 
 
 """

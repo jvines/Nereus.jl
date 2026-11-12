@@ -23,9 +23,13 @@
 #
 # This implementation:
 # - **Replicas live in BOUNDED space** (same as pt_emcee).
-# - **Adaptive β schedule** — pick the next β so the effective sample
-#   size (ESS) drops to ess_target × N. Avoids the "schedule tuning"
-#   problem of static schedules.
+# - **Adaptive β schedule** — pick the next β so the conditional ESS
+#   (Zhou, Johansen & Aston 2016) of the reweighting is ess_target × N, and
+#   resample only when the ESS of the accumulated weights falls below
+#   resample_ess × N. Avoids the "schedule tuning" problem of static
+#   schedules, and the clones of resampling at every step.
+# - **Adaptive mutation** — sweep until the replicas' positions have
+#   decorrelated from where the sweeps started (`decorrelation`).
 # - **MCMC mutation** = simple Gaussian RWM with prior-scale step;
 #   independent per replica → fully threaded (Threads.@threads :static).
 # - **Systematic resampling** — low-variance, deterministic given the
@@ -50,9 +54,15 @@ Container for a `sample_pa` run.
 - `log_evidence::Float64` — accumulated log Z (unbiased estimator).
 - `log_evidence_history::Vector{Float64}` — per-step log dZ contributions.
 - `beta_history::Vector{Float64}` — adaptive β schedule that the run produced.
-- `ess_history::Vector{Float64}` — ESS / N at each step (target ~ess_target).
+- `ess_history::Vector{Float64}` — ESS / N of the weights at each step, after
+  the reweighting and before any resampling.
 - `acceptance::Float64` — mean MCMC mutation acceptance rate.
 - `n_evals::Int` — total likelihood evaluations.
+- `sweep_history::Vector{Int}` — mutation sweeps at each step.
+- `corr_history::Vector{Float64}` — at each step, the largest correlation
+  (over parameters) left between the replicas' positions before and after the
+  mutation sweeps; `decorrelation` is its target.
+- `resampled::Vector{Bool}` — whether each step resampled.
 """
 struct PAResult
     chains::MCMCChains.Chains
@@ -62,6 +72,9 @@ struct PAResult
     ess_history::Vector{Float64}
     acceptance::Float64
     n_evals::Int
+    sweep_history::Vector{Int}
+    corr_history::Vector{Float64}
+    resampled::Vector{Bool}
 end
 
 """
@@ -70,13 +83,29 @@ end
 Population Annealing sequential MC sampler.
 
 # Keywords
-- `n_replicas::Int=500` — population size. Larger N → tighter log Z + posterior.
+- `n_replicas::Int=2000` — population size. Larger N → tighter log Z + posterior,
+  and a smaller bias: where the population crosses a phase transition the
+  estimate is biased HIGH at small N. On an RV + Hipparcos-IAD companion near
+  face-on (i = 5°, e free) the population moves from the prior's inclinations
+  to the face-on corner and its mirror image between β ≈ 1e-3 and 5e-3 (the
+  inclination's median from 1.9 rad to 0.09), and up to there no parameter
+  decorrelates within `max_mcmc_mult × n_mcmc` sweeps. The few
+  replicas that seed the corner are cloned into an under-dispersed population
+  that over-weights the next increments: log Z was +0.44 and +0.51 nats from
+  bridge (σ 0.005) and reference-path at 500 replicas, +0.12 at 1000, +0.01 and
+  -0.05 at 2000. All of it accrues between β = 1e-3 and 1e-2, with each of the three
+  kernels; a slower schedule (`ess_target = 0.97`) or a stricter
+  `decorrelation` (0.05) leaves it. Away from face-on (i = 45°, 89.5°) 500
+  matched bridge to 0.2.
 - `n_mcmc::Int=10` — MINIMUM MCMC mutation sweeps per anneal step. The mutation
-  loop is adaptive (see `mcmc_target_moves`): it always runs at least `n_mcmc`
+  loop is adaptive (see `decorrelation`): it always runs at least `n_mcmc`
   sweeps and then keeps sweeping until the population has decorrelated, so a
   small `n_mcmc` is no longer the magic constant that decides whether the
   sampler mixes.
-- `ess_target::Float64=0.9` — adaptive β picks each step so ESS / N = this. This
+- `ess_target::Float64=0.9` — adaptive β picks each step so the conditional ESS
+  of its reweighting (Zhou, Johansen & Aston 2016, the ESS of the incremental
+  weights under the current ones; the plain ESS when those are equal) is this
+  fraction of N. This
   is the SMC *temperature-crawl* target: a HIGH value (0.9) makes β advance in
   many small increments so the population re-equilibrates between resamplings.
   The previous default 0.5 advanced β in ~10–15 giant jumps; the mutation
@@ -90,14 +119,28 @@ Population Annealing sequential MC sampler.
   mutation needs the slack.
 - `max_steps::Int=200` — hard cap on annealing steps (with `ess_target=0.9` a
   typical RV fit takes 30–70 steps, well under the cap).
-- `mcmc_target_moves::Float64=5.0` — adaptive-mutation target: keep running
-  mutation sweeps at the current β until each replica has, in expectation,
-  accumulated this many ACCEPTED moves (cumulative acceptance-rate × sweeps ≥
-  target). Decouples mixing from the raw `n_mcmc` count: a low-acceptance β step
-  automatically gets more sweeps, a high-acceptance step fewer. This is what
-  stops resampling from out-pacing mutation (the effective-sample-collapse that
-  biased e). Set to 0 to disable adaptivity and run exactly `n_mcmc` sweeps.
-- `max_mcmc_mult::Int=12` — safety cap on adaptive sweeps: never run more than
+- `resample_ess::Float64=0.5` — resample when the ESS of the accumulated
+  weights falls below this fraction of N, and at β = 1. Between resamplings the
+  replicas carry their weights, and every step mutates them. Resampling at every
+  step (as this sampler did) cloned the population ~50 times on the way to
+  β = 1.
+- `decorrelation::Float64=0.2` — adaptive-mutation target: after `n_mcmc`
+  sweeps, keep sweeping at the current β until no parameter's positions
+  correlate with where the sweeps started by more than this (weighted rank
+  correlation across the replicas, the largest over parameters). A clone and
+  its parent start at one point; they are independent draws only once each has
+  forgotten it. A count of accepted moves is not that: a stretch move accepts
+  short steps. On an RV + IAD companion (300 replicas, two seeds) the
+  population returned at β = 1 had a least ESS of 179-182 with i = 89.5° and
+  16 with e free at i = 45°; with this and `resample_ess` it has 201-236 and
+  98-163, for 10-30 times the likelihood evaluations. On a 1-planet RV with
+  free e, log Z came out 10-17 nats below nested INS and is now within 2.
+  Where a parameter cannot decorrelate (the e-ω-M₀ ridge of a free e near 0)
+  each step runs to the `max_mcmc_mult` cap. `0` disables it.
+- `mcmc_target_moves::Float64=5.0` — a second floor: keep sweeping until each
+  replica has, in expectation, this many ACCEPTED moves. With it and
+  `decorrelation` both 0, exactly `n_mcmc` sweeps run.
+- `max_mcmc_mult::Int=30` — safety cap on adaptive sweeps: never run more than
   `max_mcmc_mult × n_mcmc` sweeps at one β step, bounding worst-case cost.
 - `step_scale::Float64=0.05` — only used by `mutation_kernel=:rwm`. RWM step
   size as fraction of prior range (or 1·σ for normal priors). Adapted between
@@ -129,7 +172,7 @@ Population Annealing sequential MC sampler.
 function sample_pa(
     target::NereusTarget,
     data::Data;
-    n_replicas::Int = 500,
+    n_replicas::Int = 2000,
     n_mcmc::Int = 10,
     ess_target::Real = 0.9,
     max_steps::Int = 200,
@@ -138,7 +181,9 @@ function sample_pa(
     stretch_a::Real = 2.0,
     de_move::Real = DE_MOVE_DEFAULT,
     mcmc_target_moves::Real = 5.0,
-    max_mcmc_mult::Int = 12,
+    max_mcmc_mult::Int = 30,
+    resample_ess::Real = 0.5,
+    decorrelation::Real = 0.2,
     seed::Int = 1,
     show_progress::Bool = true,
 )
@@ -150,6 +195,8 @@ function sample_pa(
     # The DE share of the stretch mutation (src/samplers/de_move.jl).
     p_de       = _de_check(de_move)
     mcmc_target_moves = Float64(mcmc_target_moves)
+    resample_ess = Float64(resample_ess)
+    decorrelation = Float64(decorrelation)
     mutation_kernel in (:stretch, :rwm, :adaptive_cov) || throw(ArgumentError(
         "mutation_kernel must be :stretch (default), :rwm, or :adaptive_cov; " *
         "got :$mutation_kernel"))
@@ -253,6 +300,11 @@ function sample_pa(
     β_history     = Float64[0.0]
     ess_history   = Float64[]
     accept_history = Float64[]
+    sweep_history = Int[]
+    corr_history  = Float64[]
+    resampled     = Bool[]
+    # Normalised log-weights of the replicas, carried between resamplings.
+    log_Wt = fill(-log(n_replicas), n_replicas)
     # DE (stretch mutation): ε's scale per coordinate, refreshed from the
     # partner half before each half-sweep.
     de_scale = zeros(n_dim)
@@ -263,18 +315,19 @@ function sample_pa(
     while β_cur < 1.0 && step < max_steps
         step += 1
 
-        # ---- 1. Adaptive β: bisect to ESS/N = ess_target -----------
-        # Effective sample size at proposed β_new given current logL:
-        #   ESS = (Σ wᵢ)² / Σ wᵢ²
-        # where wᵢ = exp((β_new − β_cur) · logL_i). We bisect Δβ ∈
-        # [0, 1−β_cur] to land ESS/N at ess_target. Closed-form
-        # logsumexp keeps everything numerically stable.
+        # ---- 1. Adaptive β: bisect to CESS/N = ess_target ----------
+        # Conditional ESS of the incremental weights wᵢ = exp(Δβ · logL_i)
+        # under the current normalised weights Wᵢ (Zhou, Johansen & Aston
+        # 2016, JCGS 25, 701):
+        #   CESS = N (Σ Wᵢ wᵢ)² / Σ Wᵢ wᵢ²
+        # — the ESS of the reweighting itself, whatever the weights already
+        # carried; with equal Wᵢ it is the plain ESS. We bisect Δβ ∈
+        # [0, 1−β_cur] to land CESS/N at ess_target, in logsumexp form.
         function ess_at(Δβ::Float64)
-            log_w = Δβ .* logL
-            m = maximum(log_w)
-            sum_w  = sum(exp.(log_w .- m))
-            sum_w2 = sum(exp.(2 .* (log_w .- m)))
-            return sum_w^2 / sum_w2 / n_replicas
+            a = log_Wt .+ Δβ .* logL
+            b = log_Wt .+ 2Δβ .* logL
+            ma, mb = maximum(a), maximum(b)
+            return exp(2 * (ma + log(sum(exp.(a .- ma)))) - (mb + log(sum(exp.(b .- mb)))))
         end
         lo, hi = 0.0, 1.0 - β_cur
         # The last step allowed goes to β = 1 whatever its ESS. Stopping short
@@ -295,60 +348,72 @@ function sample_pa(
         end
         Δβ = max(Δβ, 1e-6)  # ensure forward progress
         β_new = min(β_cur + Δβ, 1.0)
+        Δβ = β_new - β_cur
+        cess = ess_at(Δβ)
 
-        # ---- 2. Compute weights + log incremental Z ----------------
-        log_w = Δβ .* logL
-        m_log_w = maximum(log_w)
-        sum_w = sum(exp.(log_w .- m_log_w))
-        log_dZ = m_log_w + log(sum_w / n_replicas)
+        # ---- 2. Reweight + log incremental Z ------------------------
+        # log dZ = log Σ Wᵢ wᵢ: the ratio Z(β_new)/Z(β_cur) estimated from
+        # the weighted population.
+        log_a = log_Wt .+ Δβ .* logL
+        m_a = maximum(log_a)
+        lse = m_a + log(sum(exp.(log_a .- m_a)))
+        log_dZ = lse
         log_z_total += log_dZ
         push!(log_z_history, log_dZ)
         push!(β_history, β_new)
 
-        # Normalized weights (in log space → exp + renormalize)
-        log_W = log_w .- m_log_w .- log(sum_w)
-        W = exp.(log_W)
+        log_Wt = log_a .- lse
+        W = exp.(log_Wt)
         ess_norm = 1.0 / sum(W .^ 2) / n_replicas
         push!(ess_history, ess_norm)
-        forced && ess_norm < ess_target &&
+        forced && cess < ess_target &&
             @warn "sample_pa: max_steps = $max_steps reached at β = " *
                   "$(round(β_cur; sigdigits = 3)); the last step went to β = 1 " *
-                  "with ESS/N = $(round(ess_norm; sigdigits = 2)) (target " *
+                  "with a conditional ESS/N of $(round(cess; sigdigits = 2)) (target " *
                   "$ess_target), so the posterior is resampled from few replicas " *
                   "and the log-evidence's last increment is noisy. Raise " *
                   "max_steps (sample_smc: pass more betas)."
 
-        # ---- 3. Systematic resampling ------------------------------
+        # ---- 3. Systematic resampling, when the weights call for it --
         # Low-variance resampling: divide [0, 1) into N equal bins,
         # offset by u/N where u ~ U(0, 1), and select replicas whose
         # CDF interval the bin lands in. Preserves more diversity
-        # than multinomial.
-        cdf = cumsum(W)
-        u0 = rand(rng_master) / n_replicas
-        indices = Vector{Int}(undef, n_replicas)
-        j = 1
-        @inbounds for k in 1:n_replicas
-            u = u0 + (k - 1) / n_replicas
-            while j < n_replicas && cdf[j] < u
-                j += 1
+        # than multinomial. At β = 1 always (unless the weights are
+        # already equal), so the returned population is equally weighted;
+        # the mutation below then decorrelates its clones.
+        do_resample = ess_norm < resample_ess ||
+                      (β_new >= 1.0 && ess_norm < 1 - 1e-12)
+        push!(resampled, do_resample)
+        if do_resample
+            cdf = cumsum(W)
+            u0 = rand(rng_master) / n_replicas
+            indices = Vector{Int}(undef, n_replicas)
+            j = 1
+            @inbounds for k in 1:n_replicas
+                u = u0 + (k - 1) / n_replicas
+                while j < n_replicas && cdf[j] < u
+                    j += 1
+                end
+                indices[k] = j
             end
-            indices[k] = j
-        end
 
-        new_replicas = Matrix{Float64}(undef, n_replicas, n_dim)
-        new_logL = Vector{Float64}(undef, n_replicas)
-        new_logπ = Vector{Float64}(undef, n_replicas)
-        @inbounds for k in 1:n_replicas
-            src = indices[k]
-            for d in 1:n_dim
-                new_replicas[k, d] = replicas[src, d]
+            new_replicas = Matrix{Float64}(undef, n_replicas, n_dim)
+            new_logL = Vector{Float64}(undef, n_replicas)
+            new_logπ = Vector{Float64}(undef, n_replicas)
+            @inbounds for k in 1:n_replicas
+                src = indices[k]
+                for d in 1:n_dim
+                    new_replicas[k, d] = replicas[src, d]
+                end
+                new_logL[k] = logL[src]
+                new_logπ[k] = logπ[src]
             end
-            new_logL[k] = logL[src]
-            new_logπ[k] = logπ[src]
+            replicas = new_replicas
+            logL     = new_logL
+            logπ     = new_logπ
+            fill!(log_Wt, -log(n_replicas))
+            W = exp.(log_Wt)
         end
-        replicas = new_replicas
-        logL     = new_logL
-        logπ     = new_logπ
 
         # ---- 3b. Re-cut the angles' charts on the resampled population --
         # The mutation kernels move replicas within each full-circle angle's
@@ -405,10 +470,10 @@ function sample_pa(
         # Two-half ensemble bookkeeping (stretch only).
         half = n_replicas ÷ 2
 
-        # adaptive_cov: refit Cholesky factor from the current (resampled)
+        # adaptive_cov: refit Cholesky factor from the current (weighted)
         # population ONCE per β step (ridge-regularized for near-singular Σ).
         if mutation_kernel === :adaptive_cov
-            Σ_emp = cov(replicas)               # n_dim × n_dim
+            Σ_emp = _pa_weighted_cov(replicas, W)   # n_dim × n_dim
             @inbounds for d in 1:n_dim
                 Σ_emp[d, d] += cov_ridge        # diagonal ridge
             end
@@ -559,20 +624,32 @@ function sample_pa(
                     mutation_kernel === :adaptive_cov  ? adaptive_cov_sweep! :
                                                          rwm_sweep!
 
-        # Adaptive sweep loop: ≥ n_mcmc sweeps, then continue until each
+        # Adaptive sweep loop: ≥ n_mcmc sweeps, then continue until no
+        # parameter's positions correlate with where the sweeps started by
+        # more than `decorrelation` (`_pa_max_corr`, weighted by W) and each
         # replica has ~mcmc_target_moves accepted moves, capped at
-        # max_mcmc_mult × n_mcmc. With mcmc_target_moves ≤ 0 the loop runs
+        # max_mcmc_mult × n_mcmc. With both targets ≤ 0 the loop runs
         # exactly n_mcmc sweeps (legacy fixed behaviour).
-        sweep_cap = mcmc_target_moves > 0 ? max(n_mcmc, max_mcmc_mult * n_mcmc) : n_mcmc
+        adaptive = mcmc_target_moves > 0 || decorrelation > 0
+        sweep_cap = adaptive ? max(n_mcmc, max_mcmc_mult * n_mcmc) : n_mcmc
+        X0 = copy(replicas)
         n_sweeps  = 0
+        ρ_max = NaN
         while n_sweeps < sweep_cap
             do_sweep!()
             n_sweeps += 1
             n_sweeps >= n_mcmc || continue
-            mcmc_target_moves > 0 || break
+            adaptive || break
             # accepted moves per replica so far this β step
-            (accept_count[] / n_replicas) >= mcmc_target_moves && break
+            mcmc_target_moves > 0 && accept_count[] / n_replicas < mcmc_target_moves &&
+                continue
+            decorrelation > 0 || break
+            ρ_max = _pa_max_corr(X0, replicas, W)
+            ρ_max <= decorrelation && break
         end
+        isnan(ρ_max) && (ρ_max = _pa_max_corr(X0, replicas, W))
+        push!(sweep_history, n_sweeps)
+        push!(corr_history, ρ_max)
 
         acc_rate = accept_count[] / max(propose_count[], 1)
         push!(accept_history, acc_rate)
@@ -599,6 +676,7 @@ function sample_pa(
                                   fields = (:β => round(β_cur, digits=3),
                                             :acc => round(acc_rate, digits=3),
                                             :ess => round(ess_norm, digits=3),
+                                            :sweeps => n_sweeps,
                                             :logZ => round(log_z_total, digits=2)))
     end
     show_progress && finish!(pb)
@@ -609,6 +687,54 @@ function sample_pa(
     mean_acc = isempty(accept_history) ? 0.0 : sum(accept_history) / length(accept_history)
     return PAResult(
         chains, log_z_total, log_z_history, β_history, ess_history,
-        mean_acc, n_evals[]
+        mean_acc, n_evals[], sweep_history, corr_history, resampled
     )
+end
+
+# Covariance of the rows of `X` under the normalised weights `W` (the
+# unbiased reliability-weights form; `cov(X)` when they are equal).
+function _pa_weighted_cov(X::AbstractMatrix{Float64}, W::AbstractVector{Float64})
+    μ = vec(sum(W .* X; dims = 1))
+    Xc = X .- μ'
+    Σ = (Xc .* W)' * Xc
+    return Σ ./ max(1 - sum(abs2, W), eps())
+end
+
+# The largest |weighted rank correlation|, over the columns (parameters), of
+# the replicas' positions in `X0` and in `X` (rows paired): Pearson's on the
+# ranks, so a log-uniform prior's decades or a few outlying replicas do not
+# decide it. 0 for a column that is constant in either.
+function _pa_max_corr(X0::AbstractMatrix{Float64}, X::AbstractMatrix{Float64},
+                      W::AbstractVector{Float64})
+    ρ = 0.0
+    @inbounds for d in axes(X, 2)
+        a = _pa_ranks(@view X0[:, d]); b = _pa_ranks(@view X[:, d])
+        μa = sum(W .* a); μb = sum(W .* b)
+        sab = saa = sbb = 0.0
+        for i in eachindex(W)
+            da = a[i] - μa; db = b[i] - μb
+            sab += W[i] * da * db; saa += W[i] * da^2; sbb += W[i] * db^2
+        end
+        (saa > 0 && sbb > 0) || continue
+        ρ = max(ρ, abs(sab) / sqrt(saa * sbb))
+    end
+    return ρ
+end
+
+# Ranks of `v`, ties given their mean rank.
+function _pa_ranks(v::AbstractVector{Float64})
+    p = sortperm(v)
+    r = Vector{Float64}(undef, length(v))
+    i = 1
+    @inbounds while i <= length(v)
+        j = i
+        while j < length(v) && v[p[j + 1]] == v[p[i]]
+            j += 1
+        end
+        for k in i:j
+            r[p[k]] = (i + j) / 2
+        end
+        i = j + 1
+    end
+    return r
 end

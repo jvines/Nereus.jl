@@ -58,6 +58,21 @@ export bridge_evidence
 # binds below a hundred threads.
 const _BRIDGE_BOOT_MEMORY = 2^31
 
+# The least bulk ESS over parameters of the draws as bridge reads them: each
+# cyclic inclination folded to [0, π], and the stellar spin in one
+# representative (`fold_cyclic_inclinations!`, as `_bridge_draw!` does). It is
+# what the "q needs d + d(d+1)/2 effective samples" guards measure. The
+# posterior on an inclination's circle is the physical one twice over, at x and
+# -x, and a cold chain that swaps between the copies has a raw-inclination ESS
+# that says nothing about the draws q is fitted to: pt_hmc near face-on
+# (i = 5°) had 28% of its draws in the mirror copy, an inclination ESS of 14
+# against 1251 folded, and bridge refused for it.
+function _bridge_min_ess(chains::MCMCChains.Chains, params::Params)
+    c = isempty(cyclic_inclination_indices(params)) ? chains :
+        fold_cyclic_inclinations!(deepcopy(chains), params)
+    return minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, c)[:, :ess])))
+end
+
 """
     bridge_evidence(target, chains; n_proposal, seed, proposal, max_iter, tol,
                     n_bootstrap, bootstrap_memory, show_progress, timings) -> NamedTuple

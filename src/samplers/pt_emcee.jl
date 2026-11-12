@@ -69,28 +69,37 @@ Container for a `sample_pt_emcee` run.
 # Fields
 - `chains::MCMCChains.Chains` — β=1 walkers, post-burnin, flattened, in bounded space
   (circular angles in the window re-charted at the end of burn-in, so contiguous).
-- `log_evidence::Float64` — evidence to USE: the TI/SS/H+ best when it agrees with
-  the mode-Laplace cross-check, otherwise `log_evidence_laplace` (the tempered
-  estimators fail catastrophically on phase-transition / signal-locked posteriors;
-  mode-Laplace does not). See [`mode_laplace_evidence`](@ref).
+- `log_evidence::Float64` — evidence to USE: `log_evidence_bridge` when it is
+  usable; otherwise the tempered value (H+) when its ladder can carry it (the
+  ladder reaches β = 0 and every adjacent pair swapped at least `swap_min`,
+  0.05, of the time, which the default ladder, geometric down to `beta_min`,
+  never does) and it agrees with the mode-Laplace cross-check within
+  `laplace_switch_tol`; otherwise `log_evidence_laplace`, with a warning (the
+  tempered estimators fail catastrophically on phase-transition / signal-locked
+  posteriors; mode-Laplace does not). `NaN`, with a warning, only when none of
+  them is available. Under `untemper_transit` with photometry the tempered value
+  is relative and mode-Laplace absolute, so there is no switch. See
+  [`mode_laplace_evidence`](@ref).
 - `log_evidence_laplace::Float64` — mode-anchored Laplace evidence from the cold
-  chain; phase-transition-immune. NaN if not computable. **Reported, not
-  headlined**: measured on 51 Peg (unimodal, tightly determined — the friendliest
-  case it will ever see) it sat 24 nats from bridge and reference-path, which
-  agree with each other to 4 and are validated against exact truth on a curved
-  15-D target. It also assumes local Gaussianity about the mode, which is exactly
-  what fails on the posteriors that break the tempered path.
+  chain, a Gaussian approximation at the mode; phase-transition-immune. NaN if
+  not computable. Measured on 51 Peg (unimodal, tightly determined) it sat 24
+  nats from bridge and reference-path, which agree with each other to 4 and are
+  validated against exact truth on a curved 15-D target; on an RV +
+  Hipparcos-IAD companion 1.1 to 1.2 nats above bridge. A warning says when it
+  is further from bridge than bridge's standard error + 1 nat.
 - `log_evidence_bridge::Float64` — bridge-sampling evidence from the same cold
   chain (Meng & Wong optimal bridge). This is the HEADLINE when it is usable:
   it never touches the prior end and makes no Gaussianity assumption. It costs
   `bridge_n` likelihood evaluations: the posterior at the kept draws is read
   off their `:lp`, after a check against a full evaluation at a few of them
   (`bridge_evidence`). NaN if not computable.
-- `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ tempered stack (raw).
+- `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ tempered stack (raw,
+  whether or not it is quotable; summary.json carries the values only when it
+  is).
 - `acceptance_within::Vector{Float64}` — within-temp stretch acceptance per temp.
 - `acceptance_swap::Vector{Float64}` — swap acceptance between (k, k+1). A tiny
   `minimum(acceptance_swap)` (≪0.1) that won't rise with more temps signals a
-  phase transition → the tempered evidence is untrustworthy (use the Laplace one).
+  phase transition; below `swap_min` the tempered evidence is not quotable.
 - `betas::Vector{Float64}` — β ladder used.
 - `n_evals::Int` — total likelihood evaluations.
 - `ladder::LadderHistory` — the ladder, the swap acceptance and the swap mean
@@ -135,24 +144,35 @@ makes tempered estimators (TI/SS/H+) fail on high-SNR / signal-locked posteriors
 (it never tempers), and **robust to railed MAPs** (uses the sample covariance in
 unconstrained space, not the Hessian, which goes singular at a rail).
 
-`logZ ≈ logq(mode) + d/2·log2π + ½·logdet(Σ_local)`, where the mode is the
-max-`lp` cold sample (NOT the mean — a multimodal mean sits in a density valley),
-and `Σ_local` is the covariance of the closest `mode_frac` of samples to the mode
-in unconstrained space (excludes multimodal spread). Carries a ~O(100)-nat
-non-Gaussian bias on pathological posteriors — negligible for strong detections,
-cross-check nested for marginal ones. Returns `NaN` if not computable (bounded
-target, missing `:lp`, or too few samples).
+`logZ ≈ logq(mode) + d/2·log2π + ½·logdet(Σ_local)`, all in the unconstrained
+space: `logq` is the log posterior density THERE, the bounded one plus the
+log-Jacobian of the map, the mode is the max-`logq` cold sample (NOT the mean —
+a multimodal mean sits in a density valley), and `Σ_local` is the covariance of
+the closest `mode_frac` of samples to the mode (excludes multimodal spread),
+divided by the factor a Gaussian's covariance shrinks by when cut to that
+inner fraction. Carries a ~O(100)-nat non-Gaussian bias on pathological
+posteriors — negligible for strong detections, cross-check nested for marginal
+ones. Returns `NaN` if not computable (bounded target, or too few samples).
+
+The chain's `:lp` is read as the log posterior in the bounded space (pt_emcee,
+pt, pt_whitening) or in the unconstrained one (pt_hmc, NUTS), whichever it
+matches at a few draws against a full evaluation (`_laplace_logq`); without
+`:lp`, or matching neither, the density is evaluated at every draw. Both
+corrections were missing: pt_emcee's `:lp`, read as `logq`, lacked the
+log-Jacobian, and the cut-down covariance was used as it came. On an RV +
+Hipparcos-IAD companion that put pt_emcee's value about 1.1 nats above bridge
+and pt_hmc's 2.6 to 3.1 below.
 """
 function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
                                mode_frac::Real = 0.3)
     try
         target.transform === nothing && return NaN
-        names = target.params.layout.unfrozen_names
-        d = length(names)
+        nms = target.params.layout.unfrozen_names
+        d = length(nms)
         d >= 1 || return NaN
-        lp = _draws(chains, :lp)
-        cols = [_draws(chains, Symbol(nm)) for nm in names]
-        N = length(lp)
+        cols = [_draws(chains, Symbol(nm)) for nm in nms]
+        N = length(cols[1])
+        lp = :lp in names(chains) ? Float64.(_draws(chains, :lp)) : fill(NaN, N)
         N >= 2d + 2 || return NaN
         pt = target.transform
         # Cyclic inclinations folded to [0, π] (src/circular.jl), and the
@@ -168,22 +188,63 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
             spin_canon!(xi, sc)
             Y[:, i] = transform_forward(xi, pt)
         end
-        good = isfinite.(lp) .& vec(all(isfinite, Y; dims = 1))
+        good = vec(all(isfinite, Y; dims = 1))
+        any(isfinite, lp) && (good .&= isfinite.(lp))
         count(good) >= 2d + 2 || return NaN
         Y = Y[:, good]; lp = lp[good]; Nk = length(lp)
-        imax = argmax(lp); mode = Y[:, imax]
+        logq = _laplace_logq(target, Y, lp)
+        logq === nothing && return NaN
+        imax = argmax(logq); mode = Y[:, imax]
         Σ  = cov(Y; dims = 2) + 1e-8 * I(d)
         Lc = cholesky(Symmetric(Σ)).L
         md = [norm(Lc \ (Y[:, i] .- mode)) for i in 1:Nk]
         sel = md .< quantile(md, mode_frac)
-        Yc = count(sel) >= 2d + 2 ? Y[:, sel] : Y
+        # The draws within a Mahalanobis radius √q of a Gaussian's centre have
+        # covariance c·Σ, c = F_{d+2}(q) / F_d(q) (F_k the χ²_k CDF): for d = 7
+        # and the inner 30%, c = 0.46 and ½·logdet is 2.7 nats short. Undo it.
+        local_ = count(sel) >= 2d + 2
+        Yc = local_ ? Y[:, sel] : Y
         Sc = cov(Yc; dims = 2) + 1e-8 * I(d)
-        lz = lp[imax] + 0.5 * d * log(2π) + 0.5 * logdet(Symmetric(Sc))
+        shrink = 0.0
+        if local_
+            f = count(sel) / Nk
+            c = cdf(Chisq(d + 2), quantile(Chisq(d), f)) / f
+            shrink = d * log(c)
+        end
+        lz = logq[imax] + 0.5 * d * log(2π) + 0.5 * (logdet(Symmetric(Sc)) - shrink)
         nf = n_folds(sc, cinc)
         return nf == 0 ? lz : lz + nf * log(2.0)
     catch
         return NaN
     end
+end
+
+# The log posterior density in the unconstrained space at each column of `Y`
+# (folded draws mapped forward), from the chain's `:lp` when it is one of the
+# two conventions Nereus chains carry: the bounded log posterior (pt_emcee, pt,
+# pt_whitening), to which the map's log-Jacobian is added, or the unconstrained
+# one (pt_hmc, NUTS), taken as it is. Which one is checked at a few draws
+# against a full evaluation; with neither (or no `:lp`) every draw is
+# evaluated. `nothing` if that leaves no finite value.
+function _laplace_logq(target::NereusTarget, Y::AbstractMatrix, lp::AbstractVector)
+    pt = target.transform
+    N = size(Y, 2)
+    # bridge's per-task evaluators: thread-safe scratch, and the same
+    # unconstrained log density (`_bridge_logdensity!`).
+    evs = [_BridgeEvaluator(target) for _ in 1:max(1, _bridge_ntasks(N))]
+    lj = [Float64(transform_logabsdetjac_inv(Y[:, i], pt)) for i in 1:N]
+    k = unique(round.(Int, range(1, N; length = min(N, 8))))
+    fk = [_bridge_logdensity!(evs[1], Y[:, i]) for i in k]
+    tol(v) = 1e-6 + 1e-10 * abs(v)
+    if all(isfinite, lp[k]) && all(isfinite, fk)
+        all(abs(lp[i] + lj[i] - f) <= tol(f) for (i, f) in zip(k, fk)) && return lp .+ lj
+        all(abs(lp[i] - f) <= tol(f) for (i, f) in zip(k, fk)) && return Vector{Float64}(lp)
+    end
+    q = Vector{Float64}(undef, N)
+    _bridge_eval!(q) do c, i
+        _bridge_logdensity!(evs[c], Y[:, i])
+    end
+    return any(isfinite, q) ? q : nothing
 end
 
 # ------------------------------------------------------------------
@@ -525,7 +586,10 @@ end
 # at a time, from the drop to the steeper side:
 #     D(h) = ℓ0 - min(ℓ(y0 + h e_j), ℓ(y0 - h e_j)),    σ_j = h / √(2D)
 # with h rescaled by 4 from `h0` until D lies in [1/8, 2] nats, the quadratic
-# core clear of rounding. At the mode of a Gaussian that is the conditional
+# core clear of rounding; once an h below and one above the window are known,
+# bisected geometrically between them (a wall or support edge makes D jump by
+# more than the factor 16 a ×4 step allows), and if none lands in it, taken at
+# the narrowest h that overshot (a smaller σ). At the mode of a Gaussian that is the conditional
 # width 1/√H_jj. Away from it the gradient g_j steepens one side,
 # D = |g_j| h + ½ H_jj h², so σ_j only comes out smaller: a walker still
 # climbing (Gaia-4 b's had its jitters 15 nats per m/s uphill) gets a smaller
@@ -533,32 +597,56 @@ end
 # half the width (half a Gaussian). `nothing` if an axis never settles. Only
 # the axes `dims` (h0 and the widths returned are theirs, in that order).
 function _pt_axis_widths(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
-                         h0::AbstractVector{Float64}; max_iter::Int = 16,
+                         h0::AbstractVector{Float64}; max_iter::Int = 24,
                          dims = eachindex(y0))
     σ = Vector{Float64}(undef, length(dims))
     y = collect(Float64, y0)
     for (i, j) in enumerate(dims)
         h = h0[i]
         ok = false
+        lo = 0.0          # the widest h seen with the drop under 1/8 nat
+        hi = Inf          # the narrowest h seen with the drop over 2 nats (or off the support)
+        up = nothing      # σ read at `hi`, when its drop was finite
         for _ in 1:max_iter
             y[j] = y0[j] + h; ℓp = ℓat(y)
             y[j] = y0[j] - h; ℓm = ℓat(y)
             y[j] = y0[j]
             if !isfinite(ℓp) && !isfinite(ℓm)
-                h /= 4
+                hi = min(hi, h)
+                h = lo > 0 ? sqrt(lo * hi) : h / 4
                 continue
             end
             half = isfinite(ℓp) && isfinite(ℓm) ? 1.0 : 0.5
             drop = ℓ0 - min(isfinite(ℓp) ? ℓp : Inf, isfinite(ℓm) ? ℓm : Inf)
             if drop > 2
-                h /= 4
+                # Too steep. The drop need not grow as h²: a wall (a support
+                # edge, a prior that diverges) makes it jump by more than the
+                # factor 16 a ×4 step allows, so once a flat h is known, bisect
+                # between the two instead of stepping back and forth.
+                if h < hi
+                    hi = h
+                    up = half * h / sqrt(2 * drop)
+                end
+                h = lo > 0 ? sqrt(lo * hi) : h / 4
             elseif drop >= 0.125
                 σ[i] = half * h / sqrt(2 * drop)
                 ok = true
                 break
             else
-                h *= 4      # flat at this scale, or uphill both ways: look wider
+                lo = max(lo, h)
+                h = isfinite(hi) ? sqrt(lo * hi) : h * 4   # flat, or uphill both ways
             end
+            # The bracket has closed on a jump: no h gives a drop in the window.
+            if lo > 0 && hi < Inf && hi <= lo * (1 + 1e-6)
+                break
+            end
+        end
+        if !ok && up !== nothing
+            # No h put the drop in the window: take the width at the narrowest h
+            # that overshot it. A larger drop gives a smaller σ, so this only
+            # underestimates the volume.
+            σ[i] = up
+            ok = true
         end
         ok || return nothing
     end
@@ -725,6 +813,13 @@ in place.
 - `seed::Int=1`
 - `thin::Int=1` — thinning factor on β=1 posterior output.
 - `show_progress::Bool=true` — display the per-step progress bar.
+- `swap_min::Real=0.05` — the least swap acceptance between adjacent rungs for
+  the tempered evidence to be quotable (with a ladder that reaches β = 0); one
+  that is not counts as broken, and mode-Laplace takes over. See
+  `log_evidence` under [`PTemceeResult`](@ref).
+- `laplace_switch_tol::Real=50.0` — the Laplace non-Gaussian bias, in nats: a
+  quotable tempered value further than this from mode-Laplace is broken, and
+  mode-Laplace takes over.
 - `prune_stranded::Bool=true` — every 50 steps through the first three quarters
   of burn-in, move walkers stranded far below their rung's mode onto walkers in
   it. Only walkers whose likelihood is so low that the whole region below it
@@ -812,6 +907,7 @@ function sample_pt_emcee(
     ladder_adapt_ν0::Real = 10.0,
     ladder_adapt_K::Real = 1.0,
     laplace_switch_tol::Real = 50.0,
+    swap_min::Real = 0.05,
     bridge_headline::Bool = true,
     bridge_n::Int = 20_000,
     bridge_warn_tol::Real = 20.0,
@@ -1756,7 +1852,9 @@ function sample_pt_emcee(
     # with more temps. The mode-Laplace estimator is immune (it never tempers).
     # Rule: if they agree, keep the tempered best (exact when it works); if they
     # disagree by ≫ the Laplace non-Gaussian bias, the tempered one is broken —
-    # use Laplace, and warn.
+    # use Laplace, and warn. Bridge, when it is usable, comes first, and a
+    # tempered value from a ladder that cannot carry it (`_tempered_quotable`)
+    # is broken too (HEADLINE SELECTION below).
     # Under untemper_transit (+photometry) the two estimators live on DIFFERENT
     # scales: mode-Laplace (built from :lp = full posterior) is ABSOLUTE logZ,
     # while the tempered TI/SS/H+ integrate only L_RV and return logZ RELATIVE
@@ -1788,12 +1886,14 @@ function sample_pt_emcee(
     # still two passes over the posterior.
     log_z_bridge = NaN
     bridge_overlap = NaN
+    bridge_se = NaN
     if bridge_headline && target.transform !== nothing
         try
             b = bridge_evidence(target, chains; n_proposal = bridge_n, seed = seed)
             if b.converged && isfinite(b.log_z)
                 log_z_bridge = b.log_z
                 bridge_overlap = b.overlap
+                bridge_se = b.se
             end
         catch err
             @debug "sample_pt_emcee: bridge evidence unavailable" exception = err
@@ -1811,7 +1911,7 @@ function sample_pt_emcee(
     # n_eff ~ 8000 against 135 parameters.
     if isfinite(log_z_bridge)
         n_eff_min = try
-            minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
+            _bridge_min_ess(chains, target.params)   # folded, as bridge reads them
         catch err
             @debug "sample_pt_emcee: ESS unavailable for the bridge guard" exception = err
             NaN
@@ -1829,11 +1929,6 @@ function sample_pt_emcee(
         end
     end
 
-    # A NON-FINITE tempered evidence is the loudest possible failure and used to
-    # be the quietest: the switch below is gated on isfinite(log_z), so -Inf or
-    # NaN skipped the check entirely and propagated into res.log_evidence with no
-    # warning at all. One -Inf log-likelihood on any rung is enough to produce it
-    # (see the guard in update_evidence!). Handle it first and explicitly.
     # HEADLINE SELECTION.
     #
     # Ordered by what each estimator has actually been measured to do, not by
@@ -1846,50 +1941,80 @@ function sample_pt_emcee(
     #   refpath   -5893.1
     #
     # The beta-path stack fails at the phase transition and cannot detect it --
-    # TI+ and H+ agreed to the second decimal while both were 178 nats out. So
-    # bridge is the headline when it is usable, Laplace only as a fallback, and
-    # the tempered value only when it is corroborated.
-    tempered_ok = isfinite(log_z)
-    bridge_ok   = isfinite(log_z_bridge)
+    # TI+ and H+ agreed to the second decimal while both were 178 nats out --
+    # and on an RV + Hipparcos-IAD companion (bridge 163.88, matched by pt_hmc's
+    # bridge, Daedalus and population annealing) SS+ read 157.85 from 8 rungs.
+    #
+    # So, in order: bridge when it is usable. Else the tempered value when its
+    # ladder can carry it (`_tempered_quotable`: the ladder reaches β = 0 and
+    # every adjacent pair swapped at least `swap_min` of the time, which the
+    # default ladder, geometric down to beta_min, never does) and it agrees with
+    # mode-Laplace within `laplace_switch_tol`. Else mode-Laplace, with a
+    # warning (Jose's rule above). No number only when none of them exists.
+    # Under untemper_transit + photometry there is no switch (above).
+    tempered_ok, tempered_why = _tempered_quotable(βs, acc_swap; swap_min)
+    if tempered_ok && !isfinite(log_z)
+        tempered_ok, tempered_why = false, "it is not finite"
+    end
     log_z_tempered = log_z
+    laplace_ok = isfinite(log_z_laplace)
+    gap = abs(log_z_tempered - log_z_laplace)
+    min_swap = isempty(acc_swap) ? NaN : minimum(acc_swap)
+    why_bridge = !bridge_headline ? "bridge_headline = false" :
+                 target.transform === nothing ? "the target is bounded " *
+                     "(unconstrained = false); run_job computes bridge after the fit" :
+                 "bridge sampling did not give a usable value"
+    switched = false
 
-    if bridge_ok
+    if isfinite(log_z_bridge)
         # Corroborate rather than assume. Bridge cannot self-detect a posterior
         # its single reference fails to cover -- `overlap` counts draws landing
         # in SUPPORT, not mode coverage, and read 0.99 on a posterior with 23
-        # period modes. A large bridge/Laplace gap is the cheapest available
-        # signal that something is off; say so rather than picking silently.
-        if isfinite(log_z_laplace) && abs(log_z_bridge - log_z_laplace) > bridge_warn_tol
-            @warn "sample_pt_emcee: bridge and mode-Laplace disagree by " *
-                  "$(round(abs(log_z_bridge - log_z_laplace), digits=1)) nats. " *
-                  "Reporting bridge (it is the validated one), but CHECK THE " *
-                  "POSTERIOR IS NOT MULTIMODAL before quoting it — a single " *
-                  "Gaussian reference cannot cover multiple modes and overlap " *
-                  "will not tell you so." bridge = log_z_bridge laplace = log_z_laplace overlap = bridge_overlap
-        end
+        # period modes. A large bridge/Laplace gap is the cheapest signal that
+        # something is off; past `bridge_warn_tol` the warning says so.
+        _warn_laplace_vs_bridge("sample_pt_emcee", log_z_laplace, log_z_bridge,
+                                bridge_se; multimodal_tol = bridge_warn_tol)
         log_z = log_z_bridge
-    elseif isfinite(log_z_laplace)
-        @warn "sample_pt_emcee: bridge evidence unavailable; falling back to " *
-              "mode-Laplace. Treat it as indicative: on a clean unimodal target " *
-              "it measured 24 nats from bridge, and it has no validation against " *
-              "a known log Z." laplace = log_z_laplace
+    elseif !laplace_check
+        # Relative tempered value, absolute Laplace: no switch, both kept.
+        tempered_ok || @warn "sample_pt_emcee: the tempered log-evidence is not " *
+              "quotable: $tempered_why. Under untemper_transit with photometry " *
+              "it is relative to the transit-conditioned reference and " *
+              "mode-Laplace is absolute, so Laplace does not replace it; both " *
+              "are kept." tempered = log_z_tempered laplace = log_z_laplace
+        log_z = log_z_tempered
+    elseif tempered_ok && laplace_ok && gap <= laplace_switch_tol
+        log_z = log_z_tempered
+    elseif laplace_ok
+        why_t = tempered_ok ?
+            "it is $(round(gap, digits = 1)) nats from mode-Laplace, beyond the " *
+            "Laplace non-Gaussian bias (laplace_switch_tol = $laplace_switch_tol): " *
+            "the phase-transition signature (min swap accept = " *
+            "$(round(min_swap, digits = 3)))" :
+            "it is not quotable: $tempered_why"
+        @warn "sample_pt_emcee: log_evidence is mode-Laplace, a Gaussian " *
+              "approximation at the posterior mode. Bridge: $why_bridge. The " *
+              "tempered value is broken: $why_t. Treat it as indicative: on a " *
+              "clean unimodal target it measured 24 nats from bridge." laplace = log_z_laplace tempered = log_z_tempered
         log_z = log_z_laplace
+        switched = true
     elseif tempered_ok
-        @warn "sample_pt_emcee: neither bridge nor mode-Laplace is available. " *
-              "log_evidence is the TEMPERED value, which is biased low by " *
-              "10^2-10^4 nats on a signal-locked posterior and cannot detect " *
-              "that it is. Do not quote it without an independent check." tempered = log_z
+        @warn "sample_pt_emcee: neither bridge (" * why_bridge * ") nor " *
+              "mode-Laplace is available. log_evidence is the tempered value; " *
+              "its ladder can carry it, but nothing corroborates it." tempered = log_z_tempered
+        log_z = log_z_tempered
     else
         @warn "sample_pt_emcee: no usable evidence estimate for this run. " *
-              "log_evidence is not quotable."
+              "Bridge: $why_bridge. mode-Laplace is not available. The tempered " *
+              "stack is not quotable: $tempered_why. log_evidence is NaN."
+        log_z = NaN
     end
 
     # Independent of which was chosen: a large tempered/headline gap is the
     # phase-transition signature and worth surfacing, because the tempered
     # numbers are still in `evidence` and someone will read them.
-    if tempered_ok && isfinite(log_z) && laplace_check &&
+    if !switched && isfinite(log_z_tempered) && isfinite(log_z) && laplace_check &&
        abs(log_z_tempered - log_z) > laplace_switch_tol
-        min_swap = isempty(acc_swap) ? NaN : minimum(acc_swap)
         @warn "sample_pt_emcee: the TEMPERED stack (TI/TI+/SS+/H+ in `evidence`) " *
               "is $(round(abs(log_z_tempered - log_z), digits=1)) nats from the " *
               "reported log_evidence — the phase-transition signature (min swap " *

@@ -94,8 +94,11 @@ export sample_pt_whitening, WhiteningPTResult
 
 # Fields
 - `chains::MCMCChains.Chains` — β=1 walkers post-burnin (walkers as chains)
-- `log_evidence::Float64` — reddemcee H+/TI+/TI stack on the β-ladder
-- `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ evidence stack
+- `log_evidence::Float64` — reddemcee H+/TI+/TI stack on the β-ladder, quoted
+  only when the ladder reaches β = 0 and every adjacent pair swapped at least
+  `swap_min` of the time (`_tempered_quotable`); otherwise `NaN`, with a warning
+  saying why
+- `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ evidence stack (raw)
 - `acceptance_within::Vector{Float64}` — within-temp stretch acceptance per temp
 - `acceptance_de::Vector{Float64}` — within-temp acceptance of the
   differential-evolution move per temp (`de_move`); NaN where none was proposed
@@ -142,6 +145,8 @@ the distinguishing feature of this sampler.
   ladder `sample_pt_emcee` uses (geometric ladders give far more uniform
   swap acceptance than the old quadratic ladder, which over-resolved the
   hot end and starved the cold end).
+- `swap_min::Real=0.05` — the least adjacent swap acceptance for
+  `log_evidence` to be quoted (with a ladder that reaches β = 0).
 - `stretch_a::Float64=2.0` — Goodman-Weare stretch parameter.
 - `de_move::Real=DE_MOVE_DEFAULT` — as in `sample_pt_emcee`: per walker and
   step, the probability of a differential-evolution move in place of the
@@ -202,6 +207,7 @@ function sample_pt_whitening(
     n_steps::Int = 2000,
     n_burnin::Int = 500,
     betas::Union{Nothing,AbstractVector} = nothing,
+    swap_min::Real = 0.05,
     stretch_a::Real = 2.0,
     de_move::Real = DE_MOVE_DEFAULT,
     proposal_scale::Real = 0.05,
@@ -926,6 +932,15 @@ function sample_pt_whitening(
 
     acc_within = accept_within ./ max.(propose_within, 1)
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)
+    # Its only log Z is the tempered one: quoted only when the ladder can carry
+    # it (`_tempered_quotable`, src/samplers/evidence.jl, as sample_pt_emcee).
+    tq_ok, tq_why = _tempered_quotable(βs, acc_swap; swap_min)
+    if !(tq_ok && isfinite(log_z))
+        @warn "sample_pt_whitening: no quotable log-evidence for this run: the " *
+              "tempered stack is not quotable ($(tq_ok ? "it is not finite" : tq_why)). " *
+              "log_evidence is NaN; give `betas` with a β = 0 rung." tempered = log_z
+        log_z = NaN
+    end
     # Collective drift of the cold ensemble, which R-hat cannot see (see
     # `ensemble_drift`); warns when it finds one.
     drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_whitening")
