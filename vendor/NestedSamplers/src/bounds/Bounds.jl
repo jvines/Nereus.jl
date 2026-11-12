@@ -114,6 +114,12 @@ include("ellipsoid.jl")
 include("multiellipsoid.jl")
 include("mlfriends.jl")
 
+# The fit, its random numbers from `rng`: MultiEllipsoid's k-means draws a new
+# centre for an empty cluster, MLFriends bootstraps its radius.
+fit_rng(rng::AbstractRNG, B, points; pointvol = 0) = fit(B, points; pointvol = pointvol)
+fit_rng(rng::AbstractRNG, B::Type{<:Union{MultiEllipsoid,MLFriends}}, points; pointvol = 0) =
+    fit(B, points; pointvol = pointvol, rng = rng)
+
 """
     Bounds.fit(rng, B, points; pointvol=0, enlarge=1, bootstrap=0)
 
@@ -123,7 +129,7 @@ bootstrap expansion (dynesty's; Buchner 2016) as a volume factor: see
 [`Bounds.bootstrap_expansion`](@ref).
 """
 function fit(rng::AbstractRNG, B, points::AbstractMatrix; pointvol = 0, enlarge = 1, bootstrap = 0)
-    b = fit(B, points; pointvol = pointvol)
+    b = fit_rng(rng, B, points; pointvol = pointvol)
     factor = Float64(enlarge)
     if bootstrap > 0
         f = bootstrap_expansion(rng, B, points; pointvol = pointvol, nboot = bootstrap)
@@ -165,7 +171,7 @@ function bootstrap_expansion(rng::AbstractRNG, B::Type{<:Union{Ellipsoid,MultiEl
         end
         all(drawn) && continue
         b = try
-            fit(B, points[:, drawn]; pointvol = pointvol)
+            fit_rng(rng, B, points[:, drawn]; pointvol = pointvol)
         catch err
             # k-means on near-duplicate points; the caller's own fit falls
             # back to one ellipsoid for the same reason

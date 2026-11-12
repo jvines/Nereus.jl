@@ -56,16 +56,20 @@ function scale!(me::MultiEllipsoid, factor)
     return me
 end
 
-function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix; pointvol = 0, bic = true)
+# `rng`: k-means draws a new centre for a cluster left empty. From the global
+# generator, a nested run seeded the same gave another run in a process that
+# had drawn from it since.
+function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix; pointvol = 0, bic = true,
+             rng::AbstractRNG = GLOBAL_RNG)
     parent = fit(Ellipsoid, x, pointvol = pointvol)
-    ells = fit(MultiEllipsoid, x, parent, pointvol = pointvol, depth = 0, bic = bic)
+    ells = fit(MultiEllipsoid, x, parent, pointvol = pointvol, depth = 0, bic = bic, rng = rng)
     return MultiEllipsoid(ells)
 end
 
 const _MAX_SPLIT_DEPTH = 32
 
 function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix, parent::Ellipsoid; pointvol = 0, depth = 0,
-             bic = true)
+             bic = true, rng::AbstractRNG = GLOBAL_RNG)
     ndim, npoints = size(x)
 
     # Clustering will fail with fewer than k=2 points
@@ -76,7 +80,7 @@ function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix, parent::Ellipsoid; poi
 
     p1, p2 = endpoints(parent)
     starting_points = hcat(p1, p2)
-    R = kmeans!(x, starting_points; maxiter = 10)
+    R = kmeans!(x, starting_points; maxiter = 10, rng = rng)
     labels = assignments(R)
     x1 = x[:, labels .== 1]
     x2 = x[:, labels .== 2]
@@ -91,8 +95,8 @@ function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix, parent::Ellipsoid; poi
 
     if bic   # dynesty's rule, see the extended help
         nparam = (ndim^2 + 3ndim) ÷ 2
-        children() = vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1, bic = true),
-                          fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1, bic = true))
+        children() = vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1, bic = true, rng = rng),
+                          fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1, bic = true, rng = rng))
         volume(ell1) + volume(ell2) < exp(-nparam * log(npoints) / npoints) * volume(parent) &&
             return children()
         out = children()
@@ -103,15 +107,15 @@ function fit(::Type{<:MultiEllipsoid}, x::AbstractMatrix, parent::Ellipsoid; poi
 
     # If total volume decreased by over half, recurse
     if volume(ell1) + volume(ell2) < 0.5volume(parent)
-        return vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1, bic = false),
-                    fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1, bic = false))
+        return vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1, bic = false, rng = rng),
+                    fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1, bic = false, rng = rng))
     end
 
     # Otherwise see if total volume is much larger than expected
     # and split into more than 2 clusters
     if volume(parent) > 2npoints * pointvol
-        out = vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1, bic = false),
-                    fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1, bic = false))
+        out = vcat(fit(MultiEllipsoid, x1, ell1, pointvol = pointvol, depth = depth + 1, bic = false, rng = rng),
+                    fit(MultiEllipsoid, x2, ell2, pointvol = pointvol, depth = depth + 1, bic = false, rng = rng))
         sum(volume, out) < 0.5volume(parent) && return out
     end
 
