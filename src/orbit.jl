@@ -246,12 +246,18 @@ end
 # A Tc window is fixed in days and holds baseline/P copies of the orbit. A
 # uniform φ_c is uniform transit phase, p(Tc | P) = 1/P.
 
+@noinline _phic_epoch_unset() = throw(ArgumentError(
+    "time = :phic has no epoch to measure the transit phase from: the Params " *
+    "was built without data. Build the NereusTarget with data, or set " *
+    "`t_ref_c` in the ParametrizationConfig."))
+
 """
     phic_to_tc(phic, P, t_ref_c) -> Tc
 
 Transit time from the transit phase `phic` = 2π (Tc − t_ref_c) / P.
 """
 function phic_to_tc(phic::Real, P::Real, t_ref_c::Real)
+    isnan(t_ref_c) && _phic_epoch_unset()
     return t_ref_c + phic * P / oftype(phic, 2π)
 end
 
@@ -261,6 +267,7 @@ end
 Inverse of `phic_to_tc`. Not wrapped: the result is `2π (Tc − t_ref_c) / P`.
 """
 function tc_to_phic(Tc::Real, P::Real, t_ref_c::Real)
+    isnan(t_ref_c) && _phic_epoch_unset()
     return oftype(Tc, 2π) * (Tc - t_ref_c) / P
 end
 

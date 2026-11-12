@@ -112,13 +112,21 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
                        instruments = InstrumentConfig(rv = ["HARPS"]), data = rvd,
                        parametrization = ParametrizationConfig(time = :phic))
         @test prv.config.parametrization.t_ref_c == rvd.t_ref
-        # Measured from the data being fitted, so it cannot be guessed without --
-        # the default anchor included.
-        @test_throws ArgumentError Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
-            instruments = InstrumentConfig(rv = ["HARPS"]),
-            parametrization = ParametrizationConfig(time = :phic))
-        @test_throws ArgumentError Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
-            instruments = InstrumentConfig(rv = ["HARPS"]))
+        # Without data there is no epoch yet, as Mo's is not known until a
+        # likelihood is evaluated: Params builds (the default anchor included,
+        # which must not throw where Mo did not), the epoch stays NaN, the
+        # NereusTarget fixes it from its data, and evaluating before that throws.
+        for kw in ((; parametrization = ParametrizationConfig(time = :phic)), (;))
+            pn = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+                          instruments = InstrumentConfig(rv = ["HARPS"]), kw...)
+            @test pn.config.parametrization.time === :phic
+            @test isnan(pn.config.parametrization.t_ref_c)
+            @test pn.layout.unfrozen_names == prv.layout.unfrozen_names
+            tgt = NereusTarget(pn, rvd; unconstrained = false)
+            @test tgt.params.config.parametrization.t_ref_c == rvd.t_ref
+            @test tgt.params.layout === pn.layout
+        end
+        @test_throws ArgumentError phic_to_tc(0.1, 4.0, NaN)
         # No planet, no phase to measure.
         @test Params(; max_kplanet = 0, planet_modes = Nereus.PlanetDataSources[],
                        instruments = InstrumentConfig(rv = ["HARPS"])) isa Params

@@ -170,16 +170,15 @@ function Params(;
             "RV-channel noise."))
     end
 
-    # φ_c is measured from an epoch of the data being fitted. It is fixed here,
-    # with the parametrization, so it travels with every Theta: a likelihood
-    # evaluated on a subset of the data (LOO, PPC) reads φ_c the same way.
-    # Without planets there is no φ_c to measure.
+    # φ_c is measured from an epoch of the data being fitted. With data it is
+    # fixed here, with the parametrization, so it travels with every Theta: a
+    # likelihood evaluated on a subset of the data (LOO, PPC) reads φ_c the same
+    # way. Without data there is no epoch yet and it stays NaN, as Mo's epoch
+    # (`data.t_ref`) does until a likelihood is evaluated: `NereusTarget` fixes it
+    # when the data arrives (`with_phic_epoch`), and a likelihood evaluated
+    # before that throws. Without planets there is no φ_c to measure.
     if parametrization.time === :phic && isnan(parametrization.t_ref_c) &&
-       max_kplanet > 0
-        data === nothing && throw(ArgumentError(
-            "time = :phic (the default time anchor) measures the transit phase " *
-            "from an epoch of the data; pass `data`, set `t_ref_c` in the " *
-            "ParametrizationConfig, or choose another anchor (time = :Mo)"))
+       max_kplanet > 0 && data !== nothing
         parametrization = _with_t_ref_c(parametrization, phic_reference_epoch(data))
     end
 
