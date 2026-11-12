@@ -534,6 +534,11 @@ selection on planet count.
   in a region of negligible total mass takes over a mode walker's parameters
   AND model. See `_td_prune_stranded!`.
 - `betas::Union{Nothing,Vector{Float64}} = nothing`
+- `swap_min::Real = 0.05` — `log_evidence` is the tempered value (H+), which
+  is quoted only when the ladder reaches β = 0 and every adjacent pair swapped
+  at least this often; otherwise it is `NaN`, with a warning saying why. The
+  default ladder stops at `beta_min`, so a log Z needs `betas` with a 0 rung.
+  The posterior model probabilities (`n_planets`) do not depend on it.
 - `beta_min::Real = 1e-4` — hottest inverse-temperature. The default ladder is
   geometric across `[beta_min, 1]` (`β_i = beta_min^(i/(n_temps-1))`), so adding
   temps DENSIFIES the cold end (closing the cold-rung swap gap) rather than
@@ -656,6 +661,7 @@ function sample_transdim_pt_emcee(
     n_burnin::Int = 2000,
     betas::Union{Nothing,AbstractVector} = nothing,
     beta_min::Real = 1e-4,
+    swap_min::Real = 0.05,
     stretch_a::Real = 2.0,
     seed::Int = 1,
     thin::Int = 1,
@@ -2597,6 +2603,19 @@ function sample_transdim_pt_emcee(
     acc_within = accept_within ./ max.(propose_within, 1)
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)
     acc_td     = accept_transdim ./ max.(propose_transdim, 1)
+
+    # The tempered value is this sampler's only log Z (bridge sampling needs a
+    # fixed dimension), so it is quoted only when its ladder can carry it:
+    # `_tempered_quotable` (src/samplers/evidence.jl), as for sample_pt_emcee
+    # and sample_pt_hmc. The raw stack stays in `evidence_report`.
+    tq_ok, tq_why = _tempered_quotable(βs, acc_swap; swap_min)
+    if !(tq_ok && isfinite(log_z))
+        @warn "sample_transdim_pt_emcee: no quotable log-evidence for this run: the " *
+              "tempered stack is not quotable ($(tq_ok ? "it is not finite" : tq_why)). " *
+              "log_evidence is NaN; the posterior model probabilities are unaffected. " *
+              "A log Z needs `betas` with a β = 0 rung." tempered = log_z
+        log_z = NaN
+    end
 
     if show_progress
         println("trans-dim moves: planet accepted/proposed = ",
