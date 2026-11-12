@@ -2742,7 +2742,7 @@ function sample_transdim_pt_emcee(
     # Collective drift of the cold ensemble, which R-hat cannot see (see
     # `ensemble_drift`); warns when it finds one.
     drift = _td_drift(samples, keep_idx, n_walkers_eff, param_names, params;
-                      sampler = "transdim_pt_emcee")
+                      sampler = "transdim_pt_emcee", de_move = p_de)
 
     return TransDimPTemceeResult(
         chains, log_z, ev_report,

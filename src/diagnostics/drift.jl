@@ -148,8 +148,9 @@ function ensemble_drift(cube::AbstractArray{<:Real,3}, names;
         "n_steps" => T, "n_walkers" => W)
 end
 
-# The warning for a flagged run: what drifted, by how much, and what to do.
-function _drift_warn(d, sampler::AbstractString)
+# The warning for a flagged run: what drifted, by how much, and what to do --
+# with the DE move named when the run had it off (`de_move` = 0).
+function _drift_warn(d, sampler::AbstractString; de_move = nothing)
     (d === nothing || !d["flagged"]) && return d
     shown = first(d["drifted"], 4)
     what = join([@sprintf("%s (z = %.1f; mean %.4g → %.4g, %+.2f sd)", r["parameter"],
@@ -157,11 +158,15 @@ function _drift_warn(d, sampler::AbstractString)
                  for r in shown], ", ")
     more = length(d["drifted"]) > length(shown) ?
            " and $(length(d["drifted"]) - length(shown)) more" : ""
+    de_off = de_move !== nothing && de_move == 0 ?
+             " This run had de_move = 0, the stretch move alone, whose walkers relax " *
+             "slowly along a thin or curved ridge; rerun with the DE move on " *
+             "(de_move > 0, default $(DE_MOVE_DEFAULT))." : ""
     @warn "$sampler: the β = 1 walkers drifted together through the recorded " *
           "steps in $what$more, from the first half of the steps to the second. " *
           "R-hat and ESS cannot see a drift every walker shares, so these draws " *
           "are not yet the stationary posterior: run longer (more burn-in and " *
-          "more steps), or rerun from a different seed or init and compare. " *
+          "more steps), or rerun from a different seed or init and compare.$de_off " *
           "(Ensemble-mean trend test, |z| > $(d["threshold"]); " *
           "summary diagnostics \"drift\".)"
     return d
@@ -186,11 +191,12 @@ function _drift_cube(samples::AbstractMatrix{Float64}, keep_idx::Int, W::Int, nc
 end
 
 # pt_emcee / pt_whitening: the cold rung's walkers, the sampled parameters.
-function _pt_drift(samples, keep_idx::Int, W::Int, params; sampler::AbstractString)
+function _pt_drift(samples, keep_idx::Int, W::Int, params; sampler::AbstractString,
+                   de_move = nothing)
     names = params.layout.unfrozen_names
     cube = _drift_cube(samples, keep_idx, W, length(names), params, length(names))
     cube === nothing && return nothing
-    return _drift_warn(ensemble_drift(cube, names), sampler)
+    return _drift_warn(ensemble_drift(cube, names), sampler; de_move)
 end
 
 # The trans-dim sampler: every recorded column but `lp` -- the parameters, the
@@ -198,17 +204,18 @@ end
 # its parked value while the slot is off, which a stationary run mixes in at a
 # steady share).
 function _td_drift(samples, keep_idx::Int, W::Int, param_names, params;
-                   sampler::AbstractString)
+                   sampler::AbstractString, de_move = nothing)
     names = String.(param_names[1:(end - 1)])          # drop :lp
     cube = _drift_cube(samples, keep_idx, W, length(names), params,
                        length(params.layout.unfrozen_names))
     cube === nothing && return nothing
-    return _drift_warn(ensemble_drift(cube, names), sampler)
+    return _drift_warn(ensemble_drift(cube, names), sampler; de_move)
 end
 
 # The `ensemble` engine: each chain's walkers are one ensemble, cube[step,
 # param, walker] in the bounded parameters; read folded, as above.
-function _ensemble_drift_chains(cubes::AbstractVector, params; sampler::AbstractString)
+function _ensemble_drift_chains(cubes::AbstractVector, params; sampler::AbstractString,
+                                de_move = nothing)
     isempty(cubes) && return nothing
     W = size(cubes[1], 3)
     cube = cat(cubes...; dims = 3)
@@ -218,5 +225,5 @@ function _ensemble_drift_chains(cubes::AbstractVector, params; sampler::Abstract
     end
     groups = [((c - 1) * W + 1):(c * W) for c in 1:length(cubes)]
     return _drift_warn(ensemble_drift(cube, params.layout.unfrozen_names; groups),
-                       sampler)
+                       sampler; de_move)
 end

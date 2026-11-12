@@ -943,7 +943,8 @@ function sample_pt_whitening(
     end
     # Collective drift of the cold ensemble, which R-hat cannot see (see
     # `ensemble_drift`); warns when it finds one.
-    drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_whitening")
+    drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_whitening",
+                      de_move = p_de)
     return WhiteningPTResult(
         chains, log_z, ev_report, acc_within,
         _de_acceptance(de_accepted, de_proposed), acc_swap, βs,

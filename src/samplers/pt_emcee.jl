@@ -2032,7 +2032,8 @@ function sample_pt_emcee(
 
     # Collective drift of the cold ensemble, which R-hat cannot see (see
     # `ensemble_drift`); warns when it finds one.
-    drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_emcee")
+    drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_emcee",
+                      de_move = p_de)
 
     return PTemceeResult(
         chains, log_z, log_z_laplace, log_z_bridge, ev_report, acc_within,

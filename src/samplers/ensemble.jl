@@ -149,7 +149,8 @@ function sample_ensemble(
         # The drift check runs on each chain's walkers (one ensemble each) and
         # reports them together, once.
         drift = _ensemble_drift_chains([c.info.walker_cube for c in chs],
-                                       target.params; sampler = "ensemble")
+                                       target.params; sampler = "ensemble",
+                                       de_move = p_de)
         out = MCMCChains.chainscat([_strip_walker_cube(c) for c in chs]...)
         return MCMCChains.setinfo(out, (; drift))
     end
@@ -558,7 +559,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     # The drift check reads each walker's own sequence: (step, param, walker).
     cube = permutedims(reshape(mat, n_walkers, n_keep, n_dim), (2, 3, 1))
     if check_drift
-        drift = _ensemble_drift_chains([cube], params; sampler = "ensemble")
+        drift = _ensemble_drift_chains([cube], params; sampler = "ensemble", de_move)
         return MCMCChains.Chains(mat, param_names; info = (; drift))
     end
     # Several chains: `sample_ensemble` checks them together, and drops this.
