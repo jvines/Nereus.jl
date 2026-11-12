@@ -164,8 +164,16 @@ end
     tu = NereusTarget(tg.params, data; unconstrained = true)
     kw = (; n_temps = 6, n_walkers = 16, n_steps = 800, n_burnin = 400, seed = 3,
           show_progress = false)
-    r = sample_pt_emcee(tu, data; kw...)
+    # Bridge only from a chain that has converged: 32 walkers for 8000 steps
+    # reach R-hat 1.02 here. 16 walkers for 800 steps stop at R-hat 1.36, and
+    # bridge, refused there, read -92.87 where it is -92.63 (bridge and
+    # reference-path at 8000 steps).
+    r = sample_pt_emcee(tu, data; merge(kw, (; n_walkers = 32, n_steps = 8000,
+                                              n_burnin = 4000))...)
     @test isfinite(r.log_evidence_bridge) && r.log_evidence == r.log_evidence_bridge
+    rs = @test_logs (:warn, r"dropping bridge.*R-hat") match_mode = :any sample_pt_emcee(
+        tu, data; kw...)
+    @test isnan(rs.log_evidence_bridge) && rs.log_evidence == rs.log_evidence_laplace
     # The default ladder stops at beta_min: its tempered stack stays in the
     # result, raw, and summary.json says why it is not quoted.
     @test minimum(r.betas) > 0 && isfinite(r.evidence.ss_plus[1])
@@ -386,10 +394,11 @@ end
         s1, e1, 160.0; why_bridge = "x", laplace_check = true, tol = 50.0)
     # On run_job itself: a short pt_emcee on two rungs. The tempered stack is
     # not quotable (no β = 0 rung), the run_job target is bounded so the
-    # sampler has neither bridge nor Laplace, and the post-fit bridge converges
-    # on fewer effective draws than its reference has parameters (min ESS 28
-    # < 35), so it is refused. log_z was NaN there; it is mode-Laplace,
-    # computed post-fit on the unconstrained target, with a warning.
+    # sampler has neither bridge nor Laplace, and the post-fit bridge is
+    # refused: the chain has not converged, and it has fewer effective draws
+    # than the reference has parameters (min ESS 28 < 35). log_z was NaN
+    # there; it is mode-Laplace, computed post-fit on the unconstrained
+    # target, with a warning.
     cfg = _easy_rv_cfg()
     cfg["sampler"]["kwargs"] = Dict("show_progress" => false, "n_temps" => 2,
                                     "n_walkers" => 16, "n_steps" => 60, "n_burnin" => 40)
@@ -411,4 +420,50 @@ end
           (; laplace_check = false, laplace_switch_tol = 50.0)
     @test Nereus._postfit_rule_kw(Dict(:laplace_switch_tol => 10), (; t_phot = Float64[])) ==
           (; laplace_check = true, laplace_switch_tol = 10.0)
+end
+
+@testset "bridge is refused on a chain that has not converged" begin
+    # Walkers that sit apart and barely move: each still counts as about one
+    # effective draw, so the least ESS clears q's d + d(d+1)/2 parameters,
+    # while the walkers disagree completely (R-hat far above 1.1). The ESS
+    # guard alone reported bridge on such chains.
+    tg, _ = _ee_rv()
+    p = tg.params
+    nm = Symbol.(p.layout.unfrozen_names)
+    d = length(nm)
+    rng = MersenneTwister(5)
+    W, T = 64, 200
+    stuck = Array{Float64}(undef, T, d, W)
+    for w in 1:W
+        c = randn(rng, d)
+        stuck[:, :, w] .= c' .+ 0.01 .* cumsum(randn(rng, T, d); dims = 1)
+    end
+    g = Nereus._bridge_guard(MCMCChains.Chains(stuck, nm), p)
+    @test g.need == d + d * (d + 1) ÷ 2
+    @test g.n_eff >= g.need && g.rhat > 2
+    @test !g.ok && occursin("R-hat", g.why) && !occursin("min ESS", g.why)
+    # Independent draws: both conditions pass.
+    g2 = Nereus._bridge_guard(MCMCChains.Chains(randn(rng, T, d, W), nm), p)
+    @test g2.ok && g2.why == "" && g2.rhat < 1.02
+    # Too few draws for q: refused on the ESS.
+    g3 = Nereus._bridge_guard(MCMCChains.Chains(randn(rng, 4, d, 4), nm), p)
+    @test !g3.ok && occursin("min ESS", g3.why)
+
+    # The drift it was found on: run_job on the easy RV fixture with 32 walkers
+    # on two rungs. At 200 steps the walkers had not found the 12.3 d mode
+    # (R-hat 5.0) and bridge read -229.6 where it is -153.75 (bridge and
+    # reference-path on converged chains; -242 at 60 steps, -223 at 400 to
+    # 3000); the ESS guard reported it at min ESS 36 against 35.
+    cfg = _easy_rv_cfg()
+    cfg["sampler"]["kwargs"] = Dict("show_progress" => false, "n_temps" => 2,
+                                    "n_walkers" => 32, "n_steps" => 200, "n_burnin" => 100)
+    cfg["output"]["show_progress"] = false
+    res = Logging.with_logger(Logging.NullLogger()) do
+        Nereus.run_job(cfg)
+    end
+    s = res isa AbstractDict ? res : res.summary
+    ev = s["evidence"]
+    @test haskey(ev, "bridge") && ev["bridge"]["log_z"] < -200
+    @test ev["reported"] != "bridge" && s["log_z"] != ev["bridge"]["log_z"]
+    @test occursin("R-hat", get(ev, "bridge_not_reported", ""))
 end

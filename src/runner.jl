@@ -2693,7 +2693,8 @@ end
 # (with `mode_laplace_check`), and `log_z` is chosen again by Jose's rule, as
 # pt_emcee chooses it in the sampler:
 #
-#   1. bridge, when its reference has the effective draws it needs;
+#   1. bridge, when the chain has converged and its reference has the
+#      effective draws it needs (`_bridge_guard`);
 #   2. else the tempered value already reported, when it is quotable (its keys
 #      are in the block only then) and within `laplace_switch_tol` nats of
 #      mode-Laplace -- further than the Laplace non-Gaussian bias, it is broken;
@@ -2708,7 +2709,7 @@ end
 #
 # `show_progress` prints bridge_evidence's progress lines; `timings`, a
 # dictionary, receives its stage record (see `bridge_evidence`) and the time
-# the ESS guard took (`ess`).
+# the guard took (`ess`).
 function _augment_evidence!(summary, params, data, chains;
                             show_progress::Bool = false, timings = nothing,
                             laplace_check::Bool = true,
@@ -2755,24 +2756,17 @@ function _augment_evidence!(summary, params, data, chains;
                 ev["mode_laplace_check"]["minus_bridge"] = Float64(lap - b.log_z)
                 _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
             end
-            # Bridge is biased LOW when its reference is fitted from too few
-            # INDEPENDENT draws (see docs/src/evidence.md); q carries
-            # d + d(d+1)/2 parameters. Only promote it when the chain actually
-            # supports it.
-            d = length(params.layout.unfrozen_names)
-            need = d + d * (d + 1) ÷ 2
-            ess = _bridge_stage!(timings, "ess") do
-                try
-                    minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
-                catch; NaN end
-            end
-            if isfinite(ess) && ess >= need
+            # Bridge is biased LOW on a chain that has not converged, and when
+            # its reference is fitted from too few INDEPENDENT draws (q carries
+            # d + d(d+1)/2 parameters); see `_bridge_guard` and
+            # docs/src/evidence.md. Only promote it when the chain supports it.
+            g = _bridge_stage!(() -> _bridge_guard(chains, params), timings, "ess")
+            if g.ok
                 summary["log_z"] = Float64(b.log_z)
                 ev["reported"] = "bridge"
                 return
             end
-            why_bridge = "min ESS $(isfinite(ess) ? round(Int, ess) : "?") < $need " *
-                         "parameters in the reference; bridge is biased low here"
+            why_bridge = g.why
             ev["bridge_not_reported"] = why_bridge
         end
         _postfit_select!(summary, ev, lap; why_bridge, laplace_check,
