@@ -85,8 +85,8 @@ Container for a `sample_pt_emcee` run.
   not computable. Measured on 51 Peg (unimodal, tightly determined) it sat 24
   nats from bridge and reference-path, which agree with each other to 4 and are
   validated against exact truth on a curved 15-D target; on an RV +
-  Hipparcos-IAD companion 1.1 to 1.2 nats above bridge. A warning says when it
-  is further from bridge than bridge's standard error + 1 nat.
+  Hipparcos-IAD companion within 0.25 of bridge. A warning says when it is
+  further from bridge than bridge's standard error + 1 nat.
 - `log_evidence_bridge::Float64` — bridge-sampling evidence from the same cold
   chain (Meng & Wong optimal bridge). This is the HEADLINE when it is usable:
   it never touches the prior end and makes no Gaussianity assumption. It costs
