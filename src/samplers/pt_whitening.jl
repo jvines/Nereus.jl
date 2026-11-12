@@ -97,6 +97,8 @@ export sample_pt_whitening, WhiteningPTResult
 - `log_evidence::Float64` — reddemcee H+/TI+/TI stack on the β-ladder
 - `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ evidence stack
 - `acceptance_within::Vector{Float64}` — within-temp stretch acceptance per temp
+- `acceptance_de::Vector{Float64}` — within-temp acceptance of the
+  differential-evolution move per temp (`de_move`); NaN where none was proposed
 - `acceptance_swap::Vector{Float64}` — adjacent-temp swap rate per pair
 - `betas::Vector{Float64}`
 - `n_evals::Int`
@@ -107,6 +109,7 @@ struct WhiteningPTResult
     log_evidence::Float64
     evidence::EvidenceReport
     acceptance_within::Vector{Float64}
+    acceptance_de::Vector{Float64}
     acceptance_swap::Vector{Float64}
     betas::Vector{Float64}
     n_evals::Int
@@ -137,6 +140,11 @@ the distinguishing feature of this sampler.
   swap acceptance than the old quadratic ladder, which over-resolved the
   hot end and starved the cold end).
 - `stretch_a::Float64=2.0` — Goodman-Weare stretch parameter.
+- `de_move::Real=DE_MOVE_DEFAULT` — as in `sample_pt_emcee`: per walker and
+  step, the probability of a differential-evolution move in place of the
+  stretch move (src/samplers/de_move.jl), on the same bounded coordinates and
+  leaving held ones where they are. `0` is the stretch-only kernel, and draws
+  exactly what it did.
 - `proposal_scale::Real=0.05` — accepted for backward compatibility; the
   ensemble stretch move needs no global RWM step, so this is unused.
 - `warmup_swaps::Int=200` — iterations before whitening kicks in; standard
@@ -179,7 +187,7 @@ the distinguishing feature of this sampler.
   an uninterrupted run of `n_steps`, at any thread count. Refused, with the
   differences listed, if the checkpoint came from different data (any field,
   astrometry and `t_ref` included), priors, parameters, `n_walkers`, `n_temps`,
-  `betas`, `n_burnin`, `thin`, `seed`, `stretch_a`, `node_flip` (when a planet
+  `betas`, `n_burnin`, `thin`, `seed`, `stretch_a`, `de_move`, `node_flip` (when a planet
   can flip) or whitening settings (`warmup_swaps`, `whiten_window`,
   `whiten_refresh`).
 """
@@ -192,6 +200,7 @@ function sample_pt_whitening(
     n_burnin::Int = 500,
     betas::Union{Nothing,AbstractVector} = nothing,
     stretch_a::Real = 2.0,
+    de_move::Real = DE_MOVE_DEFAULT,
     proposal_scale::Real = 0.05,
     warmup_swaps::Int = 200,
     whiten_window::Int = 100,
@@ -210,6 +219,7 @@ function sample_pt_whitening(
     # JSON config delivers floats-as-Int and arrays-as-JSON3.Array;
     # normalize both.
     stretch_a      = Float64(stretch_a)
+    p_de           = _de_check(de_move)
     node_flip      = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
@@ -273,7 +283,8 @@ function sample_pt_whitening(
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
         n_burnin, thin, seed, stretch_a, betas = copy(βs), warmup_swaps,
         whiten_window = max(whiten_window, 1), whiten_refresh,
-        node_flip = isempty(flips) ? 0.0 : node_flip, _burnin_hold_fp(hold, params)...)
+        node_flip = isempty(flips) ? 0.0 : node_flip, _burnin_hold_fp(hold, params)...,
+        _de_fp(p_de)...)
     ck = resume ? read_checkpoint(ck_path, "pt_whitening", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -470,6 +481,13 @@ function sample_pt_whitening(
 
     accept_within  = zeros(Float64, n_temps)
     propose_within = zeros(Int, n_temps)
+    # The DE move's tally per rung (`de_move`; the two above count the stretch
+    # alone), and ε's scale per rung and coordinate (src/samplers/de_move.jl).
+    de_proposed    = zeros(Int, n_temps)
+    de_accepted    = zeros(Int, n_temps)
+    de_prop_temp   = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_acc_temp    = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_scale       = zeros(n_temps, n_dim)
     accept_swap    = zeros(Float64, n_temps - 1)
     propose_swap   = zeros(Int, n_temps - 1)
     n_evals_atomic = Threads.Atomic{Int}(n_temps * n_walkers_eff)
@@ -514,12 +532,34 @@ function sample_pt_whitening(
         # The dimensions the stretch scales: a held coordinate is shared by the
         # whole ensemble, so the move leaves it and the Jacobian is z^(m - 1).
         n_move = n_dim - count(is_held)
+        p_de > 0 && _de_spread!(de_scale, state, partner_lo, partner_hi)
         Threads.@threads :static for slot in 1:length(chunks)
             for task_idx in chunks[slot]
                 t, w = tasks[task_idx]
                 β = βs[t]
                 trng = task_rngs[task_idx]
                 buf  = thread_proposal[slot]
+
+                if _de_chosen(trng, p_de)
+                    # Differential evolution (src/samplers/de_move.jl), on the
+                    # stretch's coordinates; a held one stays. No Jacobian.
+                    j, k = _de_pair(trng, partner_lo, partner_hi)
+                    γ = _de_gamma(trng, _de_gamma0(n_move))
+                    _de_fill!(buf, state, t, w, j, k, γ, de_scale, is_held, trng)
+                    lp_prop, ll_prop = eval_bounded!(buf, slot)
+                    log_ratio = β * (ll_prop - logL_arr[t, w]) +
+                                (lp_prop - logπ_arr[t, w])
+                    Threads.atomic_add!(de_prop_temp[t], 1)
+                    if log(rand(trng)) < log_ratio
+                        @inbounds for d in 1:n_dim
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp_prop
+                        logL_arr[t, w] = ll_prop
+                        Threads.atomic_add!(de_acc_temp[t], 1)
+                    end
+                    continue
+                end
 
                 w_partner = rand(trng, partner_lo:partner_hi)
                 u = rand(trng)
@@ -610,6 +650,8 @@ function sample_pt_whitening(
         accept_within .= ck.accept_within; propose_within .= ck.propose_within
         accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
+        hasproperty(ck, :de_proposed) && (de_proposed .= ck.de_proposed;
+                                          de_accepted .= ck.de_accepted)
         n_evals_atomic[] = ck.n_evals::Int
         keep_idx = ck.keep_idx::Int
         samples[1:keep_idx, :] .= ck.samples; lp_samples[1:keep_idx] .= ck.lp_samples
@@ -656,6 +698,8 @@ function sample_pt_whitening(
         @inbounds for t in 1:n_temps
             propose_within[t] += Threads.atomic_xchg!(propose_temp[t], 0)
             accept_within[t]  += Threads.atomic_xchg!(accept_temp[t],  0)
+            de_proposed[t]    += Threads.atomic_xchg!(de_prop_temp[t], 0)
+            de_accepted[t]    += Threads.atomic_xchg!(de_acc_temp[t],  0)
         end
 
         # ---- Node flip (threaded; astrometry-only planets) -----------
@@ -834,7 +878,8 @@ function sample_pt_whitening(
                 rngs_h2, rngs_flip, ring = ring[:, 1:maximum(ring_count), :, :],
                 ring_count, ring_head, μ_w, σ_w, whitening_active_after,
                 accept_within, propose_within, accept_swap, propose_swap,
-                flip_proposed, flip_accepted, n_evals = n_evals_atomic[],
+                flip_proposed, flip_accepted, de_proposed, de_accepted,
+                n_evals = n_evals_atomic[],
                 keep_idx, samples = samples[1:keep_idx, :],
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
                 windows = circular_windows(params),
@@ -879,7 +924,8 @@ function sample_pt_whitening(
     acc_within = accept_within ./ max.(propose_within, 1)
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)
     return WhiteningPTResult(
-        chains, log_z, ev_report, acc_within, acc_swap, βs,
+        chains, log_z, ev_report, acc_within,
+        _de_acceptance(de_accepted, de_proposed), acc_swap, βs,
         n_evals_atomic[], whitening_active_after,
     )
 end
