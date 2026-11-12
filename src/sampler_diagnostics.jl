@@ -43,6 +43,7 @@ const _DIAG_FIELDS = (
     :n_evals, :n_iters, :n_iters_baseline, :n_iters_batch,
     # mixing
     :acceptance, :acceptance_within, :acceptance_swap, :acceptance_transdim,
+    :acceptance_de,
     :betas, :beta_history, :ess_history, :whitening_active_after,
     # trans-dim move bookkeeping
     :td_proposed, :td_accepted, :noise_td_proposed, :noise_td_accepted,
