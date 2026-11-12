@@ -12,6 +12,12 @@
 #   ladder is now β = 0 and a geometric run from beta_min, the tempered value
 #   SS+, quoted only when its rungs overlap; and SS+ is fed every walker's
 #   log L, not their mean.
+# - pt_emcee's tempered SS+ read 157.85 where bridge gives 163.88, and its
+#   mode-Laplace sat 3.5 to 3.8 nats above bridge with e free and stood in for
+#   bridge when bridge was unavailable. The tempered stack is now quoted only
+#   from a ladder that reaches β = 0 with every pair swapping (in pt_emcee,
+#   transdim_pt_emcee, pt_whitening and sample_pt too), and Laplace is never the
+#   headline.
 # - Population annealing resampled at every step and stopped mutating after a
 #   count of accepted moves; it now resamples on the ESS, steps β on the
 #   conditional ESS, and mutates until the replicas have decorrelated.
@@ -117,6 +123,64 @@ end
     end
     @test length(pts) == 4 && all(p -> all(isfinite, p), pts)
     @test !any(r -> occursin("sample_pt_emcee", string(r.message)), tl.logs)
+end
+
+@testset "the tempered stack is quoted only from a ladder that can carry it" begin
+    # pt_emcee's order (β = 1 first) and pt_hmc's (β = 0 first) alike.
+    ok, why = Nereus._tempered_quotable([1.0, 0.1, 0.01, 1e-4], [0.5, 0.4, 0.3])
+    @test !ok && occursin("head", why)
+    ok, why = Nereus._tempered_quotable([1.0, 0.1, 1e-4, 0.0], [0.5, 0.01, 0.3])
+    @test !ok && occursin("swapped", why) && occursin("0.1", why)
+    @test Nereus._tempered_quotable([0.0, 1e-4, 0.1, 1.0], [0.3, 0.2, 0.06]) == (true, "")
+    @test !first(Nereus._tempered_quotable([1.0, 0.0], Float64[]))
+    # mode-Laplace against bridge: a warning past bridge's error + 1 nat
+    @test (@test_logs (:warn, r"Gaussian approximation") Nereus._warn_laplace_vs_bridge(
+        "x", 165.56, 161.81, 0.05))
+    @test !(@test_logs Nereus._warn_laplace_vs_bridge("x", 162.5, 161.81, 0.05))
+    @test !Nereus._warn_laplace_vs_bridge("x", NaN, 161.81, 0.05)
+end
+
+@testset "pt_emcee: bridge, else a quotable tempered value, else no number" begin
+    tg, data = _ee_rv()
+    tu = NereusTarget(tg.params, data; unconstrained = true)
+    kw = (; n_temps = 6, n_walkers = 16, n_steps = 800, n_burnin = 400, seed = 3,
+          show_progress = false)
+    r = sample_pt_emcee(tu, data; kw...)
+    @test isfinite(r.log_evidence_bridge) && r.log_evidence == r.log_evidence_bridge
+    # The default ladder stops at beta_min: its tempered stack stays in the
+    # result, raw, and summary.json says why it is not quoted.
+    @test minimum(r.betas) > 0 && isfinite(r.evidence.ss_plus[1])
+    ev = Nereus._evidence_summary(r, r.log_evidence)
+    @test ev["reported"] == "bridge"
+    @test !any(haskey(ev, k) for k in ("ti", "ti_plus", "ss_plus", "hybrid"))
+    @test ev["tempered"]["quotable"] == false && occursin("head", ev["tempered"]["why"])
+    @test occursin("approximation", ev["mode_laplace"]["note"])
+    @test ev["mode_laplace"]["minus_bridge"] ≈ r.log_evidence_laplace - r.log_evidence_bridge
+    # Bounded: no bridge, and no tempered value from this ladder.
+    rb = @test_logs (:warn, r"no quotable log-evidence") match_mode = :any sample_pt_emcee(
+        tg, data; kw...)
+    @test isnan(rb.log_evidence) && isfinite(rb.evidence.ss_plus[1])
+    @test Nereus._evidence_summary(rb, rb.log_evidence)["reported"] == "none"
+    # A ladder with a β = 0 rung: the tempered value when its rungs swap.
+    βs = vcat(1e-3 .^ ((0:6) ./ 6), 0.0)
+    r0 = sample_pt_emcee(tg, data; merge(kw, (; n_temps = 8, betas = βs))...)
+    ok, _ = Nereus._tempered_quotable(r0.betas, r0.acceptance_swap)
+    if ok
+        @test r0.log_evidence == r0.evidence.hybrid[1]
+        @test haskey(Nereus._evidence_summary(r0, r0.log_evidence), "ss_plus")
+    else
+        @test isnan(r0.log_evidence)
+    end
+end
+
+@testset "transdim_pt_emcee: no tempered log Z from a ladder without β = 0" begin
+    tg, data = _ee_rv()
+    r = @test_logs (:warn, r"no quotable log-evidence") match_mode = :any sample_transdim_pt_emcee(
+        tg, data; td = TransDimConfig(max_kplanet = 1, planets = true), n_temps = 4,
+        n_walkers = 16, n_steps = 300, n_burnin = 150, seed = 1, show_progress = false)
+    @test isnan(r.log_evidence)
+    @test isfinite(r.evidence_report.ss_plus[1])
+    @test Nereus._evidence_summary(r, r.log_evidence)["tempered"]["quotable"] == false
 end
 
 @testset "daedalus: a replacement walk forgets its donor" begin
