@@ -60,6 +60,14 @@ function sample_ess(
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
 )
+    # ESS draws from a Gaussian built from each prior's bounds: it cannot
+    # represent the photo-eccentric reparametrization's ρ_circ box, which spans
+    # tens of decades (src/density.jl). It samples the same model in ρ★, (e, ω).
+    if density_active(target.params)
+        p0 = without_density_reparam(target.params, data)
+        init === nothing || (init = density_old_x(init, target.params, p0))
+        target = NereusTarget(p0, data; unconstrained = target.transform !== nothing)
+    end
     runs = _sample_ess(target, data; n_steps = n_burnin + n_samples, n_burnin,
                        init, seed, n_chains, checkpoint, checkpoint_interval, resume)
 
@@ -209,6 +217,10 @@ function _ess_chain(target::NereusTarget, data::Data, prior, lo::Vector{Float64}
         @inbounds for (j, idx) in enumerate(layout.unfrozen_idx)
             theta_buf.values[idx] = x[j]
         end
+        # The photo-eccentric reparametrization's prior term: the prior here is
+        # the sampled slots' surrogate (`density_logprior_correction`; 0 without).
+        dl = density_logprior_correction(theta_buf)
+        isfinite(dl) || return -1e300
         ll = rv_log_likelihood(theta_buf, data, ws_buf)
         isfinite(ll) || return -1e300
         ll += transit_log_likelihood(theta_buf, data, ws_buf)
@@ -216,7 +228,7 @@ function _ess_chain(target::NereusTarget, data::Data, prior, lo::Vector{Float64}
         # Doppler-tomography target as if it had no maps at all.
         ll += tomogram_log_likelihood(theta_buf, data, ws_buf)
         isfinite(ll) || return -1e300
-        return ll
+        return ll + dl
     end
     model = ESSModel(prior, loglike)
 

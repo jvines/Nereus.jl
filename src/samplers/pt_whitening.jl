@@ -929,6 +929,8 @@ function sample_pt_whitening(
     else
         MCMCChains.Chains(samples_with_lp, param_names)
     end
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(chains, target.params)
 
     acc_within = accept_within ./ max.(propose_within, 1)
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)

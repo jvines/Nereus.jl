@@ -186,11 +186,15 @@ function sample_nested_ins(
             ps = unfrozen_priors[j]
             theta.values[idx] = prior_transform(u[j], _ns_prior(ps))
         end
+        # The photo-eccentric reparametrization's prior term: the prior here is
+        # the sampled slots' surrogate (`density_logprior_correction`; 0 without).
+        dl = density_logprior_correction(theta)
+        isfinite(dl) || return -Inf
         ll = rv_log_likelihood(theta, data, wb)
         isfinite(ll) || return -Inf
         ll += transit_log_likelihood(theta, data, wb)
         ll += tomogram_log_likelihood(theta, data, wb)  # residual maps
-        return ll
+        return ll + dl
     end
 
     BoundT = bounds === :multi ? NestedSamplers.Bounds.MultiEllipsoid :
@@ -468,7 +472,8 @@ function sample_nested_ins(
     end
 
     param_names = Symbol.(layout.unfrozen_names)
-    chains = MCMCChains.Chains(samples, param_names)
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(MCMCChains.Chains(samples, param_names), target.params)
     return INSResult(chains, log_z_ns, log_z_ns_err, log_z_ins, iter, n_evals)
 end
 

@@ -103,6 +103,9 @@ function _draw_from_prior(target::NereusTarget, rng::AbstractRNG;
             end
             x[i] = val
         end
+        # ρ_circ / η (src/density.jl): from the prior they carry, not from
+        # their surrogate box, which spans tens of decades.
+        density_prior_draw_x!(x, params, rng)
         fold_cyclic_inclinations!(x, params; idx = cinc)
         # canonical period order within each mode group (draw is in bounded
         # space, so sorting the values at the P positions sorts the periods)
@@ -851,6 +854,7 @@ function _hmc_unbounded(x::Float64, d::Int, pt)
     tid == TRANSFORM_IDENTITY && return x
     lo = pt.lowers[d]
     tid == TRANSFORM_LOG && return log(max(x - lo, 1e-10))
+    tid == TRANSFORM_LOGLOGIT && return _loglogit_forward(x, lo, pt.uppers[d])
     t = clamp((x - lo) / (pt.uppers[d] - lo), 1e-10, 1.0 - 1e-10)
     return log(t / (1 - t))
 end
@@ -1110,7 +1114,8 @@ function _nuts_chain(
         push!(param_names, :lp)
     end
 
-    chains = MCMCChains.Chains(mat, param_names)
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(MCMCChains.Chains(mat, param_names), target.params)
 
     # --- Per-chain NUTS health → chains.info (OBSERVABILITY) ----------
     # Divergences (numerical_error), adapted step size, tree depth and

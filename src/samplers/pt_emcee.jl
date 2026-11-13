@@ -2101,6 +2101,9 @@ function sample_pt_emcee(
         # Fallback: single flat chain (very small kept count)
         MCMCChains.Chains(samples_with_lp, param_names)
     end
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl). The evidence and the
+    # diagnostics below read the sampled columns by name.
+    chains = with_density_columns(chains, target.params)
     acc_within = accept_within ./ max.(propose_within, 1)
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)
 

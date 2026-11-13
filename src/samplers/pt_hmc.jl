@@ -562,7 +562,9 @@ function sample_pt_hmc(
         pj, ll = _logdensity_parts(target, y)
         mat[i, dim + 1] = (isfinite(pj) && isfinite(ll)) ? pj + ll : -Inf
     end
-    chains = MCMCChains.Chains(mat, pnames)
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl); the evidence reads
+    # the sampled columns by name.
+    chains = with_density_columns(MCMCChains.Chains(mat, pnames), target.params)
     report = res.report
     ev = _pt_hmc_evidence(target, chains, report, βs, res.swap_acc, Float64(swap_min),
                           Float64(evidence_tol), bridge_n, seed;

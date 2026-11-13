@@ -293,7 +293,8 @@ function sample_nested_dynamic(
     end
 
     param_names = Symbol.(layout.unfrozen_names)
-    chains = MCMCChains.Chains(samples, param_names)
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(MCMCChains.Chains(samples, param_names), target.params)
 
     return DynamicNSResult(
         chains,
@@ -413,11 +414,15 @@ function _ns_inner(target::NereusTarget, data::Data;
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             theta.values[idx] = prior_transform(u[j], _ns_prior(unfrozen_priors[j]))
         end
+        # The photo-eccentric reparametrization's prior term: the prior here is
+        # the sampled slots' surrogate (`density_logprior_correction`; 0 without).
+        dl = density_logprior_correction(theta)
+        isfinite(dl) || return -Inf
         ll = rv_log_likelihood(theta, data, wb)
         isfinite(ll) || return -Inf
         ll += transit_log_likelihood(theta, data, wb)
         ll += tomogram_log_likelihood(theta, data, wb)  # residual maps
-        return ll
+        return ll + dl
     end
 
     BoundT = bounds === :multi ? NestedSamplers.Bounds.MultiEllipsoid :
