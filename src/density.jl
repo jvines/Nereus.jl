@@ -28,6 +28,22 @@ const DENSITY_G = 1.0e6
 const _ETA_LO = -π / 2
 const _ETA_HI = 3π / 2
 
+# The part of that interval an e-prior that stops at e_max < 1 needs. Along an
+# ellipse of constant g, e² = (1 + g² + g⁴ − 2g² sin η − g² sin²η)/(1 + g²)²
+# falls as sin η rises, so e grows with |η − π/2|, from |1 − g²|/(1 + g²) at
+# η = π/2, and e ≤ e_max is the arc sin η ≥ (g + 1/g)·√(1 − e_max²) − 1. That arc
+# is widest at g = 1, so π/2 ± (π/2 − asin(2√(1 − e_max²) − 1)) holds the orbits
+# of every g. Sampling the whole interval instead would put most of η's box
+# outside the prior: with |sesinw|, |secosw| ≤ 0.3, a point 0.1 from the middle
+# of the unconstrained space (e = 0) was already at e = 0.1, secosw = 0.31.
+function _density_eta_range(e_max::Float64)
+    e_max < 1 || return (Float64(_ETA_LO), Float64(_ETA_HI))
+    s = 2 * sqrt(1 - e_max^2) - 1
+    Δ = π / 2 - asin(clamp(s, -1.0, 1.0))
+    Δ > 0 || return (Float64(_ETA_LO), Float64(_ETA_HI))
+    return (π / 2 - Δ, π / 2 + Δ)
+end
+
 # ρ★ = M★ / R★³ in the solar units of `rho_s`: `RHO_SUN_CGS` is the mean density
 # of a 1 M☉, 1 R☉ star, so this is the density whose a/R★ (`rho_s_to_a_Rs`) is
 # the (M★, R★) route's (`planet_geometry`).
@@ -145,7 +161,8 @@ function _density_slots!(names::Vector{String}, config, planet_blocks, rho_s_idx
     lnorm = zeros(K)
     for k in elig
         b = planet_blocks[k]
-        G = _density_G(_density_e_max(pc.ew, pr[names[b.e1]], pr[names[b.e2]]))
+        e_max = _density_e_max(pc.ew, pr[names[b.e1]], pr[names[b.e2]])
+        G = _density_G(e_max)
         lo, hi = rho_lo / G^3, rho_hi * G^3
         push!(names, "rho_circ_k$k")
         rho_circ[k] = length(names)
@@ -154,7 +171,9 @@ function _density_slots!(names::Vector{String}, config, planet_blocks, rho_s_idx
         k == anchor && continue
         push!(names, "eta_k$k")
         eta[k] = length(names)
-        _density_surrogate!(pr, "eta_k$k", UniformPrior(_ETA_LO, _ETA_HI))
+        η_lo, η_hi = _density_eta_range(e_max)
+        _density_surrogate!(pr, "eta_k$k", UniformPrior(η_lo, η_hi))
+        lnorm[k] += log(η_hi - η_lo)
     end
 
     derived = Int[]
@@ -437,12 +456,13 @@ through the map:
 
     log π_new = log π_old(old(new)) + log |∂old/∂new|.
 
-The surrogate is log-uniform on each `rho_circ_k` box and uniform on η, so per
-planet (A_k = log log(hi/lo) of its box):
+The surrogate is log-uniform on each `rho_circ_k` box and uniform on η's
+interval, so per planet (A_k = log log(hi/lo) of its box; `lnorm[k]` holds A_k,
+plus log(η_hi − η_lo) for an η planet):
 
   * the anchor: log π(ρ★) + log ρ★ + A_k, with ρ★ = ρ_circ/g³ (|∂ρ★/∂ρ_circ| = g⁻³);
   * an η planet: log π(o₁) + log π(o₂) + log|∂o/∂(x, y)| +
-    log|∂(x, y)/∂(g, η)| + log(g/3) + A_k + log 2π, at the model's ρ★
+    log|∂(x, y)/∂(g, η)| + log(g/3) + A_k + log(η_hi − η_lo), at the model's ρ★
     (|∂g/∂ρ_circ| = g/(3 ρ_circ)), with o the planet's e-coordinates.
 
 Under `:anchor` the map is triangular (ρ★ from the anchor, then each η planet's
@@ -482,8 +502,7 @@ function density_logprior_correction(theta::Theta{T}) where {T}
         l1 = eval_packed_logpdf(o1, pp, j1)
         l2 = eval_packed_logpdf(o2, pp, j2)
         (isfinite(l1) && isfinite(l2)) || return ninf
-        lp += l1 + l2 + lj + _ellipse_logjac(c, η) + log(c / 3) + d.lnorm[k] +
-              log(convert(T, 2π))
+        lp += l1 + l2 + lj + _ellipse_logjac(c, η) + log(c / 3) + d.lnorm[k]
     end
     return isfinite(lp) ? lp : ninf
 end

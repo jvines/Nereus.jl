@@ -261,6 +261,77 @@ end
         end
     end
 
+    @testset "the prior integrates to one over the sampled box" begin
+        # The surrogate is uniform in (log ρ_circ, η) on its box, so the mean of
+        # exp(density_logprior_correction) over a midpoint grid of that box is
+        # the reparametrized prior's mass, which must be the old prior's: 1, as
+        # nothing in these e-priors reaches e = 1. Box (esinw, ecosw) priors, flat
+        # in (x, y), so the integrand is bounded; |esinw|, |ecosw| ≤ 0.3 stops at
+        # e_max = 0.42, whose η is sampled on an arc (`_density_eta_range`), and
+        # 0.6 at e_max = 0.85. The grid's error is the box edges' O(1/n).
+        box(p, nm) = Nereus.bounds(p.layout.unfrozen_priors[findfirst(==(nm), p.layout.unfrozen_names)])
+        t0 = _dr_target(; M_s = 1.0, R_s = 1.0)
+        for a in (0.3, 0.6)
+            pc = ParametrizationConfig(ew = :esinw, time = :phic,
+                                       t_ref_c = t0.params.config.parametrization.t_ref_c)
+            pri = merge(_DR_PRI1, Dict("esinw_k1" => UniformPrior(-a, a),
+                                       "ecosw_k1" => UniformPrior(-a, a)))
+            P = Params(max_kplanet = 1, planet_modes = t0.params.config.planet_modes,
+                       instruments = t0.params.config.instruments, parametrization = pc,
+                       priors = Dict{String,PriorSpec}(pri), data = t0.data,
+                       M_s = 1.0, R_s = 1.0, stability = :none)
+            d = P.layout.density
+            @test d.mode === :given && d.eta[1] > 0
+            ηlo, ηhi = box(P, "eta_k1")
+            @test (ηlo, ηhi) == Nereus._density_eta_range(Nereus._density_e_max(
+                :esinw, pri["esinw_k1"], pri["ecosw_k1"]))
+            @test ηhi - ηlo < 2π
+            lo, hi = box(P, "rho_circ_k1")
+            th = Theta{Float64}(P)
+            Nereus.set_unfrozen!(th, Nereus._draw_from_prior(NereusTarget(P, t0.data), MersenneTwister(4)))
+            n = 1200; m = 0.0
+            for i in 1:n, j in 1:n
+                th.values[d.rho_circ[1]] = exp(log(lo) + (i - 0.5) / n * log(hi / lo))
+                th.values[d.eta[1]] = ηlo + (j - 0.5) / n * (ηhi - ηlo)
+                Δ = Nereus.density_logprior_correction(th)
+                isfinite(Δ) && (m += exp(Δ))
+            end
+            @test m / n^2 ≈ 1 atol = 5e-3
+        end
+
+        # The sesinw box the GP-on-photometry test uses: every draw of the old
+        # prior maps inside the arc, at a finite prior.
+        pri = merge(_DR_PRI1, Dict("sesinw_k1" => UniformPrior(-0.3, 0.3),
+                                   "secosw_k1" => UniformPrior(-0.3, 0.3)))
+        tg = _dr_target(; pri, M_s = 1.0, R_s = 1.0); pg = tg.params
+        p0 = Nereus.without_density_reparam(pg, tg.data); t0 = NereusTarget(p0, tg.data)
+        ηlo, ηhi = box(pg, "eta_k1")
+        @test (ηlo, ηhi) == Nereus._density_eta_range(0.18)
+        q = findfirst(==("eta_k1"), pg.layout.unfrozen_names)
+        th = Theta{Float64}(pg); rng = MersenneTwister(5)
+        for _ in 1:2000
+            xn = Nereus.density_new_x(Nereus._draw_from_prior(t0, rng), p0, pg)
+            @test ηlo < xn[q] < ηhi
+            Nereus.set_unfrozen!(th, xn)
+            @test isfinite(Nereus.log_prior(th))
+        end
+
+        # The anchor: ∫ π(ρ★) dρ★ over ρ_circ's box at a fixed orbit.
+        ta = _dr_target(; use_rho_s = true); pa = ta.params; da = pa.layout.density
+        lo, hi = box(pa, "rho_circ_k1")
+        th = Theta{Float64}(pa)
+        for seed in 1:3
+            Nereus.set_unfrozen!(th, Nereus._draw_from_prior(ta, MersenneTwister(seed)))
+            n = 200_000; m = 0.0
+            for i in 1:n
+                th.values[da.rho_circ[1]] = exp(log(lo) + (i - 0.5) / n * log(hi / lo))
+                Δ = Nereus.density_logprior_correction(th)
+                isfinite(Δ) && (m += exp(Δ))
+            end
+            @test m / n ≈ 1 atol = 5e-3
+        end
+    end
+
     @testset "outside the support: -Inf, never NaN" begin
         pri = merge(_DR_PRI1, Dict("rho_s" => NormalPrior(1.0, 0.1, 0.5, 1.5)))
         tgt = _dr_target(; pri, use_rho_s = true); p = tgt.params; d = p.layout.density
