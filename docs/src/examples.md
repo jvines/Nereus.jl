@@ -769,6 +769,16 @@ primary-only.
   `n_planets_posterior` (trans-dim only), `ppc`, `loo`,
   `detection_limits`, `fit_health`, `tables`, and `figures`
   (logical-name → PNG path).
+  `provenance` records what produced the fit: `engine` (the sampler as
+  selected), `nereus_version`, `nereus_commit` (null unless Nereus runs from a
+  git checkout) and `priors`, every prior as the model was given it,
+  `{family, fixed, lo, hi, ...hyperparameters}` (`family` one of `uniform`,
+  `loguniform`, `normal`, `truncated_normal`, `beta`, `sine`,
+  `modified_jeffreys`, `wrapped_uniform`, `fixed`, ...; null bounds are
+  unbounded; a fixed parameter is `{family: "fixed", fixed: true, value}`),
+  with `external_priors` when the model has any. The photo-eccentric
+  reparametrization's sampled `rho_circ`/`eta` slots are not listed: the
+  priors on ρ★ and (e, ω) stay under their own names.
 - **`chains.nc`** — the full posterior cube (`load_chains` to reload).
 - **`plots/`** — the figure tree: `models/` (data-space fits),
   `posteriors/`, `traces/`, `transdim/`, plus top-level `corner.png`,
