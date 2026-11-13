@@ -309,6 +309,7 @@ function sample_nested(
         bounds = bounds_type,
         proposal = proposal_type,
         enlarge = Float64(enlarge),
+        min_eff = _ns_min_eff(_density_support_share(params, prior_dists; seed)),
     )
 
     # Run — returns (Chains, state_NamedTuple).
@@ -444,6 +445,64 @@ function sample_nested(
     return chains, log_ev, log_ev_err
 end
 
+
+# NestedSamplers draws new points uniformly from the cube until its cumulative
+# efficiency (iterations per likelihood call) falls below `min_eff`, 0.10 by
+# default, and only then hands them to the bounds and the proposal. Uniform
+# draws reach an efficiency `_ns_uniform_eff(x)` when the region above the
+# threshold is a share `x` of the cube: 0.10 at x ≈ 0.027.
+_ns_uniform_eff(x::Real) = x * log(1 / x) / (1 - x)
+const _NS_MIN_EFF = 0.10
+
+"""
+    _ns_min_eff(share) -> Float64
+
+The `min_eff` that hands over from uniform draws when the region above the
+threshold is the share of the prior's support that the default leaves of a cube
+that is all support, for a cube of which `share` is.
+
+The density floor (`density_ns_floor`) is cube without prior mass: 90-96% of it
+for an anchor under the `rho_circ_k` box. With the default, the handover came at
+a tenth of the compression of the support it comes at under `:rho_star`: on a
+one-planet transit at 250 live points at log L ≈ 1200 against 1770, further from
+the fits that find the transit (a mode narrow in period and phase, walled off by
+worse fits), which the slice proposal then under-filled. log Z came out 0.6 below
+`:rho_star`'s; handing over at the same share of the support puts them level.
+
+The handover is kept to a share of 1e-3 of the cube, where a uniform draw costs
+~1000 calls (the rejection's `maxiter` is 1e5).
+"""
+function _ns_min_eff(share::Real)
+    share >= 1 && return _NS_MIN_EFF
+    lo, hi = 0.0, 1.0        # _ns_uniform_eff rises on (0, 1)
+    for _ in 1:200
+        mid = (lo + hi) / 2
+        _ns_uniform_eff(mid) < _NS_MIN_EFF ? (lo = mid) : (hi = mid)
+    end
+    return _ns_uniform_eff(max((lo + hi) / 2 * share, 1e-3))
+end
+
+"""
+    _density_support_share(params, dists; n = 4000, seed = 1) -> Float64
+
+The share of the nested cube (`dists`, the per-coordinate priors it is mapped
+through) that the old prior supports (`density_logprior_correction` finite), from
+`n` uniform draws: 1 without the photo-eccentric reparametrization.
+"""
+function _density_support_share(params::Params, dists; n::Int = 4000, seed::Int = 1)
+    params.layout.density.mode === :none && return 1.0
+    rng = MersenneTwister(seed + 1_000_003)
+    th = Theta{Float64}(params)
+    idx = params.layout.unfrozen_idx
+    k = 0
+    for _ in 1:n
+        @inbounds for j in eachindex(idx)
+            th.values[idx[j]] = quantile(dists[j], rand(rng))
+        end
+        isfinite(density_logprior_correction(th)) && (k += 1)
+    end
+    return max(k, 1) / n
+end
 
 # Remaining evidence Δlog Z = log(Z + L_max·X) − log Z, the quantity the fork's
 # `nested_isdone` and `sample_parallel` stop on.
