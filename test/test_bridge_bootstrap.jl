@@ -75,7 +75,8 @@ end
 
 # 0.8.8's log ratios; only `N1` when there are too few draws.
 function _ref_ratios(target, chains::MCMCChains.Chains;
-                     n_proposal::Int = 20_000, seed::Int = 1, proposal::Symbol = :student)
+                     n_proposal::Int = 20_000, seed::Int = 1, proposal::Symbol = :student,
+                     moments = nothing)
     d = length(target.params.layout.unfrozen_names)
     Y_all = _ref_draws(target, chains)
     keep = vec(all(isfinite, Y_all; dims = 1))
@@ -83,8 +84,10 @@ function _ref_ratios(target, chains::MCMCChains.Chains;
     N1 = size(Y, 2)
     N1 >= 2d + 2 || return (; N1)
     evs = [Nereus._BridgeEvaluator(target) for _ in 1:Nereus._bridge_ntasks(max(N1, n_proposal))]
-    μ = vec(mean(Y; dims = 2))
-    Σ = cov(Y; dims = 2) + 1e-10 * I(d)
+    # `moments` given (the streamed ones): the proposal is built from them, so
+    # the ratios compare 0.8.8's arithmetic alone, on any chain.
+    μ = moments === nothing ? vec(mean(Y; dims = 2)) : moments.μ
+    Σ = (moments === nothing ? cov(Y; dims = 2) : moments.Σ) + 1e-10 * I(d)
     Lc = cholesky(Symmetric(Σ)).L
     ν  = 4.0
     function logq(y)
@@ -516,13 +519,9 @@ end
                         Mo = UniformPrior(0.0, 2π)),),
         rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(2.0, n)),
                      sigma = LogUniformPrior(0.5, 20.0)),))
-    # The stretch-only chain these bounds were set on (`de_move = 0`): how far
-    # the streamed proposal moments round from 0.8.8's matrix ones depends on
-    # the chain (4.3e-12 in l2 on the default DE chain at this seed, against
-    # the 1e-12 bound), and the chain is only the fixture here.
     res = sample_pt_emcee(tg, tg.data; n_temps = 4, n_walkers = 24, n_steps = 900,
                           n_burnin = 500, seed = 3, bridge_headline = false,
-                          de_move = 0, show_progress = false)
+                          show_progress = false)
     ch = res.chains
 
     @testset "draws streamed off the chain: no copy, the same numbers" begin
@@ -595,11 +594,14 @@ end
             @test alloc(z, lq, v9) == 0
         end
 
-        # The log ratios: 0.8.8's, but for the rounding of the moments.
+        # The log ratios: 0.8.8's, on the same moments. How far the streamed
+        # moments round from the matrix ones is checked above; through the
+        # proposal that rounding reaches l2 by an amount that depends on the
+        # chain, so the ratios are compared with it taken out.
         for (kw, use_lp) in (((n_proposal = 3_000, seed = 42, proposal = :student), false),
                              ((n_proposal = 2_000, seed = 9, proposal = :gaussian), false),
                              ((n_proposal = 3_000, seed = 42, proposal = :student), true))
-            rr = _ref_ratios(tg, ch; kw...)
+            rr = _ref_ratios(tg, ch; moments = m, kw...)
             rs = _bridge_ratios(tg, ch, kw.n_proposal, kw.seed, kw.proposal, false, nothing;
                                 use_lp)
             @test rs.n_post == rr.N1 && length(rs.l1) == length(rr.l1) &&
