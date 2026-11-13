@@ -94,15 +94,17 @@ for the per-mode parameter list, and the `PlanetBlock` subtypes
 
 ### run_job equivalent
 
-In the `model.planet_modes` array (`src/runner.jl:1084`), pass the
+In the `model.planet_modes` array, pass the
 constant **names** as strings. The schema validator
-(`src/runner.jl:276`) recognises exactly:
+(`_KNOWN_PLANET_MODES` in `src/runner.jl`) recognises exactly:
 
 ```
 RV_ONLY, PM_ONLY, RVPM, RVAS, RVPMAS,
 RVPM_RM, RVPMAS_RM, RVPM_RM_R, RVPMAS_RM_R,
 RVPM_TTV, RVPMAS_TTV, RVPM_RM_TTV, PM_TTV,
-RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB
+RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB,
+RVPM_RM_A, RVPMAS_RM_A, RVPM_GD, RVPM_RM_GD, PM_GD,
+BINARY, BINARY_RV, PM_DT
 ```
 
 ```json
