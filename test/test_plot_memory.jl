@@ -17,7 +17,8 @@ function _plotmem_fixture()
     t = sort(300.0 .* rand(rng, n))
     inst = [isodd(i) ? 1 : 2 for i in 1:n]
     data = Data(; t_rv = t, rv = zeros(n), rv_err = fill(2.0, n), rv_inst = inst)
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo),
+                       max_kplanet = 1, planet_modes = [RV_ONLY],
                        instruments = InstrumentConfig(rv = ["A", "B"]),
                        data = data, M_s = 1.0)
     vals = Dict("P_k1" => 11.3, "K_k1" => 25.0, "sesinw_k1" => 0.2,
