@@ -83,16 +83,7 @@ function detection_limits(chains, params::Params;
     n_bins >= 4 || throw(ArgumentError("n_bins must be ≥ 4"))
 
     P_name = "P_k$planet"
-    K_name = "K_k$planet"
-
-    chain_names = Set(string.(names(chains, :parameters)))
-    P_name in chain_names ||
-        throw(ArgumentError("chain has no column $P_name"))
-    K_name in chain_names ||
-        throw(ArgumentError("chain has no column $K_name"))
-
-    P_vals = Float64.(_draws(chains, Symbol(P_name)))
-    K_vals = Float64.(_draws(chains, Symbol(K_name)))
+    P_vals, K_vals = _planet_P_K_draws(chains, params, planet)
 
     # Trans-dim: keep the draws in which slot `planet` is live -- from
     # `planet_active_<k>`, not `n_planets ≥ k`, which after a death mid-list
@@ -110,7 +101,10 @@ function detection_limits(chains, params::Params;
 
     # Period prior bounds — used as default bin range and for the
     # coverage warning.
-    prior_P = _prior_for(params, P_name)
+    # The prior bounds the SAMPLED period only; under :a_driven the P_k slot
+    # holds a, and a fixed period has no prior.
+    prior_P = params.config.parametrization.mass === :a_driven ? nothing :
+              _prior_for(params, P_name)
     lo_prior, hi_prior = prior_P === nothing ?
         (minimum(P_vals), maximum(P_vals)) :
         bounds(prior_P)
@@ -161,6 +155,33 @@ end
 # =====================================================================
 # Helper
 # =====================================================================
+
+# (P [days], K [m/s]) of `planet` for every draw, from the model's own
+# accessors `planet_P` / `planet_K`. A parametrization that does not sample one
+# of them (K under :M_sec_driven and :a_driven, P under :a_driven) derives it
+# exactly as the likelihood does; a sampled column is used as is. A fixed
+# quantity is read from the Theta's fixed value, so it needs no chain column.
+function _planet_P_K_draws(chains, params::Params, planet::Int)
+    planet <= params.config.max_kplanet ||
+        throw(ArgumentError("planet $planet exceeds max_kplanet"))
+    mass = params.config.parametrization.mass
+    chain_names = Set(string.(names(chains, :parameters)))
+    P_name, K_name = "P_k$planet", "K_k$planet"
+    P_direct = mass !== :a_driven && P_name in chain_names
+    K_direct = mass === :K_driven && K_name in chain_names
+    if P_direct && K_direct
+        return Float64.(_draws(chains, Symbol(P_name))),
+               Float64.(_draws(chains, Symbol(K_name)))
+    end
+    P_vals, K_vals = _per_draw(
+        th -> (Float64(planet_P(th, planet)), Float64(planet_K(th, planet))),
+        chains, params, planet, Val(2))
+    P_direct && (P_vals = Float64.(_draws(chains, Symbol(P_name))))
+    all(isnan, K_vals) &&
+        throw(ArgumentError("cannot derive K for planet $planet from this chain " *
+                            "(no K or M_sec column, or the planet has no RV amplitude)"))
+    return P_vals, K_vals
+end
 
 function _prior_for(params::Params, name::AbstractString)
     idx = findfirst(==(name), params.layout.unfrozen_names)
@@ -284,10 +305,8 @@ function detectability(chains, params::Params, data;
     n_draw = length(first(values(cols)))
     n_draw > 0 || throw(ArgumentError("chain has no draws"))
 
-    P_name = "P_k$planet"
     M_name = "M_sec_k$planet"
     K_name = "K_k$planet"
-    haskey(cols, P_name) || throw(ArgumentError("chain has no column $P_name"))
     (haskey(cols, M_name) || haskey(cols, K_name)) ||
         throw(ArgumentError("chain has neither $M_name nor $K_name"))
     amp_name = haskey(cols, M_name) ? M_name : K_name
@@ -311,13 +330,15 @@ function detectability(chains, params::Params, data;
     ll0 = Vector{Float64}(undef, n_draw)
     zero_amp = amp_name == K_name ? 1e-6 : 1e-12        # m/s, or M_sun
     mass = Vector{Float64}(undef, n_draw)
+    P = Vector{Float64}(undef, n_draw)
     for i in 1:n_draw
         apply!(i, nothing)
         ll[i] = _total_loglike(theta, data)
         e1, _ = planet_e_w(theta, planet)
+        P[i] = planet_P(theta, planet)      # derived under :a_driven, fixed if not sampled
         sin_i = has_inc ? sin(planet_inc(theta, planet)) : 1.0
         mass[i] = amp_name == K_name ?
-            msec_from_K(cols[K_name][i], cols[P_name][i], e1, sin_i, params.config.M_s) :
+            msec_from_K(cols[K_name][i], P[i], e1, sin_i, params.config.M_s) :
             cols[M_name][i]
         apply!(i, zero_amp)                              # same nuisances, no companion
         ll0[i] = _total_loglike(theta, data)
@@ -327,7 +348,6 @@ function detectability(chains, params::Params, data;
     # Mass axis: true mass, or M sin i when there is no inclination to use.
     quantity = has_inc ? :mass : :msini
 
-    P = cols[P_name]
     P_lo = Float64(P_min === nothing ? minimum(P) : P_min)
     P_hi = Float64(P_max === nothing ? maximum(P) : P_max)
     M_lo = Float64(M_min === nothing ? max(minimum(mass), 1e-9) : M_min)

@@ -67,10 +67,7 @@ function measure_per_transit_tcs(data::Data, theta_ref::Theta, params::Params;
     # Decode planet-k's shape params from theta_ref
     P_k  = theta_ref.values[layout.name_to_idx["P_k$(planet_k)"]]
     Tc_k = _ttv_Tc(theta_ref.values, params, planet_k)
-    se_k = theta_ref.values[layout.name_to_idx["sesinw_k$(planet_k)"]]
-    sc_k = theta_ref.values[layout.name_to_idx["secosw_k$(planet_k)"]]
-    e_k  = hypot(se_k, sc_k)^2
-    w_k  = atan(se_k, sc_k)
+    e_k, w_k = planet_e_w(theta_ref, planet_k)
     b_k  = theta_ref.values[layout.name_to_idx["b_k$(planet_k)"]]
     rr_k = theta_ref.values[layout.name_to_idx["rr_k$(planet_k)"]]
 
@@ -231,12 +228,9 @@ function ttvc_envelope(chains, params::Params;
 
         P_a  = _get(theta_k.values, "P_k$(planet_a_k)")
         Tc_a = _ttv_Tc(theta_k.values, params, planet_a_k)
-        K_a  = _get(theta_k.values, "K_k$(planet_a_k)")
-        se_a = _get(theta_k.values, "sesinw_k$(planet_a_k)")
-        sc_a = _get(theta_k.values, "secosw_k$(planet_a_k)")
+        K_a  = Float64(planet_K(theta_k, planet_a_k))
+        e_a, w_a = planet_e_w(theta_k, planet_a_k)
         b_a  = _get(theta_k.values, "b_k$(planet_a_k)")
-        e_a  = hypot(se_a, sc_a)^2
-        w_a  = atan(se_a, sc_a)
 
         # a/R★ and the true mass of planet a: the exact mass function at the
         # transit's sin i, solved together with a/R★ (Kepler III with M_s + M_p).
@@ -255,11 +249,8 @@ function ttvc_envelope(chains, params::Params;
 
         P_b   = _get(theta_k.values, "P_k$(planet_b_k)")
         Tc_b  = _ttv_Tc(theta_k.values, params, planet_b_k)
-        K_b   = _get(theta_k.values, "K_k$(planet_b_k)")
-        se_b  = _get(theta_k.values, "sesinw_k$(planet_b_k)")
-        sc_b  = _get(theta_k.values, "secosw_k$(planet_b_k)")
-        e_b   = hypot(se_b, sc_b)^2
-        w_b   = atan(se_b, sc_b)
+        K_b   = Float64(planet_K(theta_k, planet_b_k))
+        e_b, w_b = planet_e_w(theta_k, planet_b_k)
         # Planet b has no transit geometry here: its exact MINIMUM mass
         # (sin i = 1), from the full mass function.
         mr_b  = msec_from_K(K_b, P_b, e_b, 1.0, M_s_use) / M_s_use
