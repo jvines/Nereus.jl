@@ -368,7 +368,7 @@ cfg = Dict(
   "model" => Dict(
      "max_kplanet"     => 1,
      "planet_modes"    => ["RVAS"],
-     "parametrization" => Dict("mass" => "M_sec_driven", "time" => "Tp", "ew" => "sesinw"),
+     "parametrization" => Dict("mass" => "M_sec_driven", "ew" => "sesinw"),  # default time anchor: phic
      "stability"       => "none"),
   "priors" => Dict(
      "P_k1"     => Dict("type" => "NormalPrior",     "args" => [2700.0, 80.0, 2300.0, 3100.0]),
@@ -378,7 +378,7 @@ cfg = Dict(
      "plx"      => Dict("type" => "NormalPrior",     "args" => [310.94, 0.17, 305.0, 320.0])),
   "noise_models" => [],
   "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
-     "n_temps" => 8, "n_walkers" => 60, "n_steps" => 3000, "n_burnin" => 1800,
+     "n_temps" => 16, "n_walkers" => 60, "n_steps" => 20000, "n_burnin" => 12000,
      "show_progress" => false)),
   "output" => Dict("plots" => ["hgca_pm_residuals", "pm_anomaly",
                                "rv_timeseries", "corner"]),
@@ -386,6 +386,24 @@ cfg = Dict(
 
 summary = run_job(cfg)
 ```
+
+This fit takes 10 to 15 minutes on 3 cores. Two choices matter for
+convergence. The default `phic` time anchor puts the orbital phase on a
+single period; a `Tp` prior spanning the RV baseline holds up to six
+identical copies of the orbit (P can be as short as 2300 d) that the ensemble
+cannot equalise, and that setup stayed at R-hat ≈ 1.2 even at 80 000 steps.
+And the 16 temperatures matter: with 8, 20 000 steps leave R-hat at 1.2–1.25
+and the two seeds disagree on the inclination lobes below; 8 temperatures
+only converge at about 60 000 steps, three times the cost.
+
+The posterior is intrinsically **bimodal in inclination**: the HGCA proper
+motions and the RVs fit equally well at `i` and at `180° − i` (with a
+shifted `Ω`), so the two lobes (`i ≈ 30–85°` and `i ≈ 100–150°`) carry
+nearly equal weight, about 0.53 of the draws at `i > 90°`. That is physical,
+not a convergence failure. Quote the inclination as two lobes, not as a
+single median, and check that independent seeds agree on the lobe weights
+before trusting a shorter run: R-hat can look fine on every parameter well
+before the lobes have equilibrated.
 
 `hgca_pm_residuals` shows the 3-epoch PM residuals; `pm_anomaly` plots
 the GOST-window-averaged Gaia-epoch reflex. Set `planet_modes =>
