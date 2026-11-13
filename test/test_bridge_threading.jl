@@ -33,8 +33,11 @@ _bt_target() = build_target(
     M_s = 1.0, R_s = 1.0)
 
 # Bounded-space draws scattered about a point near the truth, `n` of them.
+# Drawn in ρ★ and (e, ω), and under density = :rho_circ mapped to the sampled
+# ρ_circ and η (src/density.jl), whose box spans tens of decades.
 function _bt_draws(tg, n; rng = MersenneTwister(5))
-    L = tg.params.layout
+    p0 = Nereus.without_density_reparam(tg.params, tg.data)
+    L = p0.layout
     near = Dict("P_k1" => 3.11, "Tc_k1" => 1.2, "K_k1" => 30.0, "b_k1" => 0.3,
                 "rr_k1" => 0.075, "sesinw_k1" => 0.0, "secosw_k1" => 0.0)
     X = Matrix{Float64}(undef, n, length(L.unfrozen_names))
@@ -46,7 +49,8 @@ function _bt_draws(tg, n; rng = MersenneTwister(5))
             X[i, j] = clamp(c + w * randn(rng), ps.lo + 1e-9, ps.hi - 1e-9)
         end
     end
-    return X
+    p0 === tg.params && return X
+    return reduce(vcat, [Nereus.density_new_x(X[i, :], p0, tg.params)' for i in 1:n])
 end
 
 @testset "bridge evaluation threading" begin

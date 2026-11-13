@@ -218,6 +218,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       # _target_from simply did not forward, so it was
                       # reachable from Julia and not from the fit_* API.
                       parametrization = nothing, time_anchor = nothing,
+                      density = nothing,
                       use_rho_s::Bool = false, R_s = NaN, phot_trend_order = 0, as_names = String[],
                       sharing = nothing, transdim_noise = false,
                       ttv_n_transits = nothing, ttv_backend = nothing,
@@ -352,6 +353,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     use_rho_s && (kw[:use_rho_s] = true)
     parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
     time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
+    density         === nothing || (kw[:density]         = Symbol(density))
     isnan(R_s) || (kw[:R_s] = R_s)
     sharing === nothing || (kw[:sharing] = Dict{Symbol,Vector{Vector{String}}}(
         Symbol(k) => [String.(g) for g in v] for (k, v) in pairs(sharing)))
@@ -438,7 +440,8 @@ The orbital phase is sampled as the transit phase `phic_k<k>` =
 `"Tp"` or `"Tc"` (see `ParametrizationConfig` for why phic is the default:
 it removes the low-e ridge between Mo and ω). Mo, Tp and Tc are reported per
 draw in the derived table. `fit_transit`, `fit_astrometry` and `fit_joint`
-take `time_anchor` the same way.
+take `time_anchor` the same way, and `density` (`"rho_circ"`, the default, or
+`"rho_star"`; see `ParametrizationConfig`), which matters only with transits.
 
 Stellar keywords are those of a `run_job` star block. `M_s` and `R_s` (M☉, R☉)
 are model keywords. `T_eff` (K), `J_mag`, `K_mag`, `Ab` (Bond albedo, default
@@ -868,6 +871,11 @@ default_astrom_planet(; a_lo = 0.1, a_hi = 100.0, m_lo = 1e-4, m_hi = 1.0) =
      inc    = SinePrior(),
      Omega  = UniformPrior(0.0, 2pi))
 
+# Engines that run the model in ρ★ and (e, ω) whatever its `density`: the
+# trans-dimensional samplers (`sample_pt` included, which runs the trans-dim
+# path with every planet on) and ESS. See `without_density_reparam`.
+const _DENSITY_FREE_ENGINES = ("pt", "transdim_pt_emcee", "moms", "daedalus", "rjmcmc", "ess")
+
 """
     _normalize(raw) -> (chains, log_z, extra)
 
@@ -925,7 +933,9 @@ function _summarise_params(chains, params)
     out = Dict{String,Any}()
     chains === nothing && return out
     names_in = Set(MCMCChains.names(chains, :parameters))
-    for name in params.layout.unfrozen_names
+    # Under the photo-eccentric reparametrization, ρ★ and the e-coordinates it
+    # derives are reported as they were when sampled (src/density.jl).
+    for name in vcat(params.layout.unfrozen_names, density_derived_names(params))
         sym = Symbol(name)
         sym in names_in || continue
         v = _draws(chains, sym)
@@ -1108,6 +1118,9 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
     end
     spec_opts = Dict{String,Any}(String(k) => v
                                  for (k, v) in pairs(get(spec, "options", Dict())))
+    # Engines that cannot run the photo-eccentric reparametrization run the same
+    # model in ρ★ and (e, ω) (src/density.jl); the summary reads their names.
+    spec_name in _DENSITY_FREE_ENGINES && (target = without_density_reparam(target))
     raw = run_engine(target, spec)
     chains, log_z, extra = _normalize(raw)
     # The re-chart run_job does (src/circular.jl), before sampler_diagnostics,

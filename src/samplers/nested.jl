@@ -264,12 +264,16 @@ function sample_nested(
         @inbounds for (j, idx) in enumerate(layout.unfrozen_idx)
             tb.values[idx] = x[j]
         end
+        # The photo-eccentric reparametrization's prior term: the prior here is
+        # the sampled slots' surrogate (`density_logprior_correction`; 0 without).
+        dl = density_logprior_correction(tb)
+        isfinite(dl) || return -1e300
         ll = rv_log_likelihood(tb, data, wb)
         isfinite(ll) || return -1e300
         ll += transit_log_likelihood(tb, data, wb)
         ll += tomogram_log_likelihood(tb, data, wb) # residual maps
         isfinite(ll) || return -1e300
-        return ll
+        return ll + dl
     end
 
     model = NestedModel(loglike, prior_dists)
@@ -433,7 +437,8 @@ function sample_nested(
         mat[i, :] = raw[idx, :]
     end
 
-    chains = MCMCChains.Chains(mat, param_names)
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(MCMCChains.Chains(mat, param_names), target.params)
     return chains, log_ev, log_ev_err
 end
 

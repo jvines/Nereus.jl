@@ -45,6 +45,8 @@ function plot_posteriors_lp(chains, params;
             owner[layout.unfrozen_names[uf]] = k
         end
     end
+    # ρ_circ, η and the e-coordinates they derive (src/density.jl)
+    merge!(owner, density_planet_names(params))
 
     # Per-planet active index cache
     act_cache = Dict{Int, Vector{Int}}()
@@ -65,7 +67,7 @@ function plot_posteriors_lp(chains, params;
         end
     end
 
-    pnames = [nm for nm in layout.unfrozen_names if Symbol(nm) in cn]
+    pnames = [nm for nm in reported_param_names(params) if Symbol(nm) in cn]
     only !== nothing && (pnames = [nm for nm in pnames if nm in only])
     planet !== nothing && (pnames = [nm for nm in pnames if
                                       get(owner, nm, 0) == planet])

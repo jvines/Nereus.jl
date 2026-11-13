@@ -32,6 +32,12 @@ function _rv_only_plus_transit()
     data.rv .= Nereus.rv_predictions(theta, data)[1]
     data.flux .= Nereus.phot_predictions(theta, data)[1]
     nm = params.layout.unfrozen_names
+    # Under density = :rho_circ the transiting slot samples (ρ_circ, η) in place
+    # of its e-coordinates (src/density.jl): their values are the ones
+    # set_param! wrote, and the chain carries the e-coordinates beside them.
+    for x in nm
+        Nereus.is_density_reparam_name(x) && (vals[x] = Nereus.get_param(theta, x))
+    end
     missing_vals = setdiff(nm, keys(vals))
     isempty(missing_vals) || error("fixture lacks values for $missing_vals")
     cols = vcat(Symbol.(nm), [:lp])
@@ -40,7 +46,7 @@ function _rv_only_plus_transit()
         arr[i, 1:length(nm), 1] = [vals[x] * (1 + 1e-6 * i) for x in nm]
         arr[i, end, 1] = -0.1 * i
     end
-    return params, data, Chains(arr, cols)
+    return params, data, Nereus.with_density_columns(Chains(arr, cols), params)
 end
 
 @testset "transit folds: transiting slots only" begin

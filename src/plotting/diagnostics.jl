@@ -31,7 +31,7 @@ function plot_trace(chains, params;
     with_theme(nereus_theme()) do
         chain_names = Set(names(chains, :parameters))
 
-        for name in params.layout.unfrozen_names
+        for name in reported_param_names(params)
             sym = Symbol(name)
             sym in chain_names || continue
 
@@ -88,7 +88,7 @@ function plot_histograms(chains, params;
     with_theme(nereus_theme()) do
         chain_names = Set(names(chains, :parameters))
 
-        for name in params.layout.unfrozen_names
+        for name in reported_param_names(params)
             sym = Symbol(name)
             sym in chain_names || continue
 
@@ -203,7 +203,7 @@ function plot_posteriors(chains, params;
         keep = 1:cld(length(lp_all), max_points):length(lp_all)
         lp = lp_all[keep]
 
-        for name in params.layout.unfrozen_names
+        for name in reported_param_names(params)
             sym = Symbol(name)
             sym in chain_names || continue
             samp = _draws_view(chains, sym)[keep]   # the kept draws only
@@ -509,7 +509,7 @@ function plot_corner(chains, params;
     with_theme(nereus_theme()) do
         chain_names = Set(names(chains, :parameters))
         pnames = params_to_plot !== nothing ? params_to_plot :
-                 [n for n in params.layout.unfrozen_names
+                 [n for n in reported_param_names(params)
                   if Symbol(n) in chain_names]
 
         # Build a NamedTuple-of-vectors so PairPlots picks axis labels

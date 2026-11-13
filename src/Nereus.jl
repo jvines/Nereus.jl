@@ -47,6 +47,7 @@ include("params_constructor.jl") # Params() constructor (needs default_priors + 
 include("transdim/state.jl")
 include("transdim/config.jl")
 include("parameters.jl")
+include("density.jl")       # photo-eccentric reparametrization: rho_circ / eta slots, map, Jacobian, accessors
 include("transdim/proposals.jl")
 include("transdim/informed_phot.jl")  # BLS + M-R + K helpers for JointInformedBirth
 include("transdim/birth_strategies.jl")

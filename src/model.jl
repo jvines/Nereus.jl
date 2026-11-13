@@ -622,6 +622,20 @@ Choices for how orbital parameters are parametrized in the sampler.
                          goes on the quantity it was measured as, with no
                          stellar-density proxy. Mutually exclusive with
                          `use_rho_s`.
+- `density::Symbol`   : `:rho_circ` (the default) or `:rho_star`. Under
+                         `:rho_circ` every planet with transit photometry and a
+                         free eccentricity samples the circular-equivalent
+                         density its transit duration measures,
+                         ρ_circ = ρ★ g³, g = (1 + e sin ω)/√(1 − e²)
+                         (`rho_circ_k<k>`), in place of the stellar density or of
+                         one eccentricity coordinate: the duration fixes ρ★ g³,
+                         so in (ρ★, e, ω) the posterior is a thin curved sheet
+                         reaching high e, which the samplers cross slowly; in
+                         ρ_circ it lies along an axis. ρ★ and (e, ω) become
+                         derived, the Jacobian keeps their prior exactly, and the
+                         posterior is unchanged (see `DensityReparam`). It is
+                         inert for a model with no such planet. `:rho_star`
+                         samples ρ★ and (e, ω) as before.
 - `mass::Symbol`      : one of `:K_driven` (default — sample RV semi-
                          amplitude K, derive M_sec via mass function),
                          `:M_sec_driven` (sample M_sec directly, derive
@@ -663,6 +677,10 @@ struct ParametrizationConfig
     # Epoch the transit phase φ_c is measured from (time = :phic). NaN until
     # `Params` fills it in from the data.
     t_ref_c::Float64
+    # :rho_circ -- a transiting planet with a free eccentricity samples the
+    # circular-equivalent density ρ★ g³ its transit measures; :rho_star -- ρ★ and
+    # (e, ω) as sampled before. See the docstring and `DensityReparam`.
+    density::Symbol
 end
 
 function ParametrizationConfig(; ew::Symbol=:sesinw,
@@ -672,7 +690,12 @@ function ParametrizationConfig(; ew::Symbol=:sesinw,
                                 obs_prior::Bool=false,
                                 marginalize_gamma::Bool=false,
                                 sample_a_Rs::Bool=false,
-                                t_ref_c::Real=NaN)
+                                t_ref_c::Real=NaN,
+                                density::Union{Symbol,AbstractString}=:rho_circ)
+    density = Symbol(density)
+    density in (:rho_circ, :rho_star) || throw(ArgumentError(
+        "density must be :rho_circ (sample the circular-equivalent density a " *
+        "transit measures) or :rho_star (sample ρ★ and e, ω); got :$density"))
     time === nothing && (time = :auto)
     ew in (:sesinw, :esinw, :ew) ||
         throw(ArgumentError("ew must be :sesinw, :esinw, or :ew; got :$ew"))
@@ -688,7 +711,8 @@ function ParametrizationConfig(; ew::Symbol=:sesinw,
         "use_rho_s and sample_a_Rs are mutually exclusive: a/R★ is either derived " *
         "from the stellar density or sampled directly, not both"))
     return ParametrizationConfig(ew, time, geom, use_rho_s, mass, obs_prior,
-                                 marginalize_gamma, sample_a_Rs, Float64(t_ref_c))
+                                 marginalize_gamma, sample_a_Rs, Float64(t_ref_c),
+                                 density)
 end
 
 """
@@ -752,14 +776,21 @@ function resolve_time_anchor(pc::ParametrizationConfig, priors)
     time = named === nothing ? default_time_anchor(; obs_prior = pc.obs_prior) : named
     return ParametrizationConfig(pc.ew, time, pc.geom, pc.use_rho_s, pc.mass,
                                  pc.obs_prior, pc.marginalize_gamma,
-                                 pc.sample_a_Rs, pc.t_ref_c)
+                                 pc.sample_a_Rs, pc.t_ref_c, pc.density)
 end
 
 # The same parametrization with the φ_c epoch filled in.
 function _with_t_ref_c(pc::ParametrizationConfig, t_ref_c::Real)
     return ParametrizationConfig(pc.ew, pc.time, pc.geom, pc.use_rho_s, pc.mass,
                                  pc.obs_prior, pc.marginalize_gamma,
-                                 pc.sample_a_Rs, Float64(t_ref_c))
+                                 pc.sample_a_Rs, Float64(t_ref_c), pc.density)
+end
+
+# The same parametrization with another `density`.
+function _with_density(pc::ParametrizationConfig, density::Symbol)
+    return ParametrizationConfig(pc.ew, pc.time, pc.geom, pc.use_rho_s, pc.mass,
+                                 pc.obs_prior, pc.marginalize_gamma,
+                                 pc.sample_a_Rs, pc.t_ref_c, density)
 end
 
 # =====================================================================
@@ -1442,6 +1473,73 @@ const _PM_SHARING_CATEGORIES = (:pm_jitter, :pm_offset, :pm_dilution, :ld)
 const _AS_SHARING_CATEGORIES = (:as_jitter,)
 
 # =====================================================================
+# DensityReparam — the photo-eccentric reparametrization of a layout
+# =====================================================================
+
+"""
+    DensityReparam
+
+How a layout samples the stellar density and the eccentricities of its
+transiting planets under `density = :rho_circ` (`ParametrizationConfig`).
+
+A transit fixes its duration, and with it the circular-equivalent density
+
+    ρ_circ = ρ★ g³,   g = (1 + e sin ω) / √(1 − e²)
+
+(Kipping 2010; Dawson & Johnson 2012): a circular orbit of density ρ_circ makes
+the same transit as (ρ★, e, ω), to first order in the ingress. In (ρ★, e, ω) the
+posterior is a thin sheet along that curve, reaching high e. `rho_circ_k<k>`,
+the circular-equivalent density of planet k (solar units, log-uniform scale like
+`rho_s`), takes the place of one coordinate, so the sheet lies along an axis:
+
+  * `mode = :anchor` (the density `rho_s` is sampled): the first eligible planet,
+    `anchor`, samples ρ_circ in place of ρ★; its own e-coordinates stay, and
+    ρ★ = ρ_circ / g³ is derived.
+  * every other eligible planet (all of them under `mode = :given`, where ρ★ is
+    fixed, or the function M★ / R★³ of the host mass, sampled or not, and the
+    fixed radius) samples (ρ_circ,k, η_k) in place of its two e-coordinates:
+    at the model's ρ★, g = (ρ_circ,k/ρ★)^{1/3}, and the orbits with that g fill
+    the ellipse of the (e cos ω, e sin ω) disc
+
+        x = A cos η,  y = y₀ + B sin η,
+        A = g/√(1+g²),  B = g²/(1+g²),  y₀ = −1/(1+g²),
+
+    on which √(1 − e²) = g (1 + sin η)/(1 + g²). These ellipses fill the open
+    disc, one per g, all touching the circle e = 1 at η = −π/2, so (g, η) with
+    η ∈ (−π/2, 3π/2) is a bijection onto e < 1: no quadratic in e, no choice
+    of root. |∂(x, y)/∂(g, η)| = g² (1 + sin η)² / (1 + g²)^{5/2}.
+
+The old coordinates (`rho_s`, the e-coordinates of the η planets) stay layout
+slots, read through the accessors (`planet_e_w`, `stellar_density`) but never
+sampled: `derived`. The prior is the one the model states on them, carried
+through the Jacobian, so the posterior is the same distribution; the samplers
+see the sampled slots under a proper surrogate (log-uniform ρ_circ, uniform η)
+and `density_logprior_correction` adds the difference.
+
+`G` bounds g to [1/G, G], which excludes orbits with e within ~1/G² of 1 (an
+old-prior mass of about 3/(4G²) under a uniform e). `NO_DENSITY_REPARAM` is the
+inert plan.
+"""
+struct DensityReparam
+    mode::Symbol                  # :none, :anchor or :given
+    anchor::Int                   # :anchor -- the planet whose ρ_circ replaces ρ★
+    rho_circ::Vector{Int}         # per planet: slot of rho_circ_k<k>, 0 for none
+    eta::Vector{Int}              # per planet: slot of eta_k<k>, 0 for none
+    derived::Vector{Int}          # the slots now derived, in layout order
+    derived_priors::PackedPriors  # their priors, parallel to `derived`
+    derived_specs::Vector{PriorSpec}  # the same priors, unpacked (quantiles)
+    old_e::Vector{NTuple{2,Int}}  # per planet: positions in `derived` of e1, e2
+    old_rho::Int                  # position in `derived` of rho_s (:anchor), else 0
+    rho_slot::Int                 # the rho_s slot, 0 for none
+    lnorm::Vector{Float64}        # per planet: log log(hi/lo) of its ρ_circ box
+    G::Float64                    # g ∈ [1/G, G]
+end
+
+const NO_DENSITY_REPARAM = DensityReparam(:none, 0, Int[], Int[], Int[],
+    PackedPriors(Int[], zeros(0, 5), Float64[], Float64[]), PriorSpec[],
+    NTuple{2,Int}[], 0, 0, Float64[], 0.0)
+
+# =====================================================================
 # ParamsLayout — derived layout, built once from ParamsConfig
 # =====================================================================
 
@@ -1468,6 +1566,9 @@ config, testable in isolation.
 - `frozen_values::Vector{Float64}`   : fixed values (parallel to frozen_idx)
 - `planet_blocks::Vector{PlanetBlock}` : per-planet block, concrete subtype
 - `systemic::SystemicIndices`        : instrument + rho_s indices
+- `density::DensityReparam`          : the slots of the photo-eccentric
+                                       reparametrization; the slots it derives
+                                       are neither frozen nor unfrozen
 """
 struct ParamsLayout
     names::Vector{String}
@@ -1488,6 +1589,9 @@ struct ParamsLayout
     # `spin_flip`): of (i★, λ) and (π - i★, λ + π) the representative with
     # s·n ≥ 0 is reported. Mutable contents; (0, 0, 1) = i★ ≤ π/2.
     spin_axis::Vector{Float64}
+    # The photo-eccentric reparametrization (`density = :rho_circ`), or
+    # NO_DENSITY_REPARAM. See `DensityReparam`.
+    density::DensityReparam
 end
 
 # =====================================================================
@@ -1984,6 +2088,12 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         end
     end
 
+    # The photo-eccentric reparametrization (`density = :rho_circ`): the
+    # sampled `rho_circ_k<k>` / `eta_k<k>` slots, here beside the density, and
+    # the slots they derive (src/density.jl). Their surrogate priors go into
+    # `config.priors` like the limb-darkening defaults above.
+    dslots = _density_slots!(names, config, planet_blocks, rho_s_idx)
+
     dvdt_idx = 0
     d2vdt2_idx = 0
     if config.trend_order >= 1
@@ -2219,7 +2329,15 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
     # A prior on a narrower range keeps its walls: those are the user's.
     polar = _polar_angle_slots(planet_blocks, systemic)
 
+    # The prior each slot is sampled under, as the layout uses it.
+    _layout_prior(i, name, ps) = i in polar ? polar_lift(ps) :
+                                 periodic_angle(name, config) ? circular_lift(ps) : ps
+
+    derived = Set(dslots.derived)
     for (i, name) in enumerate(names)
+        # A coordinate the reparametrization derives is neither sampled nor
+        # held: the accessors compute it from the sampled slots.
+        i in derived && continue
         ps = config.priors[name]
         if is_fixed(ps)
             push!(frozen_idx, i)
@@ -2227,20 +2345,23 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         else
             push!(unfrozen_idx, i)
             push!(unfrozen_names, name)
-            push!(unfrozen_priors,
-                  i in polar ? polar_lift(ps) :
-                  periodic_angle(name, config) ? circular_lift(ps) : ps)
+            push!(unfrozen_priors, _layout_prior(i, name, ps))
         end
     end
 
     # Build type-stable packed priors for Enzyme-compatible evaluation.
     packed = pack_priors(unfrozen_priors)
 
+    # The derived coordinates keep the prior the model states on them, as the
+    # layout would sample them under it: that is the prior carried through.
+    density = _density_plan(dslots, PriorSpec[_layout_prior(i, names[i], config.priors[names[i]])
+                                              for i in dslots.derived])
+
     return ParamsLayout(
         names, name_to_idx, n_total_, n_p_idx,
         unfrozen_idx, unfrozen_names, unfrozen_priors,
         frozen_idx, frozen_values,
-        planet_blocks, systemic, packed, [0.0, 0.0, 1.0],
+        planet_blocks, systemic, packed, [0.0, 0.0, 1.0], density,
     )
 end
 

@@ -191,6 +191,7 @@ const TEST_UNITS = [
     (name = "test_postfit_progress.jl", seconds = 83, files = ["test_postfit_progress.jl"]),
     # The transit-phase time anchor (time = :phic) against the Tc one.
     (name = "test_phic_anchor.jl", seconds = 3, files = ["test_phic_anchor.jl"]),
+    (name = "test_density_reparam.jl", seconds = 160, files = ["test_density_reparam.jl"]),
     # The workspace and allocating likelihoods at e up to 0.99999.
     (name = "test_high_e_workspace.jl", seconds = 15, files = ["test_high_e_workspace.jl"]),
     # Evidence estimators that do not temper from the prior, and the Rajpaul

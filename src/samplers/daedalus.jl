@@ -121,6 +121,10 @@ function sample_daedalus(
     warm_start_points::Union{Vector{DaedalusPoint}, Nothing} = nothing,
     decorrelation::Real    = 16.0,
 )
+    # The trans-dimensional prior skips inactive planets slot by slot, which the
+    # photo-eccentric reparametrization (src/density.jl) does not decompose
+    # into: this sampler runs the same model in ρ★ and (e, ω).
+    target = without_density_reparam(target)
     # JSON may deliver these floats as Int; normalize.
     dlogz                   = Float64(dlogz)
     decorrelation           = Float64(decorrelation)

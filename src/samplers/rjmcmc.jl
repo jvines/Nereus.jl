@@ -120,6 +120,10 @@ function sample_rjmcmc(
     resume::Bool = false,
     n_scouts::Int = 16,
 )
+    # The trans-dimensional prior skips inactive planets slot by slot, which the
+    # photo-eccentric reparametrization (src/density.jl) does not decompose
+    # into: this sampler runs the same model in ρ★ and (e, ω).
+    target = without_density_reparam(target)
     initial_scale = Float64(initial_scale)   # JSON may deliver Ints
     target_accept = Float64(target_accept)
     within_model in (:slice, :rwm) ||

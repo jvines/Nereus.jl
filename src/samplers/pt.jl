@@ -205,6 +205,10 @@ function sample_pt(
     # slice-sampling explore!() loop is not parallelised by default. The
     # Pigeons path survives as `_sample_pt_pigeons` for cross-checks; it is
     # deliberately not an engine.
+    # The trans-dimensional prior skips inactive planets slot by slot, which the
+    # photo-eccentric reparametrization (src/density.jl) does not decompose
+    # into: this sampler runs the same model in ρ★ and (e, ω).
+    target = without_density_reparam(target)
     td_user_supplied = td !== nothing
     td_eff = td_user_supplied ? td :
               TransDimConfig(;
@@ -1213,7 +1217,8 @@ function _sample_pt_pigeons(
     mat = hcat(mat, lp)
     push!(param_names, :lp)
 
-    chains = MCMCChains.Chains(mat, param_names)
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(MCMCChains.Chains(mat, param_names), target.params)
     return chains, log_ev
 end
 

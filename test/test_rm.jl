@@ -128,8 +128,10 @@ using ForwardDiff
     idx = params.layout.name_to_idx
     theta.values[idx["P_k1"]]      = 3.5
     theta.values[idx["K_k1"]]      = 50.0
-    theta.values[idx["sesinw_k1"]] = 0.0
-    theta.values[idx["secosw_k1"]] = 0.0
+    # set_param!, not raw slots: under density = :rho_circ the e-coordinates
+    # are derived from ρ_circ and η (src/density.jl), and writing them sets those.
+    Nereus.set_param!(theta, "sesinw_k1", 0.0)
+    Nereus.set_param!(theta, "secosw_k1", 0.0)
     theta.values[idx["Tp_k1"]]     = 2_450_000.0
     theta.values[idx["b_k1"]]      = 0.3
     theta.values[idx["rr_k1"]]     = 0.1
@@ -234,8 +236,10 @@ end
     idx = params.layout.name_to_idx
     theta.values[idx["P_k1"]]      = 3.5
     theta.values[idx["K_k1"]]      = 50.0
-    theta.values[idx["sesinw_k1"]] = 0.0
-    theta.values[idx["secosw_k1"]] = 0.0
+    # set_param!, not raw slots: under density = :rho_circ the e-coordinates
+    # are derived from ρ_circ and η (src/density.jl), and writing them sets those.
+    Nereus.set_param!(theta, "sesinw_k1", 0.0)
+    Nereus.set_param!(theta, "secosw_k1", 0.0)
     theta.values[idx["Tp_k1"]]     = 2_450_000.0
     theta.values[idx["b_k1"]]      = 0.3
     theta.values[idx["rr_k1"]]     = 0.1

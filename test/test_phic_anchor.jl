@@ -357,7 +357,9 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
                          name == "P_k1" ? 4.137 + 1e-3 * randn(r) :
                          Nereus.quantile(pφ.layout.unfrozen_priors[j], 0.25 + 0.5 * rand(r))
         end
-        ch = Chains(X, vcat(Symbol.(nm), :lp))
+        # With ρ★ beside the sampled ρ_circ, as every engine's chains carry it
+        # under density = :rho_circ (src/density.jl).
+        ch = Nereus.with_density_columns(Chains(X, vcat(Symbol.(nm), :lp)), pφ)
         ph = vec(Array(ch[:phic_k1])); P = vec(Array(ch[:P_k1]))
         @test any(<(0), ph) && any(>(0), ph)                           # really split
         Tc = compute_derived(ch, pφ)[1].values["Tc"]
@@ -366,7 +368,8 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         @test all(abs.(rem.(Tc .- phic_to_tc.(ph, P, t_ref_c), P, Ref(RoundNearest))) .< 1e-6)
         @test median(Tc) ≈ t_ref_c + (π - 0.01) * 4.137 / 2π atol = 0.01
         # The Tc fit reports no derived Tc: it samples it.
-        chT = Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Tc_k1")), :lp))
+        chT = Nereus.with_density_columns(
+            Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Tc_k1")), :lp)), pT)
         @test !haskey(compute_derived(chT, pT)[1].values, "Tc")
 
         # Tp and Mo, per draw, from each draw's own P, e and ω: what the other
@@ -384,8 +387,9 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
                             Ref(RoundNearest))) .< 1e-6)
         @test 0 <= median(Mo) < 360
         # The Mo fit's own anchor goes untouched: nothing derived for it.
-        chM = Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Mo_k1")), :lp))
         pM = mk(:Mo)
+        chM = Nereus.with_density_columns(
+            Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Mo_k1")), :lp)), pM)
         @test !any(k -> k in ("Tc", "Tp", "Mo_deg"),
                    keys(compute_derived(chM, pM; t_ref = data.t_ref)[1].values))
     end

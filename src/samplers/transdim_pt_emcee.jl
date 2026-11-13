@@ -805,6 +805,10 @@ function sample_transdim_pt_emcee(
     max_evals::Real = Inf,
     stop_file::Union{Nothing,AbstractString} = nothing,
 )
+    # The trans-dimensional prior skips inactive planets slot by slot, which the
+    # photo-eccentric reparametrization (src/density.jl) does not decompose
+    # into: this sampler runs the same model in ρ★ and (e, ω).
+    target = without_density_reparam(target)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))

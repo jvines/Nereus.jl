@@ -507,8 +507,9 @@ _contiguous_deg(x_rad, active, lo_ref = -180.0) =
 # is consistent with the fit. ONE `Theta{Float64}` is reused for the whole walk:
 # fixed parameters already sit at their fixed values in a fresh Theta, and only
 # the unfrozen slots the accessors read are overwritten per draw (planet k's
-# own `*_k<k>` names, plus M_pri and plx). A draw that throws, or whose value
-# is not finite, comes back NaN (an inactive trans-dim slot holds junk).
+# own `*_k<k>` names, plus M_pri, plx and the anchor's density coordinates).
+# A draw that throws, or whose value is not finite, comes back NaN (an inactive
+# trans-dim slot holds junk).
 # `f(theta)` must return an `NTuple{N, Float64}`; nothing is allocated per draw.
 function _per_draw(f::F, chains, params::Params, k::Int, ::Val{N}) where {F, N}
     layout = params.layout
@@ -516,8 +517,11 @@ function _per_draw(f::F, chains, params::Params, k::Int, ::Val{N}) where {F, N}
     suffix = "_k$k"
     slots = Int[]
     cols = Vector{Vector{Float64}}()
+    # ρ★ under the photo-eccentric reparametrization's :anchor mode is read off
+    # the anchor planet's ρ_circ and e-coordinates (src/density.jl).
+    shared = density_shared_names(params)
     for nm in layout.unfrozen_names
-        (endswith(nm, suffix) || nm == "M_pri" || nm == "plx") || continue
+        (endswith(nm, suffix) || nm == "M_pri" || nm == "plx" || nm in shared) || continue
         Symbol(nm) in chain_syms || continue
         push!(slots, layout.name_to_idx[nm])
         push!(cols, _draws(chains, Symbol(nm)))

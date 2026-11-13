@@ -135,6 +135,10 @@ function sample_moms(
     # checkpoint would. 0 runs to the end.
     _stop_after::Int = 0,
 )
+    # The trans-dimensional prior skips inactive planets slot by slot, which the
+    # photo-eccentric reparametrization (src/density.jl) does not decompose
+    # into: this sampler runs the same model in ρ★ and (e, ω).
+    target = without_density_reparam(target)
     # JSON may deliver these floats as Int; normalize.
     init_scale              = Float64(init_scale)
     target_birth_accept     = Float64(target_birth_accept)

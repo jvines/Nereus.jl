@@ -1094,6 +1094,7 @@ end
     tid == TRANSFORM_IDENTITY && return yj
     lo = pt.lowers[j]
     tid == TRANSFORM_LOGIT && return lo + (pt.uppers[j] - lo) / (1 + exp(-yj))
+    tid == TRANSFORM_LOGLOGIT && return _loglogit_inverse(yj, lo, pt.uppers[j])
     return lo + exp(yj)
 end
 

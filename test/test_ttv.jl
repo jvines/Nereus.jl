@@ -68,8 +68,10 @@ using Random: MersenneTwister
     idx = params.layout.name_to_idx
     theta.values[idx["P_k1"]]      = 3.5
     theta.values[idx["K_k1"]]      = 20.0
-    theta.values[idx["sesinw_k1"]] = 0.0
-    theta.values[idx["secosw_k1"]] = 0.0
+    # set_param!, not raw slots: under density = :rho_circ the e-coordinates
+    # are derived from ρ_circ and η (src/density.jl), and writing them sets those.
+    Nereus.set_param!(theta, "sesinw_k1", 0.0)
+    Nereus.set_param!(theta, "secosw_k1", 0.0)
     theta.values[idx["Tp_k1"]]     = 2_450_001.0
     theta.values[idx["b_k1"]]      = 0.3
     theta.values[idx["rr_k1"]]     = 0.1
@@ -156,16 +158,16 @@ end
     # Planet 1: hot Jupiter
     theta.values[idx["P_k1"]]      = 4.0
     theta.values[idx["K_k1"]]      = 150.0
-    theta.values[idx["sesinw_k1"]] = 0.05
-    theta.values[idx["secosw_k1"]] = 0.0
+    Nereus.set_param!(theta, "sesinw_k1", 0.05)
+    Nereus.set_param!(theta, "secosw_k1", 0.0)
     theta.values[idx["Tp_k1"]]     = 2_450_001.0
     theta.values[idx["b_k1"]]      = 0.2
     theta.values[idx["rr_k1"]]     = 0.1
     # Planet 2: near 2:1 outside
     theta.values[idx["P_k2"]]      = 8.1
     theta.values[idx["K_k2"]]      = 50.0
-    theta.values[idx["sesinw_k2"]] = 0.05
-    theta.values[idx["secosw_k2"]] = 0.0
+    Nereus.set_param!(theta, "sesinw_k2", 0.05)
+    Nereus.set_param!(theta, "secosw_k2", 0.0)
     theta.values[idx["Tp_k2"]]     = 2_450_002.0
     theta.values[idx["b_k2"]]      = 0.3
     theta.values[idx["rr_k2"]]     = 0.08
@@ -216,8 +218,8 @@ end
     idx_s = params_solo.layout.name_to_idx
     theta_solo.values[idx_s["P_k1"]]      = 4.0
     theta_solo.values[idx_s["K_k1"]]      = 100.0
-    theta_solo.values[idx_s["sesinw_k1"]] = 0.0
-    theta_solo.values[idx_s["secosw_k1"]] = 0.0
+    Nereus.set_param!(theta_solo, "sesinw_k1", 0.0)
+    Nereus.set_param!(theta_solo, "secosw_k1", 0.0)
     theta_solo.values[idx_s["Tp_k1"]]     = 2_450_001.0
     theta_solo.values[idx_s["b_k1"]]      = 0.2
     theta_solo.values[idx_s["rr_k1"]]     = 0.1
@@ -341,7 +343,7 @@ end
         for (k, v) in ("P_k1" => P, "sesinw_k1" => sv, "secosw_k1" => cv,
                        "$(time)_k1" => anchor[time], "b_k1" => b, "rr_k1" => rr,
                        "q1_TESS" => 0.3, "q2_TESS" => 0.2)
-            th.values[ix[k]] = v
+            Nereus.set_param!(th, k, v)     # e-coordinates: derived under density = :rho_circ
         end
         for i in 1:n_tr
             th.values[ix["ttv_k1_t$i"]] = 0.0
@@ -394,7 +396,7 @@ function _nb_fixture(; backend = :ttvfaster, Tcs = (2_450_001.3, 2_450_002.9),
     for (k, o) in enumerate(orb)
         for (nm, v) in ("P" => o.P, "K" => o.K, "Tc" => o.Tc, "b" => o.b, "rr" => o.rr,
                         "sesinw" => sqrt(o.e) * sin(o.ω), "secosw" => sqrt(o.e) * cos(o.ω))
-            th.values[ix["$(nm)_k$k"]] = v
+            Nereus.set_param!(th, "$(nm)_k$k", v)   # e-coordinates: derived under :rho_circ
         end
     end
     th.values[ix["sigma_HARPS"]] = 1.0
@@ -561,7 +563,7 @@ end
     th = Theta{Float64}(params)
     for (k, v) in ("P_k1" => P, "Tc_k1" => Tc, "sesinw_k1" => 0.1, "secosw_k1" => 0.2,
                    "b_k1" => 0.3, "rr_k1" => 0.1, "q1_TESS" => 0.3, "q2_TESS" => 0.2)
-        th.values[ix[k]] = v
+        Nereus.set_param!(th, k, v)     # e-coordinates: derived under density = :rho_circ
     end
     tcs = [Tc + m * P for m in -3:4]
     meas = measure_per_transit_tcs(data, th, params; tcs_predicted = tcs, ngrid = 21)

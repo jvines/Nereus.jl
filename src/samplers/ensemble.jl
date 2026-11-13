@@ -563,10 +563,13 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     cube = permutedims(reshape(mat, n_walkers, n_keep, n_dim), (2, 3, 1))
     if check_drift
         drift = _ensemble_drift_chains([cube], params; sampler = "ensemble", de_move)
-        return MCMCChains.Chains(mat, param_names; info = (; drift))
+        return with_density_columns(MCMCChains.Chains(mat, param_names; info = (; drift)),
+                                    params)
     end
     # Several chains: `sample_ensemble` checks them together, and drops this.
-    return MCMCChains.Chains(mat, param_names; info = (; walker_cube = cube))
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    return with_density_columns(MCMCChains.Chains(mat, param_names;
+                                                  info = (; walker_cube = cube)), params)
 end
 
 # A chain without the walker cube `_ensemble_chain` hands `sample_ensemble`.

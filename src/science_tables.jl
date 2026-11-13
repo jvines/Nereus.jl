@@ -51,6 +51,11 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     # prior-rail check compares the CI with the user's prior in these units;
     # the g/cm³ value is the derived `rho_star_transit_k<n>`.
     "rho_s" => ("rho_sun", false),
+    # The circular-equivalent density ρ★ g³ a transit measures, sampled under
+    # density = :rho_circ in the same solar units, and the coordinate η of the
+    # orbit on its ellipse of constant g (src/density.jl): not an angle of the
+    # orbit, so it stays in radians.
+    "rho_circ" => ("rho_sun", false), "eta" => ("rad", false),
     "q1" => ("", false),          "q2" => ("", false),  # Kipping LD
     # derived
     "msini" => ("M_earth", false),"mass" => ("M_jup", false),
@@ -218,7 +223,7 @@ function science_fitted(chains, params::Params)
     # middle of the slot list the live planet sits in a later slot, and the
     # count-based cut dropped it from the table (see `_winning_planet_slots`).
     live = Set(_winning_planet_slots(chains, params))
-    for name in params.layout.unfrozen_names
+    for name in reported_param_names(params)
         Symbol(name) in allnames || continue
         # skip planet params for slots that are not in the winning model
         pidx = _param_planet_index(name, max_kp)
@@ -237,8 +242,10 @@ function science_fitted(chains, params::Params)
         # upper bound is checked. A cyclic inclination has no bound at all
         # (src/circular.jl): a CI reaching 0 or 180 deg is a face-on or
         # retrograde orbit the sampler passed through, not a prior wall.
+        # Nor do ρ_circ and η (src/density.jl): their box is the sampler's, and
+        # the prior's walls are on ρ★ and the e-coordinates, checked as such.
         _, is_ang = sci_param_unit(name, params)
-        if !(name in circ) && !(name in cinc)
+        if !(name in circ) && !(name in cinc) && !is_density_reparam_name(name)
             ps = params.config.priors[name]
             lo, hi = bounds(ps)
             is_ang && ((lo, hi) = (rad2deg(lo), rad2deg(hi)))
@@ -512,7 +519,8 @@ function _texsym(name::AbstractString)
                    "rr"=>"R_p/R_\\star", "radius_jup"=>"R_p", "radius_earth"=>"R_p",
                    "density_gcc"=>"\\rho_p", "Teq"=>"T_{\\rm eq}",
                    "S_earth"=>"S", "S_Wm2"=>"S", "P_yr"=>"P", "P_days"=>"P",
-                   "a_mas"=>"a", "alpha_star_uas"=>"\\alpha_\\star")
+                   "a_mas"=>"a", "alpha_star_uas"=>"\\alpha_\\star",
+                   "rho_circ"=>"\\rho_{\\rm circ}", "eta"=>"\\eta")
         # brace the base so symbols carrying their own subscript (a/R_\star, …)
         # don't make an invalid double subscript when we append _{k}.
         return haskey(sym, base) ? "\${$(sym[base])}_{$k}\$" : _texlabel(s)
@@ -711,12 +719,15 @@ function _prior_block(params::Params)
     out = Dict{String, Any}()
     circ = circular_names(params)
     cinc = cyclic_inclination_names(params)
-    for name in params.layout.unfrozen_names
+    for name in reported_param_names(params)
         pr = params.config.priors[name]
         lo, hi = bounds(pr)
         d = Dict{String, Any}(
             "type" => string(nameof(typeof(pr))),
             "lower" => lo, "upper" => hi)
+        # ρ_circ / η: the box the sampler moves in; their prior is the one on ρ★
+        # and the e-coordinates, carried through the change of variables.
+        is_density_reparam_name(name) && (d["carried"] = true)
         # The topology it was sampled on (src/circular.jl): a full circle
         # (its window a chart), or a polar angle reflected at its poles.
         name in circ && (d["circular"] = true)

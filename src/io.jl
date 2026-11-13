@@ -66,9 +66,17 @@ function save_chains(path::String, chains, params::Params;
         pc = params.config.parametrization
         ds.attrib["time_anchor"] = String(pc.time)
         pc.time === :phic && (ds.attrib["t_ref_c"] = pc.t_ref_c)
+        # The photo-eccentric reparametrization (src/density.jl): the
+        # coordinates it derives from the sampled rho_circ_k / eta_k (ρ★, the
+        # e-coordinates) are stored beside them, named in `derived_param_names`.
+        dnames = String[nm for nm in density_derived_names(params) if Symbol(nm) in has]
+        if density_active(params)
+            ds.attrib["density"] = String(pc.density)
+            ds.attrib["derived_param_names"] = join(dnames, ",")
+        end
 
         # Posterior samples — one variable per parameter
-        for name in layout.unfrozen_names
+        for name in vcat(layout.unfrozen_names, dnames)
             sym = Symbol(name)
             sym in has || continue
             v = defVar(ds, name, Float64, ("iter", "chain"))
@@ -183,6 +191,12 @@ function load_chains(path::String)
         addcol!(nm, sym) = (haskey(ds, nm) &&
                             (push!(cols, read_param(nm)); push!(syms, sym)))
         for name in param_names
+            addcol!(String(name), Symbol(name))
+        end
+        # Coordinates derived from the sampled ones (ρ★ and the e-coordinates
+        # under density = :rho_circ, src/density.jl).
+        for name in split(String(get(meta, "derived_param_names", "")), ",";
+                          keepempty = false)
             addcol!(String(name), Symbol(name))
         end
         addcol!("lp", :lp)

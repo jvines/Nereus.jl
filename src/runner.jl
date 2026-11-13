@@ -97,6 +97,13 @@ function run_job(cfg::AbstractDict)
         params, target, menu = _build_model(cfg, data, star, inst_names_rv,
                                               inst_names_pm, inst_names_as,
                                               inst_names_iad; gaia_plx = gaia)
+        # The engines that run the model in ρ★ and (e, ω) whatever its `density`
+        # (src/density.jl) return chains in those coordinates; everything
+        # written from the chains below reads them with these params.
+        if density_active(params) && _job_sampler_name(cfg) in _DENSITY_FREE_ENGINES
+            params = without_density_reparam(params, data)
+            target = NereusTarget(params, data; unconstrained = false)
+        end
 
         # --- Run sampler (with optional wall-clock watchdog) ----------
         # `timeout_sec` (top-level config) bounds the sampler call so a
@@ -1261,6 +1268,10 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         # Epoch the transit phase is measured from (time = "phic"). Absent:
         # Params takes the median photometric time.
         t_ref_c = Float64(_get(par, :t_ref_c; default = NaN)),
+        # "rho_circ" (default): a transiting planet with a free eccentricity
+        # samples the circular-equivalent density its transit measures;
+        # "rho_star": ρ★ and (e, ω) as sampled before. Same posterior.
+        density = Symbol(String(_get(par, :density; default = "rho_circ"))),
     )
 
     ic = InstrumentConfig(rv = inst_names_rv, pm = inst_names_pm,
@@ -1601,6 +1612,13 @@ end
 # failing.
 const _SAMPLER_FNS = ENGINES
 
+# The engine a job config names, with `_dispatch_sampler`'s defaults.
+function _job_sampler_name(cfg)
+    smp = _get(cfg, :sampler; default = Dict())
+    td = _get(cfg, :transdim; default = nothing) !== nothing
+    return String(_get(smp, :name; default = td ? "transdim_pt_emcee" : "pt_emcee"))
+end
+
 function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     # Default by shape: transdim_pt_emcee when a `transdim` block is present,
     # pt_emcee otherwise. Both for the same reason -- the affine-invariant
@@ -1608,9 +1626,7 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     # explorer cannot (it takes axis-aligned steps only) and which it fails at
     # SILENTLY, reporting no swap acceptance and no R-hat.
     smp = _get(cfg, :sampler; default = Dict())
-    _td_present = _get(cfg, :transdim; default = nothing) !== nothing
-    name = String(_get(smp, :name;
-                       default = _td_present ? "transdim_pt_emcee" : "pt_emcee"))
+    name = _job_sampler_name(cfg)
     kw = Dict{Symbol, Any}(Symbol(k) => v
                             for (k, v) in _get(smp, :kwargs; default = Dict()))
     kw[:seed] = get(kw, :seed, seed)

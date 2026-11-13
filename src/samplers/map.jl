@@ -410,6 +410,24 @@ function sample_map(
     basin_rtol::Float64 = 0.02,
     dom_margin::Float64 = 50.0,
 )
+    # A mode is a property of the coordinates. Under the photo-eccentric
+    # reparametrization (src/density.jl) the density in (ρ_circ, η) carries the
+    # Jacobian of the map, which has an integrable 1/e cusp at e = 0 for a
+    # prior uniform in √e sin ω, √e cos ω, and the optimiser would climb into
+    # it. The mode is found where it was before, in ρ★ and (e, ω), and returned
+    # as a point of this target's coordinates; `hessian` and `log_posterior`
+    # are those of the ρ★, (e, ω) coordinates.
+    if density_active(target.params)
+        p0 = without_density_reparam(target.params, target.data)
+        t0 = NereusTarget(p0, target.data; unconstrained = target.transform !== nothing)
+        init0 = init === nothing ? nothing : density_old_x(init, target.params, p0)
+        r = sample_map(t0; init = init0, method, maxiter, g_tol, n_starts, seed,
+                       bound_rtol, basin_rtol, dom_margin)
+        return MAPResult(density_new_x(r.x_map, p0, target.params), r.log_posterior,
+                         r.log_evidence_laplace, r.hessian,
+                         copy(target.params.layout.unfrozen_names), r.converged,
+                         r.railed, r.railed_params, r.n_basins, r.dominance)
+    end
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)

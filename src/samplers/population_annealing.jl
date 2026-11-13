@@ -683,7 +683,8 @@ function sample_pa(
 
     # --- Build output ------------------------------------------------
     param_names = Symbol.(layout.unfrozen_names)
-    chains = MCMCChains.Chains(replicas, param_names)
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(MCMCChains.Chains(replicas, param_names), target.params)
     mean_acc = isempty(accept_history) ? 0.0 : sum(accept_history) / length(accept_history)
     return PAResult(
         chains, log_z_total, log_z_history, β_history, ess_history,
