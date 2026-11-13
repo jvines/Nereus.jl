@@ -153,11 +153,14 @@ end
         params = mk(RVPM)
         th = Theta{Float64}(params)
         ix = params.layout.name_to_idx
+        # Written as the physical coordinates they are: under density =
+        # :rho_circ, ρ★ is derived from the sampled ρ_circ and (e, ω), and
+        # set_param! of it sets ρ_circ (src/density.jl); a raw slot write would not.
         for (nm, v) in ("P" => t.P, "K" => t.K, "Tc" => 2_450_003.0, "b" => t.b, "rr" => 0.1,
                         "sesinw" => sqrt(t.e) * sin(t.w), "secosw" => sqrt(t.e) * cos(t.w))
-            th.values[ix["$(nm)_k1"]] = v
+            Nereus.set_param!(th, "$(nm)_k1", v)
         end
-        th.values[ix["rho_s"]] = t.rho
+        Nereus.set_param!(th, "rho_s", t.rho)
         a, q, ci = planet_geometry(th, 1, t.P)
         @test a ≈ t.a rtol = 1e-12
         @test q ≈ 0.1 rtol = 1e-11
@@ -169,8 +172,8 @@ end
         # transit-only planet: no mass to insert
         params_pm = mk(PM_ONLY)
         thp = Theta{Float64}(params_pm)
-        thp.values[params_pm.layout.name_to_idx["rho_s"]] = t.rho
-        thp.values[params_pm.layout.name_to_idx["b_k1"]] = t.b
+        Nereus.set_param!(thp, "b_k1", t.b)
+        Nereus.set_param!(thp, "rho_s", t.rho)
         a0, q0, _ = planet_geometry(thp, 1, t.P)
         @test q0 == 0.0
         @test a0 == rho_s_to_a_Rs(t.rho, t.P)

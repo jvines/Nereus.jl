@@ -87,12 +87,15 @@ end
     n = 400
     data = Data(; t_phot = collect(range(0.0, 20.0; length = n)), flux = ones(n),
                   flux_err = fill(3e-4, n), phot_inst = ones(Int, n))
-    params = Params(; max_kplanet = 1, planet_modes = [PM_ONLY],
+    # ρ★ sampled as such (density = :rho_star); the default, where it is
+    # derived from the sampled ρ_circ, is checked at the end.
+    mkp(density) = Params(; max_kplanet = 1, planet_modes = [PM_ONLY],
                       instruments = InstrumentConfig(pm = ["TESS"]), data = data,
-                      parametrization = ParametrizationConfig(time = :Tc,
-                                                              use_rho_s = true),
+                      parametrization = ParametrizationConfig(; time = :Tc,
+                                                              use_rho_s = true, density),
                       priors = Dict("P_k1" => UniformPrior(2.9, 3.1),
                                     "Tc_k1" => UniformPrior(0.9, 1.1)))
+    params = mkp(:rho_star)
     rng = MersenneTwister(2)
     m = 2000
     val = Dict("P_k1" => 3.0, "sesinw_k1" => 0.0, "secosw_k1" => 0.0,
@@ -118,4 +121,17 @@ end
     tex = read(joinpath(out, "tables", "fitted.tex"), String)
     @test occursin("\$\\rho_\\odot\$", tex)
     @test occursin(r"\nrho_s,[^\n]*,rho_sun,", read(joinpath(out, "tables", "fitted.csv"), String))
+
+    # density = :rho_circ: ρ★ is derived from the sampled ρ_circ = ρ★ g³ (here
+    # e ≈ 0, so ρ_circ ≈ ρ★) and reported where it was, in the same units.
+    pc = mkp(:rho_circ)
+    nmc = pc.layout.unfrozen_names
+    @test "rho_circ_k1" in nmc && !("rho_s" in nmc)
+    valc = merge(val, Dict("rho_circ_k1" => 0.532))
+    chc = Nereus.with_density_columns(
+        Chains(hcat((valc[k] .+ 1e-4 .* randn(rng, m) for k in nmc)...), Symbol.(nmc)), pc)
+    scc = Nereus.science_summary(mktempdir(), chc, pc, data)
+    @test scc["fitted"]["parameters"]["rho_s"]["unit"] == "rho_sun"
+    @test scc["fitted"]["parameters"]["rho_s"]["value"] ≈ 0.532 rtol = 1e-3
+    @test scc["fitted"]["parameters"]["rho_circ_k1"]["unit"] == "rho_sun"
 end

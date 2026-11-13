@@ -54,7 +54,9 @@ function sup_case(t, P, e, ω, k, aR, b; ld = QuadLimbDark([0.4, 0.2]))
     vals = Dict("P_k1" => P, "Tc_k1" => Tc, "b_k1" => b, "rr_k1" => k, "rho_s" => rho,
                 "sesinw_k1" => sqrt(e) * sin(ω), "secosw_k1" => sqrt(e) * cos(ω),
                 "q1_TESS" => 0.36, "q2_TESS" => 0.33, "offset_TESS" => 0.0, "jitter_TESS" => 1e-4)
-    for nm in params.layout.unfrozen_names
+    # Sampled then derived: under density = :rho_circ, ρ★ is derived from the
+    # sampled ρ_circ and (e, ω), and writing it sets ρ_circ (src/density.jl).
+    for nm in Nereus.reported_param_names(params)
         Nereus.set_param!(th, nm, get(vals, nm, 0.0))
     end
     ws = Nereus.PTWorkspace(params, 1, 0; n_obs = 0, n_phot = n)
