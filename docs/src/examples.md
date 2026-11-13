@@ -781,8 +781,8 @@ primary-only.
   priors on ρ★ and (e, ω) stay under their own names.
 - **`chains.nc`** — the full posterior cube (`load_chains` to reload).
 - **`plots/`** — the figure tree: `models/` (data-space fits),
-  `posteriors/`, `traces/`, `transdim/`, plus top-level `corner.png`,
-  `ppc.png`, `detection_limits.png`.
+  `posteriors/`, `traces/`, `transdim/`, plus top-level `corner_K<k>.png`
+  (one per planet), `corner_noise.png`, `ppc.png`, `detection_limits.png`.
 - **`tables/`** — `fitted` and `derived` science tables in **csv,
   json, tex, ecsv, dat** (units, asymmetric 1σ + 3σ CI,
   model-conditioned).

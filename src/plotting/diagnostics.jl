@@ -438,8 +438,10 @@ end
 
 
 # A corner panel's limits from the full sample: its finite extrema padded 5%, as
-# Makie's autolimits pad. No limits (`(;)`) for a constant or empty column.
-function _corner_lims(x::AbstractVector)
+# Makie's autolimits pad. No limits (`(;)`) for a constant or empty column. `f`
+# is the increasing map the panel draws the column through (`rad2deg` for an
+# angle), applied to the extrema rather than to a copy of the column.
+function _corner_lims(x::AbstractVector, f = identity)
     lo, hi = Inf, -Inf                      # finite extrema, without a filtered copy
     for v in x
         isfinite(v) || continue
@@ -447,6 +449,7 @@ function _corner_lims(x::AbstractVector)
         v > hi && (hi = v)
     end
     hi > lo || return (;)
+    lo, hi = f(lo), f(hi)
     pad = 0.05 * (hi - lo)
     return (; lims = (; low = lo - pad, high = hi + pad))
 end
@@ -454,11 +457,19 @@ end
 """
     plot_corner(chains, params;
                  output=nothing, fmt=:png,
-                 params_to_plot=nothing, density=:hexbin, max_draws=200_000)
+                 params_to_plot=nothing, density=:hexbin, max_draws=200_000,
+                 draws=nothing, stem="corner")
 
-Corner plot using PairPlots.jl.
+Corner plot using PairPlots.jl, of an explicit selection of parameters.
 `params_to_plot`: optional list of parameter name strings to include
-(default: all unfrozen params).
+(default: every reported parameter -- the all-parameter corner, which costs
+n² panels; `run_job` draws `plot_corners` instead). Each axis is labelled with
+the parameter's symbol and unit, and an angle is drawn in degrees, as its label
+says.
+
+`draws` restricts the corner to those flat draws (indices into the chain's
+draws, iterations fastest): `plot_corners` passes the draws in which a
+trans-dimensional planet slot is live. Written to `output/<stem>.<fmt>`.
 
 `density` picks how the 2-D panels show the sample cloud under the contours:
 
@@ -495,7 +506,9 @@ function plot_corner(chains, params;
                       save_pdf::Bool=false,
                       params_to_plot::Union{Nothing, Vector{String}}=nothing,
                       density::Symbol=:hexbin,
-                      max_draws::Int=200_000)
+                      max_draws::Int=200_000,
+                      draws::Union{Nothing, AbstractVector{<:Integer}}=nothing,
+                      stem::AbstractString="corner")
     # PairPlots is loaded at the top of this file (see `using PairPlots`
     # there). The earlier pattern used `@eval using PairPlots` inside the
     # function body, which triggered Julia's world-age limitation:
@@ -512,22 +525,28 @@ function plot_corner(chains, params;
                  [n for n in reported_param_names(params)
                   if Symbol(n) in chain_names]
 
-        # Build a NamedTuple-of-vectors so PairPlots picks axis labels
-        # straight from the column names. (The `labels=Vector{String}`
-        # kwarg form was deprecated; current API wants Dict{Symbol,…} —
-        # avoid the issue entirely by going through a named column source.)
+        # A NamedTuple-of-vectors keyed by parameter name; the axis labels
+        # (symbol and unit, `_sci_label`) go in PairPlots' `labels` Dict.
         # Each column is read in place (`_draws_view`): only the thinned draws
         # are copied, and the limits come from the full column without a copy of
         # it. Copied whole, the columns were the chain over again -- 1 GB for a
         # 23-parameter, 5.8M-draw fit -- held for the whole figure.
-        cols = [_draws_view(chains, Symbol(name)) for name in pnames]
+        # `draws` selects the sample (a view, still no copy); an angle is drawn
+        # in degrees, as its label says.
+        cols = [(c = _draws_view(chains, Symbol(name));
+                 draws === nothing ? c : view(c, draws)) for name in pnames]
+        to_unit = [last(sci_param_unit(name, params)) ? rad2deg : identity
+                   for name in pnames]
         n_draws = isempty(cols) ? 0 : length(first(cols))
         keep = 1:max(1, cld(n_draws, max_draws)):n_draws     # every k-th draw
-        data_nt = NamedTuple{Tuple(Symbol.(pnames))}(Tuple(c[keep] for c in cols))
+        syms = Tuple(Symbol.(pnames))
+        data_nt = NamedTuple{syms}(Tuple(f.(view(c, keep)) for (c, f) in zip(cols, to_unit)))
         # Thinned: pin each panel to the full sample's range (see docstring).
         pin = length(keep) < n_draws ?
-            (; axis = NamedTuple{Tuple(Symbol.(pnames))}(Tuple(
-                _corner_lims(c) for c in cols))) : (;)
+            (; axis = NamedTuple{syms}(Tuple(
+                _corner_lims(c, f) for (c, f) in zip(cols, to_unit)))) : (;)
+        labels = Dict{Symbol, Any}(Symbol(name) => _sci_label(name, params)
+                                   for name in pnames)
 
         density in (:hexbin, :scatter) || throw(ArgumentError(
             "plot_corner: density must be :hexbin or :scatter, got $(repr(density))"))
@@ -539,15 +558,140 @@ function plot_corner(chains, params;
         layers = density === :hexbin ?
             (_CompactHexBin(colormap = :cool, colorscale = log10),   # = PairPlots.HexBin
              _CornerContour(color = :black)) :     # = PairPlots.Contour
-            (PairPlots.Scatter(markersize = 1, color = (NEREUS_COLORS.post, 0.1)),
-             _CornerContour())
-        fig = Base.invokelatest(pairplot, data_nt => layers; pin...)
+            # No stroke: the theme's 0.5 px black outline on every 1 px marker
+            # drew the cloud solid black, whatever its colour, and hid the
+            # contours in it.
+            (PairPlots.Scatter(markersize = 1, strokewidth = 0,
+                               color = (first(cool_pastel(1)), 0.45)),
+             _CornerContour(color = :black))
+        fig = Base.invokelatest(pairplot, data_nt => layers; labels, pin...)
 
         if output !== nothing
             mkpath(output)
-            _save_plot(joinpath(output, "corner.$fmt"), fig;
+            _save_plot(joinpath(output, "$stem.$fmt"), fig;
                         save_pdf=save_pdf)
         end
         return fig
     end
+end
+
+# The noise model's parameters, as the noise corner gathers them: every
+# instrument jitter and every white-noise term (`jitter_names`), the parameters
+# of every configured noise model (GP hyperparameters, decorrelation, MA/AR,
+# ...), and the residual-map noise of Doppler tomography (its σ_n and the
+# velocity correlation length of Σ_n).
+function _corner_noise_names(params)
+    s = union(_noise_param_set(params), jitter_names(params))
+    S = params.layout.systemic
+    for i in vcat(S.tomo_jit, S.tomo_ell_v)
+        i > 0 && push!(s, params.layout.names[i])
+    end
+    return s
+end
+
+"""
+    _corner_groups(chains, params) -> Vector{(; stem, names, draws)}
+
+The corners `plot_corners` draws, in order, each with the parameters it shows
+(in layout order) and the flat draws it shows them over (`nothing` for all):
+
+  - `corner_K<k>` for each planet slot: the parameters that slot owns
+    (`_param_owner`, which includes its ρ_circ / η under the photo-eccentric
+    reparametrization) and any other `_k<k>` parameter of it (λ, a/R★). On a
+    trans-dimensional chain, only the draws in which the slot is live -- a
+    parked slot keeps the values it was parked at -- and no corner for a slot
+    that is never live.
+  - `corner_noise`: the noise model (`_corner_noise_names`). When the chain
+    toggles noise models, the draws of the modal on/off pattern, without the
+    parameters of the models that pattern switches off.
+
+Nothing else is cornered: offsets, trends, stellar and limb-darkening
+parameters, per-transit TTV shifts. A group of fewer than two parameters has no
+panel and is left out.
+"""
+function _corner_groups(chains, params)
+    cn = Set(names(chains, :parameters))
+    reported = [n for n in reported_param_names(params) if Symbol(n) in cn]
+    owner = _param_owner(params)
+    max_k = params.config.max_kplanet
+    function planet_of(n)
+        k = get(owner, n, 0)
+        k > 0 && return k
+        m = match(r"_k(\d+)$", n)
+        m === nothing && return 0
+        k = parse(Int, m.captures[1])
+        return k <= max_k ? k : 0
+    end
+    tdc = _td_cols(chains, params)
+    n_all = _n_flat_draws(chains)
+    all_or(idx) = length(idx) == n_all ? nothing : idx      # every draw: no index
+    groups = @NamedTuple{stem::String, names::Vector{String},
+                         draws::Union{Nothing, Vector{Int}}}[]
+    for k in 1:max_k
+        nm = [n for n in reported if planet_of(n) == k]
+        length(nm) < 2 && continue
+        draws = tdc === nothing ? nothing :
+                all_or(_planet_present_idx(chains, params, k; tdc = tdc))
+        draws !== nothing && isempty(draws) && continue     # never live
+        push!(groups, (stem = "corner_K$k", names = nm, draws = draws))
+    end
+    noise = _corner_noise_names(params)
+    nm = [n for n in reported if planet_of(n) == 0 && n in noise]
+    draws = nothing
+    if tdc !== nothing && !isempty(nm)
+        model = Dict(n => _noise_model_index_for_param(n, params) for n in nm)
+        tog = sort!(unique(j for j in values(model)
+                           if j !== nothing && tdc.noise[j] !== nothing))
+        if !isempty(tog)
+            pattern(i) = Tuple(tdc.noise[j][i] for j in tog)
+            counts = Dict{Any, Int}()
+            first_seen = Dict{Any, Int}()
+            for i in 1:n_all
+                p = pattern(i)
+                counts[p] = get(counts, p, 0) + 1
+                haskey(first_seen, p) || (first_seen[p] = i)
+            end
+            best = first(sort!(collect(keys(counts));
+                               by = p -> (-counts[p], first_seen[p])))
+            off = Set(j for (j, on) in zip(tog, best) if !on)
+            filter!(n -> !(model[n] in off), nm)
+            draws = all_or(findall(i -> pattern(i) == best, 1:n_all))
+        end
+    end
+    length(nm) >= 2 && push!(groups, (stem = "corner_noise", names = nm, draws = draws))
+    return groups
+end
+
+"""
+    plot_corners(chains, params; output=nothing, fmt=:png, save_pdf=false,
+                 density=:hexbin, max_draws=200_000) -> Dict{String, Figure}
+
+The corners `run_job`'s `"corner"` draws: one per planet slot, of that planet's
+parameters (`corner_K<k>.<fmt>`), and one of the noise model -- jitters, GP
+hyperparameters and the other noise-model parameters (`corner_noise.<fmt>`).
+Offsets, trends and stellar parameters get none; they are in the traces,
+histograms and tables. On a trans-dimensional chain a planet's corner shows
+only the draws in which that planet is live, and a slot never live gets no
+corner. See `_corner_groups` for exactly what goes where.
+
+Each is `plot_corner` of its selection, with the same keywords. Split this
+way, a fit of n parameters draws a few small corners instead of one of n²/2
+panels. Measured on three RV planets, two instruments and a rotation GP (23
+parameters) at 1M and at 6M draws: the all-parameter corner raised the peak
+RSS by 0.69 GB and allocated 3.9 GB in 13 s; the four corners that replace it
+raise it by 0.28 GB and allocate 1.25 GB in 5 s.
+"""
+function plot_corners(chains, params;
+                      output::Union{Nothing, String}=nothing,
+                      fmt::Symbol=:png,
+                      save_pdf::Bool=false,
+                      density::Symbol=:hexbin,
+                      max_draws::Int=200_000)
+    figs = Dict{String, Any}()
+    for g in _corner_groups(chains, params)
+        fig = plot_corner(chains, params; output, fmt, save_pdf, density, max_draws,
+                          params_to_plot = g.names, draws = g.draws, stem = g.stem)
+        _keep_fig!(figs, g.stem, fig)
+    end
+    return figs
 end

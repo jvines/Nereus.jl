@@ -58,7 +58,8 @@ deliberately rather than by accident.
 Every plot takes `(chains, params, data)` and a directory as `output`; Nereus
 names the files and puts model figures under `models/`. The two notebooks
 produce along-scan residuals, the epoch-astrometry orbit, the sky-plane orbit,
-RV time series and phase folds, and the posterior corner plot.
+RV time series and phase folds, and the posterior corner plots (one per
+companion, and one of the noise model when it has two or more parameters).
 
 ## 03 — Python tutorial (`astronereus`)
 

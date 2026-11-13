@@ -357,7 +357,7 @@ export
     nereus_theme,
     plot_rv_timeseries, plot_rv_phasefold,
     plot_pm_timeseries, plot_pm_phasefold,
-    plot_trace, plot_posteriors, plot_histograms, plot_corner,
+    plot_trace, plot_posteriors, plot_histograms, plot_corner, plot_corners,
     plot_ladder_rates, plot_beta_ladder,
     plot_detrending, plot_transit_phasefold, plot_posteriors_lp,
     plot_orbit_skyplane, plot_pm_residuals, plot_rv_astrom_phasefold,

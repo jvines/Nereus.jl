@@ -1871,8 +1871,8 @@ end
 Snapshot of every PNG already under a run's `plots/` tree, taken immediately
 before rendering. The figure manifests are built by scanning that tree, so
 without a snapshot a run into a non-empty `output_dir` reports the PREVIOUS
-run's leftovers as its own -- `plots = ["corner"]` coming back with three
-figures. Comparing each file against its own earlier mtime, rather than
+run's leftovers as its own -- a run asking for one figure coming back with
+three. Comparing each file against its own earlier mtime, rather than
 against `time()`, needs no slack for filesystems whose mtime is coarser than
 the wall clock: back-to-back calls a second apart still separate cleanly.
 """
@@ -2322,8 +2322,13 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
             plot_rm(chains, params, data; output = out_dir, _kw_for(plot_rm, kw)...)
         end
     elseif name == "corner"
-        plot_corner(chains, params; output = out_dir, _kw_for(plot_corner, kw)...)
-        return "corner.png"
+        # One corner per planet slot and one of the noise model (`plot_corners`),
+        # never the all-parameter corner: its n² panels were most of the plot
+        # stage's memory. A slot never live, or a model without two noise
+        # parameters, writes nothing.
+        return _if_written(name, "corner_*.png", out_dir) do
+            plot_corners(chains, params; output = out_dir, _kw_for(plot_corners, kw)...)
+        end
     elseif name == "trace"
         plot_trace(chains, params; output = out_dir, _kw_for(plot_trace, kw)...)
         return "traces/*.png"

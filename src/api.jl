@@ -1227,7 +1227,7 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
             # Manifest: logical name -> path, relative to plots/ without the
             # extension, exactly as run_job builds it. A bare scan also picks
             # up figures an EARLIER fit into the same output_dir left behind,
-            # so `plots = ["corner"]` came back advertising three figures with
+            # so a fit asking for one figure came back advertising three with
             # no way to tell which were this run's. `_png_mtimes` snapshots
             # the tree first and only files this call created or rewrote are
             # reported; the rest stay on disk untouched.

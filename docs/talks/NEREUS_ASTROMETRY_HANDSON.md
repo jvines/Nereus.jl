@@ -291,7 +291,7 @@ mkpath(outdir)
 plot_iad_residuals(chains, target.params, target.data; output = outdir)
 plot_epoch_astrometry_orbit(chains, target.params, target.data; output = outdir)
 plot_orbit_skyplane(chains, target.params, target.data; output = outdir)
-plot_corner(chains, target.params; output = outdir)
+plot_corners(chains, target.params; output = outdir)
 ```
 
 **`plot_iad_residuals` is the one to spend time on.** It shows the along-scan residuals before
@@ -594,7 +594,7 @@ plot_iad_residuals(chains, params, data; output = dir)
 plot_epoch_astrometry_orbit(chains, params, data; output = dir)
 plot_orbit_skyplane(chains, params, data; output = dir)
 plot_rv_timeseries(chains, params, data; output = dir)
-plot_corner(chains, params; output = dir)
+plot_corners(chains, params; output = dir)
 
 save_chains(path, chains, params; data, log_evidence)
 ```

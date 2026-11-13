@@ -282,7 +282,7 @@ specific plot group, and asserts two things:
   `:convergence => :ok` and is not flagged multimodal).
 - **Emission** — every requested figure is actually written to the
   `run_job` plot tree (path exists, file is non-empty, `> 1000` bytes),
-  in the real on-disk layout (`plots/models/…`, `plots/corner.png`,
+  in the real on-disk layout (`plots/models/…`, `plots/corner_K1.png`,
   `plots/traces/`, `plots/posteriors/`, `ppc.png`, `tables/…`).
 
 These run under a smoke sampler budget (`pt_emcee`, 6–8 temps,
