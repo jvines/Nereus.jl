@@ -558,7 +558,7 @@ function plot_corner(chains, params;
         layers = density === :hexbin ?
             (_CompactHexBin(colormap = :cool, colorscale = log10),   # = PairPlots.HexBin
              _CornerContour(color = :black)) :     # = PairPlots.Contour
-            (PairPlots.Scatter(markersize = 1, color = (NEREUS_COLORS.post, 0.1)),
+            (PairPlots.Scatter(markersize = 1, color = (first(cool_pastel(1)), 0.1)),
              _CornerContour())
         fig = Base.invokelatest(pairplot, data_nt => layers; labels, pin...)
 
