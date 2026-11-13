@@ -558,8 +558,12 @@ function plot_corner(chains, params;
         layers = density === :hexbin ?
             (_CompactHexBin(colormap = :cool, colorscale = log10),   # = PairPlots.HexBin
              _CornerContour(color = :black)) :     # = PairPlots.Contour
-            (PairPlots.Scatter(markersize = 1, color = (first(cool_pastel(1)), 0.1)),
-             _CornerContour())
+            # No stroke: the theme's 0.5 px black outline on every 1 px marker
+            # drew the cloud solid black, whatever its colour, and hid the
+            # contours in it.
+            (PairPlots.Scatter(markersize = 1, strokewidth = 0,
+                               color = (first(cool_pastel(1)), 0.45)),
+             _CornerContour(color = :black))
         fig = Base.invokelatest(pairplot, data_nt => layers; labels, pin...)
 
         if output !== nothing
