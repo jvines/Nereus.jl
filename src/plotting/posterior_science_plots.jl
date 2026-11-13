@@ -69,6 +69,8 @@ function _sci_sym(name)
         base == "Tc" && return "T_{\\mathrm{c},$k}"
         base == "b"  && return "b_{$k}"
         base == "rr" && return "(R_p/R_\\star)_{$k}"
+        base == "rho_circ" && return "\\rho_{\\mathrm{circ},$k}"
+        base == "eta"      && return "\\eta_{$k}"
         return _sym_sub(base, k)
     end
     for (pre, sym) in (("gamma","\\gamma"), ("sigma","\\sigma"), ("jitter","\\sigma"))
@@ -155,6 +157,8 @@ function _sci_sym_u(name)
         base == "Tc" && return "Tc," * ks
         base == "b"  && return "b" * ks
         base == "rr" && return "Rₚ/R⋆ " * ks
+        base == "rho_circ" && return "ρcirc," * ks
+        base == "eta"      && return "η" * ks
         return _sym_sub_u(base) * ks
     end
     for (pre, sym) in (("gamma","γ"), ("sigma","σ"), ("jitter","σ"))
@@ -204,6 +208,8 @@ function _param_owner(params)
             owner[layout.unfrozen_names[uf]] = k
         end
     end
+    # ρ_circ, η and the e-coordinates they derive (src/density.jl)
+    merge!(owner, density_planet_names(params))
     return owner
 end
 
@@ -257,7 +263,7 @@ end
 # Sampled, non-fixed parameter names (optionally restricted to one planet).
 function _sci_post_names(chains, params, owner; planet=nothing)
     cn = Set(names(chains, :parameters))
-    nm = [n for n in params.layout.unfrozen_names if Symbol(n) in cn]
+    nm = [n for n in reported_param_names(params) if Symbol(n) in cn]
     nm = [n for n in nm if (v = _draws(chains, Symbol(n)); maximum(v) - minimum(v) > 1e-12)]
     planet !== nothing && (nm = [n for n in nm if get(owner, n, 0) == planet])
     return nm
@@ -433,7 +439,7 @@ function plot_traces_grouped(chains, params; output::Union{Nothing,String}=nothi
         if !haskey(gidx, g); push!(groups, g => String[]); gidx[g] = length(groups); end
         push!(groups[gidx[g]].second, n)
     end
-    for n in layout.unfrozen_names
+    for n in reported_param_names(params)
         Symbol(n) in cn || continue
         k = get(owner, n, 0)
         g = k > 0 ? "planet_K$k" : (n in noise_set ? "noise" : _instr(n) ? "instrument" : "other")

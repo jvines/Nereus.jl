@@ -88,7 +88,7 @@ function summarize_fitted(chains, params::Params)
     stats = Vector{Pair{String, ParamStats}}()
 
     chain_names = Set(names(chains, :parameters))
-    for name in params.layout.unfrozen_names
+    for name in reported_param_names(params)
         sym = Symbol(name)
         sym in chain_names || continue
         samp = _draws(chains, sym)
