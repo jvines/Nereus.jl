@@ -33,6 +33,8 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 | `smc`              | `sample_smc`              | fixed | — | yes (→ PA) |
 | `nuts`             | `sample_nuts`             | fixed | — | — (NaN) |
 | `ofti`             | `ofti_sample`             | fixed | — | — (NaN) |
+| `ensemble`         | `sample_ensemble`         | fixed | — | — (NaN) |
+| `ess`              | `sample_ess`              | fixed | — | — (NaN) |
 
 `_SAMPLERS_REQUIRE_TD = {transdim_pt_emcee, rjmcmc, moms, daedalus}` — these
 error at dispatch if no `transdim` block is present. `pt` also accepts
@@ -42,18 +44,19 @@ trans-dim (a `td=` `TransDimConfig`); the rest are fixed-dim.
     `run_job` coerces **every** string in `sampler.kwargs` to a Julia
     `Symbol` (no sampler declares a `String` kwarg), so `"proposal":
     "rslice"` arrives as `:rslice`. It also validates kwargs against the
-    dispatched function's signature for samplers in `_SAMPLER_FNS` and
-    raises an actionable error listing the valid kwargs. (`pt_hmc` is in
-    `_KNOWN_SAMPLERS` but **not** in `_SAMPLER_FNS`, so its kwargs are not
-    pre-validated — they pass straight through.)
+    dispatched function's signature (`_SAMPLER_FNS` is `ENGINES`, so every
+    `run_job` sampler, `pt_hmc` included, is checked) and raises an
+    actionable error listing the valid kwargs.
 
 ### Library-only samplers (not `run_job`-dispatchable)
 
-These are exported and callable from Julia but have **no** `sampler.name`
-and cannot be selected from a job config:
+`map` is in the engine registry (`ENGINES`, so `fit_*` and `run_engine` reach it)
+but `run_job` refuses it: it returns a point estimate with no chains, and
+summarising one point as a posterior would be wrong. `sample_ensemble` (`ensemble`)
+and `sample_ess` (`ess`) are `run_job`-dispatchable, in the table above.
+Both are exported and callable from Julia, and neither can be selected
+from a job config:
 
-- `sample_ensemble` — affine-invariant ensemble (emcee-style).
-- `sample_ess` — elliptical slice sampling.
 - `sample_map` — L-BFGS MAP + Laplace evidence.
 - `pathfinder_init` — Pathfinder warmstart / approximate posterior draws.
 
@@ -147,12 +150,15 @@ are moved onto the mode (`prune_stranded`); the recorded chain is ordinary MCMC.
 
 ```julia
 res = sample_pt_emcee(target, data;
-    n_temps        = 5,
+    n_temps        = 16,
     n_walkers      = 100,              # auto-raised to ≥ 2·n_dim+2, made even
     n_steps        = 3000,
     n_burnin       = 2000,
     prune_stranded = true,             # burn-in only; see the docstring
-    betas          = nothing,          # default: Vines+ (1/√5)^i, descending β[1]=1
+    node_flip      = 0.1,              # per-step probability of the (Ω, ω) -> (Ω+π, ω+π) mirror of astrometry-only planets
+    swap_min       = 0.05,             # least adjacent swap rate at which a tempered log Z is quoted
+    betas          = nothing,          # default: geometric from β = 1 down to beta_min
+    beta_min       = 1e-4,             # hottest β; β_i = beta_min^(i/(n_temps-1)), i = 0..n_temps-1
     stretch_a      = 2.0,
     de_move        = 0.5,              # share of within-rung moves that are DE (below)
     init           = nothing,          # bounded-space point; else init_strategy
@@ -294,7 +300,9 @@ res = sample_transdim_pt_emcee(target, data; td = td,
     show_progress           = true,
     noise_swap              = true,     # post-burn-in DB-correct noise-model swap
     noise_swap_rate         = 0.5,
-    adapt_ladder            = false,
+    adapt_ladder            = true,     # equalise swap rates during burn-in, then freeze
+    swap_min                = 0.05,     # least adjacent swap rate at which log Z is quoted
+    node_flip               = 0.1,      # (Ω, ω) -> (Ω+π, ω+π) mirror of astrometry-only planets
     ladder_adapt_window     = 50,
     ladder_adapt_ν0         = 10.0,
     ladder_adapt_K          = 1.0,
@@ -960,7 +968,7 @@ Per-chain divergences / step size / tree depth attach to `chains.info`.
 `run_job` surfaces `log_evidence = NaN`. **Target must be `unconstrained =
 true`** (auto-rebuilt internally if needed).
 
-### `sample_ensemble` *(library-only)*
+### `sample_ensemble` — `name: "ensemble"`
 
 Affine-invariant ensemble MCMC (Goodman & Weare 2010): AffineInvariantMCMC.jl's
 stretch move, step for step, mixed with the differential-evolution move of
@@ -988,7 +996,7 @@ it can do nothing for a chain none of whose walkers did. Without `init`, up to
 half the prior-drawn walkers are replaced by scouts (as in `sample_rjmcmc`),
 which the bound has kept off regions that cannot carry posterior mass.
 
-### `sample_ess` *(library-only)*
+### `sample_ess` — `name: "ess"`
 
 Elliptical slice sampling
 ([Murray, Adams & MacKay 2010](https://ui.adsabs.harvard.edu/abs/2010arXiv1001.0175M/abstract))

@@ -6,7 +6,7 @@ as the automatic stages `Nereus.run_job` runs after sampling. Every
 stage is **fail-soft**: a diagnostic that throws is logged with `@warn`
 and recorded in `summary.json` with a `status` of `"failed"`/`"skipped"`,
 but never aborts the job or alters the chains. (Nereus is at version
-`0.2.0`.)
+`0.9.0`.)
 
 ## What `run_job` runs after sampling
 

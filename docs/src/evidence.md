@@ -282,7 +282,8 @@ Pull the full stack off the result struct (pt_emcee / pt_whitening):
 
 ```julia
 res = sample_pt_emcee(target, data; n_temps = 12)
-res.log_evidence            # headline: bridge, else a quotable H+, else NaN
+res.log_evidence            # bridge if usable, else a quotable H+ within laplace_switch_tol
+                            # of mode-Laplace, else mode-Laplace (with a warning)
 ev  = res.evidence          # the EvidenceReport (raw, quotable or not)
 ev.ti_plus, ev.ss_plus      # (log_Z, σ) pairs to compare
 Nereus._tempered_quotable(res.betas, res.acceptance_swap)   # (ok, why)
@@ -308,7 +309,7 @@ chains, log_z, report, ev = sample_pt_hmc(target)    # report is EvidenceReport
 ### Through `run_job`
 
 When you drive Nereus via `Nereus.run_job` (the JSON/Dict
-dispatcher — see [JOB_CONFIG.md](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md)),
+dispatcher — see [JOB_CONFIG.md](../JOB_CONFIG.md)),
 every sampler result is normalised so `log_evidence` is always present,
 and the run summary surfaces it as the JSON key **`log_z`**
 (`src/runner.jl:2683`). Samplers with no evidence at all (e.g.

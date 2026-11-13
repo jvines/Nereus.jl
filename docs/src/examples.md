@@ -5,15 +5,16 @@ config-driven dispatcher that every Nereus deployment (Docker workers,
 Python/`juliacall`, CLI) should call. Each example is a complete,
 runnable config `Dict` with realistic priors, a sampler block, and an
 output block. The configs below are distilled from the working
-validation drivers in `test/validation/validate_runjob_*.jl`, which are
-themselves CI-checked end-to-end fits.
+validation drivers `validate_runjob_*.jl` in `studies/validation/` (a working
+directory that is not part of the published repository), which are end-to-end
+fits run by hand.
 
 There is **one example per `planet_mode`** —
 `RV_ONLY`, `PM_ONLY`, `RVPM`, `RVAS`, `RVPMAS`, `RVPM_RM`, `RVPM_TTV` —
 plus an ActivityGP-noise example and a trans-dimensional model-selection
 example.
 
-Nereus is at **version `0.2.0`**.
+Nereus is at **version `0.9.0`**.
 
 !!! note "`run_job` vs. the low-level API"
     `run_job(cfg)` builds the `Data`, `Params`, `NereusTarget`,
@@ -48,24 +49,30 @@ collated error message if any is wrong — see `_validate_config` in
 `src/runner.jl`):
 
 - **`planet_modes`**: `RV_ONLY`, `PM_ONLY`, `RVPM`, `RVAS`, `RVPMAS`,
-  `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`, `RVPM_TTV`,
-  `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`,
-  `PM_TTV_NB`.
+  `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`, `RVPM_RM_A`,
+  `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`,
+  `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`, `RVPM_RM_GD`,
+  `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 - **`parametrization.mass`**: `K_driven`, `M_sec_driven`, `a_driven`.
-  **`.time`**: `Tp`, `Tc`, `Mo`. **`.ew`**: `sesinw`, `ew`.
-  **`.geom`**: `b_rr`, `b_r`. Plus boolean `.marginalize_gamma`.
+  **`.time`**: `phic` (the default), `Mo`, `Tp`, `Tc`. **`.ew`**: `sesinw`, `ew`.
+  **`.geom`**: `b_rr` (`b_r` passes the validator but `ParametrizationConfig`
+  rejects it). **`.density`**: `rho_circ` (the default), `rho_star`. Plus
+  booleans `.marginalize_gamma` and `.use_rho_s`.
 - **`stability`**: `none`, `amd`, `gladman`.
 - **`priors[*].type`**: `UniformPrior`, `LogUniformPrior`,
   `ModJeffreysPrior`, `NormalPrior`, `FixedPrior`, `SinePrior`,
-  `BetaPrior`. `args` follow each constructor — e.g.
+  `BetaPrior`, `TruncNormalPrior`, `WrappedUniformPrior` (any spelling in
+  `PRIOR_ALIASES`). `args` follow each constructor — e.g.
   `NormalPrior(μ, σ, lo, hi)`, `UniformPrior(lo, hi)`,
   `LogUniformPrior(lo, hi)`.
 - **`noise_models[*].kind`**: `CeleriteRotation`, `CeleriteSHO`,
   `CeleriteRotationFM17`, `ActivityDecorrelation`, `ARModel`, `MAModel`,
-  `ActivityJitter`, `ActivityGP`.
-- **`sampler.name`**: `pt_emcee`, `transdim_pt_emcee`, `pt`, `rjmcmc`,
-  `moms`, `daedalus`, `nested`, `nested_ins`, `nested_dynamic`,
-  `pa`, `smc`, `pt_whitening`, `nuts`, `pt_hmc`, `ofti`.
+  `ActivityJitter`, `ActivityGP`, `ErrorScale`, `NightlyOffset`,
+  `HarmonicBlock`, `StudentT`, `MaternGP`, `IndicatorFloor`.
+- **`sampler.name`**: `pt_emcee`, `transdim_pt_emcee`, `pt`, `pt_hmc`,
+  `pt_whitening`, `rjmcmc`, `moms`, `daedalus`, `nested`, `nested_ins`,
+  `nested_dynamic`, `pa`, `smc`, `nuts`, `ofti`, `ensemble`, `ess` (`map` is
+  not available through `run_job`).
 - **`output.plots`**: `rv_timeseries`, `rv_components`, `rv_phasefold`,
   `pm_timeseries`, `pm_phasefold`, `rv_astrom_phasefold`,
   `orbit_skyplane`, `iad_residuals`, `epoch_astrometry_orbit`,
@@ -115,7 +122,7 @@ using Nereus
 
 # bjd / rv / rv_err / instrument as parallel arrays (one row per epoch)
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 42, "output_dir" => "results/51peg",
+  "version" => "1.0", "seed" => 42, "output_dir" => "results/51peg",
   "star"  => Dict("M_s" => 1.11, "R_s" => 1.27, "T_eff" => 5793.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict(
@@ -175,7 +182,7 @@ TESS 2-min) and drives finite-exposure supersampling.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/transit_only",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/transit_only",
   "star"  => Dict("M_s" => 0.95, "R_s" => 0.92, "T_eff" => 5500.0),
   "data"  => Dict(
      "transit_photometry" => [
@@ -231,7 +238,7 @@ transit-derived science (`rr`, `T14`, `rho_star_transit`).
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rvpm",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rvpm",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,
@@ -287,7 +294,7 @@ orientation, which RV alone cannot. `relastrom` arrays are
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rvas",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rvas",
   "star"  => Dict("M_s" => 1.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => t_rv, "rv" => rv_obs,
@@ -356,7 +363,7 @@ companion's absolute mass. This is the ε Eri (HIP 16537) recipe.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 7, "output_dir" => "results/eps_eri",
+  "version" => "1.0", "seed" => 7, "output_dir" => "results/eps_eri",
   "star"  => Dict("M_s" => 0.82),
   "data"  => Dict(
      "rv"   => Dict("values" => Dict("bjd" => bjd, "rv" => rv,
@@ -453,7 +460,7 @@ RM-consistent.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rm",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rm",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 6200.0),
   "data"  => Dict(
      # trv must densely sample each transit window AND cover the orbit
@@ -514,7 +521,7 @@ want an offset for. Transits before `Tc` carry no free offset. The
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/ttv",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/ttv",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,
@@ -574,7 +581,7 @@ would be a value):
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/agp",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/agp",
   "star"  => Dict("M_s" => 1.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict(
@@ -641,7 +648,7 @@ output. Trans-dim samplers (`transdim_pt_emcee`, `rjmcmc`, `moms`,
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/blind_search",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/blind_search",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,
