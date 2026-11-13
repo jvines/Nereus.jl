@@ -266,8 +266,10 @@ function sample_nested(
         end
         # The photo-eccentric reparametrization's prior term: the prior here is
         # the sampled slots' surrogate (`density_logprior_correction`; 0 without).
+        # Outside the old prior's support, a slope rather than a plateau
+        # (`density_ns_floor`).
         dl = density_logprior_correction(tb)
-        isfinite(dl) || return -1e300
+        isfinite(dl) || return density_ns_floor(tb)
         ll = rv_log_likelihood(tb, data, wb)
         isfinite(ll) || return -1e300
         ll += transit_log_likelihood(tb, data, wb)

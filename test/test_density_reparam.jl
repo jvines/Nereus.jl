@@ -361,6 +361,57 @@ end
         @test lp == -Inf && !isnan(ll)
     end
 
+    @testset "nested sampling: no plateau outside the support" begin
+        # Where the correction is -Inf the nested loglikes return
+        # density_ns_floor: finite, below every real log L, and rising toward the
+        # old prior's support. One value there was a plateau the threshold sat on,
+        # and log Z came out low by (1 - p)/p + log p for the share p of the cube
+        # inside the support (~15 nats for the anchor below).
+        pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0)))
+        ta = _dr_target(; pri, use_rho_s = true); pa = ta.params; da = pa.layout.density
+        th = Theta{Float64}(pa); Nereus.set_unfrozen!(th, Nereus._draw_from_prior(ta, MersenneTwister(2)))
+        @test isfinite(Nereus.density_logprior_correction(th))
+        @test Nereus.density_support_distance(th) == 0
+        rc = th.values[da.rho_circ[1]]; r0 = Nereus.rho_s(th)
+        fl = Float64[]
+        for f in (1e3, 1e2, 2.0)               # ρ★ = 10 f: ever closer to its top
+            th.values[da.rho_circ[1]] = rc * (10 / r0) * f
+            @test Nereus.density_logprior_correction(th) == -Inf
+            @test Nereus.density_support_distance(th) ≈ log(f) rtol = 1e-10
+            push!(fl, Nereus.density_ns_floor(th))
+        end
+        @test all(isfinite, fl) && all(<(-1e199), fl) && issorted(fl) && allunique(fl)
+
+        # An η planet: up its η = π/2 line g falls from the top of its box, and the
+        # orbit (e sin ω = (g² - 1)/(g² + 1)) comes into |sesinw| ≤ 0.3.
+        pri = merge(_DR_PRI1, Dict("sesinw_k1" => UniformPrior(-0.3, 0.3),
+                                   "secosw_k1" => UniformPrior(-0.3, 0.3)))
+        tg = _dr_target(; pri, M_s = 1.0, R_s = 1.0); pg = tg.params; dg = pg.layout.density
+        th = Theta{Float64}(pg); Nereus.set_unfrozen!(th, Nereus._draw_from_prior(tg, MersenneTwister(3)))
+        fl = Float64[]
+        for g in (1.19, 1.15, 1.10)                  # ρ★ = 1
+            th.values[dg.rho_circ[1]] = g^3; th.values[dg.eta[1]] = π / 2
+            @test Nereus.density_logprior_correction(th) == -Inf
+            @test Nereus.density_support_distance(th) ≈
+                  (sqrt((g^2 - 1) / (g^2 + 1)) - 0.3) / 0.6 rtol = 1e-8
+            push!(fl, Nereus.density_ns_floor(th))
+        end
+        @test all(isfinite, fl) && all(<(-1e199), fl) && issorted(fl) && allunique(fl)
+        th.values[dg.rho_circ[1]] = 1.05^3
+        @test isfinite(Nereus.density_logprior_correction(th))
+        @test Nereus.density_support_distance(th) == 0
+
+        # And the evidence: the anchor's log Z is the one sampling ρ★ gives, where
+        # the plateau put it ~15 nats low. Seeded; 4 is four times the scatter
+        # of the difference at this n_live.
+        pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0)))
+        lz = map((:rho_circ, :rho_star)) do density
+            tgt = _dr_target(; pri, use_rho_s = true, density)
+            Nereus.sample_nested(tgt, tgt.data; n_live = 150, seed = 1, show_progress = false)[2]
+        end
+        @test isfinite(lz[1]) && abs(lz[1] - lz[2]) < 4
+    end
+
     @testset "names, chains and summaries" begin
         tgt = _dr_target(; M_s = 1.0, R_s = 1.0); p = tgt.params
         th = Theta{Float64}(p)

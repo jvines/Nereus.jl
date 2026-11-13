@@ -507,6 +507,90 @@ function density_logprior_correction(theta::Theta{T}) where {T}
     return isfinite(lp) ? lp : ninf
 end
 
+# Nested sampling draws the sampled slots from their surrogate boxes, so it meets
+# the points where `density_logprior_correction` is -Inf (ρ★ outside its prior,
+# an orbit outside its e-coordinates' prior) as a share of the unit cube: most of
+# it, under `:anchor`. A likelihood that returns one value there (the -1e300 of a
+# failed evaluation) makes that share a plateau, and NestedSamplers accepts a
+# replacement at the threshold (logl ≥ logl_star). While the threshold sits on
+# the plateau the replacements land on it as often as it fills the cube, and
+# each such iteration is credited a 1/n_live shrink of a volume that does not
+# shrink: log Z comes out low by about (1 - p)/p + log p for a finite share p,
+# whatever n_live. That was 7 nats on a one-planet transit fit with ρ★ sampled
+# and 21 on a two-planet one, with the posterior right. `density_ns_floor` gives
+# those points a value below every real one that rises toward the support, a
+# slope the run descends at the rate it credits, not a plateau.
+
+const _DENSITY_NS_FLOOR = -1.0e200
+
+# How far outside [lo, hi] a value lies: in log for a density, in units of the
+# interval's width (or absolute, for a half-open one) otherwise.
+_density_logdist(x, lo, hi) = x < lo ? log(lo / x) : x > hi ? log(x / hi) : 0.0
+function _density_lindist(x, lo, hi)
+    w = isfinite(lo) && isfinite(hi) && hi > lo ? hi - lo : 1.0
+    return x < lo ? (lo - x) / w : x > hi ? (x - hi) / w : 0.0
+end
+
+"""
+    density_support_distance(theta) -> Float64
+
+How far the physical point the sampled slots map to lies outside the old prior's
+support: the log-distance of ρ★ from its prior's bounds under `:anchor`, plus each
+η planet's e-coordinates' distance from theirs, or how far an anchor's e exceeds
+1. Zero inside the support (and for a model without the reparametrization);
+`Inf` where the map gives no point.
+"""
+function density_support_distance(theta::Theta)
+    d = theta.params.layout.density
+    d.mode === :none && return 0.0
+    pp = d.derived_priors
+    dist = 0.0
+    if d.mode === :anchor
+        blk = theta.params.layout.planet_blocks[d.anchor]
+        e = Float64(_ecc_from_block(blk, theta))
+        isfinite(e) || return Inf
+        # e ≥ 1: no ρ★, and so no reference for the η planets either.
+        e >= 1 && return 1.0 + (e - 1)
+        rho = Float64(_anchor_rho(theta))
+        (isfinite(rho) && rho > 0) || return Inf
+        dist += _density_logdist(rho, pp.lowers[d.old_rho], pp.uppers[d.old_rho])
+    end
+    rho_ref = Float64(_eta_ref_rho(theta))
+    ew = theta.params.config.parametrization.ew
+    for k in eachindex(d.eta)
+        d.eta[k] > 0 || continue
+        (isfinite(rho_ref) && rho_ref > 0) || return Inf
+        x, y, _, _ = _eta_planet_xy(theta, k, rho_ref)
+        (isfinite(x) && isfinite(y)) || return Inf
+        r2 = x * x + y * y
+        if r2 >= 1
+            dist += 1.0 + (r2 - 1)
+            continue
+        end
+        j1, j2 = d.old_e[k]
+        o1, o2, _ = _old_from_xy(ew, x, y, _dplan_wlo(d, j2))
+        (isfinite(o1) && isfinite(o2)) || return Inf
+        dist += _density_lindist(Float64(o1), pp.lowers[j1], pp.uppers[j1]) +
+                _density_lindist(Float64(o2), pp.lowers[j2], pp.uppers[j2])
+    end
+    return dist
+end
+
+"""
+    density_ns_floor(theta) -> Float64
+
+The log-likelihood nested sampling is handed at a point where
+`density_logprior_correction` is -Inf: finite, far below every real value, and
+rising toward the old prior's support (`density_support_distance`), so those
+points form no plateau. -1e300, the value of any other failed evaluation, where
+the map gives no point at all.
+"""
+function density_ns_floor(theta::Theta)
+    dist = density_support_distance(theta)
+    isfinite(dist) || return -1.0e300
+    return _DENSITY_NS_FLOOR * (1 + dist)
+end
+
 # =====================================================================
 # Physical values in, sampled values out, and back
 # =====================================================================

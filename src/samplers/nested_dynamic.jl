@@ -416,8 +416,10 @@ function _ns_inner(target::NereusTarget, data::Data;
         end
         # The photo-eccentric reparametrization's prior term: the prior here is
         # the sampled slots' surrogate (`density_logprior_correction`; 0 without).
+        # Outside the old prior's support, a slope rather than a plateau
+        # (`density_ns_floor`).
         dl = density_logprior_correction(theta)
-        isfinite(dl) || return -Inf
+        isfinite(dl) || return density_ns_floor(theta)
         ll = rv_log_likelihood(theta, data, wb)
         isfinite(ll) || return -Inf
         ll += transit_log_likelihood(theta, data, wb)
