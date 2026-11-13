@@ -101,7 +101,10 @@ function _od_fit(; ew = :ew, time = :Tc)
                   phot_inst = ones(Int, length(t_ph)))
     params = Params(; max_kplanet = 1, planet_modes = [RVPM],
                       instruments = InstrumentConfig(rv = ["HARPS"], pm = ["TESS"]),
-                      data, parametrization = ParametrizationConfig(; ew, time),
+                      # The derivatives are taken in e and ω themselves, which
+                      # density = :rho_circ would derive from ρ_circ and η.
+                      data, parametrization = ParametrizationConfig(; ew, time,
+                                                                    density = :rho_star),
                       M_s = 1.0, R_s = 1.0, stability = :none)
     th = Theta{Float64}(params)
     ix = params.layout.name_to_idx

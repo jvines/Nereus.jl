@@ -211,7 +211,10 @@ end
         # The corresponding planet adds the same number of names to the
         # global layout. Verify by counting names with the "_k1" suffix.
         _, params = _make_rvpmas_setup()
-        per_planet = count(n -> endswith(n, "_k1"), params.layout.names)
+        # rho_circ_k1 and eta_k1, the transiting planet's sampled density
+        # coordinates (src/density.jl), are slots of the layout, not of the block.
+        per_planet = count(n -> endswith(n, "_k1") && !Nereus.is_density_reparam_name(n),
+                           params.layout.names)
         # P, K, sesinw, secosw, Mo, b, rr, Omega → 8 (no inc).
         @test per_planet == 8
 

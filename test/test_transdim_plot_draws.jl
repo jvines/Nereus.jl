@@ -57,7 +57,10 @@ function _phot_middeath()
     t = collect(0.0:0.004:30.0)
     data = Data(; t_phot = t, flux = ones(length(t)), flux_err = fill(1e-3, length(t)),
                   phot_inst = ones(Int, length(t)))
-    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 2, planet_modes = fill(PM_ONLY, 2),
+    # The trans-dimensional engines sample ρ★ and (e, ω) whatever `density` says,
+    # and hand back the :rho_star model with their chains (src/density.jl).
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo, density = :rho_star),
+                      max_kplanet = 2, planet_modes = fill(PM_ONLY, 2),
                       instruments = InstrumentConfig(pm = ["TESS"]),
                       data = data, M_s = 1.0, R_s = 1.0)
     vals = Dict("P_k1" => 3.0, "sesinw_k1" => 0.0, "secosw_k1" => 0.0, "Mo_k1" => 0.5,
