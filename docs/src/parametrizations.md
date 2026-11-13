@@ -120,12 +120,18 @@ ParametrizationConfig(;
     mass              = :K_driven,
     obs_prior         = false,
     marginalize_gamma = false,
+    sample_a_Rs       = false,       # sample a/R★ per transiting planet
+    t_ref_c           = NaN,         # phic epoch; NaN = taken from the data
+    density           = :rho_circ,   # :rho_circ | :rho_star: see below
 )
 ```
 
-Defined in `src/model.jl:623`–`669`. The keyword constructor validates
-`ew`, `time`, `geom`, and `mass` and throws an `ArgumentError` on any
-unknown value, so a typo fails fast at construction.
+Defined in `src/model.jl` (`struct ParametrizationConfig`). The keyword
+constructor validates `ew`, `time`, `geom`, `mass` and `density` and throws an
+`ArgumentError` on any unknown value, so a typo fails fast at construction.
+`use_rho_s` and `sample_a_Rs` are mutually exclusive: a/R★ is derived from the
+stellar density or sampled directly, not both. `t_ref_c` is read only under
+`time = :phic`.
 
 ### `ew::Symbol` — eccentricity parametrisation
 
@@ -257,8 +263,8 @@ The two transit-geometry slots (present only for PM planets,
 - `false` (default) — each transiting planet's `a/R_⋆` is derived from
   `P + M_⋆ + R_⋆` via Kepler III with the total mass `M_⋆ + M_p` (so `M_s` and
   `R_s` must be set on `Params`).
-- `true` — a single **shared** stellar density `rho_s` slot is sampled
-  (`src/model.jl:1832`) and `a/R_⋆` is derived from `rho_s + P` for
+- `true` — a single **shared** stellar density `rho_s` slot is declared
+  and `a/R_⋆` is derived from `rho_s + P` for
   every transiting planet (`rho_s_to_a_Rs`, with the total mass:
   `(a/R_⋆)³ = G ρ_⋆ P² (1 + q)/(3π)`, `q = M_p/M_⋆`). Use for multi-planet
   transiting systems: `rho_s` is one physical quantity shared across
@@ -268,9 +274,78 @@ The two transit-geometry slots (present only for PM planets,
   Table 7 convention). The RM `a/R_⋆` also prefers the `rho_s` path
   when present (`src/rm.jl:360`).
 
+  `rho_s` is a *sampled* slot only when the density reparametrization below
+  does not take it over. Under the default `density = :rho_circ`, a transiting
+  planet with a free eccentricity samples `rho_circ_k<k>` instead, and `rho_s`
+  becomes a derived quantity (still in the chain, the tables and the corner). It
+  stays sampled under `density = :rho_star`, for a model with no such planet,
+  and for every engine that runs in ρ★ and (e, ω) (see below). A `rho_s` prior
+  that is fixed makes ρ★ *given*, which is the case where every eligible planet
+  samples `eta_k<k>`.
+
 ```julia
 parametrization = ParametrizationConfig(time = :Tc, geom = :b_rr, use_rho_s = true)
 priors["rho_s"] = NormalPrior(2.241, 0.479, 0.1, 10.0)   # ARIADNE-derived
+```
+
+### `density::Symbol` — the photo-eccentric (ρ_circ) reparametrization
+
+A transit measures its duration, and the duration fixes the
+circular-equivalent density
+
+```
+ρ_circ = ρ★ · g³,     g = (1 + e sin ω) / √(1 − e²)
+```
+
+(Kipping 2010; Dawson & Johnson 2012). With a free eccentricity and no density
+prior, the posterior in `(ρ★, e, ω)` is a thin curved sheet along constant
+`ρ_circ` that reaches high `e`; an ensemble crosses it over thousands of steps
+without R-hat, ESS or the drift check noticing. Sampling `ρ_circ` lays the sheet
+along an axis. The posterior is the same distribution: the prior the model states
+on `(ρ★, e, ω)` is carried through the Jacobian (`src/density.jl`), so a prior on
+`rho_s`, `sesinw_k<k>` or `secosw_k<k>` still means what it said.
+
+- `:rho_circ` (default). **Eligible** planets are those with transit photometry,
+  transit geometry and both eccentricity coordinates free (not fixed). A model
+  with none, or with `sample_a_Rs = true`, or with no usable ρ★ (no `rho_s`
+  prior under `use_rho_s`, or no `M_s` and `R_s`), is not reparametrized: the
+  option is inert.
+  - **Anchor case.** When ρ★ is sampled (`use_rho_s = true` and a `rho_s` prior
+    that is not fixed), the *first* eligible planet samples `rho_circ_k<k>` in
+    place of `rho_s`; its `(e, ω)` coordinates stay sampled, and ρ★ = ρ_circ/g³ is
+    derived.
+  - **η case.** Every other eligible planet samples `rho_circ_k<k>` **and**
+    `eta_k<k>`, and its `e` and `ω` are derived. This is every eligible planet
+    when ρ★ is *given*: a fixed `rho_s`, or `M_s`/`R_s` (the host mass, sampled
+    `M_pri` or not, over the fixed radius). At the model's ρ★, `g = (ρ_circ/ρ★)^{1/3}`
+    and the orbits of that `g` fill an ellipse in the `(e cos ω, e sin ω)` disc,
+    which `η ∈ (−π/2, 3π/2)` parametrizes (a bijection onto `e < 1`; where the
+    `e` prior stops short of 1, `η` is sampled on the arc that holds it).
+  - **The cap.** `DENSITY_G = 100` bounds `g` to `[1/100, 100]`, so the box of
+    `ρ_circ` is `[ρ★_min/10⁶, ρ★_max·10⁶]`. That excludes orbits with
+    `e > 1 − 2/G² = 0.9998`, whose periastron lies inside the star (about
+    3/(4G²) ≈ 7.5×10⁻⁵ of the prior mass under a uniform `e`). A wider box costs
+    nested sampling: at `G = 10⁶` the two-planet log Z ran 1.3 nats low.
+  - **Priors on the new slots.** None are yours to give: `rho_circ_k<k>` and
+    `eta_k<k>` carry the prior on ρ★ and `(e, ω)`. They are not in
+    `summary.provenance.priors`, which lists the priors you set.
+  - **Output.** The derived coordinates (`rho_s`, `e`/`ω` of the η planets) are
+    added back to the chain, so `chains.nc`, the tables and the corner show ρ★
+    and `(e, ω)` as before, plus the new `rho_circ_k<k>` / `eta_k<k>` columns.
+- `:rho_star` — sample ρ★ (or `a/R★`) and `(e, ω)` as before.
+
+**Engines that keep the old coordinates.** `pt`, `transdim_pt_emcee`, `moms`,
+`daedalus`, `rjmcmc` and `ess` run the model in ρ★ and `(e, ω)` whatever
+`density` says (`without_density_reparam`; `src/runner.jl` swaps the model and
+its parameters before the sampler runs), and so does the optimisation inside
+`sample_map`, which returns its point in the layout's own coordinates. Their
+chains therefore have no `rho_circ_k<k>` or `eta_k<k>` columns. Every other
+engine run through `run_job` (`pt_emcee`, `pt_hmc`, the nested family, `nuts`,
+…) samples `ρ_circ`.
+
+```julia
+ParametrizationConfig(use_rho_s = true)                     # default: anchor + η planets
+ParametrizationConfig(use_rho_s = true, density = :rho_star) # the old coordinates
 ```
 
 ### `mass::Symbol` — mass / first-two-slot parametrisation
@@ -392,8 +467,8 @@ evidence) and the RV likelihood uses the γ-marginalised path
 
 ### run_job coverage of `ParametrizationConfig`
 
-The `model.parametrization` block in run_job (`src/runner.jl:1089`–`1115`)
-maps only these keys, with these accepted string values:
+The `model.parametrization` block in run_job (`_build_model` in
+`src/runner.jl`) maps only these keys, with these accepted string values:
 
 | run_job key | accepted strings | maps to | default |
 |---|---|---|---|
@@ -403,6 +478,8 @@ maps only these keys, with these accepted string values:
 | `ew` | `sesinw`, `ew` | `:sesinw` / `:ew` | `sesinw` |
 | `geom` | `b_rr` | `:b_rr` | `b_rr` |
 | `marginalize_gamma` | `true` / `false` | bool | `false` |
+| `use_rho_s` | `true` / `false` | bool | `false` |
+| `density` | `rho_circ`, `rho_star` | `:rho_circ` / `:rho_star` | `rho_circ` |
 
 ```json
 "model": {
@@ -410,22 +487,22 @@ maps only these keys, with these accepted string values:
   "planet_modes": ["RVPM"],
   "parametrization": {
     "mass": "K_driven", "time": "Tc", "ew": "sesinw",
-    "geom": "b_rr", "marginalize_gamma": false
+    "geom": "b_rr", "marginalize_gamma": false,
+    "use_rho_s": true, "density": "rho_circ"
   }
 }
 ```
 
 !!! warning "run_job gaps vs the Julia API"
     Several Julia-API options are **not** reachable through run_job
-    today (`src/runner.jl:1089`):
-    - `obs_prior` is never read from the config — set it by constructing
-      `Params`/`ParametrizationConfig` directly. (`use_rho_s` IS read, from
-      `model.parametrization.use_rho_s`, default `false`.)
+    today (`_build_model`, `src/runner.jl`):
+    - `obs_prior` and `sample_a_Rs` are never read from the config — set them by
+      constructing `Params`/`ParametrizationConfig` directly. (`use_rho_s` and
+      `density` ARE read, from `model.parametrization`.)
     - `ew = :esinw` and `geom = :r1r2` are valid in Julia but **absent
-      from the run_job string maps** (`_EW_PARAM`, `_GEOM_PARAM`,
-      `src/runner.jl:1058`–`1061`).
+      from the run_job string maps** (`_EW_PARAM`, `_GEOM_PARAM`).
     - The schema validator advertises `geom = "b_r"`
-      (`src/runner.jl:291`) and the map yields `:b_r`, but
+      (`_KNOWN_PARAMETRIZATIONS`) and the map yields `:b_r`, but
       `ParametrizationConfig` only accepts `:b_rr`/`:r1r2` — passing
       `geom: "b_r"` therefore throws at model construction. Use
       `b_rr`.

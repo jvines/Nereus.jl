@@ -226,7 +226,7 @@ depend on the `parametrization` (see [Parametrizations](parametrizations.md)).
 | `Tc_k1` | Time of transit centre (`time = :Tc`) | `UniformPrior(t_min, t_max)` |
 | `phic_k1` | Transit phase 2π(Tc − t_ref_c)/P (`time = :phic`, default) | `UniformPrior(-π, π)` |
 | `rr_k1`, `b_k1` | radius ratio, impact param (`geom = :b_rr`) | `UniformPrior(0.001, 1)`, `UniformPrior(0, 1)` |
-| `r1_k1`, `r2_k1` | Espinoza (2018) reparam (`geom = :b_r`) | `UniformPrior(0, 1)` each |
+| `r1_k1`, `r2_k1` | Espinoza (2018) reparam (`geom = :r1r2`; Julia API) | `UniformPrior(0, 1)` each |
 | `inc_k1` | Inclination — AS planet, not RVPM+AS | `SinePrior()` |
 | `Omega_k1` | Longitude of ascending node — AS planet | `UniformPrior(0, 2π)` |
 | `lambda_k1` | Sky-projected obliquity (rad) — RM planet | `UniformPrior(-π, π)` |
@@ -298,7 +298,16 @@ plots are RM-consistent. Render the in-transit anomaly with the
 | `jitter_<INST>` | extra photometric scatter (flux units) | `ModJeffreysPrior(1e-4, 1e-1)` |
 | `dilution_<INST>` | transit dilution / third light | `FixedPrior(0.0)` (override to free it) — **auto-frees to `UniformPrior(0, 0.9)`** when an SB2 `BINARY*` binary is present (the transit is diluted by the companion's light) |
 | `q1_<INST>`, `q2_<INST>` | Kipping (2013) limb-darkening reparam | `UniformPrior(0, 1)` |
-| `rho_s` | stellar density (when `use_rho_s = true`) | `LogUniformPrior(0.001, 100.0)` |
+| `rho_s` | stellar density in solar units (when `use_rho_s = true`). Sampled unless the ρ_circ reparametrization takes it over (see below), in which case it is derived | `LogUniformPrior(0.001, 100.0)` |
+| `a_Rs_k<k>` | scaled semi-major axis a/R★ of transiting planet `k` (`sample_a_Rs = true`) | `LogUniformPrior(1.2, 500.0)` |
+| `rho_circ_k<k>` | circular-equivalent density ρ★·g³ (solar units), sampled under `density = :rho_circ` for a transiting planet with free e | `LogUniformPrior(ρ★_min/G³, ρ★_max·G³)`, `G = 100`; set by the model, not by you |
+| `eta_k<k>` | angle on the orbits of one g, replacing that planet's `e` and `ω` (every eligible planet but the anchor) | `UniformPrior(-π/2, 3π/2)`, narrowed to the arc that holds `e ≤ e_max` where the `e` prior stops short of 1; set by the model, not by you |
+
+`rho_circ_k<k>` and `eta_k<k>` carry the prior on `rho_s` (or the host mass) and
+on the eccentricity coordinates through the Jacobian of the change of variables,
+so the posterior is the one those priors define. A prior given for either name is
+refused; put it on `rho_s` / `M_pri` and on `sesinw_k<k>`, `secosw_k<k>` instead, or
+set `density = :rho_star` (see [`parametrizations.md`](parametrizations.md)).
 
 ### Astrometry systemic (AS planets present)
 
