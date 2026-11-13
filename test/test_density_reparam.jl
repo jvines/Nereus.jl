@@ -412,6 +412,63 @@ end
         @test isfinite(lz[1]) && abs(lz[1] - lz[2]) < 4
     end
 
+    @testset "nested log Z: the evidence quadrature gives" begin
+        # The 3.5 d planet's light curve with every parameter but ρ★ and the
+        # e-coordinates held where it was made: log Z by quadrature over (log ρ★,
+        # sesinw, secosw), the ρ★ integral over a window round the transit's ρ★ for
+        # each (sesinw, secosw), against nested sampling in both coordinates. This
+        # grid is 2e-4 from a 300² one with 400 points a window. Under :rho_star
+        # the cube's e ≥ 1 corners are a plateau at -1e300 worth -0.03; a run
+        # scatters by ~0.25 at 250 live points.
+        tref = _dr_target(; use_rho_s = true).params.config.parametrization.t_ref_c
+        pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0),
+            "P_k1" => FixedPrior(3.5), "rr_k1" => FixedPrior(0.1), "b_k1" => FixedPrior(0.3),
+            "phic_k1" => FixedPrior(rem2pi(2π * (59000.5 - tref) / 3.5, RoundNearest)),
+            "q1_TESS" => FixedPrior(0.4225), "q2_TESS" => FixedPrior(0.4 / 1.3),
+            "offset_TESS" => FixedPrior(0.0), "jitter_TESS" => FixedPrior(1e-6)))
+        ts = _dr_target(; pri, use_rho_s = true, density = :rho_star); p = ts.params
+        @test sort(p.layout.unfrozen_names) == ["rho_s", "secosw_k1", "sesinw_k1"]
+        iρ, is, ic = (p.layout.name_to_idx[n] for n in ("rho_s", "sesinw_k1", "secosw_k1"))
+        th = Theta{Float64}(p); Nereus.set_unfrozen!(th, Nereus._draw_from_prior(ts, MersenneTwister(1)))
+        ll(t, s, c) = (th.values[iρ] = exp(t); th.values[is] = s; th.values[ic] = c;
+                       Nereus.transit_log_likelihood(th, ts.data))
+        lse(v) = (m = maximum(v); isfinite(m) ? m + log(sum(x -> exp(x - m), v)) : m)
+        a, b = log(0.1), log(10.0)
+        tg = range(a, b; length = 4001); tpk = tg[argmax(ll.(tg, 0.0, 0.0))]
+        W, M, N = 0.25, 120, 60       # the log ρ★ peak at fixed e is ±0.17 wide 60 nats down
+        du = 2 / N
+        cells = Float64[]
+        for i in 1:N, j in 1:N
+            s, c = -1 + (i - 0.5) * du, -1 + (j - 0.5) * du
+            e = s^2 + c^2; e < 1 || continue
+            t0 = tpk - 3 * log((1 + s * sqrt(e)) / sqrt(1 - e^2))
+            lo, hi = max(a, t0 - W), min(b, t0 + W); hi > lo || continue
+            dt = (hi - lo) / M
+            push!(cells, lse([ll(lo + (k - 0.5) * dt, s, c) for k in 1:M]) + log(dt))
+        end
+        lz_ref = lse(cells) + 2 * log(du) - log(4) - log(b - a)
+        lz = Dict(density => mean(1:2) do seed
+                      tgt = _dr_target(; pri, use_rho_s = true, density)
+                      Nereus.sample_nested(tgt, tgt.data; n_live = 250, seed, show_progress = false)[2]
+                  end for density in (:rho_circ, :rho_star))
+        @test abs(lz[:rho_circ] - lz_ref) < 0.6
+        @test abs(lz[:rho_star] - lz_ref) < 0.6
+
+        # Where uniform draws hand over to the slice proposal: the anchor's cube is
+        # ~4% support (its ρ_circ box spans log(100) + 6 log(1e6)), and uniform
+        # draws go on until the region left is the share of the support that it is
+        # of a cube that is all support.
+        ta = _dr_target(; pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0))),
+                        use_rho_s = true)
+        dists(t) = [Nereus._ns_prior(ps).dist for ps in t.params.layout.unfrozen_priors]
+        sh = Nereus._density_support_share(ta.params, dists(ta))
+        @test sh ≈ log(100) / (log(100) + 6 * log(1e6)) * π / 4 rtol = 0.25
+        @test Nereus._density_support_share(ts.params, dists(ts)) == 1
+        @test Nereus._ns_min_eff(1.0) == 0.10
+        @test Nereus._ns_uniform_eff(0.0269) ≈ 0.10 rtol = 1e-3
+        @test Nereus._ns_min_eff(sh) ≈ Nereus._ns_uniform_eff(0.0269 * sh) rtol = 1e-3
+    end
+
     @testset "names, chains and summaries" begin
         tgt = _dr_target(; M_s = 1.0, R_s = 1.0); p = tgt.params
         th = Theta{Float64}(p)
