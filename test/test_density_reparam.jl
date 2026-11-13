@@ -455,14 +455,14 @@ end
         @test abs(lz[:rho_star] - lz_ref) < 0.6
 
         # Where uniform draws hand over to the slice proposal: the anchor's cube is
-        # ~4% support (its ρ_circ box spans log(100) + 6 log(1e6)), and uniform
+        # ~11% support (its ρ_circ box spans log(100) + 6 log G), and uniform
         # draws go on until the region left is the share of the support that it is
         # of a cube that is all support.
         ta = _dr_target(; pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0))),
                         use_rho_s = true)
         dists(t) = [Nereus._ns_prior(ps).dist for ps in t.params.layout.unfrozen_priors]
         sh = Nereus._density_support_share(ta.params, dists(ta))
-        @test sh ≈ log(100) / (log(100) + 6 * log(1e6)) * π / 4 rtol = 0.25
+        @test sh ≈ log(100) / (log(100) + 6 * log(Nereus.DENSITY_G)) * π / 4 rtol = 0.25
         @test Nereus._density_support_share(ts.params, dists(ts)) == 1
         @test Nereus._ns_min_eff(1.0) == 0.10
         @test Nereus._ns_uniform_eff(0.0269) ≈ 0.10 rtol = 1e-3
@@ -511,7 +511,7 @@ end
         q = findfirst(==("rho_circ_k1"), tgt.params.layout.unfrozen_names)
         @test pt.type_ids[q] == Nereus.TRANSFORM_LOGLOGIT
         lo, hi = pt.lowers[q], pt.uppers[q]
-        @test hi / lo > 1e30
+        @test hi / lo ≥ Nereus.DENSITY_G^6
         for x in (1e-3, 0.5, 1.0, 2.0, 1e3)
             y = Nereus.transform_forward([x], [pt.type_ids[q]], [lo], [hi])[1]
             @test Nereus.transform_inverse([y], [pt.type_ids[q]], [lo], [hi])[1] ≈ x rtol = 1e-10

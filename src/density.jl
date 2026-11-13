@@ -19,9 +19,10 @@
 using MCMCChains
 
 # g ∈ [1/G, G]: the sampled box of ρ_circ is [ρ★_min/G³, ρ★_max·G³]. The orbits
-# it leaves out have e within ~2/G² of 1 (old-prior mass ≈ 3/(4G²) under a
-# uniform e, 7.5e-13 here), where the planet passes through the star.
-const DENSITY_G = 1.0e6
+# it leaves out have e > 1 − 2/G² (0.9998 here; old-prior mass ≈ 3/(4G²) under a
+# uniform e, 7.5e-5), with periastron inside the star. A wider box costs nested
+# sampling: at G = 1e6 the two-planet log Z ran 1.3 nats low, at twice the scatter.
+const DENSITY_G = 100.0
 
 # η's interval: both ends are the point e = 1, ω = -90° of every ellipse, where
 # the density of the map vanishes, so the walls are never felt.
