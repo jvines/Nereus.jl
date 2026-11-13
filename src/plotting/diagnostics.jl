@@ -570,3 +570,124 @@ function plot_corner(chains, params;
         return fig
     end
 end
+
+# The noise model's parameters, as the noise corner gathers them: every
+# instrument jitter and every white-noise term (`jitter_names`), the parameters
+# of every configured noise model (GP hyperparameters, decorrelation, MA/AR,
+# ...), and the residual-map noise of Doppler tomography (its σ_n and the
+# velocity correlation length of Σ_n).
+function _corner_noise_names(params)
+    s = union(_noise_param_set(params), jitter_names(params))
+    S = params.layout.systemic
+    for i in vcat(S.tomo_jit, S.tomo_ell_v)
+        i > 0 && push!(s, params.layout.names[i])
+    end
+    return s
+end
+
+"""
+    _corner_groups(chains, params) -> Vector{(; stem, names, draws)}
+
+The corners `plot_corners` draws, in order, each with the parameters it shows
+(in layout order) and the flat draws it shows them over (`nothing` for all):
+
+  - `corner_K<k>` for each planet slot: the parameters that slot owns
+    (`_param_owner`, which includes its ρ_circ / η under the photo-eccentric
+    reparametrization) and any other `_k<k>` parameter of it (λ, a/R★). On a
+    trans-dimensional chain, only the draws in which the slot is live -- a
+    parked slot keeps the values it was parked at -- and no corner for a slot
+    that is never live.
+  - `corner_noise`: the noise model (`_corner_noise_names`). When the chain
+    toggles noise models, the draws of the modal on/off pattern, without the
+    parameters of the models that pattern switches off.
+
+Nothing else is cornered: offsets, trends, stellar and limb-darkening
+parameters, per-transit TTV shifts. A group of fewer than two parameters has no
+panel and is left out.
+"""
+function _corner_groups(chains, params)
+    cn = Set(names(chains, :parameters))
+    reported = [n for n in reported_param_names(params) if Symbol(n) in cn]
+    owner = _param_owner(params)
+    max_k = params.config.max_kplanet
+    function planet_of(n)
+        k = get(owner, n, 0)
+        k > 0 && return k
+        m = match(r"_k(\d+)$", n)
+        m === nothing && return 0
+        k = parse(Int, m.captures[1])
+        return k <= max_k ? k : 0
+    end
+    tdc = _td_cols(chains, params)
+    n_all = _n_flat_draws(chains)
+    all_or(idx) = length(idx) == n_all ? nothing : idx      # every draw: no index
+    groups = @NamedTuple{stem::String, names::Vector{String},
+                         draws::Union{Nothing, Vector{Int}}}[]
+    for k in 1:max_k
+        nm = [n for n in reported if planet_of(n) == k]
+        length(nm) < 2 && continue
+        draws = tdc === nothing ? nothing :
+                all_or(_planet_present_idx(chains, params, k; tdc = tdc))
+        draws !== nothing && isempty(draws) && continue     # never live
+        push!(groups, (stem = "corner_K$k", names = nm, draws = draws))
+    end
+    noise = _corner_noise_names(params)
+    nm = [n for n in reported if planet_of(n) == 0 && n in noise]
+    draws = nothing
+    if tdc !== nothing && !isempty(nm)
+        model = Dict(n => _noise_model_index_for_param(n, params) for n in nm)
+        tog = sort!(unique(j for j in values(model)
+                           if j !== nothing && tdc.noise[j] !== nothing))
+        if !isempty(tog)
+            pattern(i) = Tuple(tdc.noise[j][i] for j in tog)
+            counts = Dict{Any, Int}()
+            first_seen = Dict{Any, Int}()
+            for i in 1:n_all
+                p = pattern(i)
+                counts[p] = get(counts, p, 0) + 1
+                haskey(first_seen, p) || (first_seen[p] = i)
+            end
+            best = first(sort!(collect(keys(counts));
+                               by = p -> (-counts[p], first_seen[p])))
+            off = Set(j for (j, on) in zip(tog, best) if !on)
+            filter!(n -> !(model[n] in off), nm)
+            draws = all_or(findall(i -> pattern(i) == best, 1:n_all))
+        end
+    end
+    length(nm) >= 2 && push!(groups, (stem = "corner_noise", names = nm, draws = draws))
+    return groups
+end
+
+"""
+    plot_corners(chains, params; output=nothing, fmt=:png, save_pdf=false,
+                 density=:hexbin, max_draws=200_000) -> Dict{String, Figure}
+
+The corners `run_job`'s `"corner"` draws: one per planet slot, of that planet's
+parameters (`corner_K<k>.<fmt>`), and one of the noise model -- jitters, GP
+hyperparameters and the other noise-model parameters (`corner_noise.<fmt>`).
+Offsets, trends and stellar parameters get none; they are in the traces,
+histograms and tables. On a trans-dimensional chain a planet's corner shows
+only the draws in which that planet is live, and a slot never live gets no
+corner. See `_corner_groups` for exactly what goes where.
+
+Each is `plot_corner` of its selection, with the same keywords. Split this
+way, a fit of n parameters draws a few small corners instead of one of n²/2
+panels. Measured on three RV planets, two instruments and a rotation GP (23
+parameters) at 1M and at 6M draws: the all-parameter corner raised the peak
+RSS by 0.69 GB and allocated 3.9 GB in 13 s; the four corners that replace it
+raise it by 0.28 GB and allocate 1.25 GB in 5 s.
+"""
+function plot_corners(chains, params;
+                      output::Union{Nothing, String}=nothing,
+                      fmt::Symbol=:png,
+                      save_pdf::Bool=false,
+                      density::Symbol=:hexbin,
+                      max_draws::Int=200_000)
+    figs = Dict{String, Any}()
+    for g in _corner_groups(chains, params)
+        fig = plot_corner(chains, params; output, fmt, save_pdf, density, max_draws,
+                          params_to_plot = g.names, draws = g.draws, stem = g.stem)
+        _keep_fig!(figs, g.stem, fig)
+    end
+    return figs
+end
