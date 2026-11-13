@@ -2,7 +2,7 @@
 
 Production-path synthetic-recovery validation for Nereus's samplers
 **and** its `run_job` output surface (every plot group, the science-table
-contract, and the post-fit pipeline). As of **v0.2.0** the validation
+contract, and the post-fit pipeline). As of **v0.9.0** the validation
 suite covers two complementary layers:
 
 1. **Sampler recovery** — does each sampler recover injected orbits /

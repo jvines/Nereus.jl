@@ -31,7 +31,7 @@ trans-dimensional engines are available (parallel tempering, MoMS
 variable selection, reversible-jump MCMC); tempered trans-dim PT is the
 workhorse.
 
-This is version `0.2.0`.
+This is version `0.9.0`.
 
 ## What's in Nereus
 

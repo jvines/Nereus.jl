@@ -15,7 +15,7 @@ two entry points:
 The page then walks three end-to-end fits — single-planet RV, a
 trans-dim planet search, and a joint RV + transit photometry fit with
 activity — followed by the new Rossiter–McLaughlin and ActivityGP
-features. Nereus is version `0.2.0`.
+features. Nereus is version `0.9.0`.
 
 ## Installation
 
@@ -185,7 +185,7 @@ Science tables are also written under `tables/` in `csv`, `json`,
 
 ### `run_job` config schema (essentials)
 
-Full reference: [`docs/JOB_CONFIG.md`](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md).
+Full reference: [`docs/JOB_CONFIG.md`](../JOB_CONFIG.md).
 Keys accept either string or symbol form; the validator collects **all**
 schema errors and reports them in one message before any heavy work.
 
@@ -622,4 +622,4 @@ Two `run_job` robustness notes:
 - One-page sampler comparison + when to use each: [Samplers](samplers.md).
 - Full worked recipes: [Worked examples](examples.md).
 - The complete `run_job` config schema:
-  [`docs/JOB_CONFIG.md`](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md).
+  [`docs/JOB_CONFIG.md`](../JOB_CONFIG.md).

@@ -6,7 +6,7 @@ the `Figure` object (so you can tweak in REPL) AND saves to disk if
 you pass an `output` directory (or, for some plotters, a `filename`).
 
 PNG is always written; pass `save_pdf=true` for a publication-ready
-PDF companion. Nereus is on version `0.2.0`.
+PDF companion. Nereus is on version `0.9.0`.
 
 ## Driving plots from `run_job`
 
@@ -549,8 +549,9 @@ parameter, arranged in a grid. Writes `posteriors/*.png`.
 ### `plot_corners(chains, params; output, fmt, save_pdf, density, max_draws)`
 
 What the `corner` plot kind draws: one corner per planet slot, of that
-planet's parameters (including its `rho_circ_k<k>` / `eta_k<k>` under
-`density = :rho_circ`, and its λ or a/R★ when sampled), written to
+planet's parameters (including its `rho_circ_k<k>` / `eta_k<k>` when the
+model is parametrized with `ParametrizationConfig(density = :rho_circ)`, the
+default, and its λ or a/R★ when sampled), written to
 `corner_K<k>.png`, and one of the noise model — instrument jitters, GP
 hyperparameters and every other noise-model parameter — written to
 `corner_noise.png`. Offsets, trends, stellar and limb-darkening parameters
@@ -561,6 +562,10 @@ gets no corner; when noise models are toggled, the noise corner uses the
 draws of the most frequent on/off pattern. A group with fewer than two
 parameters (a single jitter, say) has no panel and writes no file. Returns
 the figures by name (`"corner_K1"`, …, `"corner_noise"`).
+
+The `density` keyword of `plot_corners` is the 2-D panel style (`:hexbin`, the
+default, or `:scatter`, as in `plot_corner`); it is unrelated to the `density`
+option of `ParametrizationConfig`.
 
 There is no all-parameter corner in `run_job`: its n² panels were most of
 the plotting stage's memory.

@@ -10,7 +10,7 @@ The choices are bundled in `ParametrizationConfig` and `PlanetDataSources`.
 !!! note "Two ways in"
     Everything below is the Julia `Params(...)` / `ParametrizationConfig(...)`
     API. When you drive Nereus through `Nereus.run_job(cfg)` (the JSON/Dict
-    entry point — see [`docs/JOB_CONFIG.md`](https://github.com/) and
+    entry point — see [`docs/JOB_CONFIG.md`](../JOB_CONFIG.md) and
     `src/runner.jl`), the same options live in the `model` block, but the
     run_job schema currently exposes a **strict subset** of them. Each section
     flags what is reachable from run_job and what is Julia-API-only.

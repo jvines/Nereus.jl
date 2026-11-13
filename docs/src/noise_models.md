@@ -1,6 +1,6 @@
 # Noise models
 
-*(Nereus v0.2.0)*
+*(Nereus v0.9.0)*
 
 Nereus organises noise/activity models into three stages that
 compose under well-defined rules:

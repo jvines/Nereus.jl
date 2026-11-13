@@ -13,7 +13,7 @@ There is **one example per `planet_mode`** —
 plus an ActivityGP-noise example and a trans-dimensional model-selection
 example.
 
-Nereus is at **version `0.2.0`**.
+Nereus is at **version `0.9.0`**.
 
 !!! note "`run_job` vs. the low-level API"
     `run_job(cfg)` builds the `Data`, `Params`, `NereusTarget`,
@@ -115,7 +115,7 @@ using Nereus
 
 # bjd / rv / rv_err / instrument as parallel arrays (one row per epoch)
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 42, "output_dir" => "results/51peg",
+  "version" => "1.0", "seed" => 42, "output_dir" => "results/51peg",
   "star"  => Dict("M_s" => 1.11, "R_s" => 1.27, "T_eff" => 5793.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict(
@@ -175,7 +175,7 @@ TESS 2-min) and drives finite-exposure supersampling.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/transit_only",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/transit_only",
   "star"  => Dict("M_s" => 0.95, "R_s" => 0.92, "T_eff" => 5500.0),
   "data"  => Dict(
      "transit_photometry" => [
@@ -231,7 +231,7 @@ transit-derived science (`rr`, `T14`, `rho_star_transit`).
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rvpm",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rvpm",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,
@@ -287,7 +287,7 @@ orientation, which RV alone cannot. `relastrom` arrays are
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rvas",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rvas",
   "star"  => Dict("M_s" => 1.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => t_rv, "rv" => rv_obs,
@@ -356,7 +356,7 @@ companion's absolute mass. This is the ε Eri (HIP 16537) recipe.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 7, "output_dir" => "results/eps_eri",
+  "version" => "1.0", "seed" => 7, "output_dir" => "results/eps_eri",
   "star"  => Dict("M_s" => 0.82),
   "data"  => Dict(
      "rv"   => Dict("values" => Dict("bjd" => bjd, "rv" => rv,
@@ -453,7 +453,7 @@ RM-consistent.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rm",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rm",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 6200.0),
   "data"  => Dict(
      # trv must densely sample each transit window AND cover the orbit
@@ -514,7 +514,7 @@ want an offset for. Transits before `Tc` carry no free offset. The
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/ttv",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/ttv",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,
@@ -574,7 +574,7 @@ would be a value):
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/agp",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/agp",
   "star"  => Dict("M_s" => 1.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict(
@@ -641,7 +641,7 @@ output. Trans-dim samplers (`transdim_pt_emcee`, `rjmcmc`, `moms`,
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/blind_search",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/blind_search",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,

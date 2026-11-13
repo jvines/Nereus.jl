@@ -35,17 +35,24 @@ output_dir/
 ├── chains.nc                  # MCMCChains NetCDF (always)
 ├── summary.json               # machine-readable contract (always)
 ├── ppc.png / ppc.json         # posterior predictive check (default on)
-├── detection_limits.png       # K_lim(P) curve (PT samplers, default on)
+├── detection_limits.png       # K_lim(P) curve (pt_emcee, transdim_pt_emcee, pt; default on)
 ├── detection_limits.nc        # per-bin arrays sidecar
 ├── tables/                    # science tables (fitted/derived, multi-format)
 │   ├── fitted.{json,csv,ecsv,dat,tex}
 │   └── derived.{json,csv,ecsv,dat,tex}
 └── plots/                     # all figures (configurable)
+    ├── corner_K<k>.png        # one corner per planet slot (its parameters)
+    ├── corner_noise.png       # one corner of the noise model (jitters, GP hyperparameters, …)
     ├── models/                # rv_timeseries, pm_phasefold, rm_anomaly, …
     ├── posteriors/            # raw/, parameters/, histograms/
     ├── traces/
     └── transdim/occupancy.png
 ```
+
+There is no single `corner.png`: the `corner` plot kind writes one corner per
+planet and one for the noise model. A group with fewer than two parameters gets
+no corner, per-transit TTV shifts are in none, and on a trans-dimensional chain
+a planet's corner holds only the draws in which it is live.
 
 `run_job` exits 0 on success. Any uncaught exception during the fit writes
 `{"status":"failed","error":…,"traceback":…}` to `summary.json` **and**
@@ -54,9 +61,9 @@ rethrows (non-zero exit) so the dispatcher can pick it up
 fit-health) are **fail-soft**: they record a `"failed"`/`"skipped"` entry in
 the summary and never abort the job.
 
-> **Version**: the current schema version is **`0.2.0`** (see `Project.toml`).
-> `version` is echoed back as `summary.config_version` but is **not**
-> validated against a whitelist; supply `"0.2.0"`.
+> **Version**: `version` is a free-form label, not a schema number. The runner
+> does not validate it and echoes it as `summary.config_version` (default `"1.0"`).
+> The Nereus release that wrote a run is in `summary.provenance.nereus_version`.
 
 ---
 
@@ -134,7 +141,7 @@ rather than a single number trusted.
 
 ```jsonc
 {
-  "version": "0.2.0",                      // echoed to summary.config_version (default "1.0")
+  "version": "1.0",                      // echoed to summary.config_version (default "1.0")
   "seed":   42,                            // RNG seed; controls every sampler (default 1)
   "output_dir": "/work/out",               // REQUIRED
   "n_threads": null,                       // logged only; actual threading honours
@@ -245,7 +252,7 @@ rather than a single number trusted.
     //   See "SB2 double-lined binaries" below for the component RV column + derived masses.
     "planet_modes": ["RV_ONLY", "RVAS"],
 
-    "parametrization": {                   // src/runner.jl:287-292,419-427,1089-1113, _KNOWN_PARAMETRIZATIONS
+    "parametrization": {                   // src/runner.jl: _KNOWN_PARAMETRIZATIONS, _build_model
       "mass": "K_driven",                  // K_driven | M_sec_driven | a_driven
       "time": "phic",                      // phic (default) | Mo | Tp | Tc. Tp/Tc: keep the prior within one period.
                                            //   phic: transit phase 2π(Tc − t_ref_c)/P, one period at
@@ -257,7 +264,17 @@ rather than a single number trusted.
       "t_ref_c": 2459000.0,                // phic only: the epoch φ_c is measured from. Omit it to
                                            //   use the median photometric time (else data t_ref)
       "ew":   "sesinw",                    // sesinw | ew
-      "geom": "b_rr",                      // b_rr | b_r
+      "geom": "b_rr",                      // b_rr only. The library also has :r1r2 (Julia API), which
+                                           //   run_job's validation does not accept; "b_r" passes the
+                                           //   validation but ParametrizationConfig rejects it.
+      "density": "rho_circ",               // rho_circ (default) | rho_star. A transiting planet with a free
+                                           //   eccentricity samples rho_circ_k<k> = ρ⋆·g³,
+                                           //   g = (1 + e sin ω)/√(1 − e²), the density its transit
+                                           //   measures, and ρ⋆ or (e, ω) become derived; same posterior
+                                           //   (see parametrizations.md). "rho_star" samples ρ⋆ and (e, ω)
+                                           //   as before. Inert with no such planet. pt, transdim_pt_emcee,
+                                           //   moms, daedalus, rjmcmc and ess run in ρ⋆ / (e, ω) whatever
+                                           //   this says, and their chains carry those columns.
       "marginalize_gamma": false,          // analytic γ marginalisation (default false)
       "use_rho_s": false                   // sample stellar density ρ⋆ instead of deriving
                                            //   a/R★ from M_s×R_s (default false). ρ⋆ is what
@@ -697,10 +714,29 @@ prior when that degeneracy is present.
   for cross-checks only — it is not a sampler name and cannot be reached from
   a job config.
 - Evidence is surfaced as `summary.log_z` per sampler: PT-family and the nested
-  family return real `log_evidence`; `rjmcmc`/`moms`/`nuts`/`ofti` write
-  `NaN` (no evidence estimator). `nested_ins` reports the INS estimate,
-  `nested_dynamic` the dynamic-NS estimate, `daedalus` its nested evidence
-  (`src/runner.jl:1499-1606`).
+  family return real `log_evidence`; `rjmcmc`/`moms`/`nuts`/`ofti`/`ensemble`/`ess`
+  have no evidence estimator, so `log_z` is `null` in `summary.json` (the
+  summary `run_job` returns in memory keeps the `NaN`). Every non-finite number
+  in `summary.json` is written as `null`, not `NaN` or `Infinity`, so strict
+  JSON parsers read it. `nested_ins` reports the INS estimate,
+  `nested_dynamic` the dynamic-NS estimate, `daedalus` its nested evidence.
+- **Which evidence `log_z` is, for the tempered samplers** (`pt_emcee`,
+  `pt_hmc` and the other fixed-dimension fits that carry a `summary.evidence`
+  block; a chain whose planet count or noise models vary, as in
+  `transdim_pt_emcee`, is not re-selected and keeps its sampler's own value):
+  1. **Bridge sampling** on the cold chain, when it is usable: worst R-hat
+     ≤ 1.1 and the least ESS reaches the floor the reference density needs
+     (`_bridge_guard`). A chain that fails the guard records why in
+     `summary.evidence.bridge_not_reported`.
+  2. Otherwise the **tempered** estimate (H+ for `pt_emcee`), when it is
+     quotable (the ladder reaches β = 0 and every adjacent pair swapped at least
+     `swap_min` = 5 % of the time) and lies within `laplace_switch_tol`
+     (default 50 nats) of the mode-Laplace value.
+  3. Otherwise **mode-Laplace**, with a warning. `log_z` is `NaN` (`null` on
+     disk) only when none of the three is available.
+  `summary.evidence.reported` names the one used (`"bridge"`, `"hybrid"`,
+  `"ti_plus"`, `"ss_plus"`, `"mode_laplace"`, `"nested"`, `"none"`). The nested
+  family reports its own evidence and is not re-selected.
 - **`burnin_hold`** (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`) —
   parameters held at one value, shared by every walker of every rung, for at
   least the first `burnin_hold_frac` (default 0.5) of burn-in, then until the
@@ -749,7 +785,7 @@ numbers live under `fitted` / `derived`
 ```jsonc
 {
   "status":         "ok",                  // "ok" | "failed"  (failed adds error+traceback)
-  "config_version": "0.2.0",
+  "config_version": "1.0",
   "chains_path":    "chains.nc",
   "config_path":    "/work/in/config.json",
   "elapsed_sec":    612.3,
@@ -757,8 +793,29 @@ numbers live under `fitted` / `derived`
                     "plx_err": 0.02, "release": "DR3",                // parallax was looked up
                     "resolved_from": "name", "name": "HIP 103836"}},
 
+  // ---- Provenance: what produced this fit, and the priors it was given ----
+  "provenance": {
+    "engine":         "pt_emcee",             // the sampler as selected
+    "nereus_version": "0.9.0",                // pkgversion of the Nereus that ran
+    "nereus_commit":  "abcd123…",             // null unless Nereus is a git checkout
+    "priors": {                               // in the model's parameter (layout) order; the sampled
+                                              //   rho_circ_k*/eta_k* slots are not listed (the priors on
+                                              //   rho_s and (e, ω) that they carry are)
+      "P_k1": { "family": "loguniform", "fixed": false, "lo": 1.0, "hi": 1000.0 },
+      "e_k1": { "family": "beta", "fixed": false, "lo": 0.0, "hi": 1.0, "a": 0.867, "b": 3.03 },
+      "gamma_HARPS": { "family": "normal", "fixed": false, "lo": null, "hi": null,
+                       "mu": 0.0, "sigma": 5.0 },       // lo/hi null where unbounded
+      "rho_s": { "family": "fixed", "fixed": true, "value": 1.2 }
+    },
+    "external_priors": [                      // only when the model has any
+      { "quantity": "rho_s", "per_planet": false, "family": "normal", "fixed": false,
+        "lo": null, "hi": null, "mu": 1.2, "sigma": 0.1 }
+    ]
+  },
+
   // ---- Evidence + sampler metrics (_populate_summary!) ----
-  "log_z":   12345.67,                      // NaN for rjmcmc/moms/nuts/ofti
+  "log_z":   12345.67,                      // null (non-finite) for rjmcmc/moms/nuts/ofti/ensemble/ess;
+                                            //   which estimator, see "Which evidence log_z is" above
   "n_evals": 4501500,
   "sampler": {
     "acceptance_within":   [0.32, 0.28, /*…*/],
@@ -940,7 +997,7 @@ The smallest valid RV-only config (a single CSV, one planet, fixed-dim PT):
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "1.0",
   "seed": 42,
   "output_dir": "/work/out",
   "star": { "M_s": 1.02 },
@@ -968,7 +1025,7 @@ block:
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "1.0",
   "output_dir": "/work/out",
   "star": { "M_s": 1.02 },
   "data": { "rv": { "csv": "/work/in/rvs.csv" } },

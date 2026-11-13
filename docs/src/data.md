@@ -15,7 +15,7 @@ There are two ways to build a `Data`:
    `Data` for you. This is the production path (exoautomata, Docker,
    `juliacall`). The block schema is documented in
    [The `data` config block](#The-data-config-block) and the canonical
-   reference is [`docs/JOB_CONFIG.md`](https://github.com/) /
+   reference is [`docs/JOB_CONFIG.md`](../JOB_CONFIG.md) /
    `src/runner.jl`.
 
 Both paths produce the *same* `Data` struct, so the field semantics
