@@ -151,7 +151,7 @@ This is version `0.2.0`.
   `plot_relastrom_timeseries`,
   `plot_pm_anomaly`), TTV
   (`plot_ttv_oc`, `plot_ttv_diagram`), periodograms, posteriors
-  (`plot_corner`, `plot_trace`, `plot_posteriors`), trans-dim
+  (`plot_corners`, `plot_corner`, `plot_trace`, `plot_posteriors`), trans-dim
   occupancy, detection limits, and the ActivityGP latent. →
   [Plotting](plotting.md)
 - **Diagnostics & evidence-of-fit** — Polynomial Stein Discrepancy

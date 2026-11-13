@@ -62,7 +62,7 @@ produced.
 | `rv_astrom_phasefold`      | RV **and** astrometry           | `plot_rv_astrom_phasefold` (per planet)| `models/rv_astrom_phasefold_K*.png` |
 | `activity_gp_latent`       | an `ActivityGP` noise model     | `plot_activity_gp_latent`       | `activity_gp_latent.png` |
 | `activity_gp_decomposition`| an `ActivityGP` noise model     | `plot_activity_gp_decomposition`| `activity_gp_decomposition.png` |
-| `corner`                   | any chain                       | `plot_corner`                   | `corner.png` |
+| `corner`                   | any chain                       | `plot_corners`                  | `corner_K*.png` (one per planet), `corner_noise.png` |
 | `trace`                    | any chain                       | `plot_trace`                    | `traces/*.png` |
 | `histograms`               | any chain                       | `plot_histograms`               | `histograms/*.png` |
 | `posteriors`               | any chain                       | `plot_posteriors`               | `posteriors/*.png` |
@@ -546,12 +546,33 @@ stats box (`median`, `+(84%−50%)`, `−(50%−16%)`). Writes
 Composite figure: histograms + KDE overlays for every unfrozen
 parameter, arranged in a grid. Writes `posteriors/*.png`.
 
-### `plot_corner(chains, params; params_to_plot, output, fmt, save_pdf)`
+### `plot_corners(chains, params; output, fmt, save_pdf, density, max_draws)`
 
-Corner plot via PairPlots.jl. Pass `params_to_plot::Vector{String}` to
-select parameters (omit for all unfrozen). Covariance contours + 1D
-marginal histograms; constant columns (which crash Makie's histogram)
-are skipped automatically. Writes `corner.png`.
+What the `corner` plot kind draws: one corner per planet slot, of that
+planet's parameters (including its `rho_circ_k<k>` / `eta_k<k>` under
+`density = :rho_circ`, and its λ or a/R★ when sampled), written to
+`corner_K<k>.png`, and one of the noise model — instrument jitters, GP
+hyperparameters and every other noise-model parameter — written to
+`corner_noise.png`. Offsets, trends, stellar and limb-darkening parameters
+and per-transit TTV shifts are in no corner (they are in the traces,
+histograms and tables). On a trans-dimensional chain a planet's corner uses
+only the draws in which that planet is live, and a slot that is never live
+gets no corner; when noise models are toggled, the noise corner uses the
+draws of the most frequent on/off pattern. A group with fewer than two
+parameters (a single jitter, say) has no panel and writes no file. Returns
+the figures by name (`"corner_K1"`, …, `"corner_noise"`).
+
+There is no all-parameter corner in `run_job`: its n² panels were most of
+the plotting stage's memory.
+
+### `plot_corner(chains, params; params_to_plot, output, fmt, save_pdf, draws, stem)`
+
+Corner plot via PairPlots.jl of an explicit selection: pass
+`params_to_plot::Vector{String}` (omit for every reported parameter — the
+full n² corner). Hexbin density under PairPlots' contours; each axis is
+labelled with the symbol and unit, and angles are drawn in degrees.
+`draws` restricts it to those flat draws; `stem` names the file
+(default `corner.png`).
 
 ```julia
 plot_corner(chains, params;
