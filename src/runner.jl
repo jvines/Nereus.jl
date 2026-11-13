@@ -198,6 +198,7 @@ function run_job(cfg::AbstractDict)
         end
         _postfit_stage!(pf, "summary")
         _populate_summary!(summary, result, params, chains)
+        summary["provenance"] = provenance_block(_job_sampler_name(cfg), params)
         _postfit_stage!(pf, "evidence")
         bridge_t = Dict{String, Any}()
         _augment_evidence!(summary, params, data, chains;

@@ -189,6 +189,8 @@ const TEST_UNITS = [
     (name = "test_postfit_diagnostics.jl", seconds = 10, files = ["test_postfit_diagnostics.jl"]),
     # run_job's and fit_*'s post-fit stage lines and timings.
     (name = "test_postfit_progress.jl", seconds = 83, files = ["test_postfit_progress.jl"]),
+    # summary.json provenance block: engine, version, priors.
+    (name = "test_summary_provenance.jl", seconds = 140, files = ["test_summary_provenance.jl"]),
     # The transit-phase time anchor (time = :phic) against the Tc one.
     (name = "test_phic_anchor.jl", seconds = 3, files = ["test_phic_anchor.jl"]),
     (name = "test_density_reparam.jl", seconds = 160, files = ["test_density_reparam.jl"]),
