@@ -27,13 +27,14 @@ parameter names, the priors, the rest of the model (`params.config`: external
 priors, stability, instruments, sharing, ...), all of the data, the two
 process-wide informed-birth switches, and the sampler `settings` passed as
 keywords. Priors and model are hashed separately only so a refusal can say which.
+A model that samples ρ_circ (`density_chart_key`) carries one more entry.
 """
 function run_fingerprint(params::Params, data::Data; settings...)
     return (; names = copy(params.layout.unfrozen_names),
               priors = content_hash(params.config.priors),
               model = content_hash(params.config), data = content_hash(data),
               informed_birth = (GP_INFORMED_BIRTH[], AD_INFORMED_BIRTH[]),
-              settings...)
+              density_chart_key(params)..., settings...)
 end
 
 """
@@ -106,8 +107,11 @@ end
 _hash_skip(x, f::Symbol) = false
 _hash_skip(x::ParamsConfig, f::Symbol) =
     f === :obliquity && is_default_obliquity(x.obliquity)
+# `density` is carried by the fingerprint's own entry (`density_chart_key`),
+# present only where the reparametrization is active: a model it leaves alone
+# is the model it was, under either value.
 _hash_skip(x::ParametrizationConfig, f::Symbol) =
-    f === :sample_a_Rs && !x.sample_a_Rs
+    (f === :sample_a_Rs && !x.sample_a_Rs) || f === :density
 # No Hipparcos scan geometry: the HGCA/G23H Hipparcos epoch is instantaneous,
 # as it was in every run before the field existed.
 _hash_skip(x::Data, f::Symbol) = f === :hip_scans && x.hip_scans === nothing
@@ -155,6 +159,17 @@ function read_checkpoint(path::AbstractString, sampler::AbstractString,
     saved = ck.fingerprint
     diffs = String[string(k) for k in union(keys(fingerprint), keys(saved))
                    if !isequal(get(fingerprint, k, missing), get(saved, k, missing))]
+    if "density" in diffs
+        haskey(fingerprint, :density) && throw(ArgumentError(
+            "$path was written before this model sampled the circular-equivalent " *
+            "density: its walkers hold ρ★ and (e, ω), which this run samples as " *
+            "rho_circ_k / eta_k (density = :rho_circ, the default). Start the run " *
+            "afresh, or resume it with the parametrization's density = :rho_star."))
+        throw(ArgumentError(
+            "$path was written by a run that sampled the circular-equivalent " *
+            "density (rho_circ_k / eta_k, density = :rho_circ); this one samples ρ★ " *
+            "and (e, ω). Resume it with density = :rho_circ."))
+    end
     isempty(diffs) || throw(ArgumentError(
         "$path was written by a different run; these differ: " * join(diffs, ", ")))
     return ck.state
