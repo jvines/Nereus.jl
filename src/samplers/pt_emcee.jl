@@ -1023,7 +1023,7 @@ in place.
   2000/1000 and several sat near 1.04; at 3000/2000 all 8 passed with
   worst R-hat ≤ 1.010 and ESS ≥ 17k.
 - `betas::Union{Nothing,Vector{Float64}}=nothing` — explicit β ladder
-  (descending β[1]=1). Default: Vines+ 2023's `β_i = (1/√5)^i`.
+  (descending β[1]=1). Default: geometric from 1 down to `beta_min`.
 - `stretch_a::Float64=2.0` — Goodman-Weare stretch parameter.
 - `de_move::Real=DE_MOVE_DEFAULT` (0.5) — per walker and step, the probability
   of a differential-evolution move, x' = x + γ(x_j − x_k) + ε with j ≠ k from
