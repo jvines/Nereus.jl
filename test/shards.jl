@@ -209,6 +209,7 @@ const TEST_UNITS = [
     (name = "test_mode_laplace.jl", seconds = 6, files = ["test_mode_laplace.jl"]),
     (name = "verify_rajpaul_kernel_fd.jl", seconds = 1, files = ["verify_rajpaul_kernel_fd.jl"]),
     (name = "test_plot_corner_thinning.jl", seconds = 8, files = ["test_plot_corner_thinning.jl"]),
+    (name = "test_plot_corners_split.jl", seconds = 40, files = ["test_plot_corners_split.jl"]),
     (name = "test_font_probe.jl", seconds = 10, files = ["test_font_probe.jl"]),
     (name = "test_rv_fold_ylims.jl", seconds = 30, files = ["test_rv_fold_ylims.jl"]),
     (name = "test_periodogram_plot_limits.jl", seconds = 20, files = ["test_periodogram_plot_limits.jl"]),
