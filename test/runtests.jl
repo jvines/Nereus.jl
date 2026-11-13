@@ -899,8 +899,20 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
             M_s=1.0,
         )
 
-        # Layout: n_p + 7 (RVPM) + 5 (RV-only) + 2 (gamma, sigma) + 3 (off, jit, dil) + 2 (q1, q2) + 1 (rho_s) = 21
-        @test n_total(params) == 21
+        # Layout: n_p + 7 (RVPM) + 5 (RV-only) + 2 (gamma, sigma) + 3 (off, jit, dil) + 2 (q1, q2) + 1 (rho_s) = 21,
+        # and slot 22, rho_circ_k1: planet 1 transits with a free e, so by default
+        # (density = :rho_circ, src/density.jl) it samples ρ_circ in ρ★'s place.
+        # rho_s keeps slot 21, derived now and no longer sampled, so the sampled
+        # dimension is the one density = :rho_star gives, whose layout is the 21.
+        @test n_total(params) == 22
+        @test params.layout.names[22] == "rho_circ_k1"
+        @test 22 in params.layout.unfrozen_idx && !(21 in params.layout.unfrozen_idx)
+        params_rs = Params(; priors = priors, max_kplanet = 2,
+                             parametrization = ParametrizationConfig(ew = :sesinw, time = :Tc,
+                                 geom = :r1r2, use_rho_s = true, density = :rho_star),
+                             planet_modes = [RVPM, RV_ONLY], instruments = ic, M_s = 1.0)
+        @test n_total(params_rs) == 21
+        @test n_unfrozen(params) == n_unfrozen(params_rs)
 
         # Planet 1 (RVPM) block — all seven slots, r1r2 goes into b/r fields.
         pb1 = params.layout.planet_blocks[1]
