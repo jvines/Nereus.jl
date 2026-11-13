@@ -419,10 +419,7 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # ∏ √(2π) σ_j is at most the Gaussian volume √det(2πΣ); and away from the mode
 # the dropped gradient term exp(½ gᵀH⁻¹g) is ≥ 1. The estimate can only
 # understate Z_A, which only lowers the cut: the guarantee above holds as it
-# is. Walkers moved this way are drawn about the best walker
-# with those widths and re-evaluated, not copied: copies of fewer than d + 1
-# walkers would leave the rung in their affine hull, which no stretch move
-# leaves.
+# is.
 #
 # The best walker is measured at the top of its mode, not where it landed. A
 # walker that has just found a mode sits on its flank, where the estimate is
@@ -438,40 +435,174 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 #
 # That path waits for the rung to stop climbing. Early in burn-in the walkers
 # are still rising from the prior and the best of them is no mode, only the
-# fastest climber; the bound holds there too, but moving the rest onto it
-# herds the ensemble onto one walker. Without a check, HD 114762 with an IAD
-# jitter moved 97 of its 100 cold walkers (791 across the ladder) at step 200
-# of 4000 onto a leader at log p = -2709, and Gaia-4 b 39 at step 50. So it
-# runs only once the rung's median log-likelihood, tempered at the current β,
-# rose by less than d/2 (the depth of its typical set) since the previous
-# prune: Gaia-4 b's stranded group moved by -1.5 to +1.9 nats per 50 steps, a
-# climbing rung by ~50-100. The first prune has no record and never takes it.
+# fastest climber. Without a check, HD 114762 with an IAD jitter moved 97 of
+# its 100 cold walkers (791 across the ladder) at step 200 of 4000 onto a
+# leader at log p = -2709, and Gaia-4 b 39 at step 50. So it runs only once the
+# rung's median log-likelihood, tempered at the current β, rose by less than
+# d/2 (the depth of its typical set) since the previous prune: Gaia-4 b's
+# stranded group moved by -1.5 to +1.9 nats per 50 steps, a climbing rung by
+# ~50-100.
 #
 # Bounding the region by one of its walkers instead (sup over the group) does
 # not work: the group below any density cut always holds some tail walker of
 # the mode, 20 nats down, and the bound never clears the 70-nat plateau.
 #
+# The cut says where a walker is, not that it is stranded there. A rung can
+# sit below it whole and still not be stuck, and the median's rise does not
+# show it. A transit-only fit (450 points, e free, stellar density fixed, step
+# 100 of 2000): the β = 0.54 rung spread over 90 nats with its median up 1.2
+# nats in 50 steps, its best walker's climb gained 466 nats and stopped on the
+# photo-eccentric ridge at e = 0.59, and all 100 walkers of the rung were
+# drawn about that one point with its conditional widths, 1/100 to 1/5000 of
+# the rung's spread. Two hotter rungs did the same over the next 100 steps.
+# Swaps carried them down: by step 150, 98 of the 100 cold walkers sat at
+# e > 0.5, and at step 1500 still 11; the recorded share of e > 0.5 came out
+# anywhere from 2 to 16 % with the seed, against 7-9 % from nested sampling.
+# Meanwhile the cold rung had been climbing 300-650 nats per 50 steps on its
+# own. So a walker is moved only if it is stranded at two passes running: it
+# sat outside its rung's allowance (more than `allow` below the best walker)
+# at the previous pass and does now. One below the cut stays if it climbs fast
+# enough to clear it by the next pass, its tempered log L risen again by as
+# much as since the last: it gets there by itself. One climbing slower may
+# never. Sparing every walker that rose more than d/2 between passes left
+# ensemble walkers of an RV + IAD fit (i = 89.5°) 33,000-40,000 nats down,
+# rising 7-260 nats a pass, through the whole burn-in; one stayed, at e = 0.79,
+# for the whole run and broke its bridge. The best walker and every walker
+# within its allowance never move: they are in the mode the cut is measured
+# from, however far down its flank.
+#
+# And they are moved onto survivors, never onto one point, and never more of
+# them than survive. Each is drawn about a survivor picked at random -- a
+# walker in the upper half of A, or the top the best walker climbed to -- with
+# the mode's conditional widths (the axis widths at the top, or 1/√(Σ_A⁻¹)_jj),
+# redrawn until it lands above the cut, and evaluated: copies would keep the
+# rung in the affine hull of the survivors, which no stretch move leaves. A
+# pass moves at most as many walkers as A holds (one more for the top), the
+# lowest first, so the mode's population at most doubles per pass, the moved
+# walkers never outnumber those they were drawn about, and no pass moves more
+# than half a rung. 97 stranded walkers, as Gaia-4 b's, leave in seven passes
+# after the one that first sees them: 400 of the 1500 steps the pruning runs
+# for at the default burn-in.
+#
+# A separate mode the cut keeps. The bound gives a walker's likelihood the
+# whole prior to fill, so a narrow local mode within tau plus A's Occam factor
+# of the peak passes it however little it weighs. An eccentric RV planet
+# (e = 0.3, 60 RVs) has a circular-orbit mode, e ≈ 0.005 and jitter 5.5
+# against 3 m/s, about 30 nats down: its walkers sat 2-7 nats above a cut 23.5
+# below the best (A's Occam factor 13.6 of it), and 1-4 of 32 ensemble walkers
+# stayed there for the whole run at 8 of 10 seeds (stretch) and 4 of 10 (with
+# the DE move). So, once per rung per pass, one of the walkers the cut keeps
+# (stranded at two passes, picked at random) is followed to the top of its own
+# mode, whose mass is measured there (`_pt_mode_mass`); if that is under
+# e^-tau of A, it is moved, and the walkers of that set which sat inside the
+# mode at this pass and the last with it. (The walker followed is in the mode
+# by its own climb: on the same planet, charted through the logit after a
+# re-cut, one sat 5 nats below its mode's top yet outside the quadratic shape
+# measured there, the mode curving along ω + M₀ as e → 0.) The mode's mass is
+# a Laplace estimate, not a bound, and is taken large: each axis at its full
+# width against a support edge, and the volume measured from the density along
+# each principal axis, so a ridge or a flat direction counts at its real extent
+# (up to the support). A mode the other walkers leave between passes -- a
+# ridge they travel along, a plateau the ensemble crosses -- is not one they
+# stayed inside, and keeps them.
+#
+# The walker followed can also climb into A's own mode: it sits on that mode's
+# flank, outside the mode as measured at its top and outside A's allowance,
+# where a walker of that mode is a one-in-a-million event. On the same RV
+# planet one walker sat there, 33-38 nats below the best walker and 2-6 above
+# the cut, through the burn-in and the whole recorded run at one seed in ten:
+# its climb reached A's top at every pass, but the ensemble's moves, all drawn
+# from the other 31 walkers, never took it there. That walker moves too,
+# unless it is climbing fast enough to reach the allowance by the next pass.
+#
 # Burn-in only, so every recorded step is ordinary MCMC. Returns the number of
 # walkers moved at each rung. Serial, draws from `rng`. `evalf(y)` returns
 # (log π, log L) on the flat scale, as `logπ_arr`/`logL_arr` hold them; without
-# it a rung with too few walkers in A is left alone. `circ` lists the
-# full-circle angles. `med_logL` is each rung's median log L after the previous
-# call, NaN before the first; it is updated in place. Without it, or while a
-# rung climbs, that rung's few-walker path is skipped. `held` lists coordinates
-# every walker shares while `burnin_hold` holds them (src/samplers/burnin_hold.jl):
-# they carry no volume, so the bound runs over the other d - h, the climb
-# leaves them where they are, and a walker drawn about the best one keeps the
-# held value. The bound is then on the posterior given the held values, whose
-# prior mass is 1 over the other coordinates, so the held coordinates' own
-# log prior density on this scale (`held_logπ`, the same in every walker's
-# log π) comes out of the best walker's density: left in, a held value where
-# its prior is dense would raise the cut by as much.
+# it a rung with too few walkers in A is left alone, no walker is followed to
+# its own mode, and the walkers moved are copies of survivors. `circ` lists the
+# full-circle angles. `memory` (`PruneMemory`) is the record of the previous
+# pass, updated in place; without one, or on its first pass, nothing moves.
+# `held` lists coordinates every walker shares while `burnin_hold` holds them
+# (src/samplers/burnin_hold.jl): they carry no volume, so the bound runs over
+# the other d - h, the climb leaves them where they are, and a walker drawn
+# about a survivor keeps the held value. The bound is then on the posterior
+# given the held values, whose prior mass is 1 over the other coordinates, so
+# the held coordinates' own log prior density on this scale (`held_logπ`, the
+# same in every walker's log π) comes out of the best walker's density: left
+# in, a held value where its prior is dense would raise the cut by as much.
 # ------------------------------------------------------------------
+"""
+    PruneMemory(n_temps, n_walkers, n_dim)
+
+The stranded-walker pruning's record of its previous pass: each rung's median
+log L, and each walker slot's log L, position, model (trans-dim) and whether it
+sat outside its rung's allowance; and the transform's bounds the positions were
+recorded under (`lo`, `hi`; the unconstrained ensemble's, see
+`_prune_rechart!`). `seen` is false before the first pass and after anything
+that moves every walker at once (the end of `burnin_hold`).
+"""
+mutable struct PruneMemory
+    seen::Bool
+    med::Vector{Float64}
+    lL::Matrix{Float64}
+    x::Array{Float64,3}
+    out::Matrix{Bool}
+    key::Matrix{UInt}
+    lo::Vector{Float64}
+    hi::Vector{Float64}
+end
+PruneMemory(n_t::Integer, n_w::Integer, nd::Integer) =
+    PruneMemory(false, fill(NaN, n_t), fill(NaN, n_t, n_w), fill(NaN, n_t, n_w, nd),
+                fill(false, n_t, n_w), zeros(UInt, n_t, n_w), fill(NaN, nd), fill(NaN, nd))
+
+# Start the record over: the next pass only records.
+_prune_forget!(m::PruneMemory) = (m.seen = false; fill!(m.med, NaN); m)
+
+function _prune_record!(m::PruneMemory, state::Array{Float64,3}, lL::Matrix{Float64},
+                        out::Matrix{Bool}; key = nothing)
+    for t in axes(lL, 1)
+        m.med[t] = _pt_finite_median(view(lL, t, :))
+    end
+    copyto!(m.lL, lL); copyto!(m.x, state); copyto!(m.out, out)
+    key === nothing || copyto!(m.key, key)
+    m.seen = true
+    return m
+end
+
+# The record as a checkpoint holds it: plain arrays, not the struct, so a
+# checkpoint does not depend on its layout.
+_prune_saved(m::PruneMemory) = (seen = m.seen, med = m.med, lL = m.lL, x = m.x,
+                                out = m.out, key = m.key, lo = m.lo, hi = m.hi)
+
+# From a checkpoint, in place. One written before the record existed has only
+# the medians: the record starts over.
+function _prune_restore!(m::PruneMemory, ck)
+    if hasproperty(ck, :prune_mem)
+        c = ck.prune_mem
+        m.seen = c.seen
+        foreach(copyto!, (m.med, m.lL, m.x, m.out, m.key, m.lo, m.hi),
+                (c.med, c.lL, c.x, c.out, c.key, c.lo, c.hi))
+    else
+        _prune_forget!(m)
+    end
+    return m
+end
+
+# Rung `t`'s tempered densities at β into `ℓ`, -Inf where not finite.
+function _pt_tempered!(ℓ::Vector{Float64}, logπ_arr::Matrix{Float64},
+                       logL_arr::Matrix{Float64}, t::Int, β::Float64)
+    @inbounds for w in eachindex(ℓ)
+        v = logπ_arr[t, w] + β * logL_arr[t, w]
+        ℓ[w] = isfinite(v) ? v : -Inf
+    end
+    return ℓ
+end
+
 function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64},
                              logL_arr::Matrix{Float64}, βs::Vector{Float64}, rng;
                              tau::Float64 = 10.0, evalf = nothing,
                              circ::AbstractVector{Int} = Int[],
-                             med_logL::Union{Nothing,AbstractVector{Float64}} = nothing,
+                             memory::Union{Nothing,PruneMemory} = nothing,
                              held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0)
     n_t, n_w, nd = size(state)
     moved = zeros(Int, n_t)
@@ -479,38 +610,41 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
     d = length(free)
     d >= 1 || return moved
     allow = quantile(Chisq(d), 1 - 1e-6) / 2
-    # How far each rung climbed since the last call, at today's β (the ladder
+    mem = memory
+    known = mem !== nothing && mem.seen
+    # How far each rung climbed since the last pass, at today's β (the ladder
     # adapts in between); NaN without a record, which compares false.
-    rise = med_logL === nothing ? fill(NaN, n_t) :
-           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - med_logL[t]) for t in 1:n_t]
+    rise = known ?
+           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - mem.med[t]) for t in 1:n_t] :
+           fill(NaN, n_t)
     ℓ = Vector{Float64}(undef, n_w)
     y = Vector{Float64}(undef, nd)
     for t in 1:n_t
+        known || break
         β = βs[t]
-        @inbounds for w in 1:n_w
-            v = logπ_arr[t, w] + β * logL_arr[t, w]
-            ℓ[w] = isfinite(v) ? v : -Inf
-        end
+        _pt_tempered!(ℓ, logπ_arr, logL_arr, t, β)
         b = argmax(ℓ)
         best = ℓ[b]
         isfinite(best) || continue
-        below = [w for w in 1:n_w if ℓ[w] < best - allow]
-        isempty(below) && continue
+        # Stranded at this pass and the last.
+        cand = [w for w in 1:n_w if ℓ[w] < best - allow && mem.out[t, w]]
+        isempty(cand) && continue
         A = findall(>=(best - allow), ℓ)
         yb = state[t, b, :]
         lpb, llb = logπ_arr[t, b], logL_arr[t, b]
-        lv = length(A) >= d + 2 ? _pt_half_logdet_cov(state, t, A, yb, circ, free) : nothing
-        σ = nothing
-        if lv === nothing
+        cv = length(A) >= d + 2 ? _pt_cov_volume(state, t, A, yb, circ, free) : nothing
+        ℓat = x -> (r = evalf(x); v = r[1] + β * r[2]; isfinite(v) ? v : -Inf)
+        h0 = evalf === nothing ? Float64[] :
+             [0.1 * _pt_spread(view(state, t, :, j), yb[j], j in circ) for j in free]
+        top = false        # whether the climbed top is a survivor
+        if cv === nothing
             (evalf === nothing || !(rise[t] < d / 2)) && continue
             # A cost gate, not a bound: the whole rung's spread as the volume. A
             # rung that could not prune even then is not worth 2d+ evaluations.
             gate = _pt_half_logdet_cov(state, t, findall(isfinite, ℓ), yb, circ, free)
             gate === nothing && continue
             cg = (best - held_logπ) + 0.5 * d * log(2π) + gate - tau
-            any(w -> β * logL_arr[t, w] < cg, below) || continue
-            ℓat = x -> (r = evalf(x); v = r[1] + β * r[2]; isfinite(v) ? v : -Inf)
-            h0 = [0.1 * _pt_spread(view(state, t, :, j), yb[j], j in circ) for j in free]
+            any(w -> β * logL_arr[t, w] < cg, cand) || continue
             σ = _pt_axis_widths(ℓat, yb, best, h0; dims = free)
             σ === nothing && continue
             # From where the best walker landed to the top of its mode.
@@ -519,45 +653,76 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
             if σc !== nothing
                 yb, best, σ = yc, ℓc, σc
                 lpb, llb = evalf(yb)
-                below = [w for w in 1:n_w if ℓ[w] < best - allow]
+                top = true
+                A = findall(>=(best - allow), ℓ)
             end
-            lv = sum(log, σ)
+            cv = (sum(log, σ), σ)
         end
+        lv, s = cv
         cut = (best - held_logπ) + 0.5 * d * log(2π) + lv - tau
-        S = [w for w in below if !(β * logL_arr[t, w] >= cut)]
+        # Below the cut, and not climbing fast enough to clear it by the next pass.
+        S = [w for w in cand if !(β * logL_arr[t, w] >= cut) &&
+             !(β * (2 * logL_arr[t, w] - mem.lL[t, w]) >= cut)]
+        # The walkers the cut keeps: one followed to its own mode per pass.
+        U = [w for w in cand if β * logL_arr[t, w] >= cut]
+        if !isempty(U) && evalf !== nothing && rise[t] < d / 2
+            w0 = U[rand(rng, 1:length(U))]
+            m = _pt_mode_mass(ℓat, state[t, w0, :], ℓ[w0], h0; dims = free)
+            if m === nothing
+            elseif m.logz < best + 0.5 * d * log(2π) + lv - tau
+                # A separate mode that weighs next to nothing: the walker that
+                # climbed to it, and those inside it at both passes.
+                push!(S, w0)
+                for w in U
+                    w != w0 && _pt_in_mode(m, view(state, t, w, :), circ, allow) &&
+                        _pt_in_mode(m, view(mem.x, t, w, :), circ, allow) && push!(S, w)
+                end
+            elseif _pt_in_mode(m, view(state, t, b, :), circ, allow) &&
+                   !_pt_in_mode(m, view(state, t, w0, :), circ, allow) &&
+                   !(ℓ[w0] + β * (logL_arr[t, w0] - mem.lL[t, w0]) >= best - allow)
+                # A's own mode, far down whose flank it sits.
+                push!(S, w0)
+            end
+        end
         isempty(S) && continue
-        if σ === nothing
-            # Donors from the upper half of A: its lower edge sits `allow` down
-            # (~20 nats at d = 7), far outside a d-dim typical set (~d/2 down),
-            # and a copy placed there spends the rest of burn-in relaxing back in.
-            donors = A[ℓ[A] .>= median(ℓ[A])]
-            @inbounds for w in S
-                a = donors[rand(rng, 1:length(donors))]
-                for j in 1:nd
-                    state[t, w, j] = state[t, a, j]
-                end
-                logπ_arr[t, w] = logπ_arr[t, a]
-                logL_arr[t, w] = logL_arr[t, a]
+        # Survivors: the upper half of A (its lower edge sits `allow` down, ~20
+        # nats at d = 7, far outside a d-dim typical set), and the climbed top.
+        anchors = isempty(A) ? Int[] : A[ℓ[A] .>= median(ℓ[A])]
+        cap = length(A) + top
+        if length(S) > cap
+            sort!(S; by = w -> ℓ[w])
+            resize!(S, cap)
+        end
+        for w in S
+            k = rand(rng, 1:(length(anchors) + top))
+            a = k <= length(anchors) ? anchors[k] : 0
+            y0, lp0, ll0 = a > 0 ? (state[t, a, :], logπ_arr[t, a], logL_arr[t, a]) :
+                                   (yb, lpb, llb)
+            lp, ll = evalf === nothing ? (-Inf, -Inf) :
+                     _pt_scatter!(y, evalf, y0, s, rng; dims = free,
+                                  ok = (lp, ll) -> β * ll >= cut)
+            if !(isfinite(lp) && isfinite(ll))
+                y .= y0; lp, ll = lp0, ll0
             end
-        else
-            for w in S
-                lp, ll = _pt_scatter!(y, evalf, yb, σ, rng; dims = free)
-                if !(isfinite(lp) && isfinite(ll))
-                    y .= yb; lp, ll = lpb, llb
-                end
-                @inbounds for j in 1:nd
-                    state[t, w, j] = y[j]
-                end
-                logπ_arr[t, w] = lp
-                logL_arr[t, w] = ll
+            @inbounds for j in 1:nd
+                state[t, w, j] = y[j]
             end
+            logπ_arr[t, w] = lp
+            logL_arr[t, w] = ll
         end
         moved[t] = length(S)
     end
-    if med_logL !== nothing
+    if mem !== nothing
+        out = fill(false, n_t, n_w)
         for t in 1:n_t
-            med_logL[t] = _pt_finite_median(view(logL_arr, t, :))
+            _pt_tempered!(ℓ, logπ_arr, logL_arr, t, βs[t])
+            top = maximum(ℓ)
+            isfinite(top) || continue
+            for w in 1:n_w
+                out[t, w] = ℓ[w] < top - allow
+            end
         end
+        _prune_record!(mem, state, logL_arr, out)
     end
     return moved
 end
@@ -565,17 +730,25 @@ end
 _pt_finite_median(x) = (v = filter(isfinite, x); isempty(v) ? NaN : median(v))
 
 # ½ log det of the covariance of walkers `ws` at rung `t` over coordinates
-# `dims`; a full-circle angle (`circ`) as its offset from `yb` on the circle.
-# `nothing` if singular.
-function _pt_half_logdet_cov(state::Array{Float64,3}, t::Int, ws, yb::AbstractVector,
-                             circ::AbstractVector{Int}, dims = 1:size(state, 3))
+# `dims`, and the conditional widths 1/√(Σ⁻¹)_jj; a full-circle angle (`circ`)
+# as its offset from `yb` on the circle. `nothing` if singular.
+function _pt_cov_volume(state::Array{Float64,3}, t::Int, ws, yb::AbstractVector,
+                        circ::AbstractVector{Int}, dims = 1:size(state, 3))
     Y = Matrix{Float64}(undef, length(ws), length(dims))
     @inbounds for (i, w) in enumerate(ws), (k, j) in enumerate(dims)
         Y[i, k] = j in circ ? rem2pi(state[t, w, j] - yb[j], RoundNearest) :
                               state[t, w, j]
     end
     C = cholesky(Symmetric(cov(Y; dims = 1)); check = false)
-    return issuccess(C) ? 0.5 * logdet(C) : nothing
+    issuccess(C) || return nothing
+    return (0.5 * logdet(C), 1 ./ sqrt.(diag(inv(C))))
+end
+
+# The ½ log det alone.
+function _pt_half_logdet_cov(state::Array{Float64,3}, t::Int, ws, yb::AbstractVector,
+                             circ::AbstractVector{Int}, dims = 1:size(state, 3))
+    r = _pt_cov_volume(state, t, ws, yb, circ, dims)
+    return r === nothing ? nothing : r[1]
 end
 
 # Standard deviation of `x` (offsets from `x0` on the circle when `circular`),
@@ -597,63 +770,68 @@ end
 # D = |g_j| h + ½ H_jj h², so σ_j only comes out smaller: a walker still
 # climbing (Gaia-4 b's had its jitters 15 nats per m/s uphill) gets a smaller
 # volume, never a larger one. A side outside the support leaves the other, at
-# half the width (half a Gaussian). `nothing` if an axis never settles. Only
-# the axes `dims` (h0 and the widths returned are theirs, in that order).
+# half the width (half a Gaussian; the full width with `half = false`).
+# `nothing` if an axis never settles. Only the axes `dims` (h0 and the widths
+# returned are theirs, in that order).
 function _pt_axis_widths(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
                          h0::AbstractVector{Float64}; max_iter::Int = 24,
-                         dims = eachindex(y0))
+                         dims = eachindex(y0), half::Bool = true)
     σ = Vector{Float64}(undef, length(dims))
     y = collect(Float64, y0)
     for (i, j) in enumerate(dims)
-        h = h0[i]
-        ok = false
-        lo = 0.0          # the widest h seen with the drop under 1/8 nat
-        hi = Inf          # the narrowest h seen with the drop over 2 nats (or off the support)
-        up = nothing      # σ read at `hi`, when its drop was finite
-        for _ in 1:max_iter
-            y[j] = y0[j] + h; ℓp = ℓat(y)
-            y[j] = y0[j] - h; ℓm = ℓat(y)
+        s = _pt_line_width(ℓ0, h0[i]; max_iter, half) do h
+            y[j] = y0[j] + h
+            v = ℓat(y)
             y[j] = y0[j]
-            if !isfinite(ℓp) && !isfinite(ℓm)
-                hi = min(hi, h)
-                h = lo > 0 ? sqrt(lo * hi) : h / 4
-                continue
-            end
-            half = isfinite(ℓp) && isfinite(ℓm) ? 1.0 : 0.5
-            drop = ℓ0 - min(isfinite(ℓp) ? ℓp : Inf, isfinite(ℓm) ? ℓm : Inf)
-            if drop > 2
-                # Too steep. The drop need not grow as h²: a wall (a support
-                # edge, a prior that diverges) makes it jump by more than the
-                # factor 16 a ×4 step allows, so once a flat h is known, bisect
-                # between the two instead of stepping back and forth.
-                if h < hi
-                    hi = h
-                    up = half * h / sqrt(2 * drop)
-                end
-                h = lo > 0 ? sqrt(lo * hi) : h / 4
-            elseif drop >= 0.125
-                σ[i] = half * h / sqrt(2 * drop)
-                ok = true
-                break
-            else
-                lo = max(lo, h)
-                h = isfinite(hi) ? sqrt(lo * hi) : h * 4   # flat, or uphill both ways
-            end
-            # The bracket has closed on a jump: no h gives a drop in the window.
-            if lo > 0 && hi < Inf && hi <= lo * (1 + 1e-6)
-                break
-            end
+            return v
         end
-        if !ok && up !== nothing
-            # No h put the drop in the window: take the width at the narrowest h
-            # that overshot it. A larger drop gives a smaller σ, so this only
-            # underestimates the volume.
-            σ[i] = up
-            ok = true
-        end
-        ok || return nothing
+        s === nothing && return nothing
+        σ[i] = s
     end
     return σ
+end
+
+# The width search of `_pt_axis_widths` along one line: `f(h)` is the density
+# h along it (in the line's own units) from the point where it is `ℓ0`.
+function _pt_line_width(f, ℓ0::Float64, h::Float64; max_iter::Int = 24,
+                        half::Bool = true)
+    lo = 0.0          # the widest h seen with the drop under 1/8 nat
+    hi = Inf          # the narrowest h seen with the drop over 2 nats (or off the support)
+    up = nothing      # σ read at `hi`, when its drop was finite
+    for _ in 1:max_iter
+        ℓp = f(h)
+        ℓm = f(-h)
+        if !isfinite(ℓp) && !isfinite(ℓm)
+            hi = min(hi, h)
+            h = lo > 0 ? sqrt(lo * hi) : h / 4
+            continue
+        end
+        hf = !half || (isfinite(ℓp) && isfinite(ℓm)) ? 1.0 : 0.5
+        drop = ℓ0 - min(isfinite(ℓp) ? ℓp : Inf, isfinite(ℓm) ? ℓm : Inf)
+        if drop > 2
+            # Too steep. The drop need not grow as h²: a wall (a support
+            # edge, a prior that diverges) makes it jump by more than the
+            # factor 16 a ×4 step allows, so once a flat h is known, bisect
+            # between the two instead of stepping back and forth.
+            if h < hi
+                hi = h
+                up = hf * h / sqrt(2 * drop)
+            end
+            h = lo > 0 ? sqrt(lo * hi) : h / 4
+        elseif drop >= 0.125
+            return hf * h / sqrt(2 * drop)
+        else
+            lo = max(lo, h)
+            h = isfinite(hi) ? sqrt(lo * hi) : h * 4   # flat, or uphill both ways
+        end
+        # The bracket has closed on a jump: no h gives a drop in the window.
+        if lo > 0 && hi < Inf && hi <= lo * (1 + 1e-6)
+            break
+        end
+    end
+    # No h put the drop in the window: the width at the narrowest h that
+    # overshot it. A larger drop gives a smaller σ, so this only underestimates.
+    return up
 end
 
 # From the best walker `y0` (tempered density `ℓ0`) to the top of its mode:
@@ -688,19 +866,85 @@ function _pt_climb(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
 end
 
 # One draw y = yb + σ ⊙ z, z ~ N(0, I), redrawn (up to 20 times) until it is in
-# the support. Returns `evalf(y)`; (-Inf, -Inf) if no draw was. Only the axes
-# `dims` move (σ is theirs, in that order); the rest stay at yb.
+# the support and `ok(log π, log L)`. Returns `evalf(y)`; (-Inf, -Inf) if no
+# draw was. Only the axes `dims` move (σ is theirs, in that order); the rest
+# stay at yb.
 function _pt_scatter!(y::Vector{Float64}, evalf, yb::AbstractVector{Float64},
-                      σ::Vector{Float64}, rng; dims = eachindex(y))
+                      σ::Vector{Float64}, rng; dims = eachindex(y), ok = (lp, ll) -> true)
     copyto!(y, yb)
     for _ in 1:20
         @inbounds for (i, j) in enumerate(dims)
             y[j] = yb[j] + σ[i] * randn(rng)
         end
         lp, ll = evalf(y)
-        isfinite(lp) && isfinite(ll) && return (lp, ll)
+        isfinite(lp) && isfinite(ll) && ok(lp, ll) && return (lp, ll)
     end
     return (-Inf, -Inf)
+end
+
+# The mass of the mode a walker sits in, as a Laplace estimate taken large:
+# from `y0` (density `ℓ0`) to the top of its mode (`_pt_climb`), the axis widths
+# there at their full width against a support edge (`half = false`), the
+# correlations between axes from second differences at those widths (one at a
+# time, in units of them; zero for a pair whose four points are not all in the
+# support), and then the width along each principal axis of those correlations
+# measured from the density itself (`_pt_line_width`), not from the
+# correlations' eigenvalues: a ridge or a flat direction, where the
+# differences show nothing, counts at the extent the density actually has, up
+# to the support. log Z = ℓ_top + ½ d log 2π + Σ log σ_j + Σ log w_i.
+# `nothing` when a width never settles. Only the axes `dims` (h0 is theirs).
+# Returns the top `y`, the widths `σ`, the principal axes `V` (columns, in units
+# of σ) and their widths `w`, `logz`, and `dims`.
+function _pt_mode_mass(ℓat, y0::AbstractVector{Float64}, ℓ0::Float64,
+                       h0::AbstractVector{Float64}; dims = eachindex(y0))
+    σ = _pt_axis_widths(ℓat, y0, ℓ0, h0; dims)
+    σ === nothing && return nothing
+    yc, ℓc = _pt_climb(ℓat, y0, ℓ0, σ; dims)
+    σc = _pt_axis_widths(ℓat, yc, ℓc, h0; dims, half = false)
+    σc === nothing && return nothing
+    m = length(dims)
+    y = collect(Float64, yc)
+    function at(u)
+        @inbounds for (i, j) in enumerate(dims)
+            y[j] = yc[j] + σc[i] * u[i]
+        end
+        return ℓat(y)
+    end
+    R = Matrix{Float64}(I, m, m)
+    u = zeros(m)
+    for i in 1:m, k in (i + 1):m
+        f = 0.0
+        for (a, c) in ((1, 1), (1, -1), (-1, 1), (-1, -1))
+            u[i], u[k] = a, c
+            v = at(u)
+            isfinite(v) || (f = NaN; break)
+            f += a * c * v
+        end
+        u[i], u[k] = 0.0, 0.0
+        isfinite(f) && (R[i, k] = R[k, i] = -f / 4)
+    end
+    E = eigen(Symmetric(R))
+    w = Vector{Float64}(undef, m)
+    for i in 1:m
+        v = E.vectors[:, i]
+        wi = _pt_line_width(h -> at(h .* v), ℓc, 1 / sqrt(max(E.values[i], 1e-2));
+                            half = false)
+        wi === nothing && return nothing
+        w[i] = wi
+    end
+    logz = ℓc + 0.5 * m * log(2π) + sum(log, σc) + sum(log, w)
+    return (y = yc, σ = σc, V = E.vectors, w = w, logz = logz, dims = collect(dims))
+end
+
+# Whether `x` lies inside the mode `m` (`_pt_mode_mass`): its quadratic drop
+# from the top, in the mode's principal axes and widths, is within `allow`. A
+# full-circle angle (`circ`) counts by its offset on the circle; a position not
+# recorded (NaN) is outside.
+function _pt_in_mode(m, x::AbstractVector, circ::AbstractVector{Int}, allow::Float64)
+    u = [(j in circ ? rem2pi(x[j] - m.y[j], RoundNearest) : x[j] - m.y[j]) / m.σ[i]
+         for (i, j) in enumerate(m.dims)]
+    all(isfinite, u) || return false
+    return sum(abs2, (m.V' * u) ./ m.w) <= 2 * allow
 end
 
 # One line per run, after the progress bar: which angles were re-charted and
@@ -826,19 +1070,27 @@ in place.
   mode-Laplace takes over.
 - `prune_stranded::Bool=true` — every 50 steps through the first three quarters
   of burn-in, move walkers stranded far below their rung's mode onto walkers in
-  it. Only walkers whose likelihood is so low that the whole region below it
-  weighs under e⁻¹⁰ of the mode (bounded by that likelihood times the
-  normalised prior) are moved, so a plateau that could carry real mass — a
-  weak signal — is left alone. The mode's mass is the Laplace volume of the
+  it. A walker counts as stranded only at the second pass running that finds
+  it far below the rung's best walker, and only where the mode cannot need it:
+  either its likelihood is so low that the whole region below it weighs under
+  e⁻¹⁰ of the mode (bounded by that likelihood times the normalised prior), so
+  a plateau that could carry real mass — a weak signal — is left alone, and it
+  is not climbing fast enough to clear that bound by the next pass; or it is
+  in a separate mode whose own Laplace mass is under e⁻¹⁰ of it (the walker
+  followed to that mode's top, and the others inside it at both passes); or it
+  sits on the mode's own flank, outside it as measured at its top, and is not
+  climbing back. The mode's mass is the Laplace volume of the
   walkers in it; while fewer than `n_dim + 2` have found it, and once the rung
   has stopped climbing, a smaller volume measured from the density along each
   axis at the top of the mode, which the best walker first climbs to (BFGS, at
-  most 500 evaluations per dimension), and the walkers moved are then drawn
-  about that point rather than copied, so the rung keeps its full rank. The
+  most 500 evaluations per dimension). Each walker moved is drawn about a
+  survivor picked at random (a walker in the mode, or that top) with the
+  mode's conditional widths, never copied, and a pass moves at most as many
+  walkers as the mode holds, so no pass moves more than half a rung. The
   stretch move cannot bring stranded walkers back itself, so without this a
   narrow mode (any well-measured period on a wide prior) fills its cold rung at
-  the rate the ladder happens to rediscover it. Burn-in only: the recorded chain is ordinary
-  MCMC. `false` restores the old behaviour.
+  the rate the ladder happens to rediscover it. Burn-in only: the recorded
+  chain is ordinary MCMC. `false` restores the old behaviour.
 - `node_flip::Real=0.1` — per walker and step, the probability of proposing
   the mirror (Ω, ω) → (Ω + π, ω + π) of each astrometry-only planet, accepted
   with the tempered Metropolis-Hastings ratio (see src/samplers/node_flip.jl).
@@ -1004,7 +1256,6 @@ function sample_pt_emcee(
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
-    prune_med = fill(NaN, n_temps)      # each rung's median log L at the last prune
     # Astrometry-only planets get the (Ω, ω) → (Ω + π, ω + π) move
     # (src/samplers/node_flip.jl); empty, and never drawn for, anything else.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
@@ -1028,6 +1279,8 @@ function sample_pt_emcee(
     n_walkers_eff = let nw = max(n_walkers, 2 * n_dim + 2)
         nw + isodd(nw)
     end
+    # The pruning's record of its last pass (`_pt_prune_stranded!`).
+    prune_mem = PruneMemory(n_temps, n_walkers_eff, n_dim)
 
     # Geometric ladder across [beta_min, 1], matching sample_transdim_pt_emcee.
     #
@@ -1456,7 +1709,7 @@ function sample_pt_emcee(
                 end
             end
         end
-        prune_med .= NaN
+        _prune_forget!(prune_mem)
         return nothing
     end
 
@@ -1487,7 +1740,7 @@ function sample_pt_emcee(
         hasproperty(ck, :de_proposed) && (de_proposed .= ck.de_proposed;
                                           de_accepted .= ck.de_accepted)
         pruned .= ck.pruned
-        hasproperty(ck, :prune_med) && (prune_med .= ck.prune_med)
+        _prune_restore!(prune_mem, ck)
         n_evals_atomic[] = ck.n_evals::Int
         β_hist[1:step0, :] .= ck.β_hist; swap_hist[1:step0, :] .= ck.swap_hist
         smd_hist[1:step0, :] .= ck.smd_hist
@@ -1635,7 +1888,7 @@ function sample_pt_emcee(
         if prune_stranded && step % 50 == 0 && step <= (3 * n_burnin) ÷ 4
             pruned .+= _pt_prune_stranded!(state, logπ_arr, logL_arr, βs,
                                            rng_master; evalf = prune_eval, circ,
-                                           med_logL = prune_med,
+                                           memory = prune_mem,
                                            held = isempty(held_x) ? Int[] : hold.dims,
                                            held_logπ = isempty(held_x) ? 0.0 : held_lp)
         end
@@ -1758,7 +2011,7 @@ function sample_pt_emcee(
                 state, logπ = logπ_arr, logL = logL_arr, betas = βs, rng_master,
                 rngs_h1, rngs_h2, rngs_flip, accept_within, propose_within,
                 accept_swap, propose_swap, flip_proposed, flip_accepted, pruned,
-                prune_med, de_proposed, de_accepted,
+                prune_mem = _prune_saved(prune_mem), de_proposed, de_accepted,
                 n_evals = n_evals_atomic[], β_hist = β_hist[1:step, :],
                 swap_hist = swap_hist[1:step, :], smd_hist = smd_hist[1:step, :],
                 keep_idx, samples = samples[1:keep_idx, :],
@@ -1799,8 +2052,9 @@ function sample_pt_emcee(
                                      flip_accepted)
     show_progress && sum(pruned) > 0 && @info "pt_emcee: burn-in moved " *
         "$(sum(pruned)) stranded walker state(s) onto their rung's mode " *
-        "($(pruned[1]) at β = 1), all from a region whose total posterior mass " *
-        "is bounded below e⁻¹⁰ of the mode's. The recorded chain is ordinary MCMC."
+        "($(pruned[1]) at β = 1), each from a region whose total posterior mass " *
+        "is bounded, or a separate mode whose own is estimated, below e⁻¹⁰ of the " *
+        "mode's. The recorded chain is ordinary MCMC."
     if convergence_stop && converged_at == 0 && stop_reason == "steps"
         @warn "pt_emcee: hit max_steps=$n_steps WITHOUT meeting the convergence gate " *
               "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)) on science params — " *

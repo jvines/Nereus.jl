@@ -121,7 +121,17 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
             return state, fill(c, 1, 100), lL
         end
         ev(gap; c = 0.0) = x -> all(u -> 0 <= u <= 1, x) ? (c, mlogL(x, gap)) : (-Inf, -Inf)
-        settled(lL) = [median(lL[1, :])]
+        # The prune as the samplers run it: passes sharing one record (see
+        # test/test_pt_emcee_stranded.jl); each pass's count.
+        passes!(state, lπ, lL; n = 12, kw...) =
+            (mem = Nereus.PruneMemory(size(state)...);
+             [_pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(1 + i);
+                                  memory = mem, kw...)[1] for i in 1:n])
+        tdpasses!(state, td, lπ, lL; n = 12, kw...) =
+            (mem = Nereus.PruneMemory(size(state)...);
+             [Nereus._td_prune_stranded!(state, td, lπ, lL, [1.0], shift, [1, 1, 0], 0,
+                                         MersenneTwister(1 + i); memory = mem, kw...)[1]
+              for i in 1:n])
 
         ℓat = x -> (r = ev(50.0)(x); isfinite(r[1]) ? r[1] + r[2] : -Inf)
         σ = Nereus._pt_axis_widths(ℓat, x0, -28.0, fill(1e-3, 2); dims = [1, 2])
@@ -130,11 +140,10 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
         @test abs(Nereus._pt_climb(ℓat, x0, -28.0, [σ; σ[1]])[1][3] - 0.5) < 0.1 * width
 
         state, lπ, lL = rung(50.0)
-        @test _pt_prune_stranded!(copy(state), copy(lπ), copy(lL), [1.0], MersenneTwister(2);
-                                  evalf = ev(50.0), med_logL = settled(lL)) == [0]
-        moved = _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
-                                    evalf = ev(50.0), med_logL = settled(lL), held = [3])
-        @test moved == [100]
+        @test passes!(copy(state), copy(lπ), copy(lL); n = 3,
+                      evalf = ev(50.0)) == [0, 0, 0]
+        h = passes!(state, lπ, lL; evalf = ev(50.0), held = [3])
+        @test h[end] == 0 && sum(h) == 100
         @test all(==(v), state[1, :, 3])
         @test all(abs.(state[1, :, 1:2] .- 0.5) .< 5 * width)
         @test lL[1, :] ≈ [mlogL(state[1, w, :], 50.0) for w in 1:100]
@@ -147,10 +156,8 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
         shift = Union{Nothing,Float64}[nothing, nothing, nothing]
         state, lπ, lL = rung(50.0)
         td = tds()
-        moved = Nereus._td_prune_stranded!(state, td, lπ, lL, [1.0], shift, [1, 1, 0], 0,
-                                           MersenneTwister(2); evalf = tev(50.0),
-                                           med_logL = settled(lL), held = [3])
-        @test moved == [100]
+        h = tdpasses!(state, td, lπ, lL; evalf = tev(50.0), held = [3])
+        @test h[end] == 0 && sum(h) == 100
         @test all(w -> td[1, w].planet_active[1], 1:100)
         @test all(==(v), state[1, :, 3])
         @test all(abs.(state[1, :, 1:2] .- 0.5) .< 5 * width)
@@ -158,17 +165,15 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
         # 17 nats down could still carry mass, so it stays: the bound is on the
         # posterior given the held value, and that value's prior density (here
         # e^30, in every log π) is no evidence for the mode. Left in the best
-        # walker's density, it would raise the cut by 30 nats and move all 99.
+        # walker's density, it would raise the cut by 30 nats and move all 99
+        # (over the passes, the mode at most doubling at each).
         for (c, hl, n) in ((0.0, 0.0, 0), (30.0, 30.0, 0), (30.0, 0.0, 99))
             state, lπ, lL = rung(17.0; c, ll = -2.2)
-            @test _pt_prune_stranded!(state, lπ, lL, [1.0], MersenneTwister(2);
-                                      evalf = ev(17.0; c), med_logL = settled(lL),
-                                      held = [3], held_logπ = hl) == [n]
+            @test sum(passes!(state, lπ, lL; evalf = ev(17.0; c), held = [3],
+                               held_logπ = hl)) == n
             state, lπ, lL = rung(17.0; c, ll = -2.2)
-            @test Nereus._td_prune_stranded!(state, tds(), lπ, lL, [1.0], shift, [1, 1, 0],
-                                             0, MersenneTwister(2); evalf = tev(17.0; c),
-                                             med_logL = settled(lL), held = [3],
-                                             held_logπ = hl) == [n]
+            @test sum(tdpasses!(state, tds(), lπ, lL; evalf = tev(17.0; c), held = [3],
+                                 held_logπ = hl)) == n
         end
         # What the samplers pass: the held prior density on their own scale.
         p = _bh_iad_target().params

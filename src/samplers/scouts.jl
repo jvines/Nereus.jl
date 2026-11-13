@@ -24,12 +24,16 @@
 # them the axis widths at the top of the best one's mode, `_pt_axis_widths`),
 #     Z_{L<c} = ∫_{L<c} π L ≤ c   with   log c = log Z_A - tau,
 # so a scout with log L below c sits where the whole region of that likelihood
-# weighs under e^-tau of A, and is dropped. The chain starts at one of the
-# rest, picked at random: a genuinely multimodal posterior still sends
-# different chains to different modes, and a weak signal whose plateau carries
-# the mass keeps its plateau scouts, both as with the pruning. On the target
-# above, 5 of 16 scouts settled on the plateau (log L ≈ -23,000), the cut came
-# out at log L ≈ 148 and the other 11 sat at 192-195.
+# weighs under e^-tau of A, and is dropped. So is a scout above c that settled
+# in a separate mode of its own whose Laplace mass is under e^-tau of A's
+# (`_scouts_supported`): the bound gives its likelihood the whole prior to
+# fill, and a narrow mode within tau plus A's Occam factor of the peak passes
+# it however little it weighs. The chain starts at one of the rest, picked at
+# random: a genuinely multimodal posterior still sends different chains to
+# different modes, and a weak signal whose plateau carries the mass keeps its
+# plateau scouts, both as with the pruning. On the target above, 5 of 16
+# scouts settled on the plateau (log L ≈ -23,000), the cut came out at
+# log L ≈ 148 and the other 11 sat at 192-195.
 #
 # The ensemble (src/samplers/ensemble.jl) takes the survivors as up to half
 # its walkers: its burn-in pruning moves stranded walkers onto those that
@@ -127,8 +131,20 @@ end
 
 # The scouts that may carry posterior mass: those whose log L is at least
 # log Z_A - tau (the cut of `_pt_prune_stranded!` at β = 1, over the active
-# coordinates `act`, theta slots, at unfrozen positions `pos`). When no volume
-# can be measured, those within the margin of the best by log posterior.
+# coordinates `act`, theta slots, at unfrozen positions `pos`), less those the
+# cut keeps but which settled in a separate mode of their own whose Laplace
+# mass (`_pt_mode_mass`) is under e^-tau of A's. A scout has stopped climbing
+# by construction, so the two tests the pruning makes of a walker over two
+# passes it has already passed. On the eccentric RV planet of
+# test/test_angles_never_rail.jl half the scouts settled in its circular-orbit
+# mode, 27-37 nats down in log L but above a cut set 37 down by A's Occam
+# factor; they then made up to half an ensemble's walkers. The scouts the cut
+# keeps outside A are taken in turn from the highest, each one not yet placed
+# followed to the top of its mode, and every such scout inside that mode shares
+# its verdict. One whose climb ends in A's own mode, outside it, is on that
+# mode's flank, and is dropped as well (see `_pt_prune_stranded!`). When no
+# volume can be measured, those within the margin of the best by log
+# posterior.
 function _scouts_supported(sc::Theta, data::Data, vals, lps, lls, act, pos,
                            widths, tau, ctr)
     n = length(vals)
@@ -145,20 +161,20 @@ function _scouts_supported(sc::Theta, data::Data, vals, lps, lls, act, pos,
         state[1, s, k] = vals[s][act[k]]
     end
     yb = state[1, b, :]
+    sc.values .= vals[b]
+    ℓat = y -> begin
+        @inbounds for k in 1:d
+            sc.values[act[k]] = y[k]
+        end
+        v = _tempered_lp(sc, data, 1.0; ctr = ctr)
+        isfinite(v) ? v : -Inf
+    end
+    h0 = Float64[0.1 * widths[p] for p in pos]
     lv = length(A) >= d + 2 ? _pt_half_logdet_cov(state, 1, A, yb, circ) : nothing
     if lv === nothing
         # Too few scouts near the best to give a covariance: the volume from
         # the density about the top of the best one's mode, as the pruning
         # does for a rung with few walkers in A.
-        sc.values .= vals[b]
-        ℓat = y -> begin
-            @inbounds for k in 1:d
-                sc.values[act[k]] = y[k]
-            end
-            v = _tempered_lp(sc, data, 1.0; ctr = ctr)
-            isfinite(v) ? v : -Inf
-        end
-        h0 = Float64[0.1 * widths[p] for p in pos]
         σ = _pt_axis_widths(ℓat, yb, best, h0)
         # No width to be had: no volume, so no bound. Keep the scouts that sit
         # within the mass-bound margin of the best, never all of them: a scout
@@ -171,6 +187,26 @@ function _scouts_supported(sc::Theta, data::Data, vals, lps, lls, act, pos,
         end
         lv = sum(log, σ)
     end
-    cut = best + 0.5 * d * log(2π) + lv - tau
-    return union!([b], findall(>=(cut), lls))
+    logza = best + 0.5 * d * log(2π) + lv
+    keep = union!([b], findall(>=(logza - tau), lls))
+    # The kept scouts outside A, each placed in its own mode.
+    rest = sort!([s for s in keep if ℓ[s] < best - allow]; by = s -> -ℓ[s])
+    low = Dict{Int,Bool}()
+    for s in rest
+        haskey(low, s) && continue
+        m = _pt_mode_mass(ℓat, state[1, s, :], ℓ[s], h0)
+        low[s] = false
+        m === nothing && continue
+        # A separate mode that weighs next to nothing drops every scout in it;
+        # A's own mode drops the scout followed to it only if it sits outside
+        # it, on its flank, where its slice updates stopped short of the top.
+        v = m.logz < logza - tau
+        own = !v && _pt_in_mode(m, view(state, 1, b, :), circ, allow)
+        inside = s2 -> _pt_in_mode(m, view(state, 1, s2, :), circ, allow)
+        low[s] = v || (own && !inside(s))
+        for s2 in rest
+            haskey(low, s2) || !inside(s2) || (low[s2] = v)
+        end
+    end
+    return [s for s in keep if !get(low, s, false)]
 end

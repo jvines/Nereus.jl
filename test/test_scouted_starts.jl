@@ -22,12 +22,13 @@ const _SC_T = sort(57000 .+ 1800 .* rand(_SC_RNG, _SC_N))
 const _SC_PSI = 2π .* rand(_SC_RNG, _SC_N)
 const _SC_TRV = sort(57000 .+ 1800 .* rand(_SC_RNG, 40))
 
-function _sc_build(w, rv; unconstrained, efree = false)
+function _sc_build(w, rv; unconstrained, efree = false,
+                   msec = LogUniformPrior(0.003, 0.03))
     dt = (_SC_T .- mean(_SC_T)) ./ 365.25
     pf = sin.(2π .* (_SC_T .- 57000) ./ 365.25 .- _SC_PSI)
     iad = IADData(t = _SC_T, abscissa = w, abscissa_err = fill(0.05, _SC_N), psi = _SC_PSI,
                   parallax_factor = pf, pm_factor = dt)
-    blk = (a = LogUniformPrior(0.8, 2.0), M_sec = LogUniformPrior(0.003, 0.03),
+    blk = (a = LogUniformPrior(0.8, 2.0), M_sec = msec,
            sesinw = efree ? UniformPrior(-1.0, 1.0) : FixedPrior(0.0),
            secosw = efree ? UniformPrior(-1.0, 1.0) : FixedPrior(0.0), inc = SinePrior(),
            Omega = UniformPrior(0.0, 2π), Mo = UniformPrior(0.0, 2π))
@@ -38,13 +39,19 @@ function _sc_build(w, rv; unconstrained, efree = false)
     return NereusTarget(tg.params, tg.data; unconstrained)
 end
 
-# The companion at inclination `inc_deg` (signal = false: noise alone; efree:
-# √e sin ω and √e cos ω sampled on U(-1, 1), the truth still circular).
+# The companion at inclination `inc_deg` (efree: √e sin ω and √e cos ω sampled
+# on U(-1, 1), the truth still circular). signal = false: no companion in the
+# data, which still carry the parallax the model holds at 13.6 mas (without it
+# every point sits ~3e6 nats down, in local optima 1e5 nats apart), and M_sec
+# on LogUniform(1e-6, 0.03), down to masses the data cannot see. Held at 0.003
+# or more the companion is detectable at any orbit (~0.07 mas against 0.05 a
+# scan), and there is no plateau.
 function _sc_target(inc_deg; unconstrained = false, signal = true, efree = false)
     tg0 = _sc_build(zeros(_SC_N), zeros(40); unconstrained = false)
     th = Theta{Float64}(tg0.params)
-    for (nm, v) in ("a_k1" => 1.18, "M_sec_k1" => 0.0105, "inc_k1" => deg2rad(inc_deg),
-                    "Omega_k1" => 3.07, "Mo_k1" => 0.5, "gamma_HARPS" => 0.0)
+    for (nm, v) in ("a_k1" => 1.18, "M_sec_k1" => signal ? 0.0105 : 1e-12,
+                    "inc_k1" => deg2rad(inc_deg), "Omega_k1" => 3.07, "Mo_k1" => 0.5,
+                    "gamma_HARPS" => 0.0)
         set_param!(th, nm, v)
     end
     _, orbs, Ms = Nereus._iad_active_orbits(th, Nereus.astrom_M_pri(th),
@@ -53,9 +60,10 @@ function _sc_target(inc_deg; unconstrained = false, signal = true, efree = false
     Nereus._iad_residuals!(r, tg0.data.iad, orbs, Ms, Nereus.astrom_plx(th))
     rvm, _ = Nereus.rv_predictions(th, tg0.data)
     rng = MersenneTwister(12)
-    w = (signal ? -r : zeros(_SC_N)) .+ 0.05 .* randn(rng, _SC_N)
+    w = -r .+ 0.05 .* randn(rng, _SC_N)
     rv = (signal ? rvm : zeros(40)) .+ 5.0 .* randn(rng, 40)
-    return _sc_build(w, rv; unconstrained, efree)
+    msec = signal ? LogUniformPrior(0.003, 0.03) : LogUniformPrior(1e-6, 0.03)
+    return _sc_build(w, rv; unconstrained, efree, msec)
 end
 
 _sc_draw!(tg) = (th, r) -> (th.values[th.params.layout.unfrozen_idx] .=
