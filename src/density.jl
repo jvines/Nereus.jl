@@ -224,6 +224,9 @@ are in every chain the samplers return, beside the sampled slots.
 """
 density_derived_names(params::Params) =
     String[params.layout.names[i] for i in params.layout.density.derived]
+# Anything else standing in for a Params (a layout of names, as the summary
+# helpers accept) carries no reparametrization: nothing is derived.
+density_derived_names(_) = String[]
 
 """
     reported_param_names(params) -> Vector{String}
