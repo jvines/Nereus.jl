@@ -438,8 +438,10 @@ end
 
 
 # A corner panel's limits from the full sample: its finite extrema padded 5%, as
-# Makie's autolimits pad. No limits (`(;)`) for a constant or empty column.
-function _corner_lims(x::AbstractVector)
+# Makie's autolimits pad. No limits (`(;)`) for a constant or empty column. `f`
+# is the increasing map the panel draws the column through (`rad2deg` for an
+# angle), applied to the extrema rather than to a copy of the column.
+function _corner_lims(x::AbstractVector, f = identity)
     lo, hi = Inf, -Inf                      # finite extrema, without a filtered copy
     for v in x
         isfinite(v) || continue
@@ -447,6 +449,7 @@ function _corner_lims(x::AbstractVector)
         v > hi && (hi = v)
     end
     hi > lo || return (;)
+    lo, hi = f(lo), f(hi)
     pad = 0.05 * (hi - lo)
     return (; lims = (; low = lo - pad, high = hi + pad))
 end
@@ -454,11 +457,19 @@ end
 """
     plot_corner(chains, params;
                  output=nothing, fmt=:png,
-                 params_to_plot=nothing, density=:hexbin, max_draws=200_000)
+                 params_to_plot=nothing, density=:hexbin, max_draws=200_000,
+                 draws=nothing, stem="corner")
 
-Corner plot using PairPlots.jl.
+Corner plot using PairPlots.jl, of an explicit selection of parameters.
 `params_to_plot`: optional list of parameter name strings to include
-(default: all unfrozen params).
+(default: every reported parameter -- the all-parameter corner, which costs
+n² panels; `run_job` draws `plot_corners` instead). Each axis is labelled with
+the parameter's symbol and unit, and an angle is drawn in degrees, as its label
+says.
+
+`draws` restricts the corner to those flat draws (indices into the chain's
+draws, iterations fastest): `plot_corners` passes the draws in which a
+trans-dimensional planet slot is live. Written to `output/<stem>.<fmt>`.
 
 `density` picks how the 2-D panels show the sample cloud under the contours:
 
@@ -495,7 +506,9 @@ function plot_corner(chains, params;
                       save_pdf::Bool=false,
                       params_to_plot::Union{Nothing, Vector{String}}=nothing,
                       density::Symbol=:hexbin,
-                      max_draws::Int=200_000)
+                      max_draws::Int=200_000,
+                      draws::Union{Nothing, AbstractVector{<:Integer}}=nothing,
+                      stem::AbstractString="corner")
     # PairPlots is loaded at the top of this file (see `using PairPlots`
     # there). The earlier pattern used `@eval using PairPlots` inside the
     # function body, which triggered Julia's world-age limitation:
@@ -512,22 +525,28 @@ function plot_corner(chains, params;
                  [n for n in reported_param_names(params)
                   if Symbol(n) in chain_names]
 
-        # Build a NamedTuple-of-vectors so PairPlots picks axis labels
-        # straight from the column names. (The `labels=Vector{String}`
-        # kwarg form was deprecated; current API wants Dict{Symbol,…} —
-        # avoid the issue entirely by going through a named column source.)
+        # A NamedTuple-of-vectors keyed by parameter name; the axis labels
+        # (symbol and unit, `_sci_label`) go in PairPlots' `labels` Dict.
         # Each column is read in place (`_draws_view`): only the thinned draws
         # are copied, and the limits come from the full column without a copy of
         # it. Copied whole, the columns were the chain over again -- 1 GB for a
         # 23-parameter, 5.8M-draw fit -- held for the whole figure.
-        cols = [_draws_view(chains, Symbol(name)) for name in pnames]
+        # `draws` selects the sample (a view, still no copy); an angle is drawn
+        # in degrees, as its label says.
+        cols = [(c = _draws_view(chains, Symbol(name));
+                 draws === nothing ? c : view(c, draws)) for name in pnames]
+        to_unit = [last(sci_param_unit(name, params)) ? rad2deg : identity
+                   for name in pnames]
         n_draws = isempty(cols) ? 0 : length(first(cols))
         keep = 1:max(1, cld(n_draws, max_draws)):n_draws     # every k-th draw
-        data_nt = NamedTuple{Tuple(Symbol.(pnames))}(Tuple(c[keep] for c in cols))
+        syms = Tuple(Symbol.(pnames))
+        data_nt = NamedTuple{syms}(Tuple(f.(view(c, keep)) for (c, f) in zip(cols, to_unit)))
         # Thinned: pin each panel to the full sample's range (see docstring).
         pin = length(keep) < n_draws ?
-            (; axis = NamedTuple{Tuple(Symbol.(pnames))}(Tuple(
-                _corner_lims(c) for c in cols))) : (;)
+            (; axis = NamedTuple{syms}(Tuple(
+                _corner_lims(c, f) for (c, f) in zip(cols, to_unit)))) : (;)
+        labels = Dict{Symbol, Any}(Symbol(name) => _sci_label(name, params)
+                                   for name in pnames)
 
         density in (:hexbin, :scatter) || throw(ArgumentError(
             "plot_corner: density must be :hexbin or :scatter, got $(repr(density))"))
@@ -541,11 +560,11 @@ function plot_corner(chains, params;
              _CornerContour(color = :black)) :     # = PairPlots.Contour
             (PairPlots.Scatter(markersize = 1, color = (NEREUS_COLORS.post, 0.1)),
              _CornerContour())
-        fig = Base.invokelatest(pairplot, data_nt => layers; pin...)
+        fig = Base.invokelatest(pairplot, data_nt => layers; labels, pin...)
 
         if output !== nothing
             mkpath(output)
-            _save_plot(joinpath(output, "corner.$fmt"), fig;
+            _save_plot(joinpath(output, "$stem.$fmt"), fig;
                         save_pdf=save_pdf)
         end
         return fig
