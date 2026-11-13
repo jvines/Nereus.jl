@@ -216,6 +216,34 @@ end
     @test _nr_same(circ_run(150; checkpoint = path, resume = true), full)
 end
 
+@testset "a resume puts back both bounds of a window" begin
+    # Each re-cut keeps the span the last one left (hi - lo), so a window re-cut
+    # more than once spans 2π only to within an ulp. A resume that put back `lo`
+    # alone made hi = lo + 2π, and the resumed run's Mo, mapped into a window an
+    # ulp wider, differed from the uninterrupted run's by 4e-16 (the unseeded
+    # check below, in about one run in seven).
+    tg = _nr_target(); p = tg.params
+    i = findfirst(==("Mo_k1"), p.layout.unfrozen_names)
+    lo, hi = 1.1, nextfloat(1.1 + 2pi)
+    Nereus.set_circular_window!(p, i, lo; hi, transforms = (tg.transform,))
+    saved = Nereus.circular_windows(p)
+    @test saved["Mo_k1"] == (lo, hi)
+    held(t) = (Nereus.bounds(t.params.layout.unfrozen_priors[i]),
+               (t.params.layout.packed_priors.lowers[i], t.params.layout.packed_priors.uppers[i]),
+               (t.transform.lowers[i], t.transform.uppers[i]))
+    t2 = _nr_target()
+    Nereus._restore_windows!(t2.params, saved, (t2.transform,))
+    @test held(t2) == ((lo, hi), (lo, hi), (lo, hi))
+    # The shared restore (several chains, once): `lo` already in place is not
+    # enough to skip a window whose `hi` is not.
+    t3 = _nr_target()
+    Nereus.set_circular_window!(t3.params, i, lo; transforms = (t3.transform,))
+    @test Nereus.bounds(t3.params.layout.unfrozen_priors[i]) == (lo, 1.1 + 2pi) != (lo, hi)
+    @test Nereus._restore_shared_windows!(t3.params, saved, (t3.transform,))
+    @test held(t3) == ((lo, hi), (lo, hi), (lo, hi))
+    @test !Nereus._restore_shared_windows!(t3.params, saved, (t3.transform,))
+end
+
 @testset "sample_nuts seed: honoured, and part of the checkpoint's fingerprint" begin
     # run_job passes the job's `seed`. sample_nuts used to swallow it, so its
     # NUTS runs were unseeded. Short runs, without the warm start: the RNG is

@@ -541,10 +541,7 @@ function sample_nuts(
         # The windows the saved chains live in (moved by the warm-start
         # re-chart), and `rng` as the uninterrupted run left it once the chains
         # had started.
-        for (nm, (lo, _)) in ck.windows
-            set_circular_window!(params, findfirst(==(nm), params.layout.unfrozen_names),
-                                 lo; transforms = (target.transform,))
-        end
+        _restore_windows!(params, ck.windows, (target.transform,))
         _restore_rng!(rng, ck.rng_master)
         # Each chain's stream as its entry holds it, saved or unstarted. A
         # single chain's stream is `rng` itself.

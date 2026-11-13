@@ -480,11 +480,7 @@ function _sample_moms_one(
                 log_L  = _eval_ll(theta, data, ctr)
             end
         else
-            for (nm, (lo, _)) in ck.windows
-                i = findfirst(==(nm), layout.unfrozen_names)
-                layout.unfrozen_priors[i].lo == lo ||
-                    set_circular_window!(params, i, lo; transforms = (target.transform,))
-            end
+            _restore_shared_windows!(params, ck.windows, (target.transform,))
         end
     end
     last_ck = time()

@@ -547,10 +547,7 @@ function _sample_pt_transdim(
         end
         prev_np_post = ck.prev_np_post::Vector{Float64}
         # Windows the saved replicas live in (moved by the warmup re-cut).
-        for (nm, (lo, _)) in ck.windows
-            set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
-                                 lo; transforms = (target.transform,))
-        end
+        _restore_windows!(params, ck.windows, (target.transform,))
         if circ !== nothing
             if ck.circ_draws === nothing          # already re-cut
                 circ = nothing
