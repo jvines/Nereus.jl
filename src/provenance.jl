@@ -5,6 +5,26 @@
 # `eta_k*`) are not the user's priors and are left out; the prior on ρ★ and
 # (e, ω) they carry is listed under its own names.
 
+# A dictionary that iterates in insertion order, so summary.json is byte-stable.
+struct _ODict <: AbstractDict{String, Any}
+    keys::Vector{String}
+    d::Dict{String, Any}
+end
+_ODict() = _ODict(String[], Dict{String, Any}())
+Base.length(o::_ODict) = length(o.keys)
+Base.iterate(o::_ODict, i::Int = 1) =
+    i > length(o.keys) ? nothing : (o.keys[i] => o.d[o.keys[i]], i + 1)
+Base.getindex(o::_ODict, k::AbstractString) = o.d[String(k)]
+Base.get(o::_ODict, k::AbstractString, default) = get(o.d, String(k), default)
+Base.haskey(o::_ODict, k::AbstractString) = haskey(o.d, String(k))
+function Base.setindex!(o::_ODict, v, k::AbstractString)
+    haskey(o.d, k) || push!(o.keys, String(k))
+    o.d[String(k)] = v
+    return o
+end
+Base.empty(::_ODict, ::Type{String}, ::Type) = _ODict()
+Base.empty(::_ODict) = _ODict()
+
 # JSON-friendly number: ±Inf and NaN become `nothing` (JSON null).
 _prov_num(x::Real) = isfinite(x) ? Float64(x) : nothing
 
@@ -50,7 +70,8 @@ where unbounded). A fixed parameter is `{"family": "fixed", "value": v}`.
 """
 function prior_provenance(ps::PriorSpec)
     fam, par = _prior_family(ps.dist)
-    out = Dict{String, Any}("family" => fam)
+    out = _ODict()
+    out["family"] = fam
     if fam == "fixed"
         out["fixed"] = true
         out["value"] = par["value"]
@@ -59,7 +80,9 @@ function prior_provenance(ps::PriorSpec)
     out["fixed"] = false
     out["lo"] = _prov_num(ps.lo)
     out["hi"] = _prov_num(ps.hi)
-    merge!(out, par)
+    for k in sort!(collect(keys(par)))
+        out[k] = par[k]
+    end
     return out
 end
 
@@ -106,7 +129,10 @@ function _nereus_version_info()
     end
     dir = try pkgdir(@__MODULE__) catch; nothing end
     commit = dir === nothing ? nothing : _git_commit(dir)
-    return Dict{String, Any}("nereus_version" => ver, "nereus_commit" => commit)
+    o = _ODict()
+    o["nereus_version"] = ver
+    o["nereus_commit"] = commit
+    return o
 end
 
 """
@@ -119,19 +145,29 @@ of `{quantity, per_planet, ...prior}`) when the model has any.
 """
 function provenance_block(engine::AbstractString, params)
     cfg = params.config
-    priors = Dict{String, Any}()
-    for name in sort!(collect(keys(cfg.priors)))
+    # In the model's parameter order (the layout's), then any prior the layout
+    # does not list, by name.
+    order = filter(n -> haskey(cfg.priors, n), params.layout.names)
+    append!(order, sort!(setdiff(collect(keys(cfg.priors)), order)))
+    priors = _ODict()
+    for name in order
         is_density_reparam_name(name) && continue
         priors[name] = prior_provenance(cfg.priors[name])
     end
-    out = Dict{String, Any}("engine" => String(engine))
-    merge!(out, _nereus_version_info())
+    out = _ODict()
+    out["engine"] = String(engine)
+    for (k, v) in _nereus_version_info()
+        out[k] = v
+    end
     out["priors"] = priors
     if !isempty(cfg.external_priors)
         out["external_priors"] = Any[
-            merge(Dict{String, Any}("quantity" => String(e.quantity),
-                                    "per_planet" => e.per_planet),
-                  prior_provenance(e.prior)) for e in cfg.external_priors]
+            let o = _ODict()
+                o["quantity"] = String(e.quantity)
+                o["per_planet"] = e.per_planet
+                for (k, v) in prior_provenance(e.prior); o[k] = v; end
+                o
+            end for e in cfg.external_priors]
     end
     return out
 end

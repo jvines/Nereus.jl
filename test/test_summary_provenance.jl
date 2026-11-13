@@ -35,6 +35,13 @@ include(joinpath(@__DIR__, "fixtures", "easy_rv_target.jl"))
         @test Nereus._git_commit(mktempdir()) === nothing
     end
 
+    function _layout_order(pr)
+        cfg = _easy_rv_cfg()
+        data, a, b, c, d, _ = Nereus._build_data(cfg["data"])
+        params, _, _ = Nereus._build_model(cfg, data, Nereus._build_star(Dict()), a, b, c, d)
+        return filter(n -> n in String.(collect(keys(pr))), params.layout.names)
+    end
+
     function run_with(engine, kwargs)
         cfg = _easy_rv_cfg()
         cfg["sampler"] = Dict("name" => engine, "kwargs" => kwargs)
@@ -64,7 +71,33 @@ include(joinpath(@__DIR__, "fixtures", "easy_rv_target.jl"))
             @test pr["P_k1"]["family"] == "loguniform" && pr["P_k1"]["lo"] == 12.0
             @test !any(k -> startswith(String(k), "rho_circ") || startswith(String(k), "eta_"),
                        keys(pr))
+            # The model's parameter order, not a hash order.
+            @test String.(collect(keys(pr))) == _layout_order(pr)
+            @test String.(collect(keys(p))) ==
+                  ["engine", "nereus_version", "nereus_commit", "priors"]
             engine == "nested" && println("PROVENANCE ", JSON3.write(p))
+        end
+    end
+
+    @testset "fit_rv" begin
+        rng = MersenneTwister(7)
+        t = sort(2459000.0 .+ 100 .* rand(rng, 40))
+        rv = 15 .* sin.(2π .* t ./ 12.3) .+ randn(rng, 40)
+        data = Dict("SIM" => (t = t, rv = rv, rv_err = fill(1.0, 40)))
+        pri = Dict("P_k1" => UniformPrior(12.2, 12.4), "K_k1" => UniformPrior(10.0, 20.0),
+                   "gamma_SIM" => FixedPrior(0.0))
+        out = mktempdir()
+        r = fit_rv(data; planets = 1, priors = pri, science = false, output_dir = out,
+                   plots = String[],
+                   engine = Dict("engine" => "pt_emcee", "options" => Dict{String,Any}(
+                       "n_temps" => 2, "n_walkers" => 16, "n_steps" => 150,
+                       "n_burnin" => 50, "show_progress" => false)))
+        for p in (r.summary["provenance"],
+                  JSON3.read(read(joinpath(out, "summary.json"), String);
+                             allow_inf = true)["provenance"])
+            @test p["engine"] == "pt_emcee"
+            @test p["priors"]["gamma_SIM"]["family"] == "fixed"
+            @test p["priors"]["P_k1"]["hi"] == 12.4
         end
     end
 end
