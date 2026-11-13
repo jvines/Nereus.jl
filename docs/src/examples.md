@@ -5,8 +5,9 @@ config-driven dispatcher that every Nereus deployment (Docker workers,
 Python/`juliacall`, CLI) should call. Each example is a complete,
 runnable config `Dict` with realistic priors, a sampler block, and an
 output block. The configs below are distilled from the working
-validation drivers in `test/validation/validate_runjob_*.jl`, which are
-themselves CI-checked end-to-end fits.
+validation drivers `validate_runjob_*.jl` in `studies/validation/` (a working
+directory that is not part of the published repository), which are end-to-end
+fits run by hand.
 
 There is **one example per `planet_mode`** —
 `RV_ONLY`, `PM_ONLY`, `RVPM`, `RVAS`, `RVPMAS`, `RVPM_RM`, `RVPM_TTV` —
@@ -48,24 +49,30 @@ collated error message if any is wrong — see `_validate_config` in
 `src/runner.jl`):
 
 - **`planet_modes`**: `RV_ONLY`, `PM_ONLY`, `RVPM`, `RVAS`, `RVPMAS`,
-  `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`, `RVPM_TTV`,
-  `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`,
-  `PM_TTV_NB`.
+  `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`, `RVPM_RM_A`,
+  `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`,
+  `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`, `RVPM_RM_GD`,
+  `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 - **`parametrization.mass`**: `K_driven`, `M_sec_driven`, `a_driven`.
-  **`.time`**: `Tp`, `Tc`, `Mo`. **`.ew`**: `sesinw`, `ew`.
-  **`.geom`**: `b_rr`, `b_r`. Plus boolean `.marginalize_gamma`.
+  **`.time`**: `phic` (the default), `Mo`, `Tp`, `Tc`. **`.ew`**: `sesinw`, `ew`.
+  **`.geom`**: `b_rr` (`b_r` passes the validator but `ParametrizationConfig`
+  rejects it). **`.density`**: `rho_circ` (the default), `rho_star`. Plus
+  booleans `.marginalize_gamma` and `.use_rho_s`.
 - **`stability`**: `none`, `amd`, `gladman`.
 - **`priors[*].type`**: `UniformPrior`, `LogUniformPrior`,
   `ModJeffreysPrior`, `NormalPrior`, `FixedPrior`, `SinePrior`,
-  `BetaPrior`. `args` follow each constructor — e.g.
+  `BetaPrior`, `TruncNormalPrior`, `WrappedUniformPrior` (any spelling in
+  `PRIOR_ALIASES`). `args` follow each constructor — e.g.
   `NormalPrior(μ, σ, lo, hi)`, `UniformPrior(lo, hi)`,
   `LogUniformPrior(lo, hi)`.
 - **`noise_models[*].kind`**: `CeleriteRotation`, `CeleriteSHO`,
   `CeleriteRotationFM17`, `ActivityDecorrelation`, `ARModel`, `MAModel`,
-  `ActivityJitter`, `ActivityGP`.
-- **`sampler.name`**: `pt_emcee`, `transdim_pt_emcee`, `pt`, `rjmcmc`,
-  `moms`, `daedalus`, `nested`, `nested_ins`, `nested_dynamic`,
-  `pa`, `smc`, `pt_whitening`, `nuts`, `pt_hmc`, `ofti`.
+  `ActivityJitter`, `ActivityGP`, `ErrorScale`, `NightlyOffset`,
+  `HarmonicBlock`, `StudentT`, `MaternGP`, `IndicatorFloor`.
+- **`sampler.name`**: `pt_emcee`, `transdim_pt_emcee`, `pt`, `pt_hmc`,
+  `pt_whitening`, `rjmcmc`, `moms`, `daedalus`, `nested`, `nested_ins`,
+  `nested_dynamic`, `pa`, `smc`, `nuts`, `ofti`, `ensemble`, `ess` (`map` is
+  not available through `run_job`).
 - **`output.plots`**: `rv_timeseries`, `rv_components`, `rv_phasefold`,
   `pm_timeseries`, `pm_phasefold`, `rv_astrom_phasefold`,
   `orbit_skyplane`, `iad_residuals`, `epoch_astrometry_orbit`,

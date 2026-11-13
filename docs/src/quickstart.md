@@ -19,7 +19,7 @@ features. Nereus is version `0.9.0`.
 
 ## Installation
 
-Nereus requires Julia ≥ 1.11. Get it from
+Nereus declares Julia ≥ 1.10 (`[compat]` in `Project.toml`); CI and the runtime bundles run Julia 1.13.3, the version `Manifest.toml` was resolved with. Get it from
 [julialang.org](https://julialang.org/downloads/).
 
 Clone the repo and activate the package environment:
@@ -173,7 +173,8 @@ The returned `summary` (and `summary.json`) carries:
 - `n_planets_posterior` — `P(N_p = k)` (trans-dim runs only).
 - `ppc`, `loo`, `detection_limits`, `fit_health` blocks (all
   fail-soft — a failure here is logged and recorded, never aborts the
-  run). `detection_limits` only runs for PT-family samplers.
+  run). `detection_limits` runs by default only for `pt_emcee`, `transdim_pt_emcee`
+  and `pt` (`output.detection_limits = true` forces it for another sampler).
 - `figures` — a manifest mapping each rendered PNG's logical name
   (path under `plots/` without extension, e.g.
   `"models/rv_timeseries"`, `"transdim/occupancy"`) to its file path.
@@ -205,25 +206,32 @@ schema errors and reports them in one message before any heavy work.
 
 **`model`** — `max_kplanet` (required), `planet_modes`,
 `parametrization` (`mass` ∈ {`K_driven`, `M_sec_driven`, `a_driven`};
-`time` ∈ {`Tp`, `Tc`, `Mo`}; `ew` ∈ {`sesinw`, `ew`}; `geom` ∈
-{`b_rr`, `b_r`}; `marginalize_gamma` bool), `stability` ∈ {`none`,
-`amd`, `gladman`}, `trend_order` / `phot_trend_order` ∈ {0, 1, 2},
+`time` ∈ {`phic` (the default), `Mo`, `Tp`, `Tc`}, omitted = the anchor
+your priors name (an `Mo_k1` prior selects `Mo`), else `phic`; `t_ref_c`;
+`ew` ∈ {`sesinw`, `ew`}; `geom` = `b_rr` (the validator also lists `b_r`,
+which `ParametrizationConfig` rejects); `marginalize_gamma`, `use_rho_s`
+bool; `density` ∈ {`rho_circ` (the default), `rho_star`}), `stability` ∈
+{`none`, `amd`, `gladman`}, `trend_order` / `phot_trend_order` ∈ {0, 1, 2},
 `ttv_n_transits`, `ttv_backend`.
 
 **`planet_modes`** (known values): `RV_ONLY`, `PM_ONLY`, `RVPM`,
 `RVAS`, `RVPMAS`, `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`,
-`RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`, `RVPM_TTV_NB`,
-`RVPMAS_TTV_NB`, `PM_TTV_NB`.
+`RVPM_RM_A`, `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`,
+`PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`,
+`RVPM_RM_GD`, `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 
 **`priors`** — `{ "<name>": {"type": "<PriorType>", "args": [...]} }`.
 Types: `UniformPrior`, `LogUniformPrior`, `ModJeffreysPrior`,
-`NormalPrior`, `FixedPrior`, `SinePrior`, `BetaPrior`. Any prior you
+`NormalPrior`, `TruncNormalPrior`, `FixedPrior`, `SinePrior`, `BetaPrior`,
+`WrappedUniformPrior` (case, `_`, `-` and the `Prior` suffix are ignored; see
+`PRIOR_ALIASES` for the other spellings). Any prior you
 omit is auto-generated from the data bounds.
 
 **`sampler`** — `{ "name": "<sampler>", "kwargs": {...} }`. Names:
 `pt_emcee`, `transdim_pt_emcee`, `pt`, `pt_hmc`, `rjmcmc`, `moms`,
 `daedalus`, `nested`, `nested_ins`, `nested_dynamic`, `pa`, `smc`,
-`pt_whitening`, `nuts`, `ofti`. The trans-dim samplers
+`pt_whitening`, `nuts`, `ofti`, `ensemble`, `ess`. (`map` is not available
+through `run_job`: it returns a point, not a posterior.) The trans-dim samplers
 (`transdim_pt_emcee`, `rjmcmc`, `moms`, `daedalus`) require a top-level
 `transdim` block. JSON strings in `kwargs` that name Julia symbols
 (e.g. `"prior"` for `init_strategy`) are coerced automatically;
@@ -246,7 +254,8 @@ ESS at a wrong orbit. See [Samplers](samplers.md).
 **`noise_models`** — list of `{ "kind": "<Kind>", ... }`. Kinds:
 `CeleriteRotation`, `CeleriteSHO`, `CeleriteRotationFM17`,
 `ActivityDecorrelation`, `ARModel`, `MAModel`, `ActivityJitter`,
-`ActivityGP`. Each entry takes a `channel`, `instruments`, and a
+`ActivityGP`, `ErrorScale`, `NightlyOffset`, `HarmonicBlock`, `StudentT`,
+`MaternGP`, `IndicatorFloor`. Each entry takes a `channel`, `instruments`, and a
 `kwargs` sub-dict (see the ActivityGP section below).
 
 **`output`** — `plots` (list, or `["auto"]`), `plot_kwargs`,
