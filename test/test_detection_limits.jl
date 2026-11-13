@@ -231,3 +231,51 @@ end
     @test_throws ArgumentError detectability(chains, params, data; threshold = 0.0)
     @test_throws ArgumentError detectability(chains, params, data; n_P_bins = 2)
 end
+
+# ---------------------------------------------------------------------
+# Parametrizations that do not sample K (or P): the diagnostics must use
+# the derived quantity, not look for a `K_k1` / `P_k1` column.
+# ---------------------------------------------------------------------
+
+@testset "detection_limits / detectability — K derived, not sampled" begin
+    rng = MersenneTwister(11)
+    t = sort(200.0 .* rand(rng, 40))
+    rv = 12.0 .* sin.(2π .* t ./ 23.0) .+ randn(rng, 40)
+    data = Data(; t_rv = t, rv = rv, rv_err = ones(40), rv_inst = ones(Int, 40))
+    ic = InstrumentConfig(rv = ["SIM"])
+    priors = Dict{String, PriorSpec}(
+        "P_k1" => LogUniformPrior(2.0, 100.0),
+        "M_sec_k1" => LogUniformPrior(1.0e-5, 0.01))
+    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY], instruments = ic,
+                     data = data, M_s = 1.0, priors = priors,
+                     parametrization = ParametrizationConfig(mass = :M_sec_driven,
+                                                              time = :Mo))
+    @test !("K_k1" in params.layout.unfrozen_names)
+    @test "M_sec_k1" in params.layout.unfrozen_names
+
+    tg = NereusTarget(params, data)
+    res = sample_pt_emcee(tg, data; n_temps = 3, n_walkers = 16, n_steps = 150,
+                          n_burnin = 75, seed = 1, show_progress = false,
+                          bridge_headline = false)
+    chains = res.chains
+    @test !(:K_k1 in Symbol.(names(chains, :parameters)))
+
+    dl = detection_limits(chains, params; n_bins = 8, min_samples_per_bin = 5)
+    @test length(dl.K_limit) == 8
+    @test any(isfinite, dl.K_limit)
+    @test all(>(0), filter(isfinite, dl.K_limit))
+
+    # The K it bins is the model's own planet_K, draw by draw.
+    P, K = Nereus._planet_P_K_draws(chains, params, 1)
+    th = Theta{Float64}(params)
+    ms = vec(Array(chains[:, :M_sec_k1, :]))
+    for nm in params.layout.unfrozen_names
+        Symbol(nm) in Symbol.(names(chains, :parameters)) || continue
+        set_param!(th, nm, vec(Array(chains[:, Symbol(nm), :]))[7])
+    end
+    @test K[7] ≈ planet_K(th, 1) rtol = 1e-12
+    @test P[7] ≈ planet_P(th, 1) rtol = 1e-12
+
+    dt = detectability(chains, params, data; n_P_bins = 4, n_M_bins = 4, min_samples = 3)
+    @test size(dt.fraction) == (4, 4)
+end
