@@ -6,15 +6,15 @@ contract, and the post-fit pipeline). As of **v0.9.0** the validation
 suite covers two complementary layers:
 
 1. **Sampler recovery** — does each sampler recover injected orbits /
-   the planet count, or fail loud? (`test/validation/sampler_validation.jl`,
+   the planet count, or fail loud? (`studies/validation/sampler_validation.jl`,
    `transdim_validation.jl`.)
 2. **`run_job` plot surface + output contract** — does the production
    dispatcher emit every requested figure, recover the injected physics
    behind each science plot, and converge?
-   (`test/validation/validate_runjob_*.jl`.)
+   (`studies/validation/validate_runjob_*.jl`.)
 
-The unit tests in `test/test_*_gaussian.jl` exercise each sampler's
-**bare algorithm** against an analytic Gaussian. That proves the
+The unit tests (`test/test_evidence_gaussian.jl` for the evidence estimators)
+exercise a **bare algorithm** against an analytic Gaussian. That proves the
 sampling kernel is correct but says nothing about whether the sampler
 recovers a planet when driven through the **real** `NereusTarget` +
 `Params` + prior machinery — which is where this codebase's
@@ -22,7 +22,7 @@ silent-wrong bugs actually live (curved `(e, ω)` ridges, `threadid()`
 buffer races, transform-Jacobian MAP pulls, multi-planet label
 switching).
 
-The harness in [`test/validation/sampler_validation.jl`](https://github.com/jvines/Nereus/blob/main/Nereus.jl/test/validation/sampler_validation.jl)
+The harness in `studies/validation/sampler_validation.jl`
 closes that gap. It injects a planet with Nereus's **own** forward
 model (`rv_predictions`), runs each sampler on the production path
 under a smoke budget, and scores two things:
@@ -41,7 +41,7 @@ that looks converged and precise but is simply wrong.
 This is **synthetic-recovery validation on the production path**. It is
 the second rung of a four-rung ladder:
 
-1. **Bare-algorithm tests** (`test_*_gaussian.jl`) — kernel correctness.
+1. **Bare-algorithm tests** (`test_evidence_gaussian.jl` and the other unit tests) — kernel correctness.
 2. **Production-path synthetic recovery** (this harness) — does the
    sampler recover known truth through the real target/prior stack?
 3. **`run_job` plot surface + output contract**
@@ -61,6 +61,9 @@ estimate that fails loud rather than guessing. See
 
 ## How to run
 
+The harnesses and drivers below live in `studies/validation/`, a working
+directory that is not part of the published repository.
+
 The harness is importable; the self-test only fires when the file is run
 as a program (`abspath(PROGRAM_FILE) == @__FILE__`).
 
@@ -69,7 +72,7 @@ the eccentric target):
 
 ```bash
 julia --project=Nereus.jl -t 8 \
-    Nereus.jl/test/validation/sampler_validation.jl
+    studies/validation/sampler_validation.jl
 ```
 
 Drive individual cells from the REPL or a matrix script:
@@ -113,7 +116,8 @@ Each cell is a `NamedTuple` with `truth_in_95ci`, `silent_wrong`,
 
 Period priors are loosely bracketed (always ≥2× either side of truth)
 to keep smoke-budget samplers out of the alias forest; `K`, `e`, `Tp`,
-`γ`, `σ` use the data-driven default priors. The brackets are **not**
+`γ`, `σ` use the data-driven default priors (the harness anchors time on `Tp`
+explicitly; the package default is `phic`). The brackets are **not**
 cheating recovery — they are wide.
 
 ## Convergence diagnostics: family-aware R-hat
@@ -136,7 +140,7 @@ each sampler with `is_ensemble`:
     trace is split in half and the halves become the "chains" fed to
     `MCMCChains.rhat`. This diagnoses within-walker stationarity without
     the invalid cross-walker comparison.
-- **Independent** (`pt` (in-house / Pigeons), `nested*`, `nuts`):
+- **Independent** (`pt` (the in-house parallel tempering), `nested*`, `nuts`):
   cross-chain R-hat is the correct diagnostic when there are ≥2 genuine
   chains (e.g. parallel NUTS). A single resampled NS chain has no
   cross-chain R-hat, so the harness reports `rhat_kind = :none` and
@@ -184,7 +188,7 @@ excludes truth while passing naive R-hat / ESS. The current matrix has
 | Sampler | Status | Notes |
 |---|---|---|
 | `pt_emcee` | **Solid** | Recovers all three; within-walker split-R-hat ≈ 1.01–1.09, good ESS. |
-| `pt` (in-house / Pigeons) | **Solid** | Recovers all three; reliable fixed-dim log Z. |
+| `pt` (in-house PT) | **Solid** | Recovers all three; reliable fixed-dim log Z. |
 | `nested` | **Solid** | Recovers all three at `n_live = 1500` (`bounds = :multi`, `proposal = :rslice`); very high ESS (~10⁴). At `n_live = 400` the eccentric ridge silently mis-resolved — closed by the higher default. |
 | `nested_ins` | **Solid** | Recovers all three. |
 | `nested_dynamic` | **Solid** | Recovers all three with dynamic live-point reallocation. |
@@ -226,7 +230,7 @@ The matrix above certifies that, GIVEN the number of planets, each
 sampler recovers the orbits or fails loud — its 2-planet generator
 *freezes* `n_p=2`. It says nothing about whether the trans-dim samplers
 find the right NUMBER of planets. The companion harness
-[`test/validation/transdim_validation.jl`](https://github.com/jvines/Nereus/blob/main/Nereus.jl/test/validation/transdim_validation.jl)
+`studies/validation/transdim_validation.jl`
 closes that, one dimension up.
 
 It injects a KNOWN number of planets `k ∈ {0, 1, 2}` — strong,
@@ -271,7 +275,7 @@ The matrices above certify the *samplers*. A production pipeline
 [`Nereus.run_job(cfg)`](@ref) with a JSON/`Dict` config and consumes
 the returned summary plus the on-disk plot tree and science tables.
 That whole surface is now validated by a family of drivers under
-[`test/validation/validate_runjob_*.jl`](https://github.com/jvines/Nereus/tree/main/Nereus.jl/test/validation).
+`studies/validation/validate_runjob_*.jl`.
 Each driver builds a **synthetic dataset from Nereus's own forward
 model** (so the truth is exact), runs it through `run_job` requesting a
 specific plot group, and asserts two things:
@@ -298,7 +302,7 @@ Each driver is a standalone program. From the repo root:
 
 ```bash
 julia --project=Nereus.jl -t 8 \
-    Nereus.jl/test/validation/validate_runjob_plots.jl
+    studies/validation/validate_runjob_plots.jl
 ```
 
 Several drivers honour a `*_REPLOT=1` environment variable that
@@ -306,10 +310,10 @@ re-dispatches only the plots from the saved `chains.nc` (no re-fit) —
 useful when iterating on figure styling:
 
 ```bash
-RM_REPLOT=1     julia --project=Nereus.jl test/validation/validate_runjob_rm_plots.jl
-AGP_REPLOT=1    julia --project=Nereus.jl test/validation/validate_runjob_agp_plots.jl
-TTV_REPLOT=1    julia --project=Nereus.jl test/validation/validate_runjob_ttv_plots.jl
-IADGOST_REPLOT=1 julia --project=Nereus.jl test/validation/validate_runjob_iad_gost_plots.jl
+RM_REPLOT=1     julia --project=Nereus.jl studies/validation/validate_runjob_rm_plots.jl
+AGP_REPLOT=1    julia --project=Nereus.jl studies/validation/validate_runjob_agp_plots.jl
+TTV_REPLOT=1    julia --project=Nereus.jl studies/validation/validate_runjob_ttv_plots.jl
+IADGOST_REPLOT=1 julia --project=Nereus.jl studies/validation/validate_runjob_iad_gost_plots.jl
 ```
 
 ### Driver matrix
@@ -323,8 +327,9 @@ IADGOST_REPLOT=1 julia --project=Nereus.jl test/validation/validate_runjob_iad_g
 | `validate_runjob_astrom_plots.jl` | RV + relative astrometry (`RVAS`) | known orbit `P=900, e=0.30, inc=63°`; asserts `P/K/ecc` recovered **and `inc` within 6°** (astrometry-only → proves astrometry is in the fit), `assess_fit :convergence => :ok` | `orbit_skyplane`, `relastrom_residuals`, `relastrom_timeseries`, `rv_astrom_phasefold`, `corner` |
 | `validate_runjob_iad_gost_plots.jl` | RV + **Hipparcos IAD** + **Gaia GOST** (`RVAS`) | real ε Eri (HIP 16537) modern RV + absolute astrometry; asserts `P` near ε Eri b (within 300 d); `REPLOT` path times the full post-fit pipeline (`ppc`/`detection_limits`/`loo`/`fit_health`) on the real 968-RV / 19-yr set | `iad_residuals`, `pm_anomaly`, `rv_timeseries`, `corner` |
 | `validate_runjob_transdim.jl` | RV + transit, trans-dim (`transdim_pt_emcee`, `N_p` 0..2) | strong 1-planet signal; asserts occupancy concentrates on `N_p=1` (`P(N_p=1) > 0.6`, modal) | `transdim_occupancy` |
+| `validate_runjob_sb2.jl` | RV, **SB2 double-lined binary** + circumprimary planet (`BINARY_RV` + `RV_ONLY`) | injects `K_A = 820`, `K_B = 1240` m/s and a planet `K = 24` m/s; asserts `status` ok, `K_A`/`K_B`/`K_p` recovered in the fitted table and the binary mass ratio and minimum masses in the derived table | the SB2-aware plots |
 
-All seven drivers are tracked in the repo and pass. The injected
+All eight drivers pass. The injected
 forward model in each is built with `build_target` / `rv_predictions` /
 `phot_predictions`, so the assertions are against Nereus's own physics.
 
