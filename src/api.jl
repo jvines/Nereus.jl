@@ -1153,6 +1153,7 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
     catch err
         summary["diagnostics"] = Dict{String,Any}("error" => sprint(showerror, err))
     end
+    summary["provenance"] = provenance_block(spec_name, target.params)
     summary["params"] = _summarise_params(chains, target.params)
     _n_planets_posterior!(summary, chains)
     try
