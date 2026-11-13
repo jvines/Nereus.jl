@@ -697,16 +697,18 @@ function _density_derived_draws(params::Params, X::AbstractMatrix{<:Real})
     uf = params.layout.unfrozen_idx
     n = size(X, 1)
     out = Matrix{Float64}(undef, n, length(d.derived))
-    nslot = _nthread_slots()
-    thetas = [Theta{Float64}(params) for _ in 1:nslot]
-    Threads.@threads :static for i in 1:n
-        th = thetas[Threads.threadid()]
-        @inbounds for (j, idx) in enumerate(uf)
-            th.values[idx] = X[i, j]
-        end
-        density_physical!(th)
-        @inbounds for (j, idx) in enumerate(d.derived)
-            out[i, j] = th.values[idx]
+    # Chunk-keyed scratch (src/threading.jl), one Theta per chunk.
+    chunks = _chunk_ranges(n, _nthread_chunks())
+    Threads.@threads for c in eachindex(chunks)
+        th = Theta{Float64}(params)
+        for i in chunks[c]
+            @inbounds for (j, idx) in enumerate(uf)
+                th.values[idx] = X[i, j]
+            end
+            density_physical!(th)
+            @inbounds for (j, idx) in enumerate(d.derived)
+                out[i, j] = th.values[idx]
+            end
         end
     end
     return out
