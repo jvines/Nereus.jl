@@ -248,17 +248,21 @@ present.
 | `td::TransDimConfig` | required | trans-dim config; needs `planets` or `noise` true (`transdim_pt_emcee.jl:511`) |
 | `inclusion_prior::Real` | `0.5` | Bernoulli prior P(γ\_k = 1); must be in (0, 1) |
 | `moms_init_scale::Real` | `1.0` | initial scale multiplier for the MoMS Gaussian-RW birth |
-| `informed_birth_fraction::Real` | `0.0` | fraction of births using `JointInformedBirth` (BLS + LS, depth→radius→mass→K, BLS-t0 anchoring; auto-falls back to RV-only `InformedBirth` with no photometry). Forward/reverse use the same strategy family so detailed balance holds. **Critical for finding weak / arbitrary-period planets** — `0.0` gives blind RW births that rarely land. |
+| `informed_birth_fraction::Real` | `0.5` | fraction of births using `JointInformedBirth` (BLS + LS, depth→radius→mass→K, BLS-t0 anchoring; auto-falls back to RV-only `InformedBirth` with no photometry). Forward/reverse use the same strategy family so detailed balance holds. **Critical for finding weak / arbitrary-period planets** — `0.0` gives blind RW births that rarely land. |
 | `n_birth_tries::Int` | `1` | multi-try birth candidates per move |
 | `n_birth_refine::Int` | `0` | post-birth RWM refinement steps (jointly refines jitter with the newborn) |
 | `target_birth_accept::Real` | `0.234` | adaptation target for the MoMS scales |
-| `n_temps::Int` | `5` | PT ladder size |
+| `n_temps::Int` | `16` | PT ladder size |
 | `n_walkers::Int` | `100` | ensemble size (bumped to `≥ 2·n_dim + 2`, made even) |
-| `n_steps` / `n_burnin` | `2000` / `1000` | post-burn-in steps / burn-in |
+| `n_steps` / `n_burnin` | `3000` / `2000` | post-burn-in steps / burn-in |
 | `beta_min::Real` | `1e-4` | hottest β; geometric ladder `β_i = beta_min^(i/(n_temps-1))` over `[beta_min, 1]` — adding temps **densifies the cold end** rather than pushing T\_max hotter |
 | `betas` | `nothing` | explicit ladder (overrides `beta_min`) |
 | `noise_swap` / `noise_swap_rate` | `true` / `0.5` | post-burn-in DB-correct within-exclusion-group noise swap |
-| `adapt_ladder` | `false` | thermodynamic-length ladder re-grid (window `ladder_adapt_window`, ν₀ `ladder_adapt_ν0`, K `ladder_adapt_K`) |
+| `adapt_ladder` | `true` | equalise swap acceptance across the ladder during burn-in, holding β = 1 and `beta_min` fixed, then freeze it (window `ladder_adapt_window`, ν₀ `ladder_adapt_ν0`, K `ladder_adapt_K`) |
+| `de_move::Real` | `0.5` | per walker and step, the probability of a differential-evolution move in place of the stretch move (as in `sample_pt_emcee`) |
+| `prune_stranded::Bool` | `true` | burn-in only: walkers stranded far below their rung's mode, in the joint (model, parameter) space, are drawn about a mode walker's parameters and take its model |
+| `node_flip::Real` | `0.1` | per walker and step, the probability of the (Ω, ω) → (Ω+π, ω+π) mirror of each astrometry-only planet; `0` disables it |
+| `swap_min::Real` | `0.05` | least adjacent swap rate for the tempered `log_evidence` to be quoted |
 | `seed` / `thin` / `show_progress` | `1` / `1` / `true` | |
 
 The result `TransDimPTemceeResult` carries `chains`, `log_evidence`
