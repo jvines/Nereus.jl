@@ -158,6 +158,7 @@ include("ttv_nbody.jl")            # N-body-predicted TTVs via TTVFaster (TTV-C)
 include("ttv_nbody_full.jl")       # full ODE backend via NbodyGradient.jl
 include("sampler_diagnostics.jl") # per-engine run health, persisted into every summary
 include("engines_registry.jl")   # the ONE sampler registry; api.jl and runner.jl derive from it
+include("provenance.jl")           # summary.json provenance: engine, version, priors
 include("runner.jl")               # JSON/dict-driven batch entry point
 include("runner_obliquity.jl")     # run_job: RM-night and line-profile data blocks, model.obliquity
 include("api.jl")                  # split-by-functionality public API (fit_*)
