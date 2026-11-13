@@ -254,18 +254,22 @@ _plotmem_stage(chains, params, data) = Nereus._make_plots(
     end
 
     @testset "the plotting stage allocates little per draw" begin
-        _plotmem_stage(_plotmem_chain(params, vals, 4_000, 8), params, data)   # compile
         n1, n2 = 100_000, 300_000                    # both above the 60,000-draw band
         c1 = _plotmem_chain(params, vals, n1, 8)
         c2 = _plotmem_chain(params, vals, n2, 8)
+        # Compile on the larger chain: above `max_draws` the corners are thinned
+        # and pinned, a call of its own to compile, and compiled inside `a2` it
+        # counted as 4 rows a draw.
+        _plotmem_stage(c2, params, data)
         a1 = @allocated _plotmem_stage(c1, params, data)
         a2 = @allocated _plotmem_stage(c2, params, data)
         per_draw = (a2 - a1) / (n2 - n1)
         row = 8 * size(c2, 2)                        # one draw of every column
-        # Measured: 9 rows a draw, most of it the corner's KDEs over its thinned
-        # draws. Before it was bounded the stage took 46: a copy of every column
-        # in each figure, a sub-chain per fold, two effective sample sizes per
-        # corner panel.
-        @test per_draw < 15 * row
+        # Measured: 4.3 rows a draw, with a corner per planet and one of the
+        # noise model (`plot_corners`); 6.2 with the all-parameter corner they
+        # replaced. Before the stage was bounded it took 46: a copy of every
+        # column in each figure, a sub-chain per fold, two effective sample
+        # sizes per corner panel.
+        @test per_draw < 6 * row
     end
 end
