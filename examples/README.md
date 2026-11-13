@@ -1,7 +1,9 @@
 # Nereus examples
 
-Two worked tutorials on Gaia DR4 (pre-release) epoch astrometry. Run them in
-order — the second assumes the first.
+Four worked tutorials. Notebooks 01 and 02 are Julia tutorials on Gaia DR4
+(pre-release) epoch astrometry; run them in order, the second assumes the
+first. Notebooks 03 and 04 are Python tutorials (`astronereus`), described
+below.
 
 | notebook | system | channels | what it shows |
 |---|---|---|---|
@@ -12,7 +14,7 @@ HD 114762 b was the first exoplanet candidate ever announced (Latham et al.
 1989). Radial velocities give `M sin i ~ 11 M_Jup`; the joint fit shows the
 orbit is nearly face-on and the companion is a ~0.1 M_sun star.
 
-## Running them
+## Running notebooks 01 and 02
 
 Both need only Nereus. Data is handled for you: the DR4 VOTable is fetched to
 the Nereus cache on first use, and the HD 114762 radial velocities ship with the
@@ -36,22 +38,17 @@ julia --project -t auto -e 'using NBInclude; @nbinclude("01_gaia4_astrometry_onl
 
 ## Cost
 
-Both fit with parallel tempering, where `n_rounds` doubles the sample count each
-round — so the cost roughly doubles per round too.
+Both fit with `sample_pt_emcee` and run `n_steps` steps (3000 by default, burn-in
+included; burn-in is `min(1500, n_steps ÷ 2)`), so the cost is roughly linear in
+the step count. Both notebooks default to production settings and expose the step
+count through an environment variable (`GAIA4_STEPS`, `HD114762_STEPS`) so you
+can smoke-test deliberately rather than by accident.
 
-| rounds | Gaia-4 | use |
-|---|---|---|
-| 3–4 | ~1 min | smoke test: does it run |
-| 12 | ~1 h | a result you would quote |
-
-**The short settings do not give a usable posterior.** On HD 114762 at 4 rounds
-the inclination rails toward zero, the RV chi-squared per point sits near 59,
-and the credible intervals come out grossly asymmetric — while the headline mass
-still lands near the published value. That combination is the trap: a short run
-that agrees with the answer you expected is not evidence of anything. Both
-notebooks default to production settings and expose the round count through an
-environment variable (`GAIA4_ROUNDS`, `HD114762_ROUNDS`) so you can smoke-test
-deliberately rather than by accident.
+**A short run does not give a usable posterior.** Short chains can leave the
+inclination railing, the RV chi-squared per point far above 1 and the credible
+intervals grossly asymmetric, while the headline mass still lands near the
+published value. That combination is the trap: a short run that agrees with the
+answer you expected is not evidence of anything.
 
 ## Figures
 
