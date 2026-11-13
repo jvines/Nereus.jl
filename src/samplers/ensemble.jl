@@ -477,10 +477,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         # Windows (and spin axis) the saved walkers live in, moved by the re-cut;
         # with several chains put back, once for all, by `sample_ensemble`.
         if pre === nothing && hasproperty(ck, :windows)
-            for (nm, (lo, _)) in ck.windows
-                set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
-                                     lo; transforms = has_transform ? (target.transform,) : ())
-            end
+            _restore_windows!(params, ck.windows, has_transform ? (target.transform,) : ())
             params.layout.spin_axis .= ck.spin_axis
         end
     end

@@ -261,6 +261,77 @@ end
         end
     end
 
+    @testset "the prior integrates to one over the sampled box" begin
+        # The surrogate is uniform in (log ρ_circ, η) on its box, so the mean of
+        # exp(density_logprior_correction) over a midpoint grid of that box is
+        # the reparametrized prior's mass, which must be the old prior's: 1, as
+        # nothing in these e-priors reaches e = 1. Box (esinw, ecosw) priors, flat
+        # in (x, y), so the integrand is bounded; |esinw|, |ecosw| ≤ 0.3 stops at
+        # e_max = 0.42, whose η is sampled on an arc (`_density_eta_range`), and
+        # 0.6 at e_max = 0.85. The grid's error is the box edges' O(1/n).
+        box(p, nm) = Nereus.bounds(p.layout.unfrozen_priors[findfirst(==(nm), p.layout.unfrozen_names)])
+        t0 = _dr_target(; M_s = 1.0, R_s = 1.0)
+        for a in (0.3, 0.6)
+            pc = ParametrizationConfig(ew = :esinw, time = :phic,
+                                       t_ref_c = t0.params.config.parametrization.t_ref_c)
+            pri = merge(_DR_PRI1, Dict("esinw_k1" => UniformPrior(-a, a),
+                                       "ecosw_k1" => UniformPrior(-a, a)))
+            P = Params(max_kplanet = 1, planet_modes = t0.params.config.planet_modes,
+                       instruments = t0.params.config.instruments, parametrization = pc,
+                       priors = Dict{String,PriorSpec}(pri), data = t0.data,
+                       M_s = 1.0, R_s = 1.0, stability = :none)
+            d = P.layout.density
+            @test d.mode === :given && d.eta[1] > 0
+            ηlo, ηhi = box(P, "eta_k1")
+            @test (ηlo, ηhi) == Nereus._density_eta_range(Nereus._density_e_max(
+                :esinw, pri["esinw_k1"], pri["ecosw_k1"]))
+            @test ηhi - ηlo < 2π
+            lo, hi = box(P, "rho_circ_k1")
+            th = Theta{Float64}(P)
+            Nereus.set_unfrozen!(th, Nereus._draw_from_prior(NereusTarget(P, t0.data), MersenneTwister(4)))
+            n = 1200; m = 0.0
+            for i in 1:n, j in 1:n
+                th.values[d.rho_circ[1]] = exp(log(lo) + (i - 0.5) / n * log(hi / lo))
+                th.values[d.eta[1]] = ηlo + (j - 0.5) / n * (ηhi - ηlo)
+                Δ = Nereus.density_logprior_correction(th)
+                isfinite(Δ) && (m += exp(Δ))
+            end
+            @test m / n^2 ≈ 1 atol = 5e-3
+        end
+
+        # The sesinw box the GP-on-photometry test uses: every draw of the old
+        # prior maps inside the arc, at a finite prior.
+        pri = merge(_DR_PRI1, Dict("sesinw_k1" => UniformPrior(-0.3, 0.3),
+                                   "secosw_k1" => UniformPrior(-0.3, 0.3)))
+        tg = _dr_target(; pri, M_s = 1.0, R_s = 1.0); pg = tg.params
+        p0 = Nereus.without_density_reparam(pg, tg.data); t0 = NereusTarget(p0, tg.data)
+        ηlo, ηhi = box(pg, "eta_k1")
+        @test (ηlo, ηhi) == Nereus._density_eta_range(0.18)
+        q = findfirst(==("eta_k1"), pg.layout.unfrozen_names)
+        th = Theta{Float64}(pg); rng = MersenneTwister(5)
+        for _ in 1:2000
+            xn = Nereus.density_new_x(Nereus._draw_from_prior(t0, rng), p0, pg)
+            @test ηlo < xn[q] < ηhi
+            Nereus.set_unfrozen!(th, xn)
+            @test isfinite(Nereus.log_prior(th))
+        end
+
+        # The anchor: ∫ π(ρ★) dρ★ over ρ_circ's box at a fixed orbit.
+        ta = _dr_target(; use_rho_s = true); pa = ta.params; da = pa.layout.density
+        lo, hi = box(pa, "rho_circ_k1")
+        th = Theta{Float64}(pa)
+        for seed in 1:3
+            Nereus.set_unfrozen!(th, Nereus._draw_from_prior(ta, MersenneTwister(seed)))
+            n = 200_000; m = 0.0
+            for i in 1:n
+                th.values[da.rho_circ[1]] = exp(log(lo) + (i - 0.5) / n * log(hi / lo))
+                Δ = Nereus.density_logprior_correction(th)
+                isfinite(Δ) && (m += exp(Δ))
+            end
+            @test m / n ≈ 1 atol = 5e-3
+        end
+    end
+
     @testset "outside the support: -Inf, never NaN" begin
         pri = merge(_DR_PRI1, Dict("rho_s" => NormalPrior(1.0, 0.1, 0.5, 1.5)))
         tgt = _dr_target(; pri, use_rho_s = true); p = tgt.params; d = p.layout.density
@@ -288,6 +359,57 @@ end
         lp, ll = Nereus._logdensity_parts(NereusTarget(pg, tg.data; unconstrained = false),
                                           Nereus.unfrozen_values(tt))
         @test lp == -Inf && !isnan(ll)
+    end
+
+    @testset "nested sampling: no plateau outside the support" begin
+        # Where the correction is -Inf the nested loglikes return
+        # density_ns_floor: finite, below every real log L, and rising toward the
+        # old prior's support. One value there was a plateau the threshold sat on,
+        # and log Z came out low by (1 - p)/p + log p for the share p of the cube
+        # inside the support (~15 nats for the anchor below).
+        pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0)))
+        ta = _dr_target(; pri, use_rho_s = true); pa = ta.params; da = pa.layout.density
+        th = Theta{Float64}(pa); Nereus.set_unfrozen!(th, Nereus._draw_from_prior(ta, MersenneTwister(2)))
+        @test isfinite(Nereus.density_logprior_correction(th))
+        @test Nereus.density_support_distance(th) == 0
+        rc = th.values[da.rho_circ[1]]; r0 = Nereus.rho_s(th)
+        fl = Float64[]
+        for f in (1e3, 1e2, 2.0)               # ρ★ = 10 f: ever closer to its top
+            th.values[da.rho_circ[1]] = rc * (10 / r0) * f
+            @test Nereus.density_logprior_correction(th) == -Inf
+            @test Nereus.density_support_distance(th) ≈ log(f) rtol = 1e-10
+            push!(fl, Nereus.density_ns_floor(th))
+        end
+        @test all(isfinite, fl) && all(<(-1e199), fl) && issorted(fl) && allunique(fl)
+
+        # An η planet: up its η = π/2 line g falls from the top of its box, and the
+        # orbit (e sin ω = (g² - 1)/(g² + 1)) comes into |sesinw| ≤ 0.3.
+        pri = merge(_DR_PRI1, Dict("sesinw_k1" => UniformPrior(-0.3, 0.3),
+                                   "secosw_k1" => UniformPrior(-0.3, 0.3)))
+        tg = _dr_target(; pri, M_s = 1.0, R_s = 1.0); pg = tg.params; dg = pg.layout.density
+        th = Theta{Float64}(pg); Nereus.set_unfrozen!(th, Nereus._draw_from_prior(tg, MersenneTwister(3)))
+        fl = Float64[]
+        for g in (1.19, 1.15, 1.10)                  # ρ★ = 1
+            th.values[dg.rho_circ[1]] = g^3; th.values[dg.eta[1]] = π / 2
+            @test Nereus.density_logprior_correction(th) == -Inf
+            @test Nereus.density_support_distance(th) ≈
+                  (sqrt((g^2 - 1) / (g^2 + 1)) - 0.3) / 0.6 rtol = 1e-8
+            push!(fl, Nereus.density_ns_floor(th))
+        end
+        @test all(isfinite, fl) && all(<(-1e199), fl) && issorted(fl) && allunique(fl)
+        th.values[dg.rho_circ[1]] = 1.05^3
+        @test isfinite(Nereus.density_logprior_correction(th))
+        @test Nereus.density_support_distance(th) == 0
+
+        # And the evidence: the anchor's log Z is the one sampling ρ★ gives, where
+        # the plateau put it ~15 nats low. Seeded; 4 is four times the scatter
+        # of the difference at this n_live.
+        pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0)))
+        lz = map((:rho_circ, :rho_star)) do density
+            tgt = _dr_target(; pri, use_rho_s = true, density)
+            Nereus.sample_nested(tgt, tgt.data; n_live = 150, seed = 1, show_progress = false)[2]
+        end
+        @test isfinite(lz[1]) && abs(lz[1] - lz[2]) < 4
     end
 
     @testset "names, chains and summaries" begin

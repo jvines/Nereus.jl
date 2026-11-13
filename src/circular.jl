@@ -1296,20 +1296,40 @@ function _rendezvous_abort!(rv::_Rendezvous)
 end
 
 """
+    _restore_windows!(params, windows, transforms) -> params
+
+Put every circular window back as a checkpoint saved it (`windows`, a
+`circular_windows` Dict), on the layout and on `transforms`.
+
+Both bounds, as saved: a window re-cut more than once spans one period only to
+within an ulp (each re-cut keeps the span the last one left, `hi - lo`), so
+putting back `lo` alone, with `hi = lo + 2π`, moved `hi`, and with it every value
+the transform maps into the window, by that much, and a resumed run's draws
+were no longer the uninterrupted run's.
+"""
+function _restore_windows!(params::Params, windows, transforms)
+    names = params.layout.unfrozen_names
+    for (nm, (lo, hi)) in windows
+        set_circular_window!(params, findfirst(==(nm), names), lo; transforms, hi)
+    end
+    return params
+end
+
+"""
     _restore_shared_windows!(params, windows, transforms) -> Bool
 
-Put the layout's circular windows back as a checkpoint saved them (`windows`, a
-`circular_windows` Dict), before the chains of a resumed multi-chain run start.
-Returns whether any moved.
+`_restore_windows!` for the windows the layout does not already hold, before
+the chains of a resumed multi-chain run start. Returns whether any moved.
 """
 function _restore_shared_windows!(params::Params, windows, transforms)
     L = params.layout
     moved = false
-    for (nm, (lo, _)) in windows
+    for (nm, (lo, hi)) in windows
         i = findfirst(==(nm), L.unfrozen_names)
         i === nothing && continue
-        L.unfrozen_priors[i].lo == lo && continue
-        set_circular_window!(params, i, lo; transforms)
+        ps = L.unfrozen_priors[i]
+        ps.lo == lo && ps.hi == hi && continue
+        set_circular_window!(params, i, lo; transforms, hi)
         moved = true
     end
     return moved

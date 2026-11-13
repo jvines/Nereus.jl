@@ -415,10 +415,7 @@ function _sample_rjmcmc_one(
                 log_L = _eval_ll(theta, data, ctr)
             end
         elseif recut_circular
-            for (nm, (lo, _)) in saved.windows
-                set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
-                                     lo; transforms = (target.transform,))
-            end
+            _restore_windows!(params, saved.windows, (target.transform,))
         end
         informed === nothing || _informed_restore!(informed, saved.informed, params, rng)
     end

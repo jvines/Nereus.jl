@@ -1507,7 +1507,9 @@ the circular-equivalent density of planet k (solar units, log-uniform scale like
     on which √(1 − e²) = g (1 + sin η)/(1 + g²). These ellipses fill the open
     disc, one per g, all touching the circle e = 1 at η = −π/2, so (g, η) with
     η ∈ (−π/2, 3π/2) is a bijection onto e < 1: no quadratic in e, no choice
-    of root. |∂(x, y)/∂(g, η)| = g² (1 + sin η)² / (1 + g²)^{5/2}.
+    of root. |∂(x, y)/∂(g, η)| = g² (1 + sin η)² / (1 + g²)^{5/2}. When the
+    planet's e-prior stops at e_max < 1, η is sampled on the arc about π/2
+    that holds e ≤ e_max at every g (`_density_eta_range`).
 
 The old coordinates (`rho_s`, the e-coordinates of the η planets) stay layout
 slots, read through the accessors (`planet_e_w`, `stellar_density`) but never
@@ -1531,7 +1533,8 @@ struct DensityReparam
     old_e::Vector{NTuple{2,Int}}  # per planet: positions in `derived` of e1, e2
     old_rho::Int                  # position in `derived` of rho_s (:anchor), else 0
     rho_slot::Int                 # the rho_s slot, 0 for none
-    lnorm::Vector{Float64}        # per planet: log log(hi/lo) of its ρ_circ box
+    lnorm::Vector{Float64}        # per planet: log log(hi/lo) of its ρ_circ box, plus
+                                  # log of its η interval's width (η planets)
     G::Float64                    # g ∈ [1/G, G]
 end
 

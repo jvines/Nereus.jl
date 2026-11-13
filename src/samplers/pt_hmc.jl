@@ -511,11 +511,8 @@ function sample_pt_hmc(
     # captured `rng`, and rebinding it would box it).
     if ck !== nothing
         copy!(rng, ck.rng::MersenneTwister)
-        names_ = target.params.layout.unfrozen_names
-        for (nm, (lo, _)) in ck.windows::Dict{String,Tuple{Float64,Float64}}
-            set_circular_window!(target.params, findfirst(==(nm), names_), lo;
-                                 transforms = (target.transform,))
-        end
+        _restore_windows!(target.params, ck.windows::Dict{String,Tuple{Float64,Float64}},
+                          (target.transform,))
     end
     # A core's `save`: the checkpoint of phase `ph` around the core's state.
     # The windows the warm-ups re-cut (`_hmc_recut!`): the target's own.

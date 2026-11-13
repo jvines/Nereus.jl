@@ -1752,10 +1752,7 @@ function sample_pt_emcee(
         conv_run = ck.conv_run::Int; rhat_str = ck.rhat_str::String
         ess_str = ck.ess_str::String
         # Windows the saved walkers live in (moved by the burn-in re-cut).
-        for (nm, (lo, _)) in ck.windows
-            set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
-                                 lo; transforms = (target.transform,))
-        end
+        _restore_windows!(params, ck.windows, (target.transform,))
         merge!(recut_moved, ck.recut_moved)
         # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
         hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
