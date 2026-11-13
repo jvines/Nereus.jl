@@ -381,5 +381,24 @@ end
         th = Theta{Float64}(tgt.params); Nereus.set_unfrozen!(th, r.x_map)
         @test r.param_names == tgt.params.layout.unfrozen_names
         @test isfinite(Nereus.log_prior(th))
+        # run_job hands such an engine, and everything written from its chains,
+        # the model in ρ★ and (e, ω): the chains file names what it holds.
+        lc = _DR_LC1["TESS"]
+        u(lo, hi) = Dict("type" => "UniformPrior", "args" => [lo, hi])
+        cfg = Dict{String,Any}("seed" => 1, "output_dir" => mktempdir(),
+            "star" => Dict("M_s" => 1.0, "R_s" => 1.0),
+            "priors" => Dict("P_k1" => u(3.4, 3.6), "rr_k1" => u(0.02, 0.3)),
+            "model" => Dict("max_kplanet" => 1, "planet_modes" => ["PM_ONLY"]),
+            "data" => Dict("transit_photometry" => [Dict("instrument" => "TESS",
+                "values" => Dict("bjd" => lc.t, "flux" => lc.flux, "flux_err" => lc.flux_err))]),
+            "sampler" => Dict("name" => "ess", "kwargs" => Dict("n_samples" => 40,
+                              "n_burnin" => 20, "n_chains" => 2)),
+            "output" => Dict("plots" => String[], "ppc" => false,
+                             "detection_limits" => false, "loo" => false))
+        Nereus.run_job(cfg)
+        ch, meta = Nereus.load_chains(joinpath(cfg["output_dir"], "chains.nc"))
+        @test !haskey(meta, "density") && !haskey(meta, "derived_param_names")
+        @test :sesinw_k1 in names(ch) && !(:rho_circ_k1 in names(ch))
+        @test occursin("sesinw_k1", meta["param_names"])
     end
 end
