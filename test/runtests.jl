@@ -2290,6 +2290,7 @@ end
         rv_err=ones(101),
     )
     params = Params(
+        parametrization=ParametrizationConfig(time=:Mo),
         max_kplanet=2,
         planet_modes=[RV_ONLY, RV_ONLY],
         instruments=ic,
@@ -2521,6 +2522,7 @@ end
             hgca      = hgca_as,
         )
         params_as = Params(
+            parametrization = ParametrizationConfig(time=:Mo),
             max_kplanet  = 2,
             planet_modes = [RVAS, RVAS],
             instruments  = ic_as,
@@ -3028,6 +3030,7 @@ end
 
         # With stability
         p_stab = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=2, planet_modes=[RV_ONLY, RV_ONLY],
             instruments=ic_rv, data=data_rv,
             stability=:amd, M_s=1.0,
@@ -3053,6 +3056,7 @@ end
 
         # Without stability → finite LL
         p_nostab = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=2, planet_modes=[RV_ONLY, RV_ONLY],
             instruments=ic_rv, data=data_rv,
             stability=:none,
@@ -3156,11 +3160,13 @@ end
         ecc_prior = ExternalPrior(:ecc, BetaPrior(0.867, 3.03), true)
 
         p_with = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=1, planet_modes=[RV_ONLY],
             instruments=ic_ep, data=data_ep,
             external_priors=[ecc_prior],
         )
         p_without = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=1, planet_modes=[RV_ONLY],
             instruments=ic_ep, data=data_ep,
         )
@@ -3382,6 +3388,7 @@ end
         ic_j = InstrumentConfig(rv=["RV_SIM"], pm=["PM_SIM"])
 
         params_j = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=1,
             planet_modes=[RVPM],
             instruments=ic_j,
