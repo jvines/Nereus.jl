@@ -1261,6 +1261,10 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         # Epoch the transit phase is measured from (time = "phic"). Absent:
         # Params takes the median photometric time.
         t_ref_c = Float64(_get(par, :t_ref_c; default = NaN)),
+        # "rho_circ" (default): a transiting planet with a free eccentricity
+        # samples the circular-equivalent density its transit measures;
+        # "rho_star": ρ★ and (e, ω) as sampled before. Same posterior.
+        density = Symbol(String(_get(par, :density; default = "rho_circ"))),
     )
 
     ic = InstrumentConfig(rv = inst_names_rv, pm = inst_names_pm,
