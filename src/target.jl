@@ -43,6 +43,20 @@ function with_phic_epoch(params::Params, data::Data)
     return Params(cfg, params.layout)
 end
 
+"""
+    without_density_reparam(target) -> NereusTarget
+
+`target` on the same model sampled in ρ★ and (e, ω) (`density = :rho_star`), for
+an engine that cannot run the photo-eccentric reparametrization: the
+trans-dimensional samplers, whose prior skips inactive planets slot by slot, and
+ESS. `target` itself when it has none.
+"""
+function without_density_reparam(target::NereusTarget)
+    density_active(target.params) || return target
+    return NereusTarget(without_density_reparam(target.params, target.data), target.data;
+                        unconstrained = target.transform !== nothing)
+end
+
 function NereusTarget(params::Params, data::Data; unconstrained::Bool=true)
     params = with_phic_epoch(params, data)
     if unconstrained

@@ -188,6 +188,12 @@ diagnostics, or one-off access — the hot path uses block accessors.
 """
 function get_param(theta::Theta, name::AbstractString)
     idx = theta.params.layout.name_to_idx[name]
+    d = theta.params.layout.density
+    # A coordinate the photo-eccentric reparametrization derives: its value at
+    # the sampled point, not the slot's stale contents.
+    if d.mode !== :none && idx in d.derived && _density_sampled_ok(theta)
+        density_physical!(theta)
+    end
     return theta.values[idx]
 end
 
@@ -199,6 +205,19 @@ diagnostics only.
 """
 function set_param!(theta::Theta, name::AbstractString, value::Real)
     idx = theta.params.layout.name_to_idx[name]
+    d = theta.params.layout.density
+    # Under the photo-eccentric reparametrization a coordinate it derives (ρ★,
+    # the e-coordinates of an η planet) is written as the physical coordinate
+    # it is: the sampled ρ_circ / η follow it, the other derived coordinates
+    # held (taken from the sampled point when that is one, else from their
+    # slots, so a physical point can be written name by name, in layout order).
+    # A sampled slot is written as is.
+    if d.mode !== :none && idx in d.derived
+        _density_sampled_ok(theta) && density_physical!(theta)
+        theta.values[idx] = value
+        density_from_physical!(theta)
+        return theta
+    end
     theta.values[idx] = value
     return theta
 end
@@ -355,9 +374,12 @@ end
     planet_e_w(theta, k) -> (e, ω)
 
 Eccentricity and argument of periastron, decoded from whatever
-parametrization is in use (`:sesinw`, `:esinw`, or `:ew`).
+parametrization is in use (`:sesinw`, `:esinw`, or `:ew`), or for a planet
+sampling `eta_k` under the photo-eccentric reparametrization from its
+(ρ_circ, η) at the model's ρ★ (`DensityReparam`).
 """
 @inline function planet_e_w(theta::Theta, k::Int)
+    _is_eta_planet(theta.params.layout.density, k) && return _eta_planet_e_w(theta, k)
     block = theta.params.layout.planet_blocks[k]
     x1 = theta.values[block.e1]
     x2 = theta.values[block.e2]
@@ -955,7 +977,7 @@ for a planet without transit geometry.
     cfg = theta.params.config
     M = astrom_M_pri(theta)
     if isnan(M) && cfg.parametrization.use_rho_s && !isnan(cfg.R_s) && cfg.R_s > 0
-        rho = theta.values[theta.params.layout.systemic.rho_s]
+        rho = _rho_star(theta)
         M = rho * T(RHO_SUN_CGS) * (4 * T(π) / 3) * (cfg.R_s * T(R_SUN_CM))^3 / T(M_SUN_G)
     end
     return M
@@ -980,7 +1002,7 @@ function _planet_geometry(block::PlanetBlock, theta::Theta{T}, k::Int, P) where 
         a0 = theta.values[ai]
         scale = false
     elseif parametrization.use_rho_s
-        a0 = rho_s_to_a_Rs(theta.values[theta.params.layout.systemic.rho_s], P)
+        a0 = rho_s_to_a_Rs(_rho_star(theta), P)
     else
         M_pri = astrom_M_pri(theta)
         R_s = cfg.R_s
@@ -992,8 +1014,9 @@ function _planet_geometry(block::PlanetBlock, theta::Theta{T}, k::Int, P) where 
     (block isa Union{PMOnlyBlock, RVPMBlock, RVPMASBlock}) ||
         return (a0, zero(T), nan)
     b = _geometry_b(block, theta)
-    e = _ecc_from_block(block, theta)
-    sinw = _sinw_from_block(block, theta)
+    e, sinw = _is_eta_planet(theta.params.layout.density, k) ?
+              _eta_planet_e_sinw(theta, k) :
+              (_ecc_from_block(block, theta), _sinw_from_block(block, theta))
     M_pri = _geometry_M_pri(theta)
 
     if block isa PMOnlyBlock || isnan(M_pri)
@@ -1020,13 +1043,15 @@ end
     rho_s(theta) -> value
 
 Shared stellar density. Errors if `parametrization.use_rho_s` is
-false (in which case the slot does not exist in the layout).
+false (in which case the slot does not exist in the layout). Under the
+photo-eccentric reparametrization's `:anchor` mode it is derived from the
+anchor planet's ρ_circ and (e, ω) (`_rho_star`).
 """
 @inline function rho_s(theta::Theta)
     idx = theta.params.layout.systemic.rho_s
     idx == 0 && throw(ArgumentError(
         "rho_s is not in use (parametrization.use_rho_s == false)"))
-    return theta.values[idx]
+    return _rho_star(theta)
 end
 
 # =====================================================================
@@ -1046,15 +1071,23 @@ hot path that autodiff gradients flow through.
 
 The return type tracks `eltype(theta)` — for a `Theta{Dual{…}}`
 the output is a `Dual`, for `Theta{Float64}` it's a `Float64`.
+
+Under the photo-eccentric reparametrization the sampled `rho_circ_k` / `eta_k`
+slots carry surrogate priors, and `density_logprior_correction` turns their sum
+into the model's prior on ρ★ and (e, ω) carried through the map: the prior, and
+so the posterior, of the physical coordinates is the one the model states.
 """
 function log_prior(theta::Theta{T}) where {T}
     if theta.td === nothing
         # Fixed-dim: evaluate all unfrozen priors (hot path, Enzyme-compatible)
-        return log_prior_packed(
+        lp = log_prior_packed(
             theta.values,
             theta.params.layout.unfrozen_idx,
             theta.params.layout.packed_priors,
         )
+        theta.params.layout.density.mode === :none && return lp
+        isfinite(lp) || return lp
+        return lp + density_logprior_correction(theta)
     else
         # Trans-dim: skip priors for inactive planet/noise slots
         return _log_prior_transdim(theta)
