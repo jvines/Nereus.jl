@@ -318,7 +318,8 @@ function posterior_predictive_check(chains, params::Params, data::Data;
         summary["rv_red_chi2_median_model"] =
             sum(values(rv_chi2_inst)) / dof_total
         summary["rv_red_chi2_per_inst"] =
-            Dict(string(k) => v for (k, v) in rv_red_chi2)
+            Dict(_inst_label(params.config.instruments.rv_names, k) => v
+                 for (k, v) in rv_red_chi2)
         summary["rv_outliers_3sigma"] = count(
             i -> abs(rv_resid_med[i]) > 3 * rv_err_med[i], 1:n_rv_obs)
         summary["rv_red_chi2_per_draw_p16"] = quantile(red_per_draw, 0.16)
@@ -342,7 +343,8 @@ function posterior_predictive_check(chains, params::Params, data::Data;
         summary["phot_red_chi2_median_model"] =
             sum(values(phot_chi2_inst)) / dof_total
         summary["phot_red_chi2_per_inst"] =
-            Dict(string(k) => v for (k, v) in phot_red_chi2)
+            Dict(_inst_label(params.config.instruments.pm_names, k) => v
+                 for (k, v) in phot_red_chi2)
         summary["phot_outliers_3sigma"] = count(
             i -> abs(phot_resid_med[i]) > 3 * phot_err_med[i], 1:n_pm_obs)
         summary["phot_red_chi2_per_draw_p16"] = quantile(red_per_draw, 0.16)
@@ -375,6 +377,11 @@ end
 # =====================================================================
 # Helpers
 # =====================================================================
+
+# summary.json keys an instrument by its name, as everything else there does;
+# the index only when the model has no name for it.
+_inst_label(names, k::Integer) =
+    1 <= k <= length(names) && !isempty(names[k]) ? String(names[k]) : string(k)
 
 # Each parameter's draws as one vector, iterations fastest then chains (the
 # order of `_draws(chains, nm)`). Plain Float64 chains are read in place,
