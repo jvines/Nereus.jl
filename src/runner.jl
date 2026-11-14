@@ -2474,7 +2474,8 @@ end
 # photometry χ² beside it are of the PPC's median model; an astrometric orbit
 # is read at max lp instead because its per-parameter median sits off the
 # ridge (Gaia-4: 1.45 against 1.38). An instrument is labelled by its jitter
-# name when it has one, else `iad_<index>`. `nothing` without IAD.
+# name when it has one, else `IAD` (one instrument) or `IAD<index>`. `nothing`
+# without IAD.
 function _iad_fit_summary(chains, params::Params, data::Data; bf_cutoff::Real = 10.0)
     data.iad === nothing && return nothing
     try
@@ -2486,9 +2487,11 @@ function _iad_fit_summary(chains, params::Params, data::Data; bf_cutoff::Real = 
         inst = data.iad.inst
         names = params.config.instruments.iad_names
         per = Dict{String, Any}()
-        for m in sort(unique(inst))
+        ms = sort(unique(inst))
+        for m in ms
             sel = inst .== m
-            label = m <= length(names) && !isempty(names[m]) ? names[m] : "iad_$m"
+            label = m <= length(names) && !isempty(names[m]) ? names[m] :
+                    length(ms) == 1 ? "IAD" : "IAD$m"
             per[label] = sum(z2[sel]) / count(sel)
         end
         return Dict{String, Any}("iad_red_chi2_total" => sum(z2) / length(z2),

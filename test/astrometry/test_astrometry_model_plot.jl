@@ -280,10 +280,13 @@ end
     @test fit["iad_n"] == length(z2)
     @test fit["iad_red_chi2_total"] ≈ sum(z2) / length(z2)
     per = fit["iad_red_chi2_per_inst"]
-    @test sort(collect(keys(per))) == ["iad_1", "iad_2"]
+    @test sort(collect(keys(per))) == ["IAD1", "IAD2"]
     for m in 1:2
-        @test per["iad_$m"] ≈ sum(z2[inst .== m]) / count(==(m), inst)
+        @test per["IAD$m"] ≈ sum(z2[inst .== m]) / count(==(m), inst)
     end
+    t1, _, c1 = _two_mission_target(; gaia_only = true)
+    @test collect(keys(Nereus._iad_fit_summary(c1, t1.params, t1.data)[
+        "iad_red_chi2_per_inst"])) == ["IAD"]
     @test 0.7 < fit["iad_red_chi2_total"] < 1.3   # noise at the quoted errors
     mktempdir() do dir
         summary = Dict{String, Any}()
