@@ -901,7 +901,7 @@ numbers live under `fitted` / `derived`
     // With intermediate astrometry (an astrometry-only fit has only these):
     // χ²_min/N at the max-lp draw, the number on iad_residuals.png.
     "iad_red_chi2_total":          1.38,
-    "iad_red_chi2_per_inst":       { "iad_1": 1.38 },  // the jitter name when it has one
+    "iad_red_chi2_per_inst":       { "IAD": 1.38 },  // the jitter name when it has one
     "iad_n":                       824
   },
 
