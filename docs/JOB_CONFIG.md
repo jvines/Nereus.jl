@@ -579,7 +579,7 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   the block's `instrument`, else `HIP<hip_id>` / `GaiaDR4_<source_id>`.
   A jitter as large as the reflex is a second mode, "noise instead of orbit",
   and from the prior it is the cheaper way up: on HD 114762 (RV + DR4) every
-  pt_emcee run drawn from the prior ended there, 470-970 nats below an orbit
+  pt_emcee run drawn from the prior ended there, Δln p = 470-970 below an orbit
   no walker found. So the PT ensemble samplers (`pt_emcee`,
   `transdim_pt_emcee`, `pt_whitening`) hold every `sigma_iad_<name>` at 0 for
   at least the first half of burn-in, where the likelihood is the unjittered
@@ -734,7 +734,7 @@ prior when that degeneracy is present.
   2. Otherwise the **tempered** estimate (H+ for `pt_emcee`), when it is
      quotable (the ladder reaches β = 0 and every adjacent pair swapped at least
      `swap_min` = 5 % of the time) and lies within `laplace_switch_tol`
-     (default 50 nats) of the mode-Laplace value.
+     (default 50 in ln Z) of the mode-Laplace value.
   3. Otherwise **mode-Laplace**, with a warning. `log_z` is `NaN` (`null` on
      disk) only when none of the three is available.
   `summary.evidence.reported` names the one used (`"bridge"`, `"hybrid"`,
@@ -747,7 +747,7 @@ prior when that degeneracy is present.
   steps; three quarters of burn-in at the latest), then drawn from their
   priors walker by walker. Released while the fit without them still climbs,
   a jitter takes up the misfit: on HD 114762 RV + Hipparcos + DR4 one seed,
-  released at half of burn-in 3300 nats below the top of the held fit, lost
+  released at half of burn-in Δln p = 3300 below the top of the held fit, lost
   the orbit and did not converge. Absent (or `true`): every IAD jitter
   `sigma_iad_<name>` at 0 (see `iad` above), nothing for a model without one,
   so those runs are unchanged. `false` holds nothing; an object
@@ -943,7 +943,7 @@ numbers live under `fitted` / `derived`
       "threads": 8, "n_draws": 5800000, "n_post": 5800000, "n_post_finite": 5800000,
       "n_proposal": 20000, "n_prop_finite": 19999,
       // log p* at the posterior draws read off the chain's :lp (true), after
-      // matching a full evaluation at 64 draws to this many nats; false: evaluated
+      // matching a full evaluation at 64 draws to this many in ln p; false: evaluated
       "lp_reused": true, "lp_check_max_abs": 8.7e-10,
       "iters": 7, "converged": true,              // Newton passes of the primary solve
       "bootstrap_workers": 8, "bootstrap_ok": 200,

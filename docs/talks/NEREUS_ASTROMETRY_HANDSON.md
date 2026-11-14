@@ -205,7 +205,7 @@ demonstration is more convincing than the assertion:
 # with the reflex switched off, the abscissa likelihood ignores the parallax entirely
 ```
 
-A 1000x change in the assumed parallax moves the log-likelihood by 4e-6 nats. The default when
+A 1000x change in the assumed parallax moves the log-likelihood by 4e-6. The default when
 no parallax information is supplied is `LogUniformPrior(0.1, 1000.0)` — four decades, i.e.
 effectively no mass scale at all. **If you take one habit away from this session: on an
 astrometry-only fit, always set the parallax prior deliberately, and quote it beside the
@@ -447,7 +447,7 @@ single-star solution is measurably corrupted by the companion.**
 If there is time for one interactive exercise, it is the ridge walk: pin K and P, re-derive
 `M_sec` at each inclination, evaluate each channel separately. The RV log-likelihood is
 identical to every printed digit across a 54x range in true mass; the astrometry
-log-likelihood swings by 5e4 nats with a sharp peak at 4.84 degrees. Numbers and method are in
+log-likelihood swings by 5e4 with a sharp peak at 4.84 degrees. Numbers and method are in
 the physics document, section 3.9.
 
 It takes about fifteen lines and it makes the degeneracy break physical rather than asserted.
@@ -581,7 +581,7 @@ ladder_probabilities(iad; orders = (5,7,9), prior, model_prior, residual)
 document, section 3.3, and Gaia BH3 is the example that makes it stick.
 
 `residual` is the hook for "is the leftover curvature Keplerian or generic": subtract a
-Keplerian along-scan model and re-run the ladder on what is left. That is how the +858 nat
+Keplerian along-scan model and re-run the ladder on what is left. That is how the +858 in ln Z
 Gaia-4 demonstration is produced. There is no one-line wrapper for it; you compose
 `star_reflex_offset` and `along_scan_projection` yourself.
 

@@ -88,12 +88,12 @@ directly.
 | Quick MAP / Laplace evidence / seed for PT | `sample_map` / `pathfinder_init` |
 
 On curved RV posteriors (eccentric ridges) `sample_nested` with `:rslice`
-and its default chain length gives pt_emcee's log Z (within 0.06 nats on an
+and its default chain length gives pt_emcee's log Z (within 0.06 on an
 eccentric RV fit): the slices take only their directions from the
 ellipsoidal bound, so it does not have to conform to the ridge. An earlier
 note here called the NS bias there structural; it was measured while every
 chain step restarted from the copied live point. `:rwalk`'s value there
-is the highest of the defaults, 0.18 nats high (see the defaults table
+is the highest of the defaults, high by 0.18 in ln Z (see the defaults table
 below). See [Evidence](evidence.md).
 
 ---
@@ -444,8 +444,8 @@ chains, log_ev, report, ev = sample_pt_hmc(target;
     betas              = nothing,       # custom ladder; disables adaptation
     beta_min           = 1e-4,          # default ladder: β = 0, then geometric on [beta_min, 1]
     swap_min           = 0.05,          # least adjacent swap rate at which SS⁺ is quoted
-    evidence_tol       = 2.0,           # nats; warn when a quotable SS⁺ disagrees with bridge
-    laplace_switch_tol = 50.0,          # nats; a quotable SS⁺ further from mode-Laplace is broken
+    evidence_tol       = 2.0,           # in ln Z; warn when a quotable SS⁺ disagrees with bridge
+    laplace_switch_tol = 50.0,          # in ln Z; a quotable SS⁺ further from mode-Laplace is broken
     bridge_n           = 20_000,        # bridge proposal draws; 0 skips bridge
     warm_start         = true,
     n_scouts           = 16,            # warm_start = false: scouted prior draws
@@ -613,7 +613,7 @@ started; split when its children halved its volume, the bound cut the RM
 fit into 15 ellipsoids (1–5 now) and log Z came out 0.35–0.5 high however
 long the chains. `:unif` draws from the bound itself, so its bound is
 expanded by dynesty's bootstrap until it covers the constrained region
-(before, it missed 12–22% of the RM fit's and log Z came out 2 nats high).
+(before, it missed 12–22% of the RM fit's and log Z came out high by 2).
 On a curved posterior in more than a few dimensions that expansion leaves
 so little of the bound inside the constraint that a new point can take more
 than 100 000 likelihood calls, and the run stops with an error: four RM runs
@@ -631,7 +631,7 @@ likelihood live points and replaces them via concurrent constrained walks
 (`@threads :static`), each started at a live point above the highest of
 them. The j-th point removed shrinks the prior volume as `n_live − j + 1`
 live points do, so the batch adds no evidence bias (crediting each with
-`1/n_live` put log Z `(batch_size − 1)·H/(2·n_live)` high: 0.58 nats with
+`1/n_live` put log Z `(batch_size − 1)·H/(2·n_live)` high: 0.58 with
 16 of 100 live points on a 2-d Gaussian). `batch_size = 1` runs the serial
 sampler; `:slice`, `:rslice` and `:hslice` always run serially. `parallel`
 defaults to `!_is_under_juliacall()` — it threads in a pure-Julia process
@@ -678,7 +678,7 @@ pt_emcee's 0.027–0.028). `run_job` surfaces
 the evidence inside the bound its point was drawn from, which shrinks as
 the run goes on, so the sum comes out low (the unbiased form, Feroz et al.
 2013, weighs every point by all the bounds that contain it). With
-`:rwalk` it was reported as the evidence and came out up to 3.4 nats above
+`:rwalk` it was reported as the evidence and came out up to 3.4 above
 pt_emcee's on RM and RV fits. When `n_eff < 200` (peaked posterior), the chain
 falls back to top-N dead points by weight rather than systematic resampling
 — bump `n_live` to 2000+ for full posterior coverage.
@@ -920,7 +920,7 @@ until it stops climbing, the ones the stranded-walker bound shows to sit where
 the posterior cannot carry mass are dropped, and the chain starts at one of the
 rest, picked at random (`src/samplers/scouts.jl`). From a single draw, a chain
 that fell outside a narrow mode's basin settled on a plateau tens of thousands
-of nats below it and stayed there; the scouts keep it off such regions, not
+in ln p below it and stayed there; the scouts keep it off such regions, not
 out of a second mode of comparable mass, which a local sampler still cannot
 cross. `sample_moms` starts the same way.
 
