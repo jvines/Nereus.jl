@@ -2472,7 +2472,8 @@ function _run_detection_limits!(cfg, chains, params::Params, data::Data,
                                               default = Dict())),
                                  :name; default = ""))
 
-    # User can force on/off explicitly; default ON for PT samplers, OFF otherwise.
+    # User can force on/off explicitly; default ON for PT samplers when the
+    # chain explored the period prior (below), OFF otherwise.
     explicit = _get(out_cfg, :detection_limits; default = nothing)
     if explicit === nothing
         sampler_name in _PT_PRIOR_SEEDED || return
@@ -2488,6 +2489,28 @@ function _run_detection_limits!(cfg, chains, params::Params, data::Data,
                                 default = 0.95))
     planet = Int(_get(out_cfg, :detection_limits_planet; default = 1))
     save_pdf = Bool(_get(out_cfg, :save_pdf; default = false))
+
+    # Unasked, only a chain that explored the period prior gets limits. A fit
+    # that found the planet holds P to a sliver of it -- 1% on a transiting
+    # planet's bracketed period -- and its K quantiles per period bin would be
+    # a figure and a warning about nothing.
+    if explicit === nothing
+        cv = try
+            _detection_coverage(chains, params, planet)
+        catch
+            nothing
+        end
+        if cv !== nothing && cv.coverage < _DETECTION_MIN_COVERAGE
+            summary["detection_limits"] = Dict{String, Any}(
+                "status" => "skipped",
+                "reason" => "the central 98% of the P_k$planet draws spans " *
+                    "$(round(100 * cv.coverage; digits = 1))% of its prior's " *
+                    "log range: the planet is detected. Limits need a chain " *
+                    "that explores the period prior; set " *
+                    "output.detection_limits = true to compute them anyway.")
+            return
+        end
+    end
 
     try
         res = detection_limits(chains, params;

@@ -65,7 +65,7 @@ honest — EMPEROR-style prior-seeded pt_emcee
 ([Vousden+ 2016](https://ui.adsabs.harvard.edu/abs/2016MNRAS.455.1919V/abstract))
 is the canonical input. NUTS / NS / NF-PT chains concentrate around
 modes and would give biased limits; the function emits a warning when
-the chain's P range covers less than 10% of the prior range.
+the central 98% of the chain's P draws covers less than 10% of the prior range.
 
 Trans-dim chains are handled: draws where `n_planets < planet` are
 masked out so only samples where this planet is active contribute.
@@ -82,44 +82,18 @@ function detection_limits(chains, params::Params;
         throw(ArgumentError("confidence must be in (0.5, 1.0)"))
     n_bins >= 4 || throw(ArgumentError("n_bins must be ≥ 4"))
 
-    P_name = "P_k$planet"
-    P_vals, K_vals = _planet_P_K_draws(chains, params, planet)
-
-    # Trans-dim: keep the draws in which slot `planet` is live -- from
-    # `planet_active_<k>`, not `n_planets ≥ k`, which after a death mid-list
-    # keeps a parked slot's values and drops live ones.
-    tdc = _td_cols(chains, params)
-    if tdc !== nothing
-        active = planet <= length(tdc.planet) ? tdc.planet[planet] :
-                                                falses(length(P_vals))
-        P_vals = P_vals[active]
-        K_vals = K_vals[active]
-    end
-
-    isempty(P_vals) &&
-        throw(ArgumentError("no posterior draws with planet $planet active"))
-
-    # Period prior bounds — used as default bin range and for the
-    # coverage warning.
-    # The prior bounds the SAMPLED period only; under :a_driven the P_k slot
-    # holds a, and a fixed period has no prior.
-    prior_P = params.config.parametrization.mass === :a_driven ? nothing :
-              _prior_for(params, P_name)
-    lo_prior, hi_prior = prior_P === nothing ?
-        (minimum(P_vals), maximum(P_vals)) :
-        bounds(prior_P)
+    cv = _detection_coverage(chains, params, planet)
+    P_vals, K_vals = cv.P, cv.K
+    lo_prior, hi_prior = cv.prior_lo, cv.prior_hi
 
     P_min_eff = Float64(P_min === nothing ? lo_prior : P_min)
     P_max_eff = Float64(P_max === nothing ? hi_prior : P_max)
     (P_min_eff > 0 && P_max_eff > P_min_eff) ||
         throw(ArgumentError("require 0 < P_min < P_max"))
 
-    # Coverage check.
-    span_log_chain = log(maximum(P_vals) / minimum(P_vals))
-    span_log_prior = log(hi_prior / lo_prior)
-    if span_log_prior > 0 && span_log_chain / span_log_prior < 0.1
-        @warn ("detection_limits: chain P range covers " *
-                "$(round(100 * span_log_chain / span_log_prior; digits = 1))% " *
+    if cv.coverage < _DETECTION_MIN_COVERAGE
+        @warn ("detection_limits: central 98% of the chain P draws covers " *
+                "$(round(100 * cv.coverage; digits = 1))% " *
                 "of the prior range — limits will only be honest inside that. " *
                 "EMPEROR-style prior-seeded pt_emcee is recommended.")
     end
@@ -155,6 +129,51 @@ end
 # =====================================================================
 # Helper
 # =====================================================================
+
+# A chain whose period draws span less than this share of the prior's log range
+# has found the planet rather than explored the prior, and its K quantiles per
+# period bin are not detection limits outside that sliver.
+const _DETECTION_MIN_COVERAGE = 0.1
+
+# The draws of `planet` that detection limits read, the period prior's bounds,
+# and the share of the prior's log range the central 98% of the draws spans (1
+# when the prior has no width to compare against). Not min to max: a million
+# draws of a sharp period put their extremes at ±5σ, and that range alone came
+# to 10% of the bracketed prior of an RV-detected hot Jupiter.
+function _detection_coverage(chains, params::Params, planet::Int)
+    P_name = "P_k$planet"
+    P_vals, K_vals = _planet_P_K_draws(chains, params, planet)
+
+    # Trans-dim: keep the draws in which slot `planet` is live -- from
+    # `planet_active_<k>`, not `n_planets ≥ k`, which after a death mid-list
+    # keeps a parked slot's values and drops live ones.
+    tdc = _td_cols(chains, params)
+    if tdc !== nothing
+        active = planet <= length(tdc.planet) ? tdc.planet[planet] :
+                                                falses(length(P_vals))
+        P_vals = P_vals[active]
+        K_vals = K_vals[active]
+    end
+
+    isempty(P_vals) &&
+        throw(ArgumentError("no posterior draws with planet $planet active"))
+
+    # Period prior bounds — used as default bin range and for the
+    # coverage warning.
+    # The prior bounds the SAMPLED period only; under :a_driven the P_k slot
+    # holds a, and a fixed period has no prior.
+    prior_P = params.config.parametrization.mass === :a_driven ? nothing :
+              _prior_for(params, P_name)
+    lo_prior, hi_prior = prior_P === nothing ?
+        (minimum(P_vals), maximum(P_vals)) :
+        bounds(prior_P)
+
+    span_log_prior = log(hi_prior / lo_prior)
+    coverage = span_log_prior > 0 ?
+        log(quantile(P_vals, 0.99) / quantile(P_vals, 0.01)) / span_log_prior : 1.0
+    return (; P = P_vals, K = K_vals, prior_lo = Float64(lo_prior),
+              prior_hi = Float64(hi_prior), coverage = Float64(coverage))
+end
 
 # (P [days], K [m/s]) of `planet` for every draw, from the model's own
 # accessors `planet_P` / `planet_K`. A parametrization that does not sample one
