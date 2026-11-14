@@ -266,3 +266,30 @@ _am_files(dir) = isdir(joinpath(dir, "models")) ?
         @test _am_files(joinpath(out2, "plots")) == ["astrometry_model_K1.png"]
     end
 end
+
+# The PPC summary's IAD χ²/N is the residual panel's: χ²_min/N of the
+# likelihood at the max-lp draw, per mission and over both, and an
+# astrometry-only fit gets it without the RV/photometry PPC.
+@testset "ppc summary — IAD χ²/N per mission" begin
+    target, theta, chains = _two_mission_target()
+    params, data = target.params, target.data
+    fit = Nereus._iad_fit_summary(chains, params, data)
+    oc = Nereus._iad_oc(theta, data)          # row 1, the max-lp draw, is theta
+    z2 = (oc.oc ./ oc.σ) .^ 2
+    inst = data.iad.inst
+    @test fit["iad_n"] == length(z2)
+    @test fit["iad_red_chi2_total"] ≈ sum(z2) / length(z2)
+    per = fit["iad_red_chi2_per_inst"]
+    @test sort(collect(keys(per))) == ["iad_1", "iad_2"]
+    for m in 1:2
+        @test per["iad_$m"] ≈ sum(z2[inst .== m]) / count(==(m), inst)
+    end
+    @test 0.7 < fit["iad_red_chi2_total"] < 1.3   # noise at the quoted errors
+    mktempdir() do dir
+        summary = Dict{String, Any}()
+        Nereus._run_ppc!(Dict("output" => Dict()), chains, params, data, dir, summary)
+        @test summary["ppc"]["iad_red_chi2_total"] ≈ fit["iad_red_chi2_total"]
+        @test isfile(joinpath(dir, "ppc.json"))
+        @test !isfile(joinpath(dir, "ppc.png"))
+    end
+end
