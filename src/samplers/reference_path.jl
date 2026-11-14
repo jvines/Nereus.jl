@@ -6,12 +6,12 @@
 # first-order phase transition: <log L>(beta) jumps almost discontinuously near
 # beta = 1, one pair of adjacent temperatures sticks at ~0.6% swap acceptance no
 # matter how many rungs are added, and TI/SS+/H+ come out biased LOW by
-# 10^2-10^4 nats. Measured on HD 18599: TI+ sat 118 nats from the truth while
+# 10^2-10^4 in ln Z. Measured on HD 18599: TI+ sat Δln Z = 118 from the truth while
 # self-reporting an error of 0.48, and adding rungs, cooling beta_min or
 # enabling the adaptive ladder each moved it FURTHER away. That is a bias that
 # does not shrink with computation and cannot be tuned out, because it is a
 # property of the PATH, not of the estimator -- the estimators themselves
-# reproduce an analytic log Z to <0.01 nats on a well-behaved target.
+# reproduce an analytic log Z to <0.01 on a well-behaved target.
 #
 # The fix is to move the cold end. Let q be a NORMALISED reference fitted to the
 # posterior (the same Gaussian / Student-t that bridge_evidence builds). Define
@@ -60,14 +60,14 @@ it does not care how well the particles mix.
 require the particles to be equilibrated at each rung, so `log_z_ti` degrades
 when `n_steps` is too small. Measured on the 22-D analytic target with a
 deliberately mismatched Student-t reference, TI's error runs
--3.21 / -0.79 / -0.10 / -0.02 nats at `n_steps` = 2 / 8 / 32 / 128 while AIS
+-3.21 / -0.79 / -0.10 / -0.02 in ln Z at `n_steps` = 2 / 8 / 32 / 128 while AIS
 stays within 0.03 throughout.
 
 **That makes `log_z_ais - log_z_ti` a mixing diagnostic**, not a redundancy: the
 two share the particles but not the estimator algebra, and only one of them is
 sensitive to equilibration. Contrast TI+/SS+/H+ in `evidence.jl`, which all read
 one shared `mean_logL` array — their mutual agreement cannot detect a common
-bias, and on HD 18599 they agreed to 2.6 nats while all being 147 nats wrong.
+bias, and on HD 18599 they agreed to 2.6 in ln Z while all being wrong by 147 in ln Z.
 If AIS and TI disagree here, raise `n_steps` (and watch `ess` rise with it).
 
 `chains` must be the beta = 1 chain in the target's own parameter space, and the
@@ -206,7 +206,7 @@ function _reference_path_core(logp::Function, Y::AbstractMatrix{Float64};
     # q/Z_q with Z_q = P_q(supp p*) < 1 -- and the AIS/SMC identity assumes
     # draws from the NORMALISED q with Z_0 = 1. Feeding it restricted draws
     # makes it estimate Z/Z_q, overestimating log Z by -log Z_q. That is not
-    # hypothetical: it read +4.5 nats high against a well-conditioned bridge
+    # hypothetical: it read high by +4.5 in ln Z against a well-conditioned bridge
     # estimate on a 13-D RV posterior, and the sign is diagnostic, because an
     # SMC log-Z estimate is unbiased in Z and so should skew LOW by Jensen.
     #

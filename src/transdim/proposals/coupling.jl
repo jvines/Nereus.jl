@@ -30,8 +30,8 @@
 #
 # The proposal is a blind prior draw. That is a deliberate choice, not laziness:
 # the blind-birth bias measured against dimension (toy_blind_birth_dimension.jl)
-# is 0.050 nats at K=1 and 0.148 at K=6, so at the one or two parameters this
-# move adds it is ~0.05 nats — far below anything that matters here. A
+# is 0.050 in ln Z at K=1 and 0.148 at K=6, so at the one or two parameters this
+# move adds it is ~0.05 in ln p — far below anything that matters here. A
 # Thiele-Innes OLS-informed proposal would improve MIXING and is the natural
 # next step, but it is an efficiency question, not a correctness one.
 

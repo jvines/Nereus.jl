@@ -146,7 +146,7 @@ function sample_nested_ins(
     # six seeds, came within the NS error (0.17-0.25) of pt_emcee's on all
     # four test fits, the mean known to better than that error. At 2·n_dim
     # the walk's mean passed (-0.17, +0.16, +0.16, +0.02), but its runs
-    # scattered by 0.95 nats on the RM fit at 0°, so the mean was known only
+    # scattered by 0.95 in ln Z on the RM fit at 0°, so the mean was known only
     # to 0.39; at 5·n_dim they scatter by 0.3, as the slice's do at 2·n_dim.
     n_walks = n_walks === nothing ?
               max(25, (proposal === :slice ? 2 : 5) * n_dim) : n_walks
@@ -374,7 +374,7 @@ function sample_nested_ins(
         # shrunk by `min_X_shrinkage` log-units (~exp(10) ≈ 22000 ×).
         # The latter prevents premature termination in high-d where
         # `dlogz_now` can look small at startup when log_z_ns is still
-        # below log_z_remain by a few hundred nats — that subtraction
+        # below log_z_remain by a few hundred in ln Z — that subtraction
         # `log_z_remain - log_z_ns` going negative makes log1p(exp(.))
         # tiny even though we haven't started integrating the peak.
         max_live_logL = maximum(live_logL)
@@ -411,7 +411,7 @@ function sample_nested_ins(
     # --- log(Σ L_i · V_i) − log(N_total_evals), see INSResult -----
     # Defined only for draws from the bound: the walk and slice kernels move
     # within the constraint, and their points have no proposal volume. With
-    # :rwalk it came out 1.2-1.7 nats above pt_emcee's evidence on an RM
+    # :rwalk it came out Δln Z = 1.2-1.7 above pt_emcee's evidence on an RM
     # obliquity fit and up to 3.4 above on an eccentric-RV fit, while run_job
     # reported it as the evidence.
     finite_idx = findall(isfinite, ins_log_L)
@@ -507,7 +507,7 @@ rejections in a row, and counting `n_walks` accepted steps rather than steps.
 Where such a chain ends depends on its own acceptances, so the kernel does not
 leave the uniform distribution inside the constraint unchanged; on an RM
 obliquity fit `sample_nested_ins` and `sample_nested_dynamic` put log Z about
-2 nats above pt_emcee's.
+Δln Z = 2 above pt_emcee's.
 
 Returns `(nothing, -Inf)` only if no live point lies strictly above
 `logL_worst`.

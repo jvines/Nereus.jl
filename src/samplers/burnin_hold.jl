@@ -6,7 +6,7 @@
 # On HD 114762 RV + Gaia DR4 (a 1.9 mas reflex against ~0.12 mas per-CCD
 # errors) that way is the cheaper one, and pt_emcee started from the prior
 # (24 x 100 walkers, 8000/4000 steps) ended in it on every seed tried: s 0.7-1
-# mas, M_sec 0.04-0.09 Msun, i 7-14 deg, 470-970 nats below the orbit (s 0.36
+# mas, M_sec 0.04-0.09 Msun, i 7-14 deg, Δln p = 470-970 below the orbit (s 0.36
 # mas, M_sec 0.198 Msun, i 3.5 deg), R-hat 2.7-4.1. No walker in any rung ever
 # reached the orbit, so the stranded-walker prune had nothing to move the rest
 # onto. Without the jitter the same fit finds the orbit from the prior.
@@ -152,10 +152,10 @@ pass (NaN before the first) and is updated in place; the sampler checkpoints it.
 Released while the fit without the jitter is still climbing, the jitter takes
 up the misfit and the orbit is lost again. HD 114762 RV + Hipparcos + DR4,
 seed 3, found the 3.5 deg orbit at step 1800 of a 2000-step hold and at the
-release was 3300 nats below the top it reaches held (seeds 1 and 2 had sat at
+release was Δln p = 3300 below the top it reaches held (seeds 1 and 2 had sat at
 that top since steps 1800 and 1000): 50 steps later 44 of the 100 cold walkers
 had i above 6 deg, by step 2300 all of them, and the run ended with R-hat 1.61
-and log Z 34 nats below the other two seeds.
+and log Z 34 below the other two seeds.
 """
 function _burnin_hold_due!(med::Base.RefValue{Float64}, h::BurninHold, step::Integer,
                            n_burnin::Integer, logL_cold::AbstractVector{Float64},

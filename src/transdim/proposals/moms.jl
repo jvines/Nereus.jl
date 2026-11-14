@@ -148,7 +148,7 @@ end
 # random-walk kernel the MoMS birth actually samples from (out-of-bounds draws
 # are rejected/retried). Omitting it — using the raw Gaussian density — makes
 # the birth too easy and the deterministic death too hard by |log Z| each, so
-# the stationary P(Np) is inflated by ~2·Σ|log Z| nats (≈1.9 on the white-noise
+# the stationary P(Np) is inflated by ~2·Σ|log Z| (≈1.9 on the white-noise
 # DB gate; the per-slot |log Z| are 0.2–0.3 for the default prior-IQR scales).
 # Carrying it in BOTH the forward birth density and the reverse death density
 # restores detailed balance.

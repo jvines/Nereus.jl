@@ -83,7 +83,7 @@ Container for a `sample_pt_emcee` run.
 - `log_evidence_laplace::Float64` — mode-anchored Laplace evidence from the cold
   chain, a Gaussian approximation at the mode; phase-transition-immune. NaN if
   not computable. On 51 Peg (unimodal, tightly determined), converged, it sits
-  5.5 nats above bridge and reference-path, which agree with each other to
+  Δln Z = 5.5 above bridge and reference-path, which agree with each other to
   0.07 and are validated against exact truth on a curved 15-D target; on an
   RV + Hipparcos-IAD companion within 0.25 of bridge. A warning says when it
   is more than `bridge_warn_tol` from bridge in ln Z, where a single Gaussian
@@ -154,7 +154,7 @@ log-Jacobian of the map, the mode is the max-`logq` cold sample (NOT the mean �
 a multimodal mean sits in a density valley), and `Σ_local` is the covariance of
 the closest `mode_frac` of samples to the mode (excludes multimodal spread),
 divided by the factor a Gaussian's covariance shrinks by when cut to that
-inner fraction. Carries a ~O(100)-nat non-Gaussian bias on pathological
+inner fraction. Carries a non-Gaussian bias of ~O(100) in ln Z on pathological
 posteriors — negligible for strong detections, cross-check nested for marginal
 ones. Returns `NaN` if not computable (bounded target, or too few samples).
 
@@ -164,7 +164,7 @@ matches at a few draws against a full evaluation (`_laplace_logq`); without
 `:lp`, or matching neither, the density is evaluated at every draw. Both
 corrections were missing: pt_emcee's `:lp`, read as `logq`, lacked the
 log-Jacobian, and the cut-down covariance was used as it came. On an RV +
-Hipparcos-IAD companion that put pt_emcee's value about 1.1 nats above bridge
+Hipparcos-IAD companion that put pt_emcee's value about Δln Z = 1.1 above bridge
 and pt_hmc's 2.6 to 3.1 below.
 """
 function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
@@ -205,7 +205,7 @@ function mode_laplace_evidence(target::NereusTarget, chains::MCMCChains.Chains;
         sel = md .< quantile(md, mode_frac)
         # The draws within a Mahalanobis radius √q of a Gaussian's centre have
         # covariance c·Σ, c = F_{d+2}(q) / F_d(q) (F_k the χ²_k CDF): for d = 7
-        # and the inner 30%, c = 0.46 and ½·logdet is 2.7 nats short. Undo it.
+        # and the inner 30%, c = 0.46 and ½·logdet is short by 2.7 in ln Z. Undo it.
         local_ = count(sel) >= 2d + 2
         Yc = local_ ? Y[:, sel] : Y
         Sc = cov(Yc; dims = 2) + 1e-8 * I(d)
@@ -388,7 +388,7 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # Measured on an easy single-planet RV target (P = 12.3 d, K = 12 m/s, 60 RVs,
 # LogUniform(0.1, 3000) period prior, default 2000/1000 steps): the cold rung
 # filled at ~5 walkers per 100 steps, 30-50% of the recorded draws sat on the
-# plateau 70 nats down, and R-hat was 1.4-2.3.
+# plateau Δln p = 70 down, and R-hat was 1.4-2.3.
 #
 # So during burn-in, move walkers that cannot matter onto walkers that do, as
 # Hou et al. 2012 (ApJ 745, 198) do by clustering walkers on likelihood. What
@@ -403,16 +403,16 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # is most of the posterior -- has a likelihood within the Occam factor of the
 # peak, above c, and is left alone. So are the tails of the mode itself.
 # `state` is on the flat scale (see sample_pt_emcee), so Laplace is too: on
-# raw P a log-uniform prior's tail alone would inflate Σ_A by ~8 nats. A
+# raw P a log-uniform prior's tail alone would inflate Σ_A by ~8 in ln Z. A
 # full-circle angle enters Σ_A as its offset from the best walker on the
 # circle: a mode across the seam would otherwise span the whole window and
 # overstate Z_A.
 #
 # Σ_A needs d + 2 walkers in A. The mode a rung has just found has one to
 # three: Gaia-4 b, joint RVs + DR4 (d = 14, 24 rungs), kept 97 of its 100 cold
-# walkers in a local mode ~200 nats below the 1-3 that had found the real one
+# walkers in a local mode Δln p ~ 200 below the 1-3 that had found the real one
 # at every prune of burn-in, moved none of them, and recorded 46% of its draws
-# 60+ nats below the mode (R-hat 1.59). With too few walkers in A, or a
+# 60+ in ln p below the mode (R-hat 1.59). With too few walkers in A, or a
 # singular Σ_A (copies left by an earlier prune), the volume comes from the
 # density itself instead: the drop of ℓ along each axis about the best walker
 # gives a width σ_j no larger than the conditional one, 1/√H_jj (see
@@ -426,7 +426,7 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # walker that has just found a mode sits on its flank, where the estimate is
 # weakest twice over: its density is below the peak, and the drops along each
 # axis are steep with the gradient, so the widths come out small. Gaia-4 b's
-# lone cold walkers sat 235-280 nats below the peak with Σ log σ_j ≈ -57 (-30
+# lone cold walkers sat Δln p = 235-280 below the peak with Σ log σ_j ≈ -57 (-30
 # at the top), and the cut stayed below a plateau the mode outweighs by
 # e^200+: seeds 14 and 16 (of 21) recorded it, R-hat 1.65 and 2.10, log Z 198
 # and 191 against 537.6. So the best walker first climbs (`_pt_climb`) and the
@@ -441,33 +441,33 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # leader at log p = -2709, and Gaia-4 b 39 at step 50. So it runs only once the
 # rung's median log-likelihood, tempered at the current β, rose by less than
 # d/2 (the depth of its typical set) since the previous prune: Gaia-4 b's
-# stranded group moved by -1.5 to +1.9 nats per 50 steps, a climbing rung by
+# stranded group moved by -1.5 to +1.9 in ln p per 50 steps, a climbing rung by
 # ~50-100.
 #
 # Bounding the region by one of its walkers instead (sup over the group) does
 # not work: the group below any density cut always holds some tail walker of
-# the mode, 20 nats down, and the bound never clears the 70-nat plateau.
+# the mode, Δln p = 20 down, and the bound never clears the plateau of 70 in ln p.
 #
 # The cut says where a walker is, not that it is stranded there. A rung can
 # sit below it whole and still not be stuck, and the median's rise does not
 # show it. A transit-only fit (450 points, e free, stellar density fixed, step
-# 100 of 2000): the β = 0.54 rung spread over 90 nats with its median up 1.2
-# nats in 50 steps, its best walker's climb gained 466 nats and stopped on the
+# 100 of 2000): the β = 0.54 rung spread over 90 in ln p with its median up 1.2
+# in ln p in 50 steps, its best walker's climb gained 466 in ln p and stopped on the
 # photo-eccentric ridge at e = 0.59, and all 100 walkers of the rung were
 # drawn about that one point with its conditional widths, 1/100 to 1/5000 of
 # the rung's spread. Two hotter rungs did the same over the next 100 steps.
 # Swaps carried them down: by step 150, 98 of the 100 cold walkers sat at
 # e > 0.5, and at step 1500 still 11; the recorded share of e > 0.5 came out
 # anywhere from 2 to 16 % with the seed, against 7-9 % from nested sampling.
-# Meanwhile the cold rung had been climbing 300-650 nats per 50 steps on its
+# Meanwhile the cold rung had been climbing 300-650 in ln p per 50 steps on its
 # own. So a walker is moved only if it is stranded at two passes running: it
 # sat outside its rung's allowance (more than `allow` below the best walker)
 # at the previous pass and does now. One below the cut stays if it climbs fast
 # enough to clear it by the next pass, its tempered log L risen again by as
 # much as since the last: it gets there by itself. One climbing slower may
 # never. Sparing every walker that rose more than d/2 between passes left
-# ensemble walkers of an RV + IAD fit (i = 89.5°) 33,000-40,000 nats down,
-# rising 7-260 nats a pass, through the whole burn-in; one stayed, at e = 0.79,
+# ensemble walkers of an RV + IAD fit (i = 89.5°) Δln p = 33,000-40,000 down,
+# rising 7-260 in ln p a pass, through the whole burn-in; one stayed, at e = 0.79,
 # for the whole run and broke its bridge. The best walker and every walker
 # within its allowance never move: they are in the mode the cut is measured
 # from, however far down its flank.
@@ -489,7 +489,7 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # whole prior to fill, so a narrow local mode within tau plus A's Occam factor
 # of the peak passes it however little it weighs. An eccentric RV planet
 # (e = 0.3, 60 RVs) has a circular-orbit mode, e ≈ 0.005 and jitter 5.5
-# against 3 m/s, about 30 nats down: its walkers sat 2-7 nats above a cut 23.5
+# against 3 m/s, about Δln p = 30 down: its walkers sat Δln p = 2-7 above a cut 23.5
 # below the best (A's Occam factor 13.6 of it), and 1-4 of 32 ensemble walkers
 # stayed there for the whole run at 8 of 10 seeds (stretch) and 4 of 10 (with
 # the DE move). So, once per rung per pass, one of the walkers the cut keeps
@@ -498,7 +498,7 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # e^-tau of A, it is moved, and the walkers of that set which sat inside the
 # mode at this pass and the last with it. (The walker followed is in the mode
 # by its own climb: on the same planet, charted through the logit after a
-# re-cut, one sat 5 nats below its mode's top yet outside the quadratic shape
+# re-cut, one sat Δln p = 5 below its mode's top yet outside the quadratic shape
 # measured there, the mode curving along ω + M₀ as e → 0.) The mode's mass is
 # a Laplace estimate, not a bound, and is taken large: each axis at its full
 # width against a support edge, and the volume measured from the density along
@@ -510,7 +510,7 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # The walker followed can also climb into A's own mode: it sits on that mode's
 # flank, outside the mode as measured at its top and outside A's allowance,
 # where a walker of that mode is a one-in-a-million event. On the same RV
-# planet one walker sat there, 33-38 nats below the best walker and 2-6 above
+# planet one walker sat there, Δln p = 33-38 below the best walker and 2-6 above
 # the cut, through the burn-in and the whole recorded run at one seed in ten:
 # its climb reached A's top at every pass, but the ensemble's moves, all drawn
 # from the other 31 walkers, never took it there. That walker moves too,
@@ -687,7 +687,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
         end
         isempty(S) && continue
         # Survivors: the upper half of A (its lower edge sits `allow` down, ~20
-        # nats at d = 7, far outside a d-dim typical set), and the climbed top.
+        # in ln p at d = 7, far outside a d-dim typical set), and the climbed top.
         anchors = isempty(A) ? Int[] : A[ℓ[A] .>= median(ℓ[A])]
         cap = length(A) + top
         if length(S) > cap
@@ -762,14 +762,14 @@ end
 # Widths of the tempered density `ℓat` about `y0` (where it is `ℓ0`), one axis
 # at a time, from the drop to the steeper side:
 #     D(h) = ℓ0 - min(ℓ(y0 + h e_j), ℓ(y0 - h e_j)),    σ_j = h / √(2D)
-# with h rescaled by 4 from `h0` until D lies in [1/8, 2] nats, the quadratic
+# with h rescaled by 4 from `h0` until D lies in [1/8, 2] in ln p, the quadratic
 # core clear of rounding; once an h below and one above the window are known,
 # bisected geometrically between them (a wall or support edge makes D jump by
 # more than the factor 16 a ×4 step allows), and if none lands in it, taken at
 # the narrowest h that overshot (a smaller σ). At the mode of a Gaussian that is the conditional
 # width 1/√H_jj. Away from it the gradient g_j steepens one side,
 # D = |g_j| h + ½ H_jj h², so σ_j only comes out smaller: a walker still
-# climbing (Gaia-4 b's had its jitters 15 nats per m/s uphill) gets a smaller
+# climbing (Gaia-4 b's had its jitters 15 in ln p per m/s uphill) gets a smaller
 # volume, never a larger one. A side outside the support leaves the other, at
 # half the width (half a Gaussian; the full width with `half = false`).
 # `nothing` if an axis never settles. Only the axes `dims` (h0 and the widths
@@ -796,8 +796,8 @@ end
 # h along it (in the line's own units) from the point where it is `ℓ0`.
 function _pt_line_width(f, ℓ0::Float64, h::Float64; max_iter::Int = 24,
                         half::Bool = true)
-    lo = 0.0          # the widest h seen with the drop under 1/8 nat
-    hi = Inf          # the narrowest h seen with the drop over 2 nats (or off the support)
+    lo = 0.0          # the widest h seen with the drop under 1/8 in ln p
+    hi = Inf          # the narrowest h seen with the drop over 2 in ln p (or off the support)
     up = nothing      # σ read at `hi`, when its drop was finite
     for _ in 1:max_iter
         ℓp = f(h)
@@ -840,7 +840,7 @@ end
 # finite-difference gradients. Outside the support counts as a finite cliff,
 # so the line search backs off it instead of failing. A lone walker that has
 # just found a mode sits on its flank, where the bound it feeds is weakest:
-# Gaia-4 b's sat 235-280 nats below the peak (cold rung), still climbing.
+# Gaia-4 b's sat Δln p = 235-280 below the peak (cold rung), still climbing.
 # At most `max_evals` evaluations; stops when an iteration gains less than
 # `f_tol`. Deterministic. Returns (y, ℓ), or (y0, ℓ0) if nothing was better.
 # Only the axes `dims` move (σ is theirs, in that order): a coordinate
@@ -1066,7 +1066,7 @@ in place.
   the tempered evidence to be quotable (with a ladder that reaches β = 0); one
   that is not counts as broken, and mode-Laplace takes over. See
   `log_evidence` under [`PTemceeResult`](@ref).
-- `laplace_switch_tol::Real=50.0` — the Laplace non-Gaussian bias, in nats: a
+- `laplace_switch_tol::Real=50.0` — the Laplace non-Gaussian bias, in ln Z: a
   quotable tempered value further than this from mode-Laplace is broken, and
   mode-Laplace takes over.
 - `evidence_postfit::Bool=false` — the caller chooses the evidence again after
@@ -1111,7 +1111,7 @@ in place.
   IAD jitter `sigma_iad_<instrument>` at 0 (`Nereus.default_burnin_hold`):
   from the prior, inflating the jitter until the reflex stops mattering is the
   cheapest way up the likelihood, and on HD 114762 RV + Gaia DR4 every run
-  ended there, 470-970 nats below an orbit no walker ever found. At 0 the
+  ended there, Δln p = 470-970 below an orbit no walker ever found. At 0 the
   likelihood is the unjittered one, so the held phase is the fit without the
   jitter, which finds the orbit. `false` holds nothing; a dictionary
   `name => value` holds those instead. Burn-in only: the recorded chain is
@@ -1295,7 +1295,7 @@ function sample_pt_emcee(
     # hottest rung at 5^(-(n_temps-1)/2) — 0.04 at the default 5 temps. TI and
     # TI+ integrate <logL> only over [beta_min, 1] and ss_plus telescopes
     # Z(beta_min)->Z(1); neither adds the [0, beta_min] head, so that head was
-    # silently dropped. Measured on the HD 18599 joint fit it is worth ~715 nats
+    # silently dropped. Measured on the HD 18599 joint fit it is worth ~715 in ln Z
     # between 5 and 10 rungs — an evidence error far larger than any model
     # comparison it would be used for.
     #
@@ -2124,7 +2124,7 @@ function sample_pt_emcee(
     # scales: mode-Laplace (built from :lp = full posterior) is ABSOLUTE logZ,
     # while the tempered TI/SS/H+ integrate only L_RV and return logZ RELATIVE
     # to the transit-conditioned reference. Their difference then contains
-    # Z_ref (~1e4-1e5 nats for a 16k-pt transit) — the cross-check would fire
+    # Z_ref (~1e4-1e5 in ln Z for a 16k-pt transit) — the cross-check would fire
     # on EVERY run, silently replace the relative evidence with the absolute
     # one (breaking the Bayes-factor cancellation the flag exists for), and
     # emit a spurious phase-transition warning. Skip the switch; keep both
@@ -2169,10 +2169,10 @@ function sample_pt_emcee(
     # a chain that has converged (worst R-hat at most 1.1), and a reference `q`
     # fitted from enough INDEPENDENT points (least ESS at least the
     # n_dim + n_dim(n_dim+1)/2 parameters of q). Either way it fails silently
-    # LOW -- `overlap` reads ~1 throughout -- by fractions of a nat to tens:
-    # on a curved 15-D target with exactly known log Z bridge fell to -3.2 nats
+    # LOW -- `overlap` reads ~1 throughout -- by fractions of a unit in ln Z to tens:
+    # on a curved 15-D target with exactly known log Z bridge fell to -3.2
     # at n_eff ~ 22 while reference-path held to +0.17, and 32 walkers that had
-    # not found an easy RV planet's mode read 70 to 90 nats low at n_eff above
+    # not found an easy RV planet's mode read low by 70 to 90 in ln Z at n_eff above
     # the bound. Well-mixed chains are unaffected: 51 Peg runs at n_eff ~ 8000
     # against 135 parameters.
     bridge_refused = ""
@@ -2180,7 +2180,7 @@ function sample_pt_emcee(
         g = _bridge_guard(chains, target.params)
         if !g.ok
             # reference-path recovers from a poorly estimated q (within 0.11
-            # nats on stationary chains at d <= 15 where bridge was 0.2 to 2
+            # in ln Z on stationary chains at d <= 15 where bridge was 0.2 to 2
             # low), but not from draws that never reached the posterior.
             alt = occursin("R-hat", g.why) ? "Sample longer." :
                   "Sample longer, or use `reference_path_evidence`, which " *
@@ -2200,15 +2200,15 @@ function sample_pt_emcee(
     # to 5 decimals), converged (two seeds of 15 000 steps on the quickstart's
     # 8 rungs, R-hat 1.016 and 1.014), the spread was:
     #
-    #   TI+ / H+  -6005.59 / -5986.97              93 to 112 nats low
-    #   SS+       -5959.52 / -5948.62              55 to 66 nats low
-    #   Laplace   -5888.33 / -5888.39              5.5 nats high
+    #   TI+ / H+  -6005.59 / -5986.97              low by 93 to 112 in ln Z
+    #   SS+       -5959.52 / -5948.62              low by 55 to 66 in ln Z
+    #   Laplace   -5888.33 / -5888.39              high by 5.5 in ln Z
     #   bridge    -5893.86 / -5893.91              validated pair
     #   refpath   -5893.79 / -5893.88
     #
     # The beta-path stack fails at the phase transition and cannot detect it --
     # TI+ and H+ agreed exactly (H+ is TI+ when it finds no crossover) while
-    # both were ~100 nats out (that ladder stops at beta_min, and the
+    # both were out by ~100 in ln Z (that ladder stops at beta_min, and the
     # [0, beta_min] head it leaves out would only lower them further) -- and on
     # an RV + Hipparcos-IAD companion (bridge 163.88, matched by pt_hmc's
     # bridge, Daedalus and population annealing) SS+ read 157.85 from 8 rungs.
@@ -2260,7 +2260,7 @@ function sample_pt_emcee(
         log_z = log_z_tempered
     elseif laplace_ok
         why_t = tempered_ok ?
-            "it is $(round(gap, digits = 1)) nats from mode-Laplace, beyond the " *
+            "it differs from mode-Laplace by $(round(gap, digits = 1)) in ln Z, beyond the " *
             "Laplace non-Gaussian bias (laplace_switch_tol = $laplace_switch_tol): " *
             "the phase-transition signature (min swap accept = " *
             "$(round(min_swap, digits = 3)))" :
@@ -2268,7 +2268,7 @@ function sample_pt_emcee(
         @warn "sample_pt_emcee: log_evidence is mode-Laplace, a Gaussian " *
               "approximation at the posterior mode. Bridge: $why_bridge. The " *
               "tempered value is broken: $why_t. Treat it as indicative: on 51 " *
-              "Peg, unimodal and converged, it sits 5.5 nats above bridge." laplace = log_z_laplace tempered = log_z_tempered
+              "Peg, unimodal and converged, it sits Δln Z = 5.5 above bridge." laplace = log_z_laplace tempered = log_z_tempered
         log_z = log_z_laplace
         switched = true
     elseif tempered_ok
@@ -2289,8 +2289,8 @@ function sample_pt_emcee(
     if !switched && isfinite(log_z_tempered) && isfinite(log_z) && laplace_check &&
        abs(log_z_tempered - log_z) > laplace_switch_tol
         @warn "sample_pt_emcee: the TEMPERED stack (TI/TI+/SS+/H+ in `evidence`) " *
-              "is $(round(abs(log_z_tempered - log_z), digits=1)) nats from the " *
-              "reported log_evidence — the phase-transition signature (min swap " *
+              "differs from the reported log_evidence by " *
+              "$(round(abs(log_z_tempered - log_z), digits=1)) in ln Z — the phase-transition signature (min swap " *
               "accept = $(round(min_swap, digits=3))). Those four share one " *
               "mean_logL array, so their agreeing with EACH OTHER is not a " *
               "check." tempered = log_z_tempered reported = log_z

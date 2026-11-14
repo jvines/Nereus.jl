@@ -199,7 +199,7 @@ function noise_param_names(nm::ActivityGP, ::InstrumentConfig; data=nothing)
     # latent GP — all scale lives in the per-channel couplings (Vc, Vr,
     # Bc, …). A free amp on top is an exact non-identifiability
     # ((amp, a, b) → (amp/c, c·a, c·b) leaves the likelihood invariant)
-    # that destabilized logZ by ~80 nats run-to-run and let K inflate
+    # that destabilized logZ by ~80 run-to-run and let K inflate
     # (HD 18599 post-mortem 2026-06-12).
     names = ["gp_act_period$s",
              "gp_act_lambda_e$s", "gp_act_lambda_p$s"]

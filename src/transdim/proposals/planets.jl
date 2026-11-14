@@ -240,7 +240,7 @@ the forward birth subtracts, and mirroring how
 Omitting it does NOT cancel against Δlog_π: `log_prior` skips inactive slots,
 so a death already loses `Σ logpdf(slab_prior, β_killed)` from the prior term,
 and with a purely combinatorial ratio the round trip
-`log_q_birth + log_q_death` comes out at `−Σ logpdf(...)` — order +10 nats,
+`log_q_birth + log_q_death` comes out at `−Σ logpdf(...)` — order +10 in ln Z,
 i.e. deaths over-accepted by e^10, biasing occupancy toward low Np. The
 strategy-agnostic 2-argument method is left as-is: it is the documented
 reverse for the informed births, whose own log_q is computed against it.

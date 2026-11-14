@@ -6,15 +6,15 @@
 # E_prior[log L], and it is tail-dominated: prior draws on HD 18599 give a
 # median log L of -4.9e4 with a minimum of -1.5e7. No ladder resolves a
 # quantity whose variance is that large, and measurement bears it out — TI+
-# sat 118 nats from the truth with swap acceptance 0.23 and a self-reported
-# error of 0.48 nats, and adding rungs, cooling beta_min or enabling the
+# sat 118 in ln Z from the truth with swap acceptance 0.23 and a self-reported
+# error of 0.48 in ln Z, and adding rungs, cooling beta_min or enabling the
 # adaptive ladder all moved it FURTHER away. That is a bias that does not
 # shrink with computation, and it cannot be tuned out.
 #
 # The four estimators also all read one shared `mean_logL[k]` array, so a bias
 # in ⟨log L⟩ per rung appears identically in every one of them. Their mutual
 # agreement is therefore not evidence of correctness — on the run above they
-# agreed with each other to 2.6 nats while all being 147 nats wrong.
+# agreed with each other to 2.6 in ln Z while all being wrong by 147 in ln Z.
 #
 # Bridge sampling never touches the prior end. It needs only samples already
 # drawn from the posterior plus a proposal we can both sample and evaluate,
@@ -103,12 +103,12 @@ conditions, each measured against a log Z known exactly:
    as about one effective draw each. 51 Peg at 3000 steps (R-hat 1.7 to 2.0,
    n_eff 215 against 135) read -8720 and -8776 for two seeds where 15 000
    steps give -5893.9. On Gaussians started overdispersed, chains still
-   moving in sat 23 to 37 nats low at d = 7 with n_eff above the bound; the
-   worst error at R-hat at most 1.1 was 0.26 nats. Converged production runs
+   moving in sat low by 23 to 37 in ln Z at d = 7 with n_eff above the bound; the
+   worst error at R-hat at most 1.1 was 0.26 in ln Z. Converged production runs
    sit at 1.001 to 1.02.
 2. q is fitted from enough independent draws: the least ESS is at least its
    `d + d(d+1)/2` free parameters. From stationary chains of d = 5 to 30,
-   bridge's error grows as that ratio falls: about -0.2 to -0.3 nats near 1
+   bridge's error grows as that ratio falls: about -0.2 to -0.3 in ln Z near 1
    (chains at R-hat under 2), -0.5 to -2.5 near 0.5, -1.1 to -1.9 near 0.25,
    -5.6 to -12.6 at 0.07 to 0.14, and under 0.08 from 3.5 up. Walkers that
    barely move have an ESS floor near the walker count: at d = 5 such chains
@@ -117,7 +117,7 @@ conditions, each measured against a log Z known exactly:
    d <= 15 on the same chains.
 
 The worst error either condition lets through, over every chain measured, is
-0.36 nats (d = 30 at 1.15 times the ESS bound). See docs/src/evidence.md.
+0.36 in ln Z (d = 30 at 1.15 times the ESS bound). See docs/src/evidence.md.
 
 An ESS or R-hat that cannot be computed refuses.
 """
@@ -753,7 +753,7 @@ function _bridge_logq!(z::Vector{Float64}, lq::_BridgeLogq, y::AbstractVector)
 end
 
 # Draws at which `_bridge_stored_lp` compares the chain's `:lp` with a full
-# evaluation, and how close the two must be: `atol + rtol * |log p*|` nats.
+# evaluation, and how close the two must be: `atol + rtol * |log p*|`.
 const _BRIDGE_LP_CHECK = 64
 const _BRIDGE_LP_ATOL = 1e-6
 const _BRIDGE_LP_RTOL = 1e-12
@@ -768,7 +768,7 @@ the draws `bridge_evidence` keeps (`n_kept` of them); `y` is scratch.
 
 Checked, not assumed. At `_BRIDGE_LP_CHECK` draws spread evenly over the kept
 ones, `lp + log|J|` must match `_bridge_logdensity!` within `_BRIDGE_LP_ATOL`
-nats plus `_BRIDGE_LP_RTOL` of its size, and must be finite exactly where it
+plus `_BRIDGE_LP_RTOL` of its size, and must be finite exactly where it
 is. pt_emcee's `:lp` is the log prior plus the log likelihood at β = 1, mapped
 back from its flat scale to the bounded one, so it passes. A column that is a
 log joint on another scale, a tempered density or a sum without the prior
@@ -975,8 +975,8 @@ different model, and for gravity-darkened photometry:
   noise models, use the given e. Every likelihood rejects e outside [0, 1),
   so this matters only for a NaN e. Up to Nereus 0.8.3 `true_anomaly` clamped
   at 0.9999, and above that the two differed by much more than rounding (on
-  an RV + transit fit with a 20k-point light curve, up to 8.6 nats in the RV
-  and 8.1e4 nats in the photometry); the clamp now leaves every e < 1 alone,
+  an RV + transit fit with a 20k-point light curve, up to 8.6 in ln L in the RV
+  and 8.1e4 in ln L in the photometry); the clamp now leaves every e < 1 alone,
   and the two methods compute one model there.
 
 With that it is the same function as `_logdensity_parts` up to rounding at
@@ -987,7 +987,7 @@ every point, but not to the bit:
   none, the workspace method (`_rv_ll_no_noise(theta, data, ws)`) caches each
   planet's velocity curve and computes cos(f+ω) by the angle-sum identity, so
   its log L differs in the last bits at most points. Measured up to 2.4e-9
-  nats on the HD 18599 white-noise fit without the floor, and 2.4e-7 nats
+  in ln L on the HD 18599 white-noise fit without the floor, and 2.4e-7
   (3e-15 relative) on prior draws of an RV + astrometry fit. With any noise
   model, on the RV or only on the photometry, the RV goes through
   `_rv_ll_with_noise`, which evaluates each cadence as the other method does,
@@ -998,13 +998,13 @@ every point, but not to the bit:
   kernel sines by the angle-difference identity, so the floor term, and with
   it the RV log L, differs in the last bits at most points. On 300 prior
   draws of each HD 18599 fit with such a floor the RV matched at 31 to 113 of
-  them. With RV and photometry it differed by up to 1.5e-6 nats with activity
+  them. With RV and photometry it differed by up to 1.5e-6 in ln L with activity
   decorrelation, 5.0e-7 with white noise, 4.5e-7 with the GP rotation and
   1.3e-7 with the error scale; with RV only, by up to 6.0e-7 with the GP
   rotation, 3.0e-7 with white noise, 2.8e-7 with the error scale and 1.8e-7
   with activity decorrelation. The floor term alone differed by the same
   amounts. At 200 points close to a high-posterior point of each fit the
-  largest difference was 1.1e-10 nats. A floor whose every channel an active
+  largest difference was 1.1e-10 in ln p. A floor whose every channel an active
   ActivityGP covers scores nothing in either method, so the RV gives the same
   bits: on the HD 18599 activity-GP fit, whose floor is active and has the
   ActivityGP's four channels, at every one of those 300 draws and 200
@@ -1013,7 +1013,7 @@ every point, but not to the bit:
   In a state with the ActivityGP off the floor scores its channels, and the
   RV matched at 42 to 111 of 300 prior draws in each state the job can reach
   (floor alone, or with one of ErrorScale, CeleriteRotation or activity
-  decorrelation), up to 5.0e-7 nats apart. With no `:qp` floor that scores a channel the RV gave the same bits
+  decorrelation), up to 5.0e-7 in ln L apart. With no `:qp` floor that scores a channel the RV gave the same bits
   on every fit measured (RM with tomography, and a CeleriteSHO on the
   photometry only, with and without gravity darkening).
 - Photometry: the workspace method sums every cadence in one pass, where the
@@ -1022,27 +1022,27 @@ every point, but not to the bit:
   the figures here were measured the allocating method still took it from
   `sky_separation`, a different route. On the HD 18599 joint fits with a
   20k-point light curve the whole log density then differed by up to 5.4e-9
-  nats near the reference point.
+  in ln p near the reference point.
 
 In the whole density, on 300 prior draws per HD 18599 joint fit (floor on,
 RV and photometry together), the largest relative differences were 1.9e-11
 on the white-noise fit, 2.1e-11 with the GP rotation, 1.8e-12 with the
 activity GP and 4.7e-11 with activity decorrelation. On the three fits whose
 floor scores its channels the RV floor term set those: at the draw that gave
-each, the RV differed by 8.0e-8 nats (white noise), 6.8e-9 (GP rotation) and
+each, the RV differed by 8.0e-8 in ln L (white noise), 6.8e-9 (GP rotation) and
 1.9e-8 (activity decorrelation), the photometry by 7.3e-11, 1.3e-10 and
 6.5e-10. With the activity GP, whose RV matches, the whole difference is the
 photometry's.
 
 All of these are sample maxima, not bounds. Relative figures are |difference|
 / max(1, |log p|), and rounding does not bound that ratio: where |log p| is
-below 1, terms of thousands of nats cancel and leave their rounding. At such
+below 1, terms of thousands in ln p cancel and leave their rounding. At such
 points between the posterior and the prior of the HD 18599 fits it reached
 3.6e-7. Relative to |log prior| + |log L_RV| + |log L_phot|, the
 largest difference measured was 2.9e-11. On a two-planet RV + transit fit
 (10k-point light curve, ρ⋆ and the mean anomaly as parameters, the Gladman
-stability check) it was 1.9e-10 nats at a point near the best one where
-log p = -18.2, and 1.2e-10 nats on a prior draw where log p = 2.46 (1.03e-11
+stability check) it was 1.9e-10 in ln L at a point near the best one where
+log p = -18.2, and 1.2e-10 on a prior draw where log p = 2.46 (1.03e-11
 and 4.7e-11 relative to max(1, |log p|)).
 
 The same bits as `_logdensity_parts` come out for the tomogram, for the
@@ -1054,8 +1054,8 @@ whenever it has no RV data, or has a noise model on either channel and no
 such floor. Only a gravity-darkened fit with RV data and either no noise
 model at all or a `:qp` floor that scores a channel carries the workspace RV
 rounding, like any other such fit: on a one-planet RVPM_GD fit the RV log L
-matched at 72 of 420 points (up to 5.1e-11 nats apart); on a two-band,
-two-planet one the whole density matched at 410 of 500 (up to 4.7e-10 nats,
+matched at 72 of 420 points (up to 5.1e-11 in ln L apart); on a two-band,
+two-planet one the whole density matched at 410 of 500 (up to 4.7e-10 in ln L,
 1.4e-15 relative), and one bridge_evidence of five moved log Z by 4.5e-13.
 """
 function _bridge_logdensity!(ev::_BridgeEvaluator, y::AbstractVector)
@@ -1251,7 +1251,7 @@ e^{t - m} = σ(-u) / σ(-u_max term) and the weight is σ(-u) (or 1 - σ(-u)),
 with σ(-u) = 1 / (1 + e^u). So `_bridge_g_sums` spends one `exp` a draw
 where the log-space form spends three and a `log1p`: 13 ms a pass over 5.8
 million draws against 51 ms, to an ulp of g. Only when the largest terms sit
-more than `_BRIDGE_G_FAST` nats out, far from any root, does
+more than `_BRIDGE_G_FAST` out in ln L, far from any root, does
 `_bridge_g_shifted` take the log-space form, where nothing can underflow.
 """
 function _bridge_g(l1::Vector{Float64}, l2::Vector{Float64}, w1, w2,

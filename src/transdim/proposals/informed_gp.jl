@@ -16,8 +16,8 @@
 # prior-drawn quasi-periodic kernel essentially never lands on the rotation
 # mode. That breaks the occupancy in BOTH directions: a flexible model that is
 # hard to ENTER under-represents, and one that is hard to LEAVE over-represents
-# (measured: GP-Rot held 0.3% at a 14.8-nat gap, ~4 orders above its evidence;
-# and AD<->GP-Rot occupancy missed the reference dlogZ by 6.79 nats).
+# (measured: GP-Rot held 0.3% at a gap of 14.8 in ln Z, ~4 orders above its evidence;
+# and AD<->GP-Rot occupancy missed the reference dlogZ by 6.79).
 #
 # Only the PERIOD is informed. It is the parameter that decides whether the
 # kernel is even in the right basin; amplitude and shape are low-dimensional
@@ -41,7 +41,7 @@ _gp_period_param(::NoiseModel)           = nothing
 # (stub, coordinate) of the AMPLITUDE parameter, informed by the data scatter.
 #
 # Informing the period ALONE measurably changed nothing (AD<->GP-Rot discrepancy
-# 3.49 -> 3.62 nats off, i.e. inside seed noise). The diagnosis: a death's
+# 3.49 -> off by 3.62 in ln Z, i.e. inside seed noise). The diagnosis: a death's
 # Hastings ratio gains q_rev as a PRODUCT over every parameter of the killed
 # model, so lifting one factor is irrelevant if another is the small one. For a
 # GP the binding factor is the amplitude — a blind draw from a log-uniform
@@ -84,7 +84,7 @@ function _gp_data_scatter(data)
 end
 
 # OFF by default. Measured on the AD<->GP-Rot occupancy gate it made things
-# consistently WORSE at every swap rate (3.86/2.69/2.29 nats vs 3.49/2.18/1.56
+# consistently WORSE at every swap rate (3.86/2.69/2.29 in ln Z vs 3.49/2.18/1.56
 # blind) — detailed balance is exact, so that is degraded mixing, not bias:
 # a proposal concentrated near the data peak keeps re-offering values the chain
 # already holds, and those get rejected. The annealed birth supersedes it by

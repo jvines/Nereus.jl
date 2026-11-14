@@ -384,15 +384,15 @@ the move persists after return.
   bounded parameter agrees to within `basin_rtol · (hi - lo)`. Used to count
   distinct basins and find the runner-up for the dominance check.
 - `dom_margin::Float64=50.0` — the reported optimum must beat the best
-  *distinct* runner-up basin by at least `dom_margin` nats of log-posterior to
+  *distinct* runner-up basin by at least `dom_margin` in ln p to
   be reported as `converged`. On a multimodal RV posterior the multistart
   often lands in a thicket of comparable local modes; a point estimate cannot
   certify which is global, so without a dominant winner `converged` is forced
   `false` (honest "not-trustworthy" rather than a silent wrong mode). The
   margin is deliberately large: a genuine high-S/N planetary signal beats its
-  period/eccentricity aliases by many tens of nats (Δχ²/2 in the dozens), so a
-  true global recovery clears 50 nats easily, while a merely-deep alias that
-  dominates a missed-global by only ~10-40 nats does NOT — closing the residual
+  period/eccentricity aliases by many tens in ln p (Δχ²/2 in the dozens), so a
+  true global recovery clears 50 in ln p easily, while a merely-deep alias that
+  dominates a missed-global by only ~10-40 in ln p does NOT — closing the residual
   "dominates the found basins but the true global was never visited" hole. The
   cost is that MAP will not certify weak or poorly-covered signals as
   converged; that is the correct, conservative behaviour for a point estimate
@@ -759,7 +759,7 @@ function sample_map(
         @info("sample_map: the MAP optimum does not dominate the competing " *
               "local basins (found $n_basins distinct basins; best beats the " *
               "runner-up by only $(round(dominance, digits=2)) < " *
-              "$(round(dom_margin, digits=2)) nats). The posterior is " *
+              "$(round(dom_margin, digits=2)) in ln p). The posterior is " *
               "multimodal and this point estimate cannot certify the global " *
               "mode — reporting converged=false. Use a global sampler " *
               "(sample_pt / sample_nested) or seed `init` near the expected " *
@@ -785,7 +785,7 @@ function Base.show(io::IO, r::MAPResult)
     flags = String[]
     r.railed && push!(flags, "RAILED at $(r.railed_params)")
     r.n_basins > 1 && push!(flags,
-        "$(r.n_basins) basins, dominance=$(round(r.dominance, digits=2)) nats")
+        "$(r.n_basins) basins, dominance=$(round(r.dominance, digits=2)) in ln p")
     status = isempty(flags) ? "converged=$(r.converged)" :
              "converged=$(r.converged); " * join(flags, "; ")
     println(io, "MAP Result ($status)")
