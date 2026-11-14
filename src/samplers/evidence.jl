@@ -514,25 +514,27 @@ function _tempered_quotable(βs::AbstractVector, swap_acc::AbstractVector;
 end
 
 # mode-Laplace is a Gaussian approximation at the posterior mode. It is reported
-# beside bridge sampling, never in its place, and this warns when the two differ
-# by more than bridge's standard error plus 1 nat (and, past `multimodal_tol`,
-# that a single Gaussian reference may be missing modes). Returns whether it
-# warned. Since mode-Laplace moved to the unconstrained density it sits within
-# 0.25 nats of bridge on an RV + Hipparcos-IAD companion (e fixed at i = 5
-# and 89.5 deg, and e free) and 5.5 above on 51 Peg (converged, 15 000 steps).
+# beside bridge sampling, never in its place, and its distance from bridge is
+# recorded (`mode_laplace_check.minus_bridge`). This warns only when that
+# distance in ln Z is past `multimodal_tol` (and bridge's standard error + 1):
+# there a single Gaussian reference may be missing modes, and that is worth
+# checking. Below it the gap is Laplace's own non-Gaussian bias and says nothing
+# about the run: since mode-Laplace moved to the unconstrained density it sits
+# within Δln Z = 0.25 of bridge on an RV + Hipparcos-IAD companion (e fixed at
+# i = 5 and 89.5 deg, and e free), 5.5 above on 51 Peg (converged, 15 000
+# steps), and 1.8 to 4.7 off on the five converged fits of the tutorial, where a
+# warning at bridge's error + 1 fired on four of them. Returns whether it
+# warned.
 function _warn_laplace_vs_bridge(who::AbstractString, laplace::Real, bridge::Real,
                                  bridge_se::Real; multimodal_tol::Real = 20.0)
     (isfinite(laplace) && isfinite(bridge)) || return false
     tol = (isfinite(bridge_se) ? Float64(bridge_se) : 0.0) + 1.0
     d = Float64(laplace - bridge)
-    abs(d) > tol || return false
-    extra = abs(d) > multimodal_tol ?
-        " A gap this large can also mean a multimodal posterior that a single " *
-        "Gaussian reference does not cover, and bridge's overlap will not say so: " *
-        "check the posterior before quoting bridge." : ""
-    @warn "$who: mode-Laplace, a Gaussian approximation at the posterior mode, is " *
-          "$(round(d, digits = 2)) nats from bridge sampling, more than bridge's " *
-          "standard error + 1 nat ($(round(tol, digits = 2))). log_evidence is the " *
-          "bridge value; the Laplace one is not quotable." * extra laplace bridge bridge_se
+    abs(d) > max(tol, Float64(multimodal_tol)) || return false
+    @warn "$who: mode-Laplace, a Gaussian approximation at the posterior mode, " *
+          "differs from bridge sampling by Δln Z = $(round(d, digits = 2)). A gap this large can " *
+          "mean a multimodal posterior that a single Gaussian reference does not " *
+          "cover, and bridge's overlap will not say so: check the posterior before " *
+          "quoting bridge. log_evidence is the bridge value." laplace bridge bridge_se
     return true
 end

@@ -86,7 +86,8 @@ Container for a `sample_pt_emcee` run.
   5.5 nats above bridge and reference-path, which agree with each other to
   0.07 and are validated against exact truth on a curved 15-D target; on an
   RV + Hipparcos-IAD companion within 0.25 of bridge. A warning says when it
-  is further from bridge than bridge's standard error + 1 nat.
+  is more than `bridge_warn_tol` from bridge in ln Z, where a single Gaussian
+  reference may be missing modes.
 - `log_evidence_bridge::Float64` — bridge-sampling evidence from the same cold
   chain (Meng & Wong optimal bridge). This is the HEADLINE when it is usable:
   it never touches the prior end and makes no Gaussianity assumption. Usable
@@ -1068,6 +1069,11 @@ in place.
 - `laplace_switch_tol::Real=50.0` — the Laplace non-Gaussian bias, in nats: a
   quotable tempered value further than this from mode-Laplace is broken, and
   mode-Laplace takes over.
+- `evidence_postfit::Bool=false` — the caller chooses the evidence again after
+  the fit, on an unconstrained target (`run_job` does: its target is bounded,
+  so bridge and mode-Laplace cannot run here). On a bounded target the
+  warnings about the estimates this run cannot make are then left to that
+  choice, which warns on its own if it finds nothing quotable.
 - `prune_stranded::Bool=true` — every 50 steps through the first three quarters
   of burn-in, move walkers stranded far below their rung's mode onto walkers in
   it. A walker counts as stranded only at the second pass running that finds
@@ -1167,6 +1173,7 @@ function sample_pt_emcee(
     bridge_headline::Bool = true,
     bridge_n::Int = 20_000,
     bridge_warn_tol::Real = 20.0,
+    evidence_postfit::Bool = false,
     untemper_transit::Bool = false,
     prune_stranded::Bool = true,
     node_flip::Real = 0.1,
@@ -2227,6 +2234,10 @@ function sample_pt_emcee(
                  !isempty(bridge_refused) ? "refused, $bridge_refused" :
                  "bridge sampling did not give a usable value"
     switched = false
+    # Bridge and mode-Laplace need the unconstrained target; on a bounded one
+    # whose evidence the caller chooses after the fit, the warnings below
+    # about what this run could not estimate would be overruled moments later.
+    deferred = evidence_postfit && target.transform === nothing
 
     if isfinite(log_z_bridge)
         # Corroborate rather than assume. Bridge cannot self-detect a posterior
@@ -2239,7 +2250,7 @@ function sample_pt_emcee(
         log_z = log_z_bridge
     elseif !laplace_check
         # Relative tempered value, absolute Laplace: no switch, both kept.
-        tempered_ok || @warn "sample_pt_emcee: the tempered log-evidence is not " *
+        tempered_ok || deferred || @warn "sample_pt_emcee: the tempered log-evidence is not " *
               "quotable: $tempered_why. Under untemper_transit with photometry " *
               "it is relative to the transit-conditioned reference and " *
               "mode-Laplace is absolute, so Laplace does not replace it; both " *
@@ -2261,12 +2272,12 @@ function sample_pt_emcee(
         log_z = log_z_laplace
         switched = true
     elseif tempered_ok
-        @warn "sample_pt_emcee: neither bridge (" * why_bridge * ") nor " *
+        deferred || @warn "sample_pt_emcee: neither bridge (" * why_bridge * ") nor " *
               "mode-Laplace is available. log_evidence is the tempered value; " *
               "its ladder can carry it, but nothing corroborates it." tempered = log_z_tempered
         log_z = log_z_tempered
     else
-        @warn "sample_pt_emcee: no usable evidence estimate for this run. " *
+        deferred || @warn "sample_pt_emcee: no usable evidence estimate for this run. " *
               "Bridge: $why_bridge. mode-Laplace is not available. The tempered " *
               "stack is not quotable: $tempered_why. log_evidence is NaN."
         log_z = NaN

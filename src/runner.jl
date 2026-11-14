@@ -1683,6 +1683,9 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
 
     if name == "pt_emcee"
+        # The post-fit stage chooses the evidence again on an unconstrained
+        # target (`_augment_evidence!`), and warns there if it must.
+        haskey(kw, :evidence_postfit) || (kw[:evidence_postfit] = true)
         return sample_pt_emcee(target, data; kw...)
     elseif name == "transdim_pt_emcee"
         td === nothing && error("transdim_pt_emcee requires `transdim` block")
@@ -2833,15 +2836,17 @@ function _augment_evidence!(summary, params, data, chains;
             nothing
         end
         why_bridge = "bridge sampling did not converge"
+        sampler_bridge = get(ev, "bridge", nothing) isa Real
         if b !== nothing && b.converged && isfinite(b.log_z)
             ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
                                 "overlap" => Float64(b.overlap))
             # mode-Laplace beside the bridge that comes before it: its distance
-            # (in `mode_laplace_check`), and a warning past bridge's standard
-            # error + 1 nat.
+            # (in `mode_laplace_check`), and a warning past the multimodal gap.
+            # The sampler already compared its own bridge with Laplace and
+            # warned if it had to; the same comparison again is the same news.
             if isfinite(lap)
                 ev["mode_laplace_check"]["minus_bridge"] = Float64(lap - b.log_z)
-                _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
+                sampler_bridge || _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
             end
             # Bridge is biased LOW on a chain that has not converged, and when
             # its reference is fitted from too few INDEPENDENT draws (q carries
