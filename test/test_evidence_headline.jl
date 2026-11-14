@@ -4,9 +4,9 @@
 # the friendliest target any of these will see), converged (two seeds of
 # 15 000 steps, R-hat 1.016 and 1.014):
 #
-#   TI+ / H+  -6005.59 / -5986.97    93 to 112 nats low
-#   SS+       -5959.52 / -5948.62    55 to 66 nats low
-#   Laplace   -5888.33 / -5888.39    5.5 nats high
+#   TI+ / H+  -6005.59 / -5986.97    low by 93 to 112 in ln Z
+#   SS+       -5959.52 / -5948.62    low by 55 to 66 in ln Z
+#   Laplace   -5888.33 / -5888.39    high by 5.5 in ln Z
 #   bridge    -5893.86 / -5893.91    validated pair
 #   refpath   -5893.79 / -5893.88
 #

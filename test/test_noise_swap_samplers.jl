@@ -84,7 +84,7 @@ using Random, Statistics, MCMCChains
         # not: measured 0.4% / 99.6% (rjmcmc) and 0.9% / 99.1% (pt_emcee), a
         # ~230:1 split between two models built on iid noisy copies of the same
         # signal. That is either the open entrenchment problem showing up very
-        # cleanly, or two noise realisations genuinely differing by ~5 nats —
+        # cleanly, or two noise realisations genuinely differing by ~5 in ln Z —
         # and telling those apart needs reference evidences, which belong in a
         # validation script, not in CI.
         #

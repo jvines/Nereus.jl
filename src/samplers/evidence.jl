@@ -327,7 +327,7 @@ function ss_plus(acc::EvidenceAccumulator, betas::AbstractVector{<:Real})
     # Conservative uncertainty: dominant term from the smallest-n pair.
     # UNCERTAINTY. This used to return 1/sqrt(n_min), which is not an error on
     # log_Z at all -- it ignores the integrand entirely and produced values like
-    # "+/- 0.00" next to an estimate that was wrong by hundreds of nats, i.e. the
+    # "+/- 0.00" next to an estimate that was wrong by hundreds in ln Z, i.e. the
     # most misleading output the estimator can emit.
     #
     # There is no cheap unbiased SE for a stepping-stone sum from streamed
@@ -451,8 +451,7 @@ is the inverse-temperature ladder it was filled against.
 !!! warning "Agreement between these four is not a check"
     All four read the same shared `mean_logL` array, so a bias in
     `<log L>` at any rung appears identically in every one of them. On a
-    measured run the four agreed to 2.6 nats while all being 147 nats
-    wrong. Corroborate against an estimator that does not temper --
+    measured run the four agreed to 2.6 in ln Z while all being wrong by 147 in ln Z. Corroborate against an estimator that does not temper --
     [`bridge_evidence`](@ref), [`reference_path_evidence`](@ref) or
     [`mode_laplace_evidence`](@ref) -- before quoting a number.
 

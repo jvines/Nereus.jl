@@ -131,7 +131,7 @@ end
 @testset "pt_hmc: the warm-start pre-search reports no evidence of its own" begin
     # The pre-search, a short pt_emcee, computed and warned about its own log Z,
     # and pt_hmc's output on the companion carried "sample_pt_emcee: bridge and
-    # mode-Laplace disagree by 154.0 nats ... bridge = 13.74" beside the 165.51
+    # mode-Laplace disagree by 154.0 in ln Z ... bridge = 13.74" beside the 165.51
     # it reported. Two rungs make a pre-search's tempered stack disagree.
     tg, data = _ee_rv()
     tu = NereusTarget(tg.params, data; unconstrained = true)

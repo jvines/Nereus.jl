@@ -67,7 +67,7 @@ end
         # pt_emcee RM fit (8 rungs x 32 walkers, 3000 steps) every cold walker
         # ended outside [-π, π], hot rungs reached |λ| ~ 1e12 rad, 88% of the
         # recorded draws lay outside the window, live R-hat read 1.48, and
-        # bridge and Laplace disagreed by 23.5 nats. It is now the circular
+        # bridge and Laplace disagreed by 23.5 in ln Z. It is now the circular
         # Uniform: walls at the chart edges, which the burn-in re-cut moves to
         # the emptiest arc (src/circular.jl), so the seam is never where the
         # posterior is.

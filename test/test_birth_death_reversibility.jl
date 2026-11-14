@@ -14,7 +14,7 @@
 # The likelihood and prior terms cannot rescue an imbalance here: log_prior
 # skips inactive slots and the likelihood ignores them, so for this pair
 # ΔlogL and Δlogπ are exactly antisymmetric and cancel in the sum. Whatever
-# is left in log_q_birth + log_q_death IS the detailed-balance error, in nats.
+# is left in log_q_birth + log_q_death IS the detailed-balance error, in ln p.
 using Test
 using Random
 using Nereus

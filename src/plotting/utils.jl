@@ -1047,7 +1047,7 @@ EMPEROR best-fit cluster filter: keep samples whose log-posterior is
 within `ln(bf_cutoff)` of the maximum — the convention is the FLAT
 cut, NOT a percentile and NOT dimension-scaled. An earlier version
 multiplied the cut by d/2 ("typical-set correction"); on a
-30-parameter chain that turned the 2.3-nat cut into 34.5 nats and let
+30-parameter chain that turned the cut of 2.3 in ln p into 34.5 in ln p and let
 the high-e tail of the posterior pollute every band and fold the
 filter exists to protect (the d/2 reasoning is exactly backwards: the
 filter's PURPOSE is to exclude the typical set and show the best-fit

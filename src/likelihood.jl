@@ -1216,7 +1216,7 @@ The kernel's sin(π(tᵢ − tⱼ)/P) come from the angle-difference identity
 (n `sincos` calls instead of n(n+1)/2 `sin` calls), so the result is not
 bit-identical to the generic method: ≲ 1e-12 in the kernel entries
 (1e-13 at P ~ 10 d), which log L inherits times the conditioning of Σ:
-≲ 1e-10 nats near the HD 18599 posterior, up to ~1e-10 relative over its
+≲ 1e-10 in ln L near the HD 18599 posterior, up to ~1e-10 relative over its
 prior, more where Σ is near singular. Everything else in Σ and the solve
 is computed as in the generic method. Any other case (ForwardDiff duals,
 the `:white` kernel) goes to the generic method.
@@ -1298,7 +1298,7 @@ function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloo
             # sincos calls instead of n(n+1)/2 sin calls, angles measured from
             # the middle of the RV baseline to keep them small. Not
             # bit-identical to the generic method: ≲ 1e-12 in the kernel; in
-            # log L that is ≲ 1e-10 nats near the HD 18599 posterior and up to
+            # log L that is ≲ 1e-10 near the HD 18599 posterior and up to
             # ~1e-10 relative over its prior, more where Σ is near singular.
             sa = sc.floor_s
             ca = sc.floor_c

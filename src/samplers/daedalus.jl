@@ -340,7 +340,7 @@ function sample_daedalus(
         push!(log_L_dead, p.log_L)
     end
 
-    # Skilling's (2006) error: H the information, nats from prior to
+    # Skilling's (2006) error: H the information (natural log), from prior to
     # posterior, and σ(log Z) = √(H / n_live).
     H = 0.0
     for (lL, lw) in zip(log_L_dead, log_w_dead)
@@ -581,7 +581,7 @@ function _daedalus_evolve(start::DaedalusPoint, target::NereusTarget,
         # fixed planet off whenever the planet-less likelihood cleared L_thr.
         # On an RV + IAD companion at i = 5° (150 live points) one run in five
         # with e fixed, and the run with e free, ended planet-less: every
-        # posterior draw on the flat planet-less likelihood, 1,800 nats below
+        # posterior draw on the flat planet-less likelihood, Δln L = 1,800 below
         # the mode (log Z = -1650 against +150 to +169).
         if (td.planets || has_toggleable_noise) && rand(rng) < td.transdim_fraction
             # Between-model: with toggleable noise, split between planet

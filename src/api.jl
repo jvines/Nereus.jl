@@ -1280,9 +1280,9 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                 # the call in place. run_job gets this from _populate_summary!.
                 # A bare log_z is not quotable: the tempered stack shares one
                 # mean_logL array, so its four variants agreeing is not a
-                # cross-check and they can sit >100 nats low together.
+                # cross-check and they can sit low by >100 in ln Z together.
                 _evidence_block!(summary, raw; engine = spec_name)
-                # The tempered stack sits >100 nats low on a signal-locked
+                # The tempered stack sits low by >100 in ln Z on a signal-locked
                 # posterior while its four variants agree with each other to a
                 # decimal, so a bridge cross-check is not optional.
                 _augment_evidence!(summary, target.params, target.data, chains;

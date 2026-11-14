@@ -377,7 +377,7 @@ is always an active channel implicitly and is **not** listed in
 `G(t)` is **unit-variance** per Rajpaul+ 2015 — there is deliberately
 **no kernel amplitude parameter** (a free amplitude is an exact
 non-identifiability against the channel couplings; it destabilised log Z
-by ~80 nats run-to-run on HD 18599). All scale lives in the couplings.
+by ~80 in ln Z run-to-run on HD 18599). All scale lives in the couplings.
 Names from `src/noise/param_names.jl:196`, priors from
 `src/default_priors.jl:858`:
 
@@ -469,7 +469,7 @@ conditional drops the indicator marginal `log p(y_I | θ)`, the only term
 anchoring the kernel + couplings to the indicator data; the model can
 then buy unbounded conditional sharpness for free (couplings rail, `λ_p`
 rails, the planet is absorbed into the conditional mean, "evidence"
-inflates by hundreds of nats — HD 18599 post-mortem 2026-06-12).
+inflates by hundreds in ln Z — HD 18599 post-mortem 2026-06-12).
 
 For an honest log-Z comparison against `ActivityDecorrelation`, use the
 **chain rule** instead:
@@ -601,7 +601,7 @@ IndicatorFloor(;
     `:white` is a **strawman** null for activity indicators, which are
     temporally correlated. AGP models that correlation and the white
     floor cannot, so AGP banks the indicator-correlation evidence
-    (HD 18599: ≈ +82 nats) for free — irrelevant to the planet science
+    (HD 18599: ≈ +82 in ln Z) for free — irrelevant to the planet science
     but it leaks into the AD↔AGP occupancy (drags AGP up to a spurious
     ~15%). `:qp` gives the floor the same correlation-capturing power so
     the indicator-evidence terms ≈ cancel and the occupancy reflects the

@@ -91,8 +91,8 @@ Notes for a production reader:
   mode-Laplace, a Gaussian approximation at the mode, is written in
   summary.json as `mode_laplace` (a number), with `mode_laplace_check` beside
   it holding that label and its distance from bridge; a warning fires when it
-  is further from bridge than bridge's standard error + 1 nat (1.1 to 1.2
-  nats above bridge on the companion before the Laplace fix below, within
+  is further from bridge than bridge's standard error + 1 in ln Z (1.1 to 1.2
+  in ln Z above bridge on the companion before the Laplace fix below, within
   0.25 after it). `transdim_pt_emcee` and `pt_whitening`
   report **H+** and `sample_pt` **TI+**, each only when quotable: they have
   no mode-Laplace to fall back on, so otherwise `NaN` with a warning, written
@@ -105,7 +105,7 @@ Notes for a production reader:
   mode-Laplace with a warning, else `NaN` with a warning saying why. Its
   ladder is β = 0 and a geometric run
   from `beta_min`: from β = 0 the integrand climbs through four decades in
-  the first segment, which TI+ does not resolve (1 to 4 nats low at 8 to 12
+  the first segment, which TI+ does not resolve (low by 1 to 4 in ln Z at 8 to 12
   rungs) and SS+ does (within 0.3 of an exact log Z).
   Whichever you trust, all four numbers are always in the report — read
   the one that suits your posterior (see
@@ -328,13 +328,13 @@ sampler names that route through the PT evidence stack are
 **`summary.json` carries an `evidence` block**, not just `log_z`: every
 estimator the run produced with its standard error, plus `reported` naming
 which one `log_z` came from. Read it before quoting a number — on a measured
-HD 18599 run the four tempered estimators spanned 80 nats while TI+ reported
+HD 18599 run the four tempered estimators spanned 80 in ln Z while TI+ reported
 `se = 186`, none of which a bare `log_z` would have shown.
 
 ⚠ **`run_job` fits could not compute bridge at all until 2026-08-27.** The
 runner builds its target with `unconstrained = false`, so `target.transform`
 is `nothing` and `sample_pt_emcee` skips bridge — every job silently fell
-through to the tempered stack, the one estimator that can sit >100 nats low
+through to the tempered stack, the one estimator that can sit low by >100 in ln Z
 while its four variants agree to a decimal. Bridge is now recomputed after the
 fit against an unconstrained target built from the same `params` and `data`
 (chains untouched), and `log_z` is promoted to it **only when the chain has
@@ -350,7 +350,7 @@ nested headline, or a bridge the engine already reported, is kept; under
 `sample_pt_emcee`. Trans-dim chains are skipped — a single Gaussian reference
 over a fixed `R^n` is undefined across mixed dimensions.
 
-Measured on five HD 18599 fixed configurations: four shift by ≤ 6 nats between
+Measured on five HD 18599 fixed configurations: four shift by ≤ 6 in ln Z between
 tempered and bridge, and ActivityGP shifts by **59.9** (−1234.6 → −1174.7) —
 the one badly mixed run (worst R-hat 3.91). If you have results from a
 `run_job` fit predating this, re-run or recompute the evidence.
@@ -376,8 +376,8 @@ per coordinate), 20 000 per rung on a 16-rung geometric ladder from
 | H+  | -5.988 | 0.003 |
 
 The test PASS bar (`test_evidence_gaussian.jl:62`, `64`) is each
-estimator within `TOL = 0.5` nats of the analytic value **and** a
-mutual spread `< 1.0` nat. All four pass; the mutual spread is ~0.18
+estimator within `TOL = 0.5` in ln Z of the analytic value **and** a
+mutual spread `< 1.0` in ln Z. All four pass; the mutual spread is ~0.18
 in log Z, nearly all of it the trapezoidal TI's discretization. On exact
 draws the estimators are correct. The file also carries a regression
 guard for the descending-β sign flip: the same draws on the ascending
@@ -385,7 +385,7 @@ ladder give the same numbers, and log Z stays negative
 (`test_evidence_gaussian.jl:71-74`).
 
 Independent cross-validation: TI+/SS+/H+ agree with the analytic
-log Z to `< 0.01` nats on the 2D-Gaussian × box. Earlier HD 18599
+log Z to `< 0.01` in ln Z on the 2D-Gaussian × box. Earlier HD 18599
 disagreements were
 sampling/ladder-resolution effects, **not** estimator bugs — use
 `≥ 10` PT temperatures for trustworthy numbers.
@@ -425,11 +425,11 @@ one); which is checked against a full evaluation at a few draws, and without
 
 Until 2026-11-12 both corrections were missing. On an RV + Hipparcos-IAD
 companion (bridge 163.88 at i = 89.5°, 165.51 at 5°, 162.08 with e free)
-pt_emcee's value sat 1.1 nats above bridge — the missing Jacobian (−3.7
-nats at the mode) less the shrunk covariance (−2.6 nats for d = 6) — and
+pt_emcee's value sat Δln Z = 1.1 above bridge — the missing Jacobian (−3.7
+in ln Z at the mode) less the shrunk covariance (−2.6 in ln Z for d = 6) — and
 pt_hmc's, whose `:lp` carries the Jacobian, 2.6 to 3.1 below; with both
-corrected the two sit within 0.25 nats of bridge. On 51 Peg (d = 15,
-converged at 15 000 steps) it sits 5.5 nats above bridge and
+corrected the two sit within 0.25 in ln Z of bridge. On 51 Peg (d = 15,
+converged at 15 000 steps) it sits Δln Z = 5.5 above bridge and
 reference-path, which agree to 0.07.
 It carries an `O(100)`-log-unit non-Gaussian bias on pathological (railed,
 multimodal) posteriors — negligible for a strong detection, worth a nested
@@ -457,7 +457,7 @@ that cannot carry it (no β = 0 rung, or a pair of rungs swapping less than
 `minimum(res.acceptance_swap)` that will not rise with more temperatures is
 the independent tell-tale of the phase transition. When bridge is the
 headline, a warning fires if Laplace is further from it than bridge's
-standard error + 1 nat.
+standard error + 1 in ln Z.
 
 ## Bridge sampling — evidence from the posterior alone
 
@@ -470,8 +470,8 @@ Every β-path estimator above integrates from the prior to the posterior, so all
 of them depend on ⟨log L⟩ at the **hot** end. On a joint RV+transit fit that
 expectation is `E_prior[log L]`, and it is tail-dominated: prior draws on
 HD 18599 give a median log L of −4.9e4 with a **minimum of −1.5e7**. No ladder
-resolves a quantity with that variance — measured, TI+ sat 118 nats from the
-truth with a self-reported error of 0.48 nats, and adding rungs, cooling
+resolves a quantity with that variance — measured, TI+ sat Δln Z = 118 from the
+truth with a self-reported error of 0.48 in ln Z, and adding rungs, cooling
 `beta_min` or enabling the adaptive ladder all moved it **further away**. That
 is a bias that does not shrink with computation and cannot be tuned out.
 
@@ -547,7 +547,7 @@ A refused bridge is still written to summary.json, with
 posterior's. When the walkers have not reached it, they are not: on the easy
 single-planet RV fixture of the tests (12.3 d on `LogUniform(0.1, 3000)`), 32
 walkers on two rungs had not found the period after 60 to 3000 steps, and
-bridge read **70 to 90 nats low** while ESS cleared the old bound — walkers
+bridge read **low by 70 to 90 in ln Z** while ESS cleared the old bound — walkers
 that do not move still count as about one effective draw each, so a
 32-walker ensemble has an ESS floor near 32 to 64:
 
@@ -582,7 +582,7 @@ from the first step (so still moving in) give, per worst R-hat:
 | Gaussian, d = 15, starts at 3σ | 4.5 / 1.94 / 1.36 / 1.15 / 1.08 | −4.0 / −1.3 / −0.60 / −0.32 / −0.24 |
 | curved, d = 15, starts at 3σ | 5.3 / 2.0 / 1.71 / 1.28 | −8.8 / −4.9 / −2.0 / −0.70 |
 
-At R-hat ≤ 1.1 the worst error measured is 0.26 nats. Converged runs sit
+At R-hat ≤ 1.1 the worst error measured is 0.26 in ln Z. Converged runs sit
 well below the bound: R-hat 1.008 to 1.017 for pt_emcee and 1.001 to 1.005
 for pt_hmc on the RV + Hipparcos-IAD companion (i = 5°, 89.5°, e free; ESS
 1150 to 4200 against 27 to 44), 1.014 to 1.019 on 51 Peg (ESS 3300 to 4400
@@ -609,7 +609,7 @@ R-hat (each row a mean of 3 chains; ✓ = reported by the guard):
 The ESS of walkers that barely move has a floor near the walker count (the
 d = 5 row at 3.3 is 32 nearly frozen walkers), so the ratio alone does not
 catch them; R-hat does. The worst error the guard lets through, over every
-chain in the tables of this section, is 0.36 nats (d = 30 at 1.15 × need);
+chain in the tables of this section, is 0.36 in ln Z (d = 30 at 1.15 × need);
 fitting `q` on half the walkers removes even that (−0.02, below).
 
 Measured earlier on the curved target, thinning one chain to a fixed number
@@ -623,12 +623,12 @@ of draws:
 | 22 | **−3.217** | +0.174 |
 
 **Where bridge is refused on stationary draws**, reference-path is the better
-number: on the chains above, its mean error stays within 0.11 nats in every
+number: on the chains above, its mean error stays within 0.11 in ln Z in every
 row at d ≤ 15 (single chains within 0.19; d = 15 at ratio 0.25: −0.04
 against −1.85), and at d = 30 within 0.06 down to ratio 0.14 (single chains
 within 0.28; −0.01 against −1.53 at 0.22, +0.03 against −5.6 at 0.14); below
 that it fails too (−0.31 to +3.3). On the overdispersed Gaussians it held to
-0.21 at d = 7 where bridge was 23 to 37 nats low, but read +25 to +30 at
+0.21 at d = 7 where bridge was low by 23 to 37 in ln Z, but read +25 to +30 at
 d = 15 from 10σ starts. It is not reported automatically (the headline order
 is Jose's rule); call `reference_path_evidence(target, chains)`. It does not
 rescue a chain that never reached the posterior (above).
@@ -644,21 +644,21 @@ the same autocorrelated walkers, did not (−2.784 at `n_eff = 22`). It is not *
 
 ⚠ **Adequate ESS is necessary, not sufficient — and there is an open
 discrepancy on real targets.** On the analytic target above the two estimators
-agree to hundredths of a nat once the chain is well mixed. On the real 51 Peg
+agree to hundredths in ln Z once the chain is well mixed. On the real 51 Peg
 posterior (1691 RVs, 15 parameters, `n_eff` ≈ 9000 against 135 parameters in
 `q`) they do **not**: bridge reads −5899.4 and reference-path −5894.8, a gap of
-**4.6 nats**. Both are internally converged and neither's error bar covers it:
+**4.6 in ln Z**. Both are internally converged and neither's error bar covers it:
 
   - bridge is stable across proposals — Gaussian −5899.480, Student-t
-    −5899.383 (0.10 nats apart), `se` ≈ 0.03, `overlap` = 1.0000;
+    −5899.383 (Δln Z = 0.10 apart), `se` ≈ 0.03, `overlap` = 1.0000;
   - reference-path is stable across resolutions — −5894.773 at 1024
-    particles, −5894.909 at 2048 with more steps (0.14 nats apart), ESS
+    particles, −5894.909 at 2048 with more steps (Δln Z = 0.14 apart), ESS
     84–92%.
 
 Ruled out as causes: low effective sample size, restricted support
 (`support_frac` = 0.990), non-finite draws being filtered (0 of 80 000),
 proposal tail weight, and chain mixing. The cause is not currently known, so
-on a real multi-instrument RV posterior treat **a few nats as the systematic
+on a real multi-instrument RV posterior treat **a few in ln Z as the systematic
 floor** on any single prior-free log Z, quote which estimator produced it, and
 do not read a Bayes factor of that size as meaningful unless both estimators
 agree on it.
@@ -668,11 +668,11 @@ configuration (R-hat 1.016 and 1.014, ESS 4300 and 4440) give bridge
 −5893.86 and −5893.91 against reference-path −5893.79 and −5893.88: within
 0.07, and near the reference-path value above rather than the bridge one.
 
-**Validation.** Error of **0.003 nats** against an analytic 22-dimensional
+**Validation.** Error of **0.003 in ln Z** against an analytic 22-dimensional
 target. On the real HD 18599 RVPM posterior, `log_z = 11466.13 ± 0.02` with
 `overlap = 1.000`, from both the Student-t and Gaussian proposals
 (11466.13 vs 11466.12) — against a mode-Laplace cross-check of ~11467 and a
-nested value of 11470, while TI+/SS+ on the same run sat 117–245 nats low.
+nested value of 11470, while TI+/SS+ on the same run sat low by 117–245 in ln Z.
 
 ## Reference-path evidence — thermodynamic integration without the prior
 
@@ -706,7 +706,7 @@ The path is short because `q` already resembles the posterior, so there is no
 phase transition to resolve and no expectation is ever taken under the prior.
 This is the fix for the failure documented above: it is the *path* that breaks
 TI/TI+/SS+/H+ on a signal-locked target, not the estimators, which reproduce an
-analytic log Z to <0.01 nats on a well-behaved one.
+analytic log Z to <0.01 on a well-behaved one.
 
 **Two estimates, and their difference is a diagnostic.**
 
@@ -718,14 +718,14 @@ analytic log Z to <0.01 nats on a well-behaved one.
   require equilibration at each rung.
 
 Measured on the 22-D analytic target with a deliberately mismatched Student-t
-reference, TI's error runs **-3.21 / -0.79 / -0.10 / -0.02** nats at
+reference, TI's error runs **-3.21 / -0.79 / -0.10 / -0.02** in ln Z at
 `n_steps` = 2 / 8 / 32 / 128, while AIS stays within 0.03 throughout. So a gap
 between them means *raise `n_steps`* (and watch `ess` rise with it) — it is not
 a second opinion on the arithmetic.
 
 Contrast TI+/SS+/H+, which all read one shared `mean_logL` array: a bias at any
-rung appears identically in all of them, which is why they agreed to 2.6 nats on
-HD 18599 while all being 147 nats wrong.
+rung appears identically in all of them, which is why they agreed to 2.6 in ln Z on
+HD 18599 while all being wrong by 147 in ln Z.
 
 **Defaults and requirements.**
 
@@ -745,11 +745,11 @@ HD 18599 while all being 147 nats wrong.
 
 **Validation.**
 
-*Controlled target.* Error **0.0001-0.0015 nats** across seeds against the
+*Controlled target.* Error **0.0001-0.0015 in ln Z** across seeds against the
 analytic 22-D target (`test/test_reference_path_evidence.jl`), AIS and TI
 agreeing to better than 0.05, `ess` 511/512. Critically, it also holds under a
 deliberately MISMATCHED reference -- mean shifted 1 sigma, scale x1.5, x2.5,
-x0.6 give -0.030 / -0.004 / +0.090 / -0.089 nats -- which is the case that
+x0.6 give -0.030 / -0.004 / +0.090 / -0.089 in ln Z -- which is the case that
 matters, because fitting `q` to draws from the target itself tests the reference
 rather than the annealing.
 
@@ -766,20 +766,20 @@ parameters, P = 4.23080 +/- 0.00000 d, K = 56.16 +/- 0.24 m/s):
 | reference-path (512 particles) | -5893.26 |
 | reference-path (2048 particles) | -5893.08 |
 
-**The tempered stack is ~176 nats low**, with TI+ and H+ agreeing to the second
+**The tempered stack is low by ~176 in ln Z**, with TI+ and H+ agreeing to the second
 decimal while both being wrong -- the failure this page describes, measured on a
 real target rather than asserted. The two prior-free estimators agree to 3.8
-nats and reference-path is stable in particle count (ESS 1929/2048).
+in ln Z and reference-path is stable in particle count (ESS 1929/2048).
 
-That residual 3.8 nats between bridge and reference-path is unexplained: both
+That residual 3.8 in ln Z between bridge and reference-path is unexplained: both
 report sigma ~ 0.03 and both are stable, so it is not sampling noise. Treat a
-Bayes factor resting on less than ~5 nats from either of them with suspicion
+Bayes factor resting on less than Δln Z ~ 5 from either of them with suspicion
 until it is resolved. Two converged runs of the quickstart configuration
 (15 000 steps, R-hat 1.016 and 1.014) put them within 0.07 (bridge −5893.86
 and −5893.91, reference-path −5893.79 and −5893.88), which points at that
 run rather than the estimators; its R-hat was not recorded. On them
-mode-Laplace sits 5.5 nats above both, and the tempered stack, on the
-quickstart's 8 rungs, 93 to 112 nats (TI+, H+) and 55 to 66 (SS+) below.
+mode-Laplace sits Δln Z = 5.5 above both, and the tempered stack, on the
+quickstart's 8 rungs, 93 to 112 in ln Z (TI+, H+) and 55 to 66 (SS+) below.
 
 ## Practical guidance
 
@@ -791,8 +791,8 @@ quickstart's 8 rungs, 93 to 112 nats (TI+, H+) and 55 to 66 (SS+) below.
   ⚠ **But mutual agreement between TI/TI+/SS+/H+ is NOT evidence that they are
   right.** All four read the same shared `mean_logL[k]` array, so a bias in
   ⟨log L⟩ at any rung appears identically in every one of them. On a measured
-  HD 18599 run the four agreed with each other to **2.6 nats while all being
-  147 nats wrong**. Corroborate against something that does not temper —
+  HD 18599 run the four agreed with each other to **2.6 in ln Z while all being
+  wrong by 147 in ln Z**. Corroborate against something that does not temper —
   `bridge_evidence` or the mode-Laplace value — before quoting a number,
   especially for a Bayes factor.
 - **Trans-dim PT**: the TI+ Richardson term blows up (PCHIP can't

@@ -342,7 +342,7 @@ SS+ when it can be trusted (`tempered_ok`) and agrees with mode-Laplace within
 with a warning, only when none of them is available. SS+ is trusted when the
 ladder starts at β = 0 and every adjacent pair of rungs swapped at least
 `swap_min` of the time; `tempered_why` gives the reason it is not. A quotable
-SS+ more than `evidence_tol` nats from bridge is warned about.
+SS+ more than `evidence_tol` (in ln Z) from bridge is warned about.
 
 # Keywords
 - `n_temps=12`, `n_sweeps=1500`, `n_warmup=400`
@@ -361,15 +361,15 @@ SS+ more than `evidence_tol` nats from bridge is warned about.
   between them, where the integrand climbs through four decades, put log Z at
   −5 (4 rungs: −624 to −1329) where bridge sampling and nested INS give 164 to
   166. Geometric from 1e-4 without the β = 0 rung, as pt_emcee's ladder is,
-  the integrals start at 1e-4 and leave out a head worth −1.3 nats at i = 5°
+  the integrals start at 1e-4 and leave out a head worth −1.3 in ln Z at i = 5°
   and −4.5 at i = 89.5° (TI+ 166.9 and 168.4 against bridge 165.5 and 163.9);
   with it, SS+ gives 165.5 and 163.9.
 - `betas=nothing` : custom β-ladder (overrides default + disables adaptation)
 - `swap_min=0.05` : the least swap acceptance between adjacent rungs at which
   the tempered SS+ is quoted (above).
-- `evidence_tol=2.0` : nats; a quotable SS+ this far from bridge is warned
+- `evidence_tol=2.0` : in ln Z; a quotable SS+ this far from bridge is warned
   about.
-- `laplace_switch_tol=50.0` : nats, the Laplace non-Gaussian bias; without a
+- `laplace_switch_tol=50.0` : in ln Z, the Laplace non-Gaussian bias; without a
   usable bridge, a quotable SS+ further than this from mode-Laplace is broken
   and mode-Laplace is reported.
 - `bridge_n=20_000` : proposal draws of the bridge estimate; `0` skips it.
@@ -385,7 +385,7 @@ SS+ more than `evidence_tol` nats from bridge is warned about.
   `sample_nuts`. Each chain's kernel is frozen at the end of its warm-up, so
   where the warm-up ran decides how it samples. From one prior draw each, the
   β = 1 chain of an RV + IAD companion ended its warm-up on a plateau 1,500
-  nats below the mode with a metric ten times too wide; brought to the mode by
+  in ln p below the mode with a metric ten times too wide; brought to the mode by
   a swap, it accepted no trajectory, and the run reported one point for all
   1000 sweeps. `0` starts every chain from one draw.
 - `seed=1`, `progress=true`
@@ -587,12 +587,12 @@ end
 # `_tempered_quotable` (src/samplers/evidence.jl), which pt_emcee and the
 # summary writers share, and SS+ finite. The ladder must reach β = 0, or the
 # [0, β₁] head is not in the integral
-# (it was worth −1.3 to −4.5 nats on the RV + IAD companion from β₁ = 1e-4); and
+# (it was worth −1.3 to −4.5 in ln Z on the RV + IAD companion from β₁ = 1e-4); and
 # every adjacent pair of rungs must overlap, which a stepping-stone ratio needs
 # and the swaps between them measure: at least `swap_min` of them accepted.
 # SS+ rather than TI+: from β = 0 the integrand climbs through four decades in
 # the first segment, which PCHIP does not resolve -- TI+ came out 1.1 to 3.6
-# nats low at 8 and 12 rungs, its error 6.6 to 42 nats, where SS+ matched
+# in ln Z low at 8 and 12 rungs, its error 6.6 to 42 in ln Z, where SS+ matched
 # bridge sampling to 0.1.
 function _pt_hmc_tempered_ok(report::EvidenceReport, βs::AbstractVector,
                              swap_acc::AbstractVector, swap_min::Float64)
@@ -609,7 +609,7 @@ end
 # SS+ when `_pt_hmc_tempered_ok` and within `laplace_switch_tol` of mode-Laplace,
 # else mode-Laplace (Jose's rule), else NaN. A warning says why whenever the
 # tempered value is not quotable, and when bridge and a quotable SS+ disagree
-# by more than `tol` nats.
+# by more than `tol` in ln Z.
 function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
                           report::EvidenceReport, βs::AbstractVector,
                           swap_acc::AbstractVector, swap_min::Float64, tol::Float64,
@@ -645,7 +645,7 @@ function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
                     "quotable: $why. Reporting bridge." bridge = lz_bridge ss_plus = ssp ti_plus = report.ti_plus[1]
         ok && abs(ssp - lz_bridge) > tol &&
             @warn "sample_pt_hmc: bridge and the tempered SS+ differ by " *
-                  "$(round(abs(ssp - lz_bridge), digits=1)) nats. Reporting bridge; " *
+                  "$(round(abs(ssp - lz_bridge), digits=1)) in ln Z. Reporting bridge; " *
                   "check that the posterior is not multimodal." bridge = lz_bridge ss_plus = ssp
         return (; log_z = lz_bridge, bridge = lz_bridge, laplace, tempered_ok = ok,
                   tempered_why = why, reported = "bridge")
@@ -655,8 +655,8 @@ function _pt_hmc_evidence(target::NereusTarget, chains::MCMCChains.Chains,
     elseif isfinite(laplace)
         # Jose's rule: a tempered value that is not quotable, or that is
         # further from mode-Laplace than its non-Gaussian bias, is broken.
-        why_t = ok ? "it is $(round(abs(ssp - laplace), digits = 1)) nats from " *
-                     "mode-Laplace, beyond laplace_switch_tol = $laplace_switch_tol" :
+        why_t = ok ? "it differs from " *
+                     "mode-Laplace by $(round(abs(ssp - laplace), digits = 1)) in ln Z, beyond laplace_switch_tol = $laplace_switch_tol" :
                      "it is not quotable: $why"
         @warn "sample_pt_hmc: log_evidence is mode-Laplace, a Gaussian " *
               "approximation at the posterior mode: bridge sampling is unavailable " *

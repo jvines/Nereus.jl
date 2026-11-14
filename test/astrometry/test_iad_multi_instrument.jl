@@ -63,7 +63,7 @@ function _multi_iad_scenario(; with_gaia::Bool)
         # induces (3.26, -0.40, 0.087, -3.12, -1.54) — the proper-motion terms
         # had the WRONG SIGN, asserting μ the abscissae contradict at σ=0.02.
         # The fit relieved ~48000 of χ² by tilting the orbit, so i = 30° beat
-        # the true i = 60° by ~800 nats. The bit-for-bit pins never caught it
+        # the true i = 60° by ~800 in ln L. The bit-for-bit pins never caught it
         # because they check exact values, not ordering — hence the
         # discrimination testset added below.
         # Gaia published the fit through the DR3 window's transits; the
@@ -232,7 +232,7 @@ const JOINT_OMEGA = -3234.192242129348
     #
     # The pins above compare Float64s exactly and say nothing about
     # whether the truth is preferred. That gap let a joint path in which
-    # i = 30° beat the true i = 60° by ~800 nats sit unnoticed: the pinned
+    # i = 30° beat the true i = 60° by ~800 in ln L sit unnoticed: the pinned
     # numbers were "right" and the science was wrong. Assert the shape of
     # the likelihood surface, not only its values.
     # =================================================================
@@ -598,10 +598,10 @@ const JOINT_OMEGA = -3234.192242129348
         @test isfinite(d_hip) && isfinite(d_gaia) && isfinite(d_joint)
         # Neither mission alone can say anything: a 90-yr orbit over a
         # 3-yr baseline IS a linear sky path, and the marginalisation eats
-        # it. Measured: 0.58 nats for Hipparcos, 1.10 for Gaia.
+        # it. Measured: 0.58 in ln L for Hipparcos, 1.10 for Gaia.
         @test d_hip  < 5
         @test d_gaia < 5
-        # Shared mu across the 25-yr gap: measured 207 nats. A per-mission
+        # Shared mu across the 25-yr gap: measured 207 in ln L. A per-mission
         # mu would give d_joint ≈ d_hip + d_gaia ≈ 1.7, so the factor-of-10
         # margin below is the test that catches that mistake.
         @test d_joint > 50

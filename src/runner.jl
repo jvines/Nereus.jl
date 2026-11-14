@@ -2776,7 +2776,7 @@ end
 # `target.transform === nothing` -- and run_job builds its target with
 # `unconstrained = false`, which means EVERY run_job fit silently fell through
 # to the tempered stack for its headline evidence. That is the one estimator
-# documented to sit >100 nats low on a signal-locked posterior while its four
+# documented to sit low by >100 in ln Z on a signal-locked posterior while its four
 # variants agree with each other to a decimal.
 #
 # Rather than change the sampling geometry for every user, recompute the
@@ -2789,7 +2789,7 @@ end
 #   1. bridge, when the chain has converged and its reference has the
 #      effective draws it needs (`_bridge_guard`);
 #   2. else the tempered value already reported, when it is quotable (its keys
-#      are in the block only then) and within `laplace_switch_tol` nats of
+#      are in the block only then) and within `laplace_switch_tol` (in ln Z) of
 #      mode-Laplace -- further than the Laplace non-Gaussian bias, it is broken;
 #   3. else mode-Laplace, with a warning;
 #   4. else the tempered value if quotable, else NaN.
@@ -2886,8 +2886,8 @@ function _postfit_select!(summary, ev, lap::Float64; why_bridge::AbstractString,
         # quotable and corroborated: kept
     elseif isfinite(lap)
         why_t = tempered ?
-            "the tempered $rep ($(round(lz, digits = 2))) is " *
-            "$(round(abs(lz - lap), digits = 1)) nats from it, beyond " *
+            "the tempered $rep ($(round(lz, digits = 2))) differs from it " *
+            "by $(round(abs(lz - lap), digits = 1)) in ln Z, beyond " *
             "laplace_switch_tol = $tol" :
             "there is no quotable tempered value"
         @warn "Nereus: log_z is mode-Laplace, a Gaussian approximation at the " *
@@ -3068,7 +3068,7 @@ function _populate_summary!(summary, result, params, chains)
     # Every evidence estimate the sampler produced, with its error, and which
     # one `log_z` reports. A bare log_z is not quotable on its own: the
     # tempered stack (TI/TI+/SS+/H+) shares one mean_logL array, so those four
-    # agreeing with each other is not a cross-check, and they can sit >100 nats
+    # agreeing with each other is not a cross-check, and they can sit >100 in ln Z
     # low on a signal-locked posterior while doing so. Recording the spread is
     # what makes a Bayes factor between two runs defensible.
     #
