@@ -279,3 +279,45 @@ end
     dt = detectability(chains, params, data; n_P_bins = 4, n_M_bins = 4, min_samples = 3)
     @test size(dt.fraction) == (4, 4)
 end
+
+@testset "detection_limits — run_job skips a detected planet unless asked" begin
+    rng = MersenneTwister(3)
+    data = Data(; t_rv = collect(0.0:5.0:200.0), rv = randn(rng, 41),
+                  rv_err = ones(41), rv_inst = ones(Int, 41))
+    ic = InstrumentConfig(rv = ["SIM"])
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo),
+                    max_kplanet = 1, planet_modes = [RV_ONLY],
+                    instruments = ic, data = data, M_s = 1.0)
+    fitted = Symbol.(params.layout.unfrozen_names)
+    chain_of(P, K) = begin
+        arr = zeros(Float64, length(P), length(fitted), 1)
+        arr[:, findfirst(==(:P_k1), fitted), 1] .= P
+        arr[:, findfirst(==(:K_k1), fitted), 1] .= K
+        Chains(arr, fitted)
+    end
+    n = 4000
+    detected = chain_of(20.0 .+ 0.01 .* randn(rng, n), 5.0 .+ 0.3 .* randn(rng, n))
+    explored = chain_of(exp.(log(1.0) .+ log(100.0) .* rand(rng, n)),
+                        abs.(0.5 .* randn(rng, n)))
+    run(chains, out_cfg) = mktempdir() do dir
+        summary = Dict{String, Any}()
+        cfg = Dict("sampler" => Dict("name" => "pt_emcee"), "output" => out_cfg)
+        Nereus._run_detection_limits!(cfg, chains, params, data, dir, summary)
+        (get(summary, "detection_limits", nothing),
+         isfile(joinpath(dir, "detection_limits.png")))
+    end
+
+    dl, png = run(detected, Dict())
+    @test dl["status"] == "skipped"
+    @test occursin("detected", dl["reason"])
+    @test !png
+    # Asked for, it is computed anyway, with the coverage warning.
+    dl, png = @test_logs (:warn, r"covers") match_mode = :any run(detected,
+        Dict("detection_limits" => true))
+    @test dl["arrays_path"] == "detection_limits.nc"
+    @test png
+    # A chain that explored the prior gets limits unasked.
+    dl, png = run(explored, Dict())
+    @test dl["arrays_path"] == "detection_limits.nc"
+    @test png
+end

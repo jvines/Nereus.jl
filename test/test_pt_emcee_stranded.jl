@@ -15,7 +15,7 @@ using Nereus: _pt_prune_stranded!, _warn_repeating_time_window
 include(joinpath(@__DIR__, "fixtures", "easy_rv_target.jl"))
 
 # One rung of `n_mode` walkers in a Gaussian mode (σ = `width`, centred on 0.5)
-# and `n_flat` spread over the unit box `gap` nats of log-likelihood below it.
+# and `n_flat` spread over the unit box `gap` of log-likelihood below it.
 # Uniform prior on [0, 1]^d, so log π = 0 and ∫ π = 1.
 function _rung(; d = 3, n_mode = 70, n_flat = 30, gap = 60.0, seed = 1, width = 0.01)
     rng = MersenneTwister(seed)
@@ -35,7 +35,7 @@ function _rung(; d = 3, n_mode = 70, n_flat = 30, gap = 60.0, seed = 1, width = 
 end
 
 # The density `_rung` samples, for the pruning's own evaluations: the mode on a
-# plateau `gap` nats down, zero outside the unit box.
+# plateau `gap` down in ln p, zero outside the unit box.
 _mode_logL(x, gap, width) = max(-0.5 * sum(abs2, (x .- 0.5) ./ width), -gap)
 _mode_eval(gap; width = 0.01) =
     y -> all(v -> 0 <= v <= 1, y) ? (0.0, _mode_logL(y, gap, width)) : (-Inf, -Inf)
@@ -68,7 +68,7 @@ end
 
     @testset "prune moves a plateau that provably weighs nothing" begin
         # Z_mode ≈ (2π)^{3/2} 0.01³ → log ≈ -11.1. The plateau's whole region
-        # weighs at most e^-60, so it is 49 nats below: moved.
+        # weighs at most e^-60, so it is Δln p = 49 below: moved.
         state, lπ, lL = _rung(gap = 60.0)
         before = copy(state)
         # Nothing on the first pass, which only records; and nothing without a
@@ -83,8 +83,8 @@ end
     end
 
     @testset "prune leaves a plateau that could carry mass" begin
-        # 18 nats down is past the Gaussian allowance (~15 for d = 3), but the
-        # plateau fills the whole prior and the mode's Occam factor is 11 nats:
+        # Δln p = 18 down is past the Gaussian allowance (~15 for d = 3), but the
+        # plateau fills the whole prior and the mode's Occam factor is 11 in ln p:
         # the plateau may weigh e^-7 of the mode. Not provably nothing: kept.
         state, lπ, lL = _rung(gap = 18.0)
         before = copy(state)
@@ -112,7 +112,7 @@ end
     end
 
     @testset "a walker climbing fast enough to clear the cut is not moved" begin
-        # The cut sits ~21 nats down. Walker 71 climbed from 120 to 60 nats
+        # The cut sits Δln p ~ 21 down. Walker 71 climbed from 120 to 60 in ln p
         # down since the previous pass: as fast again, it clears the cut by
         # the next, and stays. Walker 72 climbed from 70 to 60: it would take
         # four more passes, and may never; it goes with the 28 that sat still.
@@ -130,9 +130,9 @@ end
 
     @testset "a separate mode the bound keeps: moved by its own mass" begin
         # 90 walkers in the main mode (σ = 0.001, log Z ≈ -18) and 10 in a
-        # second, 20 nats down, centred on 0.2. Its walkers sit above the cut
+        # second, Δln p = 20 down, centred on 0.2. Its walkers sit above the cut
         # (log Z_A - 10 ≈ -28): the bound gives their level of L the whole
-        # prior to fill. At σ = 0.001 the second mode weighs e^-38, 20 nats
+        # prior to fill. At σ = 0.001 the second mode weighs e^-38, 20 in ln p
         # under the first, and its 10 walkers move. At σ = 0.05 it weighs
         # e^-26, which may matter, and they stay.
         function twomode(wl; d = 3, w = 0.001, depth = 20.0)
@@ -198,7 +198,7 @@ end
 
     @testset "a mode too new for a covariance: volume from the density" begin
         # Four walkers have found the mode, fewer than the d + 2 a covariance
-        # needs. Gaia-4 b joint (d = 14) kept 97 of 100 cold walkers 200 nats
+        # needs. Gaia-4 b joint (d = 14) kept 97 of 100 cold walkers 200 in ln p
         # down at every prune for this reason. Without an evaluator the rung is
         # left alone, as before.
         state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 60.0)
@@ -206,7 +206,7 @@ end
 
         # Nor while the rung is still climbing: its best walker may be only the
         # fastest climber, and the rest would be herded onto it. Here the rung's
-        # median log L rose 2 nats since the previous pass (d/2 = 1.5).
+        # median log L rose 2 since the previous pass (d/2 = 1.5).
         mem = Nereus.PruneMemory(size(state)...)
         _pt_prune_stranded!(copy(state), copy(lπ), lL .- 2.0, [1.0], MersenneTwister(1);
                             evalf = _mode_eval(60.0), memory = mem)
@@ -233,13 +233,13 @@ end
         @test lL[1, 5:end] ≈ [_mode_logL(X[w, :], 60.0, 0.01) for w in 5:100]
         @test all(lL[1, 5:end] .> -30)
 
-        # The same guarantee as with a covariance: 18 nats down could still
+        # The same guarantee as with a covariance: Δln p = 18 down could still
         # carry mass, so it stays.
         state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 18.0)
         @test _passes!(state, lπ, lL, [1.0]; n = 3, evalf = _mode_eval(18.0)) == [0, 0, 0]
 
-        # A spike is not a mode: at σ = 1e-6 the volume is 41 nats smaller and a
-        # plateau 40 nats down may outweigh it. At σ = 0.01 it may not.
+        # A spike is not a mode: at σ = 1e-6 the volume is 41 in ln p smaller and a
+        # plateau Δln p = 40 down may outweigh it. At σ = 0.01 it may not.
         for (width, n) in ((1e-6, 0), (0.01, 96))
             state, lπ, lL = _rung(n_mode = 4, n_flat = 96, gap = 40.0, width = width)
             h = _settle!(k -> _passes!(state, lπ, lL, [1.0]; n = k,
@@ -250,11 +250,11 @@ end
 
     @testset "a lone walker on the flank of its mode climbs before it is measured" begin
         # One walker has found the mode, 7.5σ out on its flank (log L -28), and
-        # 99 sit on a plateau 50 nats down. Measured where it landed, the bound
+        # 99 sit on a plateau Δln p = 50 down. Measured where it landed, the bound
         # cannot clear the plateau: the drop along each axis is steep with the
-        # gradient, so the widths come out ~0.2σ and the cut sits ~55 nats
-        # down. At the top of the mode it sits 21 nats down. Gaia-4 b's lone
-        # walkers sat 200-280 nats below their peak, and the plateau stayed.
+        # gradient, so the widths come out ~0.2σ and the cut sits ~55 in ln p
+        # down. At the top of the mode it sits Δln p = 21 down. Gaia-4 b's lone
+        # walkers sat Δln p = 200-280 below their peak, and the plateau stayed.
         d, gap, width = 3, 50.0, 0.01
         state, lπ, lL = _rung(n_mode = 0, n_flat = 100, gap = gap)
         x0 = 0.5 .+ (7.5 * width / sqrt(d)) .* ones(d)
@@ -318,7 +318,7 @@ end
     @testset "a mode across the seam of a circle is measured on the circle" begin
         # Dim 3 is a full-circle angle, U(0, 2π), and the mode sits on its seam:
         # half the walkers near 0, half near 2π. Read as a line, Σ_A spans the
-        # window and overstates Z_A by ~4 nats; a plateau 19 nats down, which
+        # window and overstates Z_A by ~4 in ln p; a plateau Δln p = 19 down, which
         # may carry mass, would move.
         state, lπ, lL = _rung(gap = 19.0)
         state[1, :, 3] .= mod.(2π .* (state[1, :, 3] .- 0.5), 2π)
@@ -329,7 +329,7 @@ end
 
     @testset "trans-dim prune moves the model too" begin
         # 70 walkers with planet 1 active in the mode, 30 without it on the
-        # no-planet plateau 60 nats down. All three dims belong to planet 1.
+        # no-planet plateau Δln p = 60 down. All three dims belong to planet 1.
         state, lπ, lL = _rung(gap = 60.0)
         tds = [Nereus.TransDimState(w <= 70 ? 1 : 0, BitVector([w <= 70]),
                                     BitVector(), BitVector([true]))
@@ -339,7 +339,7 @@ end
         @test all(w -> tds[1, w].planet_active[1] && tds[1, w].n_planets_active == 1, 71:100)
         @test tds[1, 71].planet_active !== tds[1, 1].planet_active   # copied, not aliased
 
-        # 18 nats down could still carry mass: left alone, model and all.
+        # Δln p = 18 down could still carry mass: left alone, model and all.
         state, lπ, lL = _rung(gap = 18.0)
         tds = [Nereus.TransDimState(w <= 70 ? 1 : 0, BitVector([w <= 70]),
                                     BitVector(), BitVector([true]))

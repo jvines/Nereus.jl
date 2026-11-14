@@ -49,7 +49,7 @@ function _two_mission_target(; noise = true, seed = 5, gaia_only = false,
           sesinw = UniformPrior(-1.0, 1.0), secosw = UniformPrior(-1.0, 1.0),
           inc = SinePrior(), Omega = UniformPrior(0.0, 2pi),
           Mo = UniformPrior(0.0, 2pi))
-    target = build_target(M_pri = 0.644, planets = (b = pl,), iad = iad,
+    target = build_target(M_pri = 0.644, planets = (b = pl,), iad = iad, iad_names = String[],
                           plx = NormalPrior(13.6, 0.02), M_s = 0.644)
     truth = Dict("a_k1" => 2.4, "M_sec_k1" => 0.011, "sesinw_k1" => 0.45,
                  "secosw_k1" => 0.3, "inc_k1" => 2.1, "Omega_k1" => 3.0,
@@ -264,5 +264,35 @@ _am_files(dir) = isdir(joinpath(dir, "models")) ?
         made = Nereus._make_plots(cfg, chains, target.params, target.data, out2)
         @test made == ["models/astrometry_model_K*.png"]
         @test _am_files(joinpath(out2, "plots")) == ["astrometry_model_K1.png"]
+    end
+end
+
+# The PPC summary's IAD χ²/N is the residual panel's: χ²_min/N of the
+# likelihood at the max-lp draw, per mission and over both, and an
+# astrometry-only fit gets it without the RV/photometry PPC.
+@testset "ppc summary — IAD χ²/N per mission" begin
+    target, theta, chains = _two_mission_target()
+    params, data = target.params, target.data
+    fit = Nereus._iad_fit_summary(chains, params, data)
+    oc = Nereus._iad_oc(theta, data)          # row 1, the max-lp draw, is theta
+    z2 = (oc.oc ./ oc.σ) .^ 2
+    inst = data.iad.inst
+    @test fit["iad_n"] == length(z2)
+    @test fit["iad_red_chi2_total"] ≈ sum(z2) / length(z2)
+    per = fit["iad_red_chi2_per_inst"]
+    @test sort(collect(keys(per))) == ["IAD1", "IAD2"]
+    for m in 1:2
+        @test per["IAD$m"] ≈ sum(z2[inst .== m]) / count(==(m), inst)
+    end
+    t1, _, c1 = _two_mission_target(; gaia_only = true)
+    @test collect(keys(Nereus._iad_fit_summary(c1, t1.params, t1.data)[
+        "iad_red_chi2_per_inst"])) == ["IAD"]
+    @test 0.7 < fit["iad_red_chi2_total"] < 1.3   # noise at the quoted errors
+    mktempdir() do dir
+        summary = Dict{String, Any}()
+        Nereus._run_ppc!(Dict("output" => Dict()), chains, params, data, dir, summary)
+        @test summary["ppc"]["iad_red_chi2_total"] ≈ fit["iad_red_chi2_total"]
+        @test isfile(joinpath(dir, "ppc.json"))
+        @test !isfile(joinpath(dir, "ppc.png"))
     end
 end

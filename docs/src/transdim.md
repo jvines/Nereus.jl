@@ -318,7 +318,7 @@ and likewise P(model\_i active | D) is the fraction of samples with
 for a non-uniform prior reweight with `bayes_factors(...;
 model_prior = k -> p(k))`. The same identity is what the validation
 suite checks: occupancy must agree with an independently computed log Z
-to ≲ 0.2 nats once the ladder is dense and recovery aids are on.
+to ≲ 0.2 in ln Z once the ladder is dense and recovery aids are on.
 
 ## Reading trans-dim output
 

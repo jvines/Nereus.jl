@@ -179,7 +179,7 @@ any config without an ActivityGP toggle.
 
 ⚠ `:white` is a STRAWMAN null for activity indicators, which are temporally
 CORRELATED. AGP models that correlation with a GP and the white floor cannot,
-so AGP banks the indicator-correlation evidence (HD 18599: ≈ +82 nats) for
+so AGP banks the indicator-correlation evidence (HD 18599: ≈ +82) for
 free — that advantage is irrelevant to the RV/planet science but leaks into
 the AD↔AGP occupancy (drags AGP up to a spurious ~15%). `:qp` gives the floor
 the same correlation-capturing power, so the indicator-evidence terms ≈ cancel
@@ -440,7 +440,7 @@ struct ActivityGP <: CovarianceNoise
     # Provably (Σ_cond ⪰ the RV noise floor) the model can then buy
     # unbounded conditional sharpness for free: couplings rail, λ_p
     # rails, the planet is absorbed into the conditional mean, and
-    # "evidence" inflates by hundreds of nats (HD 18599 post-mortem
+    # "evidence" inflates by hundreds (HD 18599 post-mortem
     # 2026-06-12). For honest model comparison use the CHAIN RULE:
     #   log Z_cond = log Z(joint run) − log Z(indicators_only run),
     # which equals log p(y_R | y_I) with hyperparams anchored by

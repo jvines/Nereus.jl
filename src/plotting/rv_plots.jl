@@ -554,7 +554,7 @@ function plot_rv_phasefold(chains, params, data;
         # params (NOT an lp cutoff): keep the central `credmass` of draws in
         # (P,K,sesinw,secosw), which excludes the prior-driven e→1 tail whose
         # periastron spikes otherwise wash the median and fray the band. The
-        # old lp-cutoff (bf_cutoff) is a fixed nat-window — on a high-d chain it
+        # old lp-cutoff (bf_cutoff) is a fixed window in ln p — on a high-d chain it
         # either keeps the MAP sliver (fake-tight) or, opened up, the whole
         # degenerate tail (useless). See `_credible_region_pool`.
         top_idx = _credible_region_pool(chains, params, planet; credmass=credmass)

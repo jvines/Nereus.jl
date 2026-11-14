@@ -7,7 +7,7 @@
 # planet's velocity curve and computes cos(f+ω) by the angle-sum identity; the
 # workspace photometry sums every cadence in one pass, where `_logdensity_parts`
 # sums fixed 4096-point chunks and then the chunk totals. Near the posterior of a
-# 20k-point light curve they differ by a few 1e-9 nats. Relative to |log prior| +
+# 20k-point light curve they differ by a few 1e-9 in ln L. Relative to |log prior| +
 # |log L_RV| + |log L_phot| the largest difference measured is 2.9e-11 (a
 # sample maximum); a difference much larger than that, on that scale, is a bug
 # in one of the two, not rounding. Relative to max(1, |log p|), the scale the
@@ -121,7 +121,7 @@ end
 # for TTVs, for supersampled exposures (then longer than 2 min, now longer than
 # 3 min) and for photometric noise models. So on a fit with a :GD planet and no
 # supersampled cadence, an evaluator that called it integrated a posterior with
-# no gravity darkening: flat in i_star and lambda, and thousands of nats away
+# no gravity darkening: flat in i_star and lambda, and thousands in ln L away
 # from `_logdensity_parts`. The workspace method now has gravity darkening
 # (test_gd_workspace_likelihood.jl); the evaluator still takes the allocating
 # photometry for these fits, and must see i_star and lambda.
@@ -290,8 +290,8 @@ end
 # A two-planet RV + transit fit with ρ⋆ and the mean anomaly as parameters and
 # the Gladman stability check, no noise models, two RV and two photometric
 # instruments. On this kind of fit (with e up to 0.98 and b up to 1.3) a
-# difference of 1.9e-10 nats was measured near the best point, where
-# log p = -18.2, and 1.2e-10 nats on a prior draw where log p = 2.46: 1.03e-11
+# difference of 1.9e-10 in ln L was measured near the best point, where
+# log p = -18.2, and 1.2e-10 on a prior draw where log p = 2.46: 1.03e-11
 # and 4.7e-11 relative to max(1, |log p|), still rounding. Here e and b are
 # narrower so that prior draws give finite densities. The relative bound
 # allows for points where |log p| is that small, not for |log p| < 1.
@@ -377,7 +377,7 @@ end
 # Eccentricities close to 1. The allocating RV and transit methods take the
 # true anomaly from `true_anomaly`; the workspace photometry, and the workspace
 # RV of a fit with no noise models, use the e they are given. `true_anomaly`
-# clamped e to 0.9999, and above that those were two models, nats apart, so the
+# clamped e to 0.9999, and above that those were two models, far apart in ln L, so the
 # evaluator took the allocating methods there. The clamp now leaves every e < 1
 # alone (it acts only on the e outside [0, 1) that every likelihood rejects):
 # up to e = 0.9999999 the evaluator keeps the workspace methods and agrees with

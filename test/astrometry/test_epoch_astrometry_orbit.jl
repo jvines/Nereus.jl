@@ -50,7 +50,7 @@ function _epoch_orbit_target(; n_fov = 40, σ = 0.08, seed = 11, two = false,
           inc = SinePrior(), Omega = UniformPrior(0.0, 2pi),
           Mo = UniformPrior(0.0, 2pi))
     target = build_target(M_pri = 0.644, planets = two ? (b = pl, c = pl) : (b = pl,),
-                          iad = iad, plx = NormalPrior(13.6, 0.02), M_s = 0.644)
+                          iad = iad, iad_names = String[], plx = NormalPrior(13.6, 0.02), M_s = 0.644)
     truth = Dict("a_k1" => 1.4, "M_sec_k1" => 0.011, "sesinw_k1" => 0.45,
                  "secosw_k1" => 0.3, "inc_k1" => 2.1, "Omega_k1" => 3.0,
                  "Mo_k1" => 1.0, "plx" => 13.6)

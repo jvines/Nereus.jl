@@ -158,7 +158,7 @@ end
     # bootstrap expansion on the volume-halving split still missed 2% and 1.0%
     # (d = 10, 100 points); split by dynesty's rule, 0.04% at d = 10. On an RM
     # obliquity fit the bounds missed 12-22% of the constrained region and
-    # :unif put log Z 2 nats high.
+    # :unif put log Z high by 2.
     ball(rng, d) = (x = randn(rng, d); x ./ norm(x) .* rand(rng)^(1 / d))
     for (d, n) in ((4, 40), (10, 100), (12, 120))
         rng = MersenneTwister(1)

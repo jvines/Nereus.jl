@@ -190,8 +190,14 @@ forward model per draw, and aggregates residual diagnostics:
     A wide spread means parameter uncertainty contributes
     meaningfully to model variance.
 - Per-instrument reduced χ² at the median model (`rv_red_chi2_per_inst`
-  / `phot_red_chi2_per_inst`). dof per instrument is conservative:
-  `n_obs − 2` for RV (γ, σ) and `n_obs − 3` for photometry.
+  / `phot_red_chi2_per_inst`, keyed by instrument name in `summary`). dof
+  per instrument is conservative: `n_obs − 2` for RV (γ, σ) and
+  `n_obs − 3` for photometry.
+- With intermediate astrometry, `run_job` and the typed fits add the
+  along-scan χ²/N, over all abscissae and per IAD instrument
+  (`iad_red_chi2_total`, `iad_red_chi2_per_inst`, `iad_n`): χ²_min/N at the
+  max-lp draw, the number printed on `iad_residuals.png`. An
+  astrometry-only fit gets these keys alone.
 - Pointwise residual (median model) ± std across draws
   (`rv_resid_med` / `rv_resid_std`; same for `phot_*`). The std is the
   per-point scatter of `data − preds` across draws — a useful envelope

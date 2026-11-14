@@ -35,7 +35,7 @@ output_dir/
 ├── chains.nc                  # MCMCChains NetCDF (always)
 ├── summary.json               # machine-readable contract (always)
 ├── ppc.png / ppc.json         # posterior predictive check (default on)
-├── detection_limits.png       # K_lim(P) curve (pt_emcee, transdim_pt_emcee, pt; default on)
+├── detection_limits.png       # K_lim(P) curve (PT samplers, when P explored its prior)
 ├── detection_limits.nc        # per-bin arrays sidecar
 ├── tables/                    # science tables (fitted/derived, multi-format)
 │   ├── fitted.{json,csv,ecsv,dat,tex}
@@ -487,7 +487,10 @@ rather than a single number trusted.
     "ppc_n_draws":   500,
 
     // Bayesian K upper-limit curve K_lim(P). Default ON for PT samplers
-    // (pt_emcee/transdim_pt_emcee/pt), OFF otherwise. Set true/false to
+    // (pt_emcee/transdim_pt_emcee/pt) when the central 98% of the planet's
+    // period draws spans at least 10% of its prior's log range, OFF otherwise:
+    // a fit that detected the planet is recorded as "skipped" in summary.json.
+    // Set true/false to
     // force. Needs RV + a P_k1 column. Per-bin arrays go to detection_limits.nc.
     "detection_limits":            true,
     "detection_limits_n_bins":     30,
@@ -565,18 +568,19 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   Instrument names are sorted-unique → integer indices.
 - **`iad`** — `hip_id` (auto-fetches the Hipparcos IAD bundle) or `values`
   (`t`, `abscissa`, `abscissa_err`, `psi`, `parallax_factor`, `pm_factor`).
-  Two opt-in keys per block, both off by default:
-  `"jitter": true` adds a `sigma_iad_<name>` along-scan jitter (mas, added in
+  Two keys per block. `"jitter"` (default `true`) gives each IAD instrument
+  its own `sigma_iad_<name>` along-scan jitter (mas, added in
   quadrature to that instrument's abscissa errors; default prior
   ModJeffreys with the knee at the median reported error, capped at 10×);
-  `"clip_outliers": true` (or a number of σ, default 5) drops the CCD abscissae
+  `"jitter": false` opts that instrument out. `"clip_outliers"` (opt-in,
+  off by default): `true` (or a number of σ, default 5) drops the CCD abscissae
   that disagree with the other CCDs of their own field-of-view transit
   (`clip_transit_outliers`) — model-independent, so it cannot touch an orbit
   signal. What it dropped is in `summary.json` as `iad_outliers`. `<name>` is
   the block's `instrument`, else `HIP<hip_id>` / `GaiaDR4_<source_id>`.
   A jitter as large as the reflex is a second mode, "noise instead of orbit",
   and from the prior it is the cheaper way up: on HD 114762 (RV + DR4) every
-  pt_emcee run drawn from the prior ended there, 470-970 nats below an orbit
+  pt_emcee run drawn from the prior ended there, Δln p = 470-970 below an orbit
   no walker found. So the PT ensemble samplers (`pt_emcee`,
   `transdim_pt_emcee`, `pt_whitening`) hold every `sigma_iad_<name>` at 0 for
   at least the first half of burn-in, where the likelihood is the unjittered
@@ -731,7 +735,7 @@ prior when that degeneracy is present.
   2. Otherwise the **tempered** estimate (H+ for `pt_emcee`), when it is
      quotable (the ladder reaches β = 0 and every adjacent pair swapped at least
      `swap_min` = 5 % of the time) and lies within `laplace_switch_tol`
-     (default 50 nats) of the mode-Laplace value.
+     (default 50 in ln Z) of the mode-Laplace value.
   3. Otherwise **mode-Laplace**, with a warning. `log_z` is `NaN` (`null` on
      disk) only when none of the three is available.
   `summary.evidence.reported` names the one used (`"bridge"`, `"hybrid"`,
@@ -744,7 +748,7 @@ prior when that degeneracy is present.
   steps; three quarters of burn-in at the latest), then drawn from their
   priors walker by walker. Released while the fit without them still climbs,
   a jitter takes up the misfit: on HD 114762 RV + Hipparcos + DR4 one seed,
-  released at half of burn-in 3300 nats below the top of the held fit, lost
+  released at half of burn-in Δln p = 3300 below the top of the held fit, lost
   the orbit and did not converge. Absent (or `true`): every IAD jitter
   `sigma_iad_<name>` at 0 (see `iad` above), nothing for a model without one,
   so those runs are unchanged. `false` holds nothing; an object
@@ -889,7 +893,7 @@ numbers live under `fitted` / `derived`
     "n_draws":                    500,
     "rv_red_chi2_total":          0.98,     // best fit found in the posterior
     "rv_red_chi2_median_model":   1.10,     // χ²/dof at the per-param median Θ
-    "rv_red_chi2_per_inst":       { "1": 1.04, "2": 1.12 },
+    "rv_red_chi2_per_inst":       { "HARPS": 1.04, "CORALIE": 1.12 },  // by instrument name
     "rv_red_chi2_per_draw_p16":   0.97,
     "rv_red_chi2_per_draw_p50":   1.11,
     "rv_red_chi2_per_draw_p84":   1.42,
@@ -897,7 +901,12 @@ numbers live under `fitted` / `derived`
     "rv_residual_top_peak_period": 38.4,    // top GLS-of-residuals peak (missed signal);
     "rv_residual_top_peak_power":  0.18,    //   grid capped ≤20000 freqs, analytic FAP
     "rv_residual_top_peak_fap":    0.41,
-    "rv_residual_acf_lag1":        0.05     // > 0 → correlated unmodelled noise
+    "rv_residual_acf_lag1":        0.05,    // > 0 → correlated unmodelled noise
+    // With intermediate astrometry (an astrometry-only fit has only these):
+    // χ²_min/N at the max-lp draw, the number on iad_residuals.png.
+    "iad_red_chi2_total":          1.38,
+    "iad_red_chi2_per_inst":       { "IAD": 1.38 },  // the jitter name when it has one
+    "iad_n":                       824
   },
 
   // ---- PSIS-LOO + WAIC (output.loo, default on; "skipped" for the joint ActivityGP) ----
@@ -935,7 +944,7 @@ numbers live under `fitted` / `derived`
       "threads": 8, "n_draws": 5800000, "n_post": 5800000, "n_post_finite": 5800000,
       "n_proposal": 20000, "n_prop_finite": 19999,
       // log p* at the posterior draws read off the chain's :lp (true), after
-      // matching a full evaluation at 64 draws to this many nats; false: evaluated
+      // matching a full evaluation at 64 draws to this many in ln p; false: evaluated
       "lp_reused": true, "lp_check_max_abs": 8.7e-10,
       "iters": 7, "converged": true,              // Newton passes of the primary solve
       "bootstrap_workers": 8, "bootstrap_ok": 200,

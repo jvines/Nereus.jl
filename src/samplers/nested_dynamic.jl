@@ -95,7 +95,7 @@ importance likelihood window.
   replacement. `nothing` → `max(25, 10·n_dim)` for `:rwalk` and
   `max(25, 5·n_dim)` for `:slice`. Too few leave each new point near the
   live point its chain started from and put log Z high: with
-  `max(25, 2·n_dim)` it came out 0.6 nats above pt_emcee's on an RM obliquity
+  `max(25, 2·n_dim)` it came out Δln Z = 0.6 above pt_emcee's on an RM obliquity
   fit and its scatter between seeds was three times the NS error. An
   explicit value is honored verbatim.
 - `walk_scale::Real=1.0` — initial proposal scale (see `sample_nested_ins`).

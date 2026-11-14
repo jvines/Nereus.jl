@@ -272,7 +272,7 @@ end
     # Across a broad prior: couplings from 0.1 to 30 times the noise of their
     # channel, coherence 5-500 d, λp 0.2-5, P 3-30 d, extra jitter. Long λe
     # with large λp is where the previous solver's 1e-10·max|K| jitter on K_g
-    # moved log L by up to several nats.
+    # moved log L by up to several in ln L.
     worst = 0.0
     for _ in 1:30
         ca = randn(rng, C) .* σ .* 10 .^ (3rand(rng, C) .- 1)

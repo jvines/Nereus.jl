@@ -35,7 +35,7 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
     _iad(w) = IADData(t = t, abscissa = w, abscissa_err = fill(0.1, n), psi = psi,
                       parallax_factor = pf, pm_factor = dt)
     _target(w; rv = NamedTuple(), kw...) =
-        build_target(M_pri = 0.644, planets = (b = _blk(; kw...),), iad = _iad(w),
+        build_target(M_pri = 0.644, planets = (b = _blk(; kw...),), iad = _iad(w), iad_names = String[],
                      rv = rv, plx = NormalPrior(13.6, 0.02), M_s = 0.644)
     w_obs = let tg0 = _target(zeros(n))
         th = Theta{Float64}(tg0.params)
@@ -181,7 +181,7 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
         # The e ≡ 0 target flips Mo, so it moves Tp = t_ref − Mo·P/2π by half a
         # period: it is exact only if the orbit's period really is the sampled
         # P. It was not — `a_from_P` used the Julian year, PlanetOrbits the
-        # G = 4π² one — and this case measured 0.2 nats off until
+        # G = 4π² one — and this case measured off by 0.2 in ln Z until
         # KEPLER_YEAR_DAYS fixed it (test/astrometry/test_projection.jl pins
         # the round trip). Prior draws fit the data terribly (log L ~ −2e4),
         # which is what makes an asymmetry that size visible at all.

@@ -307,7 +307,7 @@ end
 # walker without the planet can only gain it by a birth that lands on the period,
 # phase and amplitude at once. Measured on an easy 12.3 d RV target with 16
 # temps and informed births: 13% of the cold rung still sat in the 0-planet
-# model, 70 nats down, at the end of the old 1000-step burn-in.
+# model, Δln p = 70 down, at the end of the old 1000-step burn-in.
 #
 # Differences from the fixed-dim version:
 #  - A is the best walker's MODEL only, and Laplace runs over that model's
@@ -1203,7 +1203,7 @@ function sample_transdim_pt_emcee(
     # Rajpaul AGP: 12+, multi-indicator AD: 12) a competitive config is
     # never proposed and the model reads as "rejected by the data" (HD
     # 18599: trans-dim occupancy contradicted the fixed-run ΔlogZ by 230
-    # nats). Coordinate M-H over the newborn model's params climbs the
+    # in ln Z). Coordinate M-H over the newborn model's params climbs the
     # drawn config toward its mode; positive-support params step
     # multiplicatively (Hastings-corrected), the rest additively at a
     # tenth of the prior's central width. Standard within-model M-H ⇒
@@ -1798,7 +1798,7 @@ function sample_transdim_pt_emcee(
                 # the high-evidence model (AD) in ONE exact-Hastings move. Birth/death
                 # can't cross the "none" valley at β≈1, so without this the
                 # disfavoured mode over-represents and occupancy ≠ P(M|D) (measured at
-                # toy scale: GP-Rot 0.3% at a 14.8-nat gap, ~4 orders above evidence;
+                # toy scale: GP-Rot 0.3% at a gap of 14.8 in ln Z, ~4 orders above evidence;
                 # severe on deep modes). Cold-side, infrequent (periodogram+OLS per
                 # call) — same rationale as the planet↔AD swap above.
                 if noise_swap && do_noise && !isempty(td.noise_exclusion_groups) &&
@@ -1879,7 +1879,7 @@ function sample_transdim_pt_emcee(
                     # kill the active group member and birth-climb another in
                     # ONE move. Without this, exclusion groups force a
                     # challenger model through the "none" valley — killing a
-                    # FITTED incumbent costs hundreds of nats at β ≈ 1, so
+                    # FITTED incumbent costs hundreds in ln p at β ≈ 1, so
                     # whichever member assembles first is entrenched for the
                     # whole run regardless of which model the data prefer
                     # (measured: AD-only=1.000 with AGP never evaluated
@@ -2170,7 +2170,7 @@ function sample_transdim_pt_emcee(
                 # structure is strategy-independent.
                 # Informed births only on the cold side of the ladder: at β ≲ 0.3
                 # the tempered gain β·ΔlogL can't overcome the informed proposal's
-                # Hastings density penalty (~16 nats), so they are near-always
+                # Hastings density penalty (~16 in ln p), so they are near-always
                 # rejected AND each hot junk-state would mint a fresh state-keyed
                 # BLS cache (~0.5 s build) — all cost, no benefit. Hot exploration
                 # belongs to the prior/MoMS births. The informed/MoMS mixture

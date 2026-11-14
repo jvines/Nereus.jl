@@ -69,7 +69,7 @@ Works in unconstrained space (with transforms) by default.
   on the mode's own flank (src/samplers/scouts.jl). The pruning only moves
   walkers onto ones that found the mode; when none of a chain's did, it had
   nothing to move them to, and one chain in four of an RV + IAD companion at
-  i = 5° sat 1,500 nats below the mode, at i = 161°, for the whole run. `0`
+  i = 5° sat Δln p = 1,500 below the mode, at i = 161°, for the whole run. `0`
   draws every walker from the prior.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (the walkers, their log-densities, the RNG, the step reached and

@@ -60,7 +60,7 @@ end
 Coherence test at period `P`. `y` should be the RV RESIDUAL with the other
 planets (and γ/trend) removed — this test asks only about the signal AT `P`.
 
-`Δtol` is the profile-likelihood tolerance (in nats) below which a high-Q
+`Δtol` is the profile-likelihood tolerance (in ln L) below which a high-Q
 (coherent) fit is deemed "not significantly disfavoured" — 2 ≈ 2σ. `Q_coh` is
 set internally to the number of cycles spanned by the data; a signal must stay
 coherent over that many cycles to look planet-like.

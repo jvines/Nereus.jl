@@ -406,7 +406,7 @@ function _validate_config(cfg::AbstractDict)
             for (i, e) in enumerate(iad_entries)
                 at = "`data.iad`" * (iad isa AbstractVector ? "[$i]" : "")
                 try
-                    _iad_jitter_flag(_get(e, :jitter; default = false))
+                    _iad_jitter_flag(_get(e, :jitter; default = true))
                 catch err
                     push!(errs, "$at: " * sprint(showerror, err))
                 end
@@ -653,9 +653,9 @@ function _build_data(data_cfg; obliquity = nothing)
     # conventions, and an order nobody chose is a debugging hazard when
     # reading back the per-instrument zero points.
     #
-    # Per block, opt-in: `jitter: true` gives that instrument a
-    # `sigma_iad_<name>` along-scan jitter, `clip_outliers: true` (or a number
-    # of σ) drops the CCD abscissae that disagree with their own field-of-view
+    # Per block: `jitter` (default true) gives that instrument a
+    # `sigma_iad_<name>` along-scan jitter, `jitter: false` opts it out;
+    # `clip_outliers: true` (opt-in; or a number of σ) drops the CCD abscissae that disagree with their own field-of-view
     # transit (`clip_transit_outliers`) before anything is fitted.
     if _has(data_cfg, :iad)
         iad_block = _get(data_cfg, :iad)
@@ -669,7 +669,7 @@ function _build_data(data_cfg; obliquity = nothing)
                 d, rep = clip_transit_outliers(d; nsigma = nsig, label = name)
                 push!(iad_outliers, merge((instrument = name,), rep))
             end
-            jit = _iad_jitter_flag(_get(b, :jitter; default = false))
+            jit = _iad_jitter_flag(_get(b, :jitter; default = true))
             append!(inst_names_iad, fill(jit ? name : "", n_iad_inst(d)))
             push!(parsed, d)
         end
@@ -1683,6 +1683,9 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
 
     if name == "pt_emcee"
+        # The post-fit stage chooses the evidence again on an unconstrained
+        # target (`_augment_evidence!`), and warns there if it must.
+        haskey(kw, :evidence_postfit) || (kw[:evidence_postfit] = true)
         return sample_pt_emcee(target, data; kw...)
     elseif name == "transdim_pt_emcee"
         td === nothing && error("transdim_pt_emcee requires `transdim` block")
@@ -2426,7 +2429,11 @@ function _run_ppc!(cfg, chains, params::Params, data::Data,
     out_cfg = _to_dict(_get(cfg, :output; default = Dict()))
     ppc_enabled = Bool(_get(out_cfg, :ppc; default = true))
     ppc_enabled || return
-    (n_rv(data) > 0 || n_phot(data) > 0) || return
+    iad_fit = _iad_fit_summary(chains, params, data)
+    if !(n_rv(data) > 0 || n_phot(data) > 0)
+        iad_fit === nothing || _write_ppc_summary!(summary, out_dir, iad_fit)
+        return
+    end
 
     n_draws = Int(_get(out_cfg, :ppc_n_draws; default = 500))
     seed = Int(_get(cfg, :seed; default = 1))
@@ -2442,16 +2449,57 @@ function _run_ppc!(cfg, chains, params::Params, data::Data,
         plots = get(summary, "plots", String[])
         push!(plots, fig_path)
         summary["plots"] = plots
-        # Scalar summary
-        json_path = joinpath(out_dir, "ppc.json")
-        open(json_path, "w") do io
-            JSON3.pretty(io, ppc.summary; allow_inf = true)
-        end
-        summary["ppc"] = ppc.summary
+        iad_fit === nothing || merge!(ppc.summary, iad_fit)
+        _write_ppc_summary!(summary, out_dir, ppc.summary)
     catch err
         @warn "PPC failed (continuing)" exception = (err, catch_backtrace())
         summary["ppc"] = Dict("status" => "failed",
                                 "error" => sprint(showerror, err))
+    end
+end
+
+# The scalar PPC summary, in summary.json and beside it as ppc.json.
+function _write_ppc_summary!(summary::Dict, out_dir::AbstractString, s::AbstractDict)
+    open(joinpath(out_dir, "ppc.json"), "w") do io
+        JSON3.pretty(io, s; allow_inf = true)
+    end
+    summary["ppc"] = s
+    return
+end
+
+# χ²/N of the intermediate astrometry, over all of it and per IAD instrument:
+# χ²_min/N of `iad_log_likelihood`, through the residuals and at the draw the
+# `iad_residuals` panel uses (`_iad_oc` at the max-lp draw of the best-fit
+# cluster), so the number matches the one printed on that figure. The RV and
+# photometry χ² beside it are of the PPC's median model; an astrometric orbit
+# is read at max lp instead because its per-parameter median sits off the
+# ridge (Gaia-4: 1.45 against 1.38). An instrument is labelled by its jitter
+# name when it has one, else `IAD` (one instrument) or `IAD<index>`. `nothing`
+# without IAD.
+function _iad_fit_summary(chains, params::Params, data::Data; bf_cutoff::Real = 10.0)
+    data.iad === nothing && return nothing
+    try
+        theta = _theta_best_lp(chains, params;
+                               active_idx = _top_lp_draw_pool(chains; bf_cutoff))
+        fit = _iad_oc(theta, data)
+        fit === nothing && return nothing
+        z2 = (fit.oc ./ fit.σ) .^ 2
+        inst = data.iad.inst
+        names = params.config.instruments.iad_names
+        per = Dict{String, Any}()
+        ms = sort(unique(inst))
+        for m in ms
+            sel = inst .== m
+            label = m <= length(names) && !isempty(names[m]) ? names[m] :
+                    length(ms) == 1 ? "IAD" : "IAD$m"
+            per[label] = sum(z2[sel]) / count(sel)
+        end
+        return Dict{String, Any}("iad_red_chi2_total" => sum(z2) / length(z2),
+                                 "iad_red_chi2_per_inst" => per,
+                                 "iad_n" => length(z2))
+    catch err
+        @debug "IAD χ² summary failed" exception = err
+        return nothing
     end
 end
 
@@ -2472,7 +2520,8 @@ function _run_detection_limits!(cfg, chains, params::Params, data::Data,
                                               default = Dict())),
                                  :name; default = ""))
 
-    # User can force on/off explicitly; default ON for PT samplers, OFF otherwise.
+    # User can force on/off explicitly; default ON for PT samplers when the
+    # chain explored the period prior (below), OFF otherwise.
     explicit = _get(out_cfg, :detection_limits; default = nothing)
     if explicit === nothing
         sampler_name in _PT_PRIOR_SEEDED || return
@@ -2488,6 +2537,28 @@ function _run_detection_limits!(cfg, chains, params::Params, data::Data,
                                 default = 0.95))
     planet = Int(_get(out_cfg, :detection_limits_planet; default = 1))
     save_pdf = Bool(_get(out_cfg, :save_pdf; default = false))
+
+    # Unasked, only a chain that explored the period prior gets limits. A fit
+    # that found the planet holds P to a sliver of it -- 1% on a transiting
+    # planet's bracketed period -- and its K quantiles per period bin would be
+    # a figure and a warning about nothing.
+    if explicit === nothing
+        cv = try
+            _detection_coverage(chains, params, planet)
+        catch
+            nothing
+        end
+        if cv !== nothing && cv.coverage < _DETECTION_MIN_COVERAGE
+            summary["detection_limits"] = Dict{String, Any}(
+                "status" => "skipped",
+                "reason" => "the central 98% of the P_k$planet draws spans " *
+                    "$(round(100 * cv.coverage; digits = 1))% of its prior's " *
+                    "log range: the planet is detected. Limits need a chain " *
+                    "that explores the period prior; set " *
+                    "output.detection_limits = true to compute them anyway.")
+            return
+        end
+    end
 
     try
         res = detection_limits(chains, params;
@@ -2705,7 +2776,7 @@ end
 # `target.transform === nothing` -- and run_job builds its target with
 # `unconstrained = false`, which means EVERY run_job fit silently fell through
 # to the tempered stack for its headline evidence. That is the one estimator
-# documented to sit >100 nats low on a signal-locked posterior while its four
+# documented to sit low by >100 in ln Z on a signal-locked posterior while its four
 # variants agree with each other to a decimal.
 #
 # Rather than change the sampling geometry for every user, recompute the
@@ -2718,7 +2789,7 @@ end
 #   1. bridge, when the chain has converged and its reference has the
 #      effective draws it needs (`_bridge_guard`);
 #   2. else the tempered value already reported, when it is quotable (its keys
-#      are in the block only then) and within `laplace_switch_tol` nats of
+#      are in the block only then) and within `laplace_switch_tol` (in ln Z) of
 #      mode-Laplace -- further than the Laplace non-Gaussian bias, it is broken;
 #   3. else mode-Laplace, with a warning;
 #   4. else the tempered value if quotable, else NaN.
@@ -2768,15 +2839,17 @@ function _augment_evidence!(summary, params, data, chains;
             nothing
         end
         why_bridge = "bridge sampling did not converge"
+        sampler_bridge = get(ev, "bridge", nothing) isa Real
         if b !== nothing && b.converged && isfinite(b.log_z)
             ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
                                 "overlap" => Float64(b.overlap))
             # mode-Laplace beside the bridge that comes before it: its distance
-            # (in `mode_laplace_check`), and a warning past bridge's standard
-            # error + 1 nat.
+            # (in `mode_laplace_check`), and a warning past the multimodal gap.
+            # The sampler already compared its own bridge with Laplace and
+            # warned if it had to; the same comparison again is the same news.
             if isfinite(lap)
                 ev["mode_laplace_check"]["minus_bridge"] = Float64(lap - b.log_z)
-                _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
+                sampler_bridge || _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
             end
             # Bridge is biased LOW on a chain that has not converged, and when
             # its reference is fitted from too few INDEPENDENT draws (q carries
@@ -2813,8 +2886,8 @@ function _postfit_select!(summary, ev, lap::Float64; why_bridge::AbstractString,
         # quotable and corroborated: kept
     elseif isfinite(lap)
         why_t = tempered ?
-            "the tempered $rep ($(round(lz, digits = 2))) is " *
-            "$(round(abs(lz - lap), digits = 1)) nats from it, beyond " *
+            "the tempered $rep ($(round(lz, digits = 2))) differs from it " *
+            "by $(round(abs(lz - lap), digits = 1)) in ln Z, beyond " *
             "laplace_switch_tol = $tol" :
             "there is no quotable tempered value"
         @warn "Nereus: log_z is mode-Laplace, a Gaussian approximation at the " *
@@ -2995,7 +3068,7 @@ function _populate_summary!(summary, result, params, chains)
     # Every evidence estimate the sampler produced, with its error, and which
     # one `log_z` reports. A bare log_z is not quotable on its own: the
     # tempered stack (TI/TI+/SS+/H+) shares one mean_logL array, so those four
-    # agreeing with each other is not a cross-check, and they can sit >100 nats
+    # agreeing with each other is not a cross-check, and they can sit >100 in ln Z
     # low on a signal-locked posterior while doing so. Recording the spread is
     # what makes a Bayes factor between two runs defensible.
     #

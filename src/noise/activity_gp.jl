@@ -1013,7 +1013,7 @@ reference on the HD 18599 job, at 85 to 151 points per model (prior draws,
 prior-box corners, extreme hyperparameters, near-posterior and
 coupling-edge points, and the 12 points where the previous solver was
 furthest off), the largest errors seen were, with the Float64 dense
-Cholesky's at the same points in brackets: 3.6e-11 nats (1.5e-11) near the
+Cholesky's at the same points in brackets: 3.6e-11 in ln L (1.5e-11) near the
 posterior with five channels; 6.5e-6 (6.6e-6) over all five-channel
 points; 1.5e-5 (1.6e-5) with RV + BIS and 1.8e-5 (1.8e-5) with
 RV + BIS + FWHM, at extreme draws where |log L| ~ 1e4. The medians were
@@ -1021,17 +1021,17 @@ RV + BIS + FWHM, at extreme draws where |log L| ~ 1e4. The medians were
 and point by point either method's error can be the larger. With two or
 three channels A is as large as Σ (C = 2) or not much smaller, so there is
 no accuracy to gain over the dense Cholesky. test/test_activity_gp_lowrank.jl
-checks its own sample to 1e-10 nats.
+checks its own sample to 1e-10 in ln L.
 
 The whitening adds a second source of rounding error that the dense Cholesky
 does not have. Where the channels' couplings are nearly parallel, B_j is
 nearly rank 1, r22 = √(bĠĠ − bGĠ²/bGG) is computed from a difference that
 cancels, and w divides by it. (Exactly parallel couplings give r22 = 0 and
 are exact.) With five channels, 40 epochs and the Ġ couplings parallel to
-the G couplings to within 1e-7 to 1e-10, the error was up to 1.3e-7 nats,
+the G couplings to within 1e-7 to 1e-10, the error was up to 1.3e-7 in ln L,
 against at most 7e-13 for the dense Cholesky. On the HD 18599 job with
 RV + BIS, Br = 0 and Bc scaled by 1e-5, 1e-7 and 1e-9 at six prior draws, it
-was up to 2.8e-5 nats at |log L| ≈ 7e3, against 2.8e-6 for the dense
+was up to 2.8e-5 in ln L at |log L| ≈ 7e3, against 2.8e-6 for the dense
 Cholesky. That is above the 1.5e-5 quoted for RV + BIS in the sample above.
 
 Numbers that carry derivatives (ForwardDiff duals, ReverseDiff tracked
@@ -1106,12 +1106,12 @@ points was made singular three ways (every Ġ coupling 0, 163 points; every
 G coupling 0, 259 points; Ġ couplings proportional to G couplings, 163
 points; 585 in all, over the five-channel, use_derivative = false and
 four-channel models). Against BigFloat, the sequential route's largest value
-errors were 3.7e-6, 1.65e-5 and 1.7e-4 nats in those three cases, against
+errors were 3.7e-6, 1.65e-5 and 1.7e-4 in ln L in those three cases, against
 3.7e-6, 1.64e-5 and 6.8e-6 for the dense Cholesky. Its largest relative
 errors in a directional derivative were 1.5e-8, 1.25e-7 and 2.0e-6, against
 1.4e-8, 1.24e-7 and 5.7e-7. On the five-channel model with Ġ couplings the
-medians were 3e-10 to 1.3e-9 nats and 2e-13 to 2e-12, and near the
-posterior the value errors were at most 4e-11 nats for both routes.
+medians were 3e-10 to 1.3e-9 in ln L and 2e-13 to 2e-12, and near the
+posterior the value errors were at most 4e-11 in ln L for both routes.
 
 At higher signal-to-noise than the job's, the sequential route's error at
 singular blocks grows far faster than the dense Cholesky's that it replaces
@@ -1120,16 +1120,16 @@ model (unit latent variance), against BigFloat at 40 and 80 epochs with two
 kernels unless stated otherwise:
 
 - Parallel couplings, noise variance about 1e-6 (signal-to-noise about
-  1000): value errors up to 5.3e-4 nats and directional-derivative errors
+  1000): value errors up to 5.3e-4 in ln L and directional-derivative errors
   up to 7.3e-6. At 100 and 200 epochs (one kernel, against the Float64 dense
-  likelihood) they reached 1.2e-3 nats and 1.8e-4.
-- Parallel couplings, noise variance about 1e-8: up to 0.76 nats and
-  7.5e-2, where the dense Cholesky reached 4.12e-6 nats and 1.54e-6.
+  likelihood) they reached 1.2e-3 in ln L and 1.8e-4.
+- Parallel couplings, noise variance about 1e-8: up to 0.76 in ln L and
+  7.5e-2, where the dense Cholesky reached 4.12e-6 in ln L and 1.54e-6.
 - Every Ġ coupling 0, noise variance about 1e-8, 80 epochs: a derivative
   error of 2.5e-5, against 9e-8 for the dense Cholesky in the same run (its
   largest over the four 80-epoch runs is 2.1e-7).
 - At noise variance 1e-5 (100 and 200 epochs, one kernel, against the
-  Float64 dense likelihood), every error was at most 3.1e-6 nats.
+  Float64 dense likelihood), every error was at most 3.1e-6 in ln L.
 
 These are sample maxima, not bounds. Only AD number types at singular
 blocks take this route (`Float64` evaluations never do), except that a
