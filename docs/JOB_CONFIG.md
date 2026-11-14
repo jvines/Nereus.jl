@@ -889,7 +889,7 @@ numbers live under `fitted` / `derived`
     "n_draws":                    500,
     "rv_red_chi2_total":          0.98,     // best fit found in the posterior
     "rv_red_chi2_median_model":   1.10,     // χ²/dof at the per-param median Θ
-    "rv_red_chi2_per_inst":       { "1": 1.04, "2": 1.12 },
+    "rv_red_chi2_per_inst":       { "HARPS": 1.04, "CORALIE": 1.12 },  // by instrument name
     "rv_red_chi2_per_draw_p16":   0.97,
     "rv_red_chi2_per_draw_p50":   1.11,
     "rv_red_chi2_per_draw_p84":   1.42,
@@ -897,7 +897,12 @@ numbers live under `fitted` / `derived`
     "rv_residual_top_peak_period": 38.4,    // top GLS-of-residuals peak (missed signal);
     "rv_residual_top_peak_power":  0.18,    //   grid capped ≤20000 freqs, analytic FAP
     "rv_residual_top_peak_fap":    0.41,
-    "rv_residual_acf_lag1":        0.05     // > 0 → correlated unmodelled noise
+    "rv_residual_acf_lag1":        0.05,    // > 0 → correlated unmodelled noise
+    // With intermediate astrometry (an astrometry-only fit has only these):
+    // χ²_min/N at the max-lp draw, the number on iad_residuals.png.
+    "iad_red_chi2_total":          1.38,
+    "iad_red_chi2_per_inst":       { "iad_1": 1.38 },  // the jitter name when it has one
+    "iad_n":                       824
   },
 
   // ---- PSIS-LOO + WAIC (output.loo, default on; "skipped" for the joint ActivityGP) ----

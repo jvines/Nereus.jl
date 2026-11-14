@@ -2426,7 +2426,11 @@ function _run_ppc!(cfg, chains, params::Params, data::Data,
     out_cfg = _to_dict(_get(cfg, :output; default = Dict()))
     ppc_enabled = Bool(_get(out_cfg, :ppc; default = true))
     ppc_enabled || return
-    (n_rv(data) > 0 || n_phot(data) > 0) || return
+    iad_fit = _iad_fit_summary(chains, params, data)
+    if !(n_rv(data) > 0 || n_phot(data) > 0)
+        iad_fit === nothing || _write_ppc_summary!(summary, out_dir, iad_fit)
+        return
+    end
 
     n_draws = Int(_get(out_cfg, :ppc_n_draws; default = 500))
     seed = Int(_get(cfg, :seed; default = 1))
@@ -2442,16 +2446,54 @@ function _run_ppc!(cfg, chains, params::Params, data::Data,
         plots = get(summary, "plots", String[])
         push!(plots, fig_path)
         summary["plots"] = plots
-        # Scalar summary
-        json_path = joinpath(out_dir, "ppc.json")
-        open(json_path, "w") do io
-            JSON3.pretty(io, ppc.summary; allow_inf = true)
-        end
-        summary["ppc"] = ppc.summary
+        iad_fit === nothing || merge!(ppc.summary, iad_fit)
+        _write_ppc_summary!(summary, out_dir, ppc.summary)
     catch err
         @warn "PPC failed (continuing)" exception = (err, catch_backtrace())
         summary["ppc"] = Dict("status" => "failed",
                                 "error" => sprint(showerror, err))
+    end
+end
+
+# The scalar PPC summary, in summary.json and beside it as ppc.json.
+function _write_ppc_summary!(summary::Dict, out_dir::AbstractString, s::AbstractDict)
+    open(joinpath(out_dir, "ppc.json"), "w") do io
+        JSON3.pretty(io, s; allow_inf = true)
+    end
+    summary["ppc"] = s
+    return
+end
+
+# χ²/N of the intermediate astrometry, over all of it and per IAD instrument:
+# χ²_min/N of `iad_log_likelihood`, through the residuals and at the draw the
+# `iad_residuals` panel uses (`_iad_oc` at the max-lp draw of the best-fit
+# cluster), so the number matches the one printed on that figure. The RV and
+# photometry χ² beside it are of the PPC's median model; an astrometric orbit
+# is read at max lp instead because its per-parameter median sits off the
+# ridge (Gaia-4: 1.45 against 1.38). An instrument is labelled by its jitter
+# name when it has one, else `iad_<index>`. `nothing` without IAD.
+function _iad_fit_summary(chains, params::Params, data::Data; bf_cutoff::Real = 10.0)
+    data.iad === nothing && return nothing
+    try
+        theta = _theta_best_lp(chains, params;
+                               active_idx = _top_lp_draw_pool(chains; bf_cutoff))
+        fit = _iad_oc(theta, data)
+        fit === nothing && return nothing
+        z2 = (fit.oc ./ fit.σ) .^ 2
+        inst = data.iad.inst
+        names = params.config.instruments.iad_names
+        per = Dict{String, Any}()
+        for m in sort(unique(inst))
+            sel = inst .== m
+            label = m <= length(names) && !isempty(names[m]) ? names[m] : "iad_$m"
+            per[label] = sum(z2[sel]) / count(sel)
+        end
+        return Dict{String, Any}("iad_red_chi2_total" => sum(z2) / length(z2),
+                                 "iad_red_chi2_per_inst" => per,
+                                 "iad_n" => length(z2))
+    catch err
+        @debug "IAD χ² summary failed" exception = err
+        return nothing
     end
 end
 
