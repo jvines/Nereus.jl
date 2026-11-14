@@ -2503,7 +2503,7 @@ function _run_detection_limits!(cfg, chains, params::Params, data::Data,
         if cv !== nothing && cv.coverage < _DETECTION_MIN_COVERAGE
             summary["detection_limits"] = Dict{String, Any}(
                 "status" => "skipped",
-                "reason" => "the P_k$planet draws span " *
+                "reason" => "the central 98% of the P_k$planet draws spans " *
                     "$(round(100 * cv.coverage; digits = 1))% of its prior's " *
                     "log range: the planet is detected. Limits need a chain " *
                     "that explores the period prior; set " *

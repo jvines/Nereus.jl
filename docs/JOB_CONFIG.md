@@ -487,9 +487,10 @@ rather than a single number trusted.
     "ppc_n_draws":   500,
 
     // Bayesian K upper-limit curve K_lim(P). Default ON for PT samplers
-    // (pt_emcee/transdim_pt_emcee/pt) when the planet's period draws span at
-    // least 10% of its prior's log range, OFF otherwise: a fit that detected
-    // the planet is recorded as "skipped" in summary.json. Set true/false to
+    // (pt_emcee/transdim_pt_emcee/pt) when the central 98% of the planet's
+    // period draws spans at least 10% of its prior's log range, OFF otherwise:
+    // a fit that detected the planet is recorded as "skipped" in summary.json.
+    // Set true/false to
     // force. Needs RV + a P_k1 column. Per-bin arrays go to detection_limits.nc.
     "detection_limits":            true,
     "detection_limits_n_bins":     30,
