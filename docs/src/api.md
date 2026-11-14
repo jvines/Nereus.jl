@@ -251,9 +251,10 @@ Supported catalogues are `gaia_dr4` (also `gaia_epoch`, `dr4`) and
 short-circuits the download. `resolve_astrometry(spec)` does this standalone,
 and passing an `IADData` straight through works too.
 
-Two per-instrument options ride on the same reference, both off by default:
-`"jitter" => true` adds a `sigma_iad_<name>` along-scan jitter (mas) to that
-instrument, and `"clip_outliers" => true` (or a number of σ) runs
+Two per-instrument options ride on the same reference. `"jitter"` (default
+`true`) gives that instrument a `sigma_iad_<name>` along-scan jitter (mas);
+`"jitter" => false` opts it out. A raw `IADData` gets `IAD` (or `IAD1`,
+`IAD2`, ... when several are merged). `"clip_outliers" => true`, off by default, (or a number of σ) runs
 `clip_transit_outliers` on it, which drops CCD abscissae that disagree
 with their own field-of-view transit and reports them in the result's
 `iad_outliers`. `<name>` is `GaiaDR4_<source_id>` / `HIP<hip>`, or the spec's
@@ -261,7 +262,7 @@ with their own field-of-view transit and reports them in the result's
 
 ```julia
 fit_astrometry(iad = Dict("catalogue" => "gaia_dr4", "source_id" => 1457486023639239296,
-                          "instrument" => "DR4", "jitter" => true,
+                          "instrument" => "DR4",
                           "clip_outliers" => true))      # → sigma_iad_DR4
 ```
 

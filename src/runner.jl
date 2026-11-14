@@ -406,7 +406,7 @@ function _validate_config(cfg::AbstractDict)
             for (i, e) in enumerate(iad_entries)
                 at = "`data.iad`" * (iad isa AbstractVector ? "[$i]" : "")
                 try
-                    _iad_jitter_flag(_get(e, :jitter; default = false))
+                    _iad_jitter_flag(_get(e, :jitter; default = true))
                 catch err
                     push!(errs, "$at: " * sprint(showerror, err))
                 end
@@ -653,9 +653,9 @@ function _build_data(data_cfg; obliquity = nothing)
     # conventions, and an order nobody chose is a debugging hazard when
     # reading back the per-instrument zero points.
     #
-    # Per block, opt-in: `jitter: true` gives that instrument a
-    # `sigma_iad_<name>` along-scan jitter, `clip_outliers: true` (or a number
-    # of σ) drops the CCD abscissae that disagree with their own field-of-view
+    # Per block: `jitter` (default true) gives that instrument a
+    # `sigma_iad_<name>` along-scan jitter, `jitter: false` opts it out;
+    # `clip_outliers: true` (opt-in; or a number of σ) drops the CCD abscissae that disagree with their own field-of-view
     # transit (`clip_transit_outliers`) before anything is fitted.
     if _has(data_cfg, :iad)
         iad_block = _get(data_cfg, :iad)
@@ -669,7 +669,7 @@ function _build_data(data_cfg; obliquity = nothing)
                 d, rep = clip_transit_outliers(d; nsigma = nsig, label = name)
                 push!(iad_outliers, merge((instrument = name,), rep))
             end
-            jit = _iad_jitter_flag(_get(b, :jitter; default = false))
+            jit = _iad_jitter_flag(_get(b, :jitter; default = true))
             append!(inst_names_iad, fill(jit ? name : "", n_iad_inst(d)))
             push!(parsed, d)
         end

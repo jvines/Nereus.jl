@@ -45,6 +45,25 @@
 # Anything you want to override (parametrization, stability check,
 # explicit `M_s` for transit a/R*) is a keyword. Defaults are sensible.
 
+# Marks an IAD instrument that has no name of its own and wants the default
+# jitter (a raw `IADData`). `_fill_auto_iad_names` turns it into `IAD` /
+# `IAD<m>` once the merged instrument count is known.
+const _IAD_AUTO_NAME = "\0iad-auto"
+
+"""
+    _fill_auto_iad_names(names, n) -> Vector{String}
+
+`names === nothing` -> a jitter for each of the `n` IAD instruments, named
+`IAD` (one instrument) or `IAD1`, `IAD2`, ... (merge order). A vector is kept
+as given (`""` = no jitter) except that `_IAD_AUTO_NAME` entries are named the
+same way, by their position.
+"""
+function _fill_auto_iad_names(names, n::Int)
+    names === nothing && (names = fill(_IAD_AUTO_NAME, n))
+    return String[nm == _IAD_AUTO_NAME ? (n == 1 ? "IAD" : "IAD$m") : String(nm)
+                  for (m, nm) in enumerate(names)]
+end
+
 """
     build_target(; M_pri=nothing, planets=NamedTuple(),
                  rv=NamedTuple(), relAST=nothing, hgca=nothing,
@@ -68,7 +87,10 @@ docstring above for the full block grammar and example.
 - `iad_names` — the same for the intermediate-astrometry instruments, one
   entry per instrument of `iad` in order, `""` for one without a jitter:
   `["", "GaiaDR4"]` allocates `sigma_iad_GaiaDR4` for the Gaia half of a
-  Hipparcos + Gaia fit only. Empty (the default) allocates none.
+  Hipparcos + Gaia fit only. `nothing` (the default) gives EVERY IAD
+  instrument a jitter, auto-named `IAD` for a single instrument and `IAD1`,
+  `IAD2`, ... (merge order) for several; an explicit vector is taken as
+  given, so `String[]` allocates none.
 - `M_pri` — primary mass. Pass a `Real` for fixed (becomes
   `FixedPrior`), a `PriorSpec` for sampled (e.g. `NormalPrior(0.856,
   0.014)` for a Crepp+ 2016-style spectroscopic prior). `nothing`
@@ -136,7 +158,7 @@ function build_target(;
     gaia_dr3 = nothing,
     hip_scans = nothing,
     as_names = String[],
-    iad_names = String[],
+    iad_names::Union{Nothing, AbstractVector{<:AbstractString}} = nothing,
     plx = nothing,
     parametrization::Union{Nothing, Symbol} = nothing,
     time_anchor::Union{Nothing, Symbol} = nothing,
@@ -285,9 +307,11 @@ function build_target(;
         hip_scans = hip_scans,
     )
 
+    n_iad = data.iad === nothing ? 0 : n_iad_inst(data.iad)
+    iad_names_v = _fill_auto_iad_names(iad_names, n_iad)
     instruments = InstrumentConfig(rv = rv_names, pm = phot_names,
                                    as = collect(String, as_names),
-                                   iad = collect(String, iad_names))
+                                   iad = iad_names_v)
 
     # Priors dict — system, planets, instruments.
     priors_dict = Dict{String, PriorSpec}()

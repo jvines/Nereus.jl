@@ -49,7 +49,7 @@ function _two_mission_target(; noise = true, seed = 5, gaia_only = false,
           sesinw = UniformPrior(-1.0, 1.0), secosw = UniformPrior(-1.0, 1.0),
           inc = SinePrior(), Omega = UniformPrior(0.0, 2pi),
           Mo = UniformPrior(0.0, 2pi))
-    target = build_target(M_pri = 0.644, planets = (b = pl,), iad = iad,
+    target = build_target(M_pri = 0.644, planets = (b = pl,), iad = iad, iad_names = String[],
                           plx = NormalPrior(13.6, 0.02), M_s = 0.644)
     truth = Dict("a_k1" => 2.4, "M_sec_k1" => 0.011, "sesinw_k1" => 0.45,
                  "secosw_k1" => 0.3, "inc_k1" => 2.1, "Omega_k1" => 3.0,

@@ -32,7 +32,7 @@ function _sc_build(w, rv; unconstrained, efree = false,
            sesinw = efree ? UniformPrior(-1.0, 1.0) : FixedPrior(0.0),
            secosw = efree ? UniformPrior(-1.0, 1.0) : FixedPrior(0.0), inc = SinePrior(),
            Omega = UniformPrior(0.0, 2π), Mo = UniformPrior(0.0, 2π))
-    tg = build_target(M_pri = 0.644, planets = (b = blk,), iad = iad,
+    tg = build_target(M_pri = 0.644, planets = (b = blk,), iad = iad, iad_names = String[],
                       rv = (HARPS = (data = (t = _SC_TRV, rv = rv, rv_err = fill(5.0, 40)),
                                      sigma = 0.0, gamma = UniformPrior(-50.0, 50.0)),),
                       plx = 13.6, M_s = 0.644)

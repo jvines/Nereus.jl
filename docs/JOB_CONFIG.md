@@ -568,11 +568,12 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   Instrument names are sorted-unique → integer indices.
 - **`iad`** — `hip_id` (auto-fetches the Hipparcos IAD bundle) or `values`
   (`t`, `abscissa`, `abscissa_err`, `psi`, `parallax_factor`, `pm_factor`).
-  Two opt-in keys per block, both off by default:
-  `"jitter": true` adds a `sigma_iad_<name>` along-scan jitter (mas, added in
+  Two keys per block. `"jitter"` (default `true`) gives each IAD instrument
+  its own `sigma_iad_<name>` along-scan jitter (mas, added in
   quadrature to that instrument's abscissa errors; default prior
   ModJeffreys with the knee at the median reported error, capped at 10×);
-  `"clip_outliers": true` (or a number of σ, default 5) drops the CCD abscissae
+  `"jitter": false` opts that instrument out. `"clip_outliers"` (opt-in,
+  off by default): `true` (or a number of σ, default 5) drops the CCD abscissae
   that disagree with the other CCDs of their own field-of-view transit
   (`clip_transit_outliers`) — model-independent, so it cannot touch an orbit
   signal. What it dropped is in `summary.json` as `iad_outliers`. `<name>` is

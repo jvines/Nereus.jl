@@ -122,13 +122,50 @@ end
     orb = _jit_orbit()
     iad1 = _jit_iad(; s_true = 0.15, orb = orb, M_sec = _JIT_ORB.M_sec)
 
-    @testset "off by default" begin
+    @testset "no names, no jitter slots (InstrumentConfig level)" begin
         _, p, _ = _jit_params(iad1)
         @test isempty(p.layout.systemic.iad_jitter)
         @test !any(startswith("sigma_iad_"), p.layout.names)
         @test n_iad_jitters(p.config.instruments) == 0
         # Three-argument positional form still builds (callers predating it).
         @test InstrumentConfig(["A"], String[], String[]).iad_names == String[]
+    end
+
+    @testset "build_target: a jitter per IAD instrument by default" begin
+        blk = (a = LogUniformPrior(0.8, 2.0), M_sec = LogUniformPrior(0.003, 0.03),
+               sesinw = FixedPrior(0.0), secosw = FixedPrior(0.0), inc = SinePrior(),
+               Omega = UniformPrior(0.0, 2π), Mo = UniformPrior(0.0, 2π))
+        rvn = (HARPS = (data = (t = [57000.0, 57300.0], rv = [1.0, -1.0],
+                                rv_err = [1.0, 1.0]), sigma = 0.0,
+                        gamma = UniformPrior(-50.0, 50.0)),)
+        mk(iad; kw...) = build_target(M_pri = 1.0, planets = (b = blk,), iad = iad,
+                                      rv = rvn, plx = 13.6, M_s = 1.0; kw...)
+        iad2 = _jit_iad(; seed = 5)
+        # One raw IADData: named IAD.
+        t1 = mk(iad1)
+        @test t1.params.config.instruments.iad_names == ["IAD"]
+        @test "sigma_iad_IAD" in t1.params.layout.names
+        # Two: IAD1, IAD2 in merge order.
+        t2 = mk([iad1, iad2])
+        @test t2.params.config.instruments.iad_names == ["IAD1", "IAD2"]
+        @test all(n -> n in t2.params.layout.names, ["sigma_iad_IAD1", "sigma_iad_IAD2"])
+        # Explicit vectors keep their meaning.
+        @test isempty(mk(iad1; iad_names = String[]).params.config.instruments.iad_names |>
+                      x -> filter(!isempty, x))
+        t3 = mk([iad1, iad2]; iad_names = ["", "G"])
+        @test t3.params.config.instruments.iad_names == ["", "G"]
+        @test "sigma_iad_G" in t3.params.layout.names
+        @test !("sigma_iad_IAD1" in t3.params.layout.names)
+        # The burn-in hold picks the default slots up by name.
+        @test Set(keys(Nereus.default_burnin_hold(t2.params))) ==
+              Set(["sigma_iad_IAD1", "sigma_iad_IAD2"])
+        # Typed specs: raw IADData get the same names; Nereus._resolve_iad
+        # feeds the typed fit_* path.
+        @test Nereus._resolve_iad(iad1)[2] == [Nereus._IAD_AUTO_NAME]
+        tt = Nereus._target_from([Dict{String, Any}("source" => "AS", "iad" => [iad1, iad2])], 1)
+        @test tt.params.config.instruments.iad_names == ["IAD1", "IAD2"]
+        tt1 = Nereus._target_from([Dict{String, Any}("source" => "AS", "iad" => iad1)], 1)
+        @test tt1.params.config.instruments.iad_names == ["IAD"]
     end
 
     @testset "layout, accessor, default prior, units, jitter set" begin
@@ -353,11 +390,25 @@ end
         s = Nereus._iad_outlier_summary(outl)
         @test s[1]["instrument"] == "G" && s[1]["n_rejected"] == 1
 
-        # Off by default: no key, no slot, no clipping, data untouched.
+        # Default: a jitter per block (named AS<i> without an instrument),
+        # no clipping, data untouched.
         dcfg0 = Dict{String, Any}("rv" => rv, "iad" => Dict{String, Any}("values" => vals(a)))
         data0, _, _, _, iadn0, outl0 = Nereus._build_data(dcfg0)
-        @test isempty(iadn0) && isempty(outl0)
+        @test iadn0 == ["AS1"] && isempty(outl0)
         @test data0.iad.abscissa == a
+        # `jitter: false` opts out.
+        dcfgf = Dict{String, Any}("rv" => rv, "iad" => Dict{String, Any}(
+            "jitter" => false, "values" => vals(a)))
+        @test isempty(Nereus._build_data(dcfgf)[5])
+
+        # Two blocks: one jitter each by default; false opts one out.
+        b1 = Dict{String, Any}("instrument" => "H", "values" => vals(dat.abscissa))
+        b2 = Dict{String, Any}("instrument" => "G", "values" => vals(dat.abscissa))
+        d2 = Nereus._build_data(Dict{String, Any}("rv" => rv, "iad" => [b1, b2]))
+        @test d2[5] == ["H", "G"]
+        d2f = Nereus._build_data(Dict{String, Any}("rv" => rv,
+            "iad" => [b1, merge(b2, Dict("jitter" => false))]))
+        @test d2f[5] == ["H", ""]
 
         # Typos are errors, not models.
         bad = deepcopy(dcfg); bad["iad"][1]["jitter"] = "yes"
@@ -369,9 +420,10 @@ end
         err = try; Nereus._validate_config(vcfg); nothing; catch e; e; end
         @test err isa ArgumentError && occursin("clip_outliers", err.msg)
 
-        # fit_* specs: an already-built IADData carries no jitter request.
+        # fit_* specs: an already-built IADData gets the auto name.
         iad, names, reps = Nereus._resolve_iad([dat, dat])
-        @test n_iad_inst(iad) == 2 && names == ["", ""] && isempty(reps)
+        @test n_iad_inst(iad) == 2 && names == fill(Nereus._IAD_AUTO_NAME, 2) &&
+              isempty(reps)
         @test Nereus._iad_block_name(Dict("catalogue" => "hipparcos", "hip" => 64426), 1) ==
               "HIP64426"
         @test Nereus._iad_block_name(Dict("catalogue" => "gaia_dr4", "source_id" => 12), 1) ==
