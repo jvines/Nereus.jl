@@ -152,10 +152,14 @@ end
     @test !ok && occursin("swapped", why) && occursin("0.1", why)
     @test Nereus._tempered_quotable([0.0, 1e-4, 0.1, 1.0], [0.3, 0.2, 0.06]) == (true, "")
     @test !first(Nereus._tempered_quotable([1.0, 0.0], Float64[]))
-    # mode-Laplace against bridge: a warning past bridge's error + 1 nat
-    @test (@test_logs (:warn, r"Gaussian approximation") Nereus._warn_laplace_vs_bridge(
-        "x", 165.56, 161.81, 0.05))
+    # mode-Laplace against bridge: a Δln Z of a few is Laplace's own bias (5.5 on a
+    # converged 51 Peg) and stays quiet; past multimodal_tol it warns.
+    @test !(@test_logs Nereus._warn_laplace_vs_bridge("x", 165.56, 161.81, 0.05))
     @test !(@test_logs Nereus._warn_laplace_vs_bridge("x", 162.5, 161.81, 0.05))
+    @test (@test_logs (:warn, r"multimodal") Nereus._warn_laplace_vs_bridge(
+        "x", 139.0, 161.81, 0.05))
+    @test (@test_logs (:warn, r"multimodal") Nereus._warn_laplace_vs_bridge(
+        "x", 165.56, 161.81, 0.05; multimodal_tol = 3.0))
     @test !Nereus._warn_laplace_vs_bridge("x", NaN, 161.81, 0.05)
 end
 
@@ -202,6 +206,13 @@ end
     @test isnan(rb.log_evidence) && isnan(rb.log_evidence_laplace)
     @test isfinite(rb.evidence.ss_plus[1])
     @test Nereus._evidence_summary(rb, rb.log_evidence)["reported"] == "none"
+    # run_job's call: it chooses the evidence again after the fit, so the
+    # sampler's own "no estimate" is not printed, and the result is the same.
+    logs, rq = Test.collect_test_logs() do
+        sample_pt_emcee(tg, data; merge(kw, (; evidence_postfit = true))...)
+    end
+    @test !any(l -> occursin("evidence", string(l.message)), logs)
+    @test isnan(rq.log_evidence)
     # A ladder with a β = 0 rung, bridge withheld: the tempered value when its
     # rungs swap and it agrees with mode-Laplace within laplace_switch_tol;
     # mode-Laplace otherwise.
