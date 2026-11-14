@@ -169,7 +169,7 @@ const _WS_IAD = let rng = MersenneTwister(11), n = 40
             psi = psi, parallax_factor = sin.(2pi .* (t .- 57000) ./ 365.25 .- psi),
             pm_factor = (t .- sum(t) / n) ./ 365.25)
 end
-_ws_as_target(iad = _WS_IAD) = build_target(M_pri = 0.644, iad = iad,
+_ws_as_target(iad = _WS_IAD) = build_target(M_pri = 0.644, iad = iad, iad_names = String[],
     planets = (b = (a = LogUniformPrior(0.3, 4.0), M_sec = LogUniformPrior(0.001, 0.05),
                     sesinw = UniformPrior(-1.0, 1.0), secosw = UniformPrior(-1.0, 1.0),
                     inc = SinePrior(), Omega = UniformPrior(0.0, 2pi),

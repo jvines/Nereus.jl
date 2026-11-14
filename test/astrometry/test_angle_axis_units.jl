@@ -45,7 +45,7 @@ function _units_target(a, M_sec; plx = 20.0, seed = 3)
           sesinw = UniformPrior(-1.0, 1.0), secosw = UniformPrior(-1.0, 1.0),
           inc = SinePrior(), Omega = UniformPrior(0.0, 2pi),
           Mo = UniformPrior(0.0, 2pi))
-    target = build_target(M_pri = 1.0, planets = (b = pl,), iad = iad, hgca = hg,
+    target = build_target(M_pri = 1.0, planets = (b = pl,), iad = iad, iad_names = String[], hgca = hg,
                           gost = gost, plx = NormalPrior(plx, 0.05), M_s = 1.0)
     truth = Dict("a_k1" => a, "M_sec_k1" => M_sec, "sesinw_k1" => 0.3,
                  "secosw_k1" => 0.2, "inc_k1" => 1.1, "Omega_k1" => 2.0,
@@ -66,7 +66,7 @@ function _units_target(a, M_sec; plx = 20.0, seed = 3)
                    pmra = Tuple(μra .+ 3.0), pmdec = Tuple(μdec .- 2.0),
                    sigma_pmra = (0.5, 0.02, 0.05), sigma_pmdec = (0.5, 0.02, 0.05),
                    plx = plx, plx_err = 0.05, hip_id = 1)
-    target = build_target(M_pri = 1.0, planets = (b = pl,), iad = target.data.iad,
+    target = build_target(M_pri = 1.0, planets = (b = pl,), iad = target.data.iad, iad_names = String[],
                           hgca = hg2, gost = gost, plx = NormalPrior(plx, 0.05), M_s = 1.0)
     nm = target.params.layout.unfrozen_names
     arr = zeros(3, length(nm) + 1, 1)

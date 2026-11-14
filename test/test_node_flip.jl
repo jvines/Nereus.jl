@@ -35,7 +35,7 @@ using Nereus: IADData, NodeFlip, node_flips, node_flip!, logdensity_bounded
     _iad(w) = IADData(t = t, abscissa = w, abscissa_err = fill(0.1, n), psi = psi,
                       parallax_factor = pf, pm_factor = dt)
     _target(w; rv = NamedTuple(), kw...) =
-        build_target(M_pri = 0.644, planets = (b = _blk(; kw...),), iad = _iad(w),
+        build_target(M_pri = 0.644, planets = (b = _blk(; kw...),), iad = _iad(w), iad_names = String[],
                      rv = rv, plx = NormalPrior(13.6, 0.02), M_s = 0.644)
     w_obs = let tg0 = _target(zeros(n))
         th = Theta{Float64}(tg0.params)
