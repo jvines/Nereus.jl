@@ -80,6 +80,21 @@ if [ -n "${SKIP_TESTS:-}" ]; then
 else
   say "test suite (5 shards, in the CI image)"
   ( cd "$JL_ROOT" && docker build -q -t "nereus-ci:julia-$CFG_JULIA" ci/ >/dev/null ) || die "CI image build failed"
+  # The depot persists between releases and is only ever instantiated here or
+  # by CI, which runs on pull requests alone. A release cut without a PR met a
+  # Manifest that had gained a dependency (PrecompileTools) since the depot was
+  # last filled, and every shard died on "is required but does not seem to be
+  # installed". Instantiate and precompile first, under the lock CI takes on
+  # the same depot (lockf on macOS, flock on Linux).
+  lock=$(command -v flock || command -v lockf || true)
+  ${lock:+"$lock" "$CFG_DEPOT.lock"} docker run --rm --name "nereus-release-pre-$$" \
+    --label cl.jvines.owner=nereus-release \
+    --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    -e JULIA_DEPOT_PATH=/depot -v "$CFG_DEPOT":/depot \
+    -v "$JL_ROOT":/repo -w /repo --cpus 12 --memory 24g \
+    "nereus-ci:julia-$CFG_JULIA" \
+    julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()' \
+    || die "could not instantiate the release depot"
   docker run --rm --name "nereus-release-suite-$$" \
     --label cl.jvines.owner=nereus-release \
     --user "$(id -u):$(id -g)" -e HOME=/tmp \
