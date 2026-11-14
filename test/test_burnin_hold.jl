@@ -4,7 +4,7 @@
 # that is every IAD jitter `sigma_iad_<instrument>` at 0, where the likelihood is
 # the unjittered one: from the prior an IAD jitter otherwise absorbs the reflex
 # before any walker finds the orbit (HD 114762 RV + Gaia DR4: every pt_emcee run
-# ended 470-970 nats below it).
+# ended Δln p = 470-970 below it).
 #
 # Checked here, on runs of a few seconds: the keywords resolve and refuse what
 # cannot be held; while held, every walker carries the value exactly (on
@@ -102,7 +102,7 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
 
     @testset "the stranded-walker prune: held coordinates stay, and carry no mass" begin
         # One walker has found a mode, out on its flank (log L `ll`); 99 sit
-        # on a plateau `gap` nats down. Every walker holds coordinate 3 at 0.52,
+        # on a plateau `gap` down in ln p. Every walker holds coordinate 3 at 0.52,
         # 2σ off the mode's centre: the prune's climb, widths and draws run over
         # coordinates 1-2 only, so it stays there exactly. Over all three the
         # rung's covariance is singular and the climb would move it to 0.5.
@@ -162,10 +162,10 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
         @test all(==(v), state[1, :, 3])
         @test all(abs.(state[1, :, 1:2] .- 0.5) .< 5 * width)
 
-        # 17 nats down could still carry mass, so it stays: the bound is on the
+        # Δln p = 17 down could still carry mass, so it stays: the bound is on the
         # posterior given the held value, and that value's prior density (here
         # e^30, in every log π) is no evidence for the mode. Left in the best
-        # walker's density, it would raise the cut by 30 nats and move all 99
+        # walker's density, it would raise the cut by 30 in ln p and move all 99
         # (over the passes, the mode at most doubling at each).
         for (c, hl, n) in ((0.0, 0.0, 0), (30.0, 30.0, 0), (30.0, 0.0, 99))
             state, lπ, lL = rung(17.0; c, ll = -2.2)
@@ -196,7 +196,7 @@ _col(r, nm) = vec(r.chains[Symbol(nm)].data)
         med = Ref(NaN)
         @test !due(med, 50, -1000.0) && med[] == -1000.0   # a pass before h.step: recorded
         @test !due(med, 51, 0.0) && med[] == -1000.0       # not a pass
-        @test !due(med, 100, -900.0) && med[] == -900.0    # rose 100 nats: still climbing
+        @test !due(med, 100, -900.0) && med[] == -900.0    # rose 100 in ln p: still climbing
         @test due(med, 150, 0.0)                           # the latest step, whatever it does
         @test due(Ref(-900.0), 100, -895.0)                # rose 5 < d/2 = 6: settled
         @test !due(Ref(-900.0), 100, -893.0)

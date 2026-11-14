@@ -7,7 +7,7 @@
 # take cos f and sin f from E with the e they are given. Kepler's equation and
 # r/a always used the given e, so above 0.9999 the allocating methods computed
 # a true anomaly from another orbit than the rest of their model, and the two
-# disagreed by up to ~10 nats in the RV and ~1e4 nats in the photometry.
+# disagreed by up to ~10 in ln L in the RV and ~1e4 in ln L in the photometry.
 
 using Test
 using Nereus

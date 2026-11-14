@@ -2,7 +2,7 @@
 # started with. This regressed once already: every ensemble sampler drew
 # from a PER-THREAD RNG (`thread_rngs[threadid()]`), so `-t 2` and `-t 4`
 # produced different chains at the same seed. On 51 Peg that moved the
-# reported log-evidence by ~3.5 nats, which was briefly mistaken for a
+# reported log-evidence by ~3.5, which was briefly mistaken for a
 # disagreement between two evidence estimators.
 #
 # The fix is to key every random stream on the TASK (walker / replica /
