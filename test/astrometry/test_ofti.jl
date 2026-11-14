@@ -20,7 +20,7 @@ using PlanetOrbits
                     relastrom=relast)
         params = Params(max_kplanet=1, planet_modes=[RVAS],
             instruments=instruments, data=data, stability=:none, M_s=1.0,
-            parametrization=ParametrizationConfig(mass=:K_driven))
+            parametrization=ParametrizationConfig(time = :Mo, mass=:K_driven))
         target = NereusTarget(params, data)
         @test_throws ArgumentError ofti_sample(target; n_attempts=10)
     end
@@ -29,7 +29,7 @@ using PlanetOrbits
         instruments = InstrumentConfig(rv=["X"])
         # No relastrom
         data = Data(t_rv=[55000.0, 55100.0], rv=[0.0,0.0], rv_err=[1.0,1.0])
-        params = Params(max_kplanet=1, planet_modes=[RV_ONLY],
+        params = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet=1, planet_modes=[RV_ONLY],
             instruments=instruments, data=data, stability=:none, M_s=1.0)
         target = NereusTarget(params, data)
         # Even if we had :a_driven, no relAST → error.
@@ -102,7 +102,7 @@ using PlanetOrbits
             max_kplanet=1, planet_modes=[RVAS],
             instruments=InstrumentConfig(rv=["X"]),
             data=data, stability=:none, M_s=M_pri,
-            parametrization=ParametrizationConfig(mass=:a_driven),
+            parametrization=ParametrizationConfig(time = :Mo, mass=:a_driven),
             priors=Dict{String, PriorSpec}(
                 "n_p"        => FixedPrior(1.0),
                 "a_k1"       => LogUniformPrior(0.5, 50.0),
@@ -141,7 +141,7 @@ using PlanetOrbits
             max_kplanet=1, planet_modes=[RVAS],
             instruments=InstrumentConfig(rv=["X"]),
             data=data, stability=:none, M_s=1.0,
-            parametrization=ParametrizationConfig(mass=:a_driven),
+            parametrization=ParametrizationConfig(time = :Mo, mass=:a_driven),
             priors=Dict{String, PriorSpec}(
                 "n_p"        => FixedPrior(1.0),
                 "a_k1"       => LogUniformPrior(0.5, 50.0),
@@ -185,7 +185,7 @@ using PlanetOrbits
             max_kplanet=1, planet_modes=[RVAS],
             instruments=InstrumentConfig(rv=["X"]),
             data=data, stability=:none, M_s=1.0,
-            parametrization=ParametrizationConfig(mass=:a_driven),
+            parametrization=ParametrizationConfig(time = :Mo, mass=:a_driven),
             priors=Dict{String, PriorSpec}(
                 "n_p" => FixedPrior(1.0),
                 "a_k1" => LogUniformPrior(0.1, 1.0),  # tiny vs anchor

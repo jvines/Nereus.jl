@@ -575,17 +575,38 @@ combinations (`RVPM`, `RVPMAS_RM`, ...) that build one.
 # =====================================================================
 
 """
-    ParametrizationConfig(; ew=:sesinw, time=:Mo, geom=:b_rr, use_rho_s=false,
+    ParametrizationConfig(; ew=:sesinw, time=:auto, geom=:b_rr, use_rho_s=false,
                             mass=:K_driven, t_ref_c=NaN)
 
 Choices for how orbital parameters are parametrized in the sampler.
 
 # Fields
 - `ew::Symbol`        : one of `:sesinw`, `:esinw`, `:ew`
-- `time::Symbol`      : one of `:Mo`, `:Tp`, `:Tc`, `:phic`. `:phic` samples the
-                         transit phase φ_c = 2π (Tc − t_ref_c) / P, Tc on a
-                         circle: one period wide at every P, and pinned by the
-                         transit like Tc (see `phic_to_tc`).
+- `time::Symbol`      : one of `:phic`, `:Mo`, `:Tp`, `:Tc`, or `:auto` (the
+                         default), which `Params` resolves when it is built
+                         (`resolve_time_anchor`): the anchor the priors name
+                         (an `Mo_k1` prior → `:Mo`), else `:phic`. A `Params`
+                         never holds `:auto`.
+                         `:phic` samples the transit phase
+                         φ_c = 2π (Tc − t_ref_c) / P, Tc on a circle: one
+                         period wide at every P, and pinned by the transit like
+                         Tc (see `phic_to_tc`). It is the default because at
+                         low e it is the mean longitude (φ_c = π/2 − λ at
+                         e = 0), which the data pin; Mo is λ − ω, and ω is
+                         free there, so (Mo, √e sin ω, √e cos ω) is a thin
+                         ridge the samplers mix along badly, biasing e. For
+                         fixed (P, e, ω) the map Mo → φ_c is a shift, so a
+                         uniform φ_c is the same prior as a uniform Mo.
+                         With `obs_prior = true` `:auto` resolves to `:Mo`
+                         (see `obs_prior`).
+- `obs_prior::Bool`   : the O'Neil (2019) observation-based prior for
+                         relative astrometry. It is a density in
+                         (P, e, Tp) over ONE fixed period of Tp (orbitize!'s
+                         τ ∈ [0, 1)) and is not periodic in Tp. `:Mo` spans
+                         such a window, Tp ∈ (t_ref − P, t_ref]; the `:phic`
+                         window in Tp moves with (e, ω), which would reweight
+                         the prior by ω. So when `time` is not given and
+                         `obs_prior` is on, the anchor is `:Mo`.
 - `t_ref_c::Float64`  : the epoch φ_c is measured from. `NaN` (the default)
                          is filled in by `Params` from the data: the median
                          photometric time, else `data.t_ref` (see
@@ -601,6 +622,20 @@ Choices for how orbital parameters are parametrized in the sampler.
                          goes on the quantity it was measured as, with no
                          stellar-density proxy. Mutually exclusive with
                          `use_rho_s`.
+- `density::Symbol`   : `:rho_circ` (the default) or `:rho_star`. Under
+                         `:rho_circ` every planet with transit photometry and a
+                         free eccentricity samples the circular-equivalent
+                         density its transit duration measures,
+                         ρ_circ = ρ★ g³, g = (1 + e sin ω)/√(1 − e²)
+                         (`rho_circ_k<k>`), in place of the stellar density or of
+                         one eccentricity coordinate: the duration fixes ρ★ g³,
+                         so in (ρ★, e, ω) the posterior is a thin curved sheet
+                         reaching high e, which the samplers cross slowly; in
+                         ρ_circ it lies along an axis. ρ★ and (e, ω) become
+                         derived, the Jacobian keeps their prior exactly, and the
+                         posterior is unchanged (see `DensityReparam`). It is
+                         inert for a model with no such planet. `:rho_star`
+                         samples ρ★ and (e, ω) as before.
 - `mass::Symbol`      : one of `:K_driven` (default — sample RV semi-
                          amplitude K, derive M_sec via mass function),
                          `:M_sec_driven` (sample M_sec directly, derive
@@ -642,19 +677,30 @@ struct ParametrizationConfig
     # Epoch the transit phase φ_c is measured from (time = :phic). NaN until
     # `Params` fills it in from the data.
     t_ref_c::Float64
+    # :rho_circ -- a transiting planet with a free eccentricity samples the
+    # circular-equivalent density ρ★ g³ its transit measures; :rho_star -- ρ★ and
+    # (e, ω) as sampled before. See the docstring and `DensityReparam`.
+    density::Symbol
 end
 
-function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
+function ParametrizationConfig(; ew::Symbol=:sesinw,
+                                time::Union{Symbol,Nothing}=:auto,
                                 geom::Symbol=:b_rr, use_rho_s::Bool=false,
                                 mass::Symbol=:K_driven,
                                 obs_prior::Bool=false,
                                 marginalize_gamma::Bool=false,
                                 sample_a_Rs::Bool=false,
-                                t_ref_c::Real=NaN)
+                                t_ref_c::Real=NaN,
+                                density::Union{Symbol,AbstractString}=:rho_circ)
+    density = Symbol(density)
+    density in (:rho_circ, :rho_star) || throw(ArgumentError(
+        "density must be :rho_circ (sample the circular-equivalent density a " *
+        "transit measures) or :rho_star (sample ρ★ and e, ω); got :$density"))
+    time === nothing && (time = :auto)
     ew in (:sesinw, :esinw, :ew) ||
         throw(ArgumentError("ew must be :sesinw, :esinw, or :ew; got :$ew"))
-    time in (:Mo, :Tp, :Tc, :phic) ||
-        throw(ArgumentError("time must be :Mo, :Tp, :Tc or :phic; got :$time"))
+    time in (:Mo, :Tp, :Tc, :phic, :auto) ||
+        throw(ArgumentError("time must be :Mo, :Tp, :Tc, :phic or :auto; got :$time"))
     (isnan(t_ref_c) || isfinite(t_ref_c)) ||
         throw(ArgumentError("t_ref_c must be finite, or NaN to take it from the data"))
     geom in (:b_rr, :r1r2) ||
@@ -665,7 +711,42 @@ function ParametrizationConfig(; ew::Symbol=:sesinw, time::Symbol=:Mo,
         "use_rho_s and sample_a_Rs are mutually exclusive: a/R★ is either derived " *
         "from the stellar density or sampled directly, not both"))
     return ParametrizationConfig(ew, time, geom, use_rho_s, mass, obs_prior,
-                                 marginalize_gamma, sample_a_Rs, Float64(t_ref_c))
+                                 marginalize_gamma, sample_a_Rs, Float64(t_ref_c),
+                                 density)
+end
+
+"""
+    default_time_anchor(; obs_prior=false) -> Symbol
+
+The time anchor a fit gets when none is given and its priors name none:
+`:phic`, the transit phase, except `:Mo` under the O'Neil `obs_prior`.
+`resolve_time_anchor` (so `Params`, run_job and the `fit_*` functions) and
+`build_target` all take it from here. See `ParametrizationConfig` for why.
+"""
+default_time_anchor(; obs_prior::Bool = false) = obs_prior ? :Mo : :phic
+
+"""
+    time_anchor_named(names) -> Union{Symbol, Nothing}
+
+The time anchor a set of parameter names declares: `:Mo`, `:Tp`, `:Tc` or
+`:phic` when the names carry `<anchor>_k<n>` for exactly one of them, `nothing`
+when none does. Where no `time` is given, a model whose priors name an anchor
+samples that anchor, as `build_target` does with a planet block's names, so a
+setup written with `Mo_k1` priors keeps sampling Mo. Names of two anchors
+throw: one model samples one.
+"""
+function time_anchor_named(names)
+    found = Set{Symbol}()
+    for n in names
+        m = match(r"^(Mo|Tp|Tc|phic)_k\d+$", String(n))
+        m === nothing || push!(found, Symbol(m.captures[1]))
+    end
+    isempty(found) && return nothing
+    length(found) == 1 && return only(found)
+    throw(ArgumentError(
+        "the priors name more than one time anchor (" *
+        join(sort!(String.(collect(found))), ", ") * "); a model samples one. " *
+        "Set the parametrization's `time`, and give priors to that anchor only."))
 end
 
 """
@@ -679,11 +760,37 @@ photometry it is `data.t_ref`.
 phic_reference_epoch(data) =
     isempty(data.t_phot) ? Float64(data.t_ref) : Float64(median(data.t_phot))
 
+"""
+    resolve_time_anchor(pc, priors) -> ParametrizationConfig
+
+`pc` with `time = :auto` replaced by the anchor the model samples: the one
+`priors` name (`time_anchor_named`; two different ones throw), else
+`default_time_anchor(; obs_prior = pc.obs_prior)`. An explicit anchor is kept
+as given. `Params` calls it before anything else, so a `Params` -- and the
+checkpoint fingerprint and equality built from it -- holds the anchor actually
+sampled, never `:auto`.
+"""
+function resolve_time_anchor(pc::ParametrizationConfig, priors)
+    pc.time === :auto || return pc
+    named = priors === nothing ? nothing : time_anchor_named(keys(priors))
+    time = named === nothing ? default_time_anchor(; obs_prior = pc.obs_prior) : named
+    return ParametrizationConfig(pc.ew, time, pc.geom, pc.use_rho_s, pc.mass,
+                                 pc.obs_prior, pc.marginalize_gamma,
+                                 pc.sample_a_Rs, pc.t_ref_c, pc.density)
+end
+
 # The same parametrization with the φ_c epoch filled in.
 function _with_t_ref_c(pc::ParametrizationConfig, t_ref_c::Real)
     return ParametrizationConfig(pc.ew, pc.time, pc.geom, pc.use_rho_s, pc.mass,
                                  pc.obs_prior, pc.marginalize_gamma,
-                                 pc.sample_a_Rs, Float64(t_ref_c))
+                                 pc.sample_a_Rs, Float64(t_ref_c), pc.density)
+end
+
+# The same parametrization with another `density`.
+function _with_density(pc::ParametrizationConfig, density::Symbol)
+    return ParametrizationConfig(pc.ew, pc.time, pc.geom, pc.use_rho_s, pc.mass,
+                                 pc.obs_prior, pc.marginalize_gamma,
+                                 pc.sample_a_Rs, pc.t_ref_c, density)
 end
 
 # =====================================================================
@@ -692,7 +799,7 @@ end
 
 """
     InstrumentConfig(rv_names, pm_names)
-    InstrumentConfig(; rv=String[], pm=String[], as=String[])
+    InstrumentConfig(; rv=String[], pm=String[], as=String[], iad=String[])
 
 Names of RV, photometric and astrometric instruments. Instrument indices
 throughout the code refer to positions in these vectors (1-based). The
@@ -708,18 +815,31 @@ existing relative-astrometry fit is untouched.
 Two imagers of the same companion are two `as` names and ONE planet index:
 GPI and SPHERE have different astrometric error budgets, and a shared
 jitter lets whichever is better absorb the other's systematics.
+
+`iad` does the same for the INTERMEDIATE-astrometry instruments (Hipparcos
+IAD, Gaia DR4 epoch astrometry), indexed by `IADData.inst`: entry `m` names
+instrument `m`, and a non-empty name allocates a `sigma_iad_<name>` jitter
+(mas) added in quadrature to that instrument's abscissa errors. It is
+opt-in PER INSTRUMENT, so an empty string leaves instrument `m` on its
+reported errors — `iad = ["", "GaiaDR4"]` jitters the Gaia abscissae of a
+Hipparcos + Gaia fit and not the Hipparcos ones. Empty (the default)
+allocates nothing, and the IAD likelihood is the unjittered one bit for bit.
+When it is non-empty it must have one entry per instrument in `data.iad`.
 """
 struct InstrumentConfig
     rv_names::Vector{String}
     pm_names::Vector{String}
     as_names::Vector{String}
+    iad_names::Vector{String}
 end
 
-InstrumentConfig(; rv=String[], pm=String[], as=String[]) =
-    InstrumentConfig(rv, pm, as)
-# Two-argument positional form kept for callers predating astrometric
-# instruments (e.g. `InstrumentConfig(String[], ["TESS"])`).
+InstrumentConfig(; rv=String[], pm=String[], as=String[], iad=String[]) =
+    InstrumentConfig(rv, pm, as, iad)
+# Positional forms kept for callers predating astrometric instruments
+# (e.g. `InstrumentConfig(String[], ["TESS"])`) and IAD jitter.
 InstrumentConfig(rv_names, pm_names) = InstrumentConfig(rv_names, pm_names, String[])
+InstrumentConfig(rv_names, pm_names, as_names) =
+    InstrumentConfig(rv_names, pm_names, as_names, String[])
 
 """
     n_rv_instruments(ic::InstrumentConfig) -> Int
@@ -742,6 +862,13 @@ Number of distinct relative-astrometry imagers -- the count of
 per-instrument jitter slots the layout allocates.
 """
 n_as_instruments(ic::InstrumentConfig) = length(ic.as_names)
+"""
+    n_iad_jitters(ic::InstrumentConfig) -> Int
+
+Number of intermediate-astrometry instruments that carry a `sigma_iad_<name>`
+jitter -- the non-empty entries of `ic.iad_names`.
+"""
+n_iad_jitters(ic::InstrumentConfig) = count(!isempty, ic.iad_names)
 
 # =====================================================================
 # PlanetBlock — abstract + concrete per-mode subtypes
@@ -793,10 +920,10 @@ and applying the appropriate conversion (see the hot-path accessors
              - `:ew`     → `ω` (argument of periastron)
 - **`t`**  — **time-anchor slot.** Its meaning depends on
              `parametrization.time`:
+             - `:phic` (default) → transit phase `2π (Tc − t_ref_c) / P` (rad)
              - `:Mo` → `M₀`, mean anomaly at the reference epoch (rad)
              - `:Tp` → time of periastron passage (same units as data)
              - `:Tc` → time of transit center
-             - `:phic` → transit phase `2π (Tc − t_ref_c) / P` (rad)
 - **`b`**  — **transit geometry slot 1.** Present on `PMOnlyBlock` and
              `RVPMBlock`; absent on `RVOnlyBlock` (no transit to fit).
              Meaning depends on `parametrization.geom`:
@@ -1064,6 +1191,9 @@ offset/jitter/dilution/rho_s slots.
 - `pm_dilution::Vector{Int}` : one entry per PM instrument
 - `as_jitter::Vector{Int}` : one entry per astrometric (relative-astrometry)
                              instrument; empty when none are configured
+- `iad_jitter::Vector{Int}` : one entry per intermediate-astrometry
+                             instrument (`IADData.inst`), `0` for one without
+                             a jitter; empty when none are configured
 - `rho_s::Int`             : shared stellar-density slot, or `0` if unused
 
 Future extensions (GP kernels, ARMA, activity, LD groups, acceleration,
@@ -1085,6 +1215,12 @@ struct SystemicIndices
                             # user names astrometric instruments, so astrometry
                             # that does not ask for it keeps using the reported
                             # uncertainties verbatim — and keeps its old numbers.
+    iad_jitter::Vector{Int} # one per intermediate-astrometry instrument
+                            # (`IADData.inst`), 0 where that instrument has no
+                            # jitter. Additive in mas, sigma^2 -> sigma^2 + s_m^2.
+                            # EMPTY unless the user opts an instrument in; while
+                            # it is empty `iad_log_likelihood` takes the cached-
+                            # weight path and its numbers are unchanged.
     rho_s::Int      # 0 if not used
     dvdt::Int       # 0 if not used (linear RV trend)
     d2vdt2::Int     # 0 if not used (quadratic RV trend)
@@ -1162,7 +1298,7 @@ eccentricity derived from √e sin ω / √e cos ω).
 
 # Supported quantities
 - `:ecc`   — eccentricity (per-planet, evaluated for each active planet)
-- `:rho_s` — stellar density in SOLAR units, ρ★/ρ☉ with ρ☉ = 1.411 g/cm³, as
+- `:rho_s` — stellar density in SOLAR units, ρ★/ρ☉ with ρ☉ = `RHO_SUN_CGS` ≈ 1.4098 g/cm³, as
   `rho_s` is sampled (global, evaluated once)
 
 # Fields
@@ -1337,6 +1473,76 @@ const _PM_SHARING_CATEGORIES = (:pm_jitter, :pm_offset, :pm_dilution, :ld)
 const _AS_SHARING_CATEGORIES = (:as_jitter,)
 
 # =====================================================================
+# DensityReparam — the photo-eccentric reparametrization of a layout
+# =====================================================================
+
+"""
+    DensityReparam
+
+How a layout samples the stellar density and the eccentricities of its
+transiting planets under `density = :rho_circ` (`ParametrizationConfig`).
+
+A transit fixes its duration, and with it the circular-equivalent density
+
+    ρ_circ = ρ★ g³,   g = (1 + e sin ω) / √(1 − e²)
+
+(Kipping 2010; Dawson & Johnson 2012): a circular orbit of density ρ_circ makes
+the same transit as (ρ★, e, ω), to first order in the ingress. In (ρ★, e, ω) the
+posterior is a thin sheet along that curve, reaching high e. `rho_circ_k<k>`,
+the circular-equivalent density of planet k (solar units, log-uniform scale like
+`rho_s`), takes the place of one coordinate, so the sheet lies along an axis:
+
+  * `mode = :anchor` (the density `rho_s` is sampled): the first eligible planet,
+    `anchor`, samples ρ_circ in place of ρ★; its own e-coordinates stay, and
+    ρ★ = ρ_circ / g³ is derived.
+  * every other eligible planet (all of them under `mode = :given`, where ρ★ is
+    fixed, or the function M★ / R★³ of the host mass, sampled or not, and the
+    fixed radius) samples (ρ_circ,k, η_k) in place of its two e-coordinates:
+    at the model's ρ★, g = (ρ_circ,k/ρ★)^{1/3}, and the orbits with that g fill
+    the ellipse of the (e cos ω, e sin ω) disc
+
+        x = A cos η,  y = y₀ + B sin η,
+        A = g/√(1+g²),  B = g²/(1+g²),  y₀ = −1/(1+g²),
+
+    on which √(1 − e²) = g (1 + sin η)/(1 + g²). These ellipses fill the open
+    disc, one per g, all touching the circle e = 1 at η = −π/2, so (g, η) with
+    η ∈ (−π/2, 3π/2) is a bijection onto e < 1: no quadratic in e, no choice
+    of root. |∂(x, y)/∂(g, η)| = g² (1 + sin η)² / (1 + g²)^{5/2}. When the
+    planet's e-prior stops at e_max < 1, η is sampled on the arc about π/2
+    that holds e ≤ e_max at every g (`_density_eta_range`).
+
+The old coordinates (`rho_s`, the e-coordinates of the η planets) stay layout
+slots, read through the accessors (`planet_e_w`, `stellar_density`) but never
+sampled: `derived`. The prior is the one the model states on them, carried
+through the Jacobian, so the posterior is the same distribution; the samplers
+see the sampled slots under a proper surrogate (log-uniform ρ_circ, uniform η)
+and `density_logprior_correction` adds the difference.
+
+`G` bounds g to [1/G, G], which excludes orbits with e within ~1/G² of 1 (an
+old-prior mass of about 3/(4G²) under a uniform e). `NO_DENSITY_REPARAM` is the
+inert plan.
+"""
+struct DensityReparam
+    mode::Symbol                  # :none, :anchor or :given
+    anchor::Int                   # :anchor -- the planet whose ρ_circ replaces ρ★
+    rho_circ::Vector{Int}         # per planet: slot of rho_circ_k<k>, 0 for none
+    eta::Vector{Int}              # per planet: slot of eta_k<k>, 0 for none
+    derived::Vector{Int}          # the slots now derived, in layout order
+    derived_priors::PackedPriors  # their priors, parallel to `derived`
+    derived_specs::Vector{PriorSpec}  # the same priors, unpacked (quantiles)
+    old_e::Vector{NTuple{2,Int}}  # per planet: positions in `derived` of e1, e2
+    old_rho::Int                  # position in `derived` of rho_s (:anchor), else 0
+    rho_slot::Int                 # the rho_s slot, 0 for none
+    lnorm::Vector{Float64}        # per planet: log log(hi/lo) of its ρ_circ box, plus
+                                  # log of its η interval's width (η planets)
+    G::Float64                    # g ∈ [1/G, G]
+end
+
+const NO_DENSITY_REPARAM = DensityReparam(:none, 0, Int[], Int[], Int[],
+    PackedPriors(Int[], zeros(0, 5), Float64[], Float64[]), PriorSpec[],
+    NTuple{2,Int}[], 0, 0, Float64[], 0.0)
+
+# =====================================================================
 # ParamsLayout — derived layout, built once from ParamsConfig
 # =====================================================================
 
@@ -1363,6 +1569,9 @@ config, testable in isolation.
 - `frozen_values::Vector{Float64}`   : fixed values (parallel to frozen_idx)
 - `planet_blocks::Vector{PlanetBlock}` : per-planet block, concrete subtype
 - `systemic::SystemicIndices`        : instrument + rho_s indices
+- `density::DensityReparam`          : the slots of the photo-eccentric
+                                       reparametrization; the slots it derives
+                                       are neither frozen nor unfrozen
 """
 struct ParamsLayout
     names::Vector{String}
@@ -1379,6 +1588,13 @@ struct ParamsLayout
     planet_blocks::Vector{PlanetBlock}
     systemic::SystemicIndices
     packed_priors::PackedPriors   # type-stable prior eval for Enzyme
+    # The axis n of the stellar spin-flip canonicalisation (src/circular.jl,
+    # `spin_flip`): of (i★, λ) and (π - i★, λ + π) the representative with
+    # s·n ≥ 0 is reported. Mutable contents; (0, 0, 1) = i★ ≤ π/2.
+    spin_axis::Vector{Float64}
+    # The photo-eccentric reparametrization (`density = :rho_circ`), or
+    # NO_DENSITY_REPARAM. See `DensityReparam`.
+    density::DensityReparam
 end
 
 # =====================================================================
@@ -1407,7 +1623,8 @@ end
 
 Every white-noise jitter term in the layout -- a variance added in quadrature to
 the reported errors, physically ≥ 0: the per-instrument RV `sigma_<inst>`,
-photometric `jitter_<label>` and relative-astrometry `sigma_as_<imager>` slots,
+photometric `jitter_<label>`, relative-astrometry `sigma_as_<imager>` and
+intermediate-astrometry `sigma_iad_<instrument>` slots,
 and the noise models' `jit_base_*`, `gp_act_jit_*` and `IndicatorFloor`'s floor
 (`ind_floor_<ch>` under its default `:white` kernel, `ind_floor_<ch>_jit` under
 `:qp`). Not jitter despite the names: `jit_act_*` (a signed activity slope), the
@@ -1425,7 +1642,8 @@ FAIL -- DO NOT TRUST THIS POSTERIOR" for `sigma_HARPS` sitting at 0.
 function jitter_names(params::Params)
     L = params.layout
     S = L.systemic
-    out = Set{String}(L.names[i] for i in vcat(S.rv_sigma, S.pm_jitter, S.as_jitter)
+    out = Set{String}(L.names[i] for i in vcat(S.rv_sigma, S.pm_jitter, S.as_jitter,
+                                                S.iad_jitter)
                       if i > 0)
     for n in L.names
         (startswith(n, "jit_base_") || startswith(n, "gp_act_jit_") ||
@@ -1749,6 +1967,34 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         end
     end
 
+    # Intermediate-astrometry instruments (Hipparcos IAD, Gaia DR4 epoch
+    # astrometry), opt-in per instrument: `iad_names[m]` names instrument m of
+    # `IADData.inst`, and an empty name means "reported errors, no jitter".
+    # Nothing is pushed unless some name is non-empty, so every existing layout
+    # is unchanged. No sharing category: a jitter is one instrument's error
+    # budget, and Hipparcos and Gaia have nothing in common to share.
+    iad_names = config.instruments.iad_names
+    n_iad_named = length(iad_names)
+    iad_jitter = zeros(Int, n_iad_named)
+    if any(!isempty, iad_names)
+        if data !== nothing
+            data.iad === nothing && throw(ArgumentError(
+                "an intermediate-astrometry jitter is configured " *
+                "($(filter(!isempty, iad_names))) but the data has no IAD"))
+            n_inst = n_iad_inst(data.iad)
+            n_iad_named == n_inst || throw(ArgumentError(
+                "instruments.iad has $n_iad_named entr$(n_iad_named == 1 ? "y" : "ies") " *
+                "($(iad_names)) but the IAD data has $n_inst instrument(s). It is " *
+                "positional -- entry m is IADData instrument m -- so give one per " *
+                "instrument, \"\" for those without a jitter."))
+        end
+        for (m, label) in enumerate(iad_names)
+            isempty(label) && continue
+            push!(names, "sigma_iad_$label")
+            iad_jitter[m] = length(names)
+        end
+    end
+
     pm_names = config.instruments.pm_names
     n_pm = length(pm_names)
 
@@ -1844,6 +2090,12 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
             a_Rs_idx[k] = length(names)
         end
     end
+
+    # The photo-eccentric reparametrization (`density = :rho_circ`): the
+    # sampled `rho_circ_k<k>` / `eta_k<k>` slots, here beside the density, and
+    # the slots they derive (src/density.jl). Their surrogate priors go into
+    # `config.priors` like the limb-darkening defaults above.
+    dslots = _density_slots!(names, config, planet_blocks, rho_s_idx)
 
     dvdt_idx = 0
     d2vdt2_idx = 0
@@ -1972,7 +2224,7 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
 
     systemic = SystemicIndices(rv_gamma, rv_sigma,
                                pm_offset, pm_jitter, pm_dilution, pm_trend,
-                               ld_q1, ld_q2, as_jitter,
+                               ld_q1, ld_q2, as_jitter, iad_jitter,
                                rho_s_idx, dvdt_idx, d2vdt2_idx,
                                plx_idx, m_pri_idx, v_sin_i_star_idx, i_star_idx,
                                gd_beta_idx,
@@ -2042,9 +2294,18 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         haskey(name_to_idx, k) || push!(extra_priors, k)
     end
     if !isempty(extra_priors)
+        # A prior on another time anchor's slot is not a typo: say which anchor
+        # this model samples, now that the default is not the one it names.
+        anchors = filter(k -> occursin(r"^(Mo|Tp|Tc|phic)_k\d+$", k), extra_priors)
+        hint = isempty(anchors) ? "" :
+            ". " * join(anchors, ", ") * " belong" * (length(anchors) == 1 ? "s" : "") *
+            " to another time anchor: this model samples time = " *
+            ":$(config.parametrization.time). Set the parametrization's `time` to " *
+            "the anchor the priors name, or give the prior to " *
+            "$(config.parametrization.time)_k<n>"
         throw(ArgumentError(
             "Unknown parameter names in priors dict (typos?): " *
-            join(extra_priors, ", ")))
+            join(extra_priors, ", ") * hint))
     end
 
     # --- Physical validation for each prior --------------------------
@@ -2059,7 +2320,27 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
     frozen_idx      = Int[]
     frozen_values   = Float64[]
 
+    # Angles are sampled on their circles (src/circular.jl); `config.priors`
+    # keeps every prior as the user wrote it.
+    #   * Polar angles -- the orbital inclinations `planet_inc` reads and the
+    #     stellar inclination `system_i_star` reads, both through
+    #     `fold_inclination` -- under a prior on the whole of [0, π] are lifted
+    #     to their circle (`polar_lift`): 0 and π are poles, not walls.
+    #   * Full-circle angles the likelihood reads periodically (`periodic_angle`)
+    #     under a prior covering a period or more are pushed forward onto one
+    #     period (`circular_lift`), a chart whose seam the samplers move.
+    # A prior on a narrower range keeps its walls: those are the user's.
+    polar = _polar_angle_slots(planet_blocks, systemic)
+
+    # The prior each slot is sampled under, as the layout uses it.
+    _layout_prior(i, name, ps) = i in polar ? polar_lift(ps) :
+                                 periodic_angle(name, config) ? circular_lift(ps) : ps
+
+    derived = Set(dslots.derived)
     for (i, name) in enumerate(names)
+        # A coordinate the reparametrization derives is neither sampled nor
+        # held: the accessors compute it from the sampled slots.
+        i in derived && continue
         ps = config.priors[name]
         if is_fixed(ps)
             push!(frozen_idx, i)
@@ -2067,19 +2348,49 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         else
             push!(unfrozen_idx, i)
             push!(unfrozen_names, name)
-            push!(unfrozen_priors, ps)
+            push!(unfrozen_priors, _layout_prior(i, name, ps))
         end
     end
 
     # Build type-stable packed priors for Enzyme-compatible evaluation.
     packed = pack_priors(unfrozen_priors)
 
+    # The derived coordinates keep the prior the model states on them, as the
+    # layout would sample them under it: that is the prior carried through.
+    density = _density_plan(dslots, PriorSpec[_layout_prior(i, names[i], config.priors[names[i]])
+                                              for i in dslots.derived])
+
     return ParamsLayout(
         names, name_to_idx, n_total_, n_p_idx,
         unfrozen_idx, unfrozen_names, unfrozen_priors,
         frozen_idx, frozen_values,
-        planet_blocks, systemic, packed,
+        planet_blocks, systemic, packed, [0.0, 0.0, 1.0], density,
     )
+end
+
+"""
+    _orbital_inclination_slots(planet_blocks) -> Set{Int}
+
+Theta slots holding a sampled orbital inclination `inc_k<N>`: the `inc` of an
+`RVASBlock` or of an astrometric `SB2Block`, the slots `planet_inc` reads (and
+folds). An `RVPMASBlock` derives i from the impact parameter and has none; the
+stellar inclination `i_star` is not a planet slot.
+"""
+_orbital_inclination_slots(planet_blocks) =
+    Set{Int}(b.inc for b in planet_blocks
+             if (b isa RVASBlock || b isa SB2Block) && b.inc > 0)
+
+"""
+    _polar_angle_slots(planet_blocks, systemic) -> Set{Int}
+
+Theta slots of the polar angles read through `fold_inclination`: the orbital
+inclinations (`_orbital_inclination_slots`) and the stellar inclination
+`i_star`, read by `system_i_star` (gravity darkening; the only reader).
+"""
+function _polar_angle_slots(planet_blocks, systemic)
+    s = _orbital_inclination_slots(planet_blocks)
+    systemic.i_star > 0 && push!(s, systemic.i_star)
+    return s
 end
 
 # Public Params constructor is in params_constructor.jl (loaded after

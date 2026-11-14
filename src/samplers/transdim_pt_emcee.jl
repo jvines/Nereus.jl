@@ -22,12 +22,12 @@
 # accounting in `noise_td_proposed`/`noise_td_accepted`.
 #
 # Full-circle angles (Mo, Ω, λ, ω under `:ew`; src/circular.jl) are re-charted
-# halfway through and at the end of burn-in, as in `sample_pt_emcee`, except
+# during burn-in on `sample_pt_emcee`'s schedule (`_pt_recut_due`), except
 # that only active slots vote and same-mode planet slots share one window per
 # angle, because births re-sort planets between them (`_td_ensemble_recut!`).
 
 using Random: AbstractRNG, MersenneTwister
-using Statistics: median, quantile
+using Statistics: mean, median, quantile, std
 import MCMCChains
 
 export sample_transdim_pt_emcee, TransDimPTemceeResult
@@ -67,6 +67,91 @@ struct TransDimPTemceeResult
     # <log L> per rung -- see `LadderHistory`. The swap distance runs over the
     # dimensions active in both walkers.
     ladder::LadderHistory
+    # How the run ended: `(; stopped, step, n_steps, n_draws, stop_file)`, with
+    # `stopped` one of "steps", "converged", "interrupted", "requested",
+    # "max_seconds", "max_evals". See src/graceful_stop.jl.
+    stop::NamedTuple
+    # Within-rung acceptance of the differential-evolution move (`de_move`),
+    # per temp; NaN where none was proposed. `acceptance_within` is the stretch's.
+    acceptance_de::Vector{Float64}
+    # The collective-drift check of the β = 1 ensemble (`ensemble_drift`), or
+    # `nothing` when the run was too short to test.
+    drift::Union{Nothing, Dict{String, Any}}
+end
+
+# ------------------------------------------------------------------
+# Periodic convergence diagnostic on the β=1 ensemble of a trans-dim run (the
+# counterpart of `_pt_convergence`). Same return, same use: (mean R̂, worst R̂,
+# mean bulk ESS, min tail ESS), read by the live readout and by the optional
+# `convergence_stop` gate.
+#
+# The GATING SET is what a trans-dim posterior is made of that is defined across
+# walkers and models:
+#   - `n_planets`, the model index (its occupancy of 0, 1, 2 ... planets): a
+#     walker entrenched in another model order shows up as a R̂ on it, which no
+#     per-parameter statistic can see;
+#   - every planet-slot parameter (`*_k<j>`) and `rho_s`, which in a trans-dim
+#     chain exist only where the slot is active. They are assessed CONDITIONED
+#     on the slot's activity (a slot's value while inactive is stale junk that
+#     drifts to 1e6 and would poison an unconditional R̂), with the slots
+#     relabelled into period order per draw so label switching between
+#     exchangeable slots is not read as non-convergence. This is exactly the
+#     machinery of `convergence_report` (src/reporting.jl), which this sampler
+#     already printed at the end of the run: the gate and the final report
+#     agree on what converged means.
+# Slot parameters of a slot active in under 1 % of the draws are not assessed
+# (nothing to measure), and in under half of them gate on R̂ only: a disfavoured
+# model has to mix, not to reach an ESS. Noise-model parameters, γ, jitter and
+# offsets are not gated, as in `sample_pt_emcee`. `canon` reads the cyclic
+# inclinations folded to [0, π] and the stellar spin in its reported
+# representative, as in `_pt_convergence` (`fold` alone only folds): a walker
+# in the mirror representative holds the same state. Full-circle angles are
+# NOT unwrapped here: `_convergence_stats` permutes planet slots by period,
+# and same-mode slots share one window (`unify_circular_groups!`), which a
+# per-column unwrap would split.
+# ------------------------------------------------------------------
+function _td_convergence(samples::AbstractMatrix, keep_idx::Int, n_walkers::Int,
+                         col_names::Vector{Symbol}, gate::Vector{Symbol},
+                         model_params; cap::Int = 2000,
+                         fold::AbstractVector{Int} = Int[],
+                         canon::Union{Nothing, AngleCanon} = nothing)
+    ac = canon === nothing ? AngleCanon(collect(Int, fold), nothing, Float64[], Int[]) : canon
+    (n_walkers < 2 || keep_idx < 4 * n_walkers) && return nothing
+    keep_idx % n_walkers == 0 || return nothing
+    n_step = keep_idx ÷ n_walkers
+    n_step < 4 && return nothing
+    stride = max(1, n_step ÷ cap)
+    kept = 1:stride:n_step
+    nk = length(kept)
+    # Only the columns the statistics read: the gating set, the activity bits
+    # and the planet-slot parameters the relabelling sorts by.
+    cols = Int[i for (i, nm) in enumerate(col_names)
+               if nm in gate || startswith(String(nm), "planet_active_") ||
+                  occursin(r"_k\d+$", String(nm))]
+    M = Matrix{Float64}(undef, nk * n_walkers, length(cols))
+    @inbounds for (si, s) in enumerate(kept), w in 1:n_walkers
+        row = (si - 1) * n_walkers + w
+        src = (s - 1) * n_walkers + w
+        flip = canon_row_flips(ac, samples, src)
+        for (j, c) in enumerate(cols)
+            M[row, j] = canon_value(ac, samples, src, c, flip)
+        end
+    end
+    st = try
+        _convergence_stats(MCMCChains.Chains(M, col_names[cols]), n_walkers;
+                           params = gate, model_params)
+    catch err
+        err isa InterruptException && rethrow()
+        return nothing
+    end
+    st.failure === nothing || return nothing
+    rhf = filter(isfinite, st.rh)
+    isempty(rhf) && return nothing
+    bf = filter(isfinite, st.es)
+    tf = [t for (t, g) in zip(st.et, st.gate_ess) if g && isfinite(t)]
+    (mean(rhf), maximum(rhf), isempty(bf) ? 0.0 : mean(bf),
+     # nothing ESS-gated (every slot is rare): no ESS requirement, as the report
+     isempty(tf) ? Inf : minimum(tf))
 end
 
 # Debug event log for trans-dim moves, gated by ENV["TD_DEBUG_BIRTHS"]="1".
@@ -116,8 +201,10 @@ end
 # Period is BLS-precise so it gets a tiny step; geometry/eccentricity get
 # fixed moderate steps; K/rr scale with their value. `time_param` distinguishes
 # Tc/Tp (days) from Mo (radians) for the time anchor. The transit phase phic is
-# in radians but pinned like Tc: 0.01 rad is 0.002-0.02 d at P = 1-10 d,
-# Tc's 0.01 d step.
+# in radians; a transit pins it like Tc: 0.01 rad is 0.002-0.02 d at P = 1-10 d,
+# Tc's 0.01 d step. Without a transit (phic is the default anchor, so this is
+# every RV or astrometric planet) it is pinned as Mo + ω was, and takes Mo's
+# 0.05 rad: at low e φ_c = π/2 − λ.
 @inline function _refine_sigma(blk, slot, val::Float64, time_param::Symbol)
     if slot == blk.P
         return max(1e-6, 1e-4 * abs(val))
@@ -126,8 +213,8 @@ end
     elseif has_geometry(blk) && slot == blk.r
         return max(1e-4, 0.1 * abs(val))
     elseif slot == blk.t
-        return (time_param === :Tc || time_param === :Tp || time_param === :phic) ?
-               0.01 : 0.05
+        return (time_param === :Tc || time_param === :Tp ||
+                (time_param === :phic && has_geometry(blk))) ? 0.01 : 0.05
     elseif slot == blk.e1 || slot == blk.e2
         return 0.05
     elseif has_K(blk) && slot == blk.K
@@ -151,12 +238,15 @@ end
 # Serial, between steps, no randomness. The cached logπ / logL stay valid: the
 # prior is uniform over one period in either window and the likelihood is
 # periodic in these angles, so each walker's physical state and log-density are
-# unchanged up to rounding. The MoMS off-values move WITH the window rather than
-# being relabelled: they are the prior's median by construction (`MoMSBirth`),
+# unchanged up to rounding. A full-circle angle's MoMS off-values move WITH the
+# window rather than being relabelled: they are the prior's median by
+# construction (`MoMSBirth`),
 # i.e. the old window's midpoint, and a move is needed when the posterior
 # straddles the old seam -- which tends to put the new seam near that midpoint.
 # Relabelled, the off-value would then sit on the new seam and centre every
-# blind birth on the emptiest arc of the posterior. Birth and death read the
+# blind birth on the emptiest arc of the posterior. A polar angle's off-value is
+# relabelled instead (`moved_off_value`): it is π/2, and a fixed place in the
+# chart would land on a pole, where a Sine prior vanishes. Birth and death read the
 # same off-value and the same bounds, so the kernel stays balanced; it is
 # adapted here like the Robbins-Monro scales, during burn-in only. Every other
 # birth draws from, or wraps into, the layout's bounds and so follows the window
@@ -176,7 +266,9 @@ function _td_ensemble_recut!(state::Array{Float64,3},
             is_node = startswith(L.unfrozen_names[d], "Omega_")
             @inbounds for w in 1:n_w
                 tds = td_states[1, w]
-                (k > length(tds.planet_active) || tds.planet_active[k]) || continue
+                # Owner 0 is the star's (i★): always there.
+                (k == 0 || k > length(tds.planet_active) || tds.planet_active[k]) ||
+                    continue
                 is_node && !is_as_active(tds, k) && continue
                 push!(draws, state[1, w, d])
             end
@@ -195,9 +287,12 @@ function _td_ensemble_recut!(state::Array{Float64,3},
             @inbounds for w in 1:n_w, t in 1:n_t
                 state[t, w, d] = circular_relabel(state[t, w, d], lo, hi)
             end
-            if k <= length(strategy.slot_indices)
+            if 1 <= k <= length(strategy.slot_indices)
                 i = findfirst(==(d), strategy.slot_indices[k])
-                i === nothing || (strategy.off_values[k][i] += lo - old_lo[m])
+                i === nothing ||
+                    (strategy.off_values[k][i] = moved_off_value(strategy.off_values[k][i],
+                                                                 L.unfrozen_priors[d],
+                                                                 lo - old_lo[m]))
             end
             moved[L.unfrozen_names[d]] = (Float64(lo), Float64(hi))
         end
@@ -218,12 +313,33 @@ end
 #  - A is the best walker's MODEL only, and Laplace runs over that model's
 #    active dimensions (an inactive slot has no prior density to integrate).
 #    `owner[d]` is 0 for an always-on dimension, k > 0 for planet slot k and
-#    -j for noise model j.
+#    -j for noise model j. A walker outside A -- in another model, or more than
+#    `allow` below the best walker -- is a candidate.
 #  - The bound: the spike-slab prior over (planet indicators, active
 #    parameters) is normalised, but the noise indicators carry no prior, so the
 #    joint prior integrates to at most 2^n_noise_toggle. The cut is lowered by
 #    that factor.
-#  - A walker moved onto a donor takes the donor's whole TransDimState.
+#  - A walker moved onto a survivor takes the survivor's whole TransDimState.
+#  - Walkers live in x, not on the flat scale: Laplace, the axis widths and the
+#    draws about the survivors all work on the flat scale of the best model's
+#    active dimensions, mapped back to x.
+#  - A walker followed to its own mode is followed in its own model, over that
+#    model's active dimensions; the walkers that move with it are those of the
+#    same model, at this pass and the last, inside that mode at both. It is on
+#    the flank of A's own mode only if it is in A's model.
+# As there, a model a rung has only just found -- fewer than m + 2 walkers in
+# it, or a singular Σ_A -- takes its volume from the axis widths at the top the
+# best walker climbs to (`evalf(x, tds)` returns its (log π, log L)), and only
+# once the rung has stopped climbing; a walker moves only once it is stranded at
+# two passes running, and from below the cut only if it is not climbing fast
+# enough to clear it by the next pass; it is drawn about a survivor picked at
+# random (a walker in the upper half of A, or the climbed top), never copied
+# while an evaluator is given; and a pass moves at most as many walkers as A
+# holds (one more for the top). `memory` is the record of the previous pass,
+# its `key` each slot's model. Coordinates `held` by `burnin_hold` are left
+# out of the active set: every walker shares them, the climb and the draws leave
+# them, and their share of the density (`held_logπ`) comes out of the bound, as
+# in `_pt_prune_stranded!`.
 # ------------------------------------------------------------------
 function _td_prune_stranded!(state::Array{Float64,3},
                              td_states::AbstractMatrix{TransDimState},
@@ -231,56 +347,191 @@ function _td_prune_stranded!(state::Array{Float64,3},
                              βs::Vector{Float64},
                              flat_shift::Vector{Union{Nothing,Float64}},
                              owner::Vector{Int}, n_noise_toggle::Int, rng;
-                             tau::Float64 = 10.0)
+                             tau::Float64 = 10.0, evalf = nothing,
+                             circ::AbstractVector{Int} = Int[],
+                             memory::Union{Nothing,PruneMemory} = nothing,
+                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0)
     n_t, n_w, n_dim = size(state)
     moved = zeros(Int, n_t)
+    mem = memory
+    known = mem !== nothing && mem.seen
+    rise = known ?
+           [βs[t] * (_pt_finite_median(view(logL_arr, t, :)) - mem.med[t]) for t in 1:n_t] :
+           fill(NaN, n_t)
     _active(tds, o) = o == 0 || (o > 0 ? tds.planet_active[o] : tds.noise_active[-o])
     _same(a, b) = a.planet_active == b.planet_active &&
                   a.noise_active == b.noise_active && a.as_active == b.as_active
+    _key(a) = hash((a.planet_active, a.noise_active, a.as_active))
+    _flat(x, s) = s === nothing ? x : (x + s > 0 ? log(x + s) : -Inf)
+    _dims(tds) = [d for d in 1:n_dim if _active(tds, owner[d]) && !(d in held)]
+    _allow(m) = quantile(Chisq(max(m, 1)), 1 - 1e-6) / 2
+    # A slot's log π on the flat scale of its own active dims.
+    function flatlπ(X, t, w)
+        v = logπ_arr[t, w]
+        @inbounds for d in 1:n_dim
+            s = flat_shift[d]
+            (s === nothing || !_active(td_states[t, w], owner[d])) && continue
+            v += _flat(X[t, w, d], s)
+        end
+        return v
+    end
+    # The active dims `dims` of slot (t, w) of `X` on the flat scale; a circular
+    # one as its offset from `ref` on the circle when given.
+    flatv(X, t, w, dims, ref = nothing) =
+        [(ref !== nothing && d in circ ? rem2pi(X[t, w, d] - ref[d], RoundNearest) :
+          _flat(X[t, w, d], flat_shift[d])) for d in dims]
     ℓ = Vector{Float64}(undef, n_w)
-    for t in 1:n_t
-        β = βs[t]
-        # Tempered density on the flat scale, over each walker's own active dims.
+    function tempered!(t, β)
         @inbounds for w in 1:n_w
-            v = logπ_arr[t, w] + β * logL_arr[t, w]
-            for d in 1:n_dim
-                s = flat_shift[d]
-                (s === nothing || !_active(td_states[t, w], owner[d])) && continue
-                x = state[t, w, d]
-                v += x + s > 0 ? log(x + s) : -Inf
-            end
+            v = flatlπ(state, t, w) + β * logL_arr[t, w]
             ℓ[w] = isfinite(v) ? v : -Inf
         end
+    end
+    # From flat values `yd` of `dims` to x, the other coordinates from `base`.
+    function tox!(xbuf, base, dims, yd)
+        copyto!(xbuf, base)
+        @inbounds for (j, d) in enumerate(dims)
+            s = flat_shift[d]
+            xbuf[d] = s === nothing ? yd[j] : exp(yd[j]) - s
+        end
+        return xbuf
+    end
+    jac(dims, yd) = sum((yd[j] for (j, d) in enumerate(dims) if flat_shift[d] !== nothing);
+                        init = 0.0)
+    xbuf = Vector{Float64}(undef, n_dim)
+    for t in 1:n_t
+        known || break
+        β = βs[t]
+        tempered!(t, β)
         b = argmax(ℓ)
         isfinite(ℓ[b]) || continue
         tb = td_states[t, b]
-        dims = [d for d in 1:n_dim if _active(tb, owner[d])]
+        dims = _dims(tb)
         m = length(dims)
         m >= 1 || continue
-        allow = quantile(Chisq(m), 1 - 1e-6) / 2
+        allow = _allow(m)
         A = [w for w in 1:n_w if ℓ[w] >= ℓ[b] - allow && _same(td_states[t, w], tb)]
-        length(A) >= m + 2 || continue
-        Y = Matrix{Float64}(undef, length(A), m)
-        @inbounds for (i, w) in enumerate(A), (j, d) in enumerate(dims)
-            s = flat_shift[d]
-            Y[i, j] = s === nothing ? state[t, w, d] : log(state[t, w, d] + s)
-        end
-        C = cholesky(Symmetric(cov(Y; dims = 1)); check = false)
-        issuccess(C) || continue
-        cut = ℓ[b] + 0.5 * m * log(2π) + 0.5 * logdet(C) - tau -
-              n_noise_toggle * log(2)
         inA = falses(n_w); inA[A] .= true
-        S = [w for w in 1:n_w if !inA[w] && !(β * logL_arr[t, w] >= cut)]
-        isempty(S) && continue
-        donors = A[ℓ[A] .>= median(ℓ[A])]
-        @inbounds for w in S
-            a = donors[rand(rng, 1:length(donors))]
-            for d in 1:n_dim
-                state[t, w, d] = state[t, a, d]
+        # Stranded at this pass and the last.
+        cand = [w for w in 1:n_w if !inA[w] && mem.out[t, w]]
+        isempty(cand) && continue
+        # The best walker's active dims on the flat scale, a circular one as its
+        # offset from the best walker on the circle (see `_pt_half_logdet_cov`).
+        xb = state[t, b, :]
+        yb = flatv(state, t, b, dims)
+        Y(ws) = [(d in circ ? rem2pi(state[t, w, d] - xb[d], RoundNearest) :
+                  _flat(state[t, w, d], flat_shift[d])) for w in ws, d in dims]
+        cv = length(A) >= m + 2 ? _td_cov_volume(Y(A)) : nothing
+        evaly(base, yd) = evalf(tox!(xbuf, base, dims, yd), tb)
+        ℓat = yd -> (r = evaly(xb, yd); v = r[1] + β * r[2] + jac(dims, yd);
+                     isfinite(v) ? v : -Inf)
+        ℓb = ℓ[b]
+        xc, lpb, llb = xb, logπ_arr[t, b], logL_arr[t, b]     # the best walker, or its top
+        top = false
+        if cv === nothing
+            (evalf === nothing || !(rise[t] < m / 2)) && continue
+            # A cost gate, not a bound (see `_pt_prune_stranded!`).
+            gate = _td_half_logdet_cov(Y(findall(isfinite, ℓ)))
+            gate === nothing && continue
+            cg = (ℓb - held_logπ) + 0.5 * m * log(2π) + gate - tau - n_noise_toggle * log(2)
+            any(w -> β * logL_arr[t, w] < cg, cand) || continue
+            Yall = Y(findall(isfinite, ℓ))
+            h0 = [0.1 * max(std(view(Yall, :, j)), 1e-6 * max(1.0, abs(yb[j])))
+                  for j in 1:m]
+            σ = _pt_axis_widths(ℓat, yb, ℓb, h0)
+            σ === nothing && continue
+            # From where the best walker landed to the top of its mode
+            # (`_pt_climb`).
+            yc, ℓc = _pt_climb(ℓat, yb, ℓb, σ)
+            σc = ℓc > ℓb ? _pt_axis_widths(ℓat, yc, ℓc, h0) : nothing
+            if σc !== nothing
+                yb, ℓb, σ = yc, ℓc, σc
+                lpb, llb = evaly(xb, yb)
+                xc = copy(xbuf)
+                top = true
+                A = [w for w in 1:n_w
+                     if ℓ[w] >= ℓb - allow && _same(td_states[t, w], tb)]
             end
-            logπ_arr[t, w] = logπ_arr[t, a]
-            logL_arr[t, w] = logL_arr[t, a]
-            src, dst = td_states[t, a], td_states[t, w]
+            cv = (sum(log, σ), σ)
+        end
+        lv, s = cv
+        logza = ℓb + 0.5 * m * log(2π) + lv
+        cut = (logza - held_logπ) - tau - n_noise_toggle * log(2)
+        # Below the cut, and not climbing fast enough to clear it by the next pass.
+        S = [w for w in cand if !(β * logL_arr[t, w] >= cut) &&
+             !(β * (2 * logL_arr[t, w] - mem.lL[t, w]) >= cut)]
+        # The walkers the cut keeps: one followed to its own mode, in its own
+        # model, per pass.
+        U = [w for w in cand if β * logL_arr[t, w] >= cut]
+        if !isempty(U) && evalf !== nothing && rise[t] < m / 2
+            w0 = U[rand(rng, 1:length(U))]
+            t0 = td_states[t, w0]
+            d0 = _dims(t0)
+            if !isempty(d0)
+                x0 = state[t, w0, :]
+                ℓat0 = yd -> (r = evalf(tox!(xbuf, x0, d0, yd), t0);
+                              v = r[1] + β * r[2] + jac(d0, yd); isfinite(v) ? v : -Inf)
+                same0 = [w for w in 1:n_w if _same(td_states[t, w], t0)]
+                h0 = [0.1 * max(std([_flat(state[t, w, d], flat_shift[d]) for w in same0];
+                                    corrected = false),
+                                1e-6 * max(1.0, abs(_flat(x0[d], flat_shift[d]))))
+                      for d in d0]
+                mm = _pt_mode_mass(ℓat0, flatv(state, t, w0, d0), ℓ[w0], h0)
+                c0 = [j for (j, d) in enumerate(d0) if d in circ]
+                a0 = _allow(length(d0))
+                if mm === nothing
+                elseif mm.logz < logza - tau
+                    # A separate mode that weighs next to nothing: the walker
+                    # that climbed to it, and those inside it at both passes.
+                    push!(S, w0)
+                    k0 = _key(t0)
+                    for w in U
+                        w != w0 && _same(td_states[t, w], t0) && mem.key[t, w] == k0 &&
+                            _pt_in_mode(mm, flatv(state, t, w, d0), c0, a0) &&
+                            _pt_in_mode(mm, flatv(mem.x, t, w, d0), c0, a0) && push!(S, w)
+                    end
+                elseif _same(t0, tb) && _pt_in_mode(mm, flatv(state, t, b, d0), c0, a0) &&
+                       !_pt_in_mode(mm, flatv(state, t, w0, d0), c0, a0) &&
+                       !(ℓ[w0] + β * (logL_arr[t, w0] - mem.lL[t, w0]) >= ℓb - allow)
+                    # A's own mode, far down whose flank it sits.
+                    push!(S, w0)
+                end
+            end
+        end
+        isempty(S) && continue
+        # Survivors, as in `_pt_prune_stranded!`: the upper half of A, and the top.
+        anchors = isempty(A) ? Int[] : A[ℓ[A] .>= median(ℓ[A])]
+        cap = length(A) + top
+        if length(S) > cap
+            sort!(S; by = w -> ℓ[w])
+            resize!(S, cap)
+        end
+        yd = similar(yb)
+        for w in S
+            k = rand(rng, 1:(length(anchors) + top))
+            a = k <= length(anchors) ? anchors[k] : 0
+            base, ya, lp, ll = a > 0 ?
+                (state[t, a, :], flatv(state, t, a, dims), logπ_arr[t, a],
+                 logL_arr[t, a]) :
+                (xc, yb, lpb, llb)
+            src = a > 0 ? td_states[t, a] : tb
+            lp2, ll2 = evalf === nothing ? (-Inf, -Inf) :
+                       _pt_scatter!(yd, y -> evaly(base, y), ya, s, rng;
+                                    ok = (lp, ll) -> β * ll >= cut)
+            if isfinite(lp2) && isfinite(ll2)
+                tox!(xbuf, base, dims, yd)
+                lp, ll = lp2, ll2
+                @inbounds for d in 1:n_dim
+                    state[t, w, d] = xbuf[d]
+                end
+            else
+                @inbounds for d in 1:n_dim
+                    state[t, w, d] = base[d]
+                end
+            end
+            logπ_arr[t, w] = lp
+            logL_arr[t, w] = ll
+            dst = td_states[t, w]
             dst.n_planets_active = src.n_planets_active
             copyto!(dst.planet_active, src.planet_active)
             copyto!(dst.noise_active, src.noise_active)
@@ -288,7 +539,40 @@ function _td_prune_stranded!(state::Array{Float64,3},
         end
         moved[t] = length(S)
     end
+    if mem !== nothing
+        out = fill(false, n_t, n_w)
+        key = zeros(UInt, n_t, n_w)
+        for t in 1:n_t
+            for w in 1:n_w
+                key[t, w] = _key(td_states[t, w])
+            end
+            tempered!(t, βs[t])
+            b = argmax(ℓ)
+            isfinite(ℓ[b]) || continue
+            tb = td_states[t, b]
+            allow = _allow(length(_dims(tb)))
+            for w in 1:n_w
+                out[t, w] = !(ℓ[w] >= ℓ[b] - allow && _same(td_states[t, w], tb))
+            end
+        end
+        _prune_record!(mem, state, logL_arr, out; key)
+    end
     return moved
+end
+
+# ½ log det of the covariance of the rows of `Y`, and the conditional widths
+# 1/√(Σ⁻¹)_jj; `nothing` if singular.
+function _td_cov_volume(Y::AbstractMatrix{Float64})
+    all(isfinite, Y) || return nothing
+    C = cholesky(Symmetric(cov(Y; dims = 1)); check = false)
+    issuccess(C) || return nothing
+    return (0.5 * logdet(C), 1 ./ sqrt.(diag(inv(C))))
+end
+
+# The ½ log det alone.
+function _td_half_logdet_cov(Y::AbstractMatrix{Float64})
+    r = _td_cov_volume(Y)
+    return r === nothing ? nothing : r[1]
 end
 
 """
@@ -324,12 +608,42 @@ selection on planet count.
   0-planet model; 16 left 13% at the old budget and none at the new one.
 - `n_walkers::Int = 100`
 - `n_steps::Int = 3000`
+- `convergence_stop::Bool = false` — end production once the gating set has
+  worst split-R̂ below `rhat_threshold` and worst tail-ESS above
+  `tail_ess_threshold` for `n_converged_checks` consecutive diagnostics, no
+  earlier than `min_steps`; the draws kept so far are the result and
+  `stop.stopped` is `"converged"`. The gating set is the model index
+  (`n_planets`), every planet-slot parameter and `rho_s`, the slot parameters
+  assessed only over the draws where the slot is active (and relabelled in
+  period order, so label switching between slots is not read as
+  non-convergence) -- the statistics of `convergence_report`. A slot active in
+  under half the draws gates on R̂ only; one active in under 1 % is not
+  assessed. Noise-model parameters, γ, jitter and offsets are not gated.
+  `science_params` replaces the slot-and-`rho_s` part of the set with the names
+  given (`n_planets` stays in it).
+- `rhat_threshold::Real = 1.01`, `tail_ess_threshold::Real = 1000`,
+  `n_converged_checks::Int = 3`, `min_steps::Int = 0`, `diag_every::Int = 0`
+  (steps between diagnostics; default `max(200, n_steps ÷ 40)`) -- the same
+  settings, with the same meaning, as in `sample_pt_emcee`. The diagnostic also
+  drives the live `Rhat` mean/worst and `ESS` mean-bulk/min-tail readout of the
+  progress bar, whether or not the gate is on.
+- `max_seconds::Real = Inf`, `max_evals::Real = Inf`, `stop_file = nothing` --
+  as in `sample_pt_emcee`: end production gracefully on a wall-clock limit, an
+  evaluation limit, or the appearance of a file (looked for about every 5 s);
+  an error if that happens before the end of burn-in. An `InterruptException`
+  after burn-in ends production the same way (`stop.stopped == "interrupted"`).
 - `n_burnin::Int = 2000` — was 2000/1000, see `sample_pt_emcee`.
 - `prune_stranded::Bool = true` — as in `sample_pt_emcee`, in the joint
-  (model, parameter) space: during burn-in a walker whose likelihood puts it
-  in a region of negligible total mass takes over a mode walker's parameters
-  AND model. See `_td_prune_stranded!`.
+  (model, parameter) space: during burn-in a walker stranded at two passes
+  running, in a region of negligible total mass, in a separate mode that
+  carries next to none, or far down the mode's own flank, is drawn about a
+  mode walker's parameters and takes its model. See `_td_prune_stranded!`.
 - `betas::Union{Nothing,Vector{Float64}} = nothing`
+- `swap_min::Real = 0.05` — `log_evidence` is the tempered value (H+), which
+  is quoted only when the ladder reaches β = 0 and every adjacent pair swapped
+  at least this often; otherwise it is `NaN`, with a warning saying why. The
+  default ladder stops at `beta_min`, so a log Z needs `betas` with a 0 rung.
+  The posterior model probabilities (`n_planets`) do not depend on it.
 - `beta_min::Real = 1e-4` — hottest inverse-temperature. The default ladder is
   geometric across `[beta_min, 1]` (`β_i = beta_min^(i/(n_temps-1))`), so adding
   temps DENSIFIES the cold end (closing the cold-rung swap gap) rather than
@@ -366,6 +680,12 @@ selection on planet count.
   -- the tell that some realisations fell into a badly mixing state for the
   whole run -- is now 2.4x, and the new floor sits above the old ceiling.
 - `stretch_a::Float64 = 2.0`
+- `de_move::Real = DE_MOVE_DEFAULT` — as in `sample_pt_emcee`: per walker and
+  step, the probability of a differential-evolution move in place of the
+  stretch move (src/samplers/de_move.jl). It moves the coordinates the stretch
+  moves -- the walker's active ones, on the same scales, with the same
+  Jacobian -- and leaves parked and held ones where they are. `0` is the
+  stretch-only kernel, and draws exactly what it did.
 - `seed::Int = 1`
 - `thin::Int = 1`
 - `show_progress::Bool = true`
@@ -374,7 +694,9 @@ selection on planet count.
   mean-longitude ridge (src/samplers/lambda_slide.jl). **Off by default**, and
   the measurement is why. At low e the data pin λ = Mo + ω, not either angle:
   on the easy 12.3 d target, circular sd 0.056 rad for λ against 0.66 for each
-  of Mo and ω. Under (:Mo, :sesinw) that ridge is a helix in the sampler's
+  of Mo and ω (measured under `time = :Mo`; the default transit phase φ_c is
+  π/2 − λ at low e, so it has no such ridge and no planet is offered the
+  move). Under (:Mo, :sesinw) that ridge is a helix in the sampler's
   coordinates, so the LINEAR stretch can only cut chords across it and walkers
   freeze on their own arc (between-walker circular sd 0.52 against
   within-walker 0.39 in a failing run, while λ mixed as well as in a passing
@@ -393,6 +715,12 @@ selection on planet count.
 - `node_flip::Real = 0.1` — as in `sample_pt_emcee`: the tempered
   (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets, proposed only to
   walkers in which the planet is active and astrometrically coupled.
+- `burnin_hold = nothing`, `burnin_hold_frac::Real = 0.5` — as in
+  `sample_pt_emcee`: every IAD jitter `sigma_iad_<instrument>` held at 0 for
+  at least the first half of burn-in, until the β = 1 rung stops climbing, then
+  drawn from its prior walker by walker. Only a
+  parameter every model has can be held; not a planet or noise-model slot, or
+  one the node flip or the λ slide moves.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (every rung's walkers and their models, the ladder, every RNG
   stream, the MoMS proposal scales and off-values, the counters, the ladder
@@ -416,11 +744,12 @@ selection on planet count.
   per step.
 - Tempered M-H: the MoMS acceptance uses `β · (log_L_new − log_L_old)`
   so hot chains explore more freely between models.
-- Full-circle angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`:
-  the seam moves to the emptiest arc of the cold rung's active-slot draws (see
-  src/circular.jl), which moves `target.params.layout` and `target.transform`
-  in place. Same-mode planet slots share one window per angle, unified at the
-  start when an earlier fit on the same target left them apart.
+- Full-circle angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`,
+  and every 50 steps through 3/4 of burn-in with the pruning: the seam moves to
+  the emptiest arc of the cold rung's active-slot draws (see src/circular.jl),
+  which moves `target.params.layout` and `target.transform` in place.
+  Same-mode planet slots share one window per angle, unified at the start when
+  an earlier fit on the same target left them apart.
 """
 function sample_transdim_pt_emcee(
     target::NereusTarget,
@@ -443,7 +772,9 @@ function sample_transdim_pt_emcee(
     n_burnin::Int = 2000,
     betas::Union{Nothing,AbstractVector} = nothing,
     beta_min::Real = 1e-4,
+    swap_min::Real = 0.05,
     stretch_a::Real = 2.0,
+    de_move::Real = DE_MOVE_DEFAULT,
     seed::Int = 1,
     thin::Int = 1,
     show_progress::Bool = true,
@@ -458,10 +789,26 @@ function sample_transdim_pt_emcee(
     node_flip::Real = 0.1,
     lambda_slide::Real = 0.0,
     lambda_slide_sigma::Real = 0.6,
+    burnin_hold = nothing,
+    burnin_hold_frac::Real = 0.5,
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    diag_every::Int = 0,
+    convergence_stop::Bool = false,
+    science_params::Union{Nothing,Vector{String}} = nothing,
+    rhat_threshold::Real = 1.01,
+    tail_ess_threshold::Real = 1000,
+    n_converged_checks::Int = 3,
+    min_steps::Int = 0,
+    max_seconds::Real = Inf,
+    max_evals::Real = Inf,
+    stop_file::Union{Nothing,AbstractString} = nothing,
 )
+    # The trans-dimensional prior skips inactive planets slot by slot, which the
+    # photo-eccentric reparametrization (src/density.jl) does not decompose
+    # into: this sampler runs the same model in ρ★ and (e, ω).
+    target = without_density_reparam(target)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))
@@ -480,6 +827,7 @@ function sample_transdim_pt_emcee(
     informed_birth_fraction = Float64(informed_birth_fraction)
     target_birth_accept     = Float64(target_birth_accept)
     stretch_a               = Float64(stretch_a)
+    p_de                    = _de_check(de_move)
     ladder_adapt_ν0         = Float64(ladder_adapt_ν0)
     ladder_adapt_K          = Float64(ladder_adapt_K)
 
@@ -531,8 +879,12 @@ function sample_transdim_pt_emcee(
                              occursin("jitter", String(layout.unfrozen_names[j]))]
 
     # Goodman-Weare: each half needs ≥ n_dim+1 walkers
-    n_walkers_eff = max(n_walkers, 2 * n_dim + 2)
-    n_walkers_eff % 2 == 1 && (n_walkers_eff += 1)
+    # One assignment: the half-step closures capture it, and a variable
+    # assigned twice is boxed there, so every walker's partner range was
+    # typed Any.
+    n_walkers_eff = let nw = max(n_walkers, 2 * n_dim + 2)
+        nw + isodd(nw)
+    end
 
     # Geometric ladder DENSIFIED at fixed β_min: β_i = β_min^(i/(N-1)), spanning
     # [β_min, 1]. Adding temps closes the cold-end gap (raises cold swap acceptance)
@@ -557,6 +909,8 @@ function sample_transdim_pt_emcee(
     # initialisation below and is put back just before the main loop, which
     # then carries on from step `step0 + 1`.
     menu_pos(nm) = something(findfirst(==(nm), params.config.noise_models), 0)
+    hold = _burnin_hold(params, burnin_hold, burnin_hold_frac, n_burnin;
+                        sampler = "transdim_pt_emcee")
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
         n_burnin, thin, seed, stretch_a, ladder = copy(βs), adapt_ladder,
         ladder_adapt_window, ladder_adapt_ν0, ladder_adapt_K, untemper_transit,
@@ -568,7 +922,8 @@ function sample_transdim_pt_emcee(
               transdim_fraction = td.transdim_fraction),
         inclusion_prior, moms_init_scale, informed_birth_fraction,
         target_birth_accept, n_birth_refine, n_birth_tries, n_noise_bridge,
-        n_noise_relax, noise_swap, noise_swap_rate = Float64(noise_swap_rate))
+        n_noise_relax, noise_swap, noise_swap_rate = Float64(noise_swap_rate),
+        _burnin_hold_fp(hold, params)..., _de_fp(p_de)...)
     ck = resume ? read_checkpoint(ck_path, "transdim_pt_emcee", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -607,11 +962,15 @@ function sample_transdim_pt_emcee(
     circ_groups = circular_groups(params; permutable = td.planets)
     unify_circular_groups!(params, circ_groups; transforms = (target.transform,))
     recut_moved = Dict{String,NTuple{2,Float64}}()
+    # Cyclic inclinations: no window, folded to [0, π] on the re-cut schedule.
+    cinc = cyclic_inclination_indices(params)
     # Stretch scale per dimension (see the stretch move), pruning tally per rung,
     # and which component owns each dimension (see `_td_prune_stranded!`).
     flat_shift = Union{Nothing,Float64}[log_scale_shift(ps)
                                         for ps in layout.unfrozen_priors]
     pruned = zeros(Int, n_temps)
+    # The pruning's record of its last pass (`_td_prune_stranded!`).
+    prune_mem = PruneMemory(n_temps, n_walkers_eff, n_dim)
     # Astrometry-only planets get the node flip (src/samplers/node_flip.jl).
     # Same-mode slots share Ω's window, and the flip reads it from the layout.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
@@ -625,6 +984,20 @@ function sample_transdim_pt_emcee(
         j = _noise_model_index_for_param(layout.unfrozen_names[d], params)
         j === nothing || (dim_owner[d] = -j)
     end
+    # Coordinates held early in burn-in (src/samplers/burnin_hold.jl). Walkers
+    # live in x here, so the held value is stored exactly; the stretch parks a
+    # held coordinate (`is_held`, cleared at the release). Only an always-on
+    # coordinate no other move writes can be held.
+    # (`hold` itself is resolved before the checkpoint fingerprint, above.)
+    _burnin_hold_forbid(hold, params,
+        vcat(findall(!=(0), dim_owner), jitter_refine_idx,
+             reduce(vcat, (vcat(f.shift, f.negate) for f in flips); init = Int[]),
+             reduce(vcat, (Int[sl.mo, sl.se, sl.sc] for sl in slides); init = Int[]));
+        sampler = "transdim_pt_emcee")
+    is_held = falses(n_dim)
+    is_held[hold.dims] .= true
+    held_lp = _burnin_hold_logπ(hold, params; flat_shift)
+    hold_med = Ref(NaN)                 # the β = 1 median log L at the last pass
 
     # MoMS proposal strategy — shared across threads. Scales are tuned
     # during burn-in (Robbins-Monro); writes are protected by atomic
@@ -797,7 +1170,7 @@ function sample_transdim_pt_emcee(
     noise_refine_budget = fill(n_birth_refine, n_noise_slots)
     if ck === nothing && n_birth_refine > 1 && do_noise
         min_refine = max(3, n_birth_refine ÷ 6)
-        x_med = Float64[clamp(quantile(layout.unfrozen_priors[j], 0.5),
+        x_med = Float64[clamp(prior_centre(layout.unfrozen_priors[j]),
                               bounds(layout.unfrozen_priors[j])...)
                         for j in 1:n_dim]
         tds_c = TransDimState(; max_planets = max_k, n_noise = n_noise_slots)
@@ -941,6 +1314,10 @@ function sample_transdim_pt_emcee(
                 @inbounds for d in 1:n_dim
                     state[t, w, d] = x_b[d]
                 end
+                # Every walker of every rung starts at the held value.
+                @inbounds for (d, v) in zip(hold.dims, hold.values)
+                    state[t, w, d] = v
+                end
                 lp, ll = eval_bounded!(@view(state[t, w, :]),
                                         td_states[t, w], slot)
                 if isfinite(lp) && isfinite(ll)
@@ -1029,6 +1406,7 @@ function sample_transdim_pt_emcee(
     smd_hist  = zeros(Float64, n_steps, n_temps - 1)
     smd_scale = _swap_distance_scale(layout.unfrozen_priors, flat_shift)
     n_done    = 0
+    halt      = Threads.Atomic{Bool}(false)   # tells threaded loops to take no more tasks
     accept_transdim  = zeros(Int, max_k)
     propose_transdim = zeros(Int, max_k)
     # Noise-toggle moves get their OWN per-temp raw counters. They were
@@ -1076,6 +1454,15 @@ function sample_transdim_pt_emcee(
     propose_pb   = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
     accept_pd    = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
     propose_pd   = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    # The DE move's tally per rung (`de_move`; the two counters above count the
+    # stretch alone), and ε's scale along each coordinate per rung, refreshed
+    # from the partner half before each half-step (src/samplers/de_move.jl).
+    de_proposed  = zeros(Int, n_temps)
+    de_accepted  = zeros(Int, n_temps)
+    de_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_scale     = zeros(n_temps, n_dim)
+    de_col       = Vector{Float64}(undef, n_walkers_eff)
 
     half = n_walkers_eff ÷ 2
     tasks_h1 = Vector{Tuple{Int,Int}}(undef, n_temps * half)
@@ -1120,6 +1507,11 @@ function sample_transdim_pt_emcee(
     slide_proposed  = zeros(Int, n_temps)
     slide_accepted  = zeros(Int, n_temps)
     flip_eval(buf, t, w, slot) = eval_bounded!(buf, td_states[t, w], slot)
+    # The pruning's own evaluations (`_td_prune_stranded!`), counted, and the
+    # full-circle angles it measures on the circle.
+    prune_eval(x, tds) = (Threads.atomic_add!(n_evals_atomic, 1);
+                          eval_bounded!(x, tds, 1))
+    circ = circular_indices(params)
     # `planet_active` is sized from `td.max_kplanet` while the move builders
     # enumerate `config.max_kplanet`; the two need not agree, so bound-check
     # before indexing. A slot the trans-dim state does not track has no
@@ -1135,12 +1527,80 @@ function sample_transdim_pt_emcee(
         partner_hi = active_half === :h1 ? n_walkers_eff : half
         task_rngs  = active_half === :h1 ? rngs_h1 : rngs_h2
         half_chunks = _chunk_ranges(length(tasks), n_slots)
+        # ε's scale for the DE move, on the scale the move takes each coordinate.
+        if p_de > 0
+            @inbounds for d in 1:n_dim, t in 1:n_temps
+                s = flat_shift[d]
+                for (i, w) in enumerate(partner_lo:partner_hi)
+                    x = state[t, w, d]
+                    de_col[i] = s === nothing ? x : (x + s > 0 ? log(x + s) : NaN)
+                end
+                de_scale[t, d] = _de_spread(view(de_col, 1:(partner_hi - partner_lo + 1)))
+            end
+        end
         Threads.@threads :static for slot in 1:length(half_chunks)
             for task_idx in half_chunks[slot]
+                halt[] && break
                 t, w = tasks[task_idx]
                 β = βs[t]
                 trng = task_rngs[task_idx]
                 buf  = thread_proposal[slot]
+
+                if _de_chosen(trng, p_de)
+                    # Differential evolution (src/samplers/de_move.jl) over the
+                    # coordinates the stretch below moves: active in this walker
+                    # and not held, linear or on log(x + s) as it takes them,
+                    # with the same Jacobian. j, k need not share the walker's
+                    # model; the move never changes it, so it stays symmetric.
+                    j, k = _de_pair(trng, partner_lo, partner_hi)
+                    tds_w = td_states[t, w]
+                    n_on = 0
+                    @inbounds for d in 1:n_dim
+                        o = dim_owner[d]
+                        on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
+                        (on && !is_held[d]) && (n_on += 1)
+                    end
+                    γ = _de_gamma(trng, _de_gamma0(n_on))
+                    log_jac = 0.0
+                    in_domain = true
+                    @inbounds for d in 1:n_dim
+                        xw = state[t, w, d]
+                        o = dim_owner[d]
+                        on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
+                        if !on || is_held[d]
+                            buf[d] = xw
+                            continue
+                        end
+                        ε = _DE_EPS * de_scale[t, d] * randn(trng)
+                        xj, xk = state[t, j, d], state[t, k, d]
+                        s = flat_shift[d]
+                        if s === nothing
+                            buf[d] = xw + γ * (xj - xk) + ε
+                        elseif xw + s > 0 && xj + s > 0 && xk + s > 0
+                            yw = log(xw + s)
+                            yn = yw + γ * (log(xj + s) - log(xk + s)) + ε
+                            buf[d] = exp(yn) - s
+                            log_jac += yn - yw
+                        else
+                            buf[d] = xw
+                            in_domain = false
+                        end
+                    end
+                    lp_prop, ll_prop = in_domain ?
+                        eval_bounded!(buf, td_states[t, w], slot) : (-Inf, -Inf)
+                    log_ratio = log_jac + β * (ll_prop - logL_arr[t, w]) +
+                                (lp_prop - logπ_arr[t, w])
+                    Threads.atomic_add!(de_prop_temp[t], 1)
+                    if log(rand(trng)) < log_ratio
+                        @inbounds for d in 1:n_dim
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp_prop
+                        logL_arr[t, w] = ll_prop
+                        Threads.atomic_add!(de_acc_temp[t], 1)
+                    end
+                    continue
+                end
 
                 w_partner = rand(trng, partner_lo:partner_hi)
                 u = rand(trng)
@@ -1168,7 +1628,9 @@ function sample_transdim_pt_emcee(
                     s = flat_shift[d]
                     o = dim_owner[d]
                     on = o == 0 || (o > 0 ? tds_w.planet_active[o] : tds_w.noise_active[-o])
-                    if !on
+                    # A coordinate `burnin_hold` holds is parked the same way:
+                    # the whole ensemble shares it.
+                    if !on || is_held[d]
                         # A PARKED dimension does not move. MoMS is a spike-slab
                         # over (indicator, parameters): an inactive slot SITS at
                         # `strategy.off_values[k]`, and the birth/death algebra
@@ -1235,6 +1697,43 @@ function sample_transdim_pt_emcee(
         Threads.atomic_add!(n_evals_atomic, length(tasks))
     end
 
+    # The end of `burnin_hold`, as in sample_pt_emcee: every walker of every
+    # rung draws its held coordinates from their priors and is evaluated there,
+    # in its own model; one none of 100 draws gives a finite density for keeps
+    # the held value. The prune's climbing record restarts.
+    function release_hold!()
+        fill!(is_held, false)
+        n_tot = n_temps * n_walkers_eff
+        rel_seeds = rand(rng_master, UInt64, n_tot)
+        rel_chunks = _chunk_ranges(n_tot, n_slots)
+        Threads.@threads :static for slot in 1:length(rel_chunks)
+            buf = thread_proposal[slot]
+            for task_idx in rel_chunks[slot]
+                t = (task_idx - 1) ÷ n_walkers_eff + 1
+                w = (task_idx - 1) % n_walkers_eff + 1
+                rng = MersenneTwister(rel_seeds[task_idx])
+                for _ in 1:100
+                    @inbounds for d in 1:n_dim
+                        buf[d] = state[t, w, d]
+                    end
+                    _burnin_hold_draw!(buf, hold, layout.unfrozen_priors, rng)
+                    lp, ll = eval_bounded!(buf, td_states[t, w], slot)
+                    Threads.atomic_add!(n_evals_atomic, 1)
+                    if isfinite(lp) && isfinite(ll)
+                        @inbounds for d in hold.dims
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp
+                        logL_arr[t, w] = ll
+                        break
+                    end
+                end
+            end
+        end
+        _prune_forget!(prune_mem)
+        return nothing
+    end
+
     # ---- Trans-dim MoMS step (per walker, tempered M-H) --------------
     # Each (t, w) attempts one trans-dim move with probability
     # `td.transdim_fraction`. With `do_noise` active, half the moves
@@ -1245,6 +1744,7 @@ function sample_transdim_pt_emcee(
         chunks_td = _chunk_ranges(n_temps * n_walkers_eff, n_slots)
         Threads.@threads :static for slot in 1:length(chunks_td)
             for task_idx in chunks_td[slot]
+                halt[] && break
                 t = (task_idx - 1) ÷ n_walkers_eff + 1
                 w = (task_idx - 1) % n_walkers_eff + 1
                 trng = rngs_td[task_idx]
@@ -1847,6 +2347,22 @@ function sample_transdim_pt_emcee(
     pb = ProgressBar("td-pt_emcee"; total = n_steps, enabled = show_progress,
                      start = step0)
 
+    # --- Live convergence readout + optional run-until-converged ------
+    # (the gating set is described at `_td_convergence`)
+    _sci_names = science_params === nothing ?
+        String[nm for nm in layout.unfrozen_names if occursin(r"_k\d+$", nm) || nm == "rho_s"] :
+        science_params
+    gate_set = Symbol[:n_planets; Symbol.(_sci_names)]
+    diag_cols = vcat(Symbol.(layout.unfrozen_names), [:n_planets],
+                     [Symbol("planet_active_$k") for k in 1:max_k],
+                     [Symbol("noise_active_$(nm_idx)") for nm_idx in noise_toggle_idx])
+    diag_cadence = diag_every > 0 ? diag_every : max(200, n_steps ÷ 40)
+    rhat_str = "—"; ess_str = "—"
+    conv_run = 0; converged_at = 0
+    sc = StopControl(; max_seconds, max_evals, stop_file)
+    stop_reason = "steps"; stop_step = 0
+    cur_step = 0; step_keep0 = 0
+
     # --- Resume: put the saved run back exactly as it stopped ----------
     # In place throughout: the closures above captured these arrays (and the
     # TransDimStates, and the MoMS strategy), and rebinding a captured variable
@@ -1874,7 +2390,10 @@ function sample_transdim_pt_emcee(
         planet_death_accepted .= ck.planet_death_accepted
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
         slide_proposed .= ck.slide_proposed; slide_accepted .= ck.slide_accepted
+        hasproperty(ck, :de_proposed) && (de_proposed .= ck.de_proposed;
+                                          de_accepted .= ck.de_accepted)
         pruned .= ck.pruned
+        _prune_restore!(prune_mem, ck)
         n_evals_atomic[] = ck.n_evals::Int
         for (a, v) in zip((pswap_prop, pswap_acc, pn_prop, pn_acc, np_prop, np_acc),
                           ck.swap_diag)
@@ -1888,17 +2407,30 @@ function sample_transdim_pt_emcee(
             setfield!(evidence_acc, f, getfield(ck.evidence, f))
         end
         # Windows the saved walkers live in (moved by the burn-in re-cut).
-        for (nm, (lo, _)) in ck.windows
-            set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
-                                 lo; transforms = (target.transform,))
-        end
+        _restore_windows!(params, ck.windows, (target.transform,))
         merge!(recut_moved, ck.recut_moved)
+        # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
+        hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
         n_done = step0
+        # Past the release, the saved walkers carry their own values.
+        if hasproperty(ck, :hold_on)
+            ck.hold_on || fill!(is_held, false)
+            hold_med[] = ck.hold_med
+        else
+            step0 >= hold.step && fill!(is_held, false)
+        end
     end
     last_ck = time()
+    show_progress && any(is_held) &&
+        _burnin_hold_info("td-pt_emcee", hold, params, n_burnin)
 
+    # An InterruptException after burn-in ends production at the last step that
+    # was fully recorded (the step it landed in is dropped whole); before that,
+    # or with nothing recorded, it aborts the run.
+    try
     for step in (step0 + 1):n_steps
+        cur_step = step; step_keep0 = keep_idx
         do_half_step!(tasks_h1, :h1); _np_chk("h1", step)
         do_half_step!(tasks_h2, :h2); _np_chk("h2", step)
         if !isempty(flips)
@@ -1931,6 +2463,8 @@ function sample_transdim_pt_emcee(
         @inbounds for t in 1:n_temps
             propose_within[t] += Threads.atomic_xchg!(propose_temp[t], 0)
             accept_within[t]  += Threads.atomic_xchg!(accept_temp[t],  0)
+            de_proposed[t]    += Threads.atomic_xchg!(de_prop_temp[t], 0)
+            de_accepted[t]    += Threads.atomic_xchg!(de_acc_temp[t],  0)
         end
         @inbounds for t in 1:n_temps
             propose_noise_transdim[t] += Threads.atomic_xchg!(propose_ntd[t], 0)
@@ -2047,6 +2581,19 @@ function sample_transdim_pt_emcee(
         β_hist[step, :] .= βs
         n_done = step
 
+        # ---- Cyclic inclinations (serial; burn-in only) -------------
+        # Folded back to [0, π], every walker (active or not) at every rung,
+        # on the re-cut schedule and before the pruning: no seam to move, and
+        # the cached log-densities stay valid (src/circular.jl). A MoMS
+        # off-value, the prior sample median (near π/2), is already its own
+        # representative.
+        # Under the stellar spin flip (`spin_flip`) the walkers are also put in
+        # one representative of the spin, the axis chosen from the cold rung;
+        # before the re-cut, which then cuts λ's seam from the moved draws.
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
+            fold_cyclic_inclinations!(state, params; idx = cinc,
+                                      decide_from = view(state, 1, :, :))
+
         # ---- Stranded walkers (serial; burn-in only) -----------------
         # See `_td_prune_stranded!`. Same schedule as pt_emcee: every 50
         # steps through 3/4 of burn-in, before the re-cut.
@@ -2054,19 +2601,30 @@ function sample_transdim_pt_emcee(
             pruned .+= _td_prune_stranded!(state, td_states, logπ_arr, logL_arr,
                                            βs, flat_shift, dim_owner,
                                            do_noise ? length(noise_toggle_idx) : 0,
-                                           rng_master)
+                                           rng_master; evalf = prune_eval, circ,
+                                           memory = prune_mem,
+                                           held = any(is_held) ? hold.dims : Int[],
+                                           held_logπ = any(is_held) ? held_lp : 0.0)
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
         # Halfway through burn-in, while the ensemble can still merge the two
-        # lobes a seam-centred angle burns in as; and at the end, which fixes
-        # the chart for every recorded step. Relabels `state` at every rung.
+        # lobes a seam-centred angle burns in as; with every pruning pass, so a
+        # mode found later is not held behind the seam (`_pt_recut_due`); and
+        # at the end, which fixes the chart for every recorded step. Relabels
+        # `state` at every rung.
         # thread_theta and the proposal buffers are rewritten from `state`
         # before every evaluation, so they hold nothing to relabel.
-        if !isempty(circ_groups) && (step == n_burnin ÷ 2 || step == n_burnin)
+        if !isempty(circ_groups) && _pt_recut_due(step, n_burnin)
             _td_ensemble_recut!(state, td_states, params, circ_groups, strategy,
                                 (target.transform,), recut_moved)
         end
+
+        # ---- End of `burnin_hold` (threaded; within burn-in) -----------
+        any(is_held) && _burnin_hold_due!(hold_med, hold, step, n_burnin,
+                                          view(logL_arr, 1, :),
+                                          n_dim - length(hold.dims)) &&
+            release_hold!()
 
         if step > n_burnin
             @inbounds for w in 1:n_walkers_eff
@@ -2093,6 +2651,24 @@ function sample_transdim_pt_emcee(
             end
         end
 
+        # ---- Periodic convergence diagnostic (β=1 gating set) ----
+        if step > n_burnin && (step - n_burnin) % diag_cadence == 0
+            diag = _td_convergence(samples, keep_idx, n_walkers_eff, diag_cols,
+                                   gate_set, params; canon = AngleCanon(params))
+            if diag !== nothing
+                meanr, maxr, meanb, mte = diag
+                rhat_str = string(round(meanr, digits = 3), "/", round(maxr, digits = 3))
+                ess_str  = string(round(Int, meanb), "/",
+                                  isfinite(mte) ? round(Int, mte) : "∞")
+                if convergence_stop
+                    pass = step >= min_steps && maxr < rhat_threshold &&
+                           mte > tail_ess_threshold
+                    conv_run = pass ? conv_run + 1 : 0
+                    conv_run >= n_converged_checks && (converged_at = step)
+                end
+            end
+        end
+
         if show_progress
             total_props = sum(propose_within)
             total_acc   = sum(accept_within)
@@ -2105,16 +2681,33 @@ function sample_transdim_pt_emcee(
             # as "frozen" when it is in fact toggling.
             update!(pb; n_done = step,
                     fields = (:acc => round(acc_rate, digits=3),
+                              # the DE move's at β = 1, when it is on
+                              (p_de > 0 ? (:β1_de => round(de_accepted[1] /
+                                  max(de_proposed[1], 1), digits = 3),) : ())...,
                               :td_acc => round(td_rate, digits=3),
                               :td_n => td_acc,
                               :ntd_n => sum(accept_noise_transdim),
+                              :Rhat => rhat_str,    # mean/worst over the gating set
+                              :ESS => ess_str,      # mean(bulk)/worst(tail)
                               :nevals => n_evals_atomic[]))
         end
 
         # ---- Checkpoint: every `checkpoint_interval` s and on the last step
         # (src/checkpoint.jl); this sampler has no early stop -------------
+        # ---- Out-of-band stops (see src/graceful_stop.jl): an error during
+        # burn-in, where there is nothing to keep.
+        _step_hook!(step, sc)
+        stop_now = _stop_check!(sc, n_evals_atomic[];
+                    force = step > n_burnin && (step - n_burnin) % diag_cadence == 0)
+        if stop_now !== nothing
+            step <= n_burnin && throw(_stop_in_burnin_error(
+                "td-pt_emcee", stop_now, sc, step, n_burnin))
+            keep_idx > 0 || (stop_now = nothing)
+        end
+
         if ck_path !== nothing &&
-           (step == n_steps || time() - last_ck >= checkpoint_interval)
+           (step == n_steps || (convergence_stop && converged_at > 0) ||
+            stop_now !== nothing || time() - last_ck >= checkpoint_interval)
             write_checkpoint(ck_path, "transdim_pt_emcee", ck_fp, (; step,
                 state, logπ = logπ_arr, logL = logL_arr, td_states, betas = βs,
                 rng_master, rngs_h1, rngs_h2, rngs_td, rngs_flip, rngs_slide,
@@ -2125,6 +2718,9 @@ function sample_transdim_pt_emcee(
                 propose_noise_transdim, planet_birth_proposed, planet_birth_accepted,
                 planet_death_proposed, planet_death_accepted, flip_proposed,
                 flip_accepted, slide_proposed, slide_accepted, pruned,
+                prune_mem = _prune_saved(prune_mem),
+                de_proposed, de_accepted,
+                hold_on = any(is_held), hold_med = hold_med[],
                 n_evals = n_evals_atomic[],
                 swap_diag = Int[a[] for a in (pswap_prop, pswap_acc, pn_prop, pn_acc,
                                                np_prop, np_acc)],
@@ -2132,21 +2728,49 @@ function sample_transdim_pt_emcee(
                 smd_hist = smd_hist[1:step, :], keep_idx,
                 samples = samples[1:keep_idx, :], lp_samples = lp_samples[1:keep_idx],
                 evidence = evidence_acc, windows = circular_windows(params),
+                spin_axis = copy(params.layout.spin_axis),
                 recut_moved,
                 informed = _informed_cache_snapshot(rngs_td, informed_keys)))
             last_ck = time()
         end
+
+        if convergence_stop && converged_at > 0
+            show_progress && @info "td-pt_emcee: gating set converged at step $converged_at " *
+                "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)); stopping early"
+            stop_reason = "converged"; stop_step = step
+            break
+        end
+        if stop_now !== nothing
+            stop_reason = stop_now; stop_step = step
+            break
+        end
     end
+    catch err
+        err isa InterruptException && cur_step > n_burnin && step_keep0 > 0 ||
+            rethrow()
+        keep_idx = step_keep0
+        n_done = cur_step - 1
+        stop_reason = "interrupted"; stop_step = cur_step - 1
+        halt[] = true; sleep(0.5)         # let straggler threads finish their walker
+    end
+    stop_reason == "steps" && (stop_step = n_done)
     show_progress && finish!(pb)
+    stop_reason == "steps" ||
+        _announce_stop(stop_reason, stop_step, n_steps, keep_idx)
+    if convergence_stop && converged_at == 0 && stop_reason == "steps"
+        @warn "td-pt_emcee: hit n_steps=$n_steps WITHOUT meeting the convergence gate " *
+              "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)) on the gating set — " *
+              "results may be unconverged (last $rhat_str Rhat, $ess_str ESS)"
+    end
     show_progress && _node_flip_info("td-pt_emcee", flips, params, flip_proposed,
                                      flip_accepted)
     show_progress && _lambda_slide_info("td-pt_emcee", slides, params,
                                         slide_proposed, slide_accepted)
     show_progress && sum(pruned) > 0 && @info "td-pt_emcee: burn-in moved " *
         "$(sum(pruned)) stranded walker state(s), model included, onto their " *
-        "rung's mode ($(pruned[1]) at β = 1), all from a region whose total " *
-        "posterior mass is bounded below e⁻¹⁰ of the mode's. The recorded chain " *
-        "is ordinary MCMC."
+        "rung's mode ($(pruned[1]) at β = 1), each from a region whose total " *
+        "posterior mass is bounded, or a separate mode whose own is estimated, " *
+        "below e⁻¹⁰ of the mode's. The recorded chain is ordinary MCMC."
     @info "planet↔activity swap: proposed=$(pswap_prop[]) accepted=$(pswap_acc[])" *
           "  | PN(pl→AD) $(pn_acc[])/$(pn_prop[])  NP(AD→pl) $(np_acc[])/$(np_prop[])"
     # A silent move would leave the reader of a trace plot wondering why Mo now
@@ -2184,6 +2808,19 @@ function sample_transdim_pt_emcee(
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)
     acc_td     = accept_transdim ./ max.(propose_transdim, 1)
 
+    # The tempered value is this sampler's only log Z (bridge sampling needs a
+    # fixed dimension), so it is quoted only when its ladder can carry it:
+    # `_tempered_quotable` (src/samplers/evidence.jl), as for sample_pt_emcee
+    # and sample_pt_hmc. The raw stack stays in `evidence_report`.
+    tq_ok, tq_why = _tempered_quotable(βs, acc_swap; swap_min)
+    if !(tq_ok && isfinite(log_z))
+        @warn "sample_transdim_pt_emcee: no quotable log-evidence for this run: the " *
+              "tempered stack is not quotable ($(tq_ok ? "it is not finite" : tq_why)). " *
+              "log_evidence is NaN; the posterior model probabilities are unaffected. " *
+              "A log Z needs `betas` with a β = 0 rung." tempered = log_z
+        log_z = NaN
+    end
+
     if show_progress
         println("trans-dim moves: planet accepted/proposed = ",
                 sum(accept_transdim), "/", sum(propose_transdim),
@@ -2196,11 +2833,18 @@ function sample_transdim_pt_emcee(
         # `n_walkers_eff` (not the requested NW) is the recorded walker count.
         # A chain is science-grade only if this PASSes; FAIL ⇒ sample more.
         try
-            convergence_report(chains, n_walkers_eff; model_params=params)
+            # Read folded, as the gate does; the returned chains stay raw.
+            rep = isempty(cinc) ? chains :
+                  fold_cyclic_inclinations!(deepcopy(chains), params)
+            convergence_report(rep, n_walkers_eff; model_params=params)
         catch e
             @warn "convergence_report failed (chain may be too short)" exception=e
         end
     end
+    # Collective drift of the cold ensemble, which R-hat cannot see (see
+    # `ensemble_drift`); warns when it finds one.
+    drift = _td_drift(samples, keep_idx, n_walkers_eff, param_names, params;
+                      sampler = "transdim_pt_emcee", de_move = p_de)
 
     return TransDimPTemceeResult(
         chains, log_z, ev_report,
@@ -2211,5 +2855,7 @@ function sample_transdim_pt_emcee(
         copy(planet_birth_proposed), copy(planet_birth_accepted),
         copy(planet_death_proposed), copy(planet_death_accepted),
         _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
+        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc),
+        _de_acceptance(de_accepted, de_proposed), drift,
     )
 end

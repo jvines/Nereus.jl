@@ -87,7 +87,9 @@ encoded as a non-finite, mapped to 0.0) are ignored: we read the true bound
 from the prior, not the transform's clamp.
 
 Circular angles ([`is_circular`](@ref)) are never flagged: their bounds are
-where the chart of the circle was cut, not an edge of the support. Nor is a
+where the chart of the circle was cut, not an edge of the support. Neither is
+a cyclic inclination ([`is_cyclic_inclination`](@ref)): 0 and π are points it
+passes through, and its chart's edges are the mirror image of i = 90°. Nor is a
 jitter ([`jitter_names`](@ref)) at its lower bound, whatever that bound is.
 """
 function _detect_railed(x_bounded::AbstractVector{<:Real},
@@ -120,6 +122,9 @@ function _detect_railed(x_bounded::AbstractVector{<:Real},
         ps = priors[i]
         is_fixed(ps) && continue
         i in circ && continue
+        # A cyclic inclination has no bound to rail against: 0 and π are
+        # points it passes through, its chart's edges a seam (src/circular.jl).
+        is_cyclic_inclination(ps) && continue
         lo, hi = bounds(ps)
         (isfinite(lo) && isfinite(hi)) || continue   # only fully-bounded params
         span = hi - lo
@@ -195,7 +200,13 @@ function _same_basin(xa::AbstractVector, xb::AbstractVector,
         lo, hi = bounds(priors[i])
         (isfinite(lo) && isfinite(hi) && hi > lo) || continue
         d = abs(xa[i] - xb[i])
-        if i in circ
+        if is_cyclic_inclination(priors[i])
+            # x and -x (and x + 2π) are one orbit: compare the inclinations,
+            # on the physical span π.
+            d = abs(fold_inclination(xa[i]) - fold_inclination(xb[i]))
+            d / π > basin_rtol && return false
+            continue
+        elseif i in circ
             # Mo = 0.001 and Mo = 6.282 are the same orbit. Compared linearly
             # they were two basins, and the "runner-up" at the far end of the
             # window was the winner itself -- a spurious multimodal verdict.
@@ -265,7 +276,9 @@ Move the window of every circular parameter whose value in `x` (bounded space,
 current chart) lies within `_MAP_SEAM_FRAC` of the span of either bound, so that
 value sits at the centre of the new window. The value is first taken to its
 representative in the user's own window (`config.priors`), so the optimum stays
-readable in the user's convention. Returns the moved `(index, previous lo)`
+readable in the user's convention. A polar angle's seam goes to the pole
+farther from the optimum and its mirror image ([`polar_centre_lo`](@ref)), and
+the value is folded to `[0, π]`. Returns the moved `(index, previous lo)`
 pairs, for undoing, and `x` with those dims relabelled into their new windows.
 The layout and `target.transform` are moved in place.
 """
@@ -274,13 +287,21 @@ function _centre_circular_seams!(target::NereusTarget, x::AbstractVector{<:Real}
     L = params.layout
     moved = Tuple{Int,Float64}[]
     xc = Float64.(x)
-    for i in circular_indices(params)
-        lo, hi = bounds(L.unfrozen_priors[i])
+    for i in seam_indices(params)
+        ps = L.unfrozen_priors[i]
+        lo, hi = bounds(ps)
         span = hi - lo
         xi = xc[i]
         isfinite(xi) || continue
         min(xi - lo, hi - xi) <= _MAP_SEAM_FRAC * span || continue
-        lo_ref = params.config.priors[L.unfrozen_names[i]].lo
+        if is_cyclic_inclination(ps)
+            push!(moved, (i, Float64(lo)))
+            set_circular_window!(params, i, polar_centre_lo(xi);
+                                 transforms = (target.transform,))
+            xc[i] = fold_inclination(xi)
+            continue
+        end
+        lo_ref = circular_ref_lo(params, i)
         xr = lo_ref + mod(xi - lo_ref, CIRCULAR_PERIOD)
         push!(moved, (i, Float64(lo)))
         set_circular_window!(params, i, xr - span / 2;
@@ -308,7 +329,10 @@ function _circular_to_user_window!(target::NereusTarget,
     has_transform = target.transform !== nothing
     xb = has_transform ? transform_inverse(x_opt, target.transform) : x_opt
     for (i, _) in moved
-        lo_ref = params.config.priors[L.unfrozen_names[i]].lo
+        # A polar angle keeps the chart it was centred in, which holds [0, π]:
+        # its value is reported folded.
+        is_cyclic_inclination(L.unfrozen_priors[i]) && continue
+        lo_ref = circular_ref_lo(params, i)
         k = floor((xb[i] - lo_ref) / CIRCULAR_PERIOD)
         (isfinite(k) && k != 0) || continue
         lo, _ = bounds(L.unfrozen_priors[i])
@@ -386,6 +410,24 @@ function sample_map(
     basin_rtol::Float64 = 0.02,
     dom_margin::Float64 = 50.0,
 )
+    # A mode is a property of the coordinates. Under the photo-eccentric
+    # reparametrization (src/density.jl) the density in (ρ_circ, η) carries the
+    # Jacobian of the map, which has an integrable 1/e cusp at e = 0 for a
+    # prior uniform in √e sin ω, √e cos ω, and the optimiser would climb into
+    # it. The mode is found where it was before, in ρ★ and (e, ω), and returned
+    # as a point of this target's coordinates; `hessian` and `log_posterior`
+    # are those of the ρ★, (e, ω) coordinates.
+    if density_active(target.params)
+        p0 = without_density_reparam(target.params, target.data)
+        t0 = NereusTarget(p0, target.data; unconstrained = target.transform !== nothing)
+        init0 = init === nothing ? nothing : density_old_x(init, target.params, p0)
+        r = sample_map(t0; init = init0, method, maxiter, g_tol, n_starts, seed,
+                       bound_rtol, basin_rtol, dom_margin)
+        return MAPResult(density_new_x(r.x_map, p0, target.params), r.log_posterior,
+                         r.log_evidence_laplace, r.hessian,
+                         copy(target.params.layout.unfrozen_names), r.converged,
+                         r.railed, r.railed_params, r.n_basins, r.dominance)
+    end
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -666,6 +708,9 @@ function sample_map(
         lp = LogDensityProblems.logdensity(target, x)
         return isfinite(lp) ? -lp : 1e300
     end
+    # A cyclic inclination (src/circular.jl) puts the mode twice on its circle,
+    # at x and at its mirror -x, each holding half of Z: log 2 per one.
+    n_cinc = length(cyclic_inclination_indices(params))
     H, log_ev_laplace = try
         Hloc = ForwardDiff.hessian(neg_logdensity_unc, x_opt)
         if any(!isfinite, Hloc)
@@ -674,7 +719,8 @@ function sample_map(
             eigs = eigvals(Hloc)
             log_dens_unc = -neg_logdensity_unc(x_opt)
             ev = if all(isfinite, eigs) && all(eigs .> 0) && isfinite(log_dens_unc)
-                log_dens_unc + n_dim / 2 * log(2π) - sum(log.(eigs)) / 2
+                lz = log_dens_unc + n_dim / 2 * log(2π) - sum(log.(eigs)) / 2
+                n_cinc == 0 ? lz : lz + n_cinc * log(2.0)
             else
                 NaN
             end
@@ -690,10 +736,12 @@ function sample_map(
     # rejects anything outside. transform_inverse guarantees that; a
     # bounded-space optimiser does not. A no-op (bit for bit) when inside.
     x_bounded = copy(xs_bounded[best])
-    for i in circular_indices(params)
+    for i in seam_indices(params)
         lo, hi = bounds(layout.unfrozen_priors[i])
         x_bounded[i] = circular_relabel(x_bounded[i], lo, hi)
     end
+    # A cyclic inclination is reported folded to [0, π], its own representative.
+    fold_cyclic_inclinations!(x_bounded, params)
     railed_names = String[layout.unfrozen_names[i] for i in railed_idx]
 
     if railed

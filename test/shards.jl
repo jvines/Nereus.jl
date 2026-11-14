@@ -50,9 +50,15 @@ const TEST_UNITS = [
     (name = "astrometry/test_ofti.jl", seconds = 19, files = ["astrometry/test_ofti.jl"]),
     (name = "astrometry/test_iad_gost.jl", seconds = 8, files = ["astrometry/test_iad_gost.jl"]),
     (name = "astrometry/test_iad_multi_instrument.jl", seconds = 10, files = ["astrometry/test_iad_multi_instrument.jl"]),
+    (name = "astrometry/test_gost_dr_windows.jl", seconds = 8, files = ["astrometry/test_gost_dr_windows.jl"]),
+    # measured standalone (16.8 s, 2026-11-10, arm64), not in a five-shard CI run
+    (name = "astrometry/test_hip_epoch_models.jl", seconds = 17, files = ["astrometry/test_hip_epoch_models.jl"]),
     (name = "astrometry/test_iad_marginalised_residuals.jl", seconds = 1, files = ["astrometry/test_iad_marginalised_residuals.jl"]),
+    (name = "astrometry/test_iad_jitter.jl", seconds = 25, files = ["astrometry/test_iad_jitter.jl"]),
     (name = "epoch astrometry orbit + trans-dim plot draws (shares a fixture)", seconds = 157, files = ["astrometry/test_epoch_astrometry_orbit.jl", "test_transdim_plot_draws.jl"]),
+    (name = "astrometry/test_angle_axis_units.jl", seconds = 46, files = ["astrometry/test_angle_axis_units.jl"]),
     (name = "astrometry/test_hgca_residual_plot.jl", seconds = 61, files = ["astrometry/test_hgca_residual_plot.jl"]),
+    (name = "astrometry/test_pm_anomaly_gaia_releases.jl", seconds = 40, files = ["astrometry/test_pm_anomaly_gaia_releases.jl"]),
     (name = "astrometry/test_astrometry_model_plot.jl", seconds = 90, files = ["astrometry/test_astrometry_model_plot.jl"]),
     (name = "astrometry/test_iad_multi_instrument_e2e.jl", seconds = 24, files = ["astrometry/test_iad_multi_instrument_e2e.jl"]),
     (name = "astrometry/test_gaia_epoch_guards.jl", seconds = 1, files = ["astrometry/test_gaia_epoch_guards.jl"]),
@@ -91,15 +97,21 @@ const TEST_UNITS = [
     (name = "test_prior_dicts.jl", seconds = 2, files = ["test_prior_dicts.jl"]),
     (name = "test_relast_channel.jl", seconds = 5, files = ["test_relast_channel.jl"]),
     (name = "test_hgca_gost_channel.jl", seconds = 5, files = ["test_hgca_gost_channel.jl"]),
+    (name = "test_gaia_parallax.jl", seconds = 10, files = ["test_gaia_parallax.jl"]),
+    (name = "test_gaia_plx_prior.jl", seconds = 6, files = ["test_gaia_plx_prior.jl"]),
+    (name = "test_gaia_plx_wiring.jl", seconds = 10, files = ["test_gaia_plx_wiring.jl"]),
+    (name = "test_fetch_resume.jl", seconds = 5, files = ["test_fetch_resume.jl"]),
     (name = "test_fit_summary_transdim.jl", seconds = 47, files = ["test_fit_summary_transdim.jl"]),
     # Two short fits (run_job, fit_rv); not yet measured on the CI runner.
     (name = "test_derived_stellar.jl", seconds = 60, files = ["test_derived_stellar.jl"]),
     (name = "test_fit_transit_keywords.jl", seconds = 5, files = ["test_fit_transit_keywords.jl"]),
+    (name = "test_fit_joint_rho_s.jl", seconds = 60, files = ["test_fit_joint_rho_s.jl"]),
     # The two full default-settings fits, split so they run in different
     # shards. The trans-dim one is the single heaviest unit of the suite: LPT
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.
     (name = "test_pt_emcee_stranded.jl", seconds = 98, files = ["test_pt_emcee_stranded.jl"]),
     (name = "test_pt_emcee_resume.jl", seconds = 19, files = ["test_pt_emcee_resume.jl"]),
+    (name = "test_burnin_hold.jl", seconds = 100, files = ["test_burnin_hold.jl"]),
     (name = "test_pt_resume.jl", seconds = 43, files = ["test_pt_resume.jl"]),
     (name = "test_pt_hmc_resume.jl", seconds = 84, files = ["test_pt_hmc_resume.jl"]),
     (name = "test_pt_whitening_resume.jl", seconds = 9, files = ["test_pt_whitening_resume.jl"]),
@@ -114,6 +126,21 @@ const TEST_UNITS = [
     (name = "test_transdim_pt_emcee_defaults.jl", seconds = 641, files = ["test_transdim_pt_emcee_defaults.jl"]),
     (name = "test_circular.jl", seconds = 149, files = ["test_circular.jl"]),
     (name = "test_node_flip.jl", seconds = 90, files = ["test_node_flip.jl"]),
+    (name = "test_de_move.jl", seconds = 45, files = ["test_de_move.jl"]),
+    (name = "test_cyclic_inclination.jl", seconds = 45, files = ["test_cyclic_inclination.jl"]),
+    # measured: 49 s, one process, 8 threads (2026-11-11)
+    (name = "test_angles_never_rail.jl", seconds = 49, files = ["test_angles_never_rail.jl"]),
+    # measured: 2 s, one process, 8 threads (2026-11-11)
+    (name = "test_packed_normalisation.jl", seconds = 2, files = ["test_packed_normalisation.jl"]),
+    # measured: 63 s, one process, 8 threads (2026-11-11)
+    (name = "test_seam_samplers.jl", seconds = 63, files = ["test_seam_samplers.jl"]),
+    # measured: 165 s, one process, 4 threads (2026-11-11)
+    (name = "test_scouted_starts.jl", seconds = 165, files = ["test_scouted_starts.jl"]),
+    (name = "test_evidence_engines.jl", seconds = 240, files = ["test_evidence_engines.jl"]),
+    # measured: 31 s, one process, 8 threads (2026-11-11)
+    (name = "test_polar_recut.jl", seconds = 31, files = ["test_polar_recut.jl"]),
+    # measured: 24 s, one process, 8 threads (2026-11-11)
+    (name = "test_within_model_scales.jl", seconds = 24, files = ["test_within_model_scales.jl"]),
     (name = "test_lambda_slide.jl", seconds = 1, files = ["test_lambda_slide.jl"]),
     (name = "test_label_switching.jl", seconds = 6, files = ["test_label_switching.jl"]),
     (name = "test_pt_donor_buffer.jl", seconds = 1, files = ["test_pt_donor_buffer.jl"]),
@@ -136,6 +163,8 @@ const TEST_UNITS = [
     (name = "test_harmonic_external.jl", seconds = 1, files = ["test_harmonic_external.jl"]),
     (name = "test_transdim_caches.jl", seconds = 1, files = ["test_transdim_caches.jl"]),
     (name = "test_birth_death_reversibility.jl", seconds = 1, files = ["test_birth_death_reversibility.jl"]),
+    (name = "test_derived_angular.jl", seconds = 25, files = ["test_derived_angular.jl"]),
+    (name = "test_exact_mass.jl", seconds = 30, files = ["test_exact_mass.jl"]),
     (name = "test_informed_birth_a_driven.jl", seconds = 2, files = ["test_informed_birth_a_driven.jl"]),
     (name = "test_alias_jump.jl", seconds = 1, files = ["test_alias_jump.jl"]),
     (name = "test_transdim_death_counters.jl", seconds = 7, files = ["test_transdim_death_counters.jl"]),
@@ -160,8 +189,11 @@ const TEST_UNITS = [
     (name = "test_postfit_diagnostics.jl", seconds = 10, files = ["test_postfit_diagnostics.jl"]),
     # run_job's and fit_*'s post-fit stage lines and timings.
     (name = "test_postfit_progress.jl", seconds = 83, files = ["test_postfit_progress.jl"]),
+    # summary.json provenance block: engine, version, priors.
+    (name = "test_summary_provenance.jl", seconds = 140, files = ["test_summary_provenance.jl"]),
     # The transit-phase time anchor (time = :phic) against the Tc one.
     (name = "test_phic_anchor.jl", seconds = 3, files = ["test_phic_anchor.jl"]),
+    (name = "test_density_reparam.jl", seconds = 160, files = ["test_density_reparam.jl"]),
     # The workspace and allocating likelihoods at e up to 0.99999.
     (name = "test_high_e_workspace.jl", seconds = 15, files = ["test_high_e_workspace.jl"]),
     # Evidence estimators that do not temper from the prior, and the Rajpaul
@@ -179,19 +211,30 @@ const TEST_UNITS = [
     (name = "test_mode_laplace.jl", seconds = 6, files = ["test_mode_laplace.jl"]),
     (name = "verify_rajpaul_kernel_fd.jl", seconds = 1, files = ["verify_rajpaul_kernel_fd.jl"]),
     (name = "test_plot_corner_thinning.jl", seconds = 8, files = ["test_plot_corner_thinning.jl"]),
+    (name = "test_plot_corners_split.jl", seconds = 40, files = ["test_plot_corners_split.jl"]),
+    (name = "test_font_probe.jl", seconds = 10, files = ["test_font_probe.jl"]),
     (name = "test_rv_fold_ylims.jl", seconds = 30, files = ["test_rv_fold_ylims.jl"]),
     (name = "test_periodogram_plot_limits.jl", seconds = 20, files = ["test_periodogram_plot_limits.jl"]),
     (name = "test_rv_timeseries_plot.jl", seconds = 20, files = ["test_rv_timeseries_plot.jl"]),
     (name = "test_progress_time_fmt.jl", seconds = 2, files = ["test_progress_time_fmt.jl"]),
     (name = "test_nested_progress.jl", seconds = 30, files = ["test_nested_progress.jl"]),
+    (name = "test_ns_proposals.jl", seconds = 16, files = ["test_ns_proposals.jl"]),
     (name = "test_ppc_residual_acf.jl", seconds = 2, files = ["test_ppc_residual_acf.jl"]),
     (name = "test_pm_fold_rv_only_slot.jl", seconds = 30, files = ["test_pm_fold_rv_only_slot.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 3, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_posteriors_thinning.jl", seconds = 5, files = ["test_plot_posteriors_thinning.jl"]),
+    # The plotting stage's memory: two `auto` plot sets of 100k and 300k draws.
+    # Measured locally (arm64), on its own in a fresh process.
+    (name = "test_plot_memory.jl", seconds = 150, files = ["test_plot_memory.jl"]),
+    (name = "test_plot_precompile_workload.jl", seconds = 60, files = ["test_plot_precompile_workload.jl"]),
     (name = "test_plot_labels.jl", seconds = 2, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 15, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 1, files = ["test_plot_patterns.jl"]),
     (name = "test_ladder_history.jl", seconds = 80, files = ["test_ladder_history.jl"]),
+    # Stopping a PT run early without losing its draws: interrupt, stop file,
+    # limits, the trans-dim convergence gate, Stopping. Measured locally (arm64,
+    # 4 threads), not yet on the CI runner.
+    (name = "test_graceful_stop.jl", seconds = 135, files = ["test_graceful_stop.jl"]),
     (name = "test_thread_slots.jl", seconds = 176, files = ["test_thread_slots.jl"]),
 ]
 

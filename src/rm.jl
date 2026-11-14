@@ -312,11 +312,6 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
     Mtrs        = Vector{T}(undef, n_rm)
     tm_kind     = config.parametrization.time
 
-    use_rho = config.parametrization.use_rho_s
-    rho_val = use_rho ? theta.values[layout.systemic.rho_s] : zero(T)
-    M_s = config.M_s
-    R_s = config.R_s
-    have_ms_rs = !isnan(M_s) && !isnan(R_s) && R_s > 0
 
     r = 0
     j = 0
@@ -357,19 +352,10 @@ function _decode_rm_state(theta::Theta{T}, p_idx,
             bs[r], rrs[r] = b_raw, rr_raw
         end
 
-        # a_Rs: sampled a/R★ slot, else rho_s, else M_s+R_s
-        if (ai = a_Rs_slot(theta, k)) > 0
-            a_Rs[r] = theta.values[ai]
-        elseif use_rho
-            a_Rs[r] = rho_s_to_a_Rs(rho_val, Ps[j])
-        elseif have_ms_rs
-            P_s = Ps[j] * T(86400.0)
-            GM = T(GM_SUN_CGS) * M_s
-            a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-            a_Rs[r] = a_cm / (R_s * T(R_SUN_CM))
-        else
-            return (-1, nothing)
-        end
+        # a_Rs: sampled slot, else rho_s, else M_s+R_s, with the companion's
+        # mass in Kepler III (M_star + M_p): see `planet_geometry`.
+        a_Rs[r] = planet_a_Rs(theta, k, Ps[j])
+        isnan(a_Rs[r]) && return (-1, nothing)
     end
 
     v_sini = system_vsini(theta)

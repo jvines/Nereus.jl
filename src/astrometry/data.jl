@@ -216,6 +216,24 @@ Each epoch carries a 2×2 within-epoch RA-Dec covariance matrix
 The three epochs are treated as independent in time — orvara's
 likelihood does the same (Brandt 2021, Appendix Eq. 1).
 
+# Per-coordinate epochs
+
+The HGCA tabulates a central epoch per mission AND per coordinate
+(`epoch_ra_hip`, `epoch_dec_hip`, `epoch_ra_gaia`, `epoch_dec_gaia`): the
+epoch at which that coordinate's position is uncorrelated with its proper
+motion. They are not one epoch: across the catalogue the Hipparcos RA and Dec
+epochs differ by up to 1.2 yr, the Gaia ones by up to 1.3 yr (HIP 103836:
+1991.20 / 1991.39 and 2015.96 / 2016.11). The Hipparcos–Gaia proper motion is
+the positional difference between those epochs, coordinate by coordinate
+(Brandt 2018 §3; orvara and Octofitter model it the same way):
+
+    μα*,HG = (α*_Gaia(t_α,Gaia) − α*_Hip(t_α,Hip)) / (t_α,Gaia − t_α,Hip)
+
+and likewise in Dec with the Dec epochs. `epochs_ra` and `epochs_dec` carry
+them, as `(Hip, HG, Gaia)` in MJD with the HG entry the midpoint of the other
+two; [`hgca_log_likelihood`](@ref) fits the reflex to those epochs. `epochs`
+stays the one-per-quantity tuple used for plotting and `t_ref`.
+
 # Fields
 - `epochs::NTuple{3, Float64}`     : (Hip, HG, Gaia) MJD
 - `pmra::NTuple{3, Float64}`       : (Hip, HG, Gaia) μ_α* (mas/yr)
@@ -226,6 +244,8 @@ likelihood does the same (Brandt 2021, Appendix Eq. 1).
 - `plx::Float64`                   : Gaia parallax (mas)
 - `plx_err::Float64`               : 1σ parallax uncertainty (mas)
 - `hip_id::Int`                    : Hipparcos catalog ID
+- `epochs_ra::NTuple{3, Float64}`  : (Hip, HG, Gaia) central epochs of RA (MJD)
+- `epochs_dec::NTuple{3, Float64}` : (Hip, HG, Gaia) central epochs of Dec (MJD)
 
 # Invariants
 - Each 2×2 covariance matrix is symmetric positive-definite.
@@ -239,11 +259,18 @@ struct HGCAData
     plx::Float64
     plx_err::Float64
     hip_id::Int
+    epochs_ra::NTuple{3, Float64}
+    epochs_dec::NTuple{3, Float64}
 end
+
+# The pre-per-coordinate positional form: both coordinates at `epochs`.
+HGCAData(epochs, pmra, pmdec, cov_ep, plx, plx_err, hip_id) =
+    HGCAData(epochs, pmra, pmdec, cov_ep, plx, plx_err, hip_id,
+             NTuple{3, Float64}(Float64.(epochs)), NTuple{3, Float64}(Float64.(epochs)))
 
 """
     HGCAData(; epochs, pmra, pmdec, sigma_pmra, sigma_pmdec, corr_pmra_pmdec,
-              plx, plx_err, hip_id)
+              plx, plx_err, hip_id, epochs_ra = epochs, epochs_dec = epochs)
 
 Keyword constructor. Pass per-epoch 1σ errors and within-epoch
 RA-Dec correlations; the constructor builds the three 2×2 matrices.
@@ -252,6 +279,11 @@ RA-Dec correlations; the constructor builds the three 2×2 matrices.
 - `sigma_pmra::NTuple{3, Real}`     : (Hip, HG, Gaia) σ on pmra (mas/yr)
 - `sigma_pmdec::NTuple{3, Real}`    : (Hip, HG, Gaia) σ on pmdec (mas/yr)
 - `corr_pmra_pmdec::NTuple{3, Real}`: (Hip, HG, Gaia) ρ_RA-Dec ∈ [−1, 1]
+- `epochs_ra`, `epochs_dec`         : the catalogue's per-coordinate central
+                                      epochs (MJD), see the type's docstring.
+                                      Default to `epochs` for both
+                                      coordinates; [`load_hgca_row`](@ref)
+                                      fills them from the catalogue.
 
 Use `mjd_epochs(epochs_jyear)` to convert decimal-year epoch tuples to MJD.
 """
@@ -265,6 +297,8 @@ function HGCAData(;
     plx::Real,
     plx_err::Real,
     hip_id::Integer,
+    epochs_ra::Union{Nothing, NTuple{3, <:Real}} = nothing,
+    epochs_dec::Union{Nothing, NTuple{3, <:Real}} = nothing,
 )
     plx > 0     || throw(ArgumentError("plx must be > 0"))
     plx_err > 0 || throw(ArgumentError("plx_err must be > 0"))
@@ -278,15 +312,32 @@ function HGCAData(;
         Matrix{Float64}([σra^2          ρ*σra*σdec;
                          ρ*σra*σdec     σdec^2     ])
     end, 3)
+    ep  = NTuple{3, Float64}(Float64.(epochs))
+    era = epochs_ra  === nothing ? ep : NTuple{3, Float64}(Float64.(epochs_ra))
+    ede = epochs_dec === nothing ? ep : NTuple{3, Float64}(Float64.(epochs_dec))
+    _check_catalogue_epochs(era, ede, 1, 3, "HGCAData")
     return HGCAData(
-        NTuple{3, Float64}(Float64.(epochs)),
+        ep,
         NTuple{3, Float64}(Float64.(pmra)),
         NTuple{3, Float64}(Float64.(pmdec)),
         cov_eps,
         Float64(plx),
         Float64(plx_err),
         Int(hip_id),
+        era, ede,
     )
+end
+
+# The per-coordinate epochs set the divisor of a positional-difference proper
+# motion, so they must be finite and the two ends of that difference distinct.
+function _check_catalogue_epochs(era, ede, i0::Int, i1::Int, who::String)
+    (all(isfinite, era) && all(isfinite, ede)) ||
+        throw(ArgumentError("$who: epochs_ra / epochs_dec must be finite"))
+    (era[i1] != era[i0] && ede[i1] != ede[i0]) || throw(ArgumentError(
+        "$who: the epochs at the two ends of a positional difference coincide " *
+        "(epochs_ra[$i0] = $(era[i0]), epochs_ra[$i1] = $(era[i1]), " *
+        "epochs_dec[$i0] = $(ede[i0]), epochs_dec[$i1] = $(ede[i1]))"))
+    return nothing
 end
 
 """
@@ -744,6 +795,167 @@ function iad_for_inst(d::IADData, m::Integer)
 end
 
 """
+    clip_transit_outliers(iad; nsigma = 5.0, psi_tol = 1e-4, min_ccds = 3,
+                          label = "", verbose = true) -> (iad_clean, report)
+
+Reject along-scan abscissae that disagree with the other CCDs of their own
+field-of-view transit. Opt-in; `iad` itself is never modified.
+
+# Why within a transit, and only there
+
+Gaia epoch astrometry is per CCD: one field-of-view transit is 8-9 abscissae
+read ~5 s apart (`grp_head`), at one scan angle to 3e-5 rad and one parallax
+factor. Across those 40 s nothing the model contains can move -- a 2 mas
+reflex on an 84 d orbit shifts by 1e-4 mas, a 600 mas/yr proper motion by
+1e-3 mas -- so the CCDs of one transit are repeated measurements of a single
+along-scan coordinate, and an outlier among them is identifiable WITHOUT any
+orbit or astrometric model. That makes this safe for exactly the case a model
+clip is not: a few-mas wobble. A clip against a no-orbit five-parameter
+solution flags the wobble itself; this cannot see it.
+
+Measured on the DR4 pre-release: HD 114762's 63 transits have a within-
+transit χ²/dof of 9.8, the same excess its orbit fit shows (χ²/N ≈ 9.6) --
+the excess is CCDs disagreeing with their own transit, not the orbit. One
+transit scatters by ±5 mas across its CCDs and five more have a single CCD
+0.6-5.6 mas off. Gaia-4: 1.38 within transits, one CCD 1.0 mas off.
+
+# The rule
+
+For each transit of at least `min_ccds` abscissae whose scan angles agree to
+`psi_tol` rad (Hipparcos IAD records sharing an epoch are different scans:
+on HIP 64426 their scan angles differ by 1e-4 to 1e-2 rad, so none of its
+records is tested):
+
+1. Take the transit median `c` of the abscissae.
+2. Flag CCD `j` if `|a_j − c| > nsigma · σ_j`, `σ_j` its reported error.
+3. If the flagged CCDs are not a strict minority, there is no consensus on
+   where the star was and the WHOLE transit is rejected.
+
+Before step 1 each abscissa is moved to its transit head's scan angle,
+`a_j − η⊥_j · Δψ_j`, where `η⊥` is the across-scan position from a no-orbit
+five-parameter fit of the instrument. That term is ≤ 0.017 mas on HD 114762
+(582 mas/yr) but reaches several tenths of a mas for a Barnard's-star proper
+motion, which would otherwise read as an outlier. The fit only supplies that
+geometric correction: an orbit it misses by a few mas changes it by 1e-4 mas.
+
+`nsigma = 5`: with ~10³ abscissae per source, Gaussian errors give ~6e-4
+false rejections per source; with the reported errors ~15% low (both DR4
+sources above, outliers removed) it is still 4.3 true σ, ~0.015 per source.
+
+# Report
+
+`report` is a NamedTuple: `n_in`, `n_rejected`, `nsigma`; per rejected
+abscissa (indices into the INPUT `iad`) `index`, `t`, `inst`, `transit` (the
+transit's index, in order, within its instrument), `ccd` (position within the
+transit), `deviation` (mas, from the transit median), `z` (`deviation/σ`) and
+`whole_transit`; and `n_transits_tested`, `n_transits_rejected`. With
+`verbose` the same goes to the log, one line per rejected abscissa.
+
+# Cost of the alternatives
+
+A heavy-tailed likelihood (Student-t) or a good/bad mixture per abscissa would
+not throw anything away, but either breaks the analytic marginalisation of the
+catalogue solution: the integral over `q` is no longer Gaussian, so `q` (4 to
+6 parameters, strongly correlated with the orbit) would have to be sampled or
+Laplace-approximated on every call, plus an outlier fraction and scale per
+instrument. Both also judge outliers against the orbit model rather than
+against the transit's own CCDs.
+"""
+function clip_transit_outliers(iad::IADData; nsigma::Real = 5.0, psi_tol::Real = 1e-4,
+                               min_ccds::Int = 3, label::AbstractString = "",
+                               verbose::Bool = true)
+    nsigma > 0 || throw(ArgumentError("nsigma must be positive, got $nsigma"))
+    min_ccds >= 3 || throw(ArgumentError(
+        "min_ccds must be at least 3: with two CCDs that disagree there is no " *
+        "telling which one is wrong"))
+    n = n_iad(iad)
+
+    # Across-scan position per abscissa, from a no-orbit five-parameter fit of
+    # each instrument. Only ever multiplied by the 3e-5 rad scan-angle drift
+    # inside a transit, so its own error does not matter (see docstring).
+    across = zeros(n)
+    for m in 1:n_iad_inst(iad)
+        idx = findall(==(m), iad.inst)
+        sw  = 1 ./ iad.abscissa_err[idx]
+        pmf = iad.pm_factor[idx]
+        X = hcat(iad.sinpsi[idx], iad.cospsi[idx], iad.parallax_factor[idx],
+                 iad.sinpsi[idx] .* pmf, iad.cospsi[idx] .* pmf)
+        q = (sw .* X) \ (sw .* iad.abscissa[idx])
+        all(isfinite, q) || continue
+        @inbounds for (k, j) in enumerate(idx)
+            Δα = q[1] + q[4] * pmf[k]
+            Δδ = q[2] + q[5] * pmf[k]
+            across[j] = Δα * iad.cospsi[j] - Δδ * iad.sinpsi[j]
+        end
+    end
+
+    rej = Int[]; ccd = Int[]; trn = Int[]; dev = Float64[]; zs = Float64[]
+    whole = Bool[]
+    n_tested = 0; n_whole = 0
+    transit_no = zeros(Int, n_iad_inst(iad))
+    j = 1
+    while j <= n
+        h = iad.grp_head[j]
+        k = j
+        while k < n && iad.grp_head[k + 1] == h
+            k += 1
+        end
+        g = j:k
+        m = iad.inst[j]
+        transit_no[m] += 1
+        j = k + 1
+        length(g) >= min_ccds || continue
+        dψ = [rem2pi(iad.psi[i] - iad.psi[h], RoundNearest) for i in g]
+        maximum(abs, dψ) <= psi_tol || continue
+        n_tested += 1
+        a = [iad.abscissa[i] - across[i] * dψ[ii] for (ii, i) in enumerate(g)]
+        c = median(a)
+        d = a .- c
+        z = d ./ iad.abscissa_err[g]
+        bad = abs.(z) .> nsigma
+        any(bad) || continue
+        all_out = 2 * count(!, bad) <= length(g)       # no strict majority left
+        all_out && (n_whole += 1)
+        for (ii, i) in enumerate(g)
+            (bad[ii] || all_out) || continue
+            push!(rej, i); push!(ccd, ii); push!(trn, transit_no[m])
+            push!(dev, d[ii]); push!(zs, z[ii]); push!(whole, all_out)
+        end
+    end
+
+    report = (n_in = n, n_rejected = length(rej), nsigma = Float64(nsigma),
+              index = rej, t = iad.t[rej], inst = iad.inst[rej], transit = trn,
+              ccd = ccd, deviation = dev, z = zs, whole_transit = whole,
+              n_transits_tested = n_tested, n_transits_rejected = n_whole)
+
+    if verbose
+        tag = isempty(label) ? "" : " ($label)"
+        lines = ["MJD $(round(report.t[r]; digits = 5))  inst $(report.inst[r])  " *
+                 "transit $(report.transit[r]) CCD $(report.ccd[r])  " *
+                 "Δ = $(round(report.deviation[r]; digits = 3)) mas " *
+                 "($(round(report.z[r]; digits = 1))σ)" *
+                 (report.whole_transit[r] ? "  [whole transit]" : "")
+                 for r in eachindex(rej)]
+        @info "clip_transit_outliers$tag: rejected $(length(rej)) of $n abscissae " *
+              "at $(nsigma)σ from their transit median ($n_tested transits tested, " *
+              "$n_whole rejected whole)" * (isempty(lines) ? "" : "\n  " * join(lines, "\n  "))
+    end
+
+    isempty(rej) && return iad, report
+    keep = setdiff(1:n, rej)
+    for m in 1:n_iad_inst(iad)
+        any(i -> iad.inst[i] == m, keep) || throw(ArgumentError(
+            "clip_transit_outliers rejected every abscissa of instrument $m"))
+    end
+    clean = IADData(; t = iad.t[keep], abscissa = iad.abscissa[keep],
+                    abscissa_err = iad.abscissa_err[keep], psi = iad.psi[keep],
+                    parallax_factor = iad.parallax_factor[keep],
+                    pm_factor = iad.pm_factor[keep], inst = iad.inst[keep],
+                    ref_params = iad.ref_params, abscissa_kind = iad.abscissa_kind)
+    return clean, report
+end
+
+"""
     GOSTData
 
 Gaia Generic Object Slope-angle Tracker (GOST) — the Gaia mission
@@ -833,6 +1045,53 @@ the fit.
 n_gost(d::GOSTData) = length(d.t)
 
 """
+    GAIA_DR2_WINDOW, GAIA_DR3_WINDOW
+
+The spans of Gaia observations each release's astrometry was fitted to, as
+`(start, end)` in MJD: DR2 2014-07-25 10:30 to 2016-05-23 11:35 UTC
+(Lindegren et al. 2018), EDR3/DR3 2014-07-25 10:30 to 2017-05-28 08:44 UTC
+(Lindegren et al. 2021). A GOST scan plan covers the whole mission, so a
+release's five-parameter solution is reproduced from the transits inside its
+window only: the `window` keyword of `gost_5param_fit` in the
+likelihoods (HGCA, G23H, Gaia DR3 + IAD), `_gost_window` in the plots.
+"""
+const GAIA_DR2_WINDOW = (56863.4375, 57531.4826)
+const GAIA_DR3_WINDOW = (56863.4375, 57901.3639)
+
+"""
+    HIPPARCOS_WINDOW
+
+The span of the Hipparcos mission's observations, `(start, end)` in MJD: the
+Julian years 1989.84 to 1993.20. Every unrejected record of the 2007
+reduction's intermediate data (the `ResRec_JavaTool_2014` bundle
+[`fetch_hip_iad`](@ref) reads, all sources) lies between EPOCH −1.4049 and
++1.9458 yr from J1991.25, i.e. 1989.8451 to 1993.1958; the window is that
+range rounded outwards. The Hipparcos epoch of the HGCA and G23H models is a
+five-parameter fit through the scans inside it — which also keeps the Gaia
+transits of a merged Hipparcos + Gaia `IADData` out of that fit.
+"""
+const HIPPARCOS_WINDOW = ((1989.84 - 2000.0) * 365.25 + 51544.5,
+                          (1993.20 - 2000.0) * 365.25 + 51544.5)
+
+# Scans of `t` inside `win`, both ends inclusive.
+_n_in_window(t::AbstractVector{<:Real}, win::Tuple{Real, Real}) =
+    count(x -> win[1] <= x <= win[2], t)
+
+"""
+    _gost_window(gost, (t0, t1)) -> GOSTData or nothing
+
+The transits of `gost` with `t0 ≤ t ≤ t1`, or `nothing` when fewer than five
+fall inside: a five-parameter fit needs five, and `gost_5param_fit` returns
+zeros below that, which would read as a real projection.
+"""
+function _gost_window(gost::GOSTData, win::Tuple{Real, Real})
+    keep = (gost.t .>= win[1]) .& (gost.t .<= win[2])
+    count(keep) >= 5 || return nothing
+    return GOSTData(gost.t[keep], gost.psi[keep], gost.parallax_factor[keep],
+                    gost.along_scan_pos[keep])
+end
+
+"""
     G23HData
 
 Thompson+ 2026 G23H ("Gaia DR2/DR3 + Hipparcos") joint catalog row,
@@ -842,11 +1101,28 @@ acceleration analysis (arXiv:2602.00235).
 G23H tabulates **five proper-motion measurements** per source instead
 of HGCA's three:
 
-  1. Hipparcos epoch (~1991.25)
-  2. Hipparcos→Gaia long-baseline (~2004.6)
-  3. Gaia DR2 (~2015.0)
-  4. Gaia DR3−DR2 derived (mean ~2015.5)
+  1. Hipparcos epoch (~1991.25) — adopted from the HGCA
+  2. Hipparcos→Gaia long-baseline (~2004) — adopted from the HGCA
+  3. Gaia DR2 (~2015.5)
+  4. Gaia DR3−DR2 scaled position difference (~2015.75)
   5. Gaia DR3 (~2016.0)
+
+# What each one is, and at which epochs
+
+Thompson+ 2026 §II–III and Table 1, and Octofitter's `G23HObs`, which is the
+catalogue's reference forward model:
+
+  - 1, 3, 5 are the proper motions of five-parameter fits over the
+    Hipparcos, DR2 and DR3 observations.
+  - 2 is `(α*_DR3(t_DR3) − α*_Hip(t_Hip)) / (t_DR3 − t_Hip)`, per coordinate.
+  - 4 is `(α*_DR3(t_DR3) − α*_DR2(t_DR2)) / (t_DR3 − t_DR2)`, per coordinate.
+
+Every `t` there is the catalogue's CENTRAL epoch of that release and
+coordinate (`epoch_ra_hip`, `epoch_dec_hip`, `epoch_ra_dr2`, …, the epochs
+the paper propagates both catalogues to before differencing), not the DR2
+and DR3 reference epochs J2015.5 and J2016.0. Pass them as `epochs_ra` and
+`epochs_dec`, ordered like `epochs`; the HG and DR3−DR2 entries of those are
+not used by the model (their divisors come from the end-point epochs).
 
 Crucially, DR2 and DR3 share transit data — their PMs are correlated
 (estimated `ρ_{DR2,DR3}` from the ratio of matched transits). The
@@ -875,6 +1151,10 @@ to match the full Thompson+ 2026 likelihood):
 - `plx::Float64` — parallax (mas)
 - `plx_err::Float64` — 1σ on parallax (mas)
 - `hip_id::Int` — Hipparcos catalog ID
+- `epochs_ra::NTuple{5, Float64}` — central epochs of RA, ordered like
+  `epochs` (MJD): the catalogue's `epoch_ra_hip`, `epoch_ra_hg`,
+  `epoch_ra_dr2`, `epoch_ra_dr32`, `epoch_ra_dr3`
+- `epochs_dec::NTuple{5, Float64}` — the same for Dec
 
 # Invariants
 - `cov` is 10×10, symmetric, positive-definite.
@@ -888,15 +1168,29 @@ struct G23HData
     plx::Float64
     plx_err::Float64
     hip_id::Int
+    epochs_ra::NTuple{5, Float64}
+    epochs_dec::NTuple{5, Float64}
 end
 
+# The pre-per-coordinate positional form: both coordinates at `epochs`.
+G23HData(epochs, pmra, pmdec, cov, plx, plx_err, hip_id) =
+    G23HData(epochs, pmra, pmdec, cov, plx, plx_err, hip_id,
+             NTuple{5, Float64}(Float64.(epochs)), NTuple{5, Float64}(Float64.(epochs)))
+
 """
-    G23HData(; epochs, pmra, pmdec, cov, plx, plx_err, hip_id)
+    G23HData(; epochs, pmra, pmdec, cov, plx, plx_err, hip_id,
+               epochs_ra = epochs, epochs_dec = epochs)
 
 Keyword constructor. The caller passes a 10×10 covariance matrix
 already populated with within-epoch 2×2 blocks AND the DR2↔DR3 4×4
 cross-block (off-diagonal index pairs `(5:6, 9:10)` and `(9:10, 5:6)`
 under the `[pmra_1, pmdec_1, ..., pmra_5, pmdec_5]` ordering).
+
+`epochs_ra` / `epochs_dec` are the catalogue's per-coordinate central epochs
+(MJD; the catalogue tabulates Julian years, so `mjd_epochs` them). They set the
+reference epochs of the Hipparcos, DR2 and DR3 fits and the divisors of the
+two positional differences, so pass them whenever you have the catalogue row;
+both default to `epochs`.
 """
 function G23HData(;
     epochs::NTuple{5, <:Real},
@@ -906,6 +1200,8 @@ function G23HData(;
     plx::Real,
     plx_err::Real,
     hip_id::Integer,
+    epochs_ra::Union{Nothing, NTuple{5, <:Real}} = nothing,
+    epochs_dec::Union{Nothing, NTuple{5, <:Real}} = nothing,
 )
     plx > 0     || throw(ArgumentError("plx must be > 0"))
     plx_err > 0 || throw(ArgumentError("plx_err must be > 0"))
@@ -914,14 +1210,20 @@ function G23HData(;
     cov_sym = Symmetric(Matrix{Float64}(cov))
     isposdef(cov_sym) ||
         throw(ArgumentError("cov must be symmetric positive-definite"))
+    ep  = NTuple{5, Float64}(Float64.(epochs))
+    era = epochs_ra  === nothing ? ep : NTuple{5, Float64}(Float64.(epochs_ra))
+    ede = epochs_dec === nothing ? ep : NTuple{5, Float64}(Float64.(epochs_dec))
+    _check_catalogue_epochs(era, ede, 1, 5, "G23HData")   # Hip → DR3
+    _check_catalogue_epochs(era, ede, 3, 5, "G23HData")   # DR2 → DR3
     return G23HData(
-        NTuple{5, Float64}(Float64.(epochs)),
+        ep,
         NTuple{5, Float64}(Float64.(pmra)),
         NTuple{5, Float64}(Float64.(pmdec)),
         Matrix{Float64}(cov_sym),
         Float64(plx),
         Float64(plx_err),
         Int(hip_id),
+        era, ede,
     )
 end
 

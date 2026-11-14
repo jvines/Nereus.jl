@@ -88,7 +88,7 @@ function summarize_fitted(chains, params::Params)
     stats = Vector{Pair{String, ParamStats}}()
 
     chain_names = Set(names(chains, :parameters))
-    for name in params.layout.unfrozen_names
+    for name in reported_param_names(params)
         sym = Symbol(name)
         sym in chain_names || continue
         samp = _draws(chains, sym)
@@ -104,24 +104,26 @@ end
 
 """
     summarize_derived(chains, params; M_s=nothing, R_s=nothing,
-                       T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0)
+                       T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0,
+                       t_ref=nothing)
 
 Compute summary statistics for derived parameters (eccentricity,
-omega, msini, radius, etc.) using `compute_derived`.
+omega, msini, radius, etc.) using `compute_derived`. `t_ref` (the data's
+`data.t_ref`) lets a transit-phase fit report `Mo_deg`; see `compute_derived`.
 
 Returns an ordered list of pairs: name => ParamStats.
 """
 function summarize_derived(chains, params::Params;
                             M_s=nothing, R_s=nothing,
                             T_eff=nothing, J_mag=nothing,
-                            K_mag=nothing, Ab=0.0)
+                            K_mag=nothing, Ab=0.0, t_ref=nothing)
     # Fall back to config.M_s if available
     if M_s === nothing && !isnan(params.config.M_s)
         M_s = params.config.M_s
     end
     derived_vec = compute_derived(chains, params;
                                    M_s=M_s, R_s=R_s, T_eff=T_eff,
-                                   J_mag=J_mag, K_mag=K_mag, Ab=Ab)
+                                   J_mag=J_mag, K_mag=K_mag, Ab=Ab, t_ref=t_ref)
     stats = Vector{Pair{String, ParamStats}}()
 
     for dp in derived_vec
@@ -894,9 +896,49 @@ Returns `(; pass, worst_rhat, worst_rhat_param, min_ess, min_ess_param, n_fail, 
 function convergence_report(chains, n_walkers::Int; io::IO=stdout,
                              params=nothing, model_params=nothing,
                              rhat_max::Real=1.1, ess_min::Real=400)
+    st = _convergence_stats(chains, n_walkers; params, model_params)
+    if st.failure !== nothing
+        println(io, "convergence_report: ", st.failure)
+        return (; pass=false)
+    end
+    (; keep, rh, es, fr, gate_ess, n_fixed, n_inactive, nsteps) = st
+    isempty(keep) && (println(io, "convergence_report: nothing to assess"); return (; pass=true, n_fail=0, n_fixed))
+    # R̂ gates every assessed param; ESS gates only the always/dominant ones.
+    bad = [i for i in eachindex(keep)
+           if !(isfinite(rh[i]) && rh[i] ≤ rhat_max &&
+                (!gate_ess[i] || (isfinite(es[i]) && es[i] ≥ ess_min)))]
+    wi = argmax([isfinite(x) ? x : -Inf for x in rh])
+    mi = argmin([gate_ess[i] && isfinite(es[i]) ? es[i] : Inf for i in eachindex(es)])
+    pass = isempty(bad)
+    println(io, "="^64)
+    @printf(io, "  Convergence (active-conditional split-R̂ + bulk-ESS): %d walkers × %d steps\n",
+            n_walkers, nsteps)
+    @printf(io, "  %d assessed (%d fixed, %d inactive-skipped)\n", length(keep), n_fixed, n_inactive)
+    @printf(io, "  worst R̂ = %.3f (%s)    min ESS = %.0f (%s, gated params)\n",
+            rh[wi], string(keep[wi]), es[mi], string(keep[mi]))
+    if !pass
+        @printf(io, "  %d param(s) fail (R̂ ≤ %.2f all; ESS ≥ %.0f for occupancy ≥ 0.5):\n",
+                length(bad), rhat_max, ess_min)
+        for i in bad[1:min(8, length(bad))]
+            @printf(io, "    %-22s R̂=%.3f  ESS=%.0f  (occ=%.2f)\n",
+                    string(keep[i]), rh[i], es[i], fr[i])
+        end
+        length(bad) > 8 && @printf(io, "    … and %d more\n", length(bad) - 8)
+    end
+    @printf(io, "  CONVERGENCE: %s\n", pass ? "PASS — science-grade" : "FAIL — NOT science-grade")
+    println(io, "="^64)
+    return (; pass, worst_rhat=rh[wi], worst_rhat_param=keep[wi],
+            min_ess=es[mi], min_ess_param=keep[mi], n_fail=length(bad), n_fixed)
+end
+
+# The numbers behind `convergence_report`, without the printing: per assessed
+# parameter the rank-normalised split-R̂, bulk and tail ESS, the fraction of
+# draws it is defined on, and whether its ESS gates. The live convergence gate
+# of `sample_transdim_pt_emcee` reads the same statistics.
+function _convergence_stats(chains, n_walkers::Int; params=nothing, model_params=nothing)
     allp = names(chains, :parameters)
     pnames = params === nothing ? allp : [Symbol(p) for p in params if Symbol(p) in allp]
-    isempty(pnames) && (println(io, "convergence_report: no parameters"); return (; pass=false))
+    isempty(pnames) && return (; failure = "no parameters")
     # Layout detection: a flat trans-dim chain stores one chain (size(_,3)==1)
     # with WALKER as the FAST index in the per-param vec; a native ensemble chain
     # stores (iter × param × walker) with walker as the SLOW index. Handle both.
@@ -910,8 +952,7 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
     elseif nflat % n_walkers == 0
         nsteps = nflat ÷ n_walkers; walker_fast = true     # flat single-chain
     else
-        println(io, "convergence_report: $nflat draws not divisible by n_walkers=$n_walkers")
-        return (; pass=false)
+        return (; failure = "$nflat draws not divisible by n_walkers=$n_walkers")
     end
     # per-walker flat indices into the length-`nflat` vec, layout-aware.
     _widx(w) = walker_fast ? (w:n_walkers:nflat) : (((w - 1) * nsteps + 1):(w * nsteps))
@@ -980,7 +1021,7 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
         return M
     end
 
-    keep=Symbol[]; rh=Float64[]; es=Float64[]; fr=Float64[]; gate_ess=Bool[]
+    keep=Symbol[]; rh=Float64[]; es=Float64[]; et=Float64[]; fr=Float64[]; gate_ess=Bool[]
     n_fixed=0; n_inactive=0
     # Classify every parameter, then compute R-hat and ESS of the assessed ones
     # in one batch (`_rank_diag_batch`): each sorted once on a bounded number of
@@ -1022,7 +1063,7 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
     end
     res = _rank_diag_batch(srcs, :split2; n_max = nflat, src_bytes = 16)
     for (i, r) in zip(at, res)
-        pre[i] = (pre[i]..., (r.rhat_rank, r.ess_bulk))
+        pre[i] = (pre[i]..., (r.rhat_rank, r.ess_bulk), r.tail_ok ? r.ess_tail : NaN)
     end
     for (p, pr) in zip(pnames, pre)
         kind = pr[1]
@@ -1030,41 +1071,16 @@ function convergence_report(chains, n_walkers::Int; io::IO=stdout,
         kind === :inactive && (n_inactive += 1; continue)
         f = pr[2]
         r, e = pr[3]
+        t = length(pr) >= 4 ? pr[4] : NaN
         if kind === :all
-            push!(keep,p); push!(rh,r); push!(es,e); push!(fr,1.0); push!(gate_ess,true)
+            push!(keep,p); push!(rh,r); push!(es,e); push!(et,t); push!(fr,1.0); push!(gate_ess,true)
         else
-            push!(keep,p); push!(rh,r); push!(es,e); push!(fr,f)
+            push!(keep,p); push!(rh,r); push!(es,e); push!(et,t); push!(fr,f)
             # ESS-gate only well-sampled components; ESS via active-masking is
             # unreliable for sporadically-active (disfavoured) models, and a
             # disfavoured model needn't reach ess_min — only MIX (R̂).
             push!(gate_ess, f ≥ 0.5)
         end
     end
-    isempty(keep) && (println(io, "convergence_report: nothing to assess"); return (; pass=true, n_fail=0, n_fixed))
-    # R̂ gates every assessed param; ESS gates only the always/dominant ones.
-    bad = [i for i in eachindex(keep)
-           if !(isfinite(rh[i]) && rh[i] ≤ rhat_max &&
-                (!gate_ess[i] || (isfinite(es[i]) && es[i] ≥ ess_min)))]
-    wi = argmax([isfinite(x) ? x : -Inf for x in rh])
-    mi = argmin([gate_ess[i] && isfinite(es[i]) ? es[i] : Inf for i in eachindex(es)])
-    pass = isempty(bad)
-    println(io, "="^64)
-    @printf(io, "  Convergence (active-conditional split-R̂ + bulk-ESS): %d walkers × %d steps\n",
-            n_walkers, nsteps)
-    @printf(io, "  %d assessed (%d fixed, %d inactive-skipped)\n", length(keep), n_fixed, n_inactive)
-    @printf(io, "  worst R̂ = %.3f (%s)    min ESS = %.0f (%s, gated params)\n",
-            rh[wi], string(keep[wi]), es[mi], string(keep[mi]))
-    if !pass
-        @printf(io, "  %d param(s) fail (R̂ ≤ %.2f all; ESS ≥ %.0f for occupancy ≥ 0.5):\n",
-                length(bad), rhat_max, ess_min)
-        for i in bad[1:min(8, length(bad))]
-            @printf(io, "    %-22s R̂=%.3f  ESS=%.0f  (occ=%.2f)\n",
-                    string(keep[i]), rh[i], es[i], fr[i])
-        end
-        length(bad) > 8 && @printf(io, "    … and %d more\n", length(bad) - 8)
-    end
-    @printf(io, "  CONVERGENCE: %s\n", pass ? "PASS — science-grade" : "FAIL — NOT science-grade")
-    println(io, "="^64)
-    return (; pass, worst_rhat=rh[wi], worst_rhat_param=keep[wi],
-            min_ess=es[mi], min_ess_param=keep[mi], n_fail=length(bad), n_fixed)
+    return (; failure = nothing, keep, rh, es, et, fr, gate_ess, n_fixed, n_inactive, nsteps)
 end

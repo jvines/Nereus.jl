@@ -3,9 +3,11 @@
 # `RelAstromData`, `HGCAData`, and `Data.t_rv`.
 #
 # Conventions:
-#   - Sky-plane axes: x = ΔRA·cos δ (mas), y = Δδ (mas).
+#   - Sky-plane axes: x = ΔRA·cos δ, y = Δδ, in mas or μas (see below).
 #     Standard astronomy convention is north up, east left, so the
 #     RA axis is *flipped* (RA increases to the LEFT).
+#   - Angle units: data are mas (mas/yr); each figure's axis groups are read
+#     in μas (μas/yr) when their extent is under 1 mas (`_angle_units!`).
 #   - Posterior fans: `n_draws` random samples drawn from the chain;
 #     each draw gets its own orbit traced over one full period.
 #   - The host star sits at the origin of every sky-plane plot.
@@ -43,9 +45,9 @@ function _theta_from_chain_row(chains, params, idx::Int;
 end
 
 """
-    _chain_cols(chains, params) -> Vector{Tuple{String,Vector{Float64}}}
+    _chain_cols(chains, params) -> Vector{Tuple{String, <:AbstractVector{Float64}}}
 
-Every unfrozen parameter's flat column, materialised ONCE.
+Every unfrozen parameter's flat column, looked up ONCE.
 
 `chains[sym]` is an AxisArray view, so `_draws(chains, sym)` COPIES the whole
 column. Doing that inside `_theta_from_chain_row` — which is called once per
@@ -57,16 +59,17 @@ getting there.
 
 Hoist it beside `tdc` and pass both when calling in a loop. The default argument
 keeps a bare single-row call working exactly as before.
+
+The columns are views into the chain (`_draws_view`), not copies. Copied, every
+call materialised the whole chain to read the rows it uses: through the default
+argument above, `_theta_best_lp` copied every column of a joint fit to read ONE
+row (23 columns x 5.8M draws = 1 GB), and `plot_orbit_skyplane` did the same
+with no fan to draw.
 """
 function _chain_cols(chains, params)
     chain_names = Set(names(chains, :parameters))
-    cols = Tuple{String,Vector{Float64}}[]
-    for name in params.layout.unfrozen_names
-        sym = Symbol(name)
-        sym in chain_names || continue
-        push!(cols, (name, _draws(chains, sym)))
-    end
-    return cols
+    return [(name, _draws_view(chains, Symbol(name)))
+            for name in params.layout.unfrozen_names if Symbol(name) in chain_names]
 end
 
 """
@@ -86,7 +89,7 @@ function _theta_median(chains, params; active_idx = nothing)
     for name in params.layout.unfrozen_names
         sym = Symbol(name)
         sym in chain_names || continue
-        vals = _draws(chains, sym)
+        vals = _draws_view(chains, sym)
         if active_idx !== nothing
             vals = vals[active_idx]
         end
@@ -103,10 +106,16 @@ The draw with the highest finite `:lp` among `idxs` (all draws when
 """
 function _best_lp_row(chains, idxs = nothing)
     (:lp in Set(names(chains, :parameters))) || return nothing
-    lp = _draws(chains, :lp)
-    cand = filter(i -> isfinite(lp[i]), idxs === nothing ? (1:length(lp)) : idxs)
-    isempty(cand) && return nothing
-    return cand[argmax(@view lp[cand])]
+    lp = _draws_view(chains, :lp)
+    # The first maximum, as `argmax` over the finite candidates picked it, without
+    # copying the column or collecting the candidates.
+    best = nothing
+    for i in (idxs === nothing ? (1:length(lp)) : idxs)
+        v = lp[i]
+        isfinite(v) || continue
+        (best === nothing || isless(lp[best], v)) && (best = i)
+    end
+    return best
 end
 
 """
@@ -156,7 +165,7 @@ function _planet_draw(chains, params, planet_idx::Int; bf_cutoff::Real)
     tdc = _td_cols(chains, params)
     present = _planet_present_idx(chains, params, planet_idx; tdc = tdc)
     isempty(present) && return nothing
-    pool = intersect(present, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
+    pool = _sorted_intersect(present, _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff))
     isempty(pool) && (pool = present)
     return _theta_best_lp(chains, params; active_idx = pool), pool
 end
@@ -197,6 +206,25 @@ its orbit.
 @inline function _orbit_phase_at(t::Real, t_peri::Real, P::Real)
     return mod((t - t_peri) / P, 1.0)
 end
+
+# Axis labels of the astrometric angle axes, as functions of the unit string
+# ("mas", "μas", "mas/yr", "μas/yr") `_angle_units!` settles on.
+_sky_xlabel(u) = rich("ΔRA·cos δ ($u)")
+_sky_ylabel(u) = "Δδ ($u)"
+_abscissa_label(u) = "abscissa residual ($u)"
+_sep_label(u) = "Separation ($u)"
+_dsep_label(u) = "Δρ ($u)"
+_dmu_ra_label(u) = rich("Δμ", subscript("α*"), " ($u)")
+_dmu_dec_label(u) = rich("Δμ", subscript("δ"), " ($u)")
+_reflex_ra_label(u) = rich("μ", subscript("α*"), " reflex ($u)")
+_reflex_dec_label(u) = rich("μ", subscript("δ"), " reflex ($u)")
+
+"""
+    _sky_units!(ax)
+
+Unit for a sky-plane axis: x and y share one, read from the final limits.
+"""
+_sky_units!(ax) = _angle_units!((ax, :x, _sky_xlabel), (ax, :y, _sky_ylabel))
 
 """
     _flip_xaxis!(ax)
@@ -305,8 +333,8 @@ function plot_orbit_skyplane(chains, params, data;
         fig = Figure(; size = figsize)
         ga = fig[1, 1] = GridLayout()
         ax = Axis(ga[1, 1];
-                   xlabel = rich("ΔRA·cos δ (mas)"),
-                   ylabel = "Δδ (mas)",
+                   xlabel = _sky_xlabel("mas"),
+                   ylabel = _sky_ylabel("mas"),
                    aspect = DataAspect())
         _flip_xaxis!(ax)
 
@@ -483,6 +511,8 @@ function plot_orbit_skyplane(chains, params, data;
             resize!(fig.scene, round(Int, pw + 190), round(Int, ph + 150))
         end
 
+        _sky_units!(ax)
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models",
@@ -514,7 +544,9 @@ active set), `Δη_orbit_j` the along-scan reflex of every astrometrically
 active companion, and `q_opt` the catalogue correction the marginalisation
 fits — all through the likelihood's own helpers (`_iad_oc`), so χ²/N is
 `χ²_min / N` of `iad_log_likelihood`. Per-transit `σ_j` is shown as
-errorbars.
+errorbars — the error the likelihood used, i.e. `√(σ_j² + s_m²)` when the
+instrument carries a `sigma_iad_<name>` jitter, as RV error bars include
+`sigma_<inst>`.
 
 Panels:
   top    — residual vs ψ (scan position angle, rad)
@@ -547,10 +579,10 @@ function plot_iad_residuals(chains, params, data;
         fig = Figure(; size = figsize)
         ax_psi = Axis(fig[1, 1];
                        xlabel = "ψ (rad)",
-                       ylabel = "abscissa residual (mas)")
+                       ylabel = _abscissa_label("mas"))
         ax_t   = Axis(fig[2, 1];
                        xlabel = "MJD",
-                       ylabel = "abscissa residual (mas)")
+                       ylabel = _abscissa_label("mas"))
 
         # The max-lp draw of the best-fit cluster, with its trans-dim active
         # set. NOT the per-parameter median: on Gaia-4 that sits off the ridge
@@ -562,8 +594,9 @@ function plot_iad_residuals(chains, params, data;
         # The likelihood's own residuals (`_iad_oc`): every active companion's
         # reflex and the sampled parallax subtracted, the catalogue solution
         # marginalised. So the χ²/N below is χ²_min/N of the fit.
-        resid = _iad_oc(theta, data).oc
-        σs = iad.abscissa_err
+        fit = _iad_oc(theta, data)
+        resid = fit.oc
+        σs = fit.σ          # jitter included: what the likelihood weighted by
 
         # Marker shape carries the instrument; colour is already spent on time.
         _inst_marker = (:circle, :rect, :utriangle, :diamond, :cross, :star5)
@@ -607,6 +640,8 @@ function plot_iad_residuals(chains, params, data;
                   limits = (0.0, t_span_iad),
                   label = "MJD − $(round(Int, t_min_iad))",
                   labelsize = 16, ticklabelsize = 14)
+
+        _angle_units!([ax_psi, ax_t]; dims = :y, label = _abscissa_label)
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
@@ -719,10 +754,10 @@ Hipparcos–Gaia / Gaia): `Δμ = μ_obs − μ_model − μ_b` in α* (top) and
 fit's, not an approximation of it:
 
   - `μ_model` is `_hgca_model_pm`, the model `hgca_log_likelihood` uses
-    (every active companion's reflex; the Hipparcos–Gaia epoch as the mean
-    reflex velocity over the baseline; the Gaia epoch through GOST when scan
-    plans are supplied), at the max-lp draw in which companion `planet_idx`
-    exists;
+    (every active companion's reflex; the Hipparcos epoch a fit through the
+    Hipparcos scans, the Gaia epoch one through the DR3 GOST window, the
+    Hipparcos–Gaia epoch their positional difference), at the max-lp draw
+    in which companion `planet_idx` exists;
   - `μ_b` is the barycentric PM, analytically marginalized with the same
     2×2 within-epoch covariances as the likelihood.
 
@@ -756,9 +791,9 @@ function plot_pm_residuals(chains, params, data;
         theta_med = first(drawn)
 
         # The model PM the likelihood compares with the catalogue: EVERY
-        # active companion's reflex, the Hipparcos–Gaia epoch as the mean
-        # reflex velocity over the baseline, the Gaia epoch through GOST when
-        # scan plans are supplied (`_hgca_model_pm`, shared with
+        # active companion's reflex, the Hipparcos and Gaia epochs as fits
+        # through their scans, the Hipparcos–Gaia epoch as the positional
+        # difference between those fits (`_hgca_model_pm`, shared with
         # `hgca_log_likelihood`). This figure used to take planet
         # `planet_idx`'s instantaneous reflex alone, so its residuals and χ²
         # were not the fit's whenever there were other companions or the
@@ -788,9 +823,9 @@ function plot_pm_residuals(chains, params, data;
         σ_dec_ep = Float64[sqrt(hgca.cov_ep[k][2, 2]) for k in 1:3]
 
         ax_ra  = Axis(fig[1, 1];
-                       ylabel = rich("Δμ", subscript("α*"), " (mas/yr)"))
+                       ylabel = _dmu_ra_label("mas/yr"))
         ax_dec = Axis(fig[2, 1]; xlabel = "MJD",
-                                   ylabel = rich("Δμ", subscript("δ"), " (mas/yr)"))
+                                   ylabel = _dmu_dec_label("mas/yr"))
         linkxaxes!(ax_ra, ax_dec)
         hidexdecorations!(ax_ra; grid = false, ticks = false)
 
@@ -832,6 +867,9 @@ function plot_pm_residuals(chains, params, data;
                   limits = (0.0, t_span),
                   label = "MJD − $(round(Int, t_min))",
                   labelsize = 16, ticklabelsize = 14)
+
+        _angle_units!((ax_ra, :y, u -> _dmu_ra_label(u * "/yr")),
+                      (ax_dec, :y, u -> _dmu_dec_label(u * "/yr")))
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
@@ -893,8 +931,8 @@ function plot_rv_astrom_phasefold(chains, params, data;
                       xlabel = "Phase",
                       ylabel = rich("RV (m s", superscript("-1"), ")"))
         ax_sky = Axis(fig[2, 1];
-                       xlabel = rich("ΔRA·cos δ (mas)"),
-                       ylabel = "Δδ (mas)",
+                       xlabel = _sky_xlabel("mas"),
+                       ylabel = _sky_ylabel("mas"),
                        aspect = DataAspect())
         _flip_xaxis!(ax_sky)
 
@@ -962,15 +1000,11 @@ function plot_rv_astrom_phasefold(chains, params, data;
         ph_fine = collect(range(-0.5, 0.5; length = 800))
         cred_idx = _credible_region_pool(chains, params, planet_idx;
                                           credmass = credmass)
-        band_idx = intersect(collect(active_idx), cred_idx)
+        band_idx = _sorted_intersect(active_idx, cred_idx)
         isempty(band_idx) && (band_idx = collect(active_idx))
         if !isempty(band_idx)
-            param_syms = names(chains, :parameters)
-            mat = Matrix{Float64}(undef, length(band_idx), length(param_syms))
-            for (j, sym) in enumerate(param_syms)
-                mat[:, j] = _draws(chains, sym)[band_idx]
-            end
-            ci_chains = MCMCChains.Chains(mat, param_syms)
+            # The band samples `band_idx` (`pool`), passed as indices rather
+            # than copied out as a sub-chain of every column.
             # PHASE ORIGIN. compute_ci_bands ignores fold_t0 and references
             # every draw to ITS OWN inferior conjunction Tc (deliberately — λ is
             # well determined where periastron is not). This panel, however,
@@ -979,10 +1013,10 @@ function plot_rv_astrom_phasefold(chains, params, data;
             # back on the panel's periastron axis; without this the band sits a
             # constant ~Δ in phase away from the curve it is meant to bracket.
             Δφ = (_planet_Tc(theta_med, data, planet_idx) - tp_med) / P_med
-            ci = compute_ci_bands(ci_chains, params, data,
+            ci = compute_ci_bands(chains, params, data,
                                    tp_med .+ ph_fine .* P_med;
                                    planet = planet_idx, n_draws = n_draws,
-                                   bf_cutoff = Inf,
+                                   pool = band_idx,
                                    fold_phase = ph_fine .- Δφ, fold_t0 = tp_med)
             band!(ax_rv, ph_fine, ci.lo3, ci.hi3; color = (NEREUS_COLORS.ci, CI_ALPHA_3SIGMA))
             band!(ax_rv, ph_fine, ci.lo2, ci.hi2; color = (NEREUS_COLORS.ci, CI_ALPHA_2SIGMA))
@@ -1117,6 +1151,8 @@ function plot_rv_astrom_phasefold(chains, params, data;
                 tellheight = true, tellwidth = false,
                 nbanks = 2)
 
+        _sky_units!(ax_sky)
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models",
@@ -1199,7 +1235,7 @@ function plot_relastrom_timeseries(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_sep = Axis(fig[1, 1]; ylabel = "Separation (mas)")
+        ax_sep = Axis(fig[1, 1]; ylabel = _sep_label("mas"))
         ax_pa  = Axis(fig[2, 1]; xlabel = "MJD",
                                   ylabel = "PA (deg)")
         linkxaxes!(ax_sep, ax_pa)
@@ -1305,6 +1341,8 @@ function plot_relastrom_timeseries(chains, params, data;
         axislegend(ax_sep; position = :rt, framevisible = false,
                     labelsize = 14)
 
+        _angle_units!([ax_sep]; dims = :y, label = _sep_label)
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models",
@@ -1348,7 +1386,7 @@ function plot_relastrom_residuals(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_sep = Axis(fig[1, 1]; ylabel = "Δρ (mas)")
+        ax_sep = Axis(fig[1, 1]; ylabel = _dsep_label("mas"))
         ax_pa  = Axis(fig[2, 1]; xlabel = "MJD",
                                   ylabel = "ΔPA (deg)")
         linkxaxes!(ax_sep, ax_pa)
@@ -1407,6 +1445,8 @@ function plot_relastrom_residuals(chains, params, data;
                   color = NEREUS_COLORS.rv_bin, markersize = 11,
                   strokewidth = 1.0, strokecolor = :black)
 
+        _angle_units!([ax_sep]; dims = :y, label = _dsep_label)
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models",
@@ -1433,9 +1473,10 @@ data. Five epochs: Hip, HG long-baseline, Gaia DR2, DR3-DR2, DR3.
   top    — Δμ_α* = μ_α*_obs − μ_α*_model  vs MJD   [mas/yr]
   bottom — Δμ_δ  = μ_δ_obs  − μ_δ_model  vs MJD   [mas/yr]
 
-Model PM = instantaneous reflex PM at each epoch (Mode A; no
-window-averaging). Errorbars from the diagonal of the G23H 10×10
-within-epoch covariance.
+Model PM = `_g23h_model_pm`, the likelihood's own: fits through the
+Hipparcos scans (`data.hip_scans`) and the DR2 / DR3 GOST windows, and the
+Hipparcos→Gaia and DR3−DR2 positional differences between them. Errorbars
+from the diagonal of the G23H 10×10 within-epoch covariance.
 """
 function plot_g23h_residuals(chains, params, data;
                               output::Union{Nothing, String} = nothing,
@@ -1450,9 +1491,9 @@ function plot_g23h_residuals(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_ra  = Axis(fig[1, 1]; ylabel = rich("Δμ", subscript("α*"), " (mas/yr)"))
+        ax_ra  = Axis(fig[1, 1]; ylabel = _dmu_ra_label("mas/yr"))
         ax_dec = Axis(fig[2, 1]; xlabel = "MJD",
-                                   ylabel = rich("Δμ", subscript("δ"), " (mas/yr)"))
+                                   ylabel = _dmu_dec_label("mas/yr"))
         linkxaxes!(ax_ra, ax_dec)
         hidexdecorations!(ax_ra; grid = false, ticks = false)
 
@@ -1528,6 +1569,9 @@ function plot_g23h_residuals(chains, params, data;
                   label = "MJD − $(round(Int, t_min))",
                   labelsize = 16, ticklabelsize = 14)
 
+        _angle_units!((ax_ra, :y, u -> _dmu_ra_label(u * "/yr")),
+                      (ax_dec, :y, u -> _dmu_dec_label(u * "/yr")))
+
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models", "g23h_residuals.$fmt"), fig;
@@ -1542,6 +1586,19 @@ end
 # 8. Proper-motion-anomaly trajectory along GOST scan window
 # =====================================================================
 
+# The summed reflex PM that a release's five-parameter solution absorbs, fitted
+# through the scans of `scans` inside its window `win`: `_catalogue_epoch`, the
+# routine the HGCA and G23H likelihoods model their Gaia epochs with. `t` is
+# the release's epoch (the proper motion does not depend on it).
+function _dr_reflex_pm(orbs, Ms, scans, win, t::Real)
+    μa = 0.0; μd = 0.0
+    for j in eachindex(orbs)
+        q = Nereus._catalogue_epoch(orbs[j], Ms[j], scans, win, Float64(t), Float64(t))
+        μa += q[3]; μd += q[4]
+    end
+    return μa, μd
+end
+
 """
     plot_pm_anomaly(chains, params, data;
                     n_draws=80, planet_idx=1,
@@ -1552,14 +1609,22 @@ Two-panel reflex proper-motion trajectory across the GOST scan window:
   top    — μ_α*_reflex(t) (mas/yr)   vs MJD
   bottom — μ_δ_reflex(t)  (mas/yr)   vs MJD
 
-Best-fit (max-lp) curve in cyan; the 16-84% band of `n_draws` posterior
+Best-fit (max-lp) curve in black; the 16-84% band of `n_draws` posterior
 draws in orchid. Curve and band are the same quantity -- the summed reflex
 of every companion the likelihood couples to the astrometry -- drawn among
 the draws in which companion `planet_idx` exists. HGCA / G23H observed PMs
 at their tabulated epochs, less the barycentric PM each likelihood
 marginalizes (`_hgca_mub`, `_g23h_mub`), beside open markers for the
-likelihood's own model at those epochs (baseline-mean at Hipparcos–Gaia,
-GOST window at Gaia -- not points on the instantaneous curve).
+likelihood's own model at those epochs (`_hgca_model_pm`, `_g23h_model_pm`: fits
+through the Hipparcos scans and the Gaia windows, and their positional
+differences -- not points on the instantaneous curve).
+
+Gaia DR2 and DR3 as GOST projects them: the reflex PM each release's
+five-parameter solution absorbs, fitted through the scans inside that
+release's window (`GAIA_DR2_WINDOW`, `GAIA_DR3_WINDOW`) -- a circle at
+J2015.5 and a square at J2016.0, each in its own colour, at the best-fit draw
+with the 16-84% of the posterior draws as its bar. Each window is shaded in
+its release's colour; every planned scan is rugged along the bottom.
 
 Requires `data.gost`.
 """
@@ -1577,9 +1642,9 @@ function plot_pm_anomaly(chains, params, data;
 
     with_theme(nereus_theme()) do
         fig = Figure(; size = figsize)
-        ax_ra  = Axis(fig[1, 1]; ylabel = rich("μ", subscript("α*"), " reflex (mas/yr)"))
+        ax_ra  = Axis(fig[1, 1]; ylabel = _reflex_ra_label("mas/yr"))
         ax_dec = Axis(fig[2, 1]; xlabel = "MJD",
-                                   ylabel = rich("μ", subscript("δ"), " reflex (mas/yr)"))
+                                   ylabel = _reflex_dec_label("mas/yr"))
         linkxaxes!(ax_ra, ax_dec)
         hidexdecorations!(ax_ra; grid = false, ticks = false)
 
@@ -1591,6 +1656,18 @@ function plot_pm_anomaly(chains, params, data;
         theta_med, active_idx = drawn
         tdc = _td_cols(chains, params)
         cols = _chain_cols(chains, params)   # ONCE, not once per draw
+
+        # Gaia DR2 and DR3 as GOST projects them, each through the scans of
+        # its own window: GOST plans the whole mission (the fetcher's default
+        # runs to 2025), and neither catalogue was fitted to all of it. The fit
+        # is the likelihood's own (`_dr_reflex_pm` → `_catalogue_epoch`). A
+        # release with fewer than five scans in its window is left out.
+        pal = cool_pastel(2)
+        dr_proj = [(label = "Gaia DR2 (GOST)", win = GAIA_DR2_WINDOW,
+                    t = jyear_to_mjd(2015.5), color = pal[1], marker = :circle),
+                   (label = "Gaia DR3 (GOST)", win = GAIA_DR3_WINDOW,
+                    t = jyear_to_mjd(2016.0), color = pal[2], marker = :rect)]
+        filter!(d -> Nereus._n_in_window(gost.t, d.win) >= 5, dr_proj)
 
         # Dense time grid spanning all astrometric epochs (Hip + Gaia +
         # GOST + relAST) so the model curve is shown wherever a data
@@ -1616,6 +1693,8 @@ function plot_pm_anomaly(chains, params, data;
         # draws, then summarize to a band instead of plotting individual
         # noisy lines (was unreadable at low draw count).
         ndraw = min(n_draws, length(active_idx))
+        proj_ra  = fill(NaN, max(ndraw, 0), length(dr_proj))
+        proj_dec = fill(NaN, max(ndraw, 0), length(dr_proj))
         if ndraw > 0
             draw_idx = active_idx[rand(1:length(active_idx), ndraw)]
             ng = length(t_grid)
@@ -1640,6 +1719,9 @@ function plot_pm_anomaly(chains, params, data;
                             μra_mat[q,  k] = μa
                             μdec_mat[q, k] = μd
                         end
+                    end
+                    for (w, d) in enumerate(dr_proj)
+                        proj_ra[q, w], proj_dec[q, w] = _dr_reflex_pm(orbs_i, Ms_i, gost, d.win, d.t)
                     end
                 catch
                 end
@@ -1676,15 +1758,14 @@ function plot_pm_anomaly(chains, params, data;
             end
         end
 
-        # --- GOST scan window + scan epochs ---------------------------
-        # Mode B fits the Gaia PM as the AVERAGE over the forecast scan
-        # epochs; without rendering them the GOST data are invisible in
-        # every plot. Shade the scan window and rug the individual scan
-        # times on both panels.
-        vspan!(ax_ra,  minimum(gost.t), maximum(gost.t);
-                color = (NEREUS_COLORS.pm_marker, 0.10))
-        vspan!(ax_dec, minimum(gost.t), maximum(gost.t);
-                color = (NEREUS_COLORS.pm_marker, 0.10))
+        # --- Release windows + scan epochs ----------------------------
+        # Each Gaia release's window, shaded in its colour: the scans its
+        # projection below is fitted through. The full span of the scan plan
+        # is no catalogue's window, so it is not shaded. Every planned scan is
+        # rugged on both panels.
+        for d in dr_proj, ax in (ax_ra, ax_dec)
+            vspan!(ax, d.win[1], d.win[2]; color = (d.color, 0.22))
+        end
         vlines!(ax_ra, gost.t; ymin = 0.0, ymax = 0.05,
                  color = (NEREUS_COLORS.pm_marker, 0.8), linewidth = 0.8,
                  label = "GOST scans ($(length(gost.t)))")
@@ -1721,9 +1802,9 @@ function plot_pm_anomaly(chains, params, data;
         # catalogue's Hipparcos–Gaia value, which carries the mean reflex over
         # the baseline and so shifted every point by the signal itself when
         # P ≫ 25 yr. The likelihood's own model at each epoch is drawn as an
-        # open marker: the Hipparcos–Gaia epoch is a baseline-mean reflex and
-        # the Gaia epoch a GOST-window average, neither a point on the
-        # instantaneous curve.
+        # open marker: the Hipparcos and Gaia epochs are fits through their
+        # missions' scans and the Hipparcos–Gaia epoch a positional difference,
+        # none of them a point on the instantaneous curve.
         function _overlay!(ts, μra_obs, μdec_obs, σ_ra, σ_dec, μra_mod, μdec_mod, mb,
                            color, marker, label)
             μb1, μb2 = mb === nothing ? (0.0, 0.0) : mb[1:2]
@@ -1769,7 +1850,33 @@ function plot_pm_anomaly(chains, params, data;
             end
         end
 
+        # --- Gaia DR2 / DR3 as GOST projects them ---------------------
+        # The best-fit draw at the release's reference epoch, its bar the
+        # 16-84% of the posterior draws. Drawn last and a size smaller than
+        # the catalogue markers, so a projection that lands on the HGCA Gaia
+        # point leaves both visible.
+        for (w, d) in enumerate(dr_proj)
+            bf = isempty(active_orbs) ? (NaN, NaN) :
+                 _dr_reflex_pm(active_orbs, active_Msec, gost, d.win, d.t)
+            for (ax, v, col) in ((ax_ra,  bf[1], view(proj_ra,  :, w)),
+                                 (ax_dec, bf[2], view(proj_dec, :, w)))
+                isfinite(v) || continue
+                s = filter(isfinite, col)
+                if length(s) >= 4
+                    lo, hi = quantile(s, 0.16), quantile(s, 0.84)
+                    errorbars!(ax, [d.t], [(lo + hi) / 2], [(hi - lo) / 2];
+                               color = d.color, linewidth = 2.5)
+                end
+                scatter!(ax, [d.t], [v]; color = d.color, marker = d.marker,
+                         markersize = 11, strokewidth = 1.0, strokecolor = :black,
+                         label = ax === ax_ra ? d.label : nothing)
+            end
+        end
+
         axislegend(ax_ra; position = :rt, framevisible = false, labelsize = 14)
+
+        _angle_units!((ax_ra, :y, u -> _reflex_ra_label(u * "/yr")),
+                      (ax_dec, :y, u -> _reflex_dec_label(u * "/yr")))
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
@@ -1810,9 +1917,11 @@ different scan directions.
 
 Each normal point is the inverse-variance weighted mean residual with its
 formal error `1/√Σσ⁻²`, at the weighted mean epoch, along the weighted mean
-scan direction `u = (sin ψ, cos ψ)`.
+scan direction `u = (sin ψ, cos ψ)`. `σ` is the per-abscissa error to weight
+by -- the reported one by default, `_iad_oc(...).σ` to include a fitted jitter.
 """
-function _iad_normal_points(iad, e::AbstractVector, gap::Real; psi_tol::Real = 1e-3)
+function _iad_normal_points(iad, e::AbstractVector, gap::Real; psi_tol::Real = 1e-3,
+                            σ::AbstractVector = iad.abscissa_err)
     n = length(e)
     ord = sortperm(collect(zip(iad.inst, iad.t)))
     groups = Vector{Vector{Int}}()
@@ -1831,7 +1940,7 @@ function _iad_normal_points(iad, e::AbstractVector, gap::Real; psi_tol::Real = 1
     t̄, ē, σ̄, ux, uy = zeros(m), zeros(m), zeros(m), zeros(m), zeros(m)
     inst = zeros(Int, m)
     for (g, idx) in enumerate(groups)
-        w  = [1 / iad.abscissa_err[j]^2 for j in idx]
+        w  = [1 / σ[j]^2 for j in idx]
         W  = sum(w)
         t̄[g] = sum(w[i] * iad.t[j] for (i, j) in enumerate(idx)) / W
         ē[g] = sum(w[i] * e[j]     for (i, j) in enumerate(idx)) / W
@@ -1850,7 +1959,10 @@ end
     _iad_oc(theta, data) -> NamedTuple or nothing
 
 The along-scan O−C the IAD likelihood leaves behind at `theta`, with the
-orbits it subtracted: `(oc, active_ks, orbs, M_secs, plx)`.
+orbits it subtracted and the per-abscissa error it weighted by:
+`(oc, σ, active_ks, orbs, M_secs, plx)`. `σ` includes the instruments'
+`sigma_iad_<name>` jitter at `theta` (`iad_sigma_eff`), so `Σ(oc/σ)²` is still
+`χ²_min`, and the catalogue solution removed is the jitter-weighted one.
 
 Built from the likelihood's own helpers, never a copy of them:
 `_iad_active_orbits` picks the companions (astrometric mode, active in
@@ -1881,13 +1993,16 @@ function _iad_oc(theta, data)
     pos_col = Nereus._iad_pos_cols(n_inst)
     A = zeros(n_q, n_q)
     v = zeros(n_q)
-    Nereus._iad_normal_equations!(A, v, iad, r, iad.pm_factor, pos_col)
+    s2 = Nereus._iad_jitter2(theta, n_inst)
+    Nereus._iad_normal_equations!(A, v, iad, r, iad.pm_factor, pos_col,
+                                  s2 === nothing ? nothing : Float64.(s2))
     chol = LinearAlgebra.cholesky(LinearAlgebra.Symmetric(A); check = false)
     # Rank-deficient design: the likelihood falls back to q ≡ 0, and so do we.
     q_opt = LinearAlgebra.issuccess(chol) ? (chol \ v) : zeros(n_q)
     oc = Nereus._iad_marginalised_residuals!(
         Vector{Float64}(undef, n), iad, r, q_opt, iad.pm_factor, pos_col)
-    return (oc = oc, active_ks = active_ks, orbs = orbs, M_secs = M_secs, plx = plx)
+    return (oc = oc, σ = Nereus.iad_sigma_eff(theta, iad), active_ks = active_ks,
+            orbs = orbs, M_secs = M_secs, plx = plx)
 end
 
 """
@@ -1904,7 +2019,8 @@ function _epoch_astrometry_oc(theta, data, planet_idx::Int)
     fit === nothing && return nothing
     ki = findfirst(==(planet_idx), fit.active_ks)
     ki === nothing && return nothing
-    return (orb = fit.orbs[ki], M_sec = fit.M_secs[ki], oc = fit.oc, plx = fit.plx)
+    return (orb = fit.orbs[ki], M_sec = fit.M_secs[ki], oc = fit.oc, σ = fit.σ,
+            plx = fit.plx)
 end
 
 # `plot_epoch_astrometry_orbit` itself is in astrometry_model_plot.jl, beside

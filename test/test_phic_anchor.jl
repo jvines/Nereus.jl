@@ -40,6 +40,36 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         @test pc.time === :phic && isnan(pc.t_ref_c)
         @test ParametrizationConfig(time = :phic, t_ref_c = 5.0).t_ref_c == 5.0
         @test isnan(ParametrizationConfig().t_ref_c)
+        # No anchor given: `:auto`, unresolved until a Params is built. It
+        # resolves to the anchor the priors name, else the transit phase, except
+        # under the O'Neil prior, whose density is over one fixed period of Tp
+        # (which Mo spans).
+        @test ParametrizationConfig().time === :auto
+        @test ParametrizationConfig(time = nothing).time === :auto
+        @test ParametrizationConfig(obs_prior = true).time === :auto
+        @test Nereus.default_time_anchor() === :phic
+        @test Nereus.default_time_anchor(obs_prior = true) === :Mo
+        res(pc, pr) = Nereus.resolve_time_anchor(pc, pr).time
+        moD = Dict{String, PriorSpec}("Mo_k1" => UniformPrior(0.0, 2π))
+        @test res(ParametrizationConfig(), nothing) === :phic
+        @test res(ParametrizationConfig(), Dict{String, PriorSpec}()) === :phic
+        @test res(ParametrizationConfig(obs_prior = true), nothing) === :Mo
+        @test res(ParametrizationConfig(mass = :M_sec_driven), moD) === :Mo
+        @test res(ParametrizationConfig(obs_prior = true),
+                  Dict{String, PriorSpec}("Tp_k1" => UniformPrior(0.0, 1.0))) === :Tp
+        # An explicit anchor is kept, whatever the priors name.
+        @test res(ParametrizationConfig(time = :Tc), moD) === :Tc
+        @test res(ParametrizationConfig(obs_prior = true, time = :phic), nothing) === :phic
+        # The rest of the configuration is carried over unchanged.
+        pcr = Nereus.resolve_time_anchor(ParametrizationConfig(ew = :esinw, geom = :r1r2,
+                  mass = :M_sec_driven, marginalize_gamma = true, t_ref_c = 3.0), moD)
+        @test (pcr.ew, pcr.geom, pcr.mass, pcr.marginalize_gamma, pcr.t_ref_c) ==
+              (:esinw, :r1r2, :M_sec_driven, true, 3.0)
+        @test_throws ArgumentError Nereus.resolve_time_anchor(ParametrizationConfig(),
+            merge(moD, Dict{String, PriorSpec}("phic_k2" => UniformPrior(-π, π))))
+        for t in (:Mo, :Tp, :Tc)
+            @test ParametrizationConfig(time = t).time === t
+        end
         @test_throws ArgumentError ParametrizationConfig(time = :phase)
         @test_throws ArgumentError ParametrizationConfig(time = :phic, t_ref_c = Inf)
     end
@@ -82,10 +112,110 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
                        instruments = InstrumentConfig(rv = ["HARPS"]), data = rvd,
                        parametrization = ParametrizationConfig(time = :phic))
         @test prv.config.parametrization.t_ref_c == rvd.t_ref
-        # Measured from the data being fitted, so it cannot be guessed without.
+        # Without data there is no epoch yet, as Mo's is not known until a
+        # likelihood is evaluated: Params builds (the default anchor included,
+        # which must not throw where Mo did not), the epoch stays NaN, the
+        # NereusTarget fixes it from its data, and evaluating before that throws.
+        for kw in ((; parametrization = ParametrizationConfig(time = :phic)), (;))
+            pn = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+                          instruments = InstrumentConfig(rv = ["HARPS"]), kw...)
+            @test pn.config.parametrization.time === :phic
+            @test isnan(pn.config.parametrization.t_ref_c)
+            @test pn.layout.unfrozen_names == prv.layout.unfrozen_names
+            tgt = NereusTarget(pn, rvd; unconstrained = false)
+            @test tgt.params.config.parametrization.t_ref_c == rvd.t_ref
+            @test tgt.params.layout === pn.layout
+        end
+        @test_throws ArgumentError phic_to_tc(0.1, 4.0, NaN)
+        # No planet, no phase to measure.
+        @test Params(; max_kplanet = 0, planet_modes = Nereus.PlanetDataSources[],
+                       instruments = InstrumentConfig(rv = ["HARPS"])) isa Params
+    end
+
+    @testset "the default everywhere" begin
+        # build_target: no anchor declared → the transit phase; a declared one
+        # wins; `time_anchor` wins over both.
+        blk = (P = UniformPrior(3.9, 4.4), K = UniformPrior(1.0, 100.0),
+               sesinw = UniformPrior(-0.5, 0.5), secosw = UniformPrior(-0.5, 0.5))
+        rvn = (HARPS = (data = (t = t_rv, rv = data.rv, rv_err = data.rv_err),),)
+        tg = build_target(planets = (b = blk,), rv = rvn)
+        @test tg.params.config.parametrization.time === :phic
+        @test "phic_k1" in tg.params.layout.unfrozen_names
+        @test !("Mo_k1" in tg.params.layout.unfrozen_names)
+        @test tg.params.config.parametrization.t_ref_c == tg.data.t_ref
+        @test Nereus.bounds(tg.params.config.priors["phic_k1"]) == (-Float64(π), Float64(π))
+        tgM = build_target(planets = (b = merge(blk, (Mo = UniformPrior(0.0, 2π),)),), rv = rvn)
+        @test tgM.params.config.parametrization.time === :Mo
+        @test build_target(planets = (b = blk,), rv = rvn,
+                           time_anchor = :Mo).params.config.parametrization.time === :Mo
+        # Priors that name an anchor, and no anchor given: that anchor.
+        tgP = build_target(planets = (b = blk,), rv = rvn,
+                           priors = Dict{String, PriorSpec}("Tp_k1" => UniformPrior(TG_BJD0, TG_BJD0 + 3.9)))
+        @test tgP.params.config.parametrization.time === :Tp
+        moP = Dict{String, PriorSpec}("Mo_k1" => UniformPrior(0.0, 2π))
+        pnd = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+                       instruments = InstrumentConfig(rv = ["HARPS"]), priors = moP)
+        @test pnd.config.parametrization.time === :Mo        # and needs no data
+        @test Nereus.time_anchor_named(["P_k1", "Mo_k1", "Mo_k2"]) === :Mo
+        @test Nereus.time_anchor_named(["P_k1", "ttv_k1_t1"]) === nothing
         @test_throws ArgumentError Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
             instruments = InstrumentConfig(rv = ["HARPS"]),
-            parametrization = ParametrizationConfig(time = :phic))
+            priors = merge(moP, Dict{String, PriorSpec}("Tc_k1" => UniformPrior(0.0, 1.0))))
+        # An explicit parametrization that gives no `time` resolves the same
+        # way: the anchor the priors name ...
+        drv = Data(; t_rv = t_rv, rv = data.rv, rv_err = data.rv_err)
+        mkP(pc, pr) = Params(; max_kplanet = 1, planet_modes = [RV_ONLY], data = drv,
+                               instruments = InstrumentConfig(rv = ["HARPS"]),
+                               parametrization = pc, priors = pr)
+        pM = mkP(ParametrizationConfig(mass = :K_driven, ew = :sesinw), moP)
+        @test pM.config.parametrization.time === :Mo && "Mo_k1" in pM.layout.unfrozen_names
+        @test mkP(ParametrizationConfig(mass = :M_sec_driven), moP).config.parametrization.time === :Mo
+        # ... else the default, and the O'Neil fallback under obs_prior.
+        @test mkP(ParametrizationConfig(mass = :K_driven), nothing).config.parametrization.time === :phic
+        @test Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+                       instruments = InstrumentConfig(rv = ["HARPS"]),
+                       parametrization = ParametrizationConfig(obs_prior = true)
+                      ).config.parametrization.time === :Mo
+        # Two anchors in the priors throw here too.
+        @test_throws ArgumentError mkP(ParametrizationConfig(mass = :K_driven),
+            merge(moP, Dict{String, PriorSpec}("Tc_k1" => UniformPrior(0.0, 1.0))))
+        # The Params holds the anchor sampled, never :auto, so the checkpoint
+        # fingerprint and equality see what was sampled: `:auto` that resolved
+        # to Mo is the same model as an explicit Mo, and not a phic one.
+        pE = mkP(ParametrizationConfig(mass = :K_driven, time = :Mo), moP)
+        @test pM.config.parametrization === pE.config.parametrization
+        @test Nereus.content_hash(pM.config) == Nereus.content_hash(pE.config)
+        @test isequal(Nereus.run_fingerprint(pM, drv), Nereus.run_fingerprint(pE, drv))
+        pA = mkP(ParametrizationConfig(), nothing)
+        pφE = mkP(ParametrizationConfig(time = :phic), nothing)
+        @test pA.config.parametrization.time === :phic
+        @test pA.config.parametrization === pφE.config.parametrization
+        @test isequal(Nereus.run_fingerprint(pA, drv), Nereus.run_fingerprint(pφE, drv))
+        @test Nereus.content_hash(pA.config) != Nereus.content_hash(pM.config)
+        # An explicit anchor with a prior left on another: named as another
+        # anchor's, not as a typo.
+        msg = try
+            mkP(ParametrizationConfig(time = :phic), moP)
+            ""
+        catch err
+            sprint(showerror, err)
+        end
+        @test occursin("Mo_k1 belongs to another time anchor", msg)
+        @test occursin("time = :phic", msg)
+        # fit_*'s default blocks name no anchor: the fit's time_anchor picks it.
+        @test !any(k -> k in (:Mo, :phic, :Tp, :Tc), keys(Nereus.default_rv_planet(t_rv, data.rv)))
+        @test !any(k -> k in (:Mo, :phic, :Tp, :Tc), keys(Nereus.default_astrom_planet()))
+        ch = Dict("source" => "RV",
+                  "data" => Dict("HARPS" => (t = t_rv, rv = data.rv, rv_err = data.rv_err)))
+        for (ta, want) in ((nothing, :phic), ("Mo", :Mo), ("Tp", :Tp))
+            kw = ta === nothing ? (;) : (; time_anchor = ta)
+            pt = Nereus._target_from([ch], Nereus._planet_spec(1;
+                     block = Nereus.default_rv_planet(t_rv, data.rv)); kw...).params
+            @test pt.config.parametrization.time === want
+            @test "$(want)_k1" in pt.layout.unfrozen_names
+            # no prior left on a slot the model does not have
+            @test all(k -> !startswith(k, "Mo_k") || want === :Mo, keys(pt.config.priors))
+        end
     end
 
     @testset "circular where Mo is" begin
@@ -196,6 +326,21 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
             @test p.config.parametrization.t_ref_c == want
             @test "phic_k1" in p.layout.unfrozen_names
         end
+        # No `time` at all: the default, the transit phase.
+        delete!(par, "time"); delete!(par, "t_ref_c")
+        p, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+        @test p.config.parametrization.time === :phic
+        @test p.config.parametrization.t_ref_c == median(d.t_phot)
+        par["time"] = "Mo"
+        p, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+        @test p.config.parametrization.time === :Mo && "Mo_k1" in p.layout.unfrozen_names
+        # No `time`, but a prior on an anchor: that anchor, as before the default
+        # changed for a config written with an Mo_k1 prior.
+        delete!(par, "time")
+        cfg["priors"]["Mo_k1"] = Dict{String, Any}("type" => "UniformPrior", "args" => [0.0, 2π])
+        p, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+        @test p.config.parametrization.time === :Mo && "Mo_k1" in p.layout.unfrozen_names
+        delete!(cfg["priors"], "Mo_k1")
         par["time"] = "phase"
         @test occursin("unknown parametrization.time=`phase`", verrs(cfg))
     end
@@ -212,7 +357,9 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
                          name == "P_k1" ? 4.137 + 1e-3 * randn(r) :
                          Nereus.quantile(pφ.layout.unfrozen_priors[j], 0.25 + 0.5 * rand(r))
         end
-        ch = Chains(X, vcat(Symbol.(nm), :lp))
+        # With ρ★ beside the sampled ρ_circ, as every engine's chains carry it
+        # under density = :rho_circ (src/density.jl).
+        ch = Nereus.with_density_columns(Chains(X, vcat(Symbol.(nm), :lp)), pφ)
         ph = vec(Array(ch[:phic_k1])); P = vec(Array(ch[:P_k1]))
         @test any(<(0), ph) && any(>(0), ph)                           # really split
         Tc = compute_derived(ch, pφ)[1].values["Tc"]
@@ -221,7 +368,53 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         @test all(abs.(rem.(Tc .- phic_to_tc.(ph, P, t_ref_c), P, Ref(RoundNearest))) .< 1e-6)
         @test median(Tc) ≈ t_ref_c + (π - 0.01) * 4.137 / 2π atol = 0.01
         # The Tc fit reports no derived Tc: it samples it.
-        chT = Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Tc_k1")), :lp))
+        chT = Nereus.with_density_columns(
+            Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Tc_k1")), :lp)), pT)
         @test !haskey(compute_derived(chT, pT)[1].values, "Tc")
+
+        # Tp and Mo, per draw, from each draw's own P, e and ω: what the other
+        # anchors sample. Mo needs the data's t_ref, the epoch :Mo reads it at.
+        dv = compute_derived(ch, pφ; t_ref = data.t_ref)[1].values
+        @test !haskey(compute_derived(ch, pφ)[1].values, "Mo_deg")
+        Tp = dv["Tp"]; Mo = dv["Mo_deg"]
+        se = vec(Array(ch[:sesinw_k1])); sc = vec(Array(ch[:secosw_k1]))
+        e = se .^ 2 .+ sc .^ 2; ω = atan.(se, sc)
+        # the same orbit: Tp is Tc's periastron, up to whole periods
+        @test all(abs.(rem.(Tp .- tc_to_tp.(Tc, P, e, ω), P, Ref(RoundNearest))) .< 1e-6)
+        @test maximum(abs.(Tp .- Tc)) < maximum(P)        # one copy, beside Tc
+        # Mo at t_ref: Tp = t_ref − Mo·P/2π, modulo a period; in [0, 360) at the median
+        @test all(abs.(rem.(Tp .- (data.t_ref .- deg2rad.(Mo) .* P ./ 2π), P,
+                            Ref(RoundNearest))) .< 1e-6)
+        @test 0 <= median(Mo) < 360
+        # The Mo fit's own anchor goes untouched: nothing derived for it.
+        pM = mk(:Mo)
+        chM = Nereus.with_density_columns(
+            Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Mo_k1")), :lp)), pM)
+        @test !any(k -> k in ("Tc", "Tp", "Mo_deg"),
+                   keys(compute_derived(chM, pM; t_ref = data.t_ref)[1].values))
+    end
+
+    @testset "chains.nc records the anchor and its epoch" begin
+        # A sampled phic_k<n> is undecodable without t_ref_c.
+        nm = pφ.layout.unfrozen_names
+        X = zeros(10, length(nm) + 1, 1)
+        for (j, _) in enumerate(nm)
+            X[:, j, 1] .= Nereus.quantile(pφ.layout.unfrozen_priors[j], 0.5)
+        end
+        mktempdir() do dir
+            for (p, names) in ((pφ, nm), (mk(:Mo), replace(nm, "phic_k1" => "Mo_k1")))
+                tm = p.config.parametrization.time
+                path = joinpath(dir, "chains_$(tm).nc")
+                save_chains(path, Chains(X, vcat(Symbol.(names), :lp)), p; data = data)
+                Nereus.NCDatasets.Dataset(path) do ds
+                    @test ds.attrib["time_anchor"] == String(tm)
+                    if tm === :phic
+                        @test ds.attrib["t_ref_c"] == t_ref_c
+                    else
+                        @test !haskey(ds.attrib, "t_ref_c")
+                    end
+                end
+            end
+        end
     end
 end

@@ -1,20 +1,30 @@
-# The RV phase fold's y-zoom on a sparse fold.
+# The RV phase fold's y-frame.
 #
-# Below 51 kept points the fold draws no binned overlay, so the points are the
-# only picture of the orbit. The zoom framed the 10-90% quantiles of the data
-# all the same, and on a jitter-dominated hot Jupiter (33 RVs, K = 350 m/s,
-# ~200 m/s scatter) seven points sat outside the frame, in both panels. Every
-# point but a true outlier must be in view; the outlier still is not.
+# By default the fold frames every point it draws, with its error bar, in both
+# panels. The robust zoom it used to apply put a lone periastron RV that a
+# joint RV+astrometry fit did not reach outside both panels, so the point
+# looked dropped from the fit.
+#
+# `robust_ylim = true` keeps that zoom. Below 51 kept points the fold draws no
+# binned overlay, so the points are the only picture of the orbit; the zoom
+# framed the 10-90% quantiles of the data all the same, and on a
+# jitter-dominated hot Jupiter (33 RVs, K = 350 m/s, ~200 m/s scatter) seven
+# points sat outside the frame. There, every point but a true outlier is in
+# view; the outlier still is not.
 
 using Nereus, Test, Random, MCMCChains
 using CairoMakie: Axis
+
+# y of every marker a panel draws
+_marker_ys(ax) = reduce(vcat, [Float64[pt[2] for pt in p[1][]] for p in ax.scene.plots
+                               if p isa Nereus.CairoMakie.Makie.Scatter]; init = Float64[])
 
 function _sparse_jittery_fold()
     rng = MersenneTwister(33)
     t = sort(500.0 .* rand(rng, 33))
     data = Data(; t_rv = t, rv = zeros(length(t)), rv_err = fill(30.0, length(t)),
                   rv_inst = ones(Int, length(t)))
-    params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                       instruments = InstrumentConfig(rv = ["I1"]),
                       data = data, M_s = 1.0)
     vals = Dict("P_k1" => 2.83, "K_k1" => 350.0, "sesinw_k1" => 0.0,
@@ -39,9 +49,23 @@ function _sparse_jittery_fold()
     return params, data, Chains(arr, cols), noise
 end
 
-@testset "sparse RV fold frames every point but true outliers" begin
+@testset "RV fold frames every point by default, the outlier included" begin
     params, data, chains, noise = _sparse_jittery_fold()
     fig = plot_rv_phasefold(chains, params, data; n_draws = 50)
+    ax, ax_r = filter(c -> c isa Axis, fig.content)
+    lo, hi = ax.limits[][2]
+    rlo, rhi = ax_r.limits[][2]
+    ys, rs = _marker_ys(ax), _marker_ys(ax_r)
+    @test length(ys) == length(rs) == length(data.rv)
+    # each point with its error bar, the 5000 m/s outlier among them
+    @test all(lo .< ys .- data.rv_err[1]) && all(ys .+ data.rv_err[1] .< hi)
+    @test all(rlo .< rs .- data.rv_err[1]) && all(rs .+ data.rv_err[1] .< rhi)
+    @test hi > data.rv[17]
+end
+
+@testset "robust_ylim: a sparse RV fold frames every point but true outliers" begin
+    params, data, chains, noise = _sparse_jittery_fold()
+    fig = plot_rv_phasefold(chains, params, data; n_draws = 50, robust_ylim = true)
     ax, ax_r = filter(c -> c isa Axis, fig.content)
     lo, hi = ax.limits[][2]
     rlo, rhi = ax_r.limits[][2]

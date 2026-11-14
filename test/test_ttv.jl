@@ -68,8 +68,10 @@ using Random: MersenneTwister
     idx = params.layout.name_to_idx
     theta.values[idx["P_k1"]]      = 3.5
     theta.values[idx["K_k1"]]      = 20.0
-    theta.values[idx["sesinw_k1"]] = 0.0
-    theta.values[idx["secosw_k1"]] = 0.0
+    # set_param!, not raw slots: under density = :rho_circ the e-coordinates
+    # are derived from ρ_circ and η (src/density.jl), and writing them sets those.
+    Nereus.set_param!(theta, "sesinw_k1", 0.0)
+    Nereus.set_param!(theta, "secosw_k1", 0.0)
     theta.values[idx["Tp_k1"]]     = 2_450_001.0
     theta.values[idx["b_k1"]]      = 0.3
     theta.values[idx["rr_k1"]]     = 0.1
@@ -156,16 +158,16 @@ end
     # Planet 1: hot Jupiter
     theta.values[idx["P_k1"]]      = 4.0
     theta.values[idx["K_k1"]]      = 150.0
-    theta.values[idx["sesinw_k1"]] = 0.05
-    theta.values[idx["secosw_k1"]] = 0.0
+    Nereus.set_param!(theta, "sesinw_k1", 0.05)
+    Nereus.set_param!(theta, "secosw_k1", 0.0)
     theta.values[idx["Tp_k1"]]     = 2_450_001.0
     theta.values[idx["b_k1"]]      = 0.2
     theta.values[idx["rr_k1"]]     = 0.1
     # Planet 2: near 2:1 outside
     theta.values[idx["P_k2"]]      = 8.1
     theta.values[idx["K_k2"]]      = 50.0
-    theta.values[idx["sesinw_k2"]] = 0.05
-    theta.values[idx["secosw_k2"]] = 0.0
+    Nereus.set_param!(theta, "sesinw_k2", 0.05)
+    Nereus.set_param!(theta, "secosw_k2", 0.0)
     theta.values[idx["Tp_k2"]]     = 2_450_002.0
     theta.values[idx["b_k2"]]      = 0.3
     theta.values[idx["rr_k2"]]     = 0.08
@@ -216,8 +218,8 @@ end
     idx_s = params_solo.layout.name_to_idx
     theta_solo.values[idx_s["P_k1"]]      = 4.0
     theta_solo.values[idx_s["K_k1"]]      = 100.0
-    theta_solo.values[idx_s["sesinw_k1"]] = 0.0
-    theta_solo.values[idx_s["secosw_k1"]] = 0.0
+    Nereus.set_param!(theta_solo, "sesinw_k1", 0.0)
+    Nereus.set_param!(theta_solo, "secosw_k1", 0.0)
     theta_solo.values[idx_s["Tp_k1"]]     = 2_450_001.0
     theta_solo.values[idx_s["b_k1"]]      = 0.2
     theta_solo.values[idx_s["rr_k1"]]     = 0.1
@@ -341,7 +343,7 @@ end
         for (k, v) in ("P_k1" => P, "sesinw_k1" => sv, "secosw_k1" => cv,
                        "$(time)_k1" => anchor[time], "b_k1" => b, "rr_k1" => rr,
                        "q1_TESS" => 0.3, "q2_TESS" => 0.2)
-            th.values[ix[k]] = v
+            Nereus.set_param!(th, k, v)     # e-coordinates: derived under density = :rho_circ
         end
         for i in 1:n_tr
             th.values[ix["ttv_k1_t$i"]] = 0.0
@@ -394,7 +396,7 @@ function _nb_fixture(; backend = :ttvfaster, Tcs = (2_450_001.3, 2_450_002.9),
     for (k, o) in enumerate(orb)
         for (nm, v) in ("P" => o.P, "K" => o.K, "Tc" => o.Tc, "b" => o.b, "rr" => o.rr,
                         "sesinw" => sqrt(o.e) * sin(o.ω), "secosw" => sqrt(o.e) * cos(o.ω))
-            th.values[ix["$(nm)_k$k"]] = v
+            Nereus.set_param!(th, "$(nm)_k$k", v)   # e-coordinates: derived under :rho_circ
         end
     end
     th.values[ix["sigma_HARPS"]] = 1.0
@@ -414,11 +416,25 @@ function _nb_predict(fx; t_min = nothing)
     return st
 end
 
+# The reference masses are the TRUE masses from the exact mass function, found
+# here by a plain fixed point on q = M_p/M_star that uses only `msec_from_K`
+# (itself checked against a BigFloat root): a/R* from Kepler III with M_star + M_p,
+# cos i from b at that a/R*, then the mass function at that sin i. Star: M_s = 1.
+function _exact_mass_ratio(o, b)
+    a0 = cbrt(Nereus.GM_SUN_CGS * (o.P * 86400)^2 / (4π^2)) / Nereus.R_SUN_CM
+    q = 0.0
+    for _ in 1:60
+        a = a0 * cbrt(1 + q)
+        ci = b * (1 + o.e * sin(o.ω)) / (a * (1 - o.e^2))
+        q = Nereus.msec_from_K(o.K, o.P, o.e, sqrt(1 - ci^2), 1.0)
+    end
+    return q
+end
+
 # TTVFaster called directly on transits n0 .. n0 + length - 1 of each planet,
 # the planets at their transit times with ϖ = ω - π/2.
 function _nb_direct(fx, st)
-    pl = [Planet_plane_hk(Nereus.msini(1.0, o.K, o.P, o.e) /
-                              sind(acosd(fx.bs[k] / fx.a_Rs[k])) * Nereus._MJ_PER_MS,
+    pl = [Planet_plane_hk(_exact_mass_ratio(o, fx.bs[k]),
                           o.P, o.Tc, o.e * sin(o.ω), -o.e * cos(o.ω))
           for (k, o) in enumerate(fx.orb)]
     ts = [[o.Tc + n * o.P for n in st.n0s[k] .+ (0:(length(st.δts[k]) - 1))]
@@ -547,7 +563,7 @@ end
     th = Theta{Float64}(params)
     for (k, v) in ("P_k1" => P, "Tc_k1" => Tc, "sesinw_k1" => 0.1, "secosw_k1" => 0.2,
                    "b_k1" => 0.3, "rr_k1" => 0.1, "q1_TESS" => 0.3, "q2_TESS" => 0.2)
-        th.values[ix[k]] = v
+        Nereus.set_param!(th, k, v)     # e-coordinates: derived under density = :rho_circ
     end
     tcs = [Tc + m * P for m in -3:4]
     meas = measure_per_transit_tcs(data, th, params; tcs_predicted = tcs, ngrid = 21)

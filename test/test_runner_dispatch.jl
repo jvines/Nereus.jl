@@ -90,6 +90,26 @@ _dispatch(name, kwargs, target, data) =
         @test isfinite(res.log_evidence)
     end
 
+    @testset "an init_strategy the sampler does not implement is an error" begin
+        # "map" arrived as :map and ran exactly the :prior fit, silently.
+        for (name, bad) in (("pt_emcee", "map"), ("pt_emcee", "ball"),
+                            ("pt_whitening", "pathfinder"), ("pt", "map_scatter"))
+            err = try
+                Nereus._dispatch_sampler(
+                    Dict(:sampler => Dict(:name => name,
+                                          :kwargs => Dict(:init_strategy => bad)),
+                         :output_dir => mktempdir()),
+                    target, data, 1)
+                nothing
+            catch e
+                e
+            end
+            @test err isa ArgumentError
+            @test occursin(":$bad", sprint(showerror, err))
+            @test occursin(":prior", sprint(showerror, err))
+        end
+    end
+
     @testset "unsupported kwarg → clear ArgumentError, not MethodError" begin
         # NOTE: the original example (:enlarge) went stale — sample_nested
         # gained a real `enlarge` kwarg (nested.jl, MLFriends/high-dim work),
@@ -217,7 +237,18 @@ end
     p1, _, _ = Nereus._build_model(cfg, dphot, star, String[], ["TESS"])
     @test p1.config.parametrization.use_rho_s === true
     @test haskey(p1.layout.name_to_idx, "rho_s")     # shared ρ⋆ slot allocated
-    @test "rho_s" in p1.layout.unfrozen_names        # sampled ⇒ auto prior attached
+    # By default (density = "rho_circ") a transiting planet with free e samples
+    # ρ_circ = ρ⋆ g³ in ρ⋆'s place, and ρ⋆ is derived from it (src/density.jl).
+    @test p1.config.parametrization.density === :rho_circ
+    @test "rho_circ_k1" in p1.layout.unfrozen_names && !("rho_s" in p1.layout.unfrozen_names)
+    @test "rho_s" in Nereus.reported_param_names(p1)
+    @test haskey(p1.config.priors, "rho_s")          # the prior in force is still on ρ⋆
+    # density = "rho_star" samples ρ⋆ itself, as before.
+    cfgr = deepcopy(cfg)
+    cfgr["model"]["parametrization"]["density"] = "rho_star"
+    pr, _, _ = Nereus._build_model(cfgr, dphot, star, String[], ["TESS"])
+    @test pr.config.parametrization.density === :rho_star
+    @test "rho_s" in pr.layout.unfrozen_names        # sampled ⇒ auto prior attached
 
     # Negative mirror: omitted key ⇒ false ⇒ no ρ⋆ slot (exact old behavior).
     cfg2 = deepcopy(cfg)

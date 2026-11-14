@@ -178,6 +178,11 @@ checks means no red flag was raised, not that the posterior is correct.
 - `jitter` : names of white-noise jitter terms, e.g. `jitter_names(params)`
   (see [`jitter_names`](@ref)). Their lower bound is exempt from the rail
   check (see check 3); their upper bound is not.
+- `angle_range` : `Dict` param ⇒ the full range of an angle whose prior
+  covers only part of it (`"[0, 2π)"` for a full-circle angle, `"[0, π]"` for
+  an inclination), e.g. `restricted_angles(params)`. A rail of one of these is
+  still a rail, and the message adds that the bound is the prior's own
+  restriction.
 
 See also [`FitHealthReport`](@ref), [`FitHealthCheck`](@ref).
 """
@@ -196,6 +201,7 @@ function assess_fit(
     log_scale = nothing,
     active = nothing,
     jitter = nothing,
+    angle_range = nothing,
 )
     # ----- which parameters to assess -------------------------------
     names_to_check = _resolve_param_names(chains, param_names)
@@ -213,6 +219,7 @@ function assess_fit(
                                     edge_mass_frac = edge_mass_frac,
                                     circular = circular,
                                     log_scale = log_scale, active = masks,
+                                    angle_range = angle_range,
                                     jitter = jitter))
     push!(checks, _check_logpost(chains; lp_floor = lp_floor))
 
@@ -566,7 +573,7 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
                            edge_eps::Float64, edge_mass_frac::Float64,
                            circular = nothing, log_scale = nothing,
                            active::Dict{Symbol, BitVector} = Dict{Symbol, BitVector}(),
-                           jitter = nothing)
+                           jitter = nothing, angle_range = nothing)
     if prior_bounds === nothing
         return FitHealthCheck(:prior_rail, :ok,
             "no prior_bounds given — rail check skipped")
@@ -590,6 +597,14 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
     jit = _sym_set(jitter)
     seam_msgs = String[]
     at_zero = String[]                    # jitters consistent with zero
+    # Angles whose prior covers only part of their range (`angle_range`:
+    # name => the full range, "[0, 2π)" or "[0, π]"). A rail there is the
+    # user's own restriction, and the message says so.
+    arange = Dict{Symbol, String}()
+    angle_range === nothing || for (k, v) in angle_range
+        arange[_to_sym(k)] = String(v)
+    end
+    restricted = String[]
 
     for p in names_to_check
         haskey(bounds_sym, p) || continue
@@ -641,6 +656,7 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
                   "(median $(round(med0, sigdigits=4)), bound " *
                   "$(round(med_rail_lo ? lo0 : hi0, sigdigits=4)))")
             push!(offenders, string(p) => (med_rail_lo ? frac_lo : frac_hi))
+            haskey(arange, p) && push!(restricted, "$(p) (full range $(arange[p]))")
         elseif frac_lo > edge_mass_frac || frac_hi > edge_mass_frac
             f = max(frac_lo, frac_hi)
             which = frac_lo >= frac_hi ? "lower" : "upper"
@@ -649,6 +665,7 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
                   "$(round(100edge_eps, digits=1))% of $(which) bound" *
                   (s === nothing ? "" : " (in log space)"))
             push!(offenders, string(p) => f)
+            haskey(arange, p) && push!(restricted, "$(p) (full range $(arange[p]))")
         end
     end
 
@@ -660,6 +677,12 @@ function _check_prior_rail(chains, names_to_check, prior_bounds;
     else
         parts = String[]
         isempty(rail_msgs) || push!(parts, "prior-edge rail: " * join(rail_msgs, "; "))
+        isempty(restricted) || push!(parts,
+            "angle held by its own prior: " * join(restricted, ", ") *
+            " — the prior covers only part of this angle's range and the " *
+            "posterior presses against that restriction, so the bound is the " *
+            "prior's, not the data's. Widen the prior to the full range unless the " *
+            "restriction is deliberate")
         isempty(seam_msgs) || push!(parts,
             "full-circle angle cut by its seam: " * join(seam_msgs, "; ") *
             " — 0 ≡ 2π is not an edge, but this engine could not carry the " *

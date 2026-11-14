@@ -51,6 +51,11 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     # prior-rail check compares the CI with the user's prior in these units;
     # the g/cm³ value is the derived `rho_star_transit_k<n>`.
     "rho_s" => ("rho_sun", false),
+    # The circular-equivalent density ρ★ g³ a transit measures, sampled under
+    # density = :rho_circ in the same solar units, and the coordinate η of the
+    # orbit on its ellipse of constant g (src/density.jl): not an angle of the
+    # orbit, so it stays in radians.
+    "rho_circ" => ("rho_sun", false), "eta" => ("rad", false),
     "q1" => ("", false),          "q2" => ("", false),  # Kipping LD
     # derived
     "msini" => ("M_earth", false),"mass" => ("M_jup", false),
@@ -86,10 +91,11 @@ function sci_param_unit(name::AbstractString, params::Params)
     haskey(_SCI_UNITS, s) && return _SCI_UNITS[s]
     # γ/jitter on a PHOTOMETRIC instrument live in relative flux (dimensionless),
     # not m/s — disambiguate by which instrument the param belongs to.
-    # Astrometric jitter is in mas, and it is spelled `sigma_as_<imager>` —
-    # so it has to be caught BEFORE the generic `sigma` prefix below, which
-    # would otherwise publish milliarcseconds as m/s in every table.
-    startswith(s, "sigma_as_") && return ("mas", false)
+    # Astrometric jitter is in mas, and it is spelled `sigma_as_<imager>`
+    # (relative) or `sigma_iad_<instrument>` (along-scan) — so it has to be
+    # caught BEFORE the generic `sigma` prefix below, which would otherwise
+    # publish milliarcseconds as m/s in every table.
+    (startswith(s, "sigma_as_") || startswith(s, "sigma_iad_")) && return ("mas", false)
     phot = _is_phot_param(s, params)
     startswith(s, "gamma")  && return (phot ? "" : "m/s", false)   # systemic velocity
     startswith(s, "sigma")  && return (phot ? "" : "m/s", false)   # jitter
@@ -210,12 +216,14 @@ function science_fitted(chains, params::Params)
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
     circ = circular_names(params)
+    cinc = cyclic_inclination_names(params)
     jit = jitter_names(params)
+    restr = restricted_angles(params)
     # The winning model's live SLOTS, not `1:modal_np`: after a death in the
     # middle of the slot list the live planet sits in a later slot, and the
     # count-based cut dropped it from the table (see `_winning_planet_slots`).
     live = Set(_winning_planet_slots(chains, params))
-    for name in params.layout.unfrozen_names
+    for name in reported_param_names(params)
         Symbol(name) in allnames || continue
         # skip planet params for slots that are not in the winning model
         pidx = _param_planet_index(name, max_kp)
@@ -231,9 +239,13 @@ function science_fitted(chains, params::Params)
         # in. This used to skip every angle, which was harmless while Ω and λ
         # were not registered as angles; now that they are, a narrow-arc λ prior
         # would have silently lost its flag. A jitter can be zero: only its
-        # upper bound is checked.
+        # upper bound is checked. A cyclic inclination has no bound at all
+        # (src/circular.jl): a CI reaching 0 or 180 deg is a face-on or
+        # retrograde orbit the sampler passed through, not a prior wall.
+        # Nor do ρ_circ and η (src/density.jl): their box is the sampler's, and
+        # the prior's walls are on ρ★ and the e-coordinates, checked as such.
         _, is_ang = sci_param_unit(name, params)
-        if !(name in circ)
+        if !(name in circ) && !(name in cinc) && !is_density_reparam_name(name)
             ps = params.config.priors[name]
             lo, hi = bounds(ps)
             is_ang && ((lo, hi) = (rad2deg(lo), rad2deg(hi)))
@@ -242,6 +254,11 @@ function science_fitted(chains, params::Params)
                                  floor_ok = name in jit)
             d["railed"] = rail
             rail && (d["railed_bound"] = side)
+            # An angle whose prior covers only part of its range: the rail is
+            # that restriction, which the user may have meant.
+            rail && haskey(restr, name) && (d["railed_note"] =
+                "the prior restricts this angle to part of its full range " *
+                "$(restr[name]); the bound is the prior's, not the data's")
         end
         push!(entries, name => d)
     end
@@ -253,7 +270,23 @@ function science_fitted(chains, params::Params)
         "note" => "stats conditioned on each component being active; " *
                   "occupancy field = P(component active | data)",
     )
+    _spin_sense_notes!(entries, conditioning, params,
+                       name -> name == "i_star" || startswith(name, "lambda_k"))
     return entries, conditioning
+end
+
+# The rotation-sense note (`SPIN_SENSE_NOTE`) on the rows it concerns and in
+# the table's conditioning, when the data leave the sense open (`spin_flip`).
+function _spin_sense_notes!(entries, conditioning, params::Params, concerns)
+    spin_flip(params) === nothing && return nothing
+    hit = false
+    for (k, d) in entries
+        concerns(k) || continue
+        d["spin_sense_note"] = SPIN_SENSE_NOTE
+        hit = true
+    end
+    hit && (conditioning["spin_sense"] = SPIN_SENSE_NOTE)
+    return nothing
 end
 
 # --- derived-parameter table (with stellar-uncertainty propagation) ----
@@ -268,12 +301,16 @@ const _DERIVED_UNITS = Dict{String, String}(
     "density_gcc" => "g/cm3","Teq" => "K",
     "S_Wm2" => "W/m2",      "S_earth" => "S_earth",
     "TSM" => "",            "ESM" => "",          "P_yr" => "yr",
+    # period when not sampled (:a_driven), derived K, orbit as an angle on the sky
+    "P_days" => "d",        "K" => "m/s",
+    "a_mas" => "mas",       "alpha_star_uas" => "μas",
     # transit-geometry observables (see compute_derived)
     "T14" => "hr",          "T23" => "hr",
     "depth_ppm" => "ppm",   "rho_star_transit" => "g/cm3",
     "grazing_frac" => "",
-    # transit time under the :phic parametrization (t_ref_c + φ_c·P/2π)
-    "Tc" => "BJD",
+    # under the :phic parametrization, the epochs the other anchors sample:
+    # transit time (t_ref_c + φ_c·P/2π), periastron time, mean anomaly at t_ref
+    "Tc" => "BJD",          "Tp" => "BJD",        "Mo_deg" => "deg",
     # per-instrument physical limb-darkening (keys are u1_<label>/u2_<label>;
     # those resolve to "" via the get-default, these bare entries are for
     # completeness/lookup robustness)
@@ -301,7 +338,7 @@ function science_derived(chains, params::Params;
                           J_mag=nothing, K_mag=nothing, Ab=0.0,
                           sigma_M_s=nothing, sigma_R_s=nothing, sigma_T_eff=nothing,
                           ms_frac=0.10, rs_frac=0.05, teff_abs=150.0,
-                          seed::Int=20260620)
+                          seed::Int=20260620, t_ref=nothing)
     cfg = params.config
     M_s === nothing && !isnan(cfg.M_s) && (M_s = cfg.M_s)
     R_s === nothing && hasproperty(cfg, :R_s) && !isnan(cfg.R_s) && (R_s = cfg.R_s)
@@ -336,14 +373,19 @@ function science_derived(chains, params::Params;
         kk in live || continue
         for dp in compute_derived(chains, params;
                                   M_s=ms_v, R_s=rs_v, T_eff=tf_v,
-                                  J_mag=J_mag, K_mag=K_mag, Ab=Ab, planets = kk:kk)
+                                  J_mag=J_mag, K_mag=K_mag, Ab=Ab, planets = kk:kk,
+                                  t_ref = t_ref)
             k = parse(Int, split(dp.name, "_")[end])     # "planet_1" → 1
             k in live || continue
             mask = _planet_active_mask(chains, k)
             # add P in years alongside the compute_derived outputs
             vals = copy(dp.values)
             Psym = Symbol("P_k$k")
-            Psym in allnames && (vals["P_yr"] = _draws(chains, Psym) ./ 365.25)
+            if Psym in allnames
+                vals["P_yr"] = _draws(chains, Psym) ./ 365.25
+            elseif haskey(vals, "P_days")
+                vals["P_yr"] = vals["P_days"] ./ 365.25   # P derived (:a_driven)
+            end
             for (key, samp) in vals
                 s = mask === nothing ? copy(samp) : samp[mask]
                 (isempty(s) || any(!isfinite, extrema(s))) && continue
@@ -361,6 +403,12 @@ function science_derived(chains, params::Params;
                                      "stellar" => stellar,
         "note" => "derived per-draw with stellar (M★/R★/T_eff) uncertainty " *
                   "propagated; conditioned on planet active")
+    # ψ is folded to the axis angle by compute_derived; i★ and λ (and |λ|,
+    # which the flip sends to 180° - |λ|) are the sampler's representative.
+    _spin_sense_notes!(entries, conditioning, params,
+                       k -> any(p -> startswith(k, p),
+                                ("psi_deg_k", "i_star_deg_k", "lambda_deg_k",
+                                 "lambda_abs_deg_k")))
     return entries, conditioning
 end
 
@@ -470,7 +518,9 @@ function _texsym(name::AbstractString)
                    "K_A"=>"K_{\\rm A}", "K_B"=>"K_{\\rm B}",
                    "rr"=>"R_p/R_\\star", "radius_jup"=>"R_p", "radius_earth"=>"R_p",
                    "density_gcc"=>"\\rho_p", "Teq"=>"T_{\\rm eq}",
-                   "S_earth"=>"S", "S_Wm2"=>"S", "P_yr"=>"P")
+                   "S_earth"=>"S", "S_Wm2"=>"S", "P_yr"=>"P", "P_days"=>"P",
+                   "a_mas"=>"a", "alpha_star_uas"=>"\\alpha_\\star",
+                   "rho_circ"=>"\\rho_{\\rm circ}", "eta"=>"\\eta")
         # brace the base so symbols carrying their own subscript (a/R_\star, …)
         # don't make an invalid double subscript when we append _{k}.
         return haskey(sym, base) ? "\${$(sym[base])}_{$k}\$" : _texlabel(s)
@@ -490,7 +540,7 @@ const _TEX_UNIT = Dict(
     "R_jup"=>"\$R_{\\rm Jup}\$", "R_earth"=>"\$R_\\oplus\$", "S_earth"=>"\$S_\\oplus\$",
     "W/m2"=>"W\\,m\$^{-2}\$", "g/cm3"=>"g\\,cm\$^{-3}\$", "deg"=>"deg",
     "rho_sun"=>"\$\\rho_\\odot\$", "M_sun"=>"\$M_\\odot\$",
-    "AU"=>"AU", "d"=>"d", "yr"=>"yr", "K"=>"K", "BJD"=>"BJD", "mas"=>"mas", ""=>"")
+    "AU"=>"AU", "d"=>"d", "yr"=>"yr", "K"=>"K", "BJD"=>"BJD", "mas"=>"mas", "μas"=>"\$\\mu\$as", ""=>"")
 _texunit(u) = get(_TEX_UNIT, String(u), _texesc(u))
 
 function _write_csv(path, entries; delim=",")
@@ -532,22 +582,31 @@ end
 _yamlval(v) = v isa AbstractString ? "\"$v\"" :
               v isa AbstractVector ? "[" * join(string.(v), ", ") * "]" : string(v)
 
-function _write_dat(path, entries, title)
+function _write_dat(path, entries, title; note = nothing)
     open(path, "w") do io
         println(io, "# ", title)
+        note === nothing || println(io, "# * ", note)
         @printf(io, "# %-22s %16s %14s %16s %-8s %8s\n",
                 "parameter", "value", "err_lo", "err_hi", "unit", "occ")
         for (k, v) in entries
             vs, lo, hi = _fmt3(v["value"], v["err_lo"], v["err_hi"])
-            rail = get(v, "railed", false) ? "  railed" : ""
+            rail = (get(v, "railed", false) ? "  railed" : "") *
+                   (haskey(v, "spin_sense_note") ? "  *" : "")
             @printf(io, "%-24s %16s %14s %16s %-8s %8.3f%s\n",
                     k, vs, "-"*lo, "+"*hi, v["unit"], v["occupancy"], rail)
         end
     end
 end
 
-function _write_tex(path, entries, caption)
+# `SPIN_SENSE_NOTE` in TeX; any other note as it is.
+_texnote(note) = note == SPIN_SENSE_NOTE ?
+    "rotation sense not constrained by the data: " *
+    "\$(i_\\star, \\lambda) \\equiv (180^\\circ - i_\\star, \\lambda + 180^\\circ)\$, " *
+    "\$\\psi \\equiv 180^\\circ - \\psi\$" : note
+
+function _write_tex(path, entries, caption; note = nothing)
     any_rail = any(get(v, "railed", false) for (_, v) in entries)
+    any_spin = note !== nothing && any(haskey(v, "spin_sense_note") for (_, v) in entries)
     open(path, "w") do io
         println(io, "\\begin{table}")
         println(io, "\\centering")
@@ -559,6 +618,8 @@ function _write_tex(path, entries, caption)
         for (k, v) in entries
             vs, lo, hi = _fmt3(v["value"], v["err_lo"], v["err_hi"])
             dag = get(v, "railed", false) ? "\\textsuperscript{\$\\dagger\$}" : ""
+            any_spin && haskey(v, "spin_sense_note") &&
+                (dag *= "\\textsuperscript{\$\\ddagger\$}")
             println(io, _texsym(k), " & ",
                     "\$$(vs)^{+$(hi)}_{-$(lo)}\$", dag, " & ", _texunit(v["unit"]), " \\\\")
         end
@@ -567,6 +628,8 @@ function _write_tex(path, entries, caption)
         any_rail && println(io, "{\\footnotesize \$^{\\dagger}\$ prior-dominated: " *
                                 "the 3\$\\sigma\$ CI rails against a prior bound; " *
                                 "treat as a limit, not a measurement.}")
+        any_spin && println(io, "{\\footnotesize \$^{\\ddagger}\$ ",
+                            _texnote(note), ".}")
         println(io, "\\end{table}")
     end
 end
@@ -591,8 +654,8 @@ function write_science_table(dir::AbstractString, name::AbstractString,
             open(p, "w") do io; JSON3.write(io, obj; allow_inf=true); end
         elseif fmt === :csv;  _write_csv(p, entries)
         elseif fmt === :ecsv; _write_ecsv(p, entries, meta)
-        elseif fmt === :dat;  _write_dat(p, entries, title)
-        elseif fmt === :tex;  _write_tex(p, entries, title)
+        elseif fmt === :dat;  _write_dat(p, entries, title; note = get(meta, "spin_sense", nothing))
+        elseif fmt === :tex;  _write_tex(p, entries, title; note = get(meta, "spin_sense", nothing))
         else; continue
         end
         paths[String(fmt)] = p
@@ -655,13 +718,20 @@ end
 function _prior_block(params::Params)
     out = Dict{String, Any}()
     circ = circular_names(params)
-    for name in params.layout.unfrozen_names
+    cinc = cyclic_inclination_names(params)
+    for name in reported_param_names(params)
         pr = params.config.priors[name]
         lo, hi = bounds(pr)
         d = Dict{String, Any}(
             "type" => string(nameof(typeof(pr))),
             "lower" => lo, "upper" => hi)
+        # ρ_circ / η: the box the sampler moves in; their prior is the one on ρ★
+        # and the e-coordinates, carried through the change of variables.
+        is_density_reparam_name(name) && (d["carried"] = true)
+        # The topology it was sampled on (src/circular.jl): a full circle
+        # (its window a chart), or a polar angle reflected at its poles.
         name in circ && (d["circular"] = true)
+        name in cinc && (d["polar"] = true)
         out[name] = d
     end
     return out
@@ -707,7 +777,7 @@ function science_summary(out_dir::AbstractString, chains, params::Params, data::
     der_e, der_c = science_derived(chains, params; M_s=M_s, R_s=R_s, T_eff=T_eff,
                                     J_mag=J_mag, K_mag=K_mag, Ab=Ab,
                                     sigma_M_s=sigma_M_s, sigma_R_s=sigma_R_s,
-                                    sigma_T_eff=sigma_T_eff)
+                                    sigma_T_eff=sigma_T_eff, t_ref=data.t_ref)
     modsel = science_model_selection(chains, params)
 
     tdir = joinpath(out_dir, "tables")

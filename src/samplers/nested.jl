@@ -10,10 +10,12 @@ using MCMCChains
 using LogExpFunctions: logaddexp
 
 """
-    sample_nested(target::NereusTarget, data::Data; kwargs...) -> (chains, log_evidence)
+    sample_nested(target::NereusTarget, data::Data; kwargs...) -> (chains, log_evidence, log_evidence_err)
 
 Ellipsoidal nested sampling via NestedSamplers.jl. Returns posterior
-samples as `MCMCChains.Chains` and a log-evidence estimate.
+samples as `MCMCChains.Chains`, a log-evidence estimate and its error: the
+spread of log Z over realisations of the run, its threads resampled and its
+prior volumes drawn afresh (dynesty's; src/samplers/ns_error.jl).
 
 The target must use `unconstrained=false` (bounded space).
 
@@ -27,9 +29,20 @@ The target must use `unconstrained=false` (bounded space).
   proposal note below; the two changes are coupled.
 - `bounds::Symbol=:multi` — bounding method (`:multi`, `:single`, `:none`)
 - `proposal::Symbol=:rslice` — within-bound proposal. One of
-  `:rwalk` (random walk), `:rstagger` (staggered random walk),
-  `:slice` (axis slice), `:rslice` (random-direction slice), or
-  `:unif` (uniform rejection; low-d only).
+  `:rwalk` (random walk), `:rstagger` (staggered random walk; the same walk
+  as `:rwalk` now), `:slice` (slices along the bounding ellipsoid's axes),
+  `:rslice` (random-direction slice), `:hslice` (Hamiltonian slice) or
+  `:unif` (uniform draws from the bound). `:unif` is for low dimension only:
+  its bounds are expanded as dynesty expands them (bootstrap) until they
+  cover the constrained region, and on a curved posterior in more than a few
+  dimensions they get so loose that a new point can take more than 100 000
+  likelihood calls, when the run stops with an error. On a 10-parameter RM
+  fit four runs of six stopped so, after 17–24 minutes; the two that
+  finished were 0.33 and 0.10 above pt_emcee's log Z. On a 7-parameter RV
+  fit three of three finished (+0.18 on average, 4–25 minutes each; `:rslice`
+  takes 2), and on a 2-parameter gravity-darkening fit it matches pt_emcee.
+  Before the expansion its bounds missed 12–22% of an RM fit's constrained
+  region and log Z came out 2 nats high.
   DEFAULT IS `:rslice`, NOT `:rwalk`. RWalk takes isotropic steps scaled
   by a single scalar inside the bounding ellipsoid; on the correlated RV
   ridges it cannot traverse the correlation, its acceptance collapses, the
@@ -40,21 +53,31 @@ The target must use `unconstrained=false` (bounded space).
   ellipsoid axes, which track the local correlation, so it follows the
   ridge and recovers truth on all three validation generators. `:rwalk`
   remains available for diagnostics but is NOT recommended for RV fits.
+  (Those failures were measured while every step of a walk or slice chain
+  restarted from the live point it copied, fixed since. With the fix and its
+  default chain, `:rwalk`'s posterior and log Z match pt_emcee's on RM
+  obliquity and gravity-darkening fits; on an eccentric RV fit its log Z is
+  0.18 high, against `:rslice`'s 0.06.)
 - `walk_scale::Real=1.0` — initial proposal scale for the walk / slice
   kernels (passed to NestedSamplers as `scale`).
-- `n_walks::Union{Int,Nothing}=nothing` — Metropolis steps per replacement for
-  `:rwalk` / `:rstagger`. `nothing` → dimension-scaled `max(25, 2·n_dim)`
-  (a fixed count under-decorrelates as n_dim grows → logZ biased low). An
-  explicit value is honored verbatim.
-- `slices::Union{Int,Nothing}=nothing` — slices per replacement for
-  `:slice` / `:rslice`. `nothing` → `max(5, 2·n_dim)` for `:rslice`
-  (PolyChord `num_repeats ∝ nDims`; dynesty `rslice`=`3+ndim`); `:slice`
-  already loops all n_dim axes internally so it stays at 5. Explicit honored.
-- `enlarge::Real=1.25` — linear volume factor by which the bounding
-  ellipsoid(s) are enlarged after fitting to the live set. Raise it if the
-  bound is under-covering, BUT note ellipsoidal bounds cannot conform to a
-  strongly-curved (e.g. eccentric-RV) likelihood ridge — there the evidence
-  bias is structural and `enlarge` does not remove it (use PT/TI evidence).
+- `n_walks::Union{Int,Nothing}=nothing` — walk steps per replacement for
+  `:rwalk` / `:rstagger`. `nothing` → `max(25, 10·n_dim)`.
+- `slices::Union{Int,Nothing}=nothing` — slices per replacement. `nothing` →
+  `max(5, 5·n_dim)` for `:rslice`, `max(5, 2·n_dim)` for `:hslice` and 5
+  for `:slice`, each of whose slices sweeps all n_dim axes of the bound.
+  Too short a chain leaves each new point near the live point it started
+  from and puts log Z high; how the defaults were chosen is noted where they
+  are set. An explicit `n_walks` or `slices` is honored verbatim.
+- `enlarge::Real=1.25` — volume factor by which the bounding ellipsoid(s)
+  are enlarged after fitting to the live set. For `:unif`, which draws from
+  the bound, the factor is the larger of this and the bootstrap expansion.
+  The walk and slice proposals take only their directions and scale from
+  the bound and move by the likelihood constraint itself, so a bound that
+  does not conform to a curved (e.g. eccentric-RV) ridge does not bias
+  their log Z: `:rslice` at its default came within 0.06 nats of pt_emcee's
+  on an eccentric RV fit. (An earlier note here called that bias
+  structural; it was measured while every chain step restarted from the
+  copied live point.)
 - `dlogz::Real=0.1` — stopping criterion (remaining evidence). Tighter than
   the canonical 0.5 because a loose tolerance let a run terminate while the
   live set was still confined to a wrong sub-mode (premature convergence at
@@ -65,6 +88,13 @@ The target must use `unconstrained=false` (bounded space).
   the remaining evidence `dlogz` the run stops on, `stage` (how far log dlogz
   has come toward the threshold, in percent) and `ncall`. There is no total, so
   no ETA, and the stage is not a fraction of the run time.
+- `seam_pilot::Bool=true` — with full-circle or polar angles in the model,
+  first run a small nested pilot (`sample_nested_ins`, `max(50, n_live ÷ 10)`
+  live points, `dlogz = 1`) whose live points place each angle's seam in its
+  emptiest arc (a polar angle's, of the live points and their mirror images).
+  NestedSamplers.jl owns its loop, so the seam cannot move during the run, and
+  a mode across it would be two pieces whose shares of the live points drift
+  (src/circular.jl).
 """
 function sample_nested(
     target::NereusTarget,
@@ -81,6 +111,7 @@ function sample_nested(
     parallel::Bool = !_is_under_juliacall(),
     batch_size::Int = 0,   # 0 → auto (nthreads when parallel, else 1)
     show_progress::Bool = true,
+    seam_pilot::Bool = true,
 )
     bounds in (:multi, :single, :none, :mlfriends) ||
         throw(ArgumentError("bounds must be :multi, :single, :none, or " *
@@ -107,30 +138,53 @@ function sample_nested(
     n_dim = length(layout.unfrozen_idx)
     rng = MersenneTwister(seed)
 
-    # --- Dimension-scaled decorrelation defaults --------------------------
-    # A single random-direction slice (RSlice) or Metropolis step (RWalk/
-    # RStagger) decorrelates the new live point in ~ONE direction, so the
-    # number of steps must grow ~linearly with n_dim to produce an
-    # independent draw from the constrained prior. A FIXED count (the old
-    # slices=5 / n_walks=25) is dimension-blind → under-decorrelates as n_dim
-    # grows → logZ biased LOW. This is the PolyChord prescription
-    # (`num_repeats ∝ nDims`, default 2·nDims) and dynesty's `rslice`
-    # default (`3 + ndim`). We default to PolyChord's 2·nDims, floored at the
-    # historical constants so low-d/easy problems never regress, and resolved
-    # only when the user left the knob unset (an explicit value is honored
-    # verbatim). The non-random `Slice` ALREADY loops over all n_dim axes per
-    # iteration (its `slices` is full ndim-sweeps), so it is NOT scaled here —
-    # scaling it too would be O(n_dim²).
+    # --- Decorrelation defaults ---------------------------------------------
+    # A new live point is the end of a chain of `slices` slices or `n_walks`
+    # walk steps from a live point inside the constraint. Too short a chain
+    # leaves it near that start: the live points descend from too few
+    # parents, each iteration shrinks the prior volume by more than the
+    # 1/n_live NS credits, and log Z comes out HIGH. A random-direction slice
+    # or a walk step moves the point along about one direction, so the count
+    # grows with n_dim (PolyChord's default is 5·nDims repeats, dynesty's
+    # rslice 3 + ndim). Each `:slice` slice sweeps all n_dim axes of the
+    # bound, so its count is not scaled.
     #
-    # NOTE (scope): dimension scaling fixes the DECORRELATION bias, which
-    # dominates on gentle posteriors. On sharply-curved RV ridges (the e–ω–Mo
-    # eccentricity banana) the residual evidence bias is the multi-ellipsoid
-    # BOUND failing to conform to the ridge — that is NOT removed by more
-    # slices or a larger `enlarge`; use PT/TI for evidence there, or the
-    # friends-bound (MLFriends) port. See project_ns_rslice_undermixing.
+    # Each default is the smallest multiple of n_dim whose log Z, averaged
+    # over 4-9 seeds, came within the NS error (0.17-0.22) of pt_emcee's on
+    # four fits: an RM obliquity fit at λ = 0° and 180° (10 parameters), an
+    # eccentric RV fit (7) and a gravity-darkening fit (2), with 500 live
+    # points (300 for the last). Seed-mean log Z minus pt_emcee's:
+    #
+    #   :rslice 2·n_dim   -0.05  +0.35  +0.07  -0.01   (RM 0°, RM 180°, RV, GD)
+    #           3·n_dim   +0.07  +0.23  -0.00  -0.08
+    #           5·n_dim   +0.02  +0.13  +0.06  +0.02   ← default
+    #   :slice  5         +0.13  +0.09  -0.01  -0.04   ← default
+    #   :hslice 2·n_dim   +0.13  +0.06  +0.06  -0.08   ← default
+    #   :rwalk  5·n_dim   +0.26  -0.06  +0.26  -0.21
+    #           10·n_dim  +0.07  +0.04  +0.18  -0.04   ← default
+    #
+    # `:rstagger` is the same walk as `:rwalk`. The walk's RV value is the
+    # largest of the defaults; with the walks run one at a time
+    # (`parallel = false`) it was -0.02 over six seeds, a difference of
+    # 1.5 standard errors that is not resolved. The floors keep a
+    # low-dimensional fit's chains from getting too short.
+    #
+    # The count only matters because the steps form one chain, each starting
+    # where the last ended (vendor/NestedSamplers/VENDORED.md). The fork used
+    # to start every step from the copied live point, so the new point was one
+    # step from it whatever the count: the live set descended from ever fewer
+    # ancestors and the posterior came out too narrow and off-centre (an RM
+    # obliquity fit gave λ sd 1.6–2.1° against pt_emcee's 2.1–2.5°, b's sd at
+    # half of pt_emcee's, the jitters up to 1.3 σ high). An earlier note here
+    # blamed the ellipsoid bound for an evidence bias on curved RV ridges that
+    # more slices did not remove; it was measured before the fix, when more
+    # slices could not help, and a slice takes only its direction from the
+    # bound.
     slices_resolved = slices !== nothing ? slices :
-                      (proposal === :slice ? 5 : max(5, 2 * n_dim))
-    n_walks_resolved = n_walks !== nothing ? n_walks : max(25, 2 * n_dim)
+                      proposal === :slice  ? 5 :
+                      proposal === :hslice ? max(5, 2 * n_dim) :
+                                             max(5, 5 * n_dim)
+    n_walks_resolved = n_walks !== nothing ? n_walks : max(25, 10 * n_dim)
     if slices === nothing || n_walks === nothing
         @info "sample_nested: dimension-scaled decorrelation (n_dim=$n_dim, " *
               "proposal=:$proposal) → slices=$slices_resolved " *
@@ -140,7 +194,26 @@ function sample_nested(
     # Build prior distributions vector for NestedModel.
     # NestedSamplers accepts a vector of univariate distributions that
     # define the prior transform (unit cube → parameter space).
-    prior_dists = [layout.unfrozen_priors[j].dist for j in 1:n_dim]
+    #
+    # Angles (src/circular.jl): each full-circle or polar angle's seam is
+    # placed, before the run, from a small nested pilot whose own loop re-cuts
+    # it at every bound refit.
+    #
+    # The pilot's posterior is discarded, and so is what it logs: its warning
+    # of a thin posterior (n_eff 134-192 at 50 live points on an RV + IAD
+    # companion, where the run itself had 3,000-11,000) read as this run's.
+    #
+    # Every run starts from the same charts, so a seed repeats it on the same
+    # target: an earlier run left them where it ended.
+    _ns_home_charts!(params;
+                     transforms = target.transform === nothing ? () : (target.transform,))
+    if seam_pilot && !isempty(seam_indices(params))
+        Logging.with_logger(Logging.NullLogger()) do
+            sample_nested_ins(target, data; n_live = max(50, n_live ÷ 10), dlogz = 1.0,
+                              seed = seed + 7919, show_progress = false)
+        end
+    end
+    prior_dists = [_ns_prior(layout.unfrozen_priors[j]).dist for j in 1:n_dim]
 
     # Log-likelihood function: maps bounded parameter vector → log L.
     # NestedSamplers draws from the prior internally via prior_dists,
@@ -191,12 +264,18 @@ function sample_nested(
         @inbounds for (j, idx) in enumerate(layout.unfrozen_idx)
             tb.values[idx] = x[j]
         end
+        # The photo-eccentric reparametrization's prior term: the prior here is
+        # the sampled slots' surrogate (`density_logprior_correction`; 0 without).
+        # Outside the old prior's support, a slope rather than a plateau
+        # (`density_ns_floor`).
+        dl = density_logprior_correction(tb)
+        isfinite(dl) || return density_ns_floor(tb)
         ll = rv_log_likelihood(tb, data, wb)
         isfinite(ll) || return -1e300
         ll += transit_log_likelihood(tb, data, wb)
         ll += tomogram_log_likelihood(tb, data, wb) # residual maps
         isfinite(ll) || return -1e300
-        return ll
+        return ll + dl
     end
 
     model = NestedModel(loglike, prior_dists)
@@ -218,10 +297,10 @@ function sample_nested(
     elseif proposal === :rslice
         NestedSamplers.Proposals.RSlice(; slices=slices_resolved, scale=walk_scale)
     elseif proposal === :hslice
-        # Reflective (Hamiltonian) slice — gradient-aware, for thin curved ridges.
-        # `slices` here = number of trajectories; the dimension-scaled default is
-        # fine. n_steps fixed at 15.
-        NestedSamplers.Proposals.HSlice(; slices=slices_resolved, n_steps=15, scale=walk_scale)
+        # Hamiltonian (reflective) slice: `slices` trajectories per new point,
+        # each reflecting off the likelihood constraint about the gradient where
+        # a step lands outside it (vendor/NestedSamplers Proposals.HSlice).
+        NestedSamplers.Proposals.HSlice(; slices=slices_resolved, scale=walk_scale)
     else  # :unif
         NestedSamplers.Proposals.Rejection()
     end
@@ -230,6 +309,7 @@ function sample_nested(
         bounds = bounds_type,
         proposal = proposal_type,
         enlarge = Float64(enlarge),
+        min_eff = _ns_min_eff(_density_support_share(params, prior_dists; seed)),
     )
 
     # Run — returns (Chains, state_NamedTuple).
@@ -300,6 +380,8 @@ function sample_nested(
     end
     finish!(pb)
     log_ev = ns_state.logz
+    tr = ns_state.trace
+    log_ev_err = _ns_logz_err(_NSTrace(tr.logl, tr.birth, tr.id); seed = seed)
 
     # NestedSamplers returns weighted samples. Resample to an unweighted
     # posterior with i.i.d. multinomial resampling on the importance weights
@@ -358,10 +440,69 @@ function sample_nested(
         mat[i, :] = raw[idx, :]
     end
 
-    chains = MCMCChains.Chains(mat, param_names)
-    return chains, log_ev
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(MCMCChains.Chains(mat, param_names), target.params)
+    return chains, log_ev, log_ev_err
 end
 
+
+# NestedSamplers draws new points uniformly from the cube until its cumulative
+# efficiency (iterations per likelihood call) falls below `min_eff`, 0.10 by
+# default, and only then hands them to the bounds and the proposal. Uniform
+# draws reach an efficiency `_ns_uniform_eff(x)` when the region above the
+# threshold is a share `x` of the cube: 0.10 at x ≈ 0.027.
+_ns_uniform_eff(x::Real) = x * log(1 / x) / (1 - x)
+const _NS_MIN_EFF = 0.10
+
+"""
+    _ns_min_eff(share) -> Float64
+
+The `min_eff` that hands over from uniform draws when the region above the
+threshold is the share of the prior's support that the default leaves of a cube
+that is all support, for a cube of which `share` is.
+
+The density floor (`density_ns_floor`) is cube without prior mass: 90-96% of it
+for an anchor under the `rho_circ_k` box. With the default, the handover came at
+a tenth of the compression of the support it comes at under `:rho_star`: on a
+one-planet transit at 250 live points at log L ≈ 1200 against 1770, further from
+the fits that find the transit (a mode narrow in period and phase, walled off by
+worse fits), which the slice proposal then under-filled. log Z came out 0.6 below
+`:rho_star`'s; handing over at the same share of the support puts them level.
+
+The handover is kept to a share of 1e-3 of the cube, where a uniform draw costs
+~1000 calls (the rejection's `maxiter` is 1e5).
+"""
+function _ns_min_eff(share::Real)
+    share >= 1 && return _NS_MIN_EFF
+    lo, hi = 0.0, 1.0        # _ns_uniform_eff rises on (0, 1)
+    for _ in 1:200
+        mid = (lo + hi) / 2
+        _ns_uniform_eff(mid) < _NS_MIN_EFF ? (lo = mid) : (hi = mid)
+    end
+    return _ns_uniform_eff(max((lo + hi) / 2 * share, 1e-3))
+end
+
+"""
+    _density_support_share(params, dists; n = 4000, seed = 1) -> Float64
+
+The share of the nested cube (`dists`, the per-coordinate priors it is mapped
+through) that the old prior supports (`density_logprior_correction` finite), from
+`n` uniform draws: 1 without the photo-eccentric reparametrization.
+"""
+function _density_support_share(params::Params, dists; n::Int = 4000, seed::Int = 1)
+    params.layout.density.mode === :none && return 1.0
+    rng = MersenneTwister(seed + 1_000_003)
+    th = Theta{Float64}(params)
+    idx = params.layout.unfrozen_idx
+    k = 0
+    for _ in 1:n
+        @inbounds for j in eachindex(idx)
+            th.values[idx[j]] = quantile(dists[j], rand(rng))
+        end
+        isfinite(density_logprior_correction(th)) && (k += 1)
+    end
+    return max(k, 1) / n
+end
 
 # Remaining evidence Δlog Z = log(Z + L_max·X) − log Z, the quantity the fork's
 # `nested_isdone` and `sample_parallel` stop on.

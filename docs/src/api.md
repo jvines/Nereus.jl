@@ -91,9 +91,13 @@ trans-dim engine (`transdim_pt_emcee`, `rjmcmc`, `moms`) to mean anything.
 baselines, and the semi-amplitude from 0.1 m/s to ten times the RV scatter:
 
 ```julia
-default_rv_planet(t, rv)      # -> (P, K, sesinw, secosw, Mo) priors
-default_astrom_planet()       # -> (a, M_sec, sesinw, secosw, Mo, inc, Omega)
+default_rv_planet(t, rv)      # -> (P, K, sesinw, secosw) priors
+default_astrom_planet()       # -> (a, M_sec, sesinw, secosw, inc, Omega)
 ```
+
+Neither names a time anchor: the fit's `time_anchor` does (default the
+transit phase `phic`, on `U(−π, π)`; `"Mo"`, `"Tp"` or `"Tc"` on request), and
+its default prior comes with it.
 
 You should still look at them. A data-derived prior is a sane starting point,
 not a considered one — and on a short baseline the upper period bound is
@@ -107,7 +111,7 @@ fit_rv(rv; planets = (k1 = (P = NormalPrior(4.1375, 0.001),
                             K = LogUniformPrior(1.0, 30.0),
                             sesinw = UniformPrior(-1, 1),
                             secosw = UniformPrior(-1, 1),
-                            Mo     = UniformPrior(0, 2pi)),))
+                            phic   = UniformPrior(-pi, pi)),))
 ```
 
 ---
@@ -140,8 +144,11 @@ fit_rv(rv; engine = Dict("engine" => "pt",
                          "options" => Dict("init_strategy" => "pathfinder")))
 ```
 
-`pt_emcee` does not take `init_strategy` and that is deliberate — see
-[Samplers](samplers.md) for the orbit it gets wrong when you seed it that way.
+`pt_emcee` takes `init_strategy` too (`"prior"`, the default, `"pathfinder"`
+or `"map_scatter"`), but seeding an ensemble from one basin is how
+[Samplers](samplers.md) gets a wrong orbit with pristine diagnostics: keep it
+at `"prior"` unless the posterior is known to be unimodal. A value a sampler
+does not implement is an error, not the default.
 
 Two behaviours worth relying on:
 
@@ -164,8 +171,25 @@ Uniform across engines, separate from sampler-specific knobs:
 ```julia
 Stopping(; max_seconds = nothing, max_evals = nothing,
            ess_min = nothing, rhat_max = nothing,
-           logz_tol = nothing, check_every = 500)
+           logz_tol = nothing, check_every = nothing)
 ```
+
+Pass it as `stopping=` to any `fit_rv`, `fit_transit`, `fit_astrometry` or
+`fit_joint`. Each field becomes the engine's own option, and a field an engine
+cannot honour is an `ArgumentError` that names the engines that can:
+
+| field | engine option | engines |
+|---|---|---|
+| `max_seconds` | `max_seconds` | `pt_emcee`, `transdim_pt_emcee` |
+| `max_evals` | `max_evals` | `pt_emcee`, `transdim_pt_emcee` |
+| `rhat_max` | `rhat_threshold` (and `convergence_stop = true`) | `pt_emcee`, `transdim_pt_emcee` |
+| `ess_min` | `tail_ess_threshold` (and `convergence_stop = true`) | `pt_emcee`, `transdim_pt_emcee` |
+| `check_every` | `diag_every` (steps between diagnostics) | `pt_emcee`, `transdim_pt_emcee` |
+| `logz_tol` | `dlogz` (`dlogz_batch` for `nested_dynamic`) | `nested`, `nested_ins`, `daedalus`, `nested_dynamic` |
+
+A field given together with the engine option it maps to, with a different
+value, is an error. The summary's `"stopped"` says how a run ended; see
+[Stopping a run early](samplers.md#Stopping-a-run-early).
 
 ---
 
@@ -181,6 +205,7 @@ Every entry point returns `(; chains, log_z, summary)`.
 | `"status"` | `"ok"`, or `"railed"` — see below |
 | `"log_z"` | marginal likelihood (`NaN` where the engine gives none) |
 | `"elapsed_sec"` | wall time |
+| `"stopped"` | how the sampler ended: `"steps"`, `"converged"`, `"interrupted"`, `"requested"`, `"max_seconds"` or `"max_evals"` (PT ensembles; with `"stopped_at_step"`, `"n_steps"`, `"n_draws_kept"` and, when a stop file was watched, `"stop_file"`) |
 | `"params"` | per-parameter median and credible intervals |
 | `"derived"` | physical quantities — masses, radii, separations, equilibrium temperatures |
 | `"output_dir"` | present when you passed one |
@@ -225,6 +250,28 @@ Supported catalogues are `gaia_dr4` (also `gaia_epoch`, `dr4`) and
 `hipparcos` (also `hip`, `iad`). A `"path"` key, or `NEREUS_GAIA_DR4_XML`,
 short-circuits the download. `resolve_astrometry(spec)` does this standalone,
 and passing an `IADData` straight through works too.
+
+Two per-instrument options ride on the same reference, both off by default:
+`"jitter" => true` adds a `sigma_iad_<name>` along-scan jitter (mas) to that
+instrument, and `"clip_outliers" => true` (or a number of σ) runs
+`clip_transit_outliers` on it, which drops CCD abscissae that disagree
+with their own field-of-view transit and reports them in the result's
+`iad_outliers`. `<name>` is `GaiaDR4_<source_id>` / `HIP<hip>`, or the spec's
+`"instrument"`:
+
+```julia
+fit_astrometry(iad = Dict("catalogue" => "gaia_dr4", "source_id" => 1457486023639239296,
+                          "instrument" => "DR4", "jitter" => true,
+                          "clip_outliers" => true))      # → sigma_iad_DR4
+```
+
+From the prior, a jitter as large as the reflex is the cheaper way up the
+likelihood, and a fit can settle there instead of on the orbit (HD 114762, RV +
+DR4). The PT ensemble engines (`pt_emcee`, `transdim_pt_emcee`,
+`pt_whitening`) therefore hold every `sigma_iad_<name>` at 0 for at least the
+first half of burn-in, which is the unjittered fit, and let it go once that fit
+has stopped climbing; the engine option
+`burnin_hold = false` turns that off (`burnin_hold` in `docs/JOB_CONFIG.md`).
 
 > **Always give `fit_astrometry` an informative parallax.** The abscissae
 > constrain the product a₀ ∝ M_sec·ϖ and are blind to its factorisation, so

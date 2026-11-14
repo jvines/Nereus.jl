@@ -159,6 +159,10 @@ function ofti_sample(target::NereusTarget;
     n_slots      = _nthread_chunks()
     thetas       = [Theta(params)              for _ in 1:n_slots]
     x_bounds     = [zeros(Float64, n_unf)      for _ in 1:n_slots]
+    # A cyclic inclination is drawn on its circle and folded to [0, π]
+    # (src/circular.jl): a draw from sin(i)/2, and the accepted samples are
+    # reported folded.
+    cinc         = cyclic_inclination_indices(params)
 
     # Per-slot closure. Same logic as before; takes the chunk index so it
     # can pick its own buffers. The RNG is passed IN, keyed on the attempt
@@ -172,6 +176,7 @@ function ofti_sample(target::NereusTarget;
             ps = layout.unfrozen_priors[j]
             x_bounded[j] = prior_transform(rand(trng), ps)
         end
+        fold_cyclic_inclinations!(x_bounded, params; idx = cinc)
         set_unfrozen!(theta, x_bounded)
 
         M_pri = astrom_M_pri(theta)

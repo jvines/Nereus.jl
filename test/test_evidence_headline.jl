@@ -1,12 +1,14 @@
 # What sample_pt_emcee reports as `log_evidence`, and the estimators behind it.
 #
 # Measured on 51 Peg (1691 RVs, 15 free params, unimodal, P to 5 decimals --
-# the friendliest target any of these will see):
+# the friendliest target any of these will see), converged (two seeds of
+# 15 000 steps, R-hat 1.016 and 1.014):
 #
-#   TI+ / H+  -6073.24   SS+ -6097.41    ~178 nats low
-#   Laplace   -5920.97                    ~24 nats low
-#   bridge    -5897.0                     validated pair
-#   refpath   -5893.1
+#   TI+ / H+  -6005.59 / -5986.97    93 to 112 nats low
+#   SS+       -5959.52 / -5948.62    55 to 66 nats low
+#   Laplace   -5888.33 / -5888.39    5.5 nats high
+#   bridge    -5893.86 / -5893.91    validated pair
+#   refpath   -5893.79 / -5893.88
 #
 # So the headline is bridge, Laplace is reported but not headlined, and the
 # tempered stack is reported but never silently substituted.
@@ -57,10 +59,13 @@ using LinearAlgebra, Statistics, Random, Distributions, MCMCChains
     @test res.log_evidence_bridge != res.log_evidence_laplace
     @test res.log_evidence_bridge != res.evidence.ti_plus[1]
 
-    # opting out returns the pre-existing behaviour rather than erroring
-    res2 = sample_pt_emcee(target, target.data; n_temps = 12, n_walkers = 30,
-                          n_steps = 1500, n_burnin = 800, seed = 7,
-                          bridge_headline = false, show_progress = false)
+    # Opting out of bridge: a tempered value this ladder (no β = 0 rung)
+    # cannot carry is broken, so mode-Laplace is the headline, with a warning
+    # (Jose's rule), and the estimators stay in the result.
+    res2 = @test_logs (:warn, r"log_evidence is mode-Laplace") match_mode = :any sample_pt_emcee(
+        target, target.data; n_temps = 12, n_walkers = 30, n_steps = 1500, n_burnin = 800,
+        seed = 7, bridge_headline = false, show_progress = false)
     @test isnan(res2.log_evidence_bridge)
-    @test isfinite(res2.log_evidence)
+    @test isfinite(res2.log_evidence) && res2.log_evidence == res2.log_evidence_laplace
+    @test isfinite(res2.evidence.ss_plus[1])
 end

@@ -138,9 +138,10 @@ end
     @test msg !== nothing && occursin("data", msg)
 end
 
-# Base's hash of an array of 8192 or more entries samples about log(n) of them,
-# so most single-entry changes in a long light curve leave it unchanged; the
-# content hash reads every entry.
+# Through Julia 1.12, Base's hash of an array of 8192 or more entries samples
+# about log(n) of them, so most single-entry changes in a long light curve leave
+# it unchanged; from 1.13 it reads every entry. The content hash reads every
+# entry on every version.
 @testset "pt_whitening fingerprint reads every data entry" begin
     n = 10_000
     rng = MersenneTwister(5)
@@ -150,7 +151,7 @@ end
         rv2 = copy(rv); rv2[i] += 1e-9
         hash(rv2) == hash(rv)
     end
-    @test i !== nothing                    # Base misses this entry ...
+    i = something(i, n ÷ 2)                # an entry Base misses, where it misses one ...
     rv2 = copy(rv); rv2[i] += 1e-9
     d1 = Data(t_rv = t, rv = rv2, rv_err = fill(2.0, n))
     @test Nereus.content_hash(d1) != Nereus.content_hash(d0)    # ... this does not

@@ -199,7 +199,12 @@ function plot_beta_ladder(result;
         rep = _evidence_report_of(result)
         txt = String[]
         shown = NaN
-        if rep !== nothing
+        # The tempered value only when its ladder can carry it (β = 0 reached,
+        # every pair swapping at least 5%), as in summary.json.
+        tq_ok, _ = rep === nothing ? (false, "") : _result_tempered_quotable(result)
+        if rep !== nothing && !tq_ok
+            push!(txt, "Tempered evidence (TI+): not quotable")
+        elseif rep !== nothing
             if isfinite(rep.ti_plus[1])
                 shown = rep.ti_plus[1]
                 push!(txt, @sprintf("Evidence (TI+): %.3f ± %.3f", shown, rep.ti_plus[2]))

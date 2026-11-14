@@ -94,23 +94,32 @@ export sample_pt_whitening, WhiteningPTResult
 
 # Fields
 - `chains::MCMCChains.Chains` — β=1 walkers post-burnin (walkers as chains)
-- `log_evidence::Float64` — reddemcee H+/TI+/TI stack on the β-ladder
-- `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ evidence stack
+- `log_evidence::Float64` — reddemcee H+/TI+/TI stack on the β-ladder, quoted
+  only when the ladder reaches β = 0 and every adjacent pair swapped at least
+  `swap_min` of the time (`_tempered_quotable`); otherwise `NaN`, with a warning
+  saying why
+- `evidence::EvidenceReport` — full TI / TI+ / SS+ / H+ evidence stack (raw)
 - `acceptance_within::Vector{Float64}` — within-temp stretch acceptance per temp
+- `acceptance_de::Vector{Float64}` — within-temp acceptance of the
+  differential-evolution move per temp (`de_move`); NaN where none was proposed
 - `acceptance_swap::Vector{Float64}` — adjacent-temp swap rate per pair
 - `betas::Vector{Float64}`
 - `n_evals::Int`
 - `whitening_active_after::Int` — iteration after which whitening swaps started
+- `drift` — the collective-drift check of the β=1 ensemble
+  ([`ensemble_drift`](@ref)), or `nothing` when the run was too short to test
 """
 struct WhiteningPTResult
     chains::MCMCChains.Chains
     log_evidence::Float64
     evidence::EvidenceReport
     acceptance_within::Vector{Float64}
+    acceptance_de::Vector{Float64}
     acceptance_swap::Vector{Float64}
     betas::Vector{Float64}
     n_evals::Int
     whitening_active_after::Int
+    drift::Union{Nothing, Dict{String, Any}}
 end
 
 """
@@ -128,14 +137,22 @@ the distinguishing feature of this sampler.
 - `n_walkers::Int=40` — walkers per temperature (≥ `2·n_dim + 2`, even).
 - `n_steps::Int=2000` — MCMC iterations.
 - `n_burnin::Int=500` — burn-in discarded from posterior + evidence.
-  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`,
-  moving `target.params.layout` and `target.transform` in place.
+  Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`, and
+  every 50 steps through 3/4 of burn-in (as in `sample_pt_emcee`), moving
+  `target.params.layout` and `target.transform` in place.
 - `betas::Union{Nothing,Vector{Float64}}=nothing` — explicit β ladder
   (descending β[1]=1). Default: Vines+ 2023's `β_i = (1/√5)^i`, the same
   ladder `sample_pt_emcee` uses (geometric ladders give far more uniform
   swap acceptance than the old quadratic ladder, which over-resolved the
   hot end and starved the cold end).
+- `swap_min::Real=0.05` — the least adjacent swap acceptance for
+  `log_evidence` to be quoted (with a ladder that reaches β = 0).
 - `stretch_a::Float64=2.0` — Goodman-Weare stretch parameter.
+- `de_move::Real=DE_MOVE_DEFAULT` — as in `sample_pt_emcee`: per walker and
+  step, the probability of a differential-evolution move in place of the
+  stretch move (src/samplers/de_move.jl), on the same bounded coordinates and
+  leaving held ones where they are. `0` is the stretch-only kernel, and draws
+  exactly what it did.
 - `proposal_scale::Real=0.05` — accepted for backward compatibility; the
   ensemble stretch move needs no global RWM step, so this is unused.
 - `warmup_swaps::Int=200` — iterations before whitening kicks in; standard
@@ -148,14 +165,21 @@ the distinguishing feature of this sampler.
   burned-in run, so a per-step recompute over the whole ring buffer is
   wasted work; refreshing every few steps keeps the flow current while
   cutting the dominant cost of the swap path).
-- `init_strategy::Symbol=:prior` — walker initialization (`:prior` draws
-  each walker from the prior, matching astroEMPEROR / pt_emcee).
+- `init_strategy::Symbol=:prior` — walker initialization. Only `:prior` is
+  implemented (each walker drawn from the prior, matching astroEMPEROR /
+  pt_emcee); anything else is an `ArgumentError`.
 - `seed::Int=1`
 - `thin::Int=1`
 - `show_progress::Bool=true`
 - `node_flip::Real=0.1` — as in `sample_pt_emcee`: the tempered
   (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets
   (src/samplers/node_flip.jl). `0` disables it.
+- `burnin_hold = nothing`, `burnin_hold_frac::Real = 0.5` — as in
+  `sample_pt_emcee`: every IAD jitter `sigma_iad_<instrument>` held at 0 for
+  at least the first half of burn-in, until the β = 1 rung stops climbing, then
+  drawn from its prior walker by walker, so the
+  jitter cannot absorb the reflex before the orbit is found. `false` turns it
+  off. The whitened swap maps a held coordinate to itself.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (every rung's walkers, every RNG stream, the whitening ring
   buffer and its (μ, σ), the step whitening started, the counters, the evidence
@@ -171,7 +195,7 @@ the distinguishing feature of this sampler.
   an uninterrupted run of `n_steps`, at any thread count. Refused, with the
   differences listed, if the checkpoint came from different data (any field,
   astrometry and `t_ref` included), priors, parameters, `n_walkers`, `n_temps`,
-  `betas`, `n_burnin`, `thin`, `seed`, `stretch_a`, `node_flip` (when a planet
+  `betas`, `n_burnin`, `thin`, `seed`, `stretch_a`, `de_move`, `node_flip` (when a planet
   can flip) or whitening settings (`warmup_swaps`, `whiten_window`,
   `whiten_refresh`).
 """
@@ -183,7 +207,9 @@ function sample_pt_whitening(
     n_steps::Int = 2000,
     n_burnin::Int = 500,
     betas::Union{Nothing,AbstractVector} = nothing,
+    swap_min::Real = 0.05,
     stretch_a::Real = 2.0,
+    de_move::Real = DE_MOVE_DEFAULT,
     proposal_scale::Real = 0.05,
     warmup_swaps::Int = 200,
     whiten_window::Int = 100,
@@ -193,6 +219,8 @@ function sample_pt_whitening(
     thin::Int = 1,
     show_progress::Bool = true,
     node_flip::Real = 0.1,
+    burnin_hold = nothing,
+    burnin_hold_frac::Real = 0.5,
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
@@ -200,9 +228,15 @@ function sample_pt_whitening(
     # JSON config delivers floats-as-Int and arrays-as-JSON3.Array;
     # normalize both.
     stretch_a      = Float64(stretch_a)
+    p_de           = _de_check(de_move)
     node_flip      = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
+    # Accepted for symmetry with pt_emcee, but every walker is drawn from the
+    # prior: `:pathfinder` used to be taken and silently ignored.
+    init_strategy === :prior || throw(ArgumentError(
+        "sample_pt_whitening draws every walker from the prior; init_strategy " *
+        "must be :prior, got :$init_strategy"))
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))
@@ -238,16 +272,28 @@ function sample_pt_whitening(
     # Node flip for astrometry-only planets (src/samplers/node_flip.jl). Walkers
     # here are plain bounded space, so no log-scale dimension to exclude.
     flips = node_flip > 0 ? node_flips(params, data) : NodeFlip[]
+    # Coordinates held early in burn-in (src/samplers/burnin_hold.jl). Walkers
+    # live in x, so the held value is stored exactly and the stretch leaves it
+    # (every walker shares it); `is_held` is cleared at the release.
+    hold = _burnin_hold(params, burnin_hold, burnin_hold_frac, n_burnin;
+                        forbid = reduce(vcat, (vcat(f.shift, f.negate) for f in flips);
+                                        init = Int[]),
+                        sampler = "pt_whitening")
+    is_held = falses(n_dim)
+    is_held[hold.dims] .= true
+    hold_med = Ref(NaN)                 # the β = 1 median log L at the last pass
 
     # --- Checkpoint / resume (src/checkpoint.jl) ------------------------
     # On resume the saved state replaces initialisation below and is put back
     # just before the main loop, which then carries on from step `step0 + 1`.
-    # `proposal_scale` and `init_strategy` are left out: neither is read. Nor is
-    # `node_flip` when no planet can flip, so it enters as the rate in effect.
+    # `proposal_scale` is left out: it is not read. So is `init_strategy`,
+    # which has one legal value. `node_flip` is left out when no planet can
+    # flip, so it enters as the rate in effect.
     ck_fp = run_fingerprint(params, data; n_temps, n_walkers = n_walkers_eff,
         n_burnin, thin, seed, stretch_a, betas = copy(βs), warmup_swaps,
         whiten_window = max(whiten_window, 1), whiten_refresh,
-        node_flip = isempty(flips) ? 0.0 : node_flip)
+        node_flip = isempty(flips) ? 0.0 : node_flip, _burnin_hold_fp(hold, params)...,
+        _de_fp(p_de)...)
     ck = resume ? read_checkpoint(ck_path, "pt_whitening", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -319,6 +365,10 @@ function sample_pt_whitening(
                 @inbounds for d in 1:n_dim
                     state[t, w, d] = xb[d]
                 end
+                # Every walker of every rung starts at the held value.
+                @inbounds for (d, v) in zip(hold.dims, hold.values)
+                    state[t, w, d] = v
+                end
                 lp, ll = eval_bounded!(@view(state[t, w, :]), slot)
                 if isfinite(lp) && isfinite(ll)
                     logπ_arr[t, w] = lp
@@ -387,8 +437,9 @@ function sample_pt_whitening(
     # holds past positions of every rung, so relabel its filled slots for
     # each moved coordinate (slots 1:ring_count[t] -- the ring fills in
     # order before it wraps) and refresh that coordinate's (μ, σ). The other
-    # coordinates keep their statistics and their refresh cadence.
-    circ        = circular_indices(params)
+    # coordinates keep their statistics and their refresh cadence. Polar
+    # angles' charts move with the full-circle ones (`seam_indices`).
+    circ        = seam_indices(params)
     recut_moved = Dict{String,NTuple{2,Float64}}()
     function recut_whitening!()
         for d in _pt_ensemble_recut!(state, params, circ, (target.transform,),
@@ -398,6 +449,25 @@ function sample_pt_whitening(
                 @inbounds for s in 1:ring_count[t], w in 1:n_walkers_eff
                     ring[t, s, w, d] = circular_relabel(ring[t, s, w, d], lo, hi)
                 end
+                refresh_whiten_dim!(t, d)
+            end
+        end
+    end
+    # A cyclic inclination is folded to [0, π] on the same schedule
+    # (src/circular.jl), and under the stellar spin flip (`spin_flip`) every
+    # point is put in one representative of the spin, the axis chosen from the
+    # cold rung: the walkers, and the ring's filled slots so the whitening
+    # (μ, σ) describe the one representative the walkers are in.
+    cinc = cyclic_inclination_indices(params)
+    sflip = spin_flip(params)
+    fold_dims = sflip === nothing ? cinc : union(cinc, sflip.lams)
+    function fold_whitening!()
+        fold_cyclic_inclinations!(state, params; idx = cinc, sf = sflip,
+                                  decide_from = view(state, 1, :, :))
+        for t in 1:n_temps
+            fold_cyclic_inclinations!(view(ring, t, 1:ring_count[t], 1:n_walkers_eff, :),
+                                      params; idx = cinc, sf = sflip)
+            for d in fold_dims
                 refresh_whiten_dim!(t, d)
             end
         end
@@ -420,6 +490,13 @@ function sample_pt_whitening(
 
     accept_within  = zeros(Float64, n_temps)
     propose_within = zeros(Int, n_temps)
+    # The DE move's tally per rung (`de_move`; the two above count the stretch
+    # alone), and ε's scale per rung and coordinate (src/samplers/de_move.jl).
+    de_proposed    = zeros(Int, n_temps)
+    de_accepted    = zeros(Int, n_temps)
+    de_prop_temp   = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_acc_temp    = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    de_scale       = zeros(n_temps, n_dim)
     accept_swap    = zeros(Float64, n_temps - 1)
     propose_swap   = zeros(Int, n_temps - 1)
     n_evals_atomic = Threads.Atomic{Int}(n_temps * n_walkers_eff)
@@ -461,12 +538,37 @@ function sample_pt_whitening(
         # `thread_proposal` as a plain loop counter, independent of the
         # thread count and immune to `:static`'s task-migration risk.
         chunks = _chunk_ranges(length(tasks), n_slots)
+        # The dimensions the stretch scales: a held coordinate is shared by the
+        # whole ensemble, so the move leaves it and the Jacobian is z^(m - 1).
+        n_move = n_dim - count(is_held)
+        p_de > 0 && _de_spread!(de_scale, state, partner_lo, partner_hi)
         Threads.@threads :static for slot in 1:length(chunks)
             for task_idx in chunks[slot]
                 t, w = tasks[task_idx]
                 β = βs[t]
                 trng = task_rngs[task_idx]
                 buf  = thread_proposal[slot]
+
+                if _de_chosen(trng, p_de)
+                    # Differential evolution (src/samplers/de_move.jl), on the
+                    # stretch's coordinates; a held one stays. No Jacobian.
+                    j, k = _de_pair(trng, partner_lo, partner_hi)
+                    γ = _de_gamma(trng, _de_gamma0(n_move))
+                    _de_fill!(buf, state, t, w, j, k, γ, de_scale, is_held, trng)
+                    lp_prop, ll_prop = eval_bounded!(buf, slot)
+                    log_ratio = β * (ll_prop - logL_arr[t, w]) +
+                                (lp_prop - logπ_arr[t, w])
+                    Threads.atomic_add!(de_prop_temp[t], 1)
+                    if log(rand(trng)) < log_ratio
+                        @inbounds for d in 1:n_dim
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp_prop
+                        logL_arr[t, w] = ll_prop
+                        Threads.atomic_add!(de_acc_temp[t], 1)
+                    end
+                    continue
+                end
 
                 w_partner = rand(trng, partner_lo:partner_hi)
                 u = rand(trng)
@@ -478,7 +580,7 @@ function sample_pt_whitening(
                 end
 
                 lp_prop, ll_prop = eval_bounded!(buf, slot)
-                log_ratio = (n_dim - 1) * log(z) +
+                log_ratio = (n_move - 1) * log(z) +
                             β * (ll_prop - logL_arr[t, w]) +
                             (lp_prop - logπ_arr[t, w])
                 Threads.atomic_add!(propose_temp[t], 1)
@@ -493,6 +595,49 @@ function sample_pt_whitening(
             end
         end
         Threads.atomic_add!(n_evals_atomic, length(tasks))
+    end
+
+    # The end of `burnin_hold`, as in sample_pt_emcee: every walker of every
+    # rung draws its held coordinates from their priors and is evaluated there;
+    # one none of 100 draws gives a finite density for keeps the held value.
+    # The ring's history of a held coordinate is a single value, so it is
+    # overwritten with the drawn ones and that coordinate's (μ, σ) refreshed.
+    function release_hold!()
+        fill!(is_held, false)
+        n_tot = n_temps * n_walkers_eff
+        rel_seeds = rand(rng_master, UInt64, n_tot)
+        rel_chunks = _chunk_ranges(n_tot, n_slots)
+        Threads.@threads :static for slot in 1:length(rel_chunks)
+            buf = thread_proposal[slot]
+            for task_idx in rel_chunks[slot]
+                t = (task_idx - 1) ÷ n_walkers_eff + 1
+                w = (task_idx - 1) % n_walkers_eff + 1
+                rng = MersenneTwister(rel_seeds[task_idx])
+                for _ in 1:100
+                    @inbounds for d in 1:n_dim
+                        buf[d] = state[t, w, d]
+                    end
+                    _burnin_hold_draw!(buf, hold, layout.unfrozen_priors, rng)
+                    lp, ll = eval_bounded!(buf, slot)
+                    Threads.atomic_add!(n_evals_atomic, 1)
+                    if isfinite(lp) && isfinite(ll)
+                        @inbounds for d in hold.dims
+                            state[t, w, d] = buf[d]
+                        end
+                        logπ_arr[t, w] = lp
+                        logL_arr[t, w] = ll
+                        break
+                    end
+                end
+            end
+        end
+        for t in 1:n_temps, d in hold.dims
+            @inbounds for s in 1:ring_count[t], w in 1:n_walkers_eff
+                ring[t, s, w, d] = state[t, w, d]
+            end
+            refresh_whiten_dim!(t, d)
+        end
+        return nothing
     end
 
     whitening_active_after = -1
@@ -514,6 +659,8 @@ function sample_pt_whitening(
         accept_within .= ck.accept_within; propose_within .= ck.propose_within
         accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
+        hasproperty(ck, :de_proposed) && (de_proposed .= ck.de_proposed;
+                                          de_accepted .= ck.de_accepted)
         n_evals_atomic[] = ck.n_evals::Int
         keep_idx = ck.keep_idx::Int
         samples[1:keep_idx, :] .= ck.samples; lp_samples[1:keep_idx] .= ck.lp_samples
@@ -536,8 +683,19 @@ function sample_pt_whitening(
             end
         end
         merge!(recut_moved, ck.recut_moved)
+        # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
+        hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
+        # Past the release, the saved walkers carry their own values.
+        if hasproperty(ck, :hold_on)
+            ck.hold_on || fill!(is_held, false)
+            hold_med[] = ck.hold_med
+        else
+            step0 >= hold.step && fill!(is_held, false)
+        end
     end
     last_ck = time()
+    show_progress && any(is_held) &&
+        _burnin_hold_info("pt_whitening", hold, params, n_burnin)
 
     pb = ProgressBar("pt_whitening"; total = n_steps, enabled = show_progress,
                      start = step0)
@@ -549,6 +707,8 @@ function sample_pt_whitening(
         @inbounds for t in 1:n_temps
             propose_within[t] += Threads.atomic_xchg!(propose_temp[t], 0)
             accept_within[t]  += Threads.atomic_xchg!(accept_temp[t],  0)
+            de_proposed[t]    += Threads.atomic_xchg!(de_prop_temp[t], 0)
+            de_accepted[t]    += Threads.atomic_xchg!(de_acc_temp[t],  0)
         end
 
         # ---- Node flip (threaded; astrometry-only planets) -----------
@@ -607,6 +767,12 @@ function sample_pt_whitening(
                 buf_k   = swap_buf_k
                 buf_kp1 = swap_buf_kp1
                 @inbounds for d in 1:n_dim
+                    if is_held[d]
+                        # Held (`burnin_hold`): the identity, so it stays put.
+                        buf_k[d]   = state[t,     w,  d]
+                        buf_kp1[d] = state[t + 1, w2, d]
+                        continue
+                    end
                     σk   = σ_w[t,     d]
                     σkp1 = σ_w[t + 1, d]
                     s_fwd = σkp1 / σk
@@ -665,13 +831,23 @@ function sample_pt_whitening(
         end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
-        # Same schedule as pt_emcee: halfway through burn-in to merge the
-        # two lobes of a seam-centred angle, and at the end of burn-in to
-        # fix the chart for every recorded step. logπ_arr / logL_arr stay
-        # valid (uniform prior, periodic likelihood).
-        if !isempty(circ) && (step == n_burnin ÷ 2 || step == n_burnin)
+        # Same schedule as pt_emcee (`_pt_recut_due`): halfway through
+        # burn-in to merge the two lobes of a seam-centred angle, every 50
+        # steps through 3/4 of it so a mode found late is not held behind
+        # the seam, and at the end to fix the chart for every recorded step.
+        # logπ_arr / logL_arr stay valid (uniform prior, periodic likelihood).
+        # Folded first (and spin-flipped), so the re-cut chooses λ's seam
+        # from the representative the walkers end up in.
+        !isempty(cinc) && _pt_recut_due(step, n_burnin) && fold_whitening!()
+        if !isempty(circ) && _pt_recut_due(step, n_burnin)
             recut_whitening!()
         end
+
+        # ---- End of `burnin_hold` (threaded; within burn-in) -----------
+        any(is_held) && _burnin_hold_due!(hold_med, hold, step, n_burnin,
+                                          view(logL_arr, 1, :),
+                                          n_dim - length(hold.dims)) &&
+            release_hold!()
 
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
         if step > n_burnin
@@ -711,10 +887,13 @@ function sample_pt_whitening(
                 rngs_h2, rngs_flip, ring = ring[:, 1:maximum(ring_count), :, :],
                 ring_count, ring_head, μ_w, σ_w, whitening_active_after,
                 accept_within, propose_within, accept_swap, propose_swap,
-                flip_proposed, flip_accepted, n_evals = n_evals_atomic[],
+                flip_proposed, flip_accepted, de_proposed, de_accepted,
+                n_evals = n_evals_atomic[],
                 keep_idx, samples = samples[1:keep_idx, :],
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
-                windows = circular_windows(params), recut_moved))
+                windows = circular_windows(params),
+                spin_axis = copy(params.layout.spin_axis), recut_moved,
+                hold_on = any(is_held), hold_med = hold_med[]))
             last_ck = time()
         end
     end
@@ -750,11 +929,27 @@ function sample_pt_whitening(
     else
         MCMCChains.Chains(samples_with_lp, param_names)
     end
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(chains, target.params)
 
     acc_within = accept_within ./ max.(propose_within, 1)
     acc_swap   = accept_swap   ./ max.(propose_swap,   1)
+    # Its only log Z is the tempered one: quoted only when the ladder can carry
+    # it (`_tempered_quotable`, src/samplers/evidence.jl, as sample_pt_emcee).
+    tq_ok, tq_why = _tempered_quotable(βs, acc_swap; swap_min)
+    if !(tq_ok && isfinite(log_z))
+        @warn "sample_pt_whitening: no quotable log-evidence for this run: the " *
+              "tempered stack is not quotable ($(tq_ok ? "it is not finite" : tq_why)). " *
+              "log_evidence is NaN; give `betas` with a β = 0 rung." tempered = log_z
+        log_z = NaN
+    end
+    # Collective drift of the cold ensemble, which R-hat cannot see (see
+    # `ensemble_drift`); warns when it finds one.
+    drift = _pt_drift(samples, keep_idx, n_walkers_eff, params; sampler = "pt_whitening",
+                      de_move = p_de)
     return WhiteningPTResult(
-        chains, log_z, ev_report, acc_within, acc_swap, βs,
-        n_evals_atomic[], whitening_active_after,
+        chains, log_z, ev_report, acc_within,
+        _de_acceptance(de_accepted, de_proposed), acc_swap, βs,
+        n_evals_atomic[], whitening_active_after, drift,
     )
 end

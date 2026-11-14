@@ -63,9 +63,18 @@ Returns a random live point and the bounds associated with it.
 function rand_live(rng::AbstractRNG, B::AbstractBoundingSpace, us)
     idx = rand(rng, Base.axes(us, 2))
     u = us[:, idx]
-    return u, u ∈ B ? B : nothing
+    return u, bound_containing(rng, B, u)
 end
 rand_live(B::AbstractBoundingSpace, us) = rand_live(GLOBAL_RNG, B, us)
+
+"""
+    bound_containing([rng], ::AbstractBoundingSpace, u) -> bound or nothing
+
+The bound to propose from for a walk starting at `u`: the bound itself if it
+contains `u` (for a `MultiEllipsoid`, one of the ellipsoids that do, at random),
+`nothing` if `u` is outside it.
+"""
+bound_containing(rng::AbstractRNG, B::AbstractBoundingSpace, u) = u ∈ B ? B : nothing
 
 function Base.show(io::IO, bound::B) where {T,B <: AbstractBoundingSpace{T}}
     base = nameof(B) |> string
@@ -104,5 +113,82 @@ axes(b::NoBounds{T}) where {T} = Diagonal(ones(T, b.ndims))
 include("ellipsoid.jl")
 include("multiellipsoid.jl")
 include("mlfriends.jl")
+
+# The fit, its random numbers from `rng`: MultiEllipsoid's k-means draws a new
+# centre for an empty cluster, MLFriends bootstraps its radius.
+fit_rng(rng::AbstractRNG, B, points; pointvol = 0) = fit(B, points; pointvol = pointvol)
+fit_rng(rng::AbstractRNG, B::Type{<:Union{MultiEllipsoid,MLFriends}}, points; pointvol = 0) =
+    fit(B, points; pointvol = pointvol, rng = rng)
+
+"""
+    Bounds.fit(rng, B, points; pointvol=0, enlarge=1, bootstrap=0)
+
+Fit bounds of type `B` to `points` (one per column) and enlarge their volume by
+`enlarge`, or, with `bootstrap > 0`, by the larger of `enlarge` and the
+bootstrap expansion (dynesty's; Buchner 2016) as a volume factor: see
+[`Bounds.bootstrap_expansion`](@ref).
+"""
+function fit(rng::AbstractRNG, B, points::AbstractMatrix; pointvol = 0, enlarge = 1, bootstrap = 0)
+    b = fit_rng(rng, B, points; pointvol = pointvol)
+    factor = Float64(enlarge)
+    if bootstrap > 0
+        f = bootstrap_expansion(rng, B, points; pointvol = pointvol, nboot = bootstrap)
+        factor = max(factor, f^size(points, 1))
+    end
+    return scale!(b, factor)
+end
+
+"""
+    Bounds.bootstrap_expansion(rng, B, points; pointvol=0, nboot=5) -> Float64
+
+The linear factor by which bounds of type `B` fitted to `points` must grow to
+hold points they were not fitted to. `nboot` times: resample the points with
+replacement, fit the bounds to the distinct points drawn, and measure how far
+each point left out lies, in units of the radius of the nearest fitted
+ellipsoid along its direction (1 on the surface); the factor is the largest
+such distance, and at least 1.
+
+A fit holds the points it was fitted to and no more, while the constrained
+region those points were drawn from reaches past them, further with fewer
+points per dimension and per ellipsoid. A uniform draw from bounds that miss
+part of the region never lands there, so nested sampling drew its new points
+from a smaller region than the one it assigned them to, and log Z came out high.
+`NoBounds` is the cube and `MLFriends` calibrates itself this way already, so
+for those the factor is 1.
+"""
+bootstrap_expansion(rng::AbstractRNG, B, points::AbstractMatrix; pointvol = 0, nboot = 5) = 1.0
+
+
+function bootstrap_expansion(rng::AbstractRNG, B::Type{<:Union{Ellipsoid,MultiEllipsoid}},
+                             points::AbstractMatrix; pointvol = 0, nboot = 5)
+    npoints = size(points, 2)
+    expand = 1.0
+    drawn = falses(npoints)
+    for _ in 1:nboot
+        fill!(drawn, false)
+        for _ in 1:npoints
+            drawn[rand(rng, 1:npoints)] = true
+        end
+        all(drawn) && continue
+        b = try
+            fit_rng(rng, B, points[:, drawn]; pointvol = pointvol)
+        catch err
+            # k-means on near-duplicate points; the caller's own fit falls
+            # back to one ellipsoid for the same reason
+            err isa ArgumentError || rethrow(err)
+            continue
+        end
+        ells = b isa MultiEllipsoid ? b.ellipsoids : (b,)
+        for j in findall(!, drawn)
+            p = view(points, :, j)
+            d = minimum(ells) do ell
+                δ = p .- ell.center
+                sqrt(max(dot(δ, ell.A * δ), 0.0))
+            end
+            expand = max(expand, d)
+        end
+    end
+    return expand
+end
 
 end # module Bounds

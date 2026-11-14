@@ -1,0 +1,469 @@
+# The evidence engines on what made each give wrong or poor answers on an RV +
+# Hipparcos-IAD companion:
+#
+# - Daedalus replaced a dead point by a short walk that stayed by its donor
+#   (log Z over 150-169 across 8 seeds at i = 5°, where bridge sampling gives
+#   165.5), and its live points all started at the data's γ. The walk now moves
+#   every coordinate at once, shaped by the live points, at a scale adapted
+#   between walks, for as many steps as decorrelate it, and the live points
+#   start from the prior.
+# - pt_hmc's quadratic ladder from β = 0 left the integrand's climb through
+#   four decades to one segment (TI+ at -5 and -624 where log Z is 164). Its
+#   ladder is now β = 0 and a geometric run from beta_min, the tempered value
+#   SS+, quoted only when its rungs overlap; and SS+ is fed every walker's
+#   log L, not their mean.
+# - pt_emcee's tempered SS+ read 157.85 where bridge gives 163.88. The
+#   tempered stack is now quoted only from a ladder that reaches β = 0 with
+#   every pair swapping (in pt_emcee, transdim_pt_emcee, pt_whitening and
+#   sample_pt too), and then only within `laplace_switch_tol` of mode-Laplace
+#   (Jose's rule; pt_emcee, pt_hmc and run_job's post-fit). Laplace is the
+#   headline only when there is neither a usable bridge nor such a tempered
+#   value.
+# - Population annealing resampled at every step and stopped mutating after a
+#   count of accepted moves; it now resamples on the ESS, steps β on the
+#   conditional ESS, and mutates until the replicas have decorrelated.
+
+using Nereus, MCMCChains, Random, Test
+using Logging: Logging
+using Statistics: mean, std
+include(joinpath(@__DIR__, "fixtures", "easy_rv_target.jl"))
+
+# A Gaussian prior and likelihood, so log Z is exact; the likelihood 200 times
+# narrower than the prior in each of 3 dimensions, so ⟨log L⟩ climbs from -6e4
+# at the prior, as on the companion.
+const _EE_D = 3
+const _EE_S0 = 10.0
+const _EE_S1 = 0.05
+const _EE_MU = [1.0, -2.0, 0.5]
+_ee_parts(y) = (-_EE_D / 2 * log(2π * _EE_S0^2) - sum(abs2, y) / (2 * _EE_S0^2),
+                -_EE_D / 2 * log(2π * _EE_S1^2) - sum(abs2, y .- _EE_MU) / (2 * _EE_S1^2))
+const _EE_LOGZ = -_EE_D / 2 * log(2π * (_EE_S0^2 + _EE_S1^2)) -
+                 sum(abs2, _EE_MU) / (2 * (_EE_S0^2 + _EE_S1^2))
+
+function _ee_core(βs, W; seed = 1)
+    rng = MersenneTwister(seed)
+    inits = [_EE_S0 .* randn(rng, _EE_D) for _ in 1:(length(βs) * W)]
+    return Nereus._pt_hmc_core(_ee_parts, _EE_D, inits, βs; n_sweeps = 600, n_warmup = 200,
+                               swap_interval = 1, target_accept = 0.8, W = W,
+                               progress = false, rng = rng)
+end
+
+@testset "pt_hmc: the default ladder and SS+ recover an exact log Z" begin
+    βs = Nereus._pt_hmc_ladder(8, 1e-4)
+    @test βs[1] == 0 && βs[2] ≈ 1e-4 && βs[end] == 1
+    @test all(≈(1e-4^(-1 / 6)), βs[3:end] ./ βs[2:(end - 1)])
+    @test Nereus._pt_hmc_ladder(2, 1e-4) == [0.0, 1.0]
+    # Measured, 3 seeds: SS+ within 0.3 of the exact -9.69 with one walker per
+    # rung and with two; TI+ 1.7 to 2.1 low, from the first segment. With two
+    # walkers SS+ was fed their mean log L and came out 1.9 to 2.3 low.
+    for W in (1, 2)
+        r = _ee_core(βs, W)
+        @test abs(r.report.ss_plus[1] - _EE_LOGZ) < 0.6
+        ok, why = Nereus._pt_hmc_tempered_ok(r.report, βs, r.swap_acc, 0.05)
+        @test ok
+        @test why == ""
+        @test length(r.swap_acc) == length(βs) - 1 && all(0 .<= r.swap_acc .<= 1)
+    end
+    # The old ladder: no overlap between β = 0 and its second rung (TI+ near
+    # -500, SS+ -12 to -68), which the gate reports instead of a number.
+    quad = Float64[((i - 1) / 7)^2 for i in 1:8]
+    r = _ee_core(quad, 1)
+    @test abs(r.report.ti_plus[1] - _EE_LOGZ) > 100
+    ok, why = Nereus._pt_hmc_tempered_ok(r.report, quad, r.swap_acc, 0.05)
+    @test !ok
+    @test occursin("swapped", why)
+    # A ladder that does not reach β = 0 leaves the head out of the integral.
+    r = _ee_core(βs[2:end], 1)
+    ok, why = Nereus._pt_hmc_tempered_ok(r.report, βs[2:end], r.swap_acc, 0.05)
+    @test !ok
+    @test occursin("head", why)
+end
+
+# A small RV target for the end-to-end checks.
+function _ee_rv(; P = NormalPrior(4.16, 0.05, 4.0, 4.3))
+    rng = MersenneTwister(7)
+    t = sort(rand(rng, 40) .* 30.0)
+    rv = 5.0 .+ 12.0 .* sin.(2π .* t ./ 4.16) .+ 1.5 .* randn(rng, 40)
+    data = Data(; t_rv = t, rv = rv, rv_err = fill(1.5, 40))
+    params = Params(max_kplanet = 1, planet_modes = [RV_ONLY],
+                    instruments = InstrumentConfig(rv = ["X"]), data = data, M_s = 1.0,
+                    priors = Dict{String,PriorSpec}("P_k1" => P))
+    return NereusTarget(params, data; unconstrained = false), data
+end
+
+@testset "pt_hmc: bridge, else a corroborated SS+, else mode-Laplace" begin
+    tg, data = _ee_rv()
+    ch, lz, rep, ev = sample_pt_hmc(tg; n_temps = 5, n_sweeps = 60, n_warmup = 60,
+                                    adapt_ladder = false, bridge_n = 0, seed = 2,
+                                    progress = false)
+    @test ev.betas == Nereus._pt_hmc_ladder(5, 1e-4)
+    @test isnan(ev.bridge) && ev.reported != "bridge"
+    @test isfinite(ev.laplace)
+    if ev.tempered_ok && abs(ev.tempered - ev.laplace) <= 50
+        @test lz == ev.tempered == rep.ss_plus[1] && ev.reported == "ss_plus"
+    else
+        @test lz == ev.laplace && ev.reported == "mode_laplace"
+    end
+    # Two rungs, 0 and 1, cannot overlap on this target: the tempered SS+ is not
+    # quotable, and with no bridge mode-Laplace is reported, with a warning --
+    # never NaN while Laplace is finite.
+    ch, lz, rep, ev = @test_logs (:warn, r"log_evidence is mode-Laplace") match_mode = :any sample_pt_hmc(
+        tg; n_temps = 2, n_sweeps = 60, n_warmup = 60, adapt_ladder = false, bridge_n = 0,
+        seed = 2, progress = false)
+    @test !ev.tempered_ok
+    @test isfinite(lz) && lz == ev.laplace && ev.reported == "mode_laplace"
+    # The selection itself, on a quotable SS+ (a β = 0 ladder whose rungs all
+    # swap): kept within laplace_switch_tol of Laplace, replaced by it beyond,
+    # NaN only with neither Laplace nor a quotable value.
+    βs = [0.0, 0.5, 1.0]; acc = [0.5, 0.5]
+    R = Nereus.EvidenceReport((10.0, 0.1), (10.0, 0.1), (10.0, 0.1), (10.0, 0.1), 1.0)
+    sel(tol; nolap = false) = Logging.with_logger(Logging.NullLogger()) do
+        Nereus._pt_hmc_evidence(NereusTarget(tg.params, data; unconstrained = !nolap),
+                                ch, R, βs, acc, 0.05, 2.0, 0, 1; laplace_switch_tol = tol)
+    end
+    lap = sel(Inf).laplace
+    @test sel(abs(10.0 - lap) + 1).reported == "ss_plus"
+    @test sel(abs(10.0 - lap) - 1).log_z == lap
+    e0 = sel(50.0; nolap = true)                     # bounded: no Laplace
+    @test isnan(e0.laplace) && e0.log_z == 10.0 && e0.reported == "ss_plus"
+end
+
+@testset "pt_hmc: the warm-start pre-search reports no evidence of its own" begin
+    # The pre-search, a short pt_emcee, computed and warned about its own log Z,
+    # and pt_hmc's output on the companion carried "sample_pt_emcee: bridge and
+    # mode-Laplace disagree by 154.0 nats ... bridge = 13.74" beside the 165.51
+    # it reported. Two rungs make a pre-search's tempered stack disagree.
+    tg, data = _ee_rv()
+    tu = NereusTarget(tg.params, data; unconstrained = true)
+    tl = Test.TestLogger(min_level = Logging.Warn)
+    pts = Logging.with_logger(tl) do
+        Nereus._warmstart_points(tu, 4, MersenneTwister(1); n_temps = 2,
+                                 n_steps = 200, n_burnin = 100)
+    end
+    @test length(pts) == 4 && all(p -> all(isfinite, p), pts)
+    @test !any(r -> occursin("sample_pt_emcee", string(r.message)), tl.logs)
+end
+
+@testset "the tempered stack is quoted only from a ladder that can carry it" begin
+    # pt_emcee's order (β = 1 first) and pt_hmc's (β = 0 first) alike.
+    ok, why = Nereus._tempered_quotable([1.0, 0.1, 0.01, 1e-4], [0.5, 0.4, 0.3])
+    @test !ok && occursin("head", why)
+    ok, why = Nereus._tempered_quotable([1.0, 0.1, 1e-4, 0.0], [0.5, 0.01, 0.3])
+    @test !ok && occursin("swapped", why) && occursin("0.1", why)
+    @test Nereus._tempered_quotable([0.0, 1e-4, 0.1, 1.0], [0.3, 0.2, 0.06]) == (true, "")
+    @test !first(Nereus._tempered_quotable([1.0, 0.0], Float64[]))
+    # mode-Laplace against bridge: a warning past bridge's error + 1 nat
+    @test (@test_logs (:warn, r"Gaussian approximation") Nereus._warn_laplace_vs_bridge(
+        "x", 165.56, 161.81, 0.05))
+    @test !(@test_logs Nereus._warn_laplace_vs_bridge("x", 162.5, 161.81, 0.05))
+    @test !Nereus._warn_laplace_vs_bridge("x", NaN, 161.81, 0.05)
+end
+
+@testset "pt_emcee: bridge, else a corroborated tempered value, else mode-Laplace" begin
+    tg, data = _ee_rv()
+    tu = NereusTarget(tg.params, data; unconstrained = true)
+    kw = (; n_temps = 6, n_walkers = 16, n_steps = 800, n_burnin = 400, seed = 3,
+          show_progress = false)
+    # Bridge only from a chain that has converged: 32 walkers for 8000 steps
+    # reach R-hat 1.02 here. 16 walkers for 800 steps stop at R-hat 1.36, and
+    # bridge, refused there, read -92.87 where it is -92.63 (bridge and
+    # reference-path at 8000 steps).
+    r = sample_pt_emcee(tu, data; merge(kw, (; n_walkers = 32, n_steps = 8000,
+                                              n_burnin = 4000))...)
+    @test isfinite(r.log_evidence_bridge) && r.log_evidence == r.log_evidence_bridge
+    rs = @test_logs (:warn, r"dropping bridge.*R-hat") match_mode = :any sample_pt_emcee(
+        tu, data; kw...)
+    @test isnan(rs.log_evidence_bridge) && rs.log_evidence == rs.log_evidence_laplace
+    # The default ladder stops at beta_min: its tempered stack stays in the
+    # result, raw, and summary.json says why it is not quoted.
+    @test minimum(r.betas) > 0 && isfinite(r.evidence.ss_plus[1])
+    ev = Nereus._evidence_summary(r, r.log_evidence)
+    @test ev["reported"] == "bridge"
+    @test !any(haskey(ev, k) for k in ("ti", "ti_plus", "ss_plus", "hybrid", "tempered"))
+    @test ev["tempered_check"]["quotable"] == false &&
+          occursin("head", ev["tempered_check"]["why"])
+    # mode-Laplace a plain number, as summary.json readers know it; its label
+    # and its distance from bridge in a key of their own
+    @test ev["mode_laplace"] === r.log_evidence_laplace
+    @test occursin("approximation", ev["mode_laplace_check"]["note"])
+    @test ev["mode_laplace_check"]["minus_bridge"] ≈ r.log_evidence_laplace - r.log_evidence_bridge
+    # No bridge (opted out), and a tempered value from a ladder that cannot
+    # carry it is broken, so mode-Laplace takes over (Jose's rule), warned.
+    rl = @test_logs (:warn, r"log_evidence is mode-Laplace") match_mode = :any sample_pt_emcee(
+        tu, data; merge(kw, (; bridge_headline = false))...)
+    @test isfinite(rl.log_evidence_laplace) && rl.log_evidence == rl.log_evidence_laplace
+    @test isfinite(rl.evidence.ss_plus[1])
+    @test Nereus._evidence_summary(rl, rl.log_evidence)["reported"] == "mode_laplace"
+    # Bounded: neither bridge nor mode-Laplace (both need the unconstrained
+    # map; run_job computes bridge after the fit), and this ladder cannot carry
+    # the tempered value: no number, a warning, and summary.json says so.
+    rb = @test_logs (:warn, r"no usable evidence estimate") match_mode = :any sample_pt_emcee(
+        tg, data; kw...)
+    @test isnan(rb.log_evidence) && isnan(rb.log_evidence_laplace)
+    @test isfinite(rb.evidence.ss_plus[1])
+    @test Nereus._evidence_summary(rb, rb.log_evidence)["reported"] == "none"
+    # A ladder with a β = 0 rung, bridge withheld: the tempered value when its
+    # rungs swap and it agrees with mode-Laplace within laplace_switch_tol;
+    # mode-Laplace otherwise.
+    βs = vcat(1e-3 .^ ((0:6) ./ 6), 0.0)
+    k0 = merge(kw, (; n_temps = 8, betas = βs, bridge_headline = false))
+    r0 = sample_pt_emcee(tu, data; k0...)
+    ok, _ = Nereus._tempered_quotable(r0.betas, r0.acceptance_swap)
+    @test isfinite(r0.log_evidence_laplace)
+    if ok && abs(r0.evidence.hybrid[1] - r0.log_evidence_laplace) <= 50
+        @test r0.log_evidence == r0.evidence.hybrid[1]
+        e0 = Nereus._evidence_summary(r0, r0.log_evidence)
+        @test haskey(e0, "ss_plus") && e0["reported"] == "hybrid"
+    else
+        @test r0.log_evidence == r0.log_evidence_laplace
+    end
+    # A quotable tempered value that disagrees with mode-Laplace by more than
+    # the Laplace non-Gaussian bias is broken too.
+    r1 = @test_logs (:warn, r"log_evidence is mode-Laplace") match_mode = :any sample_pt_emcee(
+        tu, data; merge(k0, (; laplace_switch_tol = 0.0))...)
+    @test r1.log_evidence == r1.log_evidence_laplace
+end
+
+@testset "transdim_pt_emcee: no tempered log Z from a ladder without β = 0" begin
+    tg, data = _ee_rv()
+    r = @test_logs (:warn, r"no quotable log-evidence") match_mode = :any sample_transdim_pt_emcee(
+        tg, data; td = TransDimConfig(max_kplanet = 1, planets = true), n_temps = 4,
+        n_walkers = 16, n_steps = 300, n_burnin = 150, seed = 1, show_progress = false)
+    @test isnan(r.log_evidence)
+    @test isfinite(r.evidence_report.ss_plus[1])
+    # No mode-Laplace here to take over: no number, and summary.json says why.
+    ev = Nereus._evidence_summary(r, r.log_evidence)
+    @test ev["tempered_check"]["quotable"] == false && ev["reported"] == "none"
+end
+
+@testset "summary.json: valid JSON, NaN and ±Inf written as null" begin
+    mktempdir() do dir
+        s = Dict{String, Any}("log_z" => NaN, "n" => 3, "inf" => Inf,
+                              "evidence" => Dict{String, Any}("mode_laplace" => 1.5,
+                                                              "v" => [1.0, NaN, -Inf],
+                                                              "ci" => (-Inf, 2.0)))
+        Nereus._write_summary(dir, s)
+        txt = read(joinpath(dir, "summary.json"), String)
+        @test !occursin("NaN", txt) && !occursin("Infinity", txt)
+        j = Nereus.JSON3.read(txt)                   # strict: no NaN/Infinity allowed
+        @test j.log_z === nothing && j.inf === nothing && j.n == 3
+        @test j.evidence.mode_laplace == 1.5
+        @test j.evidence.v[1] == 1.0 && j.evidence.v[2] === nothing && j.evidence.v[3] === nothing
+        @test j.evidence.ci[1] === nothing && j.evidence.ci[2] == 2.0
+        @test isnan(s["log_z"]) && s["inf"] == Inf  # the summary in memory keeps them
+    end
+end
+
+@testset "daedalus: a replacement walk forgets its donor" begin
+    tg, data = _ee_rv()
+    params = tg.params
+    td = TransDimConfig(max_kplanet = 1, planets = false)
+    strategy = Nereus.MoMSBirth(params; rng = MersenneTwister(1))
+    live = [Nereus._daedalus_init_point(tg, data, strategy, td, 0.5, MersenneTwister(k))
+            for k in 1:120]
+    d = length(params.layout.unfrozen_idx)
+    # The live points start as prior draws, γ included: it was the data's median
+    # RV at every one of them, which the walks then could not move.
+    g = [p.values[params.layout.name_to_idx["gamma_X"]] for p in live]
+    @test allunique(g)
+    # No constraint (L_thr = -Inf): the constrained prior is the prior, and the
+    # live points are draws from it. The walk's scale and length adapt over 40
+    # walks as in sample_daedalus, then 150 walks from one donor must spread
+    # like the live points do. The single-coordinate walk at 1/50 of each
+    # prior width kept them within a fraction of that.
+    scale = Ref(2.38 / sqrt(d)); jump = Ref(NaN)
+    for k in 1:40
+        c = Ref((0, 0, 0.0))
+        nw = Nereus._daedalus_walk_length(jump, 25, d, 16.0)
+        Nereus._daedalus_evolve(live[k], tg, data, strategy, td, -Inf, 25, 0.5,
+                                MersenneTwister(100 + k); live, scale = scale[],
+                                n_walk = nw, counts = c)
+        a, r, j = c[]
+        Nereus._daedalus_update_scale!(scale, a, r, d)
+        jump[] = isfinite(jump[]) ? 0.9 * jump[] + 0.1 * j / (a + r) : j / (a + r)
+    end
+    nw = Nereus._daedalus_walk_length(jump, 25, d, 16.0)
+    @test 25 <= nw <= 1000
+    donor = live[1]
+    out = [Nereus._daedalus_evolve(donor, tg, data, strategy, td, -Inf, 25, 0.5,
+                                   MersenneTwister(1000 + s); live, scale = scale[],
+                                   n_walk = nw) for s in 1:150]
+    for idx in params.layout.unfrozen_idx
+        ref = [p.values[idx] for p in live]
+        got = [p.values[idx] for p in out]
+        @test std(got) > 0.6 * std(ref)
+        @test abs(mean(got) - mean(ref)) < 0.4 * std(ref)
+    end
+    # And the run returns its log Z's standard error, √(H / n_live).
+    ch, lz, _, lze = sample_daedalus(tg, data; td, n_live = 40, seed = 3,
+                                     show_progress = false)
+    @test isfinite(lz)
+    @test 0 < lze < 2
+end
+
+@testset "population annealing: resampled on the ESS, mutated to decorrelation" begin
+    # P on LogUniform(1, 20) and e free. Measured, seeds 1-3: log Z -98.9,
+    # -97.6, -97.1, where nested INS gives -97.2 and -96.9 (n_live = 400); the
+    # sampler resampling at every step, mutating to 5 accepted moves a replica,
+    # gave -107.3, -107.3 and -113.6.
+    tg, data = _ee_rv(P = LogUniformPrior(1.0, 20.0))
+    r = sample_pa(tg, data; n_replicas = 120, seed = 2, show_progress = false)
+    ref = sample_nested_ins(tg, data; n_live = 400, seed = 1, show_progress = false).log_z_ns
+    @test abs(r.log_evidence - ref) < 3
+    n = length(r.beta_history) - 1
+    @test r.beta_history[end] == 1.0
+    @test length(r.resampled) == length(r.sweep_history) == length(r.corr_history) == n
+    @test r.resampled[end]
+    @test count(r.resampled) < n
+    # Every step either decorrelated or ran into the cap of 30 × n_mcmc
+    # sweeps (the e-ω-M₀ ridge of a free e near 0 does not decorrelate).
+    @test all((r.corr_history .<= 0.2) .| (r.sweep_history .== 300))
+    # The decorrelation measure: rank correlation, so 1 for a monotone map of
+    # the same positions and 0 for positions the start does not predict.
+    X0 = reshape(collect(1.0:10.0), 10, 1)
+    W = fill(0.1, 10)
+    @test Nereus._pa_max_corr(X0, exp.(X0), W) ≈ 1
+    @test Nereus._pa_max_corr(X0, reshape([3.0, 1, 4, 1, 5, 9, 2, 6, 5, 3], 10, 1), W) < 0.5
+    @test Nereus._pa_ranks([2.0, 1.0, 2.0]) == [2.5, 1.0, 2.5]
+end
+
+@testset "sample_smc: no step cap unless betas is given" begin
+    tg, data = _ee_rv()
+    r = @test_logs (:info, r"routing through sample_pa") match_mode = :any sample_smc(
+        tg, data; n_replicas = 60, n_mcmc = 2, seed = 1, show_progress = false)
+    @test r.beta_history[end] == 1.0
+    @test isfinite(r.log_evidence)
+end
+
+@testset "bridge's ESS guard reads the draws folded, as bridge does" begin
+    # A cyclic inclination's posterior is the physical one twice over, at x and
+    # -x. A chain that sits in the mirror copy for stretches has a raw ESS on
+    # the inclination that says nothing about the folded draws q is fitted to.
+    t_rv = collect(55000.0:30.0:55360.0)
+    relast = RelAstromData(t = [55000.0, 55090.0, 55180.0, 55270.0],
+        ra_off = [10.0, 8.0, -5.0, -10.0], dec_off = [0.0, 6.0, 9.0, 0.0],
+        ra_err = ones(4), dec_err = ones(4))
+    hgca = HGCAData(epochs = mjd_epochs((1991.25, 2004.6, 2016.0)),
+        pmra = (5.0, 4.95, 4.9), pmdec = (-3.0, -3.05, -3.1),
+        sigma_pmra = (0.2, 0.2, 0.2), sigma_pmdec = (0.2, 0.2, 0.2),
+        plx = 25.0, plx_err = 0.05, hip_id = 1)
+    data = Data(t_rv = t_rv, rv = 3.0 .* sin.(t_rv ./ 50), rv_err = ones(length(t_rv)),
+                relastrom = relast, hgca = hgca)
+    p = Params(parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
+               planet_modes = [RVAS], instruments = InstrumentConfig(rv = ["HARPS"], pm = String[]),
+               data = data, stability = :none, M_s = 1.0)
+    names_ = p.layout.unfrozen_names
+    ii = findfirst(==("inc_k1"), names_)
+    @test Nereus.cyclic_inclination_indices(p) == [ii]
+    rng = MersenneTwister(3)
+    n = 2000
+    X = randn(rng, n, length(names_))
+    # i = 5° ± 0.2°, in the mirror copy for 6 stretches of the chain
+    X[:, ii] .= deg2rad.(5 .+ 0.2 .* randn(rng, n)) .* [isodd(k ÷ 170) ? -1 : 1 for k in 0:n-1]
+    ch = MCMCChains.Chains(reshape(X, n, :, 1), Symbol.(names_))
+    raw = minimum(Nereus._diag_by_param(MCMCChains.ess, ch)[:, :ess])
+    @test raw < 50
+    @test Nereus._bridge_min_ess(ch, p) > 1000
+    @test ch.value.data[:, ii, 1] == X[:, ii]          # the chains handed in are untouched
+end
+
+@testset "run_job post-fit: Jose's rule once the bridge is not usable" begin
+    # `_augment_evidence!` after a refused or failed post-fit bridge: the
+    # tempered headline is kept when it is within laplace_switch_tol of
+    # mode-Laplace, mode-Laplace replaces it beyond or when there is none, and
+    # NaN only with neither. A nested or bridge headline is the engine's own,
+    # and untemper_transit with photometry (laplace_check false) keeps the
+    # tempered value, as pt_emcee does.
+    sel(rep, lz, lap; lc = true) = Logging.with_logger(Logging.NullLogger()) do
+        s = Dict{String, Any}("log_z" => lz)
+        e = Dict{String, Any}("reported" => rep)
+        Nereus._postfit_select!(s, e, lap; why_bridge = "x", laplace_check = lc, tol = 50.0)
+        (s["log_z"], e["reported"])
+    end
+    @test sel("hybrid", 100.0, 120.0) == (100.0, "hybrid")
+    @test sel("ss_plus", 100.0, 160.0) == (160.0, "mode_laplace")
+    @test sel("none", NaN, 160.0) == (160.0, "mode_laplace")
+    @test sel("hybrid", 100.0, NaN) == (100.0, "hybrid")
+    r = sel("none", NaN, NaN)
+    @test isnan(r[1]) && r[2] == "none"
+    @test sel("hybrid", 100.0, 160.0; lc = false) == (100.0, "hybrid")
+    @test sel("bridge", 100.0, 160.0) == (100.0, "bridge")
+    @test sel("nested", 100.0, 160.0) == (100.0, "nested")
+    s1 = Dict{String, Any}("log_z" => NaN); e1 = Dict{String, Any}("reported" => "none")
+    @test_logs (:warn, r"log_z is mode-Laplace") Nereus._postfit_select!(
+        s1, e1, 160.0; why_bridge = "x", laplace_check = true, tol = 50.0)
+    # On run_job itself: a short pt_emcee on two rungs. The tempered stack is
+    # not quotable (no β = 0 rung), the run_job target is bounded so the
+    # sampler has neither bridge nor Laplace, and the post-fit bridge is
+    # refused: the chain has not converged, and it has fewer effective draws
+    # than the reference has parameters (min ESS 28 < 35). log_z was NaN
+    # there; it is mode-Laplace, computed post-fit on the unconstrained
+    # target, with a warning.
+    cfg = _easy_rv_cfg()
+    cfg["sampler"]["kwargs"] = Dict("show_progress" => false, "n_temps" => 2,
+                                    "n_walkers" => 16, "n_steps" => 60, "n_burnin" => 40)
+    cfg["output"]["show_progress"] = false
+    res = @test_logs (:warn, r"log_z is mode-Laplace") match_mode = :any Nereus.run_job(cfg)
+    s = res isa AbstractDict ? res : res.summary
+    ev = s["evidence"]
+    @test haskey(ev, "bridge") && occursin("min ESS", get(ev, "bridge_not_reported", ""))
+    @test haskey(ev, "tempered_check")
+    @test isfinite(ev["mode_laplace"]) && s["log_z"] == ev["mode_laplace"]
+    @test ev["reported"] == "mode_laplace"
+    @test ev["mode_laplace_check"]["minus_bridge"] == ev["mode_laplace"] - ev["bridge"]["log_z"]
+    j = Nereus.JSON3.read(read(joinpath(cfg["output_dir"], "summary.json"), String))
+    @test j.log_z == s["log_z"] && j.evidence.reported == "mode_laplace"
+
+    # The options run_job and the fit_* route read off the engine's.
+    d_phot = (; t_phot = [1.0])
+    @test Nereus._postfit_rule_kw(Dict("untemper_transit" => true), d_phot) ==
+          (; laplace_check = false, laplace_switch_tol = 50.0)
+    @test Nereus._postfit_rule_kw(Dict(:laplace_switch_tol => 10), (; t_phot = Float64[])) ==
+          (; laplace_check = true, laplace_switch_tol = 10.0)
+end
+
+@testset "bridge is refused on a chain that has not converged" begin
+    # Walkers that sit apart and barely move: each still counts as about one
+    # effective draw, so the least ESS clears q's d + d(d+1)/2 parameters,
+    # while the walkers disagree completely (R-hat far above 1.1). The ESS
+    # guard alone reported bridge on such chains.
+    tg, _ = _ee_rv()
+    p = tg.params
+    nm = Symbol.(p.layout.unfrozen_names)
+    d = length(nm)
+    rng = MersenneTwister(5)
+    W, T = 64, 200
+    stuck = Array{Float64}(undef, T, d, W)
+    for w in 1:W
+        c = randn(rng, d)
+        stuck[:, :, w] .= c' .+ 0.01 .* cumsum(randn(rng, T, d); dims = 1)
+    end
+    g = Nereus._bridge_guard(MCMCChains.Chains(stuck, nm), p)
+    @test g.need == d + d * (d + 1) ÷ 2
+    @test g.n_eff >= g.need && g.rhat > 2
+    @test !g.ok && occursin("R-hat", g.why) && !occursin("min ESS", g.why)
+    # Independent draws: both conditions pass.
+    g2 = Nereus._bridge_guard(MCMCChains.Chains(randn(rng, T, d, W), nm), p)
+    @test g2.ok && g2.why == "" && g2.rhat < 1.02
+    # Too few draws for q: refused on the ESS.
+    g3 = Nereus._bridge_guard(MCMCChains.Chains(randn(rng, 4, d, 4), nm), p)
+    @test !g3.ok && occursin("min ESS", g3.why)
+
+    # The drift it was found on: run_job on the easy RV fixture with 32 walkers
+    # on two rungs. At 200 steps the walkers had not found the 12.3 d mode
+    # (R-hat 5.0) and bridge read -229.6 where it is -153.75 (bridge and
+    # reference-path on converged chains; -242 at 60 steps, -223 at 400 to
+    # 3000); the ESS guard reported it at min ESS 36 against 35.
+    cfg = _easy_rv_cfg()
+    cfg["sampler"]["kwargs"] = Dict("show_progress" => false, "n_temps" => 2,
+                                    "n_walkers" => 32, "n_steps" => 200, "n_burnin" => 100)
+    cfg["output"]["show_progress"] = false
+    res = Logging.with_logger(Logging.NullLogger()) do
+        Nereus.run_job(cfg)
+    end
+    s = res isa AbstractDict ? res : res.summary
+    ev = s["evidence"]
+    @test haskey(ev, "bridge") && ev["bridge"]["log_z"] < -200
+    @test ev["reported"] != "bridge" && s["log_z"] != ev["bridge"]["log_z"]
+    @test occursin("R-hat", get(ev, "bridge_not_reported", ""))
+end

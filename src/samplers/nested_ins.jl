@@ -26,7 +26,7 @@
 using NestedSamplers
 using Random
 using MCMCChains
-using LinearAlgebra: det
+using LinearAlgebra: det, dot, mul!
 
 export sample_nested_ins, INSResult
 
@@ -38,13 +38,24 @@ Container for a `sample_nested_ins` run.
 # Fields
 - `chains::MCMCChains.Chains` — posterior samples (importance-resampled).
 - `log_z_ns::Float64` — Skilling-style NS log Z (iso-likelihood shells).
-- `log_z_ins::Float64` — INS log Z (importance over all evaluations).
+- `log_z_ns_err::Float64` — its error: the spread of log Z over realisations
+  of the run, its threads resampled and its prior volumes drawn afresh
+  (dynesty's; src/samplers/ns_error.jl). sqrt(H / n_live) counts the volumes
+  alone.
+- `log_z_ins::Float64` — the sum of `L·V` over every evaluation, divided by
+  their number, `V` the volume of the bound it was drawn from. `NaN` unless
+  `proposal = :unif`: the walk and slice kernels do not draw from the bound.
+  Not an evidence to report even then: each term estimates the evidence
+  inside the bound its point was drawn from, which shrinks as the run goes
+  on, so it comes out low. The unbiased form (Feroz et al. 2013) weighs each
+  point by every bound that contains it. `log_z_ns` is the evidence.
 - `n_iters::Int` — outer NS iterations completed.
 - `n_evals::Int` — total likelihood evaluations (NS + rejected proposals).
 """
 struct INSResult
     chains::MCMCChains.Chains
     log_z_ns::Float64
+    log_z_ns_err::Float64
     log_z_ins::Float64
     n_iters::Int
     n_evals::Int
@@ -53,8 +64,10 @@ end
 """
     sample_nested_ins(target, data; kwargs...) -> INSResult
 
-Importance Nested Sampling. Standard NS posterior + log Z + an INS
-log Z that uses every likelihood evaluation (incl. rejected proposals).
+Nested sampling with Nereus's own loop and kernels: the posterior and the
+NS log Z (`log_z_ns`), plus, with `proposal = :unif`, a sum over every
+likelihood evaluation (`log_z_ins`, see [`INSResult`](@ref): not an evidence
+to report).
 
 Operates in **unit-cube space**: `u ∈ [0,1]^n_dim`, prior-transformed
 to bounded params via per-coordinate `quantile(prior, u)`. The
@@ -69,16 +82,25 @@ machinery use the same draws.
 - `dlogz::Real=0.5` — stopping when log(Z_remaining/Z_done) < dlogz.
 - `max_iter::Int=50_000`
 - `bound_update_interval::Int=50` — refit ellipsoid every N iterations.
-- `n_walks::Union{Int,Nothing}=nothing` — Metropolis steps per replacement
-  (`:rwalk`) or slice sweeps (`:slice`). `nothing` → dimension-scaled
-  `max(25, 2·n_dim)` (a fixed count under-decorrelates as n_dim grows → logZ
-  biased low). Explicit value honored verbatim.
-- `walk_scale::Real=1.0` — initial proposal scale.
+- `n_walks::Union{Int,Nothing}=nothing` — walk steps (`:rwalk`) or slices
+  (`:slice`, each along a random direction through the bound's ellipsoid
+  axes) per replacement.
+  `nothing` → `max(25, 5·n_dim)` for `:rwalk` and `max(25, 2·n_dim)` for
+  `:slice`. Too few leave each new point near the live point its chain
+  started from: with `max(25, 2·n_dim)` the walk's log Z on an RM obliquity
+  fit scattered between seeds from 1.5 below pt_emcee's to 1.1 above, four
+  times the NS error. An explicit value is honored verbatim.
+- `walk_scale::Real=1.0` — initial proposal scale: for `:rwalk` the step in
+  units of the bounding ellipsoid's axes, adapted between chains toward 50 %
+  acceptance and fixed within each; for `:slice` the initial bracket, in
+  units of an ellipsoid axis vector.
 - `proposal::Symbol=:rwalk` — within-shell move: `:rwalk` (random walk),
-  `:slice` (random-direction slice), or `:unif` (rejection; low-d only).
-  These are Nereus's own accumulator-aware kernels — NestedSamplers'
-  proposal types can't feed the per-evaluation INS estimator, so INS
-  cannot reuse them.
+  `:slice` (random-direction slice), or `:unif` (draws from the bound; low
+  dimension only: on 7- and 10-parameter RV and RM fits a run, here or in
+  `sample_nested_dynamic`, stops within two minutes with an error when no
+  draw in 100 000 likelihood calls reaches the threshold; on a 2-parameter
+  gravity-darkening fit it matches pt_emcee). These are Nereus's own
+  kernels: every likelihood call they make is recorded for `log_z_ins`.
 - `min_X_shrinkage::Real=10.0` — min log prior-volume shrinkage before
   the dlogz stop can trigger.
 - `seed::Int=1`
@@ -119,14 +141,21 @@ function sample_nested_ins(
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
-    # Dimension-scaled within-shell decorrelation: a fixed step count is
-    # dimension-blind and under-decorrelates as n_dim grows → logZ biased low
-    # (PolyChord `num_repeats ∝ nDims`). `nothing` → max(25, 2·n_dim); an
-    # explicit value is honored verbatim. See sample_nested / project_ns_rslice_undermixing.
-    n_walks = n_walks === nothing ? max(25, 2 * n_dim) : n_walks
+    # Steps per replacement, chosen as sample_nested's are (the decorrelation
+    # note there): the smallest multiple of n_dim whose log Z, averaged over
+    # six seeds, came within the NS error (0.17-0.25) of pt_emcee's on all
+    # four test fits, the mean known to better than that error. At 2·n_dim
+    # the walk's mean passed (-0.17, +0.16, +0.16, +0.02), but its runs
+    # scattered by 0.95 nats on the RM fit at 0°, so the mean was known only
+    # to 0.39; at 5·n_dim they scatter by 0.3, as the slice's do at 2·n_dim.
+    n_walks = n_walks === nothing ?
+              max(25, (proposal === :slice ? 2 : 5) * n_dim) : n_walks
     unfrozen_idx = layout.unfrozen_idx
     unfrozen_priors = layout.unfrozen_priors
     rng = MersenneTwister(seed)
+    ns_tr = target.transform === nothing ? () : (target.transform,)
+    # every run starts from the same charts, so a seed repeats it
+    _ns_home_charts!(params; transforms = ns_tr)
 
     # Per-slot Theta buffer. NS outer loop is sequential (one replacement
     # per iter, run on slot 1 by default) but the init pass threads over
@@ -155,13 +184,19 @@ function sample_nested_ins(
         # transform u → bounded x via per-coord prior quantile
         @inbounds for (j, idx) in enumerate(unfrozen_idx)
             ps = unfrozen_priors[j]
-            theta.values[idx] = prior_transform(u[j], ps)
+            theta.values[idx] = prior_transform(u[j], _ns_prior(ps))
         end
+        # The photo-eccentric reparametrization's prior term: the prior here is
+        # the sampled slots' surrogate (`density_logprior_correction`; 0 without).
+        # Outside the old prior's support, a slope rather than a plateau
+        # (`density_ns_floor`).
+        dl = density_logprior_correction(theta)
+        isfinite(dl) || return density_ns_floor(theta)
         ll = rv_log_likelihood(theta, data, wb)
         isfinite(ll) || return -Inf
         ll += transit_log_likelihood(theta, data, wb)
         ll += tomogram_log_likelihood(theta, data, wb)  # residual maps
-        return ll
+        return ll + dl
     end
 
     BoundT = bounds === :multi ? NestedSamplers.Bounds.MultiEllipsoid :
@@ -181,21 +216,28 @@ function sample_nested_ins(
         end
     end
     n_evals = n_live
+    # The bound each live point was drawn above, for the log Z error
+    # (src/samplers/ns_error.jl): the prior's for the first ones.
+    live_birth = fill(-Inf, n_live)
+    trace = _NSTrace()
 
     # Fit initial bound (with MultiEllipsoid fallback to single Ellipsoid
     # when k-means clustering fails on near-duplicate live points).
+    # :unif draws its points from the bound, which must then cover the
+    # constrained region, so the bound is bootstrap-expanded for it as in
+    # sample_nested (`Bounds.bootstrap_expansion`): fitted to the live points
+    # and enlarged by 1.25 in volume, a MultiEllipsoid missed 12-22% of the
+    # constrained region of an RM obliquity fit. The walks take only their
+    # shape from the bound.
+    n_boot = proposal === :unif ? 5 : 0
     pointvol = 1.0 / n_live
     bound = try
-        NestedSamplers.Bounds.scale!(
-            NestedSamplers.Bounds.fit(BoundT, live_u; pointvol=pointvol),
-            enlarge)
+        NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     catch err
         err isa ArgumentError || rethrow(err)
-        NestedSamplers.Bounds.scale!(
-            NestedSamplers.Bounds.fit(
-                NestedSamplers.Bounds.Ellipsoid,
-                live_u; pointvol = pointvol),
-            enlarge)
+        NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     end
 
     # INS accumulators (one entry per likelihood evaluation made during
@@ -222,6 +264,10 @@ function sample_nested_ins(
     scratch_prop  = Vector{Float64}(undef, n_dim)
     scratch_noise = Vector{Float64}(undef, n_dim)
     worst_save    = Vector{Float64}(undef, n_dim)
+
+    # The random walk's step size, in units of the bound's axes: fixed within
+    # each chain, adapted between them (`_rwalk_within_shell!`).
+    walk_scale_now = Ref(walk_scale)
 
     log_z_ns = -Inf
     log_X = 0.0  # log(prior volume contained)
@@ -254,6 +300,7 @@ function sample_nested_ins(
             worst_save[d] = live_u[d, idx_worst]
         end
         push!(dead_u, copy(worst_save))
+        _ns_trace_push!(trace, logL_worst, live_birth[idx_worst], idx_worst)
 
         log_X = log_X_new
 
@@ -266,7 +313,7 @@ function sample_nested_ins(
         new_u, new_logL = if proposal === :rwalk
             _rwalk_within_shell!(live_u, live_logL, rng, eval_loglike,
                                   n_dim, n_live, idx_worst, logL_worst,
-                                  bound, log_V_cur, n_walks, walk_scale,
+                                  bound, log_V_cur, n_walks, walk_scale_now,
                                   ins_log_L, ins_log_V,
                                   scratch_cur, scratch_prop, scratch_noise)
         elseif proposal === :slice
@@ -276,11 +323,19 @@ function sample_nested_ins(
                                   ins_log_L, ins_log_V,
                                   scratch_cur, scratch_prop, scratch_noise)
         else  # :unif
-            _rejection_within_bound!(rng, eval_loglike, n_dim,
+            u_r, l_r, bound = _rejection_within_bound!(rng, eval_loglike, n_dim,
                                       logL_worst, bound, log_V_cur,
-                                      ins_log_L, ins_log_V)
+                                      ins_log_L, ins_log_V;
+                                      refit = let pv = exp(log_X) / n_live
+                                          () -> _fit_ins_bound(rng, BoundT, live_u, pv,
+                                                               enlarge, n_boot)
+                                      end,
+                                      refit_every = round(Int, 1.5 * n_live))
+            (u_r, l_r)
         end
         if new_u === nothing
+            # stopping would return a truncated run's evidence
+            proposal === :unif && _rejection_failed(iter)
             verbose && @warn "INS: no new candidate accepted at iter $iter; stopping"
             break
         end
@@ -292,6 +347,7 @@ function sample_nested_ins(
             live_u[d, idx_worst] = new_u[d]
         end
         live_logL[idx_worst] = new_logL
+        live_birth[idx_worst] = _ns_floor(logL_worst)
 
         # Refit bound periodically (after several live points have
         # turned over, the bound needs to track the shrinking support).
@@ -299,18 +355,17 @@ function sample_nested_ins(
         # duplicate live points (RWalk-in-tight-shell signature). Fall
         # back to a single Ellipsoid bound in that case.
         if iter % bound_update_interval == 0
+            # Seams of the circular angles moved off the live points first
+            # (`_ns_recut!`): the refit below is in the new chart.
+            _ns_recut!(live_u, (dead_u,), params; transforms = ns_tr)
             pv = exp(log_X) / n_live
             try
-                bound = NestedSamplers.Bounds.scale!(
-                    NestedSamplers.Bounds.fit(BoundT, live_u; pointvol=pv),
-                    enlarge)
+                bound = NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = pv, enlarge = enlarge, bootstrap = n_boot)
             catch err
                 err isa ArgumentError || rethrow(err)
-                bound = NestedSamplers.Bounds.scale!(
-                    NestedSamplers.Bounds.fit(
-                        NestedSamplers.Bounds.Ellipsoid,
-                        live_u; pointvol = pv),
-                    enlarge)
+                bound = NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = pv, enlarge = enlarge, bootstrap = n_boot)
             end
         end
 
@@ -349,11 +404,20 @@ function sample_nested_ins(
         push!(dead_logL, live_logL[i])
         push!(dead_logwt, log_wt)
         push!(dead_u, copy(live_u[:, i]))
+        _ns_trace_push!(trace, live_logL[i], live_birth[i], i)
     end
+    log_z_ns_err = _ns_logz_err(trace; seed = seed)
 
-    # --- INS log Z = log(Σ L_i · V_i) − log(N_total_evals) -----
+    # --- log(Σ L_i · V_i) − log(N_total_evals), see INSResult -----
+    # Defined only for draws from the bound: the walk and slice kernels move
+    # within the constraint, and their points have no proposal volume. With
+    # :rwalk it came out 1.2-1.7 nats above pt_emcee's evidence on an RM
+    # obliquity fit and up to 3.4 above on an eccentric-RV fit, while run_job
+    # reported it as the evidence.
     finite_idx = findall(isfinite, ins_log_L)
-    if isempty(finite_idx)
+    if proposal !== :unif
+        log_z_ins = NaN
+    elseif isempty(finite_idx)
         log_z_ins = -Inf
     else
         terms = ins_log_L[finite_idx] .+ ins_log_V[finite_idx]
@@ -362,14 +426,20 @@ function sample_nested_ins(
     end
 
     # --- Posterior chain construction ----------------------------------
-    # Systematic importance resampling clones the MAP when the posterior
-    # is peaked enough that `n_eff ≪ N`: all N indices land on the same
-    # max-weight dead point. To preserve actual posterior diversity we
-    # split on `n_eff` (Kish 1965): if it's large enough for unbiased
-    # resampling, do the standard systematic draw; otherwise return the
-    # top-N unique dead points sorted by weight descending. The latter
-    # is biased low (mode-heavy) but it shows the *support* of the
-    # posterior, not a degenerate single-point chain.
+    # Importance resampling clones the MAP when the posterior is peaked
+    # enough that `n_eff ≪ N`: all N indices land on the same max-weight
+    # dead point. To preserve actual posterior diversity we split on
+    # `n_eff` (Kish 1965): if it's large enough for unbiased resampling,
+    # draw n_eff indices; otherwise return the top-N unique dead points
+    # sorted by weight descending. The latter is biased low (mode-heavy)
+    # but it shows the *support* of the posterior, not a degenerate
+    # single-point chain.
+    #
+    # The draw is i.i.d. multinomial, as in `sample_nested`, not
+    # systematic: systematic resampling walks the dead points in their
+    # order, which is the order of increasing likelihood, so the chain came
+    # back sorted and its R-hat and ESS measured the sort. On an RV + IAD
+    # companion a single run read R-hat 1.06-1.11 on its own draws.
     n_dead = length(dead_logL)
     log_w = Float64[dead_logwt[i] - log_z_ns for i in 1:n_dead]
     log_w_max = maximum(log_w)
@@ -380,7 +450,7 @@ function sample_nested_ins(
     if n_eff >= 200
         # Standard importance resampling
         n_resample = n_eff
-        indices = _systematic_resample(rng, w, n_resample)
+        indices = _multinomial_resample(rng, w, n_resample)
     else
         # Peaked posterior — take the top dead points by weight, keeping
         # uniqueness. This avoids the resample-collapse failure on real-
@@ -399,13 +469,14 @@ function sample_nested_ins(
     samples = Matrix{Float64}(undef, n_resample, n_dim)
     for (i, idx) in enumerate(indices)
         for (j, _) in enumerate(unfrozen_idx)
-            samples[i, j] = prior_transform(dead_u[idx][j], unfrozen_priors[j])
+            samples[i, j] = prior_transform(dead_u[idx][j], _ns_prior(unfrozen_priors[j]))
         end
     end
 
     param_names = Symbol.(layout.unfrozen_names)
-    chains = MCMCChains.Chains(samples, param_names)
-    return INSResult(chains, log_z_ns, log_z_ins, iter, n_evals)
+    # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
+    chains = with_density_columns(MCMCChains.Chains(samples, param_names), target.params)
+    return INSResult(chains, log_z_ns, log_z_ns_err, log_z_ins, iter, n_evals)
 end
 
 
@@ -416,19 +487,30 @@ end
 """
     _rwalk_within_shell!(live_u, live_logL, rng, eval_loglike, n_dim,
                           n_live, idx_worst, logL_worst, bound, log_V_cur,
-                          n_walks, walk_scale, ins_log_L, ins_log_V)
+                          n_walks, scale, ins_log_L, ins_log_V)
     -> (new_u, new_logL) or (nothing, -Inf)
 
-Within-shell RWalk: pick a random live point as the starting state,
-take `n_walks` Gaussian random-walk Metropolis steps inside the
-[0,1]^n_dim unit cube subject to the constraint `L > logL_worst`.
-Step size adapts toward ~50% acceptance over the chain. Each proposal
-feeds the INS accumulator (we don't distinguish accepted from rejected
-for the importance estimator — all evaluations contribute the same way).
+Within-shell random walk: from a live point inside the constraint, chosen at
+random among those other than the one being replaced, exactly `n_walks`
+Metropolis steps `u + σ·A·z` inside the unit cube and the constraint
+`L > logL_worst`, with `z` uniform in the unit ball and `A` the axes of a
+bounding ellipsoid around the start (`_walk_ellipsoid`). The step size
+`σ = scale[]` is the same for every step of the chain; after it, `scale[]`
+moves toward 50 % acceptance, as the vendored `Proposals.RWalk`'s does
+(dynesty's rule). A chain with no step accepted returns its start. Every
+proposal feeds the INS accumulator (accepted or not, the importance estimator
+counts all evaluations the same way).
 
-Returns the final accepted state. Falls back to `(nothing, -Inf)` if no
-proposal is accepted across all `n_walks` steps (extremely unlikely if
-the starting state already satisfies the constraint).
+The walk used to adapt its step inside the chain: growing it when the running
+acceptance was low and shrinking it when high, halving it after five
+rejections in a row, and counting `n_walks` accepted steps rather than steps.
+Where such a chain ends depends on its own acceptances, so the kernel does not
+leave the uniform distribution inside the constraint unchanged; on an RM
+obliquity fit `sample_nested_ins` and `sample_nested_dynamic` put log Z about
+2 nats above pt_emcee's.
+
+Returns `(nothing, -Inf)` only if no live point lies strictly above
+`logL_worst`.
 """
 function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
                                live_logL::AbstractVector{Float64},
@@ -436,7 +518,7 @@ function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
                                n_dim::Int, n_live::Int, idx_worst::Int,
                                logL_worst::Float64, bound,
                                log_V_cur::Float64, n_walks::Int,
-                               walk_scale::Float64,
+                               scale::Base.RefValue{Float64},
                                ins_log_L::Vector{Float64},
                                ins_log_V::Vector{Float64},
                                # Pre-allocated scratch (caller owns;
@@ -448,50 +530,29 @@ function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
                                scratch_prop::Vector{Float64},
                                scratch_noise::Vector{Float64};
                                slot::Int = 1)
-    # Start state: pick a random viable live point that's NOT the one
-    # being replaced. Standard NS rule. Random offset + first-viable
-    # scan avoids the `filter` allocation that the old code did per
-    # call.
-    rand_offset = rand(rng, 0:(n_live - 1))
-    start_idx = 0
-    @inbounds for offset in 0:(n_live - 1)
-        cand = ((rand_offset + offset) % n_live) + 1
-        if cand != idx_worst && live_logL[cand] > logL_worst
-            start_idx = cand
-            break
-        end
-    end
+    start_idx = _pick_start(rng, live_logL, idx_worst, logL_worst)
     start_idx == 0 && return (nothing, -Inf)
     @inbounds for d in 1:n_dim
         scratch_cur[d] = live_u[d, start_idx]
     end
     cur_logL = live_logL[start_idx]
+    A = _walk_ellipsoid(rng, bound, scratch_cur).axes
 
-    # Initial step scale. Adapted below toward the in-band acceptance.
-    σ = walk_scale / sqrt(n_dim)
-
-    max_attempts = max(5 * n_walks, 100)
+    σ = scale[]
     n_accept = 0
-    attempt = 0
-    n_reject_streak = 0
-    while n_accept < n_walks && attempt < max_attempts
-        attempt += 1
-        Random.randn!(rng, scratch_noise)
+    for _ in 1:n_walks
+        _rand_ball!(rng, scratch_noise)
+        mul!(scratch_prop, A, scratch_noise)
         in_cube = true
         @inbounds for d in 1:n_dim
-            scratch_prop[d] = scratch_cur[d] + σ * scratch_noise[d]
-            if scratch_prop[d] < 0.0 || scratch_prop[d] > 1.0
-                in_cube = false
-            end
+            x = scratch_cur[d] + σ * scratch_prop[d]
+            scratch_prop[d] = x
+            (x < 0.0 || x > 1.0) && (in_cube = false)
         end
         if !in_cube
+            # out of the cube: a rejected step
             push!(ins_log_L, -Inf)
             push!(ins_log_V, log_V_cur)
-            n_reject_streak += 1
-            if n_reject_streak >= 5
-                σ *= 0.5
-                n_reject_streak = 0
-            end
             continue
         end
         logL_prop = eval_loglike(scratch_prop, slot)
@@ -503,36 +564,60 @@ function _rwalk_within_shell!(live_u::AbstractMatrix{Float64},
             end
             cur_logL = logL_prop
             n_accept += 1
-            n_reject_streak = 0
-            acc = n_accept / attempt
-            # NOTE: this looks inverted against the usual acceptance-targeting
-            # law (and against the vendored dynesty-style `update_scale!`), and
-            # it does make per-call displacement saturate — an 80-walk chain
-            # travels no further than a 10-walk one. But flipping it to the
-            # "correct" direction MEASURABLY DEGRADES FITS: on an injected
-            # 1-planet RV recovery (P=8 d, 8 seeds, n_live=100, dlogz=0.5) the
-            # flipped version recovers 5/8 instead of 8/8, rails three seeds to
-            # P ≈ 660-810 d, drops median logZ_ns from -77.4 to -94.0, and
-            # widens the NS-vs-INS estimator gap from 2.0 to 8.3 nats.
-            # With walk_scale=1.0 the initial σ = 1/√n_dim is a large fraction
-            # of the unit cube, and the shrink-on-high-acceptance behaviour is
-            # what pulls it down to a workable scale; removing that leaves the
-            # walk diffusing into junk long-period modes. Do not "fix" the sign
-            # without re-running that benchmark — the real suspects are the
-            # bang-bang controller shape and the walk_scale default, not this
-            # line alone.
-            σ *= acc < 0.2 ? 1.2 : (acc > 0.7 ? 0.8 : 1.0)
-        else
-            n_reject_streak += 1
-            if n_reject_streak >= 5
-                σ *= 0.7
-                n_reject_streak = 0
-            end
         end
     end
-
-    n_accept == 0 && return (nothing, -Inf)
+    # between chains only (vendored `update_scale!`)
+    ratio = n_accept / n_walks
+    scale[] = min(σ * exp((ratio - 0.5) / (0.5 * n_dim)), sqrt(n_dim))
     return (scratch_cur, cur_logL)
+end
+
+# A live point other than `idx_worst` strictly above `logL_worst`, uniformly
+# at random; 0 if there is none. (The walks used to take the first such point
+# after a random offset, which favoured the point after `idx_worst`.)
+function _pick_start(rng::AbstractRNG, live_logL::AbstractVector{Float64},
+                     idx_worst::Int, logL_worst::Float64)
+    n = 0
+    @inbounds for i in eachindex(live_logL)
+        (i != idx_worst && live_logL[i] > logL_worst) && (n += 1)
+    end
+    n == 0 && return 0
+    k = rand(rng, 1:n)
+    @inbounds for i in eachindex(live_logL)
+        if i != idx_worst && live_logL[i] > logL_worst
+            k -= 1
+            k == 0 && return i
+        end
+    end
+    return 0
+end
+
+# The ellipsoid whose axes shape a walk or slice chain starting at `u`: one
+# of the bound's ellipsoids holding `u`, at random, as the vendored samplers
+# choose (`Bounds.bound_containing`); if none holds it (the bound is refit
+# only every `bound_update_interval` iterations), the nearest in its own
+# metric. The shape depends on the start only, never on the chain after it.
+function _walk_ellipsoid(rng::AbstractRNG, bound, u::AbstractVector{Float64})
+    e = NestedSamplers.Bounds.bound_containing(rng, bound, u)
+    e === nothing || return e
+    ells = bound isa NestedSamplers.Bounds.MultiEllipsoid ? bound.ellipsoids : (bound,)
+    best = first(ells)
+    dbest = Inf
+    for ell in ells
+        δ = u .- ell.center
+        dd = dot(δ, ell.A * δ)
+        dd < dbest && (best = ell; dbest = dd)
+    end
+    return best
+end
+
+# `z` in place: uniform in the unit ball.
+function _rand_ball!(rng::AbstractRNG, z::Vector{Float64})
+    Random.randn!(rng, z)
+    n = length(z)
+    r = rand(rng)^(1 / n) / sqrt(sum(abs2, z))
+    z .*= r
+    return z
 end
 
 # Evaluate the constrained log-likelihood at `scratch_cur + t·dir`,
@@ -570,16 +655,23 @@ end
                           scratch_cur, scratch_prop, scratch_noise)
     -> (new_u, new_logL) or (nothing, -Inf)
 
-Within-shell random-direction slice sampling (dynesty `rslice` style).
-From a random viable live point, perform `n_walks` slice updates: each
-draws an isotropic unit direction, brackets a slice interval by stepping
-out while `L > logL_worst`, then shrinks the interval until a point
-satisfying the constraint is found. More robust than the random walk in
-high dimensions / strongly-correlated posteriors because the slice
-interval auto-scales to the local constraint geometry along each
-direction. Every likelihood probe feeds the INS accumulator.
+Within-shell random-direction slice sampling (dynesty's `rslice`, the
+vendored `RSlice`). From a random viable live point, a chain of `n_walks`
+slices: each takes a random unit vector through the axes of the bound's
+ellipsoid holding the start (`_walk_ellipsoid`, as the random walk does),
+brackets a slice interval along it by stepping out while
+`L > logL_worst`, then shrinks the interval until a point satisfying the
+constraint is found. Every likelihood probe feeds the INS accumulator.
 
-`walk_scale` sets the initial slice half-width (`walk_scale / √n_dim`).
+`walk_scale` sets the initial bracket, in units of that axis vector.
+
+The directions used to be isotropic in the unit cube, with a bracket of
+`walk_scale / √n_dim`. Where the constrained region is much narrower along
+some parameters than others such a slice moves about its narrowest width
+along every direction: on an RM obliquity fit the posterior widths of
+`sample_nested_ins` and `sample_nested_dynamic` scattered by 15–25% between
+seeds (b's sd 0.019–0.037 against pt_emcee's 0.027–0.028, the walk's
+0.026–0.028).
 """
 function _slice_within_shell!(live_u::AbstractMatrix{Float64},
                                live_logL::AbstractVector{Float64},
@@ -594,30 +686,24 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
                                scratch_prop::Vector{Float64},
                                scratch_noise::Vector{Float64};
                                slot::Int = 1)
-    # Start from a random viable live point that isn't the one being
-    # replaced (same NS rule as the RWalk kernel).
-    rand_offset = rand(rng, 0:(n_live - 1))
-    start_idx = 0
-    @inbounds for offset in 0:(n_live - 1)
-        cand = ((rand_offset + offset) % n_live) + 1
-        if cand != idx_worst && live_logL[cand] > logL_worst
-            start_idx = cand
-            break
-        end
-    end
+    # Start from a live point inside the constraint other than the one being
+    # replaced, uniformly among them (as the RWalk kernel does).
+    start_idx = _pick_start(rng, live_logL, idx_worst, logL_worst)
     start_idx == 0 && return (nothing, -Inf)
     @inbounds for d in 1:n_dim
         scratch_cur[d] = live_u[d, start_idx]
     end
     cur_logL = live_logL[start_idx]
+    A = _walk_ellipsoid(rng, bound, scratch_cur).axes
 
-    w = walk_scale / sqrt(n_dim)   # initial slice half-width
+    w = walk_scale   # initial bracket, in units of the direction vector
     max_expand = 20
     max_shrink = 50
     n_done = 0
 
     for _sweep in 1:n_walks
-        # Isotropic unit direction in `scratch_noise`.
+        # A random unit vector through the ellipsoid's axes, in
+        # `scratch_noise` (`scratch_prop` is overwritten by every probe).
         Random.randn!(rng, scratch_noise)
         nrm = 0.0
         @inbounds for d in 1:n_dim
@@ -628,6 +714,8 @@ function _slice_within_shell!(live_u::AbstractMatrix{Float64},
         @inbounds for d in 1:n_dim
             scratch_noise[d] /= nrm
         end
+        mul!(scratch_prop, A, scratch_noise)
+        copyto!(scratch_noise, scratch_prop)
 
         # Random initial bracket [lo, hi] straddling t = 0.
         r  = rand(rng)
@@ -687,38 +775,61 @@ function _rejection_within_bound!(rng::AbstractRNG,
                                    logL_worst::Float64, bound,
                                    log_V_cur::Float64,
                                    ins_log_L::Vector{Float64},
-                                   ins_log_V::Vector{Float64})
-    for _ in 1:10_000
+                                   ins_log_V::Vector{Float64};
+                                   refit = nothing, refit_every::Int = typemax(Int))
+    # A draw outside the cube costs no likelihood call, and the bootstrap-
+    # expanded bound can lie mostly outside the cube while the constrained
+    # region is still large, so those draws have a cap of their own. Each one
+    # still counts in the INS normalisation, with L = 0.
+    #
+    # `refit()` refits the bound every `refit_every` likelihood calls during
+    # the search, each refit with a fresh bootstrap expansion, as dynesty and
+    # sample_nested do (vendored `draw_uniform`): an expansion that came out
+    # far too large is otherwise drawn from until the caps run out. The bound
+    # the search ends on is returned with the point.
+    ncall = nout = since = 0
+    while ncall < 100_000 && nout < 1_000_000
+        if refit !== nothing && since ≥ refit_every
+            bound = refit()
+            log_V_cur = log(NestedSamplers.Bounds.volume(bound))
+            since = 0
+        end
         u_prop = rand(rng, bound)
         in_cube = all(0 <= u <= 1 for u in u_prop)
         if !in_cube
             push!(ins_log_L, -Inf)
             push!(ins_log_V, log_V_cur)
+            nout += 1
             continue
         end
+        ncall += 1
+        since += 1
         logL_prop = eval_loglike(u_prop)
         push!(ins_log_L, logL_prop)
         push!(ins_log_V, log_V_cur)
         if logL_prop > logL_worst
-            return (u_prop, logL_prop)
+            return (u_prop, logL_prop, bound)
         end
     end
-    return (nothing, -Inf)
+    return (nothing, -Inf, bound)
 end
 
+_rejection_failed(iter) =
+    error("no point from the bound reached the likelihood threshold at iteration " *
+          "$iter after 100 000 likelihood calls (proposal = :unif): ellipsoids that " *
+          "cover this constrained region are too loose for uniform draws, so use " *
+          ":rwalk or :slice")
 
-"""Systematic resampling — same low-variance pattern used by sample_pa."""
-function _systematic_resample(rng::AbstractRNG, w::Vector{Float64}, n::Int)
-    cdf = cumsum(w)
-    u0 = rand(rng) / n
-    indices = Vector{Int}(undef, n)
-    j = 1
-    for k in 1:n
-        u = u0 + (k - 1) / n
-        while j < length(cdf) && cdf[j] < u
-            j += 1
-        end
-        indices[k] = j
+# The bound fitted to the live points; a single Ellipsoid when MultiEllipsoid's
+# k-means fails on near-duplicate points.
+function _fit_ins_bound(rng, BoundT, live_u, pointvol, enlarge, n_boot)
+    try
+        NestedSamplers.Bounds.fit(rng, BoundT, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
+    catch err
+        err isa ArgumentError || rethrow(err)
+        NestedSamplers.Bounds.fit(rng, NestedSamplers.Bounds.Ellipsoid, live_u;
+                    pointvol = pointvol, enlarge = enlarge, bootstrap = n_boot)
     end
-    return indices
 end
+

@@ -47,8 +47,10 @@ transit nearest `t_phot_min` (`n0 < 0` when the photometry starts before
 Tc; `n0 = 0` without `t_phot_min`) to the one nearest `t_phot_max`. Sums
 pairwise contributions across all NB planets (1st-order valid).
 
-Mass ratios derive from K via `msini` divided by `sin(inc)` where
-`inc = acos(b / (a/R*))`. Requires `M_s` to be set in
+Mass ratios `q = M_p / M★` come from `planet_geometry`: the exact mass function
+(`M_p³ sin³i / (M★ + M_p)² = f(K, P, e)`, Cardano) solved together with the
+inclination implied by `b` and `a/R★`, so they are the TRUE masses, with no
+`M_p << M★` approximation. Requires `M_s` to be set in
 `theta.params.config`; if missing, leaves the NB rows at zero δts.
 """
 function _apply_ttv_nb!(state, theta::Theta{T}, p_idx,
@@ -109,12 +111,8 @@ function _apply_ttv_nb!(state, theta::Theta{T}, p_idx,
         sums[q]  = zeros(T, ntr)
         n0s[q]   = n0
 
-        # Mass ratio = M_p / M_s via Kepler + inclination from b, a/R*.
-        K = planet_K(theta, k)
-        inc_deg = acosd(bs[j] / a_Rs[j])
-        mp_mjup = msini(M_s, K, P, e) / sind(inc_deg)
-        mp_msun = mp_mjup * _MJ_PER_MS
-        mass_ratio = mp_msun / M_s
+        # Mass ratio = M_p / M_star: exact mass function at the transit's sin i.
+        _, mass_ratio, _ = planet_geometry(theta, k, P)
         # TTVFaster 1st-order series has a 0/0 at exactly e=0 (formula
         # divides by e at one step). Floor the eccentricity vector at
         # 1e-4 — well below any detectable TTV amplitude at this order.

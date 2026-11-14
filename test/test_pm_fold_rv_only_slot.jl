@@ -16,7 +16,7 @@ function _rv_only_plus_transit()
                   rv_inst = ones(Int, length(t_rv)),
                   t_phot = t_ph, flux = ones(length(t_ph)), flux_err = fill(1e-3, length(t_ph)),
                   phot_inst = ones(Int, length(t_ph)))
-    params = Params(; max_kplanet = 2, planet_modes = [RV_ONLY, RVPM],
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 2, planet_modes = [RV_ONLY, RVPM],
                       instruments = InstrumentConfig(rv = ["I1"], pm = ["TESS"]),
                       data = data, M_s = 1.0, R_s = 1.0)
     vals = Dict("P_k1" => 1.39, "K_k1" => 20.0, "sesinw_k1" => 0.0, "secosw_k1" => 0.0,
@@ -32,6 +32,12 @@ function _rv_only_plus_transit()
     data.rv .= Nereus.rv_predictions(theta, data)[1]
     data.flux .= Nereus.phot_predictions(theta, data)[1]
     nm = params.layout.unfrozen_names
+    # Under density = :rho_circ the transiting slot samples (ρ_circ, η) in place
+    # of its e-coordinates (src/density.jl): their values are the ones
+    # set_param! wrote, and the chain carries the e-coordinates beside them.
+    for x in nm
+        Nereus.is_density_reparam_name(x) && (vals[x] = Nereus.get_param(theta, x))
+    end
     missing_vals = setdiff(nm, keys(vals))
     isempty(missing_vals) || error("fixture lacks values for $missing_vals")
     cols = vcat(Symbol.(nm), [:lp])
@@ -40,7 +46,7 @@ function _rv_only_plus_transit()
         arr[i, 1:length(nm), 1] = [vals[x] * (1 + 1e-6 * i) for x in nm]
         arr[i, end, 1] = -0.1 * i
     end
-    return params, data, Chains(arr, cols)
+    return params, data, Nereus.with_density_columns(Chains(arr, cols), params)
 end
 
 @testset "transit folds: transiting slots only" begin

@@ -536,12 +536,7 @@ function _predraw_M_sec!(new_values, theta::Theta, block, rng)
     lo, hi = bounds(prior)
     v = clamp(rand(rng, prior.dist), lo, hi)
     new_values[block.K] = v
-    return (true, eval_packed_logpdf(v,
-        layout.packed_priors.type_ids[uf_pos],
-        layout.packed_priors.params[uf_pos, 1],
-        layout.packed_priors.params[uf_pos, 2],
-        layout.packed_priors.lowers[uf_pos],
-        layout.packed_priors.uppers[uf_pos]))
+    return (true, eval_packed_logpdf(v, layout.packed_priors, uf_pos))
 end
 
 # =====================================================================
@@ -744,12 +739,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
             v = rand(rng, prior.dist)
             v = clamp(v, lo, hi)
             new_values[slot] = convert(T, v)
-            lp = eval_packed_logpdf(v,
-                layout.packed_priors.type_ids[uf_pos],
-                layout.packed_priors.params[uf_pos, 1],
-                layout.packed_priors.params[uf_pos, 2],
-                layout.packed_priors.lowers[uf_pos],
-                layout.packed_priors.uppers[uf_pos])
+            lp = eval_packed_logpdf(v, layout.packed_priors, uf_pos)
             log_q_fwd += lp
         end
     end
@@ -1500,12 +1490,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
             v = rand(rng, prior.dist)
             v = clamp(v, lo, hi)
             new_values[slot] = convert(T, v)
-            lp = eval_packed_logpdf(v,
-                layout.packed_priors.type_ids[uf_pos],
-                layout.packed_priors.params[uf_pos, 1],
-                layout.packed_priors.params[uf_pos, 2],
-                layout.packed_priors.lowers[uf_pos],
-                layout.packed_priors.uppers[uf_pos])
+            lp = eval_packed_logpdf(v, layout.packed_priors, uf_pos)
             log_q_fwd += lp
         end
     end

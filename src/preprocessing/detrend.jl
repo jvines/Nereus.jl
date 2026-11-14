@@ -480,12 +480,16 @@ function _fit_gp_hyperparams(t::Vector{Float64}, flux::Vector{Float64},
     # draws cover basin diversity; PSIS-reweighted draws form a real
     # posterior — robust to the multimodality / bound-pinning that MAP
     # alone gets stuck in. Returns posterior medians as the point
-    # estimate used by the trend prediction below.
+    # estimate used by the trend prediction below. Pathfinder's own starts
+    # (`n_scouts = 0`): scouting the starts, as the samplers' warm starts now
+    # do, costs ~10⁴ likelihood evaluations, each a GP solve over the light
+    # curve here, and was not measured on a detrending target.
     pf = pathfinder_init(target;
                           n_runs = 3,
                           n_draws = 200,
                           seed   = 42,
-                          quiet  = false)
+                          quiet  = false,
+                          n_scouts = 0)
 
     n_dim = size(pf.draws, 1)
     n_draws = size(pf.draws, 2)

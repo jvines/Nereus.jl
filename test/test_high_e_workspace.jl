@@ -51,8 +51,10 @@ end
     worst_rv = 0.0; worst_ph = 0.0; n = 0
     for e in (0.5, 0.9, 0.99, 0.999, 0.9999, 0.99993, 0.99995, 0.99998, 0.99999),
         ω in (-π / 2, -π / 2 + 1e-3, -π / 2 - 0.02, 0.0, 1.1, π / 2, -2.5)
-        th.values[ix["sesinw_k1"]] = sqrt(e) * sin(ω)
-        th.values[ix["secosw_k1"]] = sqrt(e) * cos(ω)
+        # set_param!, not raw slots: under density = :rho_circ the
+        # e-coordinates are derived from ρ_circ and η (src/density.jl).
+        Nereus.set_param!(th, "sesinw_k1", sqrt(e) * sin(ω))
+        Nereus.set_param!(th, "secosw_k1", sqrt(e) * cos(ω))
         e_got, _ = Nereus.planet_e_w(th, 1)
         @test e_got < 1
         rv_a = rv_log_likelihood(th, data)
@@ -83,8 +85,10 @@ end
         startswith(nm, "errscale") && (thn.values[ixn[nm]] = 1.3)
     end
     for e in (0.9999, 0.99995, 0.99999), ω in (-π / 2, 0.4)
-        thn.values[ixn["sesinw_k1"]] = sqrt(e) * sin(ω)
-        thn.values[ixn["secosw_k1"]] = sqrt(e) * cos(ω)
+        # set_param!, not raw slots: under density = :rho_circ the
+        # e-coordinates are derived from ρ_circ and η (src/density.jl).
+        Nereus.set_param!(thn, "sesinw_k1", sqrt(e) * sin(ω))
+        Nereus.set_param!(thn, "secosw_k1", sqrt(e) * cos(ω))
         a = rv_log_likelihood(thn, dn)
         w = rv_log_likelihood(thn, dn, wsn)
         @test isfinite(a)

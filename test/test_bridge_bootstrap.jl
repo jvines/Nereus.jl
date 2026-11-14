@@ -75,7 +75,8 @@ end
 
 # 0.8.8's log ratios; only `N1` when there are too few draws.
 function _ref_ratios(target, chains::MCMCChains.Chains;
-                     n_proposal::Int = 20_000, seed::Int = 1, proposal::Symbol = :student)
+                     n_proposal::Int = 20_000, seed::Int = 1, proposal::Symbol = :student,
+                     moments = nothing)
     d = length(target.params.layout.unfrozen_names)
     Y_all = _ref_draws(target, chains)
     keep = vec(all(isfinite, Y_all; dims = 1))
@@ -83,8 +84,10 @@ function _ref_ratios(target, chains::MCMCChains.Chains;
     N1 = size(Y, 2)
     N1 >= 2d + 2 || return (; N1)
     evs = [Nereus._BridgeEvaluator(target) for _ in 1:Nereus._bridge_ntasks(max(N1, n_proposal))]
-    μ = vec(mean(Y; dims = 2))
-    Σ = cov(Y; dims = 2) + 1e-10 * I(d)
+    # `moments` given (the streamed ones): the proposal is built from them, so
+    # the ratios compare 0.8.8's arithmetic alone, on any chain.
+    μ = moments === nothing ? vec(mean(Y; dims = 2)) : moments.μ
+    Σ = (moments === nothing ? cov(Y; dims = 2) : moments.Σ) + 1e-10 * I(d)
     Lc = cholesky(Symmetric(Σ)).L
     ν  = 4.0
     function logq(y)
@@ -225,6 +228,21 @@ end
         end
         @test _ref_bridge_iterate(slow..., 1_000, 1e-10)[2] > 100   # the old way crawled
         @test _bridge_iterate(slow..., 1_000, 1e-10)[2] <= 10
+
+        # Further out (g' = 0.976 at the root) the old iteration needs ~1070
+        # passes and stops at its 1000-pass cap, unconverged and ~1e-7 short of
+        # the root. Newton converges; given the passes, the old iteration finds
+        # the same root, within its stopping error tol / (1 - |g'|). A pt_emcee
+        # chain with one stranded walker did exactly this (g' = 0.985, 1287
+        # passes), and bridge_evidence's answer was the right one.
+        stalled = _bb_ratios(20_000, 400; stuck = 0.02, shift = 8.0, seed = 2)
+        @test !_ref_bridge_iterate(stalled..., 1_000, 1e-10)[3]
+        x, it, ok = _bridge_iterate(stalled..., 1_000, 1e-10)
+        @test ok && it <= 15
+        @test abs(_residual(stalled..., x)) < 1e-9
+        xr, itr, okr = _ref_bridge_iterate(stalled..., 100_000, 1e-10)
+        @test okr && itr > 1_000
+        @test abs(x - xr) <= 1e-10 / (1 - abs(_gpass(stalled..., x)[2]))
 
         # g' as computed in the pass is the derivative of g.
         for (l1, l2) in (fast, slow, ext), x in (-330.0, -321.0, -300.0)
@@ -490,7 +508,7 @@ end
         @test occursin("stage=x", lines[end])
     end
 
-    # End to end: bridge_evidence against 0.8.8's, on a posterior it converges on.
+    # End to end: bridge_evidence against 0.8.8's, on a pt_emcee chain.
     rng = MersenneTwister(20261025)
     n = 60
     t = sort!(900 .* rand(rng, n))
@@ -576,11 +594,14 @@ end
             @test alloc(z, lq, v9) == 0
         end
 
-        # The log ratios: 0.8.8's, but for the rounding of the moments.
+        # The log ratios: 0.8.8's, on the same moments. How far the streamed
+        # moments round from the matrix ones is checked above; through the
+        # proposal that rounding reaches l2 by an amount that depends on the
+        # chain, so the ratios are compared with it taken out.
         for (kw, use_lp) in (((n_proposal = 3_000, seed = 42, proposal = :student), false),
                              ((n_proposal = 2_000, seed = 9, proposal = :gaussian), false),
                              ((n_proposal = 3_000, seed = 42, proposal = :student), true))
-            rr = _ref_ratios(tg, ch; kw...)
+            rr = _ref_ratios(tg, ch; moments = m, kw...)
             rs = _bridge_ratios(tg, ch, kw.n_proposal, kw.seed, kw.proposal, false, nothing;
                                 use_lp)
             @test rs.n_post == rr.N1 && length(rs.l1) == length(rr.l1) &&
@@ -595,6 +616,15 @@ end
     # and its standard error to far below that error. Only the solver, the
     # rounding of the proposal's moments (streamed, not from a matrix) and,
     # with the chain's :lp, the rounding of each log p* differ.
+    #
+    # 0.8.8 is iterated to its root (`_ref_root`): its 1000-pass cap is a
+    # property of the old solver, not of the estimate, and whether this chain
+    # needs more passes than that depends on the sampler that drew it. A walker
+    # left stranded puts g' near 1 and the old iteration then stops short,
+    # unconverged, while Newton does not (see the solver testset). At tol 1e-12
+    # its stopping error, tol / (1 - |g'|), stays below the 1e-8 compared here
+    # for any |g'| < 0.9999.
+    _ref_root(tg, ch; kw...) = _ref_bridge_evidence(tg, ch; max_iter = 100_000, tol = 1e-12, kw...)
     function same_estimate(b, r)
         (b.converged == r.converged && b.n_post == r.n_post && b.n_prop == r.n_prop &&
          isequal(b.overlap, r.overlap) && b.proposal === r.proposal) || return false
@@ -604,7 +634,7 @@ end
     end
 
     @testset "bridge_evidence: the 0.8.8 estimate" begin
-        ref = _ref_bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = 30)
+        ref = _ref_root(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = 30)
         @test ref.converged && isfinite(ref.se)
         tm = Dict{String, Any}()
         got = bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = 30,
@@ -655,8 +685,8 @@ end
         for nb in (0, 1)
             b = bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42, n_bootstrap = nb)
             @test isnan(b.se) && b.log_z === got.log_z
-            @test same_estimate(b, _ref_bridge_evidence(tg, ch; n_proposal = 3_000, seed = 42,
-                                                        n_bootstrap = nb))
+            @test same_estimate(b, _ref_root(tg, ch; n_proposal = 3_000, seed = 42,
+                                             n_bootstrap = nb))
         end
 
         # A non-converged primary skips the bootstrap entirely.
@@ -669,8 +699,8 @@ end
         # posterior loses some), and too few draws: the old early returns.
         @test same_estimate(bridge_evidence(tg, ch; n_proposal = 2_000, seed = 9,
                                             proposal = :gaussian, n_bootstrap = 12),
-                            _ref_bridge_evidence(tg, ch; n_proposal = 2_000, seed = 9,
-                                                 proposal = :gaussian, n_bootstrap = 12))
+                            _ref_root(tg, ch; n_proposal = 2_000, seed = 9,
+                                      proposal = :gaussian, n_bootstrap = 12))
         # Non-finite posterior draws are dropped before anything else, as
         # before, and the :lp of the others still lines up with them.
         A = copy(ch.value.data)
@@ -681,8 +711,8 @@ end
         tmb = Dict{String, Any}()
         gb = bridge_evidence(tg, bad; n_proposal = 3_000, seed = 42, n_bootstrap = 30,
                              timings = tmb)
-        @test same_estimate(gb, _ref_bridge_evidence(tg, bad; n_proposal = 3_000, seed = 42,
-                                                     n_bootstrap = 30))
+        @test same_estimate(gb, _ref_root(tg, bad; n_proposal = 3_000, seed = 42,
+                                          n_bootstrap = 30))
         @test tmb["lp_reused"] === true
         @test tmb["n_post"] == tmb["n_draws"] - 2 == gb.n_post
         @test gb.converged && isfinite(gb.se)

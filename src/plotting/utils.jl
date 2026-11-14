@@ -1,6 +1,7 @@
 # Plotting utilities: phase folding, CI computation, binning, model evaluation.
 
-using Statistics: mean, median, std, quantile
+using Statistics: mean, median, median!, std, quantile, quantile!
+import CodecZlib                  # `_save_png`'s image data
 
 """
     _save_plot(filename, fig; save_pdf=false, save_kwargs...)
@@ -20,7 +21,15 @@ Returns the primary `filename`.
 """
 function _save_plot(filename::AbstractString, fig;
                      save_pdf::Bool=false, release=nothing, save_kwargs...)
-    save(filename, fig; save_kwargs...)
+    # Built, a large figure has left its garbage behind; rendering it adds the
+    # pixel buffers (235 MB apiece for the 23-parameter corner). Collect first
+    # if due, so the two do not stack.
+    _RELEASE_MEMORY[] && _release_memory_if_due()
+    if lowercase(splitext(filename)[2]) == ".png"
+        _save_png(filename, fig; save_kwargs...)    # without the image's copies
+    else
+        save(filename, fig; save_kwargs...)
+    end
     if save_pdf
         base, ext = splitext(filename)
         if lowercase(ext) == ".png"
@@ -32,6 +41,7 @@ function _save_plot(filename::AbstractString, fig;
     # batch producer is the only layer that knows the figure is being thrown
     # away, so it opts in via `_RELEASE_SCENES` (see `_make_plots`).
     (release === nothing ? _RELEASE_SCENES[] : release) && _release_scene!(fig)
+    _RELEASE_MEMORY[] && _release_memory_if_due()
     return filename
 end
 
@@ -42,6 +52,37 @@ must still get a usable figure back. `_make_plots` turns it on for the
 duration of a batch render, where the figures are written and discarded.
 """
 const _RELEASE_SCENES = Ref(false)
+
+# A plot function that returns its figures in a Dict keeps every one of them
+# alive until it returns, however many it writes: for a grid of a few dozen
+# parameters that is tens of MB of scene and draws apiece. In a batch render
+# (`_RELEASE_SCENES`) the figures are written and torn down, nobody reads the
+# Dict, so each is let go as soon as it is saved.
+_keep_fig!(figs, key, fig) = (_RELEASE_SCENES[] || (figs[key] = fig); nothing)
+
+"""
+Whether `_save_plot` collects after writing a figure, once `_RELEASE_EVERY`
+bytes have been allocated since the last collection. `_make_plots` turns it on
+for a large chain (`_large_chain`), where a figure's garbage is hundreds of MB.
+
+A figure's scene outlives the young collections that run while it is built,
+so what it allocates is promoted and is freed only by a full collection,
+which Julia runs once the old generation has grown in proportion to the live
+heap -- a fit's heap, here. Across a set of figures (the posterior grids
+write one per parameter) that garbage piled up by hundreds of MB before a
+collection. Collecting after every figure would cost a full collection each,
+for figures that allocated next to nothing.
+"""
+const _RELEASE_MEMORY = Ref(false)
+const _RELEASED_AT = Ref{Int64}(0)            # `Base.gc_bytes()` at the last one
+const _RELEASE_EVERY = 64 * 2^20
+
+function _release_memory_if_due()
+    Base.gc_bytes() - _RELEASED_AT[] < _RELEASE_EVERY && return nothing
+    _release_memory()
+    _RELEASED_AT[] = Base.gc_bytes()
+    return nothing
+end
 
 """
     _release_scene!(fig)
@@ -84,12 +125,154 @@ function _release_scene!(fig)
              hasproperty(fig, :figure) ? getfield(getfield(fig, :figure), :scene) :
              nothing
         sc === nothing && return nothing
+        _drop_screens!(sc)
         CairoMakie.Makie.empty!(sc; reset_theme = false)
     catch
         # Deterministic teardown is a cleanup optimisation. It must never be
         # the reason a figure that is already on disk reports a failure.
     end
     return nothing
+end
+
+# Every scene of a rendered figure, the root and each block's, keeps the screen
+# it was drawn on, and the screen its image surface: 13 MB for a posterior
+# figure at 2 px per unit, 235 MB for the corner. Makie's finalizer keeps the
+# root scene until the teardown task it schedules runs, which is not before the
+# plotting task yields, and the blocks' scenes stay reachable from it through
+# their callbacks; a plot set seldom yields, so every figure's surface stayed
+# alive, 1.4 GB by the 76th of 96. Makie's `free` lets the screens go; so does
+# this, for the whole tree, before `empty!` detaches the children.
+function _drop_screens!(sc)
+    foreach(_drop_screens!, sc.children)
+    empty!(sc.current_screens)
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# PNG output straight from the Cairo surface
+# ---------------------------------------------------------------------------
+#
+# Makie's PNG path renders into a Cairo surface, then hands a view of it to
+# FileIO, which converts the pixels before encoding: the surface and its
+# converted copies are alive together. For the 7632x7712 corner that is 235 MB
+# apiece, about 670 MB held while one file is written. `_save_png` encodes the
+# surface itself, a row at a time, and writes the metadata Makie's path writes
+# -- sRGB/gAMA/cHRM and the resolution, 96 dpi per unit as `save` sets it -- in
+# the same chunk order.
+
+"""
+    _cairo_png_surface(fig; px_per_unit = nothing) -> (surface, px_per_unit)
+
+Draw `fig` onto a CairoMakie image surface, exactly as `save(path, fig)` does
+for a PNG, and return the surface with its device scale. This is the ONE
+place that reaches into CairoMakie's internals (`Screen(scene, config, nothing,
+IMAGE)`, `colorbuffer(::Screen{IMAGE})` drawing onto `screen.surface`); it
+checks each and throws if they no longer hold, rather than writing something
+else. `test/test_plot_memory.jl` compares its output with Makie's `save`.
+"""
+function _cairo_png_surface(fig; px_per_unit = nothing)
+    CM = CairoMakie
+    M = CM.Makie
+    try
+        scene = M.get_scene(fig)
+        M.update_state_before_display!(fig)
+        cfg = Dict{Symbol, Any}(:visible => false)
+        px_per_unit === nothing || (cfg[:px_per_unit] = px_per_unit)
+        config = M.merge_screen_config(CM.ScreenConfig, cfg)
+        screen = CM.Screen(scene, config, nothing, CM.IMAGE)
+        M.events(fig).tick[] = M.Tick(M.OneTimeRenderTick, 0, 0.0, 0.0)
+        img = M.colorbuffer(screen)                 # draws onto screen.surface
+        surface = getfield(screen, :surface)
+        ppu = Float64(M.px_per_unit(screen))
+        w, h = size(surface.data)
+        sizeof(eltype(surface.data)) == 4 || error("the surface is not 32-bit ARGB")
+        (surface isa CM.Cairo.CairoSurface && size(img) == (h, w) &&
+         (w, h) == round.(Int, ppu .* M.size(scene))) ||
+            error("the surface is not the figure's image")
+        return surface, ppu
+    catch err
+        error("CairoMakie internals changed, cannot write a PNG from the Cairo " *
+              "surface (`_cairo_png_surface`): " * sprint(showerror, err))
+    end
+end
+
+# CRC-32 (ISO 3309, as PNG uses), for the chunks written here.
+function _png_crc(bytes)
+    c = 0xffffffff
+    for b in bytes
+        c ⊻= b
+        for _ in 1:8
+            c = (c >> 1) ⊻ (0xedb88320 * (c & 0x00000001))
+        end
+    end
+    return ~c
+end
+
+function _png_chunk(io, type::String, data::AbstractVector{UInt8})
+    write(io, hton(UInt32(length(data))))
+    td = vcat(Vector{UInt8}(codeunits(type)), data)
+    write(io, td)
+    write(io, hton(_png_crc(td)))
+    return nothing
+end
+
+# The zlib stream of a PNG's image data: 8-bit RGBA rows, filter type 0, from
+# the surface's 32-bit ARGB words (a column of `px` per image row). Its own
+# function so the loop is compiled for the matrix's type -- the surface comes
+# back from `_cairo_png_surface` untyped.
+function _png_idat(px::AbstractMatrix)
+    w, h = size(px)
+    TS = CodecZlib.TranscodingStreams
+    z = IOBuffer()
+    zs = CodecZlib.ZlibCompressorStream(z)
+    row = Vector{UInt8}(undef, 1 + 4w)
+    row[1] = 0x00                            # filter type: none
+    @inbounds for y in 1:h
+        for x in 1:w
+            p = reinterpret(UInt32, px[x, y])
+            row[4x - 2] = (p >> 16) % UInt8  # R
+            row[4x - 1] = (p >> 8) % UInt8   # G
+            row[4x]     = p % UInt8          # B
+            row[4x + 1] = (p >> 24) % UInt8  # A
+        end
+        write(zs, row)
+    end
+    write(zs, TS.TOKEN_END)
+    flush(zs)
+    idat = take!(z)
+    close(zs)
+    return idat
+end
+
+"""
+    _save_png(path, fig; px_per_unit = nothing)
+
+Write `fig` to the PNG `path` as `save(path, fig; px_per_unit)` writes it --
+the same RGBA pixels (the surface's bytes, as Makie hands them to the
+encoder), the same metadata chunks in the same order -- encoding the Cairo
+surface a row at a time instead of from converted copies of the whole image
+(see `_cairo_png_surface`).
+"""
+function _save_png(path::AbstractString, fig; px_per_unit = nothing)
+    surface, ppu = _cairo_png_surface(fig; px_per_unit)
+    w, h = size(surface.data)
+    ppm = round(UInt32, ppu * 96 / 0.0254)   # pixels per metre, as `save` sets dpi
+    idat = _png_idat(surface.data)
+    out = IOBuffer()
+    write(out, UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    _png_chunk(out, "IHDR", vcat(reinterpret(UInt8, hton.(UInt32[w, h])),
+                                 UInt8[8, 6, 0, 0, 0]))     # 8-bit RGBA
+    _png_chunk(out, "sRGB", UInt8[0x00])
+    _png_chunk(out, "gAMA", reinterpret(UInt8, [hton(UInt32(45455))]))
+    _png_chunk(out, "cHRM", reinterpret(UInt8, hton.(UInt32[
+        31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000])))
+    _png_chunk(out, "pHYs", vcat(reinterpret(UInt8, [hton(ppm), hton(ppm)]), 0x01))
+    for lo in 1:65536:length(idat)
+        _png_chunk(out, "IDAT", view(idat, lo:min(lo + 65535, length(idat))))
+    end
+    _png_chunk(out, "IEND", UInt8[])
+    write(path, take!(out))
+    return path
 end
 
 """
@@ -149,13 +332,50 @@ function _fold_inliers(res::AbstractVector{<:Real}; k::Real = 5)
 end
 
 """
+    _frame_all_ylims!(ax, ax_r, vals, residuals, errs;
+                        extra=Float64[], pad_frac=0.10, resid_pad=1.15)
+
+Y-limits for an RV data panel (`ax`) and its residual panel (`ax_r`) that
+contain every plotted point with its error bar. This is how the RV figures
+frame by default: an RV point is a measurement, and the one a model misses
+is the one the figure has to show. The robust zoom (`robust_ylim = true`,
+[`_tight_ylims_rv!`](@ref)) put a lone periastron point that a joint
+RV+astrometry fit did not reach outside both panels of the fold.
+
+`vals`, `residuals` and `errs` hold one entry per plotted point. `extra`
+holds further values the data panel must contain (a fold's model curve and
+binned points). The residual panel is symmetric about zero.
+"""
+function _frame_all_ylims!(ax, ax_r,
+                             vals::AbstractVector{<:Real},
+                             residuals::AbstractVector{<:Real},
+                             errs::AbstractVector{<:Real};
+                             extra::AbstractVector{<:Real} = Float64[],
+                             pad_frac::Float64 = 0.10,
+                             resid_pad::Float64 = 1.15)
+    e  = [isfinite(x) ? abs(Float64(x)) : 0.0 for x in errs]
+    lo = filter(isfinite, vcat(vals .- e, extra))
+    hi = filter(isfinite, vcat(vals .+ e, extra))
+    if !isempty(lo) && !isempty(hi)
+        vlo, vhi = minimum(lo), maximum(hi)
+        vhi > vlo && ylims!(ax, vlo - pad_frac * (vhi - vlo),
+                                vhi + pad_frac * (vhi - vlo))
+    end
+    r = filter(isfinite, abs.(residuals) .+ e)
+    rmax = isempty(r) ? 0.0 : maximum(r)
+    rmax > 0 && ylims!(ax_r, -resid_pad * rmax, resid_pad * rmax)
+    return nothing
+end
+
+"""
     _tight_ylims_rv!(ax, ax_r, vals, residuals;
                        pad_frac=0.10, resid_pad_frac=0.30,
                        sparse_n=50, sparse_pad=0.15, sparse_resid_pad=1.4)
 
 Y-limits for an RV data panel (`ax`) and its aligned residual panel
-(`ax_r`). `vals` and `residuals` must be in the same per-point order (one
-entry per plotted point).
+(`ax_r`), with `robust_ylim = true`; the default frames every point
+([`_frame_all_ylims!`](@ref)). `vals` and `residuals` must be in the same
+per-point order (one entry per plotted point).
 
 A sparse series (`length(vals) <= sparse_n`, the same point count below
 which [`plot_rv_phasefold`](@ref) draws no binned overlay) has no overlay
@@ -247,7 +467,7 @@ flattened `Symbol => Vector` dict the PPC/LOO code works on), or `nothing`
 for a fixed-dimension chain (no `n_planets`, no `planet_active_<k>`).
 """
 _td_cols(chains, params) =
-    _td_cols_from(Set(names(chains, :parameters)), s -> _draws(chains, s), params)
+    _td_cols_from(Set(names(chains, :parameters)), s -> _draws_view(chains, s), params)
 _td_cols(flat::AbstractDict{Symbol}, params) =
     _td_cols_from(Set(keys(flat)), s -> flat[s], params)
 
@@ -405,7 +625,7 @@ function winning_td_state(chains, params, active_idx,
     for nm_idx in 1:n_noise
         col = Symbol("noise_active_$nm_idx")
         if col in chain_names
-            noise_samp = _draws(chains, col)[active_idx]
+            noise_samp = _draws_view(chains, col)[active_idx]
             isempty(noise_samp) && continue
             if count(noise_samp .== 1.0) / length(noise_samp) > 0.5
                 td_state.noise_active[nm_idx] = true
@@ -459,7 +679,7 @@ function winning_config_idx(chains, params, active_idx, td_state)
         col in chain_names || continue          # always-on model → no constraint
         matched_any = true
         want = td_state.noise_active[nm_idx] ? 1.0 : 0.0
-        samp = _draws(chains, col)[active_idx]
+        samp = _draws_view(chains, col)[active_idx]
         @. keep &= (samp == want)
     end
     matched_any || return active_idx
@@ -577,26 +797,49 @@ component `comp` (1 = primary A, 2 = secondary B). For a normal planet
 secondary's lines). For the SB2 binary block `comp=1` gives +K_A and
 `comp=2` gives −K_B (anti-phase).
 """
-function compute_rv_model_planet(theta, data, t_grid, planet_k::Int; comp::Int=1)
+compute_rv_model_planet(theta, data, t_grid, planet_k::Int; comp::Int=1) =
+    compute_rv_model_planet!(zeros(length(t_grid)), theta, data, t_grid, planet_k;
+                             comp)
+
+# `compute_rv_model_planet` into `model` (length(t_grid)), overwritten: for a
+# caller that evaluates many draws on one grid.
+function compute_rv_model_planet!(model, theta, data, t_grid, planet_k::Int;
+                                  comp::Int=1)
+    fill!(model, 0.0)
+    el = _rv_planet_elements(theta, data, planet_k)
+    el === nothing && return model
+    return _add_keplerian!(model, t_grid, el..., comp)
+end
+
+# The elements planet `planet_k`'s RV curve is computed from in draw `theta`:
+# `(Tp, P, e, ω, K_A, -K_B)`, or `nothing` when it adds no signal (no K, or e
+# outside [0, 1)).
+function _rv_planet_elements(theta, data, planet_k::Int)
     parametrization = theta.params.config.parametrization
     t_ref = data.t_ref
-    two_pi = 2π
-
     block = theta.params.layout.planet_blocks[planet_k]
-    has_K(block) || return zeros(length(t_grid))
+    has_K(block) || return nothing
 
     P = planet_P(theta, planet_k)
     KA, cB = block isa SB2Block ?
         (planet_K_A(theta, planet_k), -planet_K_B(theta, planet_k)) :
         (planet_K(theta, planet_k), 0.0)
     e, w = planet_e_w(theta, planet_k)
-    (e < 0 || e >= 1) && return zeros(length(t_grid))
+    (e < 0 || e >= 1) && return nothing
 
     ta = planet_time_anchor(theta, planet_k)
     Tp = anchor_to_tp(parametrization.time, ta, P, e, w, t_ref,
                       parametrization.t_ref_c)
 
-    model = zeros(length(t_grid))
+    return (Tp, P, e, w, KA, cB)
+end
+
+# The curve loop of `compute_rv_model_planet`, behind a function barrier. The
+# elements come out of an abstractly typed planet block, so inside the loop they
+# were boxed: an allocation per grid point, 230 bytes, 14 GB of garbage over a
+# 60,000-draw fold band.
+function _add_keplerian!(model, t_grid, Tp, P, e, w, KA, cB, comp)
+    two_pi = 2π
     for (i, t) in enumerate(t_grid)
         M = two_pi * (t - Tp) / P
         E = kepler_solve(M, e)
@@ -730,9 +973,6 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
     a_Rs = Vector{Float64}(undef, n_transit)
     transits = Vector{Bool}(undef, n_transit)
 
-    use_rho = parametrization.use_rho_s
-    rho_val = use_rho ? rho_s(theta) : 0.0
-
     j = 0
     for k in p_idx_list
         block = theta.params.layout.planet_blocks[k]
@@ -759,22 +999,8 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
             rrs[j] = rr_raw
         end
 
-        if (ai = a_Rs_slot(theta, k)) > 0
-            a_Rs[j] = theta.values[ai]
-        elseif use_rho
-            a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
-        else
-            M_s = theta.params.config.M_s
-            R_s = theta.params.config.R_s
-            if !isnan(M_s) && !isnan(R_s) && R_s > 0
-                P_s = Ps[j] * 86400.0
-                GM = GM_SUN_CGS * M_s
-                a_cm = cbrt(GM * P_s^2 / (4 * π^2))
-                a_Rs[j] = a_cm / (R_s * R_SUN_CM)
-            else
-                return fill(NaN, n_grid)
-            end
-        end
+        a_Rs[j] = planet_a_Rs(theta, k, Ps[j])   # M_star + M_p; see `planet_geometry`
+        isnan(a_Rs[j]) && return fill(NaN, n_grid)
 
         transits[j] = bs[j] < 1 + rrs[j]
     end
@@ -832,12 +1058,17 @@ function _top_lp_draw_pool(chains; bf_cutoff::Real=10.0)
     n_flat = _n_flat_draws(chains)
     chain_names = Set(names(chains, :parameters))
     (:lp in chain_names) || return collect(1:n_flat)
-    lp = _draws(chains, :lp)
-    finite_mask = isfinite.(lp)
-    any(finite_mask) || return collect(1:n_flat)
-    lp_max = maximum(lp[finite_mask])
+    lp = _draws_view(chains, :lp)          # read in place: no copy of the column
+    lp_max = -Inf
+    any_finite = false
+    for v in lp
+        isfinite(v) || continue
+        any_finite = true
+        v > lp_max && (lp_max = v)
+    end
+    any_finite || return collect(1:n_flat)
     threshold = lp_max - log(bf_cutoff)
-    pool = findall(i -> finite_mask[i] && lp[i] >= threshold, 1:n_flat)
+    pool = findall(v -> isfinite(v) && v >= threshold, lp)
     return isempty(pool) ? collect(1:n_flat) : pool
 end
 
@@ -868,13 +1099,25 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
     n_flat = _n_flat_draws(chains)
     allnames = String.(names(chains, :parameters))
     Psym = Symbol("P_k$(planet)")
-    Pv = Psym in Symbol.(allnames) ? _draws(chains, Psym) : nothing
+    Pv = Psym in Symbol.(allnames) ? _draws_view(chains, Psym) : nothing
     timekind = params.config.parametrization.time
     anchor = timekind in (:Mo, :phic, :Tp) ? String(timekind) : ""  # wrapping anchors
 
-    _zsq(c) = begin
-        m = median(c); s = 1.4826 * median(abs.(c .- m))
-        s > 0 ? ((c .- m) ./ s) .^ 2 : nothing
+    # Two chain-length scratch vectors, reused for every parameter: the medians
+    # need a copy to partially sort, and the anchor's cos/sin a place to live.
+    # Each step used to allocate its own (the column, |c - m|, the z², cos, sin,
+    # the copy `quantile` sorts): about seven 46 MB vectors per parameter on a
+    # 5.8M-draw chain, the same values in the same order.
+    scratch = Vector{Float64}(undef, n_flat)
+    trig    = Vector{Float64}(undef, n_flat)
+    # dist2 += ((c - median) / (1.4826 MAD))², unless c does not vary.
+    function _add_zsq!(dist2, c)
+        m = median!(copyto!(scratch, c))
+        scratch .= abs.(c .- m)
+        s = 1.4826 * median!(scratch)
+        s > 0 || return false
+        @. dist2 += ((c - m) / s)^2
+        return true
     end
 
     dist2 = zeros(Float64, n_flat)
@@ -884,25 +1127,35 @@ function _credible_region_pool(chains, params, planet::Int; credmass::Real=0.95)
         mch === nothing && continue
         parse(Int, mch.captures[2]) == planet || continue
         base = mch.captures[1]
-        c = _draws(chains, Symbol(nm))
+        c = _draws_view(chains, Symbol(nm))
         length(c) == n_flat || continue
         if base == anchor                     # wrapping phase anchor → (cos, sin)
-            ang = base == "Tp" ? (Pv === nothing ? c : 2π .* (c ./ Pv)) : c  # Mo, phic: rad
-            for comp in (cos.(ang), sin.(ang))
-                z = _zsq(comp); z === nothing && continue
-                @. dist2 += z;
+            # Mo, phic: radians; Tp: a time, turned into a phase by its draw's P
+            for f in (cos, sin)
+                _phase_trig!(trig, f, c, base == "Tp" ? Pv : nothing)
+                _add_zsq!(dist2, trig)
             end
             used += 1
         else                                   # linear param
-            z = _zsq(c); z === nothing && continue
-            @. dist2 += z
+            _add_zsq!(dist2, c) || continue
             used += 1
         end
     end
     used == 0 && return collect(1:n_flat)
-    thr = quantile(dist2, clamp(Float64(credmass), 0.01, 1.0))
+    thr = quantile!(copyto!(scratch, dist2), clamp(Float64(credmass), 0.01, 1.0))
     pool = findall(<=(thr), dist2)
     return isempty(pool) ? collect(1:n_flat) : pool
+end
+
+# `f` of the phase anchor `c`, into `out`: `c` itself in radians (Mo, phic), or
+# 2π c / P for a time anchor (Tp, `P` given).
+function _phase_trig!(out, f, c, P)
+    if P === nothing
+        @inbounds for i in eachindex(out); out[i] = f(c[i]); end
+    else
+        @inbounds for i in eachindex(out); out[i] = f(2π * (c[i] / P[i])); end
+    end
+    return out
 end
 
 """
@@ -917,8 +1170,10 @@ misses the cluster keeps the draws it is present in rather than none.
 function _band_pool(chains, params, planet, bf_cutoff)
     pool = _top_lp_draw_pool(chains; bf_cutoff = bf_cutoff)
     planet === nothing && return pool
-    present = _planet_present_idx(chains, params, planet)
-    sub = intersect(pool, present)
+    tdc = _td_cols(chains, params)
+    tdc === nothing && return pool                # fixed dimension: every planet exists
+    present = _planet_present_idx(chains, params, planet; tdc = tdc)
+    sub = _sorted_intersect(pool, present)
     return isempty(sub) ? present : sub
 end
 
@@ -926,23 +1181,129 @@ _nan_bands(n) = (nan = fill(NaN, n);
                  (; median = nan, lo1 = nan, hi1 = nan, lo2 = nan, hi2 = nan,
                     lo3 = nan, hi3 = nan))
 
+# The band probabilities: the median, then the Gaussian-equivalent 1σ/2σ/3σ
+# pairs (15.87/84.13, 2.28/97.72, 0.13/99.87 %).
+const _BAND_PROBS = [0.5, 0.1587, 0.8413, 0.0228, 0.9772, 0.0013, 0.9987]
+
+"""
+    _band_quantiles(models, n) -> (median, lo1, hi1, lo2, hi2, lo3, hi3)
+
+The band quantiles of each grid column over the first `n` rows (draws) of
+`models`: the same values `quantile(models[1:n, j], p)` gives for every `p`,
+from ONE copy and ONE sort per column. `mapslices` per probability copied
+every column seven times -- 2.6 GB of transient copies for a 60,000-draw fold.
+"""
+function _band_quantiles(models::Matrix{Float64}, n::Int)
+    ng = size(models, 2)
+    q = [Vector{Float64}(undef, ng) for _ in _BAND_PROBS]
+    return _band_nt(_band_quantiles!(q, models, n, ng, 0))
+end
+
+# The percentiles of the first `ng` columns (first `n` rows) of `models`, into
+# `q[k][j0 + j]`.
+function _band_quantiles!(q, models::Matrix{Float64}, n::Int, ng::Int, j0::Int)
+    buf = Vector{Float64}(undef, n)
+    for j in 1:ng
+        copyto!(buf, 1, models, (j - 1) * size(models, 1) + 1, n)
+        v = quantile!(buf, _BAND_PROBS)
+        for k in eachindex(q)
+            q[k][j0 + j] = v[k]
+        end
+    end
+    return q
+end
+
+_band_nt(q) = (; median = q[1], lo1 = q[2], hi1 = q[3], lo2 = q[4], hi2 = q[5],
+                 lo3 = q[6], hi3 = q[7])
+
+# Grid points per pass over the draws in a planet's band (`compute_ci_bands`).
+const _BAND_GRID_CHUNK = 128
+
+"""
+    _given_band_pool(chains, params, planet, pool) -> Vector{Int}
+
+What `_band_pool(sub, params, planet, Inf)` returned for `sub`, the chain of
+the draws `pool` alone, as indices into the FULL chain: the draws of `pool`
+with a finite `:lp` (all of them if none is), and of those, for a
+single-planet band, the ones in which that planet exists.
+
+The folds used to build `sub` -- a copy of every column at every pooled draw,
+85% of a 5.8M-draw chain -- only for the band to read a few thousand rows of
+it. Passing the pool keeps the same draws, in the same order, so the same
+random subset is taken from it.
+"""
+function _given_band_pool(chains, params, planet, pool::AbstractVector{<:Integer})
+    sel = if :lp in Set(names(chains, :parameters))
+        lp = _draws_view(chains, :lp)
+        fin = Int[i for i in pool if isfinite(lp[i])]
+        isempty(fin) ? collect(Int, pool) : fin
+    else
+        collect(Int, pool)
+    end
+    planet === nothing && return sel
+    tdc = _td_cols(chains, params)
+    tdc === nothing && return sel                 # fixed dimension: every planet exists
+    present = _planet_present_idx(chains, params, planet; tdc = tdc)
+    sub = _sorted_intersect(sel, present)
+    return isempty(sub) ? _sorted_intersect(pool, present) : sub
+end
+
+"""
+    _sorted_intersect(a, b) -> Vector{Int}
+
+`intersect(a, b)` -- the elements of `a` that are in `b`, in `a`'s order --
+for index vectors. When both are sorted and free of repeats, as the draw
+pools are, a merge instead of a `Set` of `b`: a pool of millions of draws
+made a hash set of millions of entries to answer it.
+"""
+function _sorted_intersect(a::AbstractVector{<:Integer}, b::AbstractVector{<:Integer})
+    (_strictly_sorted(a) && _strictly_sorted(b)) || return intersect(a, b)
+    out = sizehint!(Int[], min(length(a), length(b)))
+    i, j = firstindex(a), firstindex(b)
+    @inbounds while i <= lastindex(a) && j <= lastindex(b)
+        x, y = a[i], b[j]
+        if x == y
+            push!(out, x); i += 1; j += 1
+        elseif x < y
+            i += 1
+        else
+            j += 1
+        end
+    end
+    return out
+end
+_strictly_sorted(v::AbstractUnitRange) = true
+_strictly_sorted(v) = all(i -> v[i] < v[i + 1], firstindex(v):lastindex(v) - 1)
+
 """
     compute_ci_bands(chains, params, data, t_grid;
-                      planet=nothing, n_draws=1000, bf_cutoff=10.0)
+                      planet=nothing, n_draws=1000, bf_cutoff=10.0, pool=nothing)
       -> (median, lo1, hi1, lo2, hi2, lo3, hi3)
 
 Compute credibility interval bands from posterior samples. EMPEROR
 convention: draws come only from the best-fit cluster — samples whose
 `:lp` is within `ln(bf_cutoff)` of the maximum log-posterior.
 If `planet` is specified, computes single-planet Keplerian only.
+
+`pool` (indices into `chains`) gives the draw pool instead, as a fold's
+credible region does: the band samples those of its draws with a finite
+`:lp` in which `planet` exists (`_given_band_pool`), and `bf_cutoff` is not
+used.
+
+For a planet's curve the draws are evaluated `grid_chunk` grid points at a
+time, in two passes, rather than held as a draws x grid matrix; the band is
+the same, to the bit, for any `grid_chunk`.
 """
 function compute_ci_bands(chains, params, data, t_grid;
                            planet::Union{Nothing, Int}=nothing,
                            n_draws::Int=1000,
                            bf_cutoff::Real=10.0,
                            fold_phase::Union{Nothing, AbstractVector}=nothing,
-                           fold_t0::Real=0.0)
-    pool = _band_pool(chains, params, planet, bf_cutoff)
+                           fold_t0::Real=0.0,
+                           pool::Union{Nothing, AbstractVector{<:Integer}}=nothing,
+                           grid_chunk::Int=_BAND_GRID_CHUNK)
+    pool = pool === nothing ? _band_pool(chains, params, planet, bf_cutoff) :
+                              _given_band_pool(chains, params, planet, pool)
     n_grid0 = fold_phase !== nothing && planet !== nothing ? length(fold_phase) : length(t_grid)
     isempty(pool) && return _nan_bands(n_grid0)
     n_samples = length(pool)
@@ -958,13 +1319,16 @@ function compute_ci_bands(chains, params, data, t_grid;
     fold = fold_phase !== nothing && planet !== nothing
     n_grid = fold ? length(fold_phase) : length(t_grid)
 
-    models = Matrix{Float64}(undef, length(draw_idx), n_grid)
-    valid = trues(length(draw_idx))
-
-    for (i, idx) in enumerate(draw_idx)
-        # Each draw with its own trans-dim active set: parked slots out.
+    # One grid and one curve, reused by every draw: per draw they were three
+    # fresh vectors of the grid, 1.4 GB of garbage over a 60,000-draw band.
+    t_eval = fold ? Vector{Float64}(undef, n_grid) : nothing
+    mbuf = Vector{Float64}(undef, n_grid)
+    # Draw `idx`'s curve on the grid points `r`, in the first `length(r)` of
+    # `mbuf`. Each point is computed on its own, so a part of the grid gives
+    # the same values as the whole of it.
+    function curve!(idx, r)
         theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
-
+        mb = view(mbuf, 1:length(r))
         if fold
             # Reference each draw to ITS OWN inferior-CONJUNCTION epoch (the
             # constrained orbital phase λ = Mo + ω), NOT periastron. Periastron
@@ -975,25 +1339,14 @@ function compute_ci_bands(chains, params, data, t_grid;
             # baseline phase smear, since each draw uses its own P.)
             P_draw  = planet_P(theta, planet)
             Tc_draw = _planet_Tc(theta, data, planet)
-            t_eval  = Tc_draw .+ collect(fold_phase) .* P_draw
-            m = compute_rv_model_planet(theta, data, t_eval, planet)
+            te = view(t_eval, r)
+            te .= Tc_draw .+ view(fold_phase, r) .* P_draw
+            return compute_rv_model_planet!(mb, theta, data, te, planet)
         elseif planet === nothing
-            m = compute_rv_model_on_grid(theta, data, t_grid)
+            return compute_rv_model_on_grid(theta, data, t_grid)   # whole grid only
         else
-            m = compute_rv_model_planet(theta, data, t_grid, planet)
+            return compute_rv_model_planet!(mb, theta, data, view(t_grid, r), planet)
         end
-        # Reject samples with NaN/Inf model values
-        if any(!isfinite, m)
-            valid[i] = false
-            models[i, :] .= 0.0
-        else
-            models[i, :] = m
-        end
-    end
-    models = models[valid, :]
-    if isempty(models)                  # every draw non-finite → return NaN bands
-        nan = fill(NaN, n_grid)         # (band! skips NaN) rather than erroring
-        return (; median=nan, lo1=nan, hi1=nan, lo2=nan, hi2=nan, lo3=nan, hi3=nan)
     end
 
     # Nested 1/2/3σ bands = EMPIRICAL percentiles of the actual computed curves
@@ -1003,22 +1356,74 @@ function compute_ci_bands(chains, params, data, t_grid;
     # from enough draws (the caller passes a large `n_draws` on a coarse phase
     # grid), NOT from a Gaussian assumption — the outer percentile is MC-noisy
     # only when undersampled.
-    pq(p) = vec(mapslices(x -> quantile(x, p), models; dims=1))
-    return (; median = pq(0.5),
-            lo1 = pq(0.1587), hi1 = pq(0.8413),
-            lo2 = pq(0.0228), hi2 = pq(0.9772),
-            lo3 = pq(0.0013), hi3 = pq(0.9987))
+    #
+    # A draw with a non-finite point anywhere is left out of the whole band.
+    chunk = planet === nothing ? n_grid : clamp(grid_chunk, 1, n_grid)
+    if chunk == n_grid
+        # One pass: every valid curve stored, in the order drawn.
+        models = Matrix{Float64}(undef, length(draw_idx), n_grid)
+        n_ok = 0
+        for idx in draw_idx
+            m = curve!(idx, 1:n_grid)
+            all(isfinite, m) || continue
+            n_ok += 1
+            models[n_ok, :] = m
+        end
+        n_ok == 0 && return _nan_bands(n_grid)
+        return _band_quantiles(models, n_ok)
+    end
+    # Two passes, for a planet's curve (each point on its own). Stored whole,
+    # the curves are a draws x grid matrix -- 458 MB for the 60,000-draw,
+    # 1000-point fold. The first pass finds the valid draws; the second
+    # computes them a slice of the grid at a time and takes that slice's
+    # percentiles: the same values from a matrix `grid_chunk` points wide.
+    # A draw's curve on the grid points `r` from its elements (as
+    # `compute_rv_model_planet!` computes it), in the first `length(r)` of `mbuf`.
+    function slice!(el, Tc_draw, P_draw, r)
+        mb = view(mbuf, 1:length(r))
+        te = fold ? (view(t_eval, r) .= Tc_draw .+ view(fold_phase, r) .* P_draw) :
+                    view(t_grid, r)
+        fill!(mb, 0.0)
+        el === nothing || _add_keplerian!(mb, te, el..., 1)
+        return mb
+    end
+    # Pass 1: each draw's elements, kept if its whole curve is finite.
+    els = Tuple{Union{Nothing, NTuple{6, Float64}}, Float64, Float64}[]
+    for idx in draw_idx
+        theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
+        el = _rv_planet_elements(theta, data, planet)
+        Tc_draw = fold ? Float64(_planet_Tc(theta, data, planet)) : 0.0
+        P_draw  = fold ? Float64(planet_P(theta, planet)) : 0.0
+        all(isfinite, slice!(el, Tc_draw, P_draw, 1:n_grid)) || continue
+        push!(els, (el, Tc_draw, P_draw))
+    end
+    n_ok = length(els)
+    n_ok == 0 && return _nan_bands(n_grid)
+    # Pass 2: the curves a slice of the grid at a time, and that slice's percentiles.
+    q = [Vector{Float64}(undef, n_grid) for _ in _BAND_PROBS]
+    models = Matrix{Float64}(undef, n_ok, chunk)
+    for lo in 1:chunk:n_grid
+        r = lo:min(lo + chunk - 1, n_grid)
+        for (k, (el, Tc_draw, P_draw)) in enumerate(els)
+            mb = slice!(el, Tc_draw, P_draw, r)
+            @inbounds for j in eachindex(mb)
+                models[k, j] = mb[j]
+            end
+        end
+        _band_quantiles!(q, models, n_ok, length(r), lo - 1)
+    end
+    return _band_nt(q)
 end
 
 """
     compute_transit_ci_bands(chains, params, data, t_grid, ins_idx;
-                              planet=nothing, n_draws=1000, exposure=0.0)
+                              planet=nothing, n_draws=1000, exposure=0.0, pool=nothing)
 
 Same shape as `compute_ci_bands` but evaluates the transit photometric
 model on `t_grid` for instrument `ins_idx`. If `planet=k`, only that
 planet's transit is computed (no contribution from other planets).
 `exposure` (days) integrates every draw's model over that exposure; see
-`compute_transit_model_on_grid`.
+`compute_transit_model_on_grid`. `pool`: as for `compute_ci_bands`.
 """
 function compute_transit_ci_bands(chains, params, data, t_grid,
                                      ins_idx::Int;
@@ -1026,8 +1431,10 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
                                      exposure::Real=0.0,
                                      n_draws::Int=1000,
                                      bf_cutoff::Real=10.0,
-                                     fold_phase::Union{Nothing, AbstractVector}=nothing)
-    pool = _band_pool(chains, params, planet, bf_cutoff)
+                                     fold_phase::Union{Nothing, AbstractVector}=nothing,
+                                     pool::Union{Nothing, AbstractVector{<:Integer}}=nothing)
+    pool = pool === nothing ? _band_pool(chains, params, planet, bf_cutoff) :
+                              _given_band_pool(chains, params, planet, pool)
     n_grid = fold_phase === nothing ? length(t_grid) : length(fold_phase)
     isempty(pool) && return _nan_bands(n_grid)
     n_samples = length(pool)
@@ -1035,11 +1442,11 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
     tdc  = _td_cols(chains, params)
     cols = _chain_cols(chains, params)   # ONCE, not once per draw — see _chain_cols
 
-    models = Matrix{Float64}(undef, length(draw_idx), n_grid)
-    valid = trues(length(draw_idx))
+    models = Matrix{Float64}(undef, length(draw_idx), n_grid)   # valid draws only
+    n_ok = 0
 
     time_kind = params.config.parametrization.time
-    for (i, idx) in enumerate(draw_idx)
+    for idx in draw_idx
         # Each draw with its own trans-dim active set: parked slots out.
         theta = _theta_from_chain_row(chains, params, idx; tdc = tdc, cols = cols)
 
@@ -1062,18 +1469,12 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
         end
         m = compute_transit_model_on_grid(theta, data, t_eval, ins_idx;
                                             planet=planet, exposure=exposure)
-        if any(!isfinite, m)
-            valid[i] = false
-            models[i, :] .= 0.0
-        else
-            models[i, :] = m
-        end
+        all(isfinite, m) || continue
+        n_ok += 1
+        models[n_ok, :] = m
     end
-    models = models[valid, :]
-    if isempty(models)                  # every draw non-finite → return NaN bands
-        nan = fill(NaN, n_grid)         # (band! skips NaN) rather than erroring
-        return (; median=nan, lo1=nan, hi1=nan, lo2=nan, hi2=nan, lo3=nan, hi3=nan)
-    end
+    # every draw non-finite → NaN bands (band! skips NaN) rather than erroring
+    n_ok == 0 && return _nan_bands(n_grid)
 
     # Nested 1/2/3σ bands = EMPIRICAL percentiles of the actual computed curves
     # (Gaussian-equivalent 15.87/84.13, 2.28/97.72, 0.13/99.87 %). This is the
@@ -1082,11 +1483,7 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
     # from enough draws (the caller passes a large `n_draws` on a coarse phase
     # grid), NOT from a Gaussian assumption — the outer percentile is MC-noisy
     # only when undersampled.
-    pq(p) = vec(mapslices(x -> quantile(x, p), models; dims=1))
-    return (; median = pq(0.5),
-            lo1 = pq(0.1587), hi1 = pq(0.8413),
-            lo2 = pq(0.0228), hi2 = pq(0.9772),
-            lo3 = pq(0.0013), hi3 = pq(0.9987))
+    return _band_quantiles(models, n_ok)
 end
 
 """
@@ -1114,7 +1511,7 @@ function set_theta_best_lp!(theta, chains, params, active_idx)
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            set_param!(theta, name, _draws(chains, sym)[ibest])
+            set_param!(theta, name, _draws_view(chains, sym)[ibest])
         end
         tdc = _td_cols(chains, params)
         tdc === nothing || (theta.td = _row_td_state(tdc, params, ibest))
@@ -1122,7 +1519,7 @@ function set_theta_best_lp!(theta, chains, params, active_idx)
         for name in params.layout.unfrozen_names
             sym = Symbol(name)
             sym in chain_names || continue
-            set_param!(theta, name, median(_draws(chains, sym)[active_idx]))
+            set_param!(theta, name, median(_draws_view(chains, sym)[active_idx]))
         end
         # No `:lp` (rjmcmc, MoMS, daedalus, trans-dim PT): the medians stand
         # for these draws, and so must their modal live slots -- the caller's
@@ -1206,4 +1603,75 @@ function bin_phasefold(x, y; target::Int = 15,
         push!(x_bin, mean(xv))
     end
     return x_bin, y_bin, yerr_bin
+end
+
+# ---------------------------------------------------------------------------
+# Angle-axis units
+# ---------------------------------------------------------------------------
+
+"""
+    _angle_unit(extent_mas) -> "mas" | "μas"
+
+The unit an astrometric axis group is read in: μas when the largest absolute
+axis limit is below 1 mas, mas otherwise.
+"""
+_angle_unit(extent_mas::Real) = extent_mas < 1 ? "μas" : "mas"
+
+# Tick labels of `values × scale`, rounded so float noise (0.002 mas × 1000 =
+# 2.0000000000000004) does not reach the label, then formatted by Makie's own
+# default tick formatter.
+function _scaled_ticklabels(scale::Real)
+    return values -> Makie.get_ticklabels(Makie.automatic,
+                         [round(v * scale; sigdigits = 10) for v in values])
+end
+
+"""
+    _angle_units!(entries...)
+    _angle_units!(axes; dims = :y, label)
+
+Choose one angle unit (mas or μas) for a group of astrometric axes that show
+the same quantity, and relabel them. Data stay in mas: when the unit is μas
+the tick labels show the values ×1000 and the axis label says μas. The unit
+comes from the extent of the group, the largest absolute value of the axes'
+final limits over the listed dimensions (`< 1` mas gives μas), so it is called
+once a figure is fully drawn and any explicit `limits!` are set.
+
+An entry is `(axis, dim, label)` with `dim` one of `:x`/`:y` and `label` a
+function `unit -> axis label` (a `String` or `rich(...)` text) called with
+`"mas"` or `"μas"`. The second form applies `dims` (a symbol or tuple of
+symbols) and one `label` function (or a function of `(unit, dim)`) to every axis
+in `axes`.
+
+Returns the unit string.
+"""
+function _angle_units!(entries::Tuple...)
+    ext = 0.0
+    for (ax, dim, _) in entries
+        reset_limits!(ax)
+        r = ax.finallimits[]
+        o, w = dim === :x ? (r.origin[1], r.widths[1]) : (r.origin[2], r.widths[2])
+        ext = max(ext, abs(o), abs(o + w))
+    end
+    unit = _angle_unit(ext)
+    scale = unit == "μas" ? 1000.0 : 1.0
+    for (ax, dim, label) in entries
+        if dim === :x
+            ax.xlabel = label(unit)
+            ax.xtickformat = scale == 1.0 ? Makie.automatic : _scaled_ticklabels(scale)
+        else
+            ax.ylabel = label(unit)
+            ax.ytickformat = scale == 1.0 ? Makie.automatic : _scaled_ticklabels(scale)
+        end
+    end
+    return unit
+end
+
+function _angle_units!(axes::AbstractVector; dims = :y, label)
+    ds = dims isa Symbol ? (dims,) : Tuple(dims)
+    entries = Tuple[]
+    for ax in axes, d in ds
+        lab = applicable(label, "mas", d) ? (u -> label(u, d)) : label
+        push!(entries, (ax, d, lab))
+    end
+    return _angle_units!(entries...)
 end

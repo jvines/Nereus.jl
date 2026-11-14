@@ -5,6 +5,7 @@
 
 using CairoMakie
 using Colors: @colorant_str
+using Logging: Logging
 
 # =====================================================================
 # Style constants (ported from emperors_canvas.py __config())
@@ -69,6 +70,31 @@ const FIG_HIST  = (1200, 800)   # 12×8
 # Theme
 # =====================================================================
 
+function _font_available(name::AbstractString)
+    # Makie.to_font does NOT throw for a missing family -- it silently substitutes
+    # whatever FreeType hands back. So asking "did it succeed?" always says yes,
+    # and the bug survives. The only reliable test is to resolve the font and check
+    # that the family we got back is the family we asked for. Makie also logs
+    # "Could not find font ..." for a missing family; this is only a probe, and
+    # `_serif_family` falls back on its own, so that warning is kept out of the
+    # user's log.
+    try
+        f = Logging.with_logger(Logging.NullLogger()) do
+            Makie.to_font(String(name))
+        end
+        got = lowercase(String(Makie.FreeTypeAbstraction.family_name(f)))
+        want = lowercase(String(name))
+        return got == want || startswith(got, want) || startswith(want, got)
+    catch
+        return false
+    end
+end
+
+# The probe's answer, kept for the session: `nereus_theme` is built for every
+# figure, and a probe scans the system's fonts (and, with no serif family at
+# all, warned) each time -- a hundred warnings in one plot set.
+const _SERIF_FAMILY = Ref{Any}(nothing)
+
 """
     _serif_family() -> NamedTuple
 
@@ -80,23 +106,16 @@ so every axis label and tick label vanishes — which is what happened to the
 transit plots generated on the compute node. Liberation Serif is
 metrically compatible with Times New Roman and ships with essentially every
 Linux distribution, so it is the first fallback.
+
+The probe runs once per session; its answer is kept in `_SERIF_FAMILY`.
 """
-function _font_available(name::AbstractString)
-    # Makie.to_font does NOT throw for a missing family -- it silently substitutes
-    # whatever FreeType hands back. So asking "did it succeed?" always says yes,
-    # and the bug survives. The only reliable test is to resolve the font and check
-    # that the family we got back is the family we asked for.
-    try
-        f = Makie.to_font(String(name))
-        got = lowercase(String(Makie.FreeTypeAbstraction.family_name(f)))
-        want = lowercase(String(name))
-        return got == want || startswith(got, want) || startswith(want, got)
-    catch
-        return false
-    end
+function _serif_family()
+    fam = _SERIF_FAMILY[]
+    fam === nothing || return fam
+    return _SERIF_FAMILY[] = _probe_serif_family()
 end
 
-function _serif_family()
+function _probe_serif_family()
     candidates = (("Times New Roman", "Times New Roman Bold", "Times New Roman Italic"),
                   ("Liberation Serif", "Liberation Serif Bold", "Liberation Serif Italic"),
                   ("DejaVu Serif", "DejaVu Serif Bold", "DejaVu Serif Italic"),

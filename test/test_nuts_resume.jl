@@ -5,12 +5,16 @@
 # mixed can simply be extended. With n_warmup = 200 Stan's schedule is: init
 # buffer 1-75 (step size only), metric windows 76-100 and 101-150 (Welford
 # accumulators, the metric updated and both adaptors reset at 100 and 150), term
-# buffer 151-200, and the step size finalised at 200. The stops below cross all
-# of it -- 40, 90, 100, 150, 160, 200 -- plus the first and a later sampling
-# iteration (201, 230) and a finished run extended past its own end. Chains stop
-# at different iterations in one run, as a kill leaves them; the test hook
-# `_NUTS_STOP_AFTER` is what stops them, since no `n_samples` ends a run inside
-# the warm-up. The last testset kills a real run, in a child process.
+# buffer 151-200, and the step size finalised at 200. The chains re-cut the
+# circular seams together after iterations 75, 100 and 150 (`_hmc_recut!`), and
+# none passes one of those before all have reached it: a chain that stops
+# before one leaves the others saved at it, the re-cut pending. The stops below
+# cross all of it -- 40, 75 (pending), 150, 160 -- plus the first and a later
+# sampling iteration (201, 230) and a finished run extended past its own end.
+# Chains stop at different iterations in one run, as a kill leaves them; the
+# test hook `_NUTS_STOP_AFTER` is what stops them, since no `n_samples` ends a
+# run inside the warm-up. The last testset kills a real run, in a child
+# process.
 using Test
 using Nereus
 using Random
@@ -84,11 +88,13 @@ _nr_err(f) = try f(); nothing catch e; e end
     @test full.windows != Nereus.circular_windows(_nr_target().params)
 
     path = joinpath(mktempdir(), "nuts_state.jls")
-    # Killed in the init buffer, a metric window, at a window split and at the
-    # last warm-up iteration; resumed, and killed again in the term buffer, at
-    # the second split, at the first sampling iteration and later in sampling.
+    # Killed in the init buffer: the other three, held at the re-cut after 75,
+    # are saved there with it pending. Resumed, and killed again at the second
+    # window end (after its re-cut), in the term buffer, at the first sampling
+    # iteration and later in sampling.
     @test_throws Nereus._NutsStopped _nr_run(150; checkpoint = path, stop = [40, 90, 100, 200])
     @test isfile(path) && !isfile(path * ".tmp")
+    @test [s.step for s in open(deserialize, path).state.chains] == [40, 75, 75, 75]
     @test_throws Nereus._NutsStopped _nr_run(150; checkpoint = path, resume = true,
                                              stop = [160, 150, 201, 230])
     mid = _nr_run(100; checkpoint = path, resume = true)   # a finished run ...
@@ -133,6 +139,109 @@ end
     path = joinpath(mktempdir(), "nuts_state.jls")
     @test_throws Nereus._NutsStopped _nr_run(60; n_chains = 1, checkpoint = path, stop = [120])
     @test _nr_same(_nr_run(60; n_chains = 1, checkpoint = path, resume = true), full)
+end
+
+@testset "sample_nuts re-cuts a seam during the adaptation, and resumes across it" begin
+    # A circular orbit with Mo = 0 at the reference epoch, a posterior of
+    # 0.0° ± 2.7° on the seam of Mo's U(0, 2π). `init` puts Mo half a turn away,
+    # at π, and centres the window on it, which leaves the seam where it is.
+    # The chains reach the posterior within the init buffer, each held on one
+    # side of the seam by the logit chart; the re-cut after iteration 75 moves
+    # it off them. Before the re-cut existed every chain kept 7-26 % of its
+    # draws within 0.5° of a wall, at Mo = 2.0° ± 1.5°.
+    err = 10.0
+    t, rv = let r = MersenneTwister(7)
+        t = sort!(100 .* rand(r, _NR_N))
+        t, [Nereus.rv_keplerian(ti, 4.23, 40.0, 0.0, 0.0, 0.0, median(t)) for ti in t] .+
+           err .* randn(r, _NR_N)
+    end
+    target() = build_target(
+        planets = (b = (P = LogUniformPrior(4.0, 4.5), K = LogUniformPrior(10.0, 90.0),
+                        sesinw = FixedPrior(0.0), secosw = FixedPrior(0.0),
+                        Mo = UniformPrior(0.0, 2pi)),),
+        rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(err, _NR_N)),
+                     sigma = LogUniformPrior(0.5, 10.0)),))
+    L = target().params.layout
+    start = Dict("P_k1" => 4.23, "K_k1" => 40.0, "Mo_k1" => float(π))
+    init = map(L.unfrozen_names, L.unfrozen_priors) do nm, ps
+        lo, hi = Nereus.bounds(ps)
+        get(start, nm, isfinite(lo) && isfinite(hi) ? (lo + hi) / 2 : 0.0)
+    end
+    function circ_run(n_samples; stop = Int[], kw...)
+        tg = target()
+        rng = MersenneTwister(3)
+        Nereus._NUTS_STOP_AFTER[] = stop
+        try
+            ch = with_logger(ConsoleLogger(stderr, Logging.Error)) do
+                sample_nuts(tg; _NR_KW..., n_samples, rng, init, warm_start = false, kw...)
+            end
+            return (; ch, rng, windows = Nereus.circular_windows(tg.params))
+        finally
+            Nereus._NUTS_STOP_AFTER[] = Int[]
+        end
+    end
+
+    full = circ_run(150)
+    lo, hi = full.windows["Mo_k1"]
+    @test lo != 0.0                                   # moved during the adaptation
+    for c in 1:4                                      # no chain is at a wall ...
+        Mo = vec(full.ch[:, :Mo_k1, c].data)
+        @test all(x -> x - lo > deg2rad(0.5) && hi - x > deg2rad(0.5), Mo)
+        @test abs(angle(sum(cis, Mo))) < deg2rad(1.0)  # ... nor pulled off the mode by one
+    end
+
+    # A resume across the re-cuts is bit-identical. Chain 1 stops at 40: the
+    # re-cut after 75 cannot be taken without it, and the other three are saved
+    # at 75 with it pending, in the windows they had. Resumed, chain 1 stops at
+    # 101, after the re-cuts at 75 (the move) and 100; the others are saved at
+    # the window end 150 with its re-cut pending, in the moved window (which
+    # that re-cut may relabel by a turn: the window keeps the draws' median in
+    # the one written, and here the median sits at its edge). Then the run
+    # finishes.
+    path = joinpath(mktempdir(), "nuts_state.jls")
+    chains_at(p) = open(deserialize, p).state.chains
+    @test_throws Nereus._NutsStopped circ_run(150; checkpoint = path, stop = [40])
+    st = chains_at(path)
+    @test [s.step for s in st] == [40, 75, 75, 75]
+    @test all(s -> s.circ.recut_at == 0, st)
+    @test open(deserialize, path).state.windows["Mo_k1"] == (0.0, 2pi)
+    @test_throws Nereus._NutsStopped circ_run(150; checkpoint = path, resume = true,
+                                              stop = [101])
+    st = chains_at(path)
+    @test [s.step for s in st] == [101, 150, 150, 150]
+    @test all(s -> s.circ.recut_at == 100, st)
+    w = open(deserialize, path).state.windows["Mo_k1"]
+    @test w != (0.0, 2pi)
+    @test rem2pi(w[1] - lo, RoundNearest) ≈ 0 atol = 1e-12
+    @test _nr_same(circ_run(150; checkpoint = path, resume = true), full)
+end
+
+@testset "a resume puts back both bounds of a window" begin
+    # Each re-cut keeps the span the last one left (hi - lo), so a window re-cut
+    # more than once spans 2π only to within an ulp. A resume that put back `lo`
+    # alone made hi = lo + 2π, and the resumed run's Mo, mapped into a window an
+    # ulp wider, differed from the uninterrupted run's by 4e-16 (the unseeded
+    # check below, in about one run in seven).
+    tg = _nr_target(); p = tg.params
+    i = findfirst(==("Mo_k1"), p.layout.unfrozen_names)
+    lo, hi = 1.1, nextfloat(1.1 + 2pi)
+    Nereus.set_circular_window!(p, i, lo; hi, transforms = (tg.transform,))
+    saved = Nereus.circular_windows(p)
+    @test saved["Mo_k1"] == (lo, hi)
+    held(t) = (Nereus.bounds(t.params.layout.unfrozen_priors[i]),
+               (t.params.layout.packed_priors.lowers[i], t.params.layout.packed_priors.uppers[i]),
+               (t.transform.lowers[i], t.transform.uppers[i]))
+    t2 = _nr_target()
+    Nereus._restore_windows!(t2.params, saved, (t2.transform,))
+    @test held(t2) == ((lo, hi), (lo, hi), (lo, hi))
+    # The shared restore (several chains, once): `lo` already in place is not
+    # enough to skip a window whose `hi` is not.
+    t3 = _nr_target()
+    Nereus.set_circular_window!(t3.params, i, lo; transforms = (t3.transform,))
+    @test Nereus.bounds(t3.params.layout.unfrozen_priors[i]) == (lo, 1.1 + 2pi) != (lo, hi)
+    @test Nereus._restore_shared_windows!(t3.params, saved, (t3.transform,))
+    @test held(t3) == ((lo, hi), (lo, hi), (lo, hi))
+    @test !Nereus._restore_shared_windows!(t3.params, saved, (t3.transform,))
 end
 
 @testset "sample_nuts seed: honoured, and part of the checkpoint's fingerprint" begin

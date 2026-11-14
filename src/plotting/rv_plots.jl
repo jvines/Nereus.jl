@@ -2,11 +2,16 @@
 
 """
     plot_rv_timeseries(chains, params, data;
-                        output=nothing, fmt=:png, figsize=FIG_RV)
+                        output=nothing, fmt=:png, figsize=FIG_RV,
+                        robust_ylim=false)
 
 RV observations over time with best-fit model and residuals.
 Multi-instrument data shown with different markers/colors.
 3:1 data/residual panel layout.
+
+Both panels frame every point with its error bar. `robust_ylim=true`
+zooms instead and can leave points outside the axes (see
+[`_tight_ylims_rv!`](@ref)).
 """
 function plot_rv_timeseries(chains, params, data;
                              output::Union{Nothing, String}=nothing,
@@ -18,7 +23,8 @@ function plot_rv_timeseries(chains, params, data;
                              show_gp::Bool=true,
                              show_total::Bool=true,
                              show_activity::Bool=true,
-                             decompose::Bool=false)
+                             decompose::Bool=false,
+                             robust_ylim::Bool=false)
     with_theme(nereus_theme()) do
         fig = Figure(; size=figsize)
         ga = fig[1, 1] = GridLayout()
@@ -61,7 +67,7 @@ function plot_rv_timeseries(chains, params, data;
         top_idx = _top_lp_draw_pool(chains; bf_cutoff=bf_cutoff)
         # An empty cut keeps the winning-model draws, not all draws: the
         # latter would let a non-winning planet count back in.
-        let cut = intersect(active_idx, top_idx)
+        let cut = _sorted_intersect(active_idx, top_idx)
             isempty(cut) || (active_idx = cut)
         end
         # Max-lp reference theta (jointly consistent; see set_theta_best_lp!)
@@ -111,6 +117,12 @@ function plot_rv_timeseries(chains, params, data;
         # tiny fraction of its own measurement uncertainty instead.
         has_activity = maximum(abs, act_at_data) > 1e-6 * maximum(abs, data.rv_err)
 
+        # What each panel draws, point by point, for the y-frame: the data
+        # (with error bars), the faded raw RV under a decorrelated view, and
+        # the residuals.
+        frame_y = Float64[]; frame_e = Float64[]
+        frame_r = Float64[]; frame_raw = Float64[]
+
         if decompose
             # === Component decomposition ====================================
             # Each Keplerian, the activity model, and their Total as separate
@@ -149,6 +161,7 @@ function plot_rv_timeseries(chains, params, data;
                     kep_at_i .+= compute_rv_model_planet(theta_med, data, data.t_rv[mask], k)
                 end
                 res_i = raw_i .- kep_at_i .- act_at_data[mask]
+                append!(frame_y, raw_i); append!(frame_e, err_i); append!(frame_r, res_i)
                 mc = inst_color(i); mk = inst_marker(i)
                 errorbars!(ax, t_i, raw_i, err_i; color=mc, linewidth=ERRBAR_LW)
                 scatter!(ax, t_i, raw_i; color=mc, marker=mk, markersize=12,
@@ -188,9 +201,11 @@ function plot_rv_timeseries(chains, params, data;
                 dec_i = rv_i .- act_at_data[mask]                   # activity-decorrelated
                 err_i = data.rv_err[mask]
                 res_i = residuals[mask]
+                append!(frame_y, dec_i); append!(frame_e, err_i); append!(frame_r, res_i)
                 mc = inst_color(i); mk = inst_marker(i)
 
                 if has_activity
+                    append!(frame_raw, rv_i)
                     scatter!(ax, t_i, rv_i; color=(:gray, 0.30), marker=mk,
                              markersize=10, strokewidth=0,
                              label = raw_labeled ? nothing : "raw RV")
@@ -231,15 +246,18 @@ function plot_rv_timeseries(chains, params, data;
                 tellheight=true, tellwidth=false,
                 nbanks=2)
 
-        # Tight y-axes — keeps single-instrument outliers (e.g. FEROS at
-        # the right edge in HD 18599) from blowing up the data panel on
-        # dense data; on a sparse series (see `_tight_ylims_rv!`) frames
-        # every point but true outliers instead, so a lone point from a
-        # thin, multi-instrument fit does not fall outside the axes.
-        # Built point-by-point (not grouped by instrument) so it stays
-        # aligned with `residuals` for the sparse inlier mask.
-        rv_centered = data.rv .- [rv_gamma(theta_med, i) for i in data.rv_inst]
-        _tight_ylims_rv!(ax, ax_r, rv_centered, residuals)
+        # Y-frame: every point drawn, with its error bar (`_frame_all_ylims!`).
+        # `robust_ylim` keeps the zoom that keeps single-instrument outliers
+        # (FEROS at the right edge in HD 18599) out of the frame: quantiles on
+        # dense data, every point but 5-robust-sigma outliers on a sparse one
+        # (`_tight_ylims_rv!`). Built point-by-point (not grouped by
+        # instrument) so it stays aligned with `residuals` for the inlier mask.
+        if robust_ylim
+            rv_centered = data.rv .- [rv_gamma(theta_med, i) for i in data.rv_inst]
+            _tight_ylims_rv!(ax, ax_r, rv_centered, residuals)
+        else
+            _frame_all_ylims!(ax, ax_r, frame_y, frame_r, frame_e; extra = frame_raw)
+        end
 
         if output !== nothing
             mkpath(joinpath(output, "models"))
@@ -268,13 +286,14 @@ function plot_rv_components(chains, params, data;
                              fmt::Symbol=:png, save_pdf::Bool=false,
                              figsize=FIG_RV, bf_cutoff::Real=10.0,
                              show_keplerian::Bool=true, show_gp::Bool=true,
-                             show_total::Bool=true, show_activity::Bool=true)
+                             show_total::Bool=true, show_activity::Bool=true,
+                             robust_ylim::Bool=false)
     fig = plot_rv_timeseries(chains, params, data;
                               output=nothing, fmt=fmt, save_pdf=save_pdf,
                               figsize=figsize, bf_cutoff=bf_cutoff,
                               show_keplerian=show_keplerian, show_gp=show_gp,
                               show_total=show_total, show_activity=show_activity,
-                              decompose=true)
+                              decompose=true, robust_ylim=robust_ylim)
     if output !== nothing
         mkpath(joinpath(output, "models"))
         _save_plot(joinpath(output, "models", "rv_components.$fmt"), fig;
@@ -306,7 +325,7 @@ function _sb2_plot_theta(chains, params, bf_cutoff)
         active_idx = collect(1:_n_flat_draws(chains)); theta = Theta{Float64}(params)
     end
     top = _top_lp_draw_pool(chains; bf_cutoff=bf_cutoff)
-    let cut = intersect(active_idx, top)          # empty cut: keep the winners
+    let cut = _sorted_intersect(active_idx, top)          # empty cut: keep the winners
         isempty(cut) || (active_idx = cut)
     end
     set_theta_best_lp!(theta, chains, params, active_idx)
@@ -321,9 +340,12 @@ secondary (component 2) data in distinct colors, with BOTH the primary
 (γ + K_A·binary + planet) and secondary (γ − K_B·binary) total model
 curves overlaid on one panel. Residuals (data − component-gated
 prediction) below. Saved as `models/rv_sb2_timeseries.<fmt>`.
+Both panels frame every point with its error bar; `robust_ylim=true`
+zooms instead, as [`plot_rv_timeseries`](@ref) does.
 """
 function plot_rv_sb2_timeseries(chains, params, data; output=nothing, fmt::Symbol=:png,
-                                 save_pdf::Bool=false, figsize=FIG_RV, bf_cutoff::Real=10.0)
+                                 save_pdf::Bool=false, figsize=FIG_RV, bf_cutoff::Real=10.0,
+                                 robust_ylim::Bool=false)
     with_theme(nereus_theme()) do
         fig = Figure(; size=figsize); ga = fig[1, 1] = GridLayout()
         ax   = Axis(ga[1, 1]; ylabel=rich("RV (m s", superscript("-1"), ")"))
@@ -366,7 +388,13 @@ function plot_rv_sb2_timeseries(chains, params, data; output=nothing, fmt::Symbo
         ax_r.xlabel = "Time (BJD - $(round(Int, tmin)))"
         Legend(ga[3, 1], ax; framevisible=false, labelsize=16, orientation=:horizontal,
                tellheight=true, tellwidth=false, nbanks=2)
-        _tight_ylims_rv!(ax, ax_r, data.rv .- g_at, residuals)
+        if robust_ylim
+            _tight_ylims_rv!(ax, ax_r, data.rv .- g_at, residuals)
+        else
+            drawn = (data.rv_comp .== 1) .| (data.rv_comp .== 2)
+            _frame_all_ylims!(ax, ax_r, (data.rv .- g_at)[drawn], residuals[drawn],
+                              data.rv_err[drawn])
+        end
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models", "rv_sb2_timeseries.$fmt"), fig;
@@ -383,11 +411,13 @@ Classic double-lined SB2 phase-fold on the binary period: primary
 (component 1) points fold onto +K_A and secondary (component 2) onto
 −K_B (anti-phase), two model curves crossing at the systemic velocity.
 The circumprimary planet is subtracted from the primary. Saved as
-`models/rv_sb2_binary_fold_K<binary_k>.<fmt>`.
+`models/rv_sb2_binary_fold_K<binary_k>.<fmt>`. The data panel frames
+every point with its error bar and both model curves, the residual panel
+every residual; `robust_ylim=true` zooms instead.
 """
 function plot_rv_sb2_binary_fold(chains, params, data; binary_k::Int=1, output=nothing,
                                   fmt::Symbol=:png, save_pdf::Bool=false, figsize=FIG_RV,
-                                  bf_cutoff::Real=10.0)
+                                  bf_cutoff::Real=10.0, robust_ylim::Bool=false)
     with_theme(nereus_theme()) do
         fig = Figure(; size=figsize); ga = fig[1, 1] = GridLayout()
         ax   = Axis(ga[1, 1]; ylabel=rich("RV (m s", superscript("-1"), ")"))
@@ -430,7 +460,13 @@ function plot_rv_sb2_binary_fold(chains, params, data; binary_k::Int=1, output=n
         hlines!(ax_r, 0; color=NEREUS_COLORS.zero_line, linestyle=:dash, linewidth=MODEL_LW)
         Legend(ga[3, 1], ax; framevisible=false, labelsize=16, orientation=:horizontal,
                tellheight=true, tellwidth=false, nbanks=2)
-        _tight_ylims_rv!(ax, ax_r, rv_folded, residuals)
+        if robust_ylim
+            _tight_ylims_rv!(ax, ax_r, rv_folded, residuals)
+        else
+            drawn = (data.rv_comp .== 1) .| (data.rv_comp .== 2)
+            _frame_all_ylims!(ax, ax_r, rv_folded[drawn], residuals[drawn],
+                              data.rv_err[drawn]; extra = vcat(curve_pri, curve_sec))
+        end
         if output !== nothing
             mkpath(joinpath(output, "models"))
             _save_plot(joinpath(output, "models", "rv_sb2_binary_fold_K$binary_k.$fmt"), fig;
@@ -452,6 +488,11 @@ Matches EMPEROR's paint_fold_rv: 10K model points, 10K CI draws.
 For an SB2 fit: folding the binary block delegates to the double-lined
 `plot_rv_sb2_binary_fold`; folding a circumprimary planet uses ONLY the
 primary (component-1) points (the planet is invisible in the secondary).
+
+The data panel frames every drawn point with its error bar, the model
+curve and the binned points; the residual panel frames every residual.
+`robust_ylim=true` zooms on the signal instead, and leaves outliers --
+including a point the model misses -- outside the axes.
 """
 function plot_rv_phasefold(chains, params, data;
                             planet::Int=1,
@@ -463,13 +504,14 @@ function plot_rv_phasefold(chains, params, data;
                             bf_cutoff::Real=10.0,
                             credmass::Real=0.85,
                             subtract_gp::Bool=true,
-                            robust_ylim::Bool=true)
+                            robust_ylim::Bool=false)
     # SB2 binary block → the dedicated double-lined fold.
     if planet <= length(params.layout.planet_blocks) &&
        params.layout.planet_blocks[planet] isa SB2Block
         return plot_rv_sb2_binary_fold(chains, params, data; binary_k=planet,
                                         output=output, fmt=fmt, save_pdf=save_pdf,
-                                        figsize=figsize, bf_cutoff=bf_cutoff)
+                                        figsize=figsize, bf_cutoff=bf_cutoff,
+                                        robust_ylim=robust_ylim)
     end
     with_theme(nereus_theme()) do
         fig = Figure(; size=figsize)
@@ -505,7 +547,7 @@ function plot_rv_phasefold(chains, params, data;
             active_idx = winning_config_idx(chains, params, active_idx, td_state)
             theta_med = Theta{Float64}(params; td=td_state)
         else
-            active_idx = collect(1:_n_flat_draws(chains))
+            active_idx = 1:_n_flat_draws(chains)
             theta_med = Theta{Float64}(params)
         end
         # Band draw pool = the JOINT credible region of this planet's orbital
@@ -516,7 +558,7 @@ function plot_rv_phasefold(chains, params, data;
         # either keeps the MAP sliver (fake-tight) or, opened up, the whole
         # degenerate tail (useless). See `_credible_region_pool`.
         top_idx = _credible_region_pool(chains, params, planet; credmass=credmass)
-        let cut = intersect(collect(active_idx), top_idx)   # empty: keep winners
+        let cut = _sorted_intersect(active_idx, top_idx)   # empty: keep winners
             isempty(cut) || (active_idx = cut)
         end
 
@@ -600,26 +642,16 @@ function plot_rv_phasefold(chains, params, data;
         # well-sampled (smooth) rather than MC-hairy at the 3σ edge.
         ph_fine = collect(range(-0.5, 0.5; length=1000))
         t_fine = t0 .+ ph_fine .* P
-        # Build sub-chain for CI computation
-        if active_idx isa UnitRange
-            ci_chains = chains
-        else
-            param_syms = names(chains, :parameters)
-            mat = Matrix{Float64}(undef, length(active_idx), length(param_syms))
-            for (j, sym) in enumerate(param_syms)
-                mat[:, j] = _draws(chains, sym)[active_idx]
-            end
-            ci_chains = MCMCChains.Chains(mat, param_syms)
-        end
         # Fold each draw at its OWN period (phase-aligned) rather than on the
         # reference-period time grid t_fine — otherwise a broad period
         # posterior decoheres the per-draw curves into a kinky median + frayed
         # band (see compute_ci_bands).
-        # ci_chains is ALREADY restricted to the credible pool above, so the
-        # band must use all of it — disable compute_ci_bands' own lp cut.
-        ci = compute_ci_bands(ci_chains, params, data, t_fine;
+        # The band samples the credible pool above (`pool`), not
+        # compute_ci_bands' own lp cut. The pool is passed as indices: copying
+        # it out as a sub-chain cost every column at 85% of the draws.
+        ci = compute_ci_bands(chains, params, data, t_fine;
                                planet=planet, n_draws=n_draws,
-                               bf_cutoff=Inf,
+                               pool=active_idx,
                                fold_phase=ph_fine, fold_t0=t0)
 
         # Nested 1σ/2σ/3σ predictive bands (lightest→darkest), concentric
@@ -708,15 +740,16 @@ function plot_rv_phasefold(chains, params, data;
         hlines!(ax_r, 0; color=NEREUS_COLORS.zero_line,
                  linestyle=:dash, linewidth=MODEL_LW)
 
-        # Tight y-axes via percentile clipping — robust to single
-        # outliers, matches the photometry convention.
-        # Robust y-zoom: frame the SIGNAL (model median + binned points
-        # + central data quantiles), NOT the CI bands (a GP band can
-        # spike to ±100s at poorly constrained phases) and NOT the data
-        # extremes — outliers land out of view instead of stretching the
-        # axis until the orbit is unreadable (`robust_ylim=false` to
-        # disable). This is the LAST limits-setting call on these axes —
-        # an earlier version set limits mid-function and was silently
+        # Y-frame. By default every drawn point with its error bar, the
+        # model median and the binned points (`_frame_all_ylims!`); never
+        # the CI bands, which can spike to ±100s at poorly constrained
+        # phases. A point the model misses is the one the fold has to
+        # show: the zoom below put a lone periastron RV that a joint
+        # RV+astrometry fit did not reach outside both panels.
+        # `robust_ylim` keeps that zoom -- the SIGNAL (model median +
+        # binned points + central data quantiles), with outliers out of
+        # view. This is the LAST limits-setting call on these axes -- an
+        # earlier version set limits mid-function and was silently
         # overwritten by a second mechanism down here.
         # Both panels are framed on the points they draw (`keep`): the
         # in-transit RM points are not drawn and must not set the scale.
@@ -755,8 +788,9 @@ function plot_rv_phasefold(chains, params, data;
             end
             isfinite(rmax) && rmax > 0 && ylims!(ax_r, -rpad * rmax, rpad * rmax)
         else
-            _tight_ylims!(ax,   rv_folded; pad_frac=0.10)
-            _tight_ylims!(ax_r, residuals; pad_frac=0.30, symmetric=true)
+            _frame_all_ylims!(ax, ax_r, rv_folded[keep], residuals[keep],
+                              data.rv_err[keep];
+                              extra = vcat(ci.median, yb .- eb, yb .+ eb))
         end
 
         ph_lo, ph_hi = extrema(phases_data)

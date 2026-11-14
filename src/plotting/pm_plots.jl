@@ -177,7 +177,7 @@ function plot_pm_phasefold(chains, params, data;
         # `credmass` of draws in (P, b, rr, sesinw, secosw, …), excluding the
         # degenerate tail that frays the band. See `_credible_region_pool`.
         cred_idx = _credible_region_pool(chains, params, planet; credmass=credmass)
-        let cut = intersect(collect(active_idx), cred_idx)   # empty: keep winners
+        let cut = _sorted_intersect(active_idx, cred_idx)   # empty: keep winners
             isempty(cut) || (active_idx = cut)
         end
 
@@ -267,25 +267,16 @@ function plot_pm_phasefold(chains, params, data;
             # CI bands on a fine phase grid using active samples only
             ph_fine = collect(range(ph_lo, ph_hi; length=2000))
             t_fine = t0 .+ ph_fine .* P
-            ci_chains = if active_idx isa UnitRange
-                chains
-            else
-                param_syms = names(chains, :parameters)
-                mat = Matrix{Float64}(undef, length(active_idx),
-                                              length(param_syms))
-                for (j, sym) in enumerate(param_syms)
-                    mat[:, j] = _draws(chains, sym)[active_idx]
-                end
-                MCMCChains.Chains(mat, param_syms)
-            end
-            # ci_chains is already restricted to the credible pool → disable
-            # compute_transit_ci_bands' own lp cut so it uses all of it.
+            # The band samples the credible pool (`pool`), not
+            # compute_transit_ci_bands' own lp cut. Passed as indices: copied out
+            # as a sub-chain it cost every column at 85% of the draws, once per
+            # instrument.
             # The curve is drawn over binned cadences: integrate it over the
             # instrument's exposure, or long-cadence ingress looks too sharp.
-            ci = compute_transit_ci_bands(ci_chains, params, data, t_fine,
+            ci = compute_transit_ci_bands(chains, params, data, t_fine,
                                              ins_idx; planet=planet,
                                              exposure=_instrument_exposure(data, mask),
-                                             bf_cutoff=Inf,
+                                             pool=active_idx,
                                              fold_phase=ph_fine,
                                              n_draws=min(2000,
                                                        length(active_idx)))

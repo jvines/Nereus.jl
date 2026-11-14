@@ -85,12 +85,25 @@ function run_job(cfg::AbstractDict)
                                    "(actual threading honours JULIA_NUM_THREADS)"
 
         # --- Build data + star + params --------------------------------
-        data, inst_names_rv, inst_names_pm, inst_names_as =
-            _build_data(_get(cfg, :data; default = Dict());
-                        obliquity = _obliquity_cfg(cfg))
+        data, inst_names_rv, inst_names_pm, inst_names_as, inst_names_iad,
+            iad_outliers = _build_data(_get(cfg, :data; default = Dict());
+                                       obliquity = _obliquity_cfg(cfg))
+        isempty(iad_outliers) ||
+            (summary["iad_outliers"] = _iad_outlier_summary(iad_outliers))
         star       = _build_star(_get(cfg, :star; default = Dict()))
+        gaia = _resolve_gaia_plx(cfg, star)
+        gaia === nothing || (summary["star"] = Dict{String, Any}(
+            "gaia" => _gaia_summary(gaia)))
         params, target, menu = _build_model(cfg, data, star, inst_names_rv,
-                                              inst_names_pm, inst_names_as)
+                                              inst_names_pm, inst_names_as,
+                                              inst_names_iad; gaia_plx = gaia)
+        # The engines that run the model in ρ★ and (e, ω) whatever its `density`
+        # (src/density.jl) return chains in those coordinates; everything
+        # written from the chains below reads them with these params.
+        if density_active(params) && _job_sampler_name(cfg) in _DENSITY_FREE_ENGINES
+            params = without_density_reparam(params, data)
+            target = NereusTarget(params, data; unconstrained = false)
+        end
 
         # --- Run sampler (with optional wall-clock watchdog) ----------
         # `timeout_sec` (top-level config) bounds the sampler call so a
@@ -185,10 +198,13 @@ function run_job(cfg::AbstractDict)
         end
         _postfit_stage!(pf, "summary")
         _populate_summary!(summary, result, params, chains)
+        summary["provenance"] = provenance_block(_job_sampler_name(cfg), params)
         _postfit_stage!(pf, "evidence")
         bridge_t = Dict{String, Any}()
         _augment_evidence!(summary, params, data, chains;
-                           show_progress = show_pf, timings = bridge_t)
+                           show_progress = show_pf, timings = bridge_t,
+                           _postfit_rule_kw(_get(_get(cfg, :sampler; default = Dict()),
+                                                 :kwargs; default = Dict()), data)...)
         _postfit_stage!(pf, "science")
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
@@ -387,6 +403,19 @@ function _validate_config(cfg::AbstractDict)
             length(unique(names_as)) == length(names_as) ||
                 push!(errs, "`data.iad` entries have duplicate instrument names: " *
                             "$(names_as)")
+            for (i, e) in enumerate(iad_entries)
+                at = "`data.iad`" * (iad isa AbstractVector ? "[$i]" : "")
+                try
+                    _iad_jitter_flag(_get(e, :jitter; default = false))
+                catch err
+                    push!(errs, "$at: " * sprint(showerror, err))
+                end
+                try
+                    _iad_clip_nsigma(_get(e, :clip_outliers; default = false))
+                catch err
+                    push!(errs, "$at: " * sprint(showerror, err))
+                end
+            end
         end
         if _has(data_cfg, :gost)
             g = _get(data_cfg, :gost)
@@ -575,13 +604,17 @@ function _build_data(data_cfg; obliquity = nothing)
     inst_names_rv = String[]
     inst_names_pm = String[]
     # Relative-astrometry imager names. Only these get `sigma_as_<name>`
-    # jitter slots; the intermediate-astrometry source names are collected
-    # for reporting but carry no sampled parameters of their own (their
-    # nuisances are marginalised analytically).
+    # jitter slots.
     inst_names_as = String[]
-    inst_names_as_iad = String[]
+    # Intermediate-astrometry instruments carry no sampled parameter of their
+    # own (their nuisances are marginalised analytically) -- except a
+    # `sigma_iad_<name>` jitter, for the blocks that ask for one with
+    # `jitter: true`. One entry per instrument, "" for those without.
+    inst_names_iad = String[]
+    iad_outliers = Any[]
     isempty(data_cfg) &&
-        return Data(), inst_names_rv, inst_names_pm, inst_names_as
+        return Data(), inst_names_rv, inst_names_pm, inst_names_as,
+               inst_names_iad, iad_outliers
 
     kw = Dict{Symbol, Any}()
 
@@ -619,14 +652,29 @@ function _build_data(data_cfg; obliquity = nothing)
     # two missions have different reference epochs and different abscissa
     # conventions, and an order nobody chose is a debugging hazard when
     # reading back the per-instrument zero points.
+    #
+    # Per block, opt-in: `jitter: true` gives that instrument a
+    # `sigma_iad_<name>` along-scan jitter, `clip_outliers: true` (or a number
+    # of σ) drops the CCD abscissae that disagree with their own field-of-view
+    # transit (`clip_transit_outliers`) before anything is fitted.
     if _has(data_cfg, :iad)
         iad_block = _get(data_cfg, :iad)
-        kw[:iad] = iad_block isa AbstractVector ?
-            merge_iad([_parse_iad_block(b) for b in iad_block]) :
-            _parse_iad_block(iad_block)
-        inst_names_as_iad = iad_block isa AbstractVector ?
-            [_iad_block_name(b, i) for (i, b) in enumerate(iad_block)] :
-            [_iad_block_name(iad_block, 1)]
+        blocks = iad_block isa AbstractVector ? iad_block : [iad_block]
+        parsed = IADData[]
+        for (i, b) in enumerate(blocks)
+            d = _parse_iad_block(b)
+            name = _iad_block_name(b, i)
+            nsig = _iad_clip_nsigma(_get(b, :clip_outliers; default = false))
+            if nsig !== nothing
+                d, rep = clip_transit_outliers(d; nsigma = nsig, label = name)
+                push!(iad_outliers, merge((instrument = name,), rep))
+            end
+            jit = _iad_jitter_flag(_get(b, :jitter; default = false))
+            append!(inst_names_iad, fill(jit ? name : "", n_iad_inst(d)))
+            push!(parsed, d)
+        end
+        kw[:iad] = merge_iad(parsed)
+        any(!isempty, inst_names_iad) || empty!(inst_names_iad)
     end
 
     # GOST: ra/dec auto-fetch or inline values
@@ -638,6 +686,12 @@ function _build_data(data_cfg; obliquity = nothing)
     if _has(data_cfg, :hgca)
         kw[:hgca] = _parse_hgca_block(_get(data_cfg, :hgca))
     end
+    # The Hipparcos scans the HGCA Hipparcos epoch is fitted through: the IAD's
+    # own when there is Hipparcos IAD, else fetched by the row's hip_id unless
+    # `data.hip_scans` says otherwise (`_hip_scans_for`).
+    hs = _hip_scans_for(_get(data_cfg, :hip_scans; default = nothing),
+                        get(kw, :iad, nothing), get(kw, :hgca, nothing), nothing)
+    hs === nothing || (kw[:hip_scans] = hs)
     if _has(data_cfg, :relastrom)
         ra_block = _get(data_cfg, :relastrom)
         if ra_block isa AbstractVector
@@ -659,7 +713,8 @@ function _build_data(data_cfg; obliquity = nothing)
         (inst_names_rv = _add_obliquity_data!(kw, inst_names_rv, data_cfg, obliquity))
 
     data = Data(; kw...)
-    return data, inst_names_rv, inst_names_pm, inst_names_as
+    return data, inst_names_rv, inst_names_pm, inst_names_as, inst_names_iad,
+           iad_outliers
 end
 
 # ---- RV block ---------------------------------------------------------
@@ -859,6 +914,7 @@ end
 function _iad_block_name(block, i::Int)
     _has(block, :instrument) && return String(_get(block, :instrument))
     _has(block, :hip_id)     && return "HIP$(Int(_get(block, :hip_id)))"
+    _has(block, :hip)        && return "HIP$(Int(_get(block, :hip)))"    # fit_* spec
     _has(block, :source_id)  && return "GaiaDR4_$(Int(_get(block, :source_id)))"
     return "AS$i"
 end
@@ -947,9 +1003,76 @@ function _parse_hgca_block(block)
     end
 end
 
+"""
+    _hip_scans_for(spec, iad, hgca, g23h; fetch) -> IADData or nothing
+
+The Hipparcos scan geometry `Data(; hip_scans)` gets on the `run_job` and
+`fit_*` paths, from a `hip_scans` entry (`data.hip_scans` in a job config, the
+`"hip_scans"` key of an astrometry channel):
+
+- absent / `nothing` / `true`: automatic. When an HGCA or G23H row is present
+  and `iad` holds no Hipparcos scans, fetch them by the row's `hip_id`
+  (`fetch_hip_iad`, cached; ~350 MB bundle on first use). The HGCA/G23H
+  Hipparcos epoch is a fit through those scans, so a catalogue row with a
+  Hipparcos ID is enough to model it as measured. With Hipparcos IAD in the
+  fit there is nothing to fetch: `Data` uses the IAD's own scans.
+- `false`: none; `Data` then warns that the Hipparcos epoch is instantaneous.
+- `{hip_id}`: fetch that source's scans.
+- `{values: {t, psi, parallax_factor, abscissa_err}}` (or those fields at the
+  top level, as the client's `load_iad` returns them): the scans themselves.
+- an `IADData`: used as given.
+
+A failed fetch is an error, not a silent fall back to the instantaneous model.
+"""
+function _hip_scans_for(spec, iad, hgca, g23h;
+                        fetch = h -> fetch_hip_iad(h; verbose = false))
+    spec === false && return nothing
+    spec isa IADData && return spec
+    (spec === nothing || spec === true) ||
+        return _parse_hip_scans_block(spec; fetch = fetch)
+    (hgca === nothing && g23h === nothing) && return nothing
+    iad !== nothing && _n_in_window(iad.t, HIPPARCOS_WINDOW) >= 5 && return nothing
+    hip = hgca !== nothing ? hgca.hip_id : g23h.hip_id
+    1 <= hip <= 120_416 || return nothing     # no usable Hipparcos ID: Data warns
+    return _fetch_hip_scans(fetch, hip)
+end
+
+function _fetch_hip_scans(fetch, hip::Integer)
+    try
+        return fetch(Int(hip))
+    catch err
+        throw(ErrorException(
+            "could not obtain the Hipparcos scans of HIP $hip, which the HGCA/G23H " *
+            "Hipparcos epoch is fitted through: $(sprint(showerror, err)). Give them " *
+            "as `hip_scans: {values: ...}`, or set `hip_scans: false` to model the " *
+            "Hipparcos epoch as the instantaneous reflex instead."))
+    end
+end
+
+function _parse_hip_scans_block(block; fetch = h -> fetch_hip_iad(h; verbose = false))
+    if _has(block, :values) || _has(block, :t)
+        vals = _has(block, :values) ? _get(block, :values) : block
+        t = Float64.(collect(_get(vals, :t; required = true)))
+        return IADData(
+            t               = t,
+            abscissa        = zeros(length(t)),     # never read: geometry only
+            abscissa_err    = Float64.(collect(_get(vals, :abscissa_err; required = true))),
+            psi             = Float64.(collect(_get(vals, :psi; required = true))),
+            parallax_factor = Float64.(collect(_get(vals, :parallax_factor; required = true))),
+        )
+    elseif _has(block, :hip_id)
+        return _fetch_hip_scans(fetch, Int(_get(block, :hip_id)))
+    end
+    error("hip_scans needs `false`, `{hip_id}` or `{values: {t, psi, " *
+          "parallax_factor, abscissa_err}}`")
+end
+
 # Three-epoch HGCA arrays (Hipparcos, HG, Gaia), built with the positional
 # constructor: the keyword one takes σ_pmra/σ_pmdec, not cov_ep. The epochs are
-# `t` in a config and `epochs` in the struct's field names.
+# `t` in a config and `epochs` in the struct's field names. `epochs_ra` /
+# `epochs_dec` are the catalogue's per-coordinate central epochs (MJD), which
+# the struct carries and the client's `load_hgca` therefore returns; absent,
+# both coordinates take `epochs`.
 function _hgca_from_values(vals)
     ep = _has(vals, :t) ? _get(vals, :t) : _get(vals, :epochs; required = true)
     ep    = Float64.(collect(ep))
@@ -958,13 +1081,19 @@ function _hgca_from_values(vals)
     cov   = [_hgca_cov(c) for c in _get(vals, :cov_ep; required = true)]
     (length(ep) == 3 && length(pmra) == 3 && length(pmdec) == 3 && length(cov) == 3) ||
         error("hgca inline values need exactly 3 epochs (Hipparcos, HG, Gaia)")
+    era = Float64.(collect(_get(vals, :epochs_ra;  default = ep)))
+    ede = Float64.(collect(_get(vals, :epochs_dec; default = ep)))
+    (length(era) == 3 && length(ede) == 3) ||
+        error("hgca `epochs_ra` / `epochs_dec` need exactly 3 entries (Hipparcos, HG, Gaia)")
+    _check_catalogue_epochs(era, ede, 1, 3, "hgca block")
     return HGCAData((ep[1], ep[2], ep[3]),
                     (pmra[1], pmra[2], pmra[3]),
                     (pmdec[1], pmdec[2], pmdec[3]),
                     (cov[1], cov[2], cov[3]),
                     Float64(_get(vals, :plx;     default = NaN)),
                     Float64(_get(vals, :plx_err; default = NaN)),
-                    Int(_get(vals, :hip_id;      default = 0)))
+                    Int(_get(vals, :hip_id;      default = 0)),
+                    (era[1], era[2], era[3]), (ede[1], ede[2], ede[3]))
 end
 
 # One epoch's 2×2 covariance: nested rows from a config, or the four entries
@@ -1036,7 +1165,33 @@ function _build_star(s)
         sigma_M_s   = sig(:sigma_M_s),
         sigma_R_s   = sig(:sigma_R_s),
         sigma_T_eff = sig(:sigma_T_eff),
+        # Which Gaia source is this star: `gaia_id` (a DR3 source_id) or `name`
+        # (resolved to one). They only feed the default parallax prior of an
+        # astrometric fit; see `_resolve_gaia_plx`.
+        gaia_id = let g = _get(s, :gaia_id; default = nothing)
+            g === nothing ? nothing : _parse_gaia_id(g)
+        end,
+        name  = let n = _get(s, :name; default = nothing)
+            n === nothing ? nothing : String(n)
+        end,
     )
+end
+
+# The Gaia DR3 parallax a fit asked for through `star.gaia_id` / `star.name`, or
+# `nothing`. Queried only when it can matter: the model has an astrometric
+# planet and the job gives no prior of its own on `plx`. A failed lookup stops
+# the job -- falling back to the catalogue parallax would silently change the
+# prior the user asked for.
+function _resolve_gaia_plx(cfg, star; kw...)
+    (star.gaia_id === nothing && star.name === nothing) && return nothing
+    mdl = _get(cfg, :model; default = Dict())
+    _has(mdl, :obliquity) && return nothing
+    modes_str = String.(_get(mdl, :planet_modes;
+                             default = fill("RV_ONLY", Int(_get(mdl, :max_kplanet; default = 1)))))
+    any(m -> AS_SOURCE in _PLANET_MODES[m], modes_str) || return nothing
+    pri = _get(cfg, :priors; default = Dict())
+    any(k -> String(k) == "plx", keys(pri)) && return nothing
+    return _gaia_lookup_from_star(star; kw...)
 end
 
 # The star block as `science_summary` takes it: the values AND their σ's. M★
@@ -1077,7 +1232,8 @@ const _PLANET_MODES = Dict(
 )
 
 function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
-                      inst_names_as = String[])
+                      inst_names_as = String[], inst_names_iad = String[];
+                      gaia_plx = nothing)
     mdl = _get(cfg, :model; required = true)
     _has(mdl, :obliquity) &&
         return _build_obliquity_model(cfg, data, inst_names_rv, inst_names_pm)
@@ -1087,14 +1243,17 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     pm = [_PLANET_MODES[m] for m in modes_str]
 
     par = _get(mdl, :parametrization; default = Dict())
-    # `time` defaults to Mo, as ParametrizationConfig and fit_* always have. It
-    # was Tp here, whose default prior spans the whole baseline and so holds
-    # baseline/P copies of the orbit; the ensemble cannot mix across them (see
-    # `_warn_repeating_time_window`), and a default job on an easy 12.3 d
-    # target never converged.
+    # `time`, when absent, is ParametrizationConfig's default `:auto`, as in
+    # build_target and fit_*: Params resolves it to the anchor the priors name
+    # (`Mo_k1`, ...), else the transit phase phic (`default_time_anchor`). It
+    # was Tp here once, whose default prior spans the whole baseline and so
+    # holds baseline/P copies of the orbit; the ensemble cannot mix across them
+    # (see `_warn_repeating_time_window`), and a default job on an easy 12.3 d
+    # target never converged. Then Mo, whose low-e ridge with ω biased e.
+    time_str = _get(par, :time; default = nothing)
     parametrization = ParametrizationConfig(
         mass = _MASS_MODE[String(_get(par, :mass; default = "K_driven"))],
-        time = _TIME_ANCHOR[String(_get(par, :time; default = "Mo"))],
+        time = time_str === nothing ? :auto : _TIME_ANCHOR[String(time_str)],
         ew   = _EW_PARAM[String(_get(par, :ew; default = "sesinw"))],
         geom = _GEOM_PARAM[String(_get(par, :geom; default = "b_rr"))],
         marginalize_gamma = Bool(_get(par, :marginalize_gamma; default = false)),
@@ -1110,10 +1269,14 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         # Epoch the transit phase is measured from (time = "phic"). Absent:
         # Params takes the median photometric time.
         t_ref_c = Float64(_get(par, :t_ref_c; default = NaN)),
+        # "rho_circ" (default): a transiting planet with a free eccentricity
+        # samples the circular-equivalent density its transit measures;
+        # "rho_star": ρ★ and (e, ω) as sampled before. Same posterior.
+        density = Symbol(String(_get(par, :density; default = "rho_circ"))),
     )
 
     ic = InstrumentConfig(rv = inst_names_rv, pm = inst_names_pm,
-                          as = inst_names_as)
+                          as = inst_names_as, iad = inst_names_iad)
 
     priors        = _build_priors(_get(cfg, :priors; default = Dict()))
     noise_models  = _build_noise_models(_get(cfg, :noise_models; default = []),
@@ -1173,6 +1336,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     isempty(priors) || (p_kw[:priors] = priors)
     star.M_s !== nothing && (p_kw[:M_s] = Float64(star.M_s))
     star.R_s !== nothing && (p_kw[:R_s] = Float64(star.R_s))
+    gaia_plx === nothing || (p_kw[:gaia_plx] = (; plx = gaia_plx.plx, plx_err = gaia_plx.plx_err))
 
     # Instrument parameter sharing, e.g.
     #   "sharing": {"ld": [["TESS", "PESTi"]], "sigma": [["HARPS", "HARPSa"]]}
@@ -1449,6 +1613,13 @@ end
 # failing.
 const _SAMPLER_FNS = ENGINES
 
+# The engine a job config names, with `_dispatch_sampler`'s defaults.
+function _job_sampler_name(cfg)
+    smp = _get(cfg, :sampler; default = Dict())
+    td = _get(cfg, :transdim; default = nothing) !== nothing
+    return String(_get(smp, :name; default = td ? "transdim_pt_emcee" : "pt_emcee"))
+end
+
 function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     # Default by shape: transdim_pt_emcee when a `transdim` block is present,
     # pt_emcee otherwise. Both for the same reason -- the affine-invariant
@@ -1456,9 +1627,7 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     # explorer cannot (it takes axis-aligned steps only) and which it fails at
     # SILENTLY, reporting no swap acceptance and no R-hat.
     smp = _get(cfg, :sampler; default = Dict())
-    _td_present = _get(cfg, :transdim; default = nothing) !== nothing
-    name = String(_get(smp, :name;
-                       default = _td_present ? "transdim_pt_emcee" : "pt_emcee"))
+    name = _job_sampler_name(cfg)
     kw = Dict{Symbol, Any}(Symbol(k) => v
                             for (k, v) in _get(smp, :kwargs; default = Dict()))
     kw[:seed] = get(kw, :seed, seed)
@@ -1493,6 +1662,23 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                                    "$(name)_state.jls")
     end
 
+    # The out-of-band stop (src/graceful_stop.jl): a file whose appearance ends
+    # the run at the last recorded step. `<output_dir>/STOP` unless the job's
+    # top-level `stop_file` says otherwise. Only the samplers that can stop
+    # early declare `stop_file`; naming one for another is an error, not a
+    # silently unwatched path.
+    _stop_file_cfg = _get(cfg, :stop_file; default = nothing)
+    if haskey(_SAMPLER_FNS, name) &&
+       any(m -> :stop_file in Base.kwarg_decl(m), methods(_SAMPLER_FNS[name]))
+        haskey(kw, :stop_file) || (kw[:stop_file] = _stop_file_cfg === nothing ?
+            joinpath(String(_get(cfg, :output_dir; required = true)), "STOP") :
+            String(_stop_file_cfg))
+    elseif _stop_file_cfg !== nothing
+        throw(ArgumentError(
+            "`stop_file` is honoured by $(join(_engines_with(:stop_file), ", ")); " *
+            "sampler \"$name\" cannot be stopped early."))
+    end
+
     td_block = _get(cfg, :transdim; default = nothing)
     td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
 
@@ -1517,10 +1703,15 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                  n_evals = n_ev)
     elseif name == "pt_hmc"
         # Hamiltonian parallel tempering (fixed-dim, differentiable). Returns
-        # (chains, log_ev, report).
-        chains, log_z, _ = sample_pt_hmc(target; kw...)
+        # (chains, log_ev, report, evidence): the tempered stack and bridge /
+        # mode-Laplace go to summary.json's evidence block as pt_emcee's do.
+        # The ladder and its swap rates go too: they decide whether the tempered
+        # stack is quotable there.
+        chains, log_z, report, ev = sample_pt_hmc(target; kw...)
         return (chains = chains, log_evidence = log_z,
-                 acceptance_within = Float64[], acceptance_swap = Float64[],
+                 log_evidence_bridge = ev.bridge, log_evidence_laplace = ev.laplace,
+                 evidence = report, betas = ev.betas,
+                 acceptance_within = Float64[], acceptance_swap = ev.swap_acc,
                  n_evals = 0)
     elseif name == "rjmcmc"
         td === nothing && error("rjmcmc requires `transdim` block")
@@ -1535,8 +1726,8 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = n_evals)
     elseif name == "nested"
-        chains, log_z = sample_nested(target, data; kw...)
-        return (chains = chains, log_evidence = log_z,
+        chains, log_z, log_z_err = sample_nested(target, data; kw...)
+        return (chains = chains, log_evidence = log_z, log_evidence_err = log_z_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = 0)
     elseif name == "pa"
@@ -1558,12 +1749,15 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
                  n_evals = res.n_evals)
     elseif name == "nested_ins"
         res = sample_nested_ins(target, data; kw...)
-        return (chains = res.chains, log_evidence = res.log_z_ins,
+        # the NS estimate: log_z_ins is not an evidence (INSResult)
+        return (chains = res.chains, log_evidence = res.log_z_ns,
+                 log_evidence_err = res.log_z_ns_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = res.n_evals)
     elseif name == "nested_dynamic"
         res = sample_nested_dynamic(target, data; kw...)
         return (chains = res.chains, log_evidence = res.log_z,
+                 log_evidence_err = res.log_z_err,
                  acceptance_within = Float64[], acceptance_swap = Float64[],
                  n_evals = res.n_evals)
     elseif name == "daedalus"
@@ -1677,8 +1871,8 @@ end
 Snapshot of every PNG already under a run's `plots/` tree, taken immediately
 before rendering. The figure manifests are built by scanning that tree, so
 without a snapshot a run into a non-empty `output_dir` reports the PREVIOUS
-run's leftovers as its own -- `plots = ["corner"]` coming back with three
-figures. Comparing each file against its own earlier mtime, rather than
+run's leftovers as its own -- a run asking for one figure coming back with
+three. Comparing each file against its own earlier mtime, rather than
 against `time()`, needs no slack for filesystems whose mtime is coarser than
 the wall clock: back-to-back calls a second apart still separate cleanly.
 """
@@ -1831,6 +2025,9 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
     _RELEASE_SCENES[] = true
     _PLOT_KW_SEEN[] = Set{Symbol}()       # filled by `_kw_for`
     seen_kw = Set{Symbol}()
+    _prev_release_mem = _RELEASE_MEMORY[]
+    _RELEASE_MEMORY[] = _large_chain(chains)     # see `_RELEASE_MEMORY`
+    _RELEASED_AT[] = Base.gc_bytes()
     try
     for (i, plot_name) in enumerate(expanded)
         update!(pb; n_done = i - 1, fields = (:now => String(plot_name),))
@@ -1854,9 +2051,17 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
         catch err
             @warn "Plot `$plot_name` failed" exception = (err, catch_backtrace())
         end
+        # A figure's garbage (its scene, its draws, its band matrix) is dead once
+        # its file is written, but the collector runs on its own schedule, and
+        # across the set the heap grew by gigabytes of it before a collection.
+        # For a large chain, collect between figures once enough is allocated
+        # (`_save_plot` checks after each file, this after each kind), so the
+        # stage peaks near its largest figure instead of at a sum of several.
+        _RELEASE_MEMORY[] && _release_memory_if_due()
     end
     finally
         _RELEASE_SCENES[] = _prev_release
+        _RELEASE_MEMORY[] = _prev_release_mem
         seen_kw = something(_PLOT_KW_SEEN[], seen_kw)
         _PLOT_KW_SEEN[] = nothing
     end
@@ -2091,7 +2296,7 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         end
         if !haskey(ttv_kw, :planet_b_k)
             a = ttv_kw[:planet_a_k]
-            b = findfirst(k -> k != a && !isempty(intersect(present(k), present(a))),
+            b = findfirst(k -> k != a && !isempty(_sorted_intersect(present(k), present(a))),
                           1:max_k)
             ttv_kw[:planet_b_k] = b === nothing ? 0 : b
         end
@@ -2117,8 +2322,13 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
             plot_rm(chains, params, data; output = out_dir, _kw_for(plot_rm, kw)...)
         end
     elseif name == "corner"
-        plot_corner(chains, params; output = out_dir, _kw_for(plot_corner, kw)...)
-        return "corner.png"
+        # One corner per planet slot and one of the noise model (`plot_corners`),
+        # never the all-parameter corner: its n² panels were most of the plot
+        # stage's memory. A slot never live, or a model without two noise
+        # parameters, writes nothing.
+        return _if_written(name, "corner_*.png", out_dir) do
+            plot_corners(chains, params; output = out_dir, _kw_for(plot_corners, kw)...)
+        end
     elseif name == "trace"
         plot_trace(chains, params; output = out_dir, _kw_for(plot_trace, kw)...)
         return "traces/*.png"
@@ -2386,6 +2596,10 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
         prior_bounds = Dict{Symbol, Tuple{Float64, Float64}}()
         log_scale = Dict{Symbol, Float64}()
         for (nm, ps) in zip(layout.unfrozen_names, layout.unfrozen_priors)
+            # A cyclic inclination has no bound to rail against (src/circular.jl):
+            # it was sampled on a circle with no wall, and i = 0 or π, where a
+            # face-on or retrograde orbit sits, is a value, not an edge.
+            is_cyclic_inclination(ps) && continue
             lo, hi = sampled_windows !== nothing && haskey(sampled_windows, nm) ?
                      sampled_windows[nm] : bounds(ps)
             prior_bounds[Symbol(nm)] = (Float64(lo), Float64(hi))
@@ -2455,7 +2669,8 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
                              circular = circular_names(params),
                              log_scale = log_scale,
                              active = active,
-                             jitter = jitter_names(params))
+                             jitter = jitter_names(params),
+                             angle_range = restricted_angles(params))
 
         summary["fit_health"] = Dict{String, Any}(
             "overall"  => String(report.overall),
@@ -2495,15 +2710,32 @@ end
 #
 # Rather than change the sampling geometry for every user, recompute the
 # prior-free estimators AFTER the fit against an unconstrained target built
-# from the same params and data. The chains are unchanged; only the evidence
-# block gains `bridge` (and `reference_path`), and `reported` is upgraded to
-# bridge when it is usable.
+# from the same params and data: bridge sampling and mode-Laplace. The chains
+# are unchanged; the evidence block gains `bridge` and a numeric `mode_laplace`
+# (with `mode_laplace_check`), and `log_z` is chosen again by Jose's rule, as
+# pt_emcee chooses it in the sampler:
+#
+#   1. bridge, when the chain has converged and its reference has the
+#      effective draws it needs (`_bridge_guard`);
+#   2. else the tempered value already reported, when it is quotable (its keys
+#      are in the block only then) and within `laplace_switch_tol` nats of
+#      mode-Laplace -- further than the Laplace non-Gaussian bias, it is broken;
+#   3. else mode-Laplace, with a warning;
+#   4. else the tempered value if quotable, else NaN.
+#
+# A headline from nested sampling, or a bridge the engine already reported,
+# is left as it is when the post-fit bridge is refused. With `laplace_check`
+# false (`untemper_transit` with photometry: the tempered likelihood is not the
+# one Laplace sees) the tempered value is kept and never switched, as in
+# pt_emcee.
 #
 # `show_progress` prints bridge_evidence's progress lines; `timings`, a
 # dictionary, receives its stage record (see `bridge_evidence`) and the time
-# the ESS guard took (`ess`).
+# the guard took (`ess`).
 function _augment_evidence!(summary, params, data, chains;
-                            show_progress::Bool = false, timings = nothing)
+                            show_progress::Bool = false, timings = nothing,
+                            laplace_check::Bool = true,
+                            laplace_switch_tol::Real = 50.0)
     try
         ev = get(summary, "evidence", nothing)
         ev isa AbstractDict || return
@@ -2517,34 +2749,98 @@ function _augment_evidence!(summary, params, data, chains;
         end
         tgt = NereusTarget(params, data; unconstrained = true)
         tgt.transform === nothing && return
-        b = bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42,
+        # mode-Laplace on the chains as written, in this target's charts.
+        lap = mode_laplace_evidence(tgt, chains)
+        if !isfinite(lap)
+            l0 = get(ev, "mode_laplace", nothing)
+            lap = l0 isa Real ? Float64(l0) : NaN
+        end
+        if isfinite(lap)
+            ev["mode_laplace"] = Float64(lap)
+            chk = get!(() -> Dict{String, Any}(), ev, "mode_laplace_check")
+            chk["note"] = _LAPLACE_LABEL
+        end
+        b = try
+            bridge_evidence(tgt, chains; n_proposal = 20_000, seed = 42,
                             show_progress = show_progress, timings = timings)
-        (b.converged && isfinite(b.log_z)) || return
-        ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
-                            "overlap" => Float64(b.overlap))
-        # Bridge is biased LOW when its reference is fitted from too few
-        # INDEPENDENT draws (see docs/src/evidence.md); q carries
-        # d + d(d+1)/2 parameters. Only promote it above the tempered value
-        # when the chain actually supports it.
-        d = length(params.layout.unfrozen_names)
-        need = d + d * (d + 1) ÷ 2
-        ess = _bridge_stage!(timings, "ess") do
-            try
-                minimum(filter(isfinite, vec(_diag_by_param(MCMCChains.ess, chains)[:, :ess])))
-            catch; NaN end
+        catch err
+            @debug "post-fit bridge failed" exception = err
+            nothing
         end
-        if isfinite(ess) && ess >= need
-            summary["log_z"] = Float64(b.log_z)
-            ev["reported"] = "bridge"
-        else
-            ev["bridge_not_reported"] =
-                "min ESS $(isfinite(ess) ? round(Int, ess) : "?") < $need " *
-                "parameters in the reference; bridge is biased low here"
+        why_bridge = "bridge sampling did not converge"
+        if b !== nothing && b.converged && isfinite(b.log_z)
+            ev["bridge"] = Dict("log_z" => Float64(b.log_z), "se" => Float64(b.se),
+                                "overlap" => Float64(b.overlap))
+            # mode-Laplace beside the bridge that comes before it: its distance
+            # (in `mode_laplace_check`), and a warning past bridge's standard
+            # error + 1 nat.
+            if isfinite(lap)
+                ev["mode_laplace_check"]["minus_bridge"] = Float64(lap - b.log_z)
+                _warn_laplace_vs_bridge("run_job", lap, b.log_z, b.se)
+            end
+            # Bridge is biased LOW on a chain that has not converged, and when
+            # its reference is fitted from too few INDEPENDENT draws (q carries
+            # d + d(d+1)/2 parameters); see `_bridge_guard` and
+            # docs/src/evidence.md. Only promote it when the chain supports it.
+            g = _bridge_stage!(() -> _bridge_guard(chains, params), timings, "ess")
+            if g.ok
+                summary["log_z"] = Float64(b.log_z)
+                ev["reported"] = "bridge"
+                return
+            end
+            why_bridge = g.why
+            ev["bridge_not_reported"] = why_bridge
         end
+        _postfit_select!(summary, ev, lap; why_bridge, laplace_check,
+                         tol = Float64(laplace_switch_tol))
     catch err
         @debug "post-fit evidence augmentation failed" exception = err
     end
     return
+end
+
+# Steps 2-4 of the post-fit selection above, once the post-fit bridge is not
+# usable (`why_bridge` says why). `lap` is mode-Laplace or NaN.
+function _postfit_select!(summary, ev, lap::Float64; why_bridge::AbstractString,
+                          laplace_check::Bool, tol::Float64)
+    rep = String(get(ev, "reported", "none"))
+    rep in ("bridge", "nested") && return             # the engine's own, kept
+    laplace_check || return                           # untemper_transit + photometry
+    lz = get(summary, "log_z", NaN)
+    lz = lz isa Real ? Float64(lz) : NaN
+    tempered = rep in ("hybrid", "ti_plus", "ss_plus", "ti") && isfinite(lz)
+    if tempered && isfinite(lap) && abs(lz - lap) <= tol
+        # quotable and corroborated: kept
+    elseif isfinite(lap)
+        why_t = tempered ?
+            "the tempered $rep ($(round(lz, digits = 2))) is " *
+            "$(round(abs(lz - lap), digits = 1)) nats from it, beyond " *
+            "laplace_switch_tol = $tol" :
+            "there is no quotable tempered value"
+        @warn "Nereus: log_z is mode-Laplace, a Gaussian approximation at the " *
+              "posterior mode: bridge is not usable ($why_bridge) and $why_t." log_z = lap
+        lz = lap; rep = "mode_laplace"
+    elseif !tempered
+        @warn "Nereus: no usable evidence estimate: bridge is not usable " *
+              "($why_bridge), there is no quotable tempered value and mode-Laplace " *
+              "is unavailable. log_z is NaN."
+        lz = NaN; rep = "none"
+    end
+    summary["log_z"] = lz
+    ev["reported"] = rep
+    return
+end
+
+# The engine options `_augment_evidence!` applies Jose's rule with:
+# `laplace_switch_tol` as given, and `laplace_check` false for
+# `untemper_transit` with photometry, as pt_emcee sets it.
+function _postfit_rule_kw(opts, data)
+    o = opts isa AbstractDict ? opts : Dict()
+    untemper = _get(o, :untemper_transit; default = false) === true
+    phot = hasproperty(data, :t_phot) && !isempty(data.t_phot)
+    tol = _get(o, :laplace_switch_tol; default = 50.0)
+    return (; laplace_check = !(untemper && phot),
+              laplace_switch_tol = tol isa Real ? Float64(tol) : 50.0)
 end
 
 # =====================================================================
@@ -2682,6 +2978,9 @@ end
 function _populate_summary!(summary, result, params, chains)
     summary["log_z"] = Float64(getfield(result, :log_evidence))
     summary["n_evals"] = Int(getfield(result, :n_evals))
+    # How the run ended: "steps", "converged", "interrupted", "requested",
+    # "max_seconds" or "max_evals", with the step and the draws kept.
+    _stop_to_summary!(summary, result)
     summary["sampler"] = Dict{String, Any}(
         "acceptance_within" => collect(Float64.(getfield(result,
                                                             :acceptance_within))),
@@ -2699,37 +2998,17 @@ function _populate_summary!(summary, result, params, chains)
     # agreeing with each other is not a cross-check, and they can sit >100 nats
     # low on a signal-locked posterior while doing so. Recording the spread is
     # what makes a Bayes factor between two runs defensible.
-    ev = Dict{String, Any}()
-    for (key, fld) in ("bridge" => :log_evidence_bridge,
-                       "mode_laplace" => :log_evidence_laplace)
-        hasfield(typeof(result), fld) || continue
-        v = getfield(result, fld)
-        v isa Real && isfinite(v) && (ev[key] = Float64(v))
-    end
-    if hasfield(typeof(result), :evidence)
-        rep = getfield(result, :evidence)
-        for (key, fld) in ("ti" => :ti, "ti_plus" => :ti_plus,
-                           "ss_plus" => :ss_plus, "hybrid" => :hybrid)
-            hasfield(typeof(rep), fld) || continue
-            t = getfield(rep, fld)
-            (t isa Tuple && length(t) == 2 && isfinite(t[1])) || continue
-            ev[key] = Dict("log_z" => Float64(t[1]), "se" => Float64(t[2]))
-        end
-        hasfield(typeof(rep), :hybrid_beta_star) &&
-            (ev["hybrid_beta_star"] = Float64(getfield(rep, :hybrid_beta_star)))
-    end
-    if !isempty(ev)
-        # Name the headline by matching the reported value, so a reader knows
-        # which estimator `log_z` came from without re-deriving the selection logic.
-        lz = Float64(getfield(result, :log_evidence))
-        which = "tempered"
-        for (k, v) in ev
-            val = v isa Dict ? get(v, "log_z", NaN) : v
-            (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)
-        end
-        ev["reported"] = which
-        summary["evidence"] = ev
-    end
+    #
+    # The tempered stack goes in only when its ladder can carry it (the ladder
+    # reaches β = 0 and every adjacent pair swapped at least 5% of the time),
+    # and mode-Laplace is labelled as the approximation it is
+    # (`_evidence_summary`, src/sampler_diagnostics.jl). A nested engine's
+    # log Z goes in with its error (src/samplers/ns_error.jl).
+    nested = hasfield(typeof(result), :log_evidence_err) ?
+             (Float64(getfield(result, :log_evidence)),
+              Float64(getfield(result, :log_evidence_err))) : nothing
+    ev = _evidence_summary(result, Float64(getfield(result, :log_evidence)); nested)
+    ev === nothing || (summary["evidence"] = ev)
 
     _n_planets_posterior!(summary, chains)
     # No per-parameter or derived quantiles here. This built an unconditioned
@@ -2741,15 +3020,33 @@ function _populate_summary!(summary, result, params, chains)
 end
 
 function _write_summary(out_dir, summary)
-    # `allow_inf=true` is needed because samplers without evidence
-    # estimators (NUTS, OFTI, rjmcmc, moms, daedalus) write
-    # `log_z = NaN` into the summary. The JSON spec forbids NaN, but
-    # most parsers (Python json.loads with `parse_constant`,
-    # JavaScript) handle it fine.
+    # JSON has no NaN or Infinity, and strict parsers (JavaScript's JSON.parse,
+    # jq, Python's json with parse_constant) reject the bare tokens. A value
+    # that is not a finite number -- `log_z` of an engine with no evidence
+    # estimator (NUTS, OFTI, rjmcmc, moms), or of a tempered stack that cannot
+    # be quoted, an unbounded interval end -- is written as null
+    # (`_json_nonfinite_to_null`); the summary returned in memory keeps its
+    # NaN and ±Inf.
     open(joinpath(out_dir, "summary.json"), "w") do io
-        JSON3.pretty(io, summary; allow_inf = true)
+        JSON3.pretty(io, _json_nonfinite_to_null(summary))
     end
 end
+
+# A copy of `x` with every NaN and ±Inf replaced by `nothing` (JSON null),
+# through dictionaries, arrays, tuples and named tuples.
+_json_nonfinite_to_null(x::AbstractFloat) = isfinite(x) ? x : nothing
+function _json_nonfinite_to_null(x::AbstractDict)
+    y = empty(x, keytype(x), Any)          # the same kind of dictionary, in order
+    for (k, v) in x
+        y[k] = _json_nonfinite_to_null(v)
+    end
+    return y
+end
+_json_nonfinite_to_null(x::AbstractArray{<:Union{AbstractFloat, Integer, AbstractString, Bool, Nothing}}) =
+    any(v -> v isa AbstractFloat && !isfinite(v), x) ? Any[_json_nonfinite_to_null(v) for v in x] : x
+_json_nonfinite_to_null(x::AbstractArray) = Any[_json_nonfinite_to_null(v) for v in x]
+_json_nonfinite_to_null(x::Union{Tuple, NamedTuple}) = map(_json_nonfinite_to_null, x)
+_json_nonfinite_to_null(x) = x
 
 
 """

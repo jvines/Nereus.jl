@@ -101,6 +101,12 @@ struct Data
     # tomography is supplied, which is the common case — the tomographic term
     # then contributes exactly zero and costs nothing.
     tomo::Vector{TomoNight}
+    # Hipparcos scan geometry for the Hipparcos epoch of the HGCA / G23H
+    # models (`_catalogue_epoch`): epochs, scan angles, parallax factors and
+    # abscissa errors of the IAD scans, never their abscissae. The `iad` itself
+    # when the fit has Hipparcos IAD, an explicit `hip_scans` otherwise,
+    # `nothing` when neither (the Hipparcos epoch is then instantaneous).
+    hip_scans::Union{Nothing, IADData}
 end
 
 """
@@ -116,6 +122,19 @@ Keyword constructor for `Data`. Validates:
 defaults to `median(t_rv)`, which is the standard choice for Mo-anchor
 parametrizations (centers the mean-anomaly zero near the middle of
 the baseline, improving sampling conditioning).
+
+# Hipparcos scan geometry (`hip_scans`)
+
+The Hipparcos epoch of the HGCA and G23H models is a five-parameter fit of the
+reflex through the Hipparcos scans, so it needs their geometry: epochs, scan
+angles, parallax factors and abscissa errors. With `iad` holding Hipparcos IAD
+(at least five scans inside `HIPPARCOS_WINDOW`) those scans are used, and
+nothing else is needed. Without it, pass `hip_scans = fetch_hip_iad(hip_id)`
+(an `IADData`; its abscissae are never read, so it adds nothing to the
+likelihood). Passing both is allowed only when they are the same scans. With
+neither, `Data` warns and the Hipparcos epoch is modelled instantaneously.
+`run_job` and the `fit_*` functions fetch the scans by the catalogue's
+`hip_id` themselves.
 """
 function Data(;
     t_rv::AbstractVector{<:Real} = Float64[],
@@ -139,6 +158,7 @@ function Data(;
     g23h::Union{Nothing, G23HData} = nothing,
     gaia_dr3::Union{Nothing, GaiaDR3Data} = nothing,
     tomo::Vector{TomoNight} = TomoNight[],
+    hip_scans::Union{Nothing, IADData} = nothing,
 )
     n_rv = length(t_rv)
     n_phot = length(t_phot)
@@ -406,14 +426,79 @@ function Data(;
               "Gaia DR3 solution) to actually constrain the Gaia epoch.", maxlog = 1)
     end
 
+    # The Gaia-epoch models fit only the transits inside the release's own
+    # window (GAIA_DR3_WINDOW; G23H's DR2 epoch GAIA_DR2_WINDOW). Fewer than
+    # five there and `gost_5param_fit` returns zeros — a zero orbital reflex
+    # at the Gaia epoch, which reads as a measurement. Refuse it here.
+    if gost !== nothing && (hgca !== nothing || gaia_dr3 !== nothing || g23h !== nothing)
+        _require_gost_window(gost, GAIA_DR3_WINDOW, "DR3")
+        g23h !== nothing && _require_gost_window(gost, GAIA_DR2_WINDOW, "DR2")
+    end
+
+    hip_geom = _resolve_hip_scans(iad, hip_scans, hgca !== nothing || g23h !== nothing)
+
     return Data(
         Vector{Float64}(t_rv), Vector{Float64}(rv),
         Vector{Float64}(rv_err), rv_inst_vec, rv_comp_vec,
         t_ref_val, ind_dict, ind_err_dict, deriv_dict,
         Vector{Float64}(t_phot), Vector{Float64}(flux),
         Vector{Float64}(flux_err), phot_inst_vec, exp_vec,
-        relastrom, hgca, iad, gost, g23h, gaia_dr3, tomo,
+        relastrom, hgca, iad, gost, g23h, gaia_dr3, tomo, hip_geom,
     )
+end
+
+"""
+    _resolve_hip_scans(iad, hip_scans, needed) -> IADData or nothing
+
+The Hipparcos scan geometry the HGCA / G23H models fit their Hipparcos epoch
+through (`needed` says whether either catalogue is present).
+
+- `iad` with at least five scans inside `HIPPARCOS_WINDOW` is used as it is:
+  a fit that has the Hipparcos IAD in its likelihood models the catalogue's
+  Hipparcos epoch through the very same scans. The window keeps a merged Gaia
+  instrument's transits out of that fit.
+- Otherwise an explicit `hip_scans`, which must have five scans in the window.
+- Both: allowed only when they are the same scans (epochs and angles inside
+  the window); two different scan sets for one mission is a mistake.
+- Neither: `nothing`, with a warning — the Hipparcos epoch is then
+  instantaneous, which is not what the catalogue measured.
+"""
+function _resolve_hip_scans(iad, hip_scans, needed::Bool)
+    if !needed
+        hip_scans === nothing || @warn("`hip_scans` given without an HGCA or G23H " *
+            "row — the Hipparcos scan geometry is INERT here (it only models the " *
+            "Hipparcos epoch of those catalogues) and adds nothing to the likelihood.",
+            maxlog = 1)
+        return hip_scans
+    end
+    win = HIPPARCOS_WINDOW
+    iad_ok = iad !== nothing && _n_in_window(iad.t, win) >= 5
+    if hip_scans !== nothing
+        n_in = _n_in_window(hip_scans.t, win)
+        n_in >= 5 || throw(ArgumentError(
+            "hip_scans has $n_in scan(s) inside the Hipparcos mission (MJD " *
+            "$(win[1]) to $(win[2])); the Hipparcos epoch is a five-parameter fit " *
+            "through them and needs at least 5. Pass `fetch_hip_iad(hip_id)`."))
+        if iad_ok
+            inwin(d) = findall(t -> win[1] <= t <= win[2], d.t)
+            a, b = inwin(iad), inwin(hip_scans)
+            (iad.t[a] == hip_scans.t[b] && iad.psi[a] == hip_scans.psi[b]) ||
+                throw(ArgumentError(
+                    "`iad` and `hip_scans` carry DIFFERENT Hipparcos scans. The " *
+                    "Hipparcos epoch of the HGCA/G23H model is fitted through the " *
+                    "IAD's own scans when the fit has IAD; drop `hip_scans`."))
+            return iad
+        end
+        return hip_scans
+    end
+    iad_ok && return iad
+    @warn("HGCA / G23H supplied without Hipparcos scan geometry (no `iad` with " *
+          "Hipparcos scans, no `hip_scans`): the Hipparcos proper motion and the " *
+          "Hipparcos position in the Hipparcos–Gaia difference are modelled as the " *
+          "INSTANTANEOUS reflex at the Hipparcos epoch, not as the catalogue's " *
+          "five-parameter fit over the mission. Pass `hip_scans = " *
+          "fetch_hip_iad(hip_id)` to model them as measured.", maxlog = 1)
+    return nothing
 end
 
 """
@@ -429,6 +514,16 @@ Number of photometric data points across every instrument, at native
 cadence (the light curve is never binned).
 """
 n_phot(data::Data) = length(data.t_phot)
+function _require_gost_window(gost::GOSTData, win::Tuple{Real, Real}, release::String)
+    n_in = count(t -> win[1] <= t <= win[2], gost.t)
+    n_in >= 5 || throw(ArgumentError(
+        "GOST has $n_in transit(s) inside the Gaia $release window (MJD $(win[1]) to " *
+        "$(win[2])); the Gaia $release proper motion is fitted through that window " *
+        "alone and needs at least 5. Fetch the scan plan over it (`fetch_gost`'s " *
+        "default range covers it)."))
+    return nothing
+end
+
 """
     has_astrometry(data) -> Bool
 

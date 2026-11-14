@@ -58,6 +58,90 @@ export bridge_evidence
 # binds below a hundred threads.
 const _BRIDGE_BOOT_MEMORY = 2^31
 
+# The least bulk ESS over parameters of the draws as bridge reads them: each
+# cyclic inclination folded to [0, π], and the stellar spin in one
+# representative (`fold_cyclic_inclinations!`, as `_bridge_draw!` does). It is
+# what the "q needs d + d(d+1)/2 effective samples" guards measure. The
+# posterior on an inclination's circle is the physical one twice over, at x and
+# -x, and a cold chain that swaps between the copies has a raw-inclination ESS
+# that says nothing about the draws q is fitted to: pt_hmc near face-on
+# (i = 5°) had 28% of its draws in the mirror copy, an inclination ESS of 14
+# against 1251 folded, and bridge refused for it.
+function _bridge_min_ess(chains::MCMCChains.Chains, params::Params)
+    return _bridge_guard_stats(chains, params).n_eff
+end
+
+# The worst rank-normalised split R-hat at which bridge is reported. Above it
+# the walkers (or the halves of one chain) have not agreed on a distribution,
+# so the draws are not from the posterior, whatever their ESS. See
+# `_bridge_guard`.
+const _BRIDGE_RHAT_MAX = 1.1
+
+# The folded draws' least bulk ESS and worst rank-normalised split R-hat over
+# parameters (`_diag_by_param`; NaN for a constant column, which is skipped).
+function _bridge_guard_stats(chains::MCMCChains.Chains, params::Params)
+    c = isempty(cyclic_inclination_indices(params)) ? chains :
+        fold_cyclic_inclinations!(deepcopy(chains), params)
+    ess = filter(isfinite, vec(_diag_by_param(MCMCChains.ess, c)[:, :ess]))
+    rh = filter(isfinite, vec(_diag_by_param(MCMCChains.rhat, c)[:, :rhat]))
+    return (; n_eff = isempty(ess) ? NaN : minimum(ess),
+              rhat = isempty(rh) ? NaN : maximum(rh))
+end
+
+"""
+    _bridge_guard(chains, params) -> (; ok, why, n_eff, rhat, need)
+
+Whether bridge sampling on `chains` can be reported, and if not, why. Two
+conditions, each measured against a log Z known exactly:
+
+1. The draws are from the posterior: the worst rank-normalised split R-hat
+   (folded, as bridge reads them) is at most `_BRIDGE_RHAT_MAX` (1.1). On the
+   easy RV fixture of the tests, 32 walkers on two rungs had not found the
+   12.3 d mode in 60 to 3000 steps (R-hat 2.2 to 6.5) and bridge read -242 to
+   -223 where it is -153.75; the ESS guard alone passed every one of them, at
+   n_eff 36 to 110 against 35, because walkers that do not move still count
+   as about one effective draw each. 51 Peg at 3000 steps (R-hat 1.7 to 2.0,
+   n_eff 215 against 135) read -8720 and -8776 for two seeds where 15 000
+   steps give -5893.9. On Gaussians started overdispersed, chains still
+   moving in sat 23 to 37 nats low at d = 7 with n_eff above the bound; the
+   worst error at R-hat at most 1.1 was 0.26 nats. Converged production runs
+   sit at 1.001 to 1.02.
+2. q is fitted from enough independent draws: the least ESS is at least its
+   `d + d(d+1)/2` free parameters. From stationary chains of d = 5 to 30,
+   bridge's error grows as that ratio falls: about -0.2 to -0.3 nats near 1
+   (chains at R-hat under 2), -0.5 to -2.5 near 0.5, -1.1 to -1.9 near 0.25,
+   -5.6 to -12.6 at 0.07 to 0.14, and under 0.08 from 3.5 up. Walkers that
+   barely move have an ESS floor near the walker count: at d = 5 such chains
+   sat at 3.3 times the bound and erred by 0.37 to 0.56, at R-hat 3.4 to 7.6,
+   which condition 1 refuses. Reference-path's mean error held to 0.11 at
+   d <= 15 on the same chains.
+
+The worst error either condition lets through, over every chain measured, is
+0.36 nats (d = 30 at 1.15 times the ESS bound). See docs/src/evidence.md.
+
+An ESS or R-hat that cannot be computed refuses.
+"""
+function _bridge_guard(chains::MCMCChains.Chains, params::Params)
+    d = length(params.layout.unfrozen_names)
+    need = d + d * (d + 1) ÷ 2
+    st = try
+        _bridge_guard_stats(chains, params)
+    catch err
+        @debug "bridge guard: ESS / R-hat unavailable" exception = err
+        (; n_eff = NaN, rhat = NaN)
+    end
+    why = String[]
+    (isfinite(st.rhat) && st.rhat <= _BRIDGE_RHAT_MAX) ||
+        push!(why, "worst R-hat $(isfinite(st.rhat) ? round(st.rhat, digits = 3) : "?") > " *
+                   "$(_BRIDGE_RHAT_MAX): the chain has not converged, so its draws are " *
+                   "not the posterior's")
+    (isfinite(st.n_eff) && st.n_eff >= need) ||
+        push!(why, "min ESS $(isfinite(st.n_eff) ? round(Int, st.n_eff) : "?") < $need " *
+                   "parameters in the reference; bridge is biased low here")
+    return (; ok = isempty(why), why = join(why, "; "), n_eff = st.n_eff, rhat = st.rhat,
+              need)
+end
+
 """
     bridge_evidence(target, chains; n_proposal, seed, proposal, max_iter, tol,
                     n_bootstrap, bootstrap_memory, show_progress, timings) -> NamedTuple
@@ -259,7 +343,11 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
     # mode_laplace_evidence does. Skipping this is not a small error: a Gaussian
     # fitted to bounded samples escapes the box on essentially every draw in 22
     # dimensions, and the estimator returns overlap = 0 with no usable output.
-    D = _BridgeDraws(chains, pnames, target.transform)
+    # Cyclic inclinations are folded to [0, π] on the way (see
+    # `_bridge_folded` for the density that goes with that).
+    D = _BridgeDraws(chains, pnames, target.transform;
+                     cinc = cyclic_inclination_indices(target.params),
+                     sc = spin_canon(target.params))
     N = D.N
     mom = _bridge_stage!(() -> _bridge_moments(D), timings, "transform")
     keep, N1 = mom.keep, mom.n
@@ -319,12 +407,15 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
     end
     v1 = Vector{Float64}(undef, N)
     ppb = ProgressBar("bridge posterior"; total = N, enabled = show_progress)
+    # The posterior is the FOLDED one where the target has cyclic inclinations
+    # (`_bridge_folded`): `fc` per draw, which `_bridge_draw!` put in [0, π].
+    fc = _bridge_fold_logc(D)
     _bridge_stage!(timings, "posterior_evals") do
         if jlp === nothing
             _bridge_eval!(v1; progress = _SharedProgress(ppb)) do c, i
                 keep[i] || return NaN
                 y = _bridge_draw!(ys[c], D, i)
-                _bridge_logdensity!(evs[c], y) - _bridge_logq!(zs[c], lq, y)
+                _bridge_logdensity!(evs[c], y) + fc - _bridge_logq!(zs[c], lq, y)
             end
         else
             pt = target.transform
@@ -333,7 +424,7 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
                 keep[i] || return NaN
                 y = _bridge_draw!(ys[c], D, i)
                 lj = pt === nothing ? 0.0 : Float64(transform_logabsdetjac_inv(y, pt))
-                _bridge_value(D, j, i) + lj - _bridge_logq!(zs[c], lq, y)
+                _bridge_value(D, j, i) + lj + fc - _bridge_logq!(zs[c], lq, y)
             end
         end
     end
@@ -348,7 +439,8 @@ function _bridge_ratios(target::NereusTarget, chains::MCMCChains.Chains,
     qpb = ProgressBar("bridge proposal"; total = n_proposal, enabled = show_progress)
     _bridge_stage!(timings, "proposal_evals") do
         _bridge_eval!(v2; progress = _SharedProgress(qpb)) do c, i
-            _bridge_logdensity!(evs[c], @view Yp[:, i])
+            y = @view Yp[:, i]
+            _bridge_folded(D, y) ? _bridge_logdensity!(evs[c], y) + fc : -Inf
         end
     end
     finish!(qpb)
@@ -398,7 +490,9 @@ iterations of chain 1, then of chain 2, and so on. `_bridge_draw!` gathers one
 into a buffer and maps it to the target's unconstrained space when `pt` is a
 transform, with `transform_forward!` -- the same numbers the `d × N` matrix
 this replaces held. `lp` is the variable index of the chain's `:lp`, or
-`nothing`.
+`nothing`. `cinc` are the positions of the cyclic inclinations, which
+`_bridge_draw!` folds to `[0, π]`, and `sc` the stellar spin flip
+([`spin_canon`](@ref)) it puts each draw through (see `_bridge_folded`).
 """
 struct _BridgeDraws{A<:AbstractArray, T}
     data::A
@@ -407,9 +501,12 @@ struct _BridgeDraws{A<:AbstractArray, T}
     pt::T
     n_iter::Int
     N::Int
+    cinc::Vector{Int}
+    sc::Union{Nothing, SpinCanon}
 end
 
-function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt)
+function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt; cinc = Int[],
+                      sc::Union{Nothing, SpinCanon} = nothing)
     data = chains.value.data
     vars = Base.names(chains)
     cols = Int[]
@@ -420,21 +517,60 @@ function _BridgeDraws(chains::MCMCChains.Chains, pnames, pt)
     end
     n_iter = size(data, 1)
     return _BridgeDraws(data, cols, findfirst(==(:lp), vars), pt, n_iter,
-                        n_iter * size(data, 3))
+                        n_iter * size(data, 3), collect(Int, cinc), sc)
 end
 
 """
     _bridge_draw!(y, D, i) -> y
 
-Draw `i` of `D` in the target's space, written into `y`.
+Draw `i` of `D` in the target's space, written into `y`, its cyclic
+inclinations folded to `[0, π]`.
 """
 @inline function _bridge_draw!(y::Vector{Float64}, D::_BridgeDraws, i::Int)
     ch, it = divrem(i - 1, D.n_iter)
     @inbounds for j in eachindex(D.cols)
         y[j] = Float64(D.data[it + 1, D.cols[j], ch + 1])
     end
+    @inbounds for j in D.cinc
+        y[j] = fold_inclination(y[j])
+    end
+    spin_canon!(y, D.sc)
     D.pt === nothing || transform_forward!(y, y, D.pt)
     return y
+end
+
+# A cyclic inclination (src/circular.jl) is sampled on a circle, density
+# |sin x|/4 under p*, where x and -x are one orbit. The posterior draws come
+# folded to [0, π] (`_bridge_draw!`), so they sample the FOLDED posterior:
+# density 2·p* on [0, π] -- sin(i)/2 times the likelihood, the prior the user
+# wrote -- and none outside. That is the density bridged here, normalised to
+# the same Z. With p* itself, [0, π] holds only half of Z per cyclic
+# inclination (log Z low by log 2 each), and a proposal draw past 0 or π would
+# count mirror mass the posterior side never sampled. The transform is the
+# identity on these coordinates (`build_transform`), so y = x there. The
+# stellar spin flip (`spin_flip`) is one more such fold: each draw is put on
+# the positive side of the spin axis, the density there is doubled again, and
+# a proposal on the other side counts for nothing.
+"""
+    _bridge_fold_logc(D) -> Float64
+
+`log 2` per cyclic inclination of `D`, and one more under the spin flip:
+the folded posterior's density over p*'s where it has its mass.
+"""
+_bridge_fold_logc(D::_BridgeDraws) = n_folds(D.sc, D.cinc) * log(2.0)
+
+"""
+    _bridge_folded(D, y) -> Bool
+
+Whether every cyclic inclination of the point `y` lies in `[0, π]` and its
+spin on the reported side (`spin_canon_ok`), where the folded posterior has
+its mass.
+"""
+@inline function _bridge_folded(D::_BridgeDraws, y::AbstractVector)
+    @inbounds for j in D.cinc
+        0 <= y[j] <= π || return false
+    end
+    return spin_canon_ok(y, D.sc, D.pt)
 end
 
 """

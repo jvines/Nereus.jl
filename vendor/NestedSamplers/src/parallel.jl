@@ -13,9 +13,14 @@
 # evidence with the exact same PR#80 trapezoidal bookkeeping as `step`, applied
 # K times — so `batch_size = 1` reproduces the serial sampler bit-for-bit.
 #
-# Correctness: the only approximation is that the K replacements are drawn above
-# L_(K) rather than each above its own advancing threshold; the resulting log Z
-# bias is O(K/N) and vanishes for K << nactive. Verified against analytic Z.
+# Correctness: removing the K lowest of N points uniform in the prior volume X
+# below L*, the j-th of them is the lowest of the N - j + 1 left once the j - 1
+# below it are gone, so its volume is the previous one shrunk as by N - j + 1
+# live points, and the K replacements drawn uniformly above L_(K) leave N points
+# uniform in X_(K) again. Batch NS is exact with that count. It used to shrink
+# each by N, as `step` does when every removal is replaced before the next:
+# that credits K(K-1)/(2N^2) too little shrinkage per batch, and log Z came out
+# about (K - 1) H / (2N) high, H the information.
 #
 # Threading is gated by `parallel`: set `parallel = false` under juliacall /
 # the Python GIL (where Julia threads can deadlock); a pure-Julia daemon runs
@@ -29,8 +34,8 @@ lowest-likelihood live points per iteration, with the K constrained walks run
 concurrently (`Threads.@threads :static`) when `parallel = true`. `batch_size =
 1` is identical to the serial sampler. Returns `(chain::Chains, state)`.
 
-Keep `batch_size << nactive` (e.g. ≤ nthreads, with nactive ≥ ~20·batch_size)
-to keep the O(K/N) evidence bias well inside `logzerr`.
+The K dead points of a batch are credited the volume the K lowest of `nactive`
+points take, so the evidence carries no bias from the batch size.
 
 `callback`, if given, is called as AbstractMCMC calls it in the serial sampler,
 `callback(rng, model, sampler, sample, state, i)`: once after the bootstrap step
@@ -92,8 +97,9 @@ sample_parallel(model::AbstractModel, sampler::Nested; kwargs...) =
     sample_parallel(Random.GLOBAL_RNG, model, sampler; kwargs...)
 
 # One batch iteration: remove the K lowest-L points, draw K replacements above
-# L_(K) (parallel), and fold the K dead points into the evidence with the exact
-# `step` bookkeeping applied K times. K=1 ⇒ identical to the recursive `step`.
+# L_(K) (parallel), and fold the K dead points into the evidence with `step`'s
+# bookkeeping, the j-th shrinking the volume as N - j + 1 live points do (see
+# the header). K=1 ⇒ identical to the recursive `step`.
 function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, parallel::Bool)
     N = sampler.nactive
     pointvol = exp(state.logvol) / N
@@ -101,10 +107,10 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
     # --- bounds update (mirror step.jl) ---
     if !state.has_bounds && state.ncall > sampler.min_ncall &&
        state.it / state.ncall < sampler.min_eff
-        active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us; pointvol=pointvol), sampler.enlarge)
+        active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
         since_update = 0; has_bounds = true
-    elseif state.has_bounds && iszero(state.since_update % sampler.update_interval)
-        active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, state.us; pointvol=pointvol), sampler.enlarge)
+    elseif state.has_bounds && state.since_update >= sampler.update_interval  # see step.jl
+        active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
         since_update = 0; has_bounds = true
     else
         active_bound = state.active_bound
@@ -116,18 +122,43 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
     order = partialsortperm(state.logl, 1:K)
     Lstar = state.logl[order[K]]
 
+    # --- where the K walks start, chosen here, serially ---
+    # A start outside the bound refits the bound, the refit is kept, as `step`
+    # keeps it, and the start stays. Each walk used to refit for itself alone
+    # and draw another start, which chose the live points outside the bound
+    # less often than the rest for as long as that bound lasted; when it
+    # lasted the whole run, log Z came out 1.5-2.7 below pt_emcee's on an RM
+    # obliquity fit. The walks start at live points above the threshold L_(K)
+    # (`start_index`), not at the K dead points at or below it.
+    starts = Vector{Any}(undef, K)
+    if has_bounds
+        for j in 1:K
+            point = state.us[:, start_index(rng, state.logl, Lstar)]
+            bound = Bounds.bound_containing(rng, active_bound, point)
+            if isnothing(bound)
+                active_bound = fit_bounds(rng, sampler, sampler.bounds, state.us, pointvol)
+                since_update = 0
+                bound = Bounds.bound_containing(rng, active_bound, point)
+            end
+            if isnothing(bound)
+                bound = fit_bounds(rng, sampler, Bounds.Ellipsoid, state.us, pointvol)
+            end
+            starts[j] = (point, proposal_bound(sampler.proposal, active_bound, bound))  # see step.jl
+        end
+    end
+
     # --- draw K replacements above Lstar (concurrent constrained walks) ---
     reps = Vector{Tuple{Vector{Float64},Any,Float64,Int}}(undef, K)
     if parallel && K > 1
         Threads.@threads :static for j in 1:K
             tid = Threads.threadid()
             reps[j] = _draw_replacement(rngs[tid], props[tid], sampler, model,
-                                         active_bound, has_bounds, Lstar, state.us, pointvol)
+                                         has_bounds ? starts[j] : nothing, Lstar, state.us, pointvol)
         end
     else
         for j in 1:K
             reps[j] = _draw_replacement(rng, props[1], sampler, model,
-                                         active_bound, has_bounds, Lstar, state.us, pointvol)
+                                         has_bounds ? starts[j] : nothing, Lstar, state.us, pointvol)
         end
     end
 
@@ -140,8 +171,10 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
         ldead = state.logl[idx]
         u_dead = state.us[:, idx]; v_dead = state.vs[:, idx]
 
-        logvol  -= sampler.dlv
-        logdvol  = logvol - log(N) - log(2)
+        n_j      = N - j + 1                 # live points this one is the lowest of
+        dlv      = log(n_j + 1) - log(n_j)   # sampler.dlv for j = 1
+        logvol  -= dlv
+        logdvol  = logvol - log(n_j) - log(2)
         logwt    = logaddexp(prev_ld, ldead) + logdvol
         logz_new = logaddexp(logz, logwt)
         # Stable information update (mirrors step.jl): logz only inside differences,
@@ -151,12 +184,13 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
         lbar     = exp(prev_ld - logwt + logdvol) * prev_ld +
                    exp(ldead   - logwt + logdvol) * ldead
         h_new    = a * h + xlogx(a) + b * (lbar - logz_new)
-        logzerr  = sqrt(max(zero(h_new), logzerr^2 + (h_new - h) * sampler.dlv))
+        logzerr  = sqrt(max(zero(h_new), logzerr^2 + (h_new - h) * dlv))
 
         batch[j] = (u = u_dead, v = v_dead, logwt = logwt, logl = ldead)
 
         u, v, ll, nc = reps[j]
         state.us[:, idx] .= u; state.vs[:, idx] .= v; state.logl[idx] = ll
+        trace_remove!(state.trace, ldead, idx, Lstar)
         ncall += nc; since_update += nc
         prev_ld = ldead; logz = logz_new; h = h_new
     end
@@ -165,24 +199,23 @@ function step_batch(rng, rngs, props, model, sampler::Nested, state, K::Int, par
                  logl = state.logl, logl_dead = prev_ld, logz = logz,
                  logzerr = logzerr, h = h, logvol = logvol,
                  since_update = since_update, has_bounds = has_bounds,
-                 active_bound = active_bound)
+                 active_bound = active_bound, trace = state.trace)
     return batch, new_state
 end
 
-# Draw one new point with L > Lstar via the sampler's proposal (bounded path
-# mirrors step.jl, including the live-point/ellipsoid fallbacks).
-function _draw_replacement(rng, proposal, sampler, model, active_bound, has_bounds, Lstar, us, pointvol)
-    if has_bounds
-        point, bound = rand_live(rng, active_bound, us)
-        if isnothing(bound)
-            active_bound = Bounds.scale!(Bounds.fit(sampler.bounds, us; pointvol=pointvol), sampler.enlarge)
-            point, bound = rand_live(rng, active_bound, us)
+# Draw one new point with L ≥ Lstar via the sampler's proposal, from the start
+# point and bound chosen in `step_batch`; uniform rejection from the cube before
+# the first bound (`start === nothing`).
+function _draw_replacement(rng, proposal, sampler, model, start, Lstar, us, pointvol)
+    if start !== nothing
+        point, bound = start
+        if proposal isa Proposals.Rejection
+            # refits during the search (see step.jl) stay with this draw
+            u, v, logl, nc = draw_uniform(rng, sampler, proposal, Lstar, bound, model, us,
+                                          pointvol, 0)
+        else
+            u, v, logl, nc = proposal(rng, point, Lstar, bound, model)
         end
-        if isnothing(bound)
-            bound = Bounds.scale!(Bounds.fit(Bounds.Ellipsoid, us; pointvol=pointvol), sampler.enlarge)
-            point = rand_live(rng, bound, us)[1]
-        end
-        u, v, logl, nc = proposal(rng, point, Lstar, bound, model)
     else
         point = rand(rng, eltype(us), sampler.ndims)
         bound = Bounds.fit(Bounds.NoBounds, us)

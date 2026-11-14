@@ -24,7 +24,41 @@ struct NereusTarget{T}
     transform::T   # PackedTransforms or Nothing
 end
 
+"""
+    with_phic_epoch(params, data) -> Params
+
+`params` with the epoch the transit phase φ_c is measured from taken from
+`data` ([`phic_reference_epoch`](@ref)), when it was built without data and
+still has none. Otherwise `params` itself. Layout and priors are untouched.
+"""
+function with_phic_epoch(params::Params, data::Data)
+    c = params.config
+    pc = c.parametrization
+    (pc.time === :phic && isnan(pc.t_ref_c) && c.max_kplanet > 0) || return params
+    cfg = ParamsConfig(c.max_kplanet, _with_t_ref_c(pc, phic_reference_epoch(data)),
+                       c.planet_modes, c.instruments, c.priors, c.trend_order,
+                       c.phot_trend_order, c.noise_models, c.stability, c.M_s, c.R_s,
+                       c.external_priors, c.sharing, c.ttv_n_transits,
+                       c.ttv_backend, c.obliquity)
+    return Params(cfg, params.layout)
+end
+
+"""
+    without_density_reparam(target) -> NereusTarget
+
+`target` on the same model sampled in ρ★ and (e, ω) (`density = :rho_star`), for
+an engine that cannot run the photo-eccentric reparametrization: the
+trans-dimensional samplers, whose prior skips inactive planets slot by slot, and
+ESS. `target` itself when it has none.
+"""
+function without_density_reparam(target::NereusTarget)
+    density_active(target.params) || return target
+    return NereusTarget(without_density_reparam(target.params, target.data), target.data;
+                        unconstrained = target.transform !== nothing)
+end
+
 function NereusTarget(params::Params, data::Data; unconstrained::Bool=true)
+    params = with_phic_epoch(params, data)
     if unconstrained
         t = build_transform(params)
         return NereusTarget(params, data, t)
@@ -387,6 +421,23 @@ function EnzymeGradientConfig(target::NereusTarget{PackedTransforms})
         copy(pp.lowers), copy(pp.uppers), copy(pp.params),
         copy(pt.lowers), copy(pt.uppers),
     )
+end
+
+# Take the arrays the restore fallback puts back afresh from `target`, after a
+# circular window moved (`set_circular_window!`); the copies taken when `cfg`
+# was built would otherwise put the old bounds back after the next gradient.
+# Only while no chain sharing `target` evaluates it: during a gradient the
+# fallback's arrays may stand zeroed. The HMC seam re-cut calls it from its
+# leader, every chain waiting (`_hmc_recut_windows!`).
+function _enzyme_resync!(cfg::EnzymeGradientConfig, target::NereusTarget{PackedTransforms})
+    pp = target.params.layout.packed_priors
+    pt = target.transform
+    cfg.pp_lowers .= pp.lowers
+    cfg.pp_uppers .= pp.uppers
+    cfg.pp_params .= pp.params
+    cfg.pt_lowers .= pt.lowers
+    cfg.pt_uppers .= pt.uppers
+    return cfg
 end
 
 """

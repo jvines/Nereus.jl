@@ -38,7 +38,9 @@ using Random
     )
     th = Nereus.Theta{Float64}(target.params)
     truth = Dict("P_k1" => P0, "Tc_k1" => T0, "b_k1" => 0.3, "rr_k1" => 0.078)
-    for nm in target.params.layout.unfrozen_names
+    # Sampled then derived: under density = :rho_circ the e-coordinates are
+    # derived from ρ_circ and η, and writing them (a circular orbit) sets those.
+    for nm in Nereus.reported_param_names(target.params)
         Nereus.set_param!(th, nm, get(truth, nm, 0.0))
     end
 

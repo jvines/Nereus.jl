@@ -120,3 +120,38 @@ end
     @test err isa ArgumentError && occursin("n_pilot", err.msg)
     @test_throws ArgumentError _ph_run(40; checkpoint = pf, resume = true)  # ladder
 end
+
+@testset "pt_hmc: the warm-up re-cuts a seam on the posterior" begin
+    # Every chain starts at the true orbit but Mo = π, half a turn from the
+    # posterior, which straddles the window's seam at 0 = 2π. The warm-ups
+    # reach it and stand against the two walls the logit chart cannot cross,
+    # until the re-cut after iteration 75, voted by the β = 1 rung
+    # (`_hmc_recut!`), moves the seam off them. Without the re-cut the cold
+    # chain keeps to a wall.
+    function run_core(recut::Bool)
+        tg = NereusTarget(_ph_target().params, _ph_target().data; unconstrained = true)
+        L = tg.params.layout
+        truth = Dict("P_k1" => 4.23, "K_k1" => 40.0, "Mo_k1" => float(π))
+        x0 = map(L.unfrozen_names, L.unfrozen_priors) do nm, ps
+            lo, hi = Nereus.bounds(ps)
+            get(truth, nm, isfinite(lo) && isfinite(hi) ? (lo + hi) / 2 : 0.0)
+        end
+        y0 = Nereus.transform_forward(x0, tg.transform)
+        res = Nereus._pt_hmc_core(y -> Nereus._logdensity_parts(tg, y), length(y0),
+            [copy(y0) for _ in 1:4], [0.0, 0.2, 0.5, 1.0];
+            n_sweeps = 100, n_warmup = 200, swap_interval = 1, target_accept = 0.8,
+            W = 1, progress = false, rng = MersenneTwister(3),
+            recut = recut ? (; params = tg.params, transform = tg.transform) : nothing)
+        lo, hi = Nereus.circular_windows(tg.params)["Mo_k1"]
+        iMo = findfirst(==("Mo_k1"), L.unfrozen_names)
+        Mo = [Nereus.transform_inverse(y, tg.transform)[iMo] for y in res.cold_ys]
+        walls = count(x -> x - lo < deg2rad(0.5) || hi - x < deg2rad(0.5), Mo)
+        return (; lo, walls, n = length(Mo))
+    end
+    with = run_core(true)
+    @test with.lo != 0.0          # moved
+    @test with.walls == 0         # and no cold draw at a wall
+    without = run_core(false)
+    @test without.lo == 0.0
+    @test without.walls > 0.1 * without.n
+end

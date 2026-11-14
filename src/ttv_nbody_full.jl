@@ -97,13 +97,11 @@ function _apply_ttv_nb_full!(state, theta::Theta{T}, p_idx,
         # The time of mid-transit (it was Tp + P/4, right only for a circular
         # orbit with ω = 0; see `_apply_ttv_nb!`).
         Tc1 = tp_to_tc(Tp, P, e, w)
-        # Mass ratio from K, inc.
-        K = Float64(ForwardDiff_value(planet_K(theta, k)))
-        b = Float64(ForwardDiff_value(bs[j]))
-        aR = Float64(ForwardDiff_value(a_Rs[j]))
-        inc_rad = acos(b / aR)
-        mp_mjup = msini(M_s_f, K, P, e) / sin(inc_rad)
-        mp_msun = mp_mjup * _MJ_PER_MS_NBG
+        # True mass from the exact mass function at the transit's sin i,
+        # solved together with a/R★ (`planet_geometry`): q = M_p / M★.
+        _, q_mass, cos_i = planet_geometry(theta, k, P)
+        inc_rad = acos(Float64(ForwardDiff_value(cos_i)))
+        mp_msun = Float64(ForwardDiff_value(q_mass)) * M_s_f
 
         elems[q+1, 1] = mp_msun
         elems[q+1, 2] = P

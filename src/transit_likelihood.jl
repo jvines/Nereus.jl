@@ -606,10 +606,6 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     gd_on   = any_gd ? fill(false, n_transit) : Bool[]
     gd_lams = any_gd ? zeros(T, n_transit)    : T[]
 
-    # Get a/R* from rho_s or per-planet
-    use_rho = parametrization.use_rho_s
-    rho_val = use_rho ? rho_s(theta) : zero(T)
-
     j = 0
     for k in p_idx
         block = theta.params.layout.planet_blocks[k]
@@ -637,24 +633,11 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
             rrs[j] = rr_raw
         end
 
-        # a/R* from rho_s or from M_s + R_s via Kepler's third law
-        if (ai = a_Rs_slot(theta, k)) > 0
-            a_Rs[j] = theta.values[ai]
-        elseif use_rho
-            a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
-        else
-            M_s = theta.params.config.M_s
-            R_s = theta.params.config.R_s
-            if !isnan(M_s) && !isnan(R_s) && R_s > 0
-                # a/R* = (G M_s P² / 4π²)^(1/3) / R_s
-                P_s = Ps[j] * T(86400.0)
-                GM = T(GM_SUN_CGS) * M_s  # GM_sun * M_s [cm³/s²]
-                a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-                a_Rs[j] = a_cm / (R_s * T(R_SUN_CM))
-            else
-                # No stellar params available — cannot compute transit geometry
-                return zero(T)
-            end
+        # a/R* with the companion's mass in Kepler III (M_star + M_p), from the
+        # sampled slot, rho_s, or (M_s, R_s): see `planet_geometry`.
+        a_Rs[j] = planet_a_Rs(theta, k, Ps[j])
+        if isnan(a_Rs[j])
+            return zero(T)
         end
 
         # Geometry gate: planet transits if b < 1 + rr
@@ -1070,9 +1053,6 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     gd_on   = any_gd ? fill(false, n_transit) : Bool[]
     gd_lams = any_gd ? zeros(T, n_transit)    : T[]
 
-    use_rho = parametrization.use_rho_s
-    rho_val = use_rho ? rho_s(theta) : zero(T)
-
     j = 0
     for k in p_idx
         block = theta.params.layout.planet_blocks[k]
@@ -1092,21 +1072,11 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
             bs[j]  = b_raw
             rrs[j] = rr_raw
         end
-        if (ai = a_Rs_slot(theta, k)) > 0
-            a_Rs[j] = theta.values[ai]
-        elseif use_rho
-            a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
-        else
-            M_s = theta.params.config.M_s
-            R_s = theta.params.config.R_s
-            if !isnan(M_s) && !isnan(R_s) && R_s > 0
-                P_s = Ps[j] * T(86400.0)
-                GM = T(GM_SUN_CGS) * M_s
-                a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-                a_Rs[j] = a_cm / (R_s * T(R_SUN_CM))
-            else
-                a_Rs[j] = zero(T)
-            end
+        # a/R* with the companion's mass in Kepler III (M_star + M_p), from the
+        # sampled slot, rho_s, or (M_s, R_s): see `planet_geometry`.
+        a_Rs[j] = planet_a_Rs(theta, k, Ps[j])
+        if isnan(a_Rs[j])
+            a_Rs[j] = zero(T)
         end
         transits[j] = bs[j] < 1 + rrs[j]
         if any_gd && has_gd(theta.params.config.planet_modes[k])
@@ -1404,9 +1374,6 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     gd_rows = any(has_gd(m) for m in theta.params.config.planet_modes) ?
         (on = fill(false, n_transit), λs = zeros(T, n_transit)) : nothing
 
-    use_rho = parametrization.use_rho_s
-    rho_val = use_rho ? rho_s(theta) : zero(T)
-
     j = 0
     for k in p_idx
         block = theta.params.layout.planet_blocks[k]
@@ -1431,21 +1398,11 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
             rrs[j] = rr_raw
         end
 
-        if (ai = a_Rs_slot(theta, k)) > 0
-            a_Rs[j] = theta.values[ai]
-        elseif use_rho
-            a_Rs[j] = rho_s_to_a_Rs(rho_val, Ps[j])
-        else
-            M_s = theta.params.config.M_s
-            R_s = theta.params.config.R_s
-            if !isnan(M_s) && !isnan(R_s) && R_s > 0
-                P_s = Ps[j] * T(86400.0)
-                GM = T(GM_SUN_CGS) * M_s
-                a_cm = cbrt(GM * P_s^2 / (4 * T(π)^2))
-                a_Rs[j] = a_cm / (R_s * T(R_SUN_CM))
-            else
-                return zero(T)
-            end
+        # a/R* with the companion's mass in Kepler III (M_star + M_p), from the
+        # sampled slot, rho_s, or (M_s, R_s): see `planet_geometry`.
+        a_Rs[j] = planet_a_Rs(theta, k, Ps[j])
+        if isnan(a_Rs[j])
+            return zero(T)
         end
 
         transits[j] = bs[j] < 1 + rrs[j]

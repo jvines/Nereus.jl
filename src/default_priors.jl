@@ -80,8 +80,13 @@ the data and model configuration. Follows EMPEROR conventions.
 
 The user can override any prior by passing it in the `priors` kwarg
 to `Params()`.
+
+With an astrometric planet the default `plx` prior is a Gaussian truncated at
+±10σ around, in order of preference: `gaia_plx` (a `(plx, plx_err)` NamedTuple,
+e.g. from [`fetch_gaia_parallax`](@ref)), the HGCA catalogue parallax, the G23H
+catalogue parallax; with none of them, `LogUniform(0.1, 1000)` mas.
 """
-function default_priors(config::ParamsConfig, data::Data)
+function default_priors(config::ParamsConfig, data::Data; gaia_plx = nothing)
     dic = Dict{String, PriorSpec}()
     parametrization = config.parametrization
     instruments = config.instruments
@@ -317,6 +322,31 @@ function default_priors(config::ParamsConfig, data::Data)
         dic["sigma_as_$label"] = ModJeffreysPrior(knee, 10 * knee)
     end
 
+    # --- Intermediate-astrometry jitter (per instrument, opt-in) ---
+    # The same prior as `sigma_as_*` and for the same reason: "mas" is not a
+    # scale. A Gaia DR4 per-CCD abscissa error is ~0.05-0.2 mas and a
+    # Hipparcos one ~1-5 mas, so a fixed prior in mas would be informative for
+    # one mission and vacuous for the other. Knee at the instrument's median
+    # reported error: flat below it, where "the quoted errors are right" lives
+    # (zero included -- a jitter at zero is a result, not a failure), Jeffreys
+    # above it for a genuinely underestimated budget. The cap at 10x the median
+    # error is well above the excess seen in real DR4 data: HD 114762 wants
+    # 2.9x (0.36 mas) with its outlier transits left in, 0.5x once they are
+    # clipped. The cap does NOT stop a jitter from absorbing a reflex: a jitter
+    # of order the reflex amplitude is a second, noise-instead-of-orbit mode,
+    # and on HD 114762 RV + DR4 (1.9 mas reflex) pt_emcee's prior-drawn walkers
+    # settled in it, 500-970 nats below the orbit, with a 5x cap as with 10x.
+    # What keeps them out is in the samplers, not here: the PT ensembles hold
+    # every `sigma_iad_*` at 0 for at least half of burn-in (`burnin_hold`,
+    # src/samplers/burnin_hold.jl). Override through `priors` like any other.
+    for (m, label) in enumerate(instruments.iad_names)
+        isempty(label) && continue
+        errs = (data.iad !== nothing && m <= n_iad_inst(data.iad)) ?
+               data.iad.abscissa_err[data.iad.inst .== m] : Float64[]
+        knee = isempty(errs) ? 1.0 : max(median(errs), 1e-3)
+        dic["sigma_iad_$label"] = ModJeffreysPrior(knee, 10 * knee)
+    end
+
     # --- PM instrumental (sharing-aware) ---
     for (label, _) in _instrument_groups(instruments.pm_names,
                                           get(sh, :pm_offset, nothing))
@@ -349,14 +379,23 @@ function default_priors(config::ParamsConfig, data::Data)
     # --- Astrometry: parallax (mas) and primary mass (M_sun) ---
     # If any planet has AS as a data source, we have `plx` and `M_pri`
     # slots in the layout. The default plx prior is Gaussian centered
-    # on the HGCA parallax. The default M_pri prior is a FixedPrior at
+    # on the Gaia DR3 / HGCA / G23H parallax. The default M_pri prior is a FixedPrior at
     # config.M_s (back-compat with the pre-sampling-M_pri code); the
     # user passes a NormalPrior to enable propagation of stellar-mass
     # uncertainty into the companion mass.
     if any(AS_SOURCE in m for m in config.planet_modes)
-        if data.hgca !== nothing
-            σ = max(data.hgca.plx_err, 1e-3)
-            μ = data.hgca.plx
+        plx_ref = if gaia_plx !== nothing
+            (gaia_plx.plx, gaia_plx.plx_err)
+        elseif data.hgca !== nothing
+            (data.hgca.plx, data.hgca.plx_err)
+        elseif data.g23h !== nothing
+            (data.g23h.plx, data.g23h.plx_err)
+        else
+            nothing
+        end
+        if plx_ref !== nothing
+            μ = plx_ref[1]
+            σ = max(plx_ref[2], 1e-3)
             lo = max(0.001, μ - 10 * σ)
             hi = μ + 10 * σ
             dic["plx"] = NormalPrior(μ, σ, lo, hi)
@@ -452,17 +491,19 @@ function default_priors(config::ParamsConfig, data::Data)
         # weakly-informative choice here; use cos-uniform explicitly if an
         # isotropic population prior is wanted.
         #
-        # The RANGE depends on what else is in the fit. Darkening alone cannot
-        # tell a spin vector from its reverse -- (i_star, lambda) and
-        # (pi - i_star, lambda + pi) are one light curve -- so [0, pi/2] already
-        # holds every solution once and [0, pi] would hold each twice. RM
-        # velocities or a tomogram measure the SENSE of rotation and pin lambda,
-        # which leaves i_star > pi/2 as a different star rather than a relabelling:
-        # stopping at pi/2 then drops half of the orientations.
+        # The RANGE is the whole of [0, pi], with or without a measurement of
+        # the sense of rotation. Darkening alone cannot tell a spin vector from
+        # its reverse -- (i_star, lambda) and (pi - i_star, lambda + pi) are one
+        # light curve -- and a range stopping at pi/2 to hold each solution once
+        # put a wall at i_star = 90 deg: an equator-on star railed against it,
+        # and its posterior split into two lambda lobes pi apart with nothing to
+        # carry walkers between them. On [0, pi] i_star is a polar angle
+        # (`polar_lift`), and the draws are put in one representative of the
+        # spin by `spin_flip` (src/circular.jl). RM velocities or a tomogram
+        # measure the sense and pin lambda, which leaves i_star > pi/2 a
+        # different star, not a relabelling.
         if any(has_gd(m) for m in config.planet_modes)
-            sense_known = any(has_any_rm(m) for m in config.planet_modes) ||
-                          !isempty(data.tomo)
-            dic["i_star"] = UniformPrior(0.0, sense_known ? pi : pi / 2)
+            dic["i_star"] = UniformPrior(0.0, pi)
         end
         # The per-band `gd_beta_<INST>` defaults are set in `_build_layout`,
         # where the photometric instrument names are known. Bolometric (0.25)

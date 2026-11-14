@@ -61,6 +61,16 @@ Run a standalone RJMCMC sampler for trans-dimensional inference.
 - `seed::Int=1` — base random seed; chain `c` uses `seed + 1000*(c-1)`
 - `initial_scale::Float64=0.01` — initial Gaussian proposal scale
 - `target_accept::Float64=0.234` — target acceptance rate for within-model
+- `n_scouts::Int=16` — with a fixed set of planets (`td.planets = false`),
+  each chain starts from the best-supported of this many prior draws rather
+  than from one: every draw is moved by slice updates until it stops
+  climbing, those stranded where the posterior cannot carry mass are dropped
+  by the bound of the stranded-walker pruning, and the chain starts at one of
+  the rest, picked at random (src/samplers/scouts.jl). A chain started at one
+  draw that fell outside a narrow mode's basin stayed on a plateau tens of
+  thousands of nats below it for the whole run. `0` starts from one draw.
+  With planet births on the chain starts without planets, and the births
+  search for them.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (per chain: the position and trans-dim masks, the RNG, the
   slice widths, the RWM scales and their counters, the likelihood caches, the
@@ -108,12 +118,18 @@ function sample_rjmcmc(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    n_scouts::Int = 16,
 )
+    # The trans-dimensional prior skips inactive planets slot by slot, which the
+    # photo-eccentric reparametrization (src/density.jl) does not decompose
+    # into: this sampler runs the same model in ρ★ and (e, ω).
+    target = without_density_reparam(target)
     initial_scale = Float64(initial_scale)   # JSON may deliver Ints
     target_accept = Float64(target_accept)
     within_model in (:slice, :rwm) ||
         throw(ArgumentError("within_model must be :slice or :rwm (got :$within_model)"))
     n_chains >= 1 || throw(ArgumentError("n_chains must be ≥ 1"))
+    n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     noise_swap_rate = Float64(noise_swap_rate)
     0.0 <= noise_swap_rate <= 1.0 ||
         throw(ArgumentError("noise_swap_rate must be in [0, 1]"))
@@ -141,8 +157,12 @@ function sample_rjmcmc(
     per_chain_samples = n_chains == 1 ? n_samples : max(1, cld(n_samples, n_chains))
     ck = nothing
     if ck_path !== nothing
+        # `n_scouts` only when not the default: a chain with no saved slot
+        # restarts from its seed, through the same start.
         ck_fp = run_fingerprint(target.params, data; n_warmup, seed, n_chains,
-                                within_model, noise_swap_rate, _td_fingerprint(td)...)
+                                within_model, noise_swap_rate, _td_fingerprint(td)...,
+                                polar_chart_key(target.params)...,
+                                (n_scouts == 16 ? (;) : (; n_scouts))...)
         saved = resume ? read_checkpoint(ck_path, "rjmcmc", ck_fp).chains::Vector{Any} :
                          Any[nothing for _ in 1:n_chains]
         for st in saved
@@ -167,25 +187,29 @@ function sample_rjmcmc(
                                    progress_every=progress_every,
                                    ck=ck, chain=1,
                                    checkpoint_interval=checkpoint_interval,
-                                   stop_at=stop_at)
+                                   stop_at=stop_at, n_scouts=n_scouts)
     end
     # Multi-chain: spawn n_chains independent chains. Total samples is
     # divided across chains; each chain runs full warmup independently
     # (warmup is per-chain to give each its own adapted proposal scale).
     #
-    # No warmup re-cut of circular angles here. The chains run concurrently
-    # over ONE shared Params, with no point at which they all stand still: a
-    # chain that moved a window at the end of its own warmup would move it
-    # under the others mid-sweep, and their states would be outside the new
-    # support (-Inf) on the next evaluation. run_job / fit_* re-cut the
-    # returned draws, which is what the summaries read.
+    # The circular seams are re-cut at the end of warmup as with one chain,
+    # from the pooled warmup draws of every chain: the chains share ONE Params,
+    # so the re-cut is taken at a rendezvous (src/circular.jl) where each has
+    # stopped at its own iteration `n_warmup` and none is evaluating the
+    # target. A resume in which some chain is already past that point takes
+    # the windows it saved (the re-cut ones) for every chain, before any
+    # starts, and re-cuts nothing more: the chains still in warmup are
+    # relabelled into them on restore.
+    rv = _multichain_recut_setup!(target, ck === nothing ? nothing : ck.chains,
+                                  n_chains, n_warmup, td.planets)
     tasks = Vector{Task}(undef, n_chains)
     for c in 1:n_chains
         chain_seed = seed + 1000 * (c - 1)
         # Only the first chain shows the live progress bar; the others
         # would clobber the carriage-return line.
         chain_show_progress = show_progress && (c == 1)
-        tasks[c] = Threads.@spawn _sample_rjmcmc_one(
+        tasks[c] = Threads.@spawn try _sample_rjmcmc_one(
             target, data;
             td = td,
             n_samples = per_chain_samples,
@@ -197,11 +221,16 @@ function sample_rjmcmc(
             noise_swap_rate = noise_swap_rate,
             show_progress = chain_show_progress,
             progress_every = progress_every,
-            recut_circular = false,
+            recut_circular = rv !== nothing, rendezvous = rv,
+            shared_windows = true,
             ck = ck, chain = c,
             checkpoint_interval = checkpoint_interval,
             stop_at = stop_at,
-        )
+            n_scouts = n_scouts,
+        ) finally
+            # Finished or failed: the others are not left waiting for it.
+            rv === nothing || _rendezvous_leave!(rv)
+        end
     end
     results = [fetch(t) for t in tasks]
     # `MCMCChains.chainscat` concatenates along the chain axis so Rhat/
@@ -225,11 +254,14 @@ function _sample_rjmcmc_one(
     noise_swap_rate::Float64 = 0.5,
     show_progress::Bool,
     progress_every::Int,
-    recut_circular::Bool = true,   # false when other chains share `params`
+    recut_circular::Bool = true,   # trace warmup and re-cut the circular seams
+    rendezvous::Union{Nothing,_Rendezvous} = nothing,  # other chains share `params`
+    shared_windows::Bool = false,  # windows restored by the caller (several chains)
     ck::Union{Nothing,_RJCheckpoint} = nothing,   # shared checkpoint file
     chain::Int = 1,                               # this chain's slot in it
     checkpoint_interval::Float64 = 900.0,
     stop_at::Int = 0,                             # _RJMCMC_STOP_AT
+    n_scouts::Int = 16,                           # scouted start (src/samplers/scouts.jl)
 )
     rng = MersenneTwister(seed)
     params = target.params
@@ -270,19 +302,28 @@ function _sample_rjmcmc_one(
     # Likelihood counter
     ctr = LikelihoodCounter()
 
+    # Slice sampling widths (initial stepping-out size per param)
+    widths = _prior_widths(layout)
+
     # Set systemics to random valid values from prior and evaluate the initial
-    # state; a resumed chain takes all of it from the checkpoint instead.
+    # state; a resumed chain takes all of it from the checkpoint instead. With a
+    # fixed set of planets, the start is the best-supported of `n_scouts` prior
+    # draws (src/samplers/scouts.jl): from one, the chain could settle on a
+    # plateau far below a narrow mode and never leave it.
     if saved === nothing
-        _init_systemics_from_prior!(theta, rng)
+        if n_scouts > 0 && !td.planets
+            theta.values .= only(_scout_starts(theta, data, rng, widths;
+                                               draw! = _init_systemics_from_prior!,
+                                               n_scouts, ctr))
+        else
+            _init_systemics_from_prior!(theta, rng)
+        end
         log_pi = log_prior(theta)
         log_L = _eval_ll(theta, data, ctr)
     else
         log_pi = saved.log_pi::Float64
         log_L = saved.log_L::Float64
     end
-
-    # Slice sampling widths (initial stepping-out size per param)
-    widths = _prior_widths(layout)
 
     # Workspace for BOTH ws-aware within-model kernels (:rwm and ws-:slice).
     # It carries the per-planet RV/transit caches + the Fix B total-phot cache,
@@ -364,14 +405,17 @@ function _sample_rjmcmc_one(
             foreach(copy!, circ.draws, saved.circ.draws)
             circ.tick = saved.circ.tick::Int
         end
-        # Windows the saved state lives in (moved by the warmup re-cut). Only
-        # a chain that re-cuts moves them; with several chains the shared
-        # layout is left alone.
-        if recut_circular
-            for (nm, (lo, _)) in saved.windows
-                set_circular_window!(params, findfirst(==(nm), layout.unfrozen_names),
-                                     lo; transforms = (target.transform,))
+        # Windows the saved state lives in (moved by the warmup re-cut). With
+        # several chains `sample_rjmcmc` has already put the shared ones back;
+        # a chain saved before the others re-cut is relabelled into them (same
+        # density, cached values refreshed below).
+        if shared_windows
+            if !isempty(_relabel_into_windows!(theta.values, params, saved.windows))
+                log_pi = log_prior(theta)
+                log_L = _eval_ll(theta, data, ctr)
             end
+        elseif recut_circular
+            _restore_windows!(params, saved.windows, (target.transform,))
         end
         informed === nothing || _informed_restore!(informed, saved.informed, params, rng)
     end
@@ -431,18 +475,23 @@ function _sample_rjmcmc_one(
             end
         end
 
-        if circ !== nothing && circ_from < iter <= n_warmup
+        circ !== nothing && circ_from < iter <= n_warmup &&
             _record_circular_warmup!(circ, theta)
-            if iter == n_warmup
-                moved = _recut_circular_warmup!(circ, params, (theta,);
-                                                transforms = (target.transform,))
-                # Same density in either chart; re-evaluated only so the
-                # cached values are those of the stored point, bit for bit.
-                if !isempty(moved)
-                    log_pi = log_prior(theta)
-                    log_L = _eval_ll(theta, data, ctr)
-                end
-                circ = nothing
+        if iter == n_warmup
+            # Warmup's end: the circular seams moved to the emptiest arc of the
+            # warmup draws (pooled over the chains at their rendezvous when
+            # several share `params`), and every polar angle folded into its
+            # representative.
+            moved = circ === nothing ? () :
+                    _warmup_recut!(circ, params, theta, rendezvous,
+                                   (target.transform,))
+            circ = nothing
+            folded = _fold_polar_slots!(theta.values, params)
+            # Same density in either chart; re-evaluated only so the
+            # cached values are those of the stored point, bit for bit.
+            if !isempty(moved) || folded
+                log_pi = log_prior(theta)
+                log_L = _eval_ll(theta, data, ctr)
             end
         end
 
@@ -528,10 +577,20 @@ end
 """
     _prior_widths(layout) -> Vector{Float64}
 
-Precompute a natural scale for each unfrozen parameter from its prior.
-For log-uniform priors, use a fraction of the log-range (perturbation
-in log-space). For bounded priors, use a fraction of the width.
-This gives sensible initial perturbation magnitudes before adaptation.
+Precompute a natural scale for each unfrozen parameter from its prior: the
+slice sampler's stepping-out width (fixed for the run, so it must not be far
+too small: stepping out grows the bracket by one width at a time, 32 at
+most) and the RWM's starting σ. For bounded priors, the width of the support.
+For a prior flat in `log(x + s)` (`log_scale_shift`: s = 0 for LogUniform, the
+knee for ModJeffreys), a tenth of the geometric mean of `lo + s` and `hi + s`.
+
+A ModJeffreys starts at 0, and its geometric mean used to be taken without
+the knee, of `max(lo, 1e-10)` and `hi`: 1.4e-5 for the default K prior
+ModJeffreys(100, 200). A slice step that size moves K by ~1e-4 per
+iteration, so K stayed at its initial draw (sd 0.008 m/s over 8000
+iterations on an RM fit) and the jitter grew to absorb the orbit it left
+unfitted. Every ModJeffreys parameter (K, astrometric and photometric
+jitters) was frozen the same way in rjmcmc, moms and pt.
 """
 function _prior_widths(layout::ParamsLayout)
     n = length(layout.unfrozen_idx)
@@ -545,10 +604,9 @@ function _prior_widths(layout::ParamsLayout)
         if !isfinite(w) || w ≤ 0
             widths[i] = 1.0
         elseif tid == PACKED_LOGUNIFORM || tid == PACKED_MODJEFFREYS
-            # Log-scale priors: perturb proportional to current value
-            # Use geometric mean of bounds as reference scale
-            mid = sqrt(max(lo, 1e-10) * hi)
-            widths[i] = mid * 0.1  # ~10% of geometric mean
+            s = something(log_scale_shift(layout.unfrozen_priors[i]), 0.0)
+            mid = sqrt(max(lo + s, 1e-10) * (hi + s))
+            widths[i] = mid * 0.1  # ~10% of the geometric mean on its log scale
         else
             widths[i] = w
         end
@@ -1413,7 +1471,8 @@ function _record_circular_warmup!(tr::_CircularWarmupTrace, theta::Theta)
     td = theta.td
     @inbounds for g in eachindex(tr.groups), (j, (_, k)) in enumerate(tr.groups[g])
         if td !== nothing
-            k <= length(td.planet_active) && !td.planet_active[k] && continue
+            # Owner 0 is the star's (i★): always there.
+            1 <= k <= length(td.planet_active) && !td.planet_active[k] && continue
             tr.node[g][j] && !is_as_active(td, k) && continue
         end
         push!(tr.draws[g], Float64(theta.values[tr.slots[g][j]]))
@@ -1456,6 +1515,56 @@ function _recut_circular_warmup!(tr::_CircularWarmupTrace, params::Params, state
         end
     end
     return moved
+end
+
+# Several chains' warmup traces as one: the multi-chain re-cut pools them.
+function _pool_circular_traces(trs)
+    t1 = first(trs)
+    draws = [reduce(vcat, (t.draws[g] for t in trs); init = Float64[])
+             for g in eachindex(t1.groups)]
+    return _CircularWarmupTrace(t1.groups, t1.slots, t1.node, draws, t1.every, t1.tick)
+end
+
+"""
+    _warmup_recut!(tr, params, theta, rv, transforms) -> moved
+
+The end-of-warmup re-cut of one chain's `theta` ([`_recut_circular_warmup!`](@ref)).
+With a rendezvous `rv` (several chains over one `Params`) the chain waits for the
+others; the last to arrive re-cuts from every chain's pooled trace and relabels
+every chain's state, and all of them get the same `moved`.
+"""
+function _warmup_recut!(tr::_CircularWarmupTrace, params::Params, theta::Theta,
+                        rv::Union{Nothing,_Rendezvous}, transforms)
+    rv === nothing && return _recut_circular_warmup!(tr, params, (theta,); transforms)
+    return _rendezvous!(rv, (tr, theta)) do pl
+        _recut_circular_warmup!(_pool_circular_traces([p[1] for p in pl]), params,
+                                [p[2] for p in pl]; transforms)
+    end
+end
+
+"""
+    _multichain_recut_setup!(target, saved, n_chains, n_warmup, permutable)
+        -> Union{Nothing,_Rendezvous}
+
+Before the chains of a multi-chain rjmcmc / moms run start: the rendezvous at
+which they will re-cut the circular seams at the end of warmup, or `nothing`
+when there is nothing to re-cut or no re-cut to do. `saved` holds each chain's
+checkpointed state (`nothing` for a fresh one). When some chain is already past
+warmup, the windows it saved -- the re-cut ones, shared by all -- are put back
+here, before any chain starts, and no further re-cut is made: a chain still in
+warmup could otherwise move them under one that is sampling.
+"""
+function _multichain_recut_setup!(target::NereusTarget, saved, n_chains::Int,
+                                  n_warmup::Int, permutable::Bool)
+    params = target.params
+    isempty(circular_groups(params; permutable)) && return nothing
+    st = saved === nothing ? Any[nothing for _ in 1:n_chains] : saved
+    its = Int[s === nothing ? -1 : s.iter::Int for s in st]
+    if any(>=(n_warmup), its)
+        _restore_shared_windows!(params, st[argmax(its)].windows, (target.transform,))
+        return nothing
+    end
+    return n_warmup > 0 ? _Rendezvous(n_chains) : nothing
 end
 
 # =====================================================================

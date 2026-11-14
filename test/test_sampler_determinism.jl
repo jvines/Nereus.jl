@@ -37,6 +37,12 @@ using Test, Nereus, Random, Statistics
     end
 
     # --- The real thing: same seed, different -t, identical output ------
+    # The bridge is compared too, so the chain must be one the bridge guard
+    # reports from (R-hat <= 1.1, ESS >= q's parameters): otherwise
+    # log_evidence_bridge is NaN in both runs and the comparison is empty. With
+    # the phic anchor, 32 walkers for 4000 steps reach R-hat 1.03 to 1.04 and
+    # ESS ~1000 against 35 in under 2 s (with Mo, 300 steps of 20 walkers
+    # stopped at R-hat 2.0, and Mo needs 10 000 steps of 32).
     @testset "pt_emcee invariant to thread count" begin
         script = """
         using Nereus, Random, Printf
@@ -46,11 +52,11 @@ using Test, Nereus, Random, Statistics
         target = build_target(
             planets=(b=(P=LogUniformPrior(4.0,4.5), K=LogUniformPrior(10.0,90.0),
                         sesinw=UniformPrior(-1.0,1.0), secosw=UniformPrior(-1.0,1.0),
-                        Mo=UniformPrior(0.0,2pi)),),
+                        phic=UniformPrior(-pi,pi)),),
             rv=(SIM=(data=(t=t,rv=rv,rv_err=fill(1.5,n)),
                      sigma=LogUniformPrior(0.5,10.0)),))
-        r = sample_pt_emcee(target, target.data; n_temps=6, n_walkers=20,
-                           n_steps=300, n_burnin=150, seed=42,
+        r = sample_pt_emcee(target, target.data; n_temps=6, n_walkers=32,
+                           n_steps=4000, n_burnin=2000, seed=42,
                            show_progress=false)
         K = vec(Array(r.chains[:, :K_k1, :]))
         @printf("%.17g %.17g %.17g\\n", sum(K), K[1], r.log_evidence_bridge)
@@ -61,6 +67,8 @@ using Test, Nereus, Random, Statistics
             s = read(`$(Base.julia_cmd()) --project=$proj -t $nt $sf`, String)
             strip(split(strip(s), '\n')[end])
         end
+        bridge = [parse(Float64, split(o)[3]) for o in out]
+        @test all(isfinite, bridge)
         @test out[1] == out[2]
     end
 end

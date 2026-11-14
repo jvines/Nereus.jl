@@ -5,15 +5,16 @@ config-driven dispatcher that every Nereus deployment (Docker workers,
 Python/`juliacall`, CLI) should call. Each example is a complete,
 runnable config `Dict` with realistic priors, a sampler block, and an
 output block. The configs below are distilled from the working
-validation drivers in `test/validation/validate_runjob_*.jl`, which are
-themselves CI-checked end-to-end fits.
+validation drivers `validate_runjob_*.jl` in `studies/validation/` (a working
+directory that is not part of the published repository), which are end-to-end
+fits run by hand.
 
 There is **one example per `planet_mode`** —
 `RV_ONLY`, `PM_ONLY`, `RVPM`, `RVAS`, `RVPMAS`, `RVPM_RM`, `RVPM_TTV` —
 plus an ActivityGP-noise example and a trans-dimensional model-selection
 example.
 
-Nereus is at **version `0.2.0`**.
+Nereus is at **version `0.9.0`**.
 
 !!! note "`run_job` vs. the low-level API"
     `run_job(cfg)` builds the `Data`, `Params`, `NereusTarget`,
@@ -48,24 +49,30 @@ collated error message if any is wrong — see `_validate_config` in
 `src/runner.jl`):
 
 - **`planet_modes`**: `RV_ONLY`, `PM_ONLY`, `RVPM`, `RVAS`, `RVPMAS`,
-  `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`, `RVPM_TTV`,
-  `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`,
-  `PM_TTV_NB`.
+  `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`, `RVPM_RM_A`,
+  `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`,
+  `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`, `RVPM_RM_GD`,
+  `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 - **`parametrization.mass`**: `K_driven`, `M_sec_driven`, `a_driven`.
-  **`.time`**: `Tp`, `Tc`, `Mo`. **`.ew`**: `sesinw`, `ew`.
-  **`.geom`**: `b_rr`, `b_r`. Plus boolean `.marginalize_gamma`.
+  **`.time`**: `phic` (the default), `Mo`, `Tp`, `Tc`. **`.ew`**: `sesinw`, `ew`.
+  **`.geom`**: `b_rr` (`b_r` passes the validator but `ParametrizationConfig`
+  rejects it). **`.density`**: `rho_circ` (the default), `rho_star`. Plus
+  booleans `.marginalize_gamma` and `.use_rho_s`.
 - **`stability`**: `none`, `amd`, `gladman`.
 - **`priors[*].type`**: `UniformPrior`, `LogUniformPrior`,
   `ModJeffreysPrior`, `NormalPrior`, `FixedPrior`, `SinePrior`,
-  `BetaPrior`. `args` follow each constructor — e.g.
+  `BetaPrior`, `TruncNormalPrior`, `WrappedUniformPrior` (any spelling in
+  `PRIOR_ALIASES`). `args` follow each constructor — e.g.
   `NormalPrior(μ, σ, lo, hi)`, `UniformPrior(lo, hi)`,
   `LogUniformPrior(lo, hi)`.
 - **`noise_models[*].kind`**: `CeleriteRotation`, `CeleriteSHO`,
   `CeleriteRotationFM17`, `ActivityDecorrelation`, `ARModel`, `MAModel`,
-  `ActivityJitter`, `ActivityGP`.
-- **`sampler.name`**: `pt_emcee`, `transdim_pt_emcee`, `pt`, `rjmcmc`,
-  `moms`, `daedalus`, `nested`, `nested_ins`, `nested_dynamic`,
-  `pa`, `smc`, `pt_whitening`, `nuts`, `pt_hmc`, `ofti`.
+  `ActivityJitter`, `ActivityGP`, `ErrorScale`, `NightlyOffset`,
+  `HarmonicBlock`, `StudentT`, `MaternGP`, `IndicatorFloor`.
+- **`sampler.name`**: `pt_emcee`, `transdim_pt_emcee`, `pt`, `pt_hmc`,
+  `pt_whitening`, `rjmcmc`, `moms`, `daedalus`, `nested`, `nested_ins`,
+  `nested_dynamic`, `pa`, `smc`, `nuts`, `ofti`, `ensemble`, `ess` (`map` is
+  not available through `run_job`).
 - **`output.plots`**: `rv_timeseries`, `rv_components`, `rv_phasefold`,
   `pm_timeseries`, `pm_phasefold`, `rv_astrom_phasefold`,
   `orbit_skyplane`, `iad_residuals`, `epoch_astrometry_orbit`,
@@ -90,7 +97,8 @@ collated error message if any is wrong — see `_validate_config` in
 ### The parameter naming convention
 
 Per-planet parameters are suffixed `_k<k>` (1-indexed):
-`P_k1`, `K_k1`, `Tc_k1`, `Tp_k1`, `Mo_k1`, `sesinw_k1`, `secosw_k1`,
+`P_k1`, `K_k1`, `phic_k1` (the default anchor), `Tc_k1`, `Tp_k1`, `Mo_k1`,
+`sesinw_k1`, `secosw_k1`,
 `ecc_k1`/`omega_k1` (with `ew=:ew`), `b_k1`, `rr_k1`, `inc_k1`,
 `Omega_k1`, `a_k1`, `M_sec_k1`, `lambda_k1` (RM obliquity),
 `ttv_k1_t<i>` (per-transit offsets). Per-instrument parameters are
@@ -114,7 +122,7 @@ using Nereus
 
 # bjd / rv / rv_err / instrument as parallel arrays (one row per epoch)
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 42, "output_dir" => "results/51peg",
+  "version" => "1.0", "seed" => 42, "output_dir" => "results/51peg",
   "star"  => Dict("M_s" => 1.11, "R_s" => 1.27, "T_eff" => 5793.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict(
@@ -125,7 +133,7 @@ cfg = Dict(
   "model" => Dict(
      "max_kplanet"     => 1,
      "planet_modes"    => ["RV_ONLY"],
-     "parametrization" => Dict("mass" => "K_driven", "time" => "Mo",
+     "parametrization" => Dict("mass" => "K_driven", "time" => "phic",
                                "ew" => "sesinw", "marginalize_gamma" => true),
      "stability"       => "none",
      "trend_order"     => 0),
@@ -174,7 +182,7 @@ TESS 2-min) and drives finite-exposure supersampling.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/transit_only",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/transit_only",
   "star"  => Dict("M_s" => 0.95, "R_s" => 0.92, "T_eff" => 5500.0),
   "data"  => Dict(
      "transit_photometry" => [
@@ -230,7 +238,7 @@ transit-derived science (`rr`, `T14`, `rho_star_transit`).
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rvpm",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rvpm",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,
@@ -286,7 +294,7 @@ orientation, which RV alone cannot. `relastrom` arrays are
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rvas",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rvas",
   "star"  => Dict("M_s" => 1.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => t_rv, "rv" => rv_obs,
@@ -355,7 +363,7 @@ companion's absolute mass. This is the ε Eri (HIP 16537) recipe.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 7, "output_dir" => "results/eps_eri",
+  "version" => "1.0", "seed" => 7, "output_dir" => "results/eps_eri",
   "star"  => Dict("M_s" => 0.82),
   "data"  => Dict(
      "rv"   => Dict("values" => Dict("bjd" => bjd, "rv" => rv,
@@ -367,7 +375,7 @@ cfg = Dict(
   "model" => Dict(
      "max_kplanet"     => 1,
      "planet_modes"    => ["RVAS"],
-     "parametrization" => Dict("mass" => "M_sec_driven", "time" => "Tp", "ew" => "sesinw"),
+     "parametrization" => Dict("mass" => "M_sec_driven", "ew" => "sesinw"),  # default time anchor: phic
      "stability"       => "none"),
   "priors" => Dict(
      "P_k1"     => Dict("type" => "NormalPrior",     "args" => [2700.0, 80.0, 2300.0, 3100.0]),
@@ -377,7 +385,7 @@ cfg = Dict(
      "plx"      => Dict("type" => "NormalPrior",     "args" => [310.94, 0.17, 305.0, 320.0])),
   "noise_models" => [],
   "sampler" => Dict("name" => "pt_emcee", "kwargs" => Dict(
-     "n_temps" => 8, "n_walkers" => 60, "n_steps" => 3000, "n_burnin" => 1800,
+     "n_temps" => 16, "n_walkers" => 60, "n_steps" => 20000, "n_burnin" => 12000,
      "show_progress" => false)),
   "output" => Dict("plots" => ["hgca_pm_residuals", "pm_anomaly",
                                "rv_timeseries", "corner"]),
@@ -386,6 +394,24 @@ cfg = Dict(
 summary = run_job(cfg)
 ```
 
+This fit takes 10 to 15 minutes on 3 cores. Two choices matter for
+convergence. The default `phic` time anchor puts the orbital phase on a
+single period; a `Tp` prior spanning the RV baseline holds up to six
+identical copies of the orbit (P can be as short as 2300 d) that the ensemble
+cannot equalise, and that setup stayed at R-hat ≈ 1.2 even at 80 000 steps.
+And the 16 temperatures matter: with 8, 20 000 steps leave R-hat at 1.2–1.25
+and the two seeds disagree on the inclination lobes below; 8 temperatures
+only converge at about 60 000 steps, three times the cost.
+
+The posterior is intrinsically **bimodal in inclination**: the HGCA proper
+motions and the RVs fit equally well at `i` and at `180° − i` (with a
+shifted `Ω`), so the two lobes (`i ≈ 30–85°` and `i ≈ 100–150°`) carry
+nearly equal weight, about 0.53 of the draws at `i > 90°`. That is physical,
+not a convergence failure. Quote the inclination as two lobes, not as a
+single median, and check that independent seeds agree on the lobe weights
+before trusting a shorter run: R-hat can look fine on every parameter well
+before the lobes have equilibrated.
+
 `hgca_pm_residuals` shows the 3-epoch PM residuals; `pm_anomaly` plots
 the GOST-window-averaged Gaia-epoch reflex. Set `planet_modes =>
 ["RVPMAS"]` and add `transit_photometry` / `relastrom` to combine with
@@ -393,7 +419,8 @@ transit and relative astrometry. `SinePrior()` takes no args.
 
 !!! warning "GOST is an auxiliary — it is inert without a Gaia-epoch product"
     `gost_log_likelihood` returns 0. GOST only window-averages the Gaia
-    epoch of a **paired** `hgca` / `gaia_dr3` / `g23h`. `Data(iad, gost)`
+    epoch of a **paired** `hgca` / `gaia_dr3` / `g23h`, through the transits
+    inside that release's window (DR3: 2014-07-25 to 2017-05-28). `Data(iad, gost)`
     with no `hgca`/`gaia_dr3` is therefore **IAD-only** (Hipparcos epoch)
     — the Gaia baseline is absent, and the `Data` constructor warns.
     Use `hgca` (above) or supply a Gaia DR3 5-param solution.
@@ -433,7 +460,7 @@ RM-consistent.
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/rm",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/rm",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 6200.0),
   "data"  => Dict(
      # trv must densely sample each transit window AND cover the orbit
@@ -494,7 +521,7 @@ want an offset for. Transits before `Tc` carry no free offset. The
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/ttv",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/ttv",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,
@@ -554,7 +581,7 @@ would be a value):
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/agp",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/agp",
   "star"  => Dict("M_s" => 1.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict(
@@ -621,7 +648,7 @@ output. Trans-dim samplers (`transdim_pt_emcee`, `rjmcmc`, `moms`,
 using Nereus
 
 cfg = Dict(
-  "version" => "0.2.0", "seed" => 1, "output_dir" => "results/blind_search",
+  "version" => "1.0", "seed" => 1, "output_dir" => "results/blind_search",
   "star"  => Dict("M_s" => 1.0, "R_s" => 1.0, "T_eff" => 5800.0),
   "data"  => Dict(
      "rv" => Dict("values" => Dict("bjd" => trv, "rv" => rv_obs,
@@ -749,10 +776,20 @@ primary-only.
   `n_planets_posterior` (trans-dim only), `ppc`, `loo`,
   `detection_limits`, `fit_health`, `tables`, and `figures`
   (logical-name → PNG path).
+  `provenance` records what produced the fit: `engine` (the sampler as
+  selected), `nereus_version`, `nereus_commit` (null unless Nereus runs from a
+  git checkout) and `priors`, every prior as the model was given it,
+  `{family, fixed, lo, hi, ...hyperparameters}` (`family` one of `uniform`,
+  `loguniform`, `normal`, `truncated_normal`, `beta`, `sine`,
+  `modified_jeffreys`, `wrapped_uniform`, `fixed`, ...; null bounds are
+  unbounded; a fixed parameter is `{family: "fixed", fixed: true, value}`),
+  with `external_priors` when the model has any. The photo-eccentric
+  reparametrization's sampled `rho_circ`/`eta` slots are not listed: the
+  priors on ρ★ and (e, ω) stay under their own names.
 - **`chains.nc`** — the full posterior cube (`load_chains` to reload).
 - **`plots/`** — the figure tree: `models/` (data-space fits),
-  `posteriors/`, `traces/`, `transdim/`, plus top-level `corner.png`,
-  `ppc.png`, `detection_limits.png`.
+  `posteriors/`, `traces/`, `transdim/`, plus top-level `corner_K<k>.png`
+  (one per planet), `corner_noise.png`, `ppc.png`, `detection_limits.png`.
 - **`tables/`** — `fitted` and `derived` science tables in **csv,
   json, tex, ecsv, dat** (units, asymmetric 1σ + 3σ CI,
   model-conditioned).

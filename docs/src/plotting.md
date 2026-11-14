@@ -6,7 +6,7 @@ the `Figure` object (so you can tweak in REPL) AND saves to disk if
 you pass an `output` directory (or, for some plotters, a `filename`).
 
 PNG is always written; pass `save_pdf=true` for a publication-ready
-PDF companion. Nereus is on version `0.2.0`.
+PDF companion. Nereus is on version `0.9.0`.
 
 ## Driving plots from `run_job`
 
@@ -62,7 +62,7 @@ produced.
 | `rv_astrom_phasefold`      | RV **and** astrometry           | `plot_rv_astrom_phasefold` (per planet)| `models/rv_astrom_phasefold_K*.png` |
 | `activity_gp_latent`       | an `ActivityGP` noise model     | `plot_activity_gp_latent`       | `activity_gp_latent.png` |
 | `activity_gp_decomposition`| an `ActivityGP` noise model     | `plot_activity_gp_decomposition`| `activity_gp_decomposition.png` |
-| `corner`                   | any chain                       | `plot_corner`                   | `corner.png` |
+| `corner`                   | any chain                       | `plot_corners`                  | `corner_K*.png` (one per planet), `corner_noise.png` |
 | `trace`                    | any chain                       | `plot_trace`                    | `traces/*.png` |
 | `histograms`               | any chain                       | `plot_histograms`               | `histograms/*.png` |
 | `posteriors`               | any chain                       | `plot_posteriors`               | `posteriors/*.png` |
@@ -84,7 +84,8 @@ produced.
 
 `output.plot_kwargs` is a single dict shared by *every* plotter, so any
 keyword a plotter accepts is settable there (`bf_cutoff`,
-`subtract_gp`, `n_draws`, `credmass`, `figsize`, `normal_point_gap`, …).
+`subtract_gp`, `n_draws`, `credmass`, `figsize`, `normal_point_gap`,
+`robust_ylim`, …).
 Each plotter receives only the keys it accepts: `n_draws` reaches
 `orbit_skyplane` and is withheld from `iad_residuals`, which does not
 take it. (It used to be splatted whole, and one key a plotter lacked made
@@ -144,7 +145,17 @@ PPC (`ppc.png`/`ppc.json`), detection limits
 
 ## RV channel
 
-### `plot_rv_timeseries(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity, decompose)`
+Every RV figure — time series, components, phase-fold, and the SB2 time
+series and binary fold — frames every point it draws, with its error
+bar, in both the data and the residual panel. A point the model misses
+stretches the axis rather than leaving the frame. `robust_ylim=true`
+(in a config, `"output": {"plot_kwargs": {"robust_ylim": true}}`) zooms
+instead: quantiles of the data on a dense series, every point but
+5-robust-sigma outliers on a sparse one (≤ 50 points), and on a fold
+the model curve and binned points as well; a point outside the zoom
+falls outside the axes.
+
+### `plot_rv_timeseries(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity, decompose, robust_ylim)`
 
 RV observations over time with the best-fit model overlay and a
 data-minus-model residual panel (3:1 data/residual layout).
@@ -178,7 +189,7 @@ to skip saving.
     secondary −K_B, crossing at γ; `models/rv_sb2_binary_fold_K<k>.png`),
     and on a circumprimary planet slot folds only the primary points.
 
-### `plot_rv_components(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity)`
+### `plot_rv_components(chains, params, data; output, fmt, save_pdf, figsize, bf_cutoff, show_keplerian, show_gp, show_total, show_activity, robust_ylim)`
 
 **RV component decomposition** time-series (new). Draws the raw
 (γ-subtracted) RV with each Keplerian, the activity model, and their
@@ -200,7 +211,10 @@ subtracted. Points are colour-coded by observation time (`:cool`
 colormap) with a colorbar; matches EMPEROR's `paint_fold_rv`
 (default `n_draws=60000` model/CI draws). `credmass` (default `0.85`)
 sets the credible-band mass; `subtract_gp=true` removes the GP/activity
-contribution; `robust_ylim` clips outliers from the y-range.
+contribution. The y-range holds every point with its error bar, the
+model median and the binned points, never the CI bands;
+`robust_ylim=true` zooms on the signal instead (see the start of this
+section).
 
 For trans-dim chains a requested `planet > modal_np` is **not** in the
 winning model, so it's skipped with a warning.
@@ -283,6 +297,15 @@ Writes `models/rm_anomaly_K<k>.png`.
 
 ## Astrometry channel
 
+Every astrometric angle axis (sky-plane offsets, separations, abscissa
+residuals, O−C, proper-motion panels) is drawn from data in mas (mas/yr) but
+read in the unit its extent calls for: when the largest absolute axis limit of
+a group is under 1 mas the tick labels show μas (μas/yr) and the axis label
+says so. Axes that show one quantity (a sky panel's x and y, the RA and Dec
+proper-motion panels, the panels of the IAD-residual figure) share a unit; the
+O−C strips of different missions each choose their own. Position angles
+(degrees) and time axes are untouched.
+
 ### `plot_orbit_skyplane(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
 Sky-plane `(ΔRA·cos δ, Δδ)` overlay of the relative-astrometry data
@@ -294,7 +317,7 @@ default `5.0`. No-ops if `data.relastrom` is `nothing`.
 
 ### `plot_relastrom_timeseries(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
-Two-panel **separation ρ [mas]** (top) and **PA [deg]** (bottom) vs MJD
+Two-panel **separation ρ [mas or μas]** (top) and **PA [deg]** (bottom) vs MJD
 — the canonical companion to `plot_orbit_skyplane`'s sky map for
 visual-orbit papers. Observed epochs with errorbars from RA/Dec error
 propagation (including correlation); best-fit (max-lp) orbit as a solid
@@ -303,7 +326,7 @@ line plus `n_draws=100` faint posterior-fan draws. No-op if
 
 ### `plot_relastrom_residuals(chains, params, data; planet_idx, output, fmt, save_pdf, figsize, bf_cutoff)`
 
-`(Δρ, ΔPA)` residual diagnostic — `Δρ = ρ_obs − ρ_med` [mas] (top) and
+`(Δρ, ΔPA)` residual diagnostic — `Δρ = ρ_obs − ρ_med` [mas or μas] (top) and
 `ΔPA = PA_obs − PA_med` [deg, wrapped to (−180, 180]] (bottom) vs MJD,
 using the best-fit (max-lp) orbit. Errorbars from per-epoch RA/Dec
 propagation; dashed zero reference per panel.
@@ -393,9 +416,10 @@ when there is no IAD or the planet has no astrometric orbit.
 (Hipparcos / Hipparcos–Gaia / Gaia): `Δμ = μ_obs − μ_model − μ_b` in α*
 (top) and δ (bottom) vs MJD with per-epoch 1σ, and the marginalized χ².
 `μ_model` is the likelihood's own (`_hgca_model_pm`: every active
-companion, the Hipparcos–Gaia epoch as the mean reflex velocity over the
-baseline, GOST Mode B at the Gaia epoch when scan plans are given) at the
-best-fit (max-lp) draw; `μ_b` is marginalized as in
+companion; the Hipparcos and Gaia epochs as five-parameter fits through
+the Hipparcos scans and the DR3 GOST window, the Hipparcos–Gaia epoch as the
+positional difference between them, the mean reflex velocity over the
+baseline) at the best-fit (max-lp) draw; `μ_b` is marginalized as in
 `hgca_log_likelihood`, so the χ² is the fit's.
 Requires `data.hgca`. Dispatched as the `hgca_pm_residuals` plot,
 written `models/hgca_pm_residuals_K<k>.png`.
@@ -405,8 +429,10 @@ written `models/hgca_pm_residuals_K<k>.png`.
 Per-epoch PM residuals for **G23H** ([Thompson+ 2026](https://ui.adsabs.harvard.edu/abs/2026arXiv260200235T/abstract)) catalog data —
 five epochs (Hip, HG long-baseline, Gaia DR2, DR3−DR2, DR3).
 `Δμ_α* = μ_α*_obs − μ_α*_model − μ_b` (top) and `Δμ_δ` (bottom) vs MJD
-(mas/yr). The model PM is the likelihood's own (`_g23h_model_pm`: every
-active companion, GOST Mode B at DR3 when scan plans are given) at the
+(mas/yr or μas/yr). The model PM is the likelihood's own (`_g23h_model_pm`: every
+active companion; Hipparcos, DR2 and DR3 as fits through the Hipparcos
+scans and the GOST windows, Hip→Gaia and DR3−DR2 as positional differences
+between those fits) at the
 best-fit (max-lp) draw, and `μ_b` is marginalized under the full 10×10
 covariance as in `g23h_log_likelihood`; errorbars from its diagonal.
 Requires `data.g23h`.
@@ -415,7 +441,7 @@ Requires `data.g23h`.
 
 Two-panel reflex proper-motion trajectory across the **GOST** scan
 window: `μ_α*_reflex(t)` (top) and `μ_δ_reflex(t)` (bottom) vs MJD
-(mas/yr). Best-fit (max-lp) curve in cyan and the 16-84% band of
+(mas/yr or μas/yr). Best-fit (max-lp) curve in black and the 16-84% band of
 `n_draws=80` posterior draws in orchid — both the summed reflex of every
 companion the likelihood couples to the astrometry. HGCA / G23H observed
 points overlaid at their tabulated epochs as `μ_obs − μ_b`, with `μ_b` the
@@ -424,6 +450,14 @@ Hipparcos–Gaia PM, which carries the mean reflex over the baseline), next
 to open markers for the likelihood's model at the same epochs — the
 Hipparcos–Gaia epoch is a baseline-mean reflex and the Gaia epoch a
 GOST-window average, neither a point on the instantaneous curve.
+Gaia DR2 and DR3 as GOST projects them: the reflex PM each release's
+five-parameter solution absorbs, fitted through the scans inside that
+release's window only (DR2 2014-07-25 to 2016-05-23, DR3 to 2017-05-28; a
+GOST scan plan runs to the end of the mission). A circle at J2015.5 and a
+square at J2016.0, each in its own colour from `cool_pastel(2)`, at the
+best-fit draw with the 16-84% of the posterior draws as the bar. Each
+release's window is shaded in its colour, and every planned scan is rugged
+along the bottom of both panels.
 Requires `data.gost`.
 
 ### `plot_rv_astrom_phasefold(chains, params, data; n_draws, planet_idx, output, fmt, save_pdf, bf_cutoff, subtract_gp, figsize)`
@@ -512,12 +546,38 @@ stats box (`median`, `+(84%−50%)`, `−(50%−16%)`). Writes
 Composite figure: histograms + KDE overlays for every unfrozen
 parameter, arranged in a grid. Writes `posteriors/*.png`.
 
-### `plot_corner(chains, params; params_to_plot, output, fmt, save_pdf)`
+### `plot_corners(chains, params; output, fmt, save_pdf, density, max_draws)`
 
-Corner plot via PairPlots.jl. Pass `params_to_plot::Vector{String}` to
-select parameters (omit for all unfrozen). Covariance contours + 1D
-marginal histograms; constant columns (which crash Makie's histogram)
-are skipped automatically. Writes `corner.png`.
+What the `corner` plot kind draws: one corner per planet slot, of that
+planet's parameters (including its `rho_circ_k<k>` / `eta_k<k>` when the
+model is parametrized with `ParametrizationConfig(density = :rho_circ)`, the
+default, and its λ or a/R★ when sampled), written to
+`corner_K<k>.png`, and one of the noise model — instrument jitters, GP
+hyperparameters and every other noise-model parameter — written to
+`corner_noise.png`. Offsets, trends, stellar and limb-darkening parameters
+and per-transit TTV shifts are in no corner (they are in the traces,
+histograms and tables). On a trans-dimensional chain a planet's corner uses
+only the draws in which that planet is live, and a slot that is never live
+gets no corner; when noise models are toggled, the noise corner uses the
+draws of the most frequent on/off pattern. A group with fewer than two
+parameters (a single jitter, say) has no panel and writes no file. Returns
+the figures by name (`"corner_K1"`, …, `"corner_noise"`).
+
+The `density` keyword of `plot_corners` is the 2-D panel style (`:hexbin`, the
+default, or `:scatter`, as in `plot_corner`); it is unrelated to the `density`
+option of `ParametrizationConfig`.
+
+There is no all-parameter corner in `run_job`: its n² panels were most of
+the plotting stage's memory.
+
+### `plot_corner(chains, params; params_to_plot, output, fmt, save_pdf, draws, stem)`
+
+Corner plot via PairPlots.jl of an explicit selection: pass
+`params_to_plot::Vector{String}` (omit for every reported parameter — the
+full n² corner). Hexbin density under PairPlots' contours; each axis is
+labelled with the symbol and unit, and angles are drawn in degrees.
+`draws` restricts it to those flat draws; `stem` names the file
+(default `corner.png`).
 
 ```julia
 plot_corner(chains, params;

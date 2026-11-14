@@ -714,4 +714,4 @@ photometry this pipeline produces (or change how a residual/PPC looks):
   `rv_timeseries`). `ttv_oc` also renders for single-planet fits now (data-only
   O–C, `planet_b_k=0`). See [`plotting.md`](plotting.md).
 
-Nereus is at version **0.2.0**.
+Nereus is at version **0.9.0**.

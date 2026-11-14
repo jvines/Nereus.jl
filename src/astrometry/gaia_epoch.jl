@@ -256,7 +256,7 @@ const GAIA_DR4_PRERELEASE_XML = "GAIA_DR4_PRERELEASE_EPOCH_ASTROMETRY_RAW.xml"
     fetch_gaia_dr4_prerelease(; cache_dir = nereus_cache_dir("GaiaDR4"), force = false)
         -> String
 
-Download and unzip the June-2026 Gaia DR4 pre-release epoch-astrometry bundle
+Download and extract the June-2026 Gaia DR4 pre-release epoch-astrometry bundle
 (12 illustrative sources, incl. the orbital systems HD 114762, Gaia-4, Gaia BH3)
 and return the path to the extracted VOTable. Cached; pass `force=true` to
 re-download. Feed the result to [`read_gaia_epoch_votable`](@ref).
@@ -269,10 +269,10 @@ function fetch_gaia_dr4_prerelease(; cache_dir::AbstractString = nereus_cache_di
     zip_path = joinpath(cache_dir, basename(GAIA_DR4_PRERELEASE_URL))
     if force || !isfile(zip_path)
         @info "Downloading Gaia DR4 pre-release epoch astrometry" url = GAIA_DR4_PRERELEASE_URL
-        Downloads.download(GAIA_DR4_PRERELEASE_URL, zip_path)
+        _download_resumable(GAIA_DR4_PRERELEASE_URL, zip_path)
     end
-    success(`unzip -o -q -d $cache_dir $zip_path $GAIA_DR4_PRERELEASE_XML`) ||
-        throw(ErrorException("failed to unzip $zip_path"))
-    isfile(xml_path) || throw(ErrorException("$GAIA_DR4_PRERELEASE_XML not found after unzip"))
+    _unzip_member(zip_path, GAIA_DR4_PRERELEASE_XML, cache_dir) ||
+        throw(ErrorException("failed to extract $zip_path"))
+    isfile(xml_path) || throw(ErrorException("$GAIA_DR4_PRERELEASE_XML not found after extraction"))
     return xml_path
 end

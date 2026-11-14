@@ -74,6 +74,9 @@ warm-starting a follow-up run.
   used in the spike-and-slab log-prior (Bayes factors between N_p
   configurations are unbiased only when this is set deliberately by the
   user; default 0.5 corresponds to a uniform prior over models).
+- `n_scouts::Int = 16` — with a fixed set of planets (`td.planets = false`),
+  each chain starts from the best-supported of this many prior draws, as in
+  `sample_rjmcmc` (src/samplers/scouts.jl). `0` starts from one draw.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (the chain's position and model indicators, the RNG, the MoMS
   proposal scales and off-values, the within-model RWM scales and likelihood
@@ -126,11 +129,16 @@ function sample_moms(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    n_scouts::Int = 16,
     # Testing hook, not an option: end the run after this iteration (warmup
     # counted) with the checkpoint written there, as a kill right after that
     # checkpoint would. 0 runs to the end.
     _stop_after::Int = 0,
 )
+    # The trans-dimensional prior skips inactive planets slot by slot, which the
+    # photo-eccentric reparametrization (src/density.jl) does not decompose
+    # into: this sampler runs the same model in ρ★ and (e, ω).
+    target = without_density_reparam(target)
     # JSON may deliver these floats as Int; normalize.
     init_scale              = Float64(init_scale)
     target_birth_accept     = Float64(target_birth_accept)
@@ -144,6 +152,7 @@ function sample_moms(
     0.0 <= informed_birth_fraction <= 1.0 || throw(ArgumentError(
         "informed_birth_fraction must be in [0, 1]"))
     n_chains >= 1 || throw(ArgumentError("n_chains must be ≥ 1"))
+    n_scouts >= 0 || throw(ArgumentError("n_scouts must be ≥ 0"))
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
         "resume = true needs `checkpoint`, the state file to continue from"))
@@ -182,7 +191,8 @@ function sample_moms(
              _moms_fingerprint(target.params, data, td; n_warmup,
                  seed = seed + 1000 * (c - 1), n_chains, chain = c, init_scale,
                  target_birth_accept, inclusion_prior, within_model,
-                 informed_birth_fraction)
+                 informed_birth_fraction,
+                 (n_scouts == 16 ? (;) : (; n_scouts))...)
         st = resume ? read_checkpoint(path, "moms", fp) : nothing
         if st !== nothing
             it = st.iter::Int
@@ -200,20 +210,20 @@ function sample_moms(
         # backward compatibility — callers that need the strategies for
         # warm-starting a follow-up should call single-chain).
         #
-        # No warmup re-cut of circular angles here. The chains run
-        # concurrently over ONE shared Params, with no point at which they
-        # all stand still: a chain that moved a window at the end of its own
-        # warmup would move it under the others mid-sweep, and their states
-        # would be outside the new support (-Inf) on the next evaluation.
-        # run_job / fit_* re-cut the returned draws, which is what the
-        # summaries read.
+        # The circular seams are re-cut at the end of warmup from the pooled
+        # warmup draws of every chain, at a rendezvous where each has stopped
+        # at its own iteration `n_warmup` (the chains share ONE Params; see
+        # sample_rjmcmc, whose helpers these are). A resume with some chain
+        # already past that point takes its saved windows for all of them.
+        rv = _multichain_recut_setup!(target, Any[ck.state for ck in cks],
+                                      n_chains, n_warmup, td.planets)
         per_chain_samples = n_per_chain
         tasks = Vector{Task}(undef, n_chains)
         for c in 1:n_chains
             chain_seed = seed + 1000 * (c - 1)
             chain_show_progress = show_progress && (c == 1)
             ck_c = cks[c]
-            tasks[c] = Threads.@spawn _sample_moms_one(target, data;
+            tasks[c] = Threads.@spawn try _sample_moms_one(target, data;
                 td = td, n_samples = per_chain_samples,
                 n_warmup = n_warmup, seed = chain_seed,
                 init_scale = init_scale,
@@ -222,11 +232,15 @@ function sample_moms(
                 show_progress = chain_show_progress,
                 within_model = within_model,
                 informed_birth_fraction = informed_birth_fraction,
-                recut_circular = false,
+                recut_circular = rv !== nothing, rendezvous = rv,
+                shared_windows = true,
                 ck_path = ck_c.path, ck_fp = ck_c.fp, ck = ck_c.state,
                 checkpoint_interval = checkpoint_interval,
                 stop_after = _stop_after,
-            )
+                n_scouts = n_scouts,
+            ) finally
+                rv === nothing || _rendezvous_leave!(rv)
+            end
         end
         results = [fetch(t) for t in tasks]
         chains = MCMCChains.chainscat((r[1] for r in results)...)
@@ -246,7 +260,7 @@ function sample_moms(
                             ck_path = cks[1].path, ck_fp = cks[1].fp,
                             ck = cks[1].state,
                             checkpoint_interval = checkpoint_interval,
-                            stop_after = _stop_after)
+                            stop_after = _stop_after, n_scouts = n_scouts)
 end
 
 # Chain `c`'s state file: the path itself for one chain, `<stem>_chain<c><ext>`
@@ -266,7 +280,7 @@ end
 # structs need not. The rest of the model, the data and the informed-birth
 # switches are in `run_fingerprint` itself (src/checkpoint.jl).
 function _moms_fingerprint(params::Params, data::Data, td::TransDimConfig; settings...)
-    return run_fingerprint(params, data; settings...,
+    return run_fingerprint(params, data; settings..., polar_chart_key(params)...,
         planets = td.planets, max_kplanet = td.max_kplanet, noise = td.noise,
         toggleable = content_hash(td.toggleable),
         transdim_fraction = td.transdim_fraction,
@@ -290,11 +304,14 @@ function _sample_moms_one(
     within_model::Symbol,
     informed_birth_fraction::Float64,
     recut_circular::Bool,
+    rendezvous::Union{Nothing,_Rendezvous} = nothing,  # other chains share `params`
+    shared_windows::Bool = false,  # windows restored by the caller (several chains)
     ck_path::Union{Nothing,String} = nothing,
     ck_fp::NamedTuple = NamedTuple(),
     ck::Union{Nothing,NamedTuple} = nothing,
     checkpoint_interval::Float64 = 900.0,
     stop_after::Int = 0,
+    n_scouts::Int = 16,
 )
     rng    = MersenneTwister(seed)
     params = target.params
@@ -326,9 +343,19 @@ function _sample_moms_one(
         end
     end
     theta = Theta{Float64}(params; td = td_state)
-    _init_systemics_from_prior!(theta, rng)
-
     ctr = LikelihoodCounter()
+    widths = _prior_widths(layout)
+    # With a fixed set of planets the start is the best-supported of
+    # `n_scouts` prior draws (src/samplers/scouts.jl), as in rjmcmc. Not on
+    # resume, which replaces the start below.
+    if ck === nothing && n_scouts > 0 && !td.planets
+        theta.values .= only(_scout_starts(theta, data, rng, widths;
+                                           draw! = _init_systemics_from_prior!,
+                                           n_scouts, ctr))
+    else
+        _init_systemics_from_prior!(theta, rng)
+    end
+
     # Use the spike-and-slab log-prior so γ-flips have unbiased M-H
     # ratios. Within-model slice sampling internally uses Nereus's
     # continuous log_prior — that's fine because at fixed γ the
@@ -336,7 +363,6 @@ function _sample_moms_one(
     # is invariant under constant offsets in log_prior.
     log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
     log_L  = _eval_ll(theta, data, ctr)
-    widths = _prior_widths(layout)
 
     # PTWorkspace lets us call the fast RWM within-model move when
     # `within_model = :rwm`. Slice sampling spends 30-100 likelihood
@@ -437,12 +463,24 @@ function _sample_moms_one(
             circ.tick = ck.circ.tick::Int
         end
         # Windows the saved state lives in (moved by the re-cut). Only a moved
-        # one is written: with several chains the layout is shared and never
-        # moves, so this writes nothing there.
-        for (nm, (lo, _)) in ck.windows
-            i = findfirst(==(nm), layout.unfrozen_names)
-            layout.unfrozen_priors[i].lo == lo ||
-                set_circular_window!(params, i, lo; transforms = (target.transform,))
+        # one is written. With several chains `sample_moms` has already put the
+        # shared ones back, and a chain saved before the others re-cut is
+        # relabelled into them, its off-values moved with the windows as at
+        # the re-cut itself.
+        if shared_windows
+            sh = _relabel_into_windows!(theta.values, params, ck.windows)
+            for (pos, shift) in sh, k in eachindex(strategy.slot_indices)
+                q = findfirst(==(pos), strategy.slot_indices[k])
+                q === nothing && continue
+                strategy.off_values[k][q] = moved_off_value(strategy.off_values[k][q],
+                                                            layout.unfrozen_priors[pos], shift)
+            end
+            if !isempty(sh)
+                log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
+                log_L  = _eval_ll(theta, data, ctr)
+            end
+        else
+            _restore_shared_windows!(params, ck.windows, (target.transform,))
         end
     end
     last_ck = time()
@@ -473,7 +511,15 @@ function _sample_moms_one(
                     accepted && (n_accepts_planet[k_touched] += 1)
                 end
             elseif td.noise && !isempty(td.toggleable)
-                _noise_move!(theta, data, td, rng, log_pi, log_L;
+                # The moves shared with rjmcmc judge `log_prior` of their
+                # proposals against the current value they are handed, so
+                # they get `log_prior(theta)`, not the spike-and-slab `log_pi`
+                # (which adds log p_inc per active planet and log(1 - p_inc)
+                # per inactive one). Handed `log_pi`, every noise toggle and swap
+                # was judged against a shifted density, as were the first
+                # slice level and the RWM steps up to the first acceptance of
+                # every within-model sweep.
+                _noise_move!(theta, data, td, rng, log_prior(theta), log_L;
                               ctr=ctr) do new_lpi, new_lL
                     log_pi = new_lpi
                     log_L  = new_lL
@@ -505,7 +551,7 @@ function _sample_moms_one(
                 # slice stepping out. Adapt σ during warmup only.
                 adapt = iter <= n_warmup
                 _within_model_move_rwm!(theta, data, rng, rwm_ws,
-                                          log_pi, log_L;
+                                          log_prior(theta), log_L;
                                           adapt = adapt,
                                           ctr = ctr) do new_lpi, new_lL
                     log_pi = new_lpi
@@ -513,7 +559,8 @@ function _sample_moms_one(
                 end
             else  # :slice — ws path so the Fix B phot cache applies
                 _within_model_move!(theta, data, rng, 1.0, widths,
-                                     log_pi, log_L, rwm_ws; ctr=ctr) do new_lpi, new_lL
+                                     log_prior(theta), log_L, rwm_ws;
+                                     ctr=ctr) do new_lpi, new_lL
                     log_pi = new_lpi
                     log_L  = new_lL
                 end
@@ -536,34 +583,41 @@ function _sample_moms_one(
             end
         end
 
-        if circ !== nothing && circ_from < iter <= n_warmup
+        circ !== nothing && circ_from < iter <= n_warmup &&
             _record_circular_warmup!(circ, theta)
-            if iter == n_warmup
-                moved = _recut_circular_warmup!(circ, params, (theta,);
-                                                transforms = (target.transform,))
-                # The off-values move WITH the window rather than being
-                # relabelled, as in transdim_pt_emcee: they are the prior's
-                # median by construction (`MoMSBirth`), i.e. the old window's
-                # midpoint, and a move is needed when the posterior straddles
-                # the old seam -- which tends to put the new seam near that
-                # midpoint. Relabelled, the off-value would then sit on the new
-                # seam and centre every blind birth on the emptiest arc of the
-                # posterior. Birth and death read the same off-value and the
-                # same bounds, so the kernel stays balanced; adapted here, in
-                # warmup, like the scales.
-                for m in moved, k in eachindex(strategy.slot_indices)
-                    q = findfirst(==(m.pos), strategy.slot_indices[k])
-                    q === nothing && continue
-                    strategy.off_values[k][q] += m.shift
-                end
-                # Same density in either chart; re-evaluated only so the
-                # cached values are those of the stored point, bit for bit.
-                if !isempty(moved)
-                    log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
-                    log_L  = _eval_ll(theta, data, ctr)
-                end
-                circ = nothing
+        if iter == n_warmup
+            # Warmup's end: the circular seams re-cut (pooled over the chains
+            # at their rendezvous when several share `params`) and every polar
+            # angle folded into its representative.
+            moved = circ === nothing ? () :
+                    _warmup_recut!(circ, params, theta, rendezvous,
+                                   (target.transform,))
+            # The off-values move WITH the window rather than being
+            # relabelled, as in transdim_pt_emcee: they are the prior's
+            # median by construction (`MoMSBirth`), i.e. the old window's
+            # midpoint, and a move is needed when the posterior straddles
+            # the old seam -- which tends to put the new seam near that
+            # midpoint. Relabelled, the off-value would then sit on the new
+            # seam and centre every blind birth on the emptiest arc of the
+            # posterior. Birth and death read the same off-value and the
+            # same bounds, so the kernel stays balanced; adapted here, in
+            # warmup, like the scales. A polar angle's is relabelled instead
+            # (`moved_off_value`).
+            for m in moved, k in eachindex(strategy.slot_indices)
+                q = findfirst(==(m.pos), strategy.slot_indices[k])
+                q === nothing && continue
+                strategy.off_values[k][q] = moved_off_value(strategy.off_values[k][q],
+                                                            params.layout.unfrozen_priors[m.pos],
+                                                            m.shift)
             end
+            folded = _fold_polar_slots!(theta.values, params)
+            # Same density in either chart; re-evaluated only so the
+            # cached values are those of the stored point, bit for bit.
+            if !isempty(moved) || folded
+                log_pi = spike_slab_log_prior(theta, strategy, inclusion_prior)
+                log_L  = _eval_ll(theta, data, ctr)
+            end
+            circ = nothing
         end
 
         # Store sample

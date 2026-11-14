@@ -115,10 +115,7 @@ function _swap_planet_q(theta::Theta{T}, k::Int, data::Data, rng,
             v = clamp(rand(rng, layout.unfrozen_priors[uf].dist), lo, hi)
             vals[slot] = convert(T, v)
         end
-        log_q += eval_packed_logpdf(vals[slot],
-            layout.packed_priors.type_ids[uf], layout.packed_priors.params[uf,1],
-            layout.packed_priors.params[uf,2], layout.packed_priors.lowers[uf],
-            layout.packed_priors.uppers[uf])
+        log_q += eval_packed_logpdf(vals[slot], layout.packed_priors, uf)
     end
     return (convert(T, log_q), P_lo, P_hi)
 end
@@ -253,10 +250,7 @@ function _noise_birth_q(theta::Theta{T}, nm::NoiseModel,
             v = clamp(rand(rng, prior.dist), lo, hi)
             vals[slot] = convert(T, v)
         end
-        log_q += eval_packed_logpdf(vals[slot],
-            layout.packed_priors.type_ids[uf], layout.packed_priors.params[uf, 1],
-            layout.packed_priors.params[uf, 2], layout.packed_priors.lowers[uf],
-            layout.packed_priors.uppers[uf])
+        log_q += eval_packed_logpdf(vals[slot], layout.packed_priors, uf)
     end
     return convert(T, log_q)
 end

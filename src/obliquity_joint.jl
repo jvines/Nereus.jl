@@ -287,9 +287,8 @@ function joint_obliquity_fit(tomo_nights::Vector{TomoNight},
         ok || error("could not initialise walker $w with a finite posterior")
     end
 
-    chain, lls = AffineInvariantMCMC.sample(lp, n_walkers, x0, n_steps, thin;
-                                            rng = rng)
-    keep = (n_burn ÷ thin + 1):size(chain, 3)
+    chain, lls = _ensemble_on_circle(lp, x0, n_steps, n_burn, thin, rng)
+    keep = 1:size(chain, 3)
     flat = reshape(chain[:, :, keep], ndim, :)
     λdeg = rad2deg.(vec(flat[1, :]))
     λdeg = @. mod(λdeg + 180, 360) - 180

@@ -127,7 +127,7 @@ using Nereus: _chunk_ranges, _nthread_slots, _nthread_chunks
             t   = sort(rand(rng, n_obs) .* 40.0)
             rv  = 12.0 .* sin.(2π .* t ./ 8.0) .+ randn(rng, n_obs)
             data = Data(; t_rv = t, rv = rv, rv_err = fill(1.0, n_obs))
-            params = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],
+            params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RV_ONLY],
                              instruments = InstrumentConfig(rv = ["SIM"]),
                              data = data, M_s = 1.0)
             return NereusTarget(params, data; unconstrained = false), data
@@ -161,7 +161,7 @@ using Nereus: _chunk_ranges, _nthread_slots, _nthread_chunks
             params = Params(max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]), data = data,
                 stability = :none, M_s = 1.0,
-                parametrization = ParametrizationConfig(mass = :a_driven),
+                parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
                 priors = Dict{String,PriorSpec}(
                     "n_p" => FixedPrior(1.0), "a_k1" => LogUniformPrior(0.5, 50.0),
                     "M_sec_k1" => LogUniformPrior(1e-5, 0.1),

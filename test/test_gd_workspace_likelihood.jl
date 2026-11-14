@@ -108,7 +108,10 @@ function gdw_point!(th, tg)
                 "gd_beta_TESS" => 0.2, "gd_beta_GROUND" => 0.12,
                 "P_k2" => 6.71, "Tc_k2" => GDW_BJD0 + 2.30, "b_k2" => 0.5, "rr_k2" => 0.06,
                 "sesinw_k2" => 0.0, "secosw_k2" => 0.0, "lambda_k2" => -1.9)
-    for nm in tg.params.layout.unfrozen_names
+    # Sampled then derived: under density = :rho_circ, ρ★ and the second
+    # planet's e-coordinates are derived from the sampled ρ_circ and η, and
+    # writing them sets those (src/density.jl).
+    for nm in Nereus.reported_param_names(tg.params)
         haskey(vals, nm) && Nereus.set_param!(th, nm, vals[nm])
     end
     return th

@@ -771,7 +771,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
     @testset "ParametrizationConfig" begin
         pc = ParametrizationConfig()
         @test pc.ew === :sesinw
-        @test pc.time === :Mo
+        @test pc.time === :auto          # resolved by Params: the transit phase unless the priors name another (Mo before)
         @test pc.geom === :b_rr
         @test pc.use_rho_s == false
 
@@ -816,7 +816,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
         params = Params(;
             priors=priors,
             max_kplanet=1,
-            parametrization=ParametrizationConfig(),
+            parametrization=ParametrizationConfig(time=:Mo),
             planet_modes=[RV_ONLY],
             instruments=ic,
         )
@@ -899,8 +899,20 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
             M_s=1.0,
         )
 
-        # Layout: n_p + 7 (RVPM) + 5 (RV-only) + 2 (gamma, sigma) + 3 (off, jit, dil) + 2 (q1, q2) + 1 (rho_s) = 21
-        @test n_total(params) == 21
+        # Layout: n_p + 7 (RVPM) + 5 (RV-only) + 2 (gamma, sigma) + 3 (off, jit, dil) + 2 (q1, q2) + 1 (rho_s) = 21,
+        # and slot 22, rho_circ_k1: planet 1 transits with a free e, so by default
+        # (density = :rho_circ, src/density.jl) it samples ρ_circ in ρ★'s place.
+        # rho_s keeps slot 21, derived now and no longer sampled, so the sampled
+        # dimension is the one density = :rho_star gives, whose layout is the 21.
+        @test n_total(params) == 22
+        @test params.layout.names[22] == "rho_circ_k1"
+        @test 22 in params.layout.unfrozen_idx && !(21 in params.layout.unfrozen_idx)
+        params_rs = Params(; priors = priors, max_kplanet = 2,
+                             parametrization = ParametrizationConfig(ew = :sesinw, time = :Tc,
+                                 geom = :r1r2, use_rho_s = true, density = :rho_star),
+                             planet_modes = [RVPM, RV_ONLY], instruments = ic, M_s = 1.0)
+        @test n_total(params_rs) == 21
+        @test n_unfrozen(params) == n_unfrozen(params_rs)
 
         # Planet 1 (RVPM) block — all seven slots, r1r2 goes into b/r fields.
         pb1 = params.layout.planet_blocks[1]
@@ -1279,7 +1291,12 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
             -log(100.0 - 0.1) +     # K_k1
             -log(2.0) +             # sesinw_k1
             -log(2.0) +             # secosw_k1
-            -log(4π) +              # Mo_k1
+            # Mo_k1: re-pinned from -log(4π). U(-2π, 2π) is two periods of a
+            # periodic likelihood; the layout carries its pushforward onto one
+            # circle (`circular_lift`), density 2/(4π) = 1/(2π) on [-π, π):
+            # the same posterior over orbits and the same evidence, and no
+            # second copy of every mode a period away.
+            -log(2π) +
             -log(200.0) +           # gamma_HARPS
             -log(10.0 - 0.001)      # sigma_HARPS
         )
@@ -1378,10 +1395,18 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
         @test params.layout isa ParamsLayout
         @test params.layout.unfrozen_priors isa Vector{<:PriorSpec}
         @test length(params.layout.unfrozen_priors) == n_unfrozen(params)
-        # Parallel to unfrozen_names.
+        # Parallel to unfrozen_names. Re-pinned: a full-circle angle under a
+        # prior over more than one period (Mo_k1 here, U(-2π, 2π)) carries its
+        # pushforward onto the circle (`circular_lift`); every other prior is
+        # the user's own object. config.priors keeps it as written (above).
         for (name, ps) in zip(params.layout.unfrozen_names,
                                params.layout.unfrozen_priors)
-            @test ps === priors[name]
+            if name == "Mo_k1"
+                @test ps.dist isa Nereus.WrappedPushforward
+                @test all(bounds(ps) .≈ (-π, π))
+            else
+                @test ps === priors[name]
+            end
         end
 
         # n_p_idx is a typed field, not a magic number.
@@ -1859,7 +1884,7 @@ if _in_shard("inline: foundation + trans-dim state/config/likelihood")
             "Mo_k1"=>UniformPrior(-2π,2π),
             "sigma_HARPS"=>LogUniformPrior(1e-3,10.0),
             "sigma_ESPRESSO"=>LogUniformPrior(1e-3,10.0))
-        pc=ParametrizationConfig(marginalize_gamma=true)
+        pc=ParametrizationConfig(time=:Mo, marginalize_gamma=true)
         params_m=Params(; priors=priors_m, max_kplanet=1,
                         planet_modes=[RV_ONLY], instruments=ic,
                         stability=:none, data=data, parametrization=pc)
@@ -2277,6 +2302,7 @@ end
         rv_err=ones(101),
     )
     params = Params(
+        parametrization=ParametrizationConfig(time=:Mo),
         max_kplanet=2,
         planet_modes=[RV_ONLY, RV_ONLY],
         instruments=ic,
@@ -2508,6 +2534,7 @@ end
             hgca      = hgca_as,
         )
         params_as = Params(
+            parametrization = ParametrizationConfig(time=:Mo),
             max_kplanet  = 2,
             planet_modes = [RVAS, RVAS],
             instruments  = ic_as,
@@ -2520,6 +2547,18 @@ end
         @test params_as.layout.planet_blocks[1] isa RVASBlock
         @test "inc_k1"   in params_as.layout.names
         @test "Omega_k1" in params_as.layout.names
+
+        # The inclination SLOT is checked against the prior the sampler
+        # evaluates, the layout's: under a Sine prior an orbital inclination
+        # is drawn on the chart [-π/2, 3π/2] of a circle (src/circular.jl),
+        # so a birth can land in the mirror representative 2π - i (seed 19's
+        # rebirth drew 3.609). The inclination the model reads, `planet_inc`,
+        # is that slot folded into the user's [0, π]; both are checked. These
+        # bounds were the config's [0, π] while the slot was sampled there.
+        inc_lo, inc_hi = bounds(params_as.layout.unfrozen_priors[
+            findfirst(==("inc_k1"), params_as.layout.unfrozen_names)])
+        @test (inc_lo, inc_hi) == (-π / 2, 3π / 2)
+        @test bounds(params_as.config.priors["inc_k1"]) == (0.0, Float64(π))
 
         @testset "PriorBirth populates inc/Omega/K" begin
             rng_as = MersenneTwister(7)
@@ -2541,11 +2580,11 @@ end
             @test isfinite(inc_v) && isfinite(Omega_v)
             @test isfinite(K_v) && isfinite(P_v)
 
-            inc_lo, inc_hi = bounds(params_as.config.priors["inc_k1"])
             om_lo,  om_hi  = bounds(params_as.config.priors["Omega_k1"])
             K_lo,   K_hi   = bounds(params_as.config.priors["K_k1"])
             P_lo,   P_hi   = bounds(params_as.config.priors["P_k1"])
             @test inc_lo ≤ inc_v ≤ inc_hi
+            @test 0 ≤ Nereus.planet_inc(new_theta, 1) ≤ π
             @test om_lo  ≤ Omega_v ≤ om_hi
             @test K_lo   ≤ K_v   ≤ K_hi
             @test P_lo   ≤ P_v   ≤ P_hi
@@ -2568,9 +2607,9 @@ end
             Omega_v = get_param(new_theta, "Omega_k1")
             @test isfinite(inc_v) && isfinite(Omega_v)
 
-            inc_lo, inc_hi = bounds(params_as.config.priors["inc_k1"])
             om_lo,  om_hi  = bounds(params_as.config.priors["Omega_k1"])
             @test inc_lo ≤ inc_v   ≤ inc_hi
+            @test 0 ≤ Nereus.planet_inc(new_theta, 1) ≤ π
             @test om_lo  ≤ Omega_v ≤ om_hi
         end
 
@@ -2612,9 +2651,9 @@ end
             Omega_v = get_param(new_theta, "Omega_k1")
             @test isfinite(inc_v) && isfinite(Omega_v)
 
-            inc_lo, inc_hi = bounds(params_as.config.priors["inc_k1"])
             om_lo,  om_hi  = bounds(params_as.config.priors["Omega_k1"])
             @test inc_lo ≤ inc_v   ≤ inc_hi
+            @test 0 ≤ Nereus.planet_inc(new_theta, 1) ≤ π
             @test om_lo  ≤ Omega_v ≤ om_hi
 
             # Cloned values should be near (but not necessarily equal to)
@@ -2650,9 +2689,9 @@ end
             @test n_p(reborn) == 1
             inc_v   = get_param(reborn, "inc_k1")
             Omega_v = get_param(reborn, "Omega_k1")
-            inc_lo, inc_hi = bounds(params_as.config.priors["inc_k1"])
             om_lo,  om_hi  = bounds(params_as.config.priors["Omega_k1"])
             @test inc_lo ≤ inc_v   ≤ inc_hi
+            @test 0 ≤ Nereus.planet_inc(reborn, 1) ≤ π
             @test om_lo  ≤ Omega_v ≤ om_hi
         end
     end
@@ -2725,7 +2764,9 @@ end
 
         @test chains_pt isa MCMCChains.Chains
         @test :n_planets in names(chains_pt, :parameters)
-        @test isfinite(log_ev)
+        # NaN unless every pair of the 4 chains swapped at least 5% of the time
+        # after the warmup (`_tempered_quotable`)
+        @test !isinf(log_ev)
         @test n_evals_pt > 0
 
         np_pt = Array(chains_pt[:n_planets])
@@ -3001,6 +3042,7 @@ end
 
         # With stability
         p_stab = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=2, planet_modes=[RV_ONLY, RV_ONLY],
             instruments=ic_rv, data=data_rv,
             stability=:amd, M_s=1.0,
@@ -3026,6 +3068,7 @@ end
 
         # Without stability → finite LL
         p_nostab = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=2, planet_modes=[RV_ONLY, RV_ONLY],
             instruments=ic_rv, data=data_rv,
             stability=:none,
@@ -3129,11 +3172,13 @@ end
         ecc_prior = ExternalPrior(:ecc, BetaPrior(0.867, 3.03), true)
 
         p_with = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=1, planet_modes=[RV_ONLY],
             instruments=ic_ep, data=data_ep,
             external_priors=[ecc_prior],
         )
         p_without = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=1, planet_modes=[RV_ONLY],
             instruments=ic_ep, data=data_ep,
         )
@@ -3187,10 +3232,12 @@ end
 
     # -----------------------------------------------------------------
     @testset "Validation — stability requires M_s for multi-planet" begin
-        # max_kplanet=1: stability irrelevant, no throw
+        # max_kplanet=1: stability irrelevant, no throw. No data, so an anchor
+        # that needs none (the default, phic, is measured from the data).
         @test Params(;
             max_kplanet=1, planet_modes=[RV_ONLY],
             instruments=InstrumentConfig(rv=["X"]),
+            parametrization=ParametrizationConfig(time=:Mo),
             stability=:amd,
         ) isa Params
         # max_kplanet≥2 without M_s: must throw
@@ -3353,6 +3400,7 @@ end
         ic_j = InstrumentConfig(rv=["RV_SIM"], pm=["PM_SIM"])
 
         params_j = Params(;
+            parametrization=ParametrizationConfig(time=:Mo),
             max_kplanet=1,
             planet_modes=[RVPM],
             instruments=ic_j,
@@ -4406,6 +4454,38 @@ end  # _in_shard
 
 if _in_shard("inline: Daedalus sampler")
 @testset "Daedalus sampler" begin
+    @testset "a batch credits each killed point its volume" begin
+        # Nested sampling simulated in X, L(X) = exp(-X/0.01): the b lowest of
+        # n live points go together and come back uniform below the highest
+        # of them. Shrinking log X by b/n per batch and sharing that evenly
+        # put log Z 0.53 high here (300 runs; 0.005 now).
+        logL(X) = -X / 0.01
+        lz_true = log(0.01 * (1 - exp(-100)))
+        function run(rng, n, b)
+            X = rand(rng, n); lx = 0.0; lz = -Inf
+            while true
+                killed = sortperm(X; rev = true)[1:b]   # lowest L first
+                lw, lx_after = Nereus._daedalus_batch_volumes(lx, n, b)
+                for (j, i) in enumerate(killed)
+                    lz = Nereus._logaddexp(lz, lw[j] + logL(X[i]))
+                end
+                lx = lx_after
+                X[killed] .= X[killed[end]] .* rand(rng, b)
+                lx + logL(minimum(X)) - lz < log(0.01) && break
+            end
+            for x in X
+                lz = Nereus._logaddexp(lz, lx - log(n) + logL(x))
+            end
+            return lz - lz_true
+        end
+        rng = MersenneTwister(1)
+        zs = [run(rng, 100, 25) for _ in 1:300]
+        @test abs(mean(zs)) < 0.05
+        # one at a time is Skilling's step
+        lw, lx = Nereus._daedalus_batch_volumes(-2.0, 50, 1)
+        @test lx ≈ -2.02 && lw[1] ≈ -2.0 + log1p(-exp(-1 / 50))
+    end
+
     @testset "sample_daedalus runs end-to-end" begin
         # Tight WASP-47-style priors so random-walk proposals can mix
         # within the constrained-likelihood region. The NS algorithm
@@ -4449,6 +4529,31 @@ if _in_shard("inline: Daedalus sampler")
         for k in 1:length(strategy.scales)
             @test all(s -> s > 0 && isfinite(s), strategy.scales[k])
         end
+    end
+
+    @testset "a fixed planet set stays fixed" begin
+        # td.planets = false: the constrained kernel may not switch the
+        # planet off (its birth/death branch once fired regardless, and a
+        # run could end with every posterior draw planet-less).
+        rng = MersenneTwister(7)
+        t = sort(rand(rng, 40) .* 30.0)
+        rv = 5.0 .+ 12.0 .* sin.(2π .* t ./ 4.16) .+ 1.5 .* randn(rng, 40)
+        data = Data(; t_rv = t, rv = rv, rv_err = fill(1.5, 40))
+        params = Params(max_kplanet = 1, planet_modes = [RV_ONLY],
+                        instruments = InstrumentConfig(rv = ["X"]), data = data, M_s = 1.0,
+                        priors = Dict{String,PriorSpec}("P_k1" => NormalPrior(4.16, 0.05, 4.0, 4.3)))
+        target = NereusTarget(params, data; unconstrained = false)
+        td = TransDimConfig(max_kplanet = 1, planets = false, transdim_fraction = 0.4)
+        strategy = Nereus.MoMSBirth(params; rng = MersenneTwister(1))
+        start = Nereus._daedalus_init_point(target, data, strategy, td, 0.5, MersenneTwister(2))
+        @test start.planet_active == [true]
+        # No constraint (L_thr = -Inf): only the kernel's own moves decide.
+        on = [Nereus._daedalus_evolve(start, target, data, strategy, td, -Inf, 50, 0.5,
+                                      MersenneTwister(s)).planet_active[1] for s in 1:20]
+        @test all(on)
+        chains, _, _ = sample_daedalus(target, data; td, n_live = 40, n_mcmc = 15, seed = 42,
+                                       show_progress = false)
+        @test all(==(1), Array(chains[:, :n_planets, :]))
     end
 
     @testset "noise toggling — runs end-to-end" begin

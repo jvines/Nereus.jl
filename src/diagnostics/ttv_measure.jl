@@ -67,25 +67,15 @@ function measure_per_transit_tcs(data::Data, theta_ref::Theta, params::Params;
     # Decode planet-k's shape params from theta_ref
     P_k  = theta_ref.values[layout.name_to_idx["P_k$(planet_k)"]]
     Tc_k = _ttv_Tc(theta_ref.values, params, planet_k)
-    se_k = theta_ref.values[layout.name_to_idx["sesinw_k$(planet_k)"]]
-    sc_k = theta_ref.values[layout.name_to_idx["secosw_k$(planet_k)"]]
-    e_k  = hypot(se_k, sc_k)^2
-    w_k  = atan(se_k, sc_k)
+    e_k, w_k = planet_e_w(theta_ref, planet_k)
     b_k  = theta_ref.values[layout.name_to_idx["b_k$(planet_k)"]]
     rr_k = theta_ref.values[layout.name_to_idx["rr_k$(planet_k)"]]
 
-    # a/R*: use ρ_s if parametrized
-    if config.parametrization.use_rho_s
-        rho = theta_ref.values[layout.name_to_idx["rho_s"]]
-        a_Rs = rho_s_to_a_Rs(rho, P_k)
-    else
-        # Fall back to M_s + R_s
-        M_s = config.M_s; R_s = config.R_s
-        P_s = P_k * 86400.0
-        GM  = GM_SUN_CGS * M_s
-        a_cm = cbrt(GM * P_s^2 / (4π^2))
-        a_Rs = a_cm / (R_s * R_SUN_CM)
-    end
+    # a/R★ with the companion's mass in Kepler III (M★ + M_p) where it is
+    # known (sampled slot, ρ★, or M_s + R_s): see `planet_geometry`.
+    a_Rs = planet_a_Rs(theta_ref, planet_k, P_k)
+    isnan(a_Rs) && error("measure_per_transit_tcs: need ρ_s or finite (M_s, R_s) " *
+                         "for the transit geometry")
 
     # Per-instrument LD, offset, jitter
     n_pm = length(config.instruments.pm_names)
@@ -238,36 +228,32 @@ function ttvc_envelope(chains, params::Params;
 
         P_a  = _get(theta_k.values, "P_k$(planet_a_k)")
         Tc_a = _ttv_Tc(theta_k.values, params, planet_a_k)
-        K_a  = _get(theta_k.values, "K_k$(planet_a_k)")
-        se_a = _get(theta_k.values, "sesinw_k$(planet_a_k)")
-        sc_a = _get(theta_k.values, "secosw_k$(planet_a_k)")
+        K_a  = Float64(planet_K(theta_k, planet_a_k))
+        e_a, w_a = planet_e_w(theta_k, planet_a_k)
         b_a  = _get(theta_k.values, "b_k$(planet_a_k)")
-        e_a  = hypot(se_a, sc_a)^2
-        w_a  = atan(se_a, sc_a)
 
-        # a/R* for planet a
+        # a/R★ and the true mass of planet a: the exact mass function at the
+        # transit's sin i, solved together with a/R★ (Kepler III with M_s + M_p).
+        # `M_s_use` may be supplied, so this is `coupled_geometry` with it
+        # rather than `planet_geometry`, which reads the config's star.
         if params.config.parametrization.use_rho_s
             rho = _get(theta_k.values, "rho_s")
-            a_Rs_a = rho_s_to_a_Rs(rho, P_a)
+            a0_a = rho_s_to_a_Rs(rho, P_a)
         else
             P_s = P_a * 86400.0
             GM = GM_SUN_CGS * M_s_use
-            a_Rs_a = cbrt(GM * P_s^2 / (4π^2)) / (params.config.R_s * R_SUN_CM)
+            a0_a = cbrt(GM * P_s^2 / (4π^2)) / (params.config.R_s * R_SUN_CM)
         end
-        inc_a = acosd(b_a / a_Rs_a)
-        mp_a  = msini(M_s_use, K_a, P_a, e_a) / sind(inc_a)
-        mr_a  = mp_a * M_JUP_G / M_SUN_G / M_s_use
+        _, mr_a, _ = coupled_geometry(a0_a, b_a, e_a, sin(w_a),
+                                      mass_function(K_a, P_a, e_a), M_s_use)
 
         P_b   = _get(theta_k.values, "P_k$(planet_b_k)")
         Tc_b  = _ttv_Tc(theta_k.values, params, planet_b_k)
-        K_b   = _get(theta_k.values, "K_k$(planet_b_k)")
-        se_b  = _get(theta_k.values, "sesinw_k$(planet_b_k)")
-        sc_b  = _get(theta_k.values, "secosw_k$(planet_b_k)")
-        e_b   = hypot(se_b, sc_b)^2
-        w_b   = atan(se_b, sc_b)
-        # Use a's inclination (coplanar assumption) for non-transiting b
-        mp_b  = msini(M_s_use, K_b, P_b, e_b)
-        mr_b  = mp_b * M_JUP_G / M_SUN_G / M_s_use
+        K_b   = Float64(planet_K(theta_k, planet_b_k))
+        e_b, w_b = planet_e_w(theta_k, planet_b_k)
+        # Planet b has no transit geometry here: its exact MINIMUM mass
+        # (sin i = 1), from the full mass function.
+        mr_b  = msec_from_K(K_b, P_b, e_b, 1.0, M_s_use) / M_s_use
 
         # TTVFaster has 0/0 at exactly e=0
         e_a_f = max(e_a, 1e-4)

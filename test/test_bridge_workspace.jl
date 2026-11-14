@@ -46,8 +46,12 @@ end
 
 # Bounded-space points: half near the truth (in transit), half anywhere in the
 # prior box (mostly no transit at all, or a very poor fit).
+# Drawn in ρ★ and (e, ω), and under density = :rho_circ mapped to the sampled
+# ρ_circ and η (src/density.jl): their box spans tens of decades, and points
+# spread over it would be nearly all at e → 1.
 function _bw_points(tg, n; rng = MersenneTwister(4))
-    L = tg.params.layout
+    p0 = Nereus.without_density_reparam(tg.params, tg.data)
+    L = p0.layout
     near = Dict("P_k1" => 3.11, "Tc_k1" => 1.2, "K_k1" => 30.0, "b_k1" => 0.3,
                 "rr_k1" => 0.075, "sesinw_k1" => 0.0, "secosw_k1" => 0.0)
     pts = Vector{Vector{Float64}}()
@@ -63,7 +67,7 @@ function _bw_points(tg, n; rng = MersenneTwister(4))
                            lo + (hi - lo) * rand(rng)
             push!(x, clamp(v, ps.lo + 1e-9, ps.hi - 1e-9))
         end
-        push!(pts, x)
+        push!(pts, p0 === tg.params ? x : Nereus.density_new_x(x, p0, tg.params))
     end
     return pts
 end
@@ -330,29 +334,44 @@ end
                      "values" => Dict("bjd" => t2, "flux" => lc(t2, 0.004, 0.002),
                                       "flux_err" => fill(5e-4, length(t2))))]))
     d, irv, ipm = Nereus._build_data(cfg["data"])
-    params, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
-    tg = Nereus.NereusTarget(params, d; unconstrained = true)
-    names = params.layout.unfrozen_names
-    @test "rho_s" in names && "Mo_k1" in names && "Mo_k2" in names
-    @test params.config.stability === :gladman && isempty(params.config.noise_models)
-    r2 = MersenneTwister(7)
-    xs = [Nereus._draw_from_prior(tg, r2) for _ in 1:250]
-    ys = [Nereus.transform_forward(x, tg.transform) for x in xs]
-    best = xs[argmax([_ref(tg, y) for y in ys])]
-    ys = ys[1:60]
-    for _ in 1:100
-        x = [clamp(v + 3e-4 * (p.hi - p.lo) * randn(r2), p.lo + 1e-9, p.hi - 1e-9)
-             for (v, p) in zip(best, params.layout.unfrozen_priors)]
-        push!(ys, Nereus.transform_forward(x, tg.transform))
+    # ρ★ sampled as such, and (the default) planet 1's ρ_circ in its place with
+    # planet 2's (ρ_circ, η) in place of its e-coordinates (src/density.jl).
+    for density in ("rho_star", "rho_circ")
+        cfg["model"]["parametrization"]["density"] = density
+        params, _, _ = Nereus._build_model(cfg, d, Nereus._build_star(cfg["star"]), irv, ipm)
+        tg = Nereus.NereusTarget(params, d; unconstrained = true)
+        names = params.layout.unfrozen_names
+        if density == "rho_star"
+            @test "rho_s" in names && "Mo_k1" in names && "Mo_k2" in names
+        else
+            @test !("rho_s" in names) && "Mo_k1" in names && "Mo_k2" in names
+            @test "rho_circ_k1" in names && "rho_circ_k2" in names && "eta_k2" in names
+            @test !("sesinw_k2" in names) && "sesinw_k1" in names
+        end
+        @test params.config.stability === :gladman && isempty(params.config.noise_models)
+        r2 = MersenneTwister(7)
+        xs = [Nereus._draw_from_prior(tg, r2) for _ in 1:250]
+        ys = [Nereus.transform_forward(x, tg.transform) for x in xs]
+        best = xs[argmax([_ref(tg, y) for y in ys])]
+        ys = ys[1:60]
+        # ρ_circ's box spans tens of decades, so a step of a fraction of it would
+        # leave the posterior: it takes a relative step, and η one of its range.
+        step(v, p, nm) = startswith(nm, "rho_circ_k") ? v * exp(1e-3 * randn(r2)) :
+                         v + 3e-4 * (p.hi - p.lo) * randn(r2)
+        for _ in 1:100
+            x = [clamp(step(v, p, nm), p.lo + 1e-9, p.hi - 1e-9)
+                 for (v, p, nm) in zip(best, params.layout.unfrozen_priors, names)]
+            push!(ys, Nereus.transform_forward(x, tg.transform))
+        end
+        ev = _BridgeEvaluator(tg)
+        ref = [_ref(tg, y) for y in ys]
+        got = [_bridge_logdensity!(ev, y) for y in ys]
+        fin = isfinite.(ref)
+        @test isfinite.(got) == fin
+        @test count(fin) >= 120
+        @test maximum(abs.(got[fin] .- ref[fin]) ./ max.(1.0, abs.(ref[fin]))) < 1e-10
+        @test maximum(abs(got[i] - ref[i]) for i in 61:160 if fin[i]) < 1e-8
     end
-    ev = _BridgeEvaluator(tg)
-    ref = [_ref(tg, y) for y in ys]
-    got = [_bridge_logdensity!(ev, y) for y in ys]
-    fin = isfinite.(ref)
-    @test isfinite.(got) == fin
-    @test count(fin) >= 120
-    @test maximum(abs.(got[fin] .- ref[fin]) ./ max.(1.0, abs.(ref[fin]))) < 1e-10
-    @test maximum(abs(got[i] - ref[i]) for i in 61:160 if fin[i]) < 1e-8
 end
 
 # Eccentricities close to 1. The allocating RV and transit methods take the
@@ -405,7 +424,11 @@ end
         rv = (SIM = (data = (t = t, rv = rv, rv_err = fill(3.0, 80)),
                      sigma = LogUniformPrior(0.1, 20.0)),))
     for tg in (rvonly, _bw_target(; se = 1.0), _bw_ew_target(t, rv))
-        names = tg.params.layout.unfrozen_names
+        # The transiting planet samples (ρ_circ, η) in place of its e-coordinates
+        # (src/density.jl): the orbits are set in (e, ω) and mapped to them.
+        p0 = Nereus.without_density_reparam(tg.params, tg.data)
+        rc = p0 !== tg.params
+        names = p0.layout.unfrozen_names
         ew = tg.params.config.parametrization.ew
         @test ew in (:sesinw, :ew)
         j1 = findfirst(==(ew === :ew ? "ecc_k1" : "sesinw_k1"), names)
@@ -413,10 +436,12 @@ end
         r2 = MersenneTwister(6)
         xs0 = [Nereus._draw_from_prior(tg, r2) for _ in 1:100]
         best = xs0[argmax([_ref(tg, Nereus.transform_forward(x, tg.transform)) for x in xs0])]
-        at(e, ω) = (x = copy(best);
+        best0 = rc ? Nereus.density_old_x(best, tg.params, p0) : best
+        at(e, ω) = (x = copy(best0);
                     ew === :ew ? (x[j1] = e; x[j2] = ω) :
                                  (x[j1] = sqrt(e) * sin(ω); x[j2] = sqrt(e) * cos(ω));
-                    Nereus.transform_forward(x, tg.transform))
+                    Nereus.transform_forward(rc ? Nereus.density_new_x(x, p0, tg.params) : x,
+                                             tg.transform))
         # With :ew, ω is a parameter bounded by [-π, π]; keep off the bound.
         ωs = range(-π, π; length = 9)[1:8] .+ (ew === :ew ? 0.05 : 0.0)
         hi = [at(e, ω) for e in (0.99990001, 0.99995, 0.99999, 0.9999999) for ω in ωs]
@@ -427,10 +452,11 @@ end
         @test !any(clamped, hi)
         @test !any(clamped, lo)
         # NaN still is; so is e >= 1 under :sesinw (the :ew prior stops at 1).
-        xn = copy(best); xn[j1] = NaN
+        # (ρ_circ, η) cannot express e >= 1: its NaN is η's.
+        xn = copy(best); xn[rc ? findfirst(==("eta_k1"), tg.params.layout.unfrozen_names) : j1] = NaN
         Nereus.set_unfrozen!(th, xn)
         @test Nereus._bridge_e_clamped(th)
-        if ew === :sesinw
+        if ew === :sesinw && !rc
             x1 = copy(best); x1[j1] = 0.8; x1[j2] = 0.8
             Nereus.set_unfrozen!(th, x1)
             @test Nereus._bridge_e_clamped(th)

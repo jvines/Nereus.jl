@@ -92,20 +92,35 @@ const SYMBOL_OPTIONS = Set{Symbol}([
 
 """
     Stopping(; max_seconds=nothing, max_evals=nothing, ess_min=nothing,
-               rhat_max=nothing, logz_tol=nothing, check_every=500)
+               rhat_max=nothing, logz_tol=nothing, check_every=nothing)
 
-Engine-independent stopping rules, checked every `check_every` iterations.
+Engine-independent stopping rules, handed to the `fit_*` functions as
+`stopping=`. Every field defaults to `nothing`, meaning "do not stop on this
+criterion"; the run then ends on the sampler's own step count. Each field is
+translated into the engine's own option, so the same budget reads the same
+across engines, and a field an engine cannot honour is an `ArgumentError` that
+names the engines that can, never a silent no-op. Giving a field AND the engine
+option it maps to is an error unless they agree.
 
-Every field defaults to `nothing`, meaning "do not stop on this criterion";
-the run then ends on the sampler's own step count. Set any combination:
+| field         | engine option                          | engines                                   |
+|---------------|----------------------------------------|-------------------------------------------|
+| `max_seconds` | `max_seconds`                          | `pt_emcee`, `transdim_pt_emcee`           |
+| `max_evals`   | `max_evals`                            | `pt_emcee`, `transdim_pt_emcee`           |
+| `rhat_max`    | `rhat_threshold` (+ `convergence_stop`) | `pt_emcee`, `transdim_pt_emcee`          |
+| `ess_min`     | `tail_ess_threshold` (+ `convergence_stop`) | `pt_emcee`, `transdim_pt_emcee`      |
+| `check_every` | `diag_every` (steps between diagnostics) | `pt_emcee`, `transdim_pt_emcee`         |
+| `logz_tol`    | `dlogz` (`dlogz_batch` for `nested_dynamic`) | `nested`, `nested_ins`, `daedalus`, `nested_dynamic` |
 
-  - `max_seconds`, `max_evals` — budget caps, honoured by every engine.
-  - `ess_min`, `rhat_max` — convergence gates on the WORST science
-    parameter, so a poorly-constrained nuisance cannot stall the run.
-  - `logz_tol` — for the nested engines, the remaining-evidence tolerance.
+The PT ensembles end production at the last recorded step and finish normally;
+the result and `summary.json` say how (`"stopped"`: `"converged"`,
+`"max_seconds"` or `"max_evals"`, with `"stopped_at_step"` and
+`"n_draws_kept"`). A limit reached during burn-in, when there is nothing to
+keep, is an error. `rhat_max` and `ess_min` gate on the worst gating parameter
+(`sample_pt_emcee`, `sample_transdim_pt_emcee` say which).
 
-Kept separate from the sampler-specific keywords deliberately, so the same
-budget can be handed to any engine in [`ENGINES`](@ref) unchanged.
+To stop a run from outside (a worker, a web front end), `fit_*` and `run_job`
+also take `stop_file`: a path whose appearance ends the run the same way, with
+`"stopped": "requested"`. It defaults to `<output_dir>/STOP`.
 """
 Base.@kwdef struct Stopping
     max_seconds::Union{Nothing,Float64} = nothing
@@ -113,7 +128,75 @@ Base.@kwdef struct Stopping
     ess_min::Union{Nothing,Float64}     = nothing
     rhat_max::Union{Nothing,Float64}    = nothing
     logz_tol::Union{Nothing,Float64}    = nothing
-    check_every::Int                    = 500
+    check_every::Union{Nothing,Int}     = nothing
+end
+
+# What each Stopping field becomes in an engine. A field an engine cannot honour
+# is an ArgumentError naming the engines that can, never a silent no-op.
+# `logz_tol` is the remaining-evidence tolerance of the nested family; the
+# dynamic sampler has two stages and the field is the tolerance of the final one.
+const _STOPPING_KW = (
+    max_seconds = :max_seconds,
+    max_evals   = :max_evals,
+    ess_min     = :tail_ess_threshold,
+    rhat_max    = :rhat_threshold,
+    check_every = :diag_every,
+    logz_tol    = :dlogz,
+)
+
+"""
+    _stopping_options(engine_name, stopping, options) -> Dict{Symbol,Any}
+
+Fold a [`Stopping`](@ref) into an engine's options. `options` are the engine's
+own keywords as the caller gave them; the result is what `run_engine` should
+get. A Stopping field the engine cannot honour, or one that disagrees with an
+engine keyword given as well, is an `ArgumentError`.
+"""
+function _stopping_options(name::AbstractString, stopping, options)
+    opts = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(options))
+    stopping === nothing && return opts
+    st = stopping isa Stopping ? stopping : begin
+        d = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(stopping))
+        bad = setdiff(keys(d), fieldnames(Stopping))
+        isempty(bad) || throw(ArgumentError(
+            "unknown Stopping field(s) $(sort!(collect(bad))); the fields are " *
+            join(fieldnames(Stopping), ", ")))
+        Stopping(; (k => (v === nothing ? nothing : v) for (k, v) in d)...)
+    end
+    fn = get(ENGINES, String(name), nothing)
+    fn === nothing && return opts
+    accepted = _kwarg_names(fn)
+    for f in fieldnames(Stopping)
+        v = getfield(st, f)
+        v === nothing && continue
+        kw = _STOPPING_KW[f]
+        f === :logz_tol && String(name) == "nested_dynamic" && (kw = :dlogz_batch)
+        if !(kw in accepted)
+            throw(ArgumentError(
+                "Stopping($f = $v) cannot be honoured by engine \"$name\": " *
+                "it is supported by " *
+                join(sort!(String[n for (n, g) in ENGINES
+                                  if _STOPPING_KW[f] in _kwarg_names(g) ||
+                                     (f === :logz_tol && :dlogz_batch in _kwarg_names(g))]),
+                     ", ") *
+                ". Drop the field, or pick one of those engines."))
+        end
+        val = f === :check_every ? Int(v) : f === :max_evals ? Float64(v) : Float64(v)
+        if haskey(opts, kw) && !(opts[kw] == val)
+            throw(ArgumentError(
+                "Stopping($f = $v) conflicts with the engine option " *
+                "$kw = $(opts[kw]); give one of them."))
+        end
+        opts[kw] = val
+        if f in (:rhat_max, :ess_min)
+            haskey(opts, :convergence_stop) && opts[:convergence_stop] == false &&
+                throw(ArgumentError(
+                    "Stopping($f = $v) conflicts with the engine option " *
+                    "convergence_stop = false; give one of them."))
+            opts[:convergence_stop] = true
+        end
+    end
+    return opts
 end
 
 # ---------------------------------------------------------------------------
@@ -135,12 +218,21 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       # _target_from simply did not forward, so it was
                       # reachable from Julia and not from the fit_* API.
                       parametrization = nothing, time_anchor = nothing,
-                      R_s = NaN, phot_trend_order = 0, as_names = String[],
+                      density = nothing,
+                      use_rho_s::Bool = false, R_s = NaN, phot_trend_order = 0, as_names = String[],
                       sharing = nothing, transdim_noise = false,
-                      ttv_n_transits = nothing, ttv_backend = nothing)
+                      ttv_n_transits = nothing, ttv_backend = nothing,
+                      # Collects `clip_transit_outliers` reports, when given.
+                      iad_reports = nothing,
+                      # The star's Gaia identity, for the default `plx` prior of
+                      # an astrometric fit (see `fetch_gaia_parallax`). Collects
+                      # the lookup into `gaia_report` when given.
+                      gaia_id = nothing, name = nothing, gaia_report = nothing)
     rv    = NamedTuple()
     phot  = NamedTuple()
     iad = hgca = gost = relast = nothing
+    hip_spec = nothing
+    iad_names = String[]          # per IAD instrument; "" = no jitter
     for ch in channels
         src = String(get(ch, "source", ""))
         if src == "RV"
@@ -153,9 +245,11 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
             # last channel silently won, so `fit_joint` with a Hipparcos
             # channel and a Gaia channel quietly fitted only Gaia — and threw
             # away that channel's parallax and primary mass with it.
-            ch_iad = resolve_astrometry(get(ch, "iad", nothing))
+            ch_iad, ch_names, ch_reps = _resolve_iad(get(ch, "iad", nothing))
             if ch_iad !== nothing
                 iad = iad === nothing ? ch_iad : merge_iad(iad, ch_iad)
+                append!(iad_names, ch_names)
+                iad_reports === nothing || append!(iad_reports, ch_reps)
             end
             ch_relast = _as_relast(get(ch, "relast", nothing))
             if ch_relast !== nothing
@@ -176,6 +270,14 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                     "plan per sky position"))
                 gost = ch_gost
             end
+            # The Hipparcos scans of the HGCA Hipparcos epoch (`_hip_scans_for`).
+            ch_hip = get(ch, "hip_scans", nothing)
+            if ch_hip !== nothing
+                (hip_spec === nothing || isequal(hip_spec, ch_hip)) || throw(ArgumentError(
+                    "two AS channels supply different `hip_scans`; it is the one " *
+                    "Hipparcos scan geometry of the system"))
+                hip_spec = ch_hip
+            end
             # No parallax/m_pri here: both are priors and belong in `priors`.
         elseif src in ("RM", "RM_R", "RM_A", "TOMO", "TTV", "TTV_NB", "SB")
             # handled by the technique-specific entry points below
@@ -183,6 +285,9 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
             throw(ArgumentError("unknown channel source $(repr(src))"))
         end
     end
+    # Fetched by the HGCA row's hip_id unless the IAD already has the scans or
+    # the channel says otherwise.
+    hip_scans = _hip_scans_for(hip_spec, iad, hgca, nothing)
     # Only pass stellar mass when we actually have one: build_target types
     # M_s::Real, and an RV-only fit legitimately has no stellar mass (K-driven
     # parametrisation needs none). Passing nothing is a TypeError, not a default.
@@ -197,6 +302,28 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
         haskey(pr, "M_pri") && (M_pri = _as_prior(pop!(pr, "M_pri")))
         priors = isempty(pr) ? nothing :
                  Dict{String, PriorSpec}(k => _as_prior(v) for (k, v) in pr)
+    end
+
+    # Gaia DR3 parallax, when asked for: only for a fit with astrometry, and
+    # never over a `plx` prior the caller gave. It ranks ahead of the HGCA
+    # catalogue value, which is why it is stated as the prior here and not left
+    # to the default. A failed lookup throws.
+    if plx === nothing && (gaia_id !== nothing || name !== nothing) &&
+       (iad !== nothing || hgca !== nothing || gost !== nothing || relast !== nothing)
+        g = _gaia_lookup_from_star((; gaia_id = gaia_id, name = name))
+        plx = _gaia_plx_prior(g)
+        gaia_report === nothing || push!(gaia_report, g)
+    end
+
+    # A photometry channel's `dilution` / `jitter` are priors on
+    # `dilution_<inst>` / `jitter_<inst>`; the same parameter in `priors` would
+    # be a second answer to the same question.
+    for (inst, spec) in pairs(phot), key in keys(spec)
+        key in (:data, :exposure_time) && continue
+        nm = "$(key)_$(inst)"
+        priors !== nothing && haskey(priors, nm) && throw(ArgumentError(
+            "`$nm` is set by the transit channel's `$key` and again in `priors`; " *
+            "give it once"))
     end
 
     # Pick the default planet block from the channels actually present.
@@ -215,14 +342,18 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     kw = Dict{Symbol,Any}(:planets => planet_spec, :rv => rv,
                           :phot => phot, :iad => iad, :hgca => hgca,
                           :gost => gost, :relAST => relast, :plx => plx,
+                          :hip_scans => hip_scans,
                           :trend_order => trend_order,
                           :noise_models => noise_models, :priors => priors,
                           :stability => stability,
                           :external_priors => _as_external(external_priors),
                           :phot_trend_order => phot_trend_order,
-                          :as_names => as_names)
+                          :as_names => as_names,
+                          :iad_names => any(!isempty, iad_names) ? iad_names : String[])
+    use_rho_s && (kw[:use_rho_s] = true)
     parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
     time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
+    density         === nothing || (kw[:density]         = Symbol(density))
     isnan(R_s) || (kw[:R_s] = R_s)
     sharing === nothing || (kw[:sharing] = Dict{Symbol,Vector{Vector{String}}}(
         Symbol(k) => [String.(g) for g in v] for (k, v) in pairs(sharing)))
@@ -304,6 +435,14 @@ what the jitter and offset terms are keyed on, so there is no unnamed form:
 `planets` is an integer for a fixed-dimension fit or a range for
 trans-dimensional model selection over planet count.
 
+The orbital phase is sampled as the transit phase `phic_k<k>` =
+2π (Tc − t_ref_c) / P, on U(−π, π), unless `time_anchor` asks for `"Mo"`,
+`"Tp"` or `"Tc"` (see `ParametrizationConfig` for why phic is the default:
+it removes the low-e ridge between Mo and ω). Mo, Tp and Tc are reported per
+draw in the derived table. `fit_transit`, `fit_astrometry` and `fit_joint`
+take `time_anchor` the same way, and `density` (`"rho_circ"`, the default, or
+`"rho_star"`; see `ParametrizationConfig`), which matters only with transits.
+
 Stellar keywords are those of a `run_job` star block. `M_s` and `R_s` (M☉, R☉)
 are model keywords. `T_eff` (K), `J_mag`, `K_mag`, `Ab` (Bond albedo, default
 0.3) and the 1σ uncertainties `sigma_M_s`, `sigma_R_s` and `sigma_T_eff` feed
@@ -315,8 +454,8 @@ left out is assumed (10% of M★, 5% of R★, 150 K) and flagged `assumed` in
 function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
-                stopping = nothing, output_dir = nothing, noise = nothing,
-                trend_order = 0, kwargs...)
+                stopping = nothing, stop_file = nothing, output_dir = nothing,
+                noise = nothing, trend_order = 0, kwargs...)
     _require_instrument_map(rv, "RV", (:t, :rv, :rv_err))
     ch = _as_channel(rv, "RV")
     if !(planets isa NamedTuple)
@@ -329,12 +468,12 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
     star, kwargs = _split_star_kwargs(kwargs)
     tgt = _target_from([ch], planets;
                        trend_order, noise_models = noise, kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", transdim, plots, plot_kwargs, save_pdf, science, output,
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
                    star)
 end
 
 """
-    fit_transit(phot; planets, limb_darkening, rho_star, gravity_darkening, ...)
+    fit_transit(phot; planets, use_rho_s, limb_darkening, rho_star, gravity_darkening, ...)
 
 Fit transit photometry alone.
 
@@ -343,36 +482,46 @@ Fit transit photometry alone.
     fit_transit(Dict("TESS" => (t = bjd, flux = f, flux_err = ferr)))
 
 Limb darkening is quadratic, sampled as Kipping's (q1, q2) per instrument
-(`:quadratic` or `:kipping`). Sampling ρ★ and a
-prior on it (`model.parametrization.use_rho_s` with an `external_priors` entry
-on `rho_s`, in solar units) and the gravity-darkened transit (planet mode
-`PM_GD`, GD_SOURCE, which constrains i* separately from λ) are `run_job`
-options; this entry point builds neither. `limb_darkening`, `rho_star` and
-`gravity_darkening` are accepted at their defaults only and throw otherwise:
-they were never read, so `gravity_darkening = true` fitted a symmetric transit
-and said nothing.
+(`:quadratic` or `:kipping`).
+
+`use_rho_s = true` samples the stellar density ρ★ (`rho_s`, solar units) and
+turns it and the period into a/R★, as `model.parametrization.use_rho_s` does in
+a `run_job` config; the prior on it is `priors["rho_s"]` (default log-uniform on
+[0.001, 100]) or an `external_priors` entry on `rho_s`. The same keyword and
+semantics as [`fit_joint`](@ref).
+
+The gravity-darkened transit (planet mode `PM_GD`, GD_SOURCE, which constrains
+i* separately from λ) is a `run_job` option; this entry point does not build
+it. `limb_darkening`, `rho_star` and `gravity_darkening` are accepted at their
+defaults only and throw otherwise: they were never read, so
+`gravity_darkening = true` fitted a symmetric transit and said nothing.
+`rho_star` is replaced by `use_rho_s` plus `priors["rho_s"]`.
 """
-function fit_transit(phot; planets = 1, limb_darkening = :quadratic,
-                     rho_star = nothing, gravity_darkening = false,
+function fit_transit(phot; planets = 1, use_rho_s::Bool = false,
+                     limb_darkening = :quadratic, rho_star = nothing, gravity_darkening = false,
                      engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, stopping = nothing,
-                     output_dir = nothing, kwargs...)
-    _require_instrument_map(phot, "transit", (:t, :flux, :flux_err))
+                     stop_file = nothing, output_dir = nothing, kwargs...)
+    # A transit CHANNEL (a dict with "source", as `fit_joint` takes) carries the
+    # photometry options; a bare instrument map has none.
+    phot_ch = phot isa AbstractDict && haskey(phot, "source") ? phot :
+              Dict{String,Any}("source" => "PM", "data" => phot)
+    _require_instrument_map(phot_ch["data"], "transit", (:t, :flux, :flux_err))
     Symbol(limb_darkening) in (:quadratic, :kipping) || throw(ArgumentError(
         "fit_transit: limb_darkening = $(repr(limb_darkening)) is not implemented; " *
         "the transit model is quadratic, sampled in Kipping's (q1, q2)"))
     rho_star === nothing || throw(ArgumentError(
-        "fit_transit: `rho_star` was never read. A stellar-density prior needs ρ★ " *
-        "sampled (model.parametrization.use_rho_s) and an external_priors entry " *
-        "on rho_s, in solar units -- run_job options"))
+        "fit_transit: `rho_star` was never read. Sample the stellar density with " *
+        "`use_rho_s = true` and put its prior (solar units) in " *
+        "`priors = Dict(\"rho_s\" => ...)`"))
     gravity_darkening == false || throw(ArgumentError(
         "fit_transit: `gravity_darkening` was never read, and this entry point " *
         "does not build a gravity-darkened transit; use run_job with " *
         "planet_modes = [\"PM_GD\"]"))
     star, kwargs = _split_star_kwargs(kwargs)
-    tgt = _target_from([_as_channel(phot, "PM")], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", transdim, plots, plot_kwargs, save_pdf, science, output,
+    tgt = _target_from([phot_ch], planets; use_rho_s, kwargs...)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
                    star)
 end
 
@@ -398,15 +547,52 @@ expressed over the wire:
     [Dict("catalogue" => "hipparcos", "hip" => 27321),
      Dict("catalogue" => "gaia_dr4",  "source_id" => 1457486023639239296)]
 """
-function resolve_astrometry(spec)
-    spec === nothing && return nothing
+resolve_astrometry(spec) = first(_resolve_iad(spec))
+
+"""
+    _resolve_iad(spec) -> (iad, jitter_names, outlier_reports)
+
+`resolve_astrometry`, plus the two per-instrument options a spec may carry:
+
+    Dict("catalogue" => "gaia_dr4", "source_id" => ..., "jitter" => true,
+         "clip_outliers" => true)
+
+- `"jitter" => true` gives this instrument a `sigma_iad_<name>` along-scan
+  jitter (`InstrumentConfig`'s `iad`). `jitter_names` has one entry per
+  instrument of the resolved `iad`, `""` for those without.
+- `"clip_outliers" => true` (or a number of σ, default 5) runs
+  [`clip_transit_outliers`](@ref) on this instrument before it is merged;
+  its report is returned in `outlier_reports`, tagged with the name.
+
+`<name>` is the spec's `"instrument"` if given, else `HIP<hip>` /
+`GaiaDR4_<source_id>` -- the names a run_job `data.iad` block gets.
+"""
+function _resolve_iad(spec)
+    spec === nothing && return (nothing, String[], Any[])
     if spec isa AbstractVector && !isempty(spec) && !(spec isa AbstractVector{<:Real})
-        resolved = [resolve_astrometry(s) for s in spec]
-        filter!(!isnothing, resolved)
-        isempty(resolved) && return nothing
-        return merge_iad(collect(IADData, resolved))
+        parts = [_resolve_iad(s) for s in spec]
+        filter!(p -> p[1] !== nothing, parts)
+        isempty(parts) && return (nothing, String[], Any[])
+        return (merge_iad(collect(IADData, first.(parts))),
+                reduce(vcat, [p[2] for p in parts]),
+                reduce(vcat, [p[3] for p in parts]))
     end
-    spec isa AbstractDict || return spec          # already an IADData
+    if !(spec isa AbstractDict)                    # already an IADData
+        return (spec, spec isa IADData ? fill("", n_iad_inst(spec)) : String[], Any[])
+    end
+    iad = _load_iad_spec(spec)
+    name = _iad_block_name(spec, 1)
+    reports = Any[]
+    nsig = _iad_clip_nsigma(_get(spec, :clip_outliers; default = false))
+    if nsig !== nothing
+        iad, rep = clip_transit_outliers(iad; nsigma = nsig, label = name)
+        push!(reports, merge((instrument = name,), rep))
+    end
+    jit = _iad_jitter_flag(_get(spec, :jitter; default = false))
+    return (iad, fill(jit ? name : "", n_iad_inst(iad)), reports)
+end
+
+function _load_iad_spec(spec::AbstractDict)
     cat = lowercase(String(get(spec, "catalogue", "")))
     if cat in ("gaia_dr4", "gaia_epoch", "dr4")
         sid = get(spec, "source_id", nothing)
@@ -426,6 +612,26 @@ function resolve_astrometry(spec)
     error("unknown astrometry catalogue $(repr(cat)). " *
           "Supported: gaia_dr4, hipparcos")
 end
+
+# `jitter`: a boolean, nothing else. A string "true" or a number is a typo for
+# something, and the safe reading of a typo here is an error, not a model.
+function _iad_jitter_flag(x)
+    x isa Bool && return x
+    throw(ArgumentError("iad `jitter` must be true or false, got $(repr(x))"))
+end
+
+# `clip_outliers`: false/absent = off, true = the default 5σ, a number = that.
+function _iad_clip_nsigma(x)
+    x === false && return nothing
+    x === true && return 5.0
+    (x isa Real && !(x isa Bool) && x > 0) && return Float64(x)
+    throw(ArgumentError("iad `clip_outliers` must be true, false or a positive " *
+                        "number of σ, got $(repr(x))"))
+end
+
+# A clip report as plain JSON-able data for a result summary.
+_iad_outlier_summary(reports) =
+    [Dict{String,Any}(String(k) => v for (k, v) in pairs(r)) for r in reports]
 
 """
     _as_relast(x) -> RelAstromData or nothing
@@ -461,22 +667,42 @@ Fit astrometry alone, no RV.
 so mass and parallax are degenerate without it. `priors["M_pri"]` sets the
 primary mass. Both are priors and both go in `priors` — there is no separate
 keyword for either.
+
+`gaia_id` (a Gaia DR3 source_id: an integer, digits, or `"Gaia DR3 <id>"`) or
+`name` (resolved to one through Simbad) makes the fit query the Gaia DR3
+parallax at runtime and use it as the default `plx` prior, a Gaussian truncated
+at ±10σ (raw catalogue value, no zero-point correction). It takes precedence
+over the HGCA parallax; a `priors["plx"]` takes precedence over it, and then
+nothing is queried. If the query fails the fit stops. See
+[`fetch_gaia_parallax`](@ref). The lookup is recorded in
+`summary["star"]["gaia"]`.
+
+`hip_scans` is the Hipparcos scan geometry the HGCA Hipparcos epoch is fitted
+through. Left out, it is the IAD's own scans when `iad` holds Hipparcos data,
+and otherwise fetched by the HGCA row's `hip_id`; `false` models the Hipparcos
+epoch instantaneously instead (with a warning). See `_hip_scans_for` for the
+other forms. An astrometry channel of `fit_joint` takes the same `"hip_scans"`
+key.
 """
 function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
-                        relast = nothing, planets = 1,
+                        relast = nothing, hip_scans = nothing, planets = 1,
                         engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
-                        stopping = nothing, output_dir = nothing, kwargs...)
-    iad = resolve_astrometry(iad)
+                        stopping = nothing, stop_file = nothing,
+                        output_dir = nothing, kwargs...)
+    # NOT resolved here: `_target_from` resolves the spec, and has to see it
+    # unresolved to read the per-instrument `jitter` / `clip_outliers` keys.
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
-              "relast" => relast)
+              "relast" => relast, "hip_scans" => hip_scans)
     planets isa NamedTuple ||
         (planets = _planet_spec(planets; block = default_astrom_planet()))
     star, kwargs = _split_star_kwargs(kwargs)
-    tgt = _target_from([ch], planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star)
+    reps = Any[]
+    greps = Any[]
+    tgt = _target_from([ch], planets; iad_reports = reps, gaia_report = greps, kwargs...)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
+                   star, iad_outliers = reps, gaia = greps)
 end
 
 
@@ -484,22 +710,43 @@ end
 
 
 """
-    fit_joint(channels...; planets, engine, stopping, ...)
+    fit_joint(channels...; planets, use_rho_s, engine, stopping, ...)
 
 Fit several techniques simultaneously. One operation for "these together",
 rather than a named function per combination.
+
+`use_rho_s = true` samples the stellar density ρ★ (`rho_s`, in solar units) and
+turns it and the period into the transit's a/R★, as a `run_job` config does with
+`model.parametrization.use_rho_s`. It needs a transit channel (`"source" => "PM"`)
+among `channels` and throws otherwise. The prior on ρ★ is `priors["rho_s"]`
+(default: log-uniform on [0.001, 100]), or an `external_priors` entry on
+`rho_s`:
+
+    fit_joint(rv_channel, phot_channel; use_rho_s = true,
+              priors = Dict("rho_s" => NormalPrior(1.79, 0.11, 0.1, 10.0)),
+              M_s = 0.767, R_s = 0.754)
 """
-function fit_joint(channels...; planets = 1, engine = nothing, transdim = nothing,
+function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
+                engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
-                   stopping = nothing, output_dir = nothing, kwargs...)
+                   stopping = nothing, stop_file = nothing,
+                   output_dir = nothing, kwargs...)
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
+    use_rho_s && !any(c -> String(get(c, "source", "")) == "PM", channels) &&
+        throw(ArgumentError(
+            "fit_joint: `use_rho_s` samples the stellar density through the " *
+            "transit a/R★, so it needs a transit channel (\"source\" => \"PM\") " *
+            "among the channels"))
     star, kwargs = _split_star_kwargs(kwargs)
-    tgt = _target_from(collect(channels), planets; kwargs...)
-    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star)
+    reps = Any[]
+    greps = Any[]
+    tgt = _target_from(collect(channels), planets; iad_reports = reps,
+                       gaia_report = greps, use_rho_s, kwargs...)
+    return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
+                   star, iad_outliers = reps, gaia = greps)
 end
 
 # ---------------------------------------------------------------------------
@@ -522,11 +769,54 @@ function _rv_namedtuple(ch::AbstractDict)
     return NamedTuple{names}(vals)
 end
 
-"""Per-instrument photometry -> NamedTuple."""
+"""
+    _phot_namedtuple(ch) -> NamedTuple
+
+A transit channel's per-instrument photometry for `build_target`, with the
+channel's options applied:
+
+- `exposure_time` -- seconds, one value for every instrument or an
+  `instrument => seconds` mapping. It switches on finite-exposure
+  supersampling (the sub-sample count follows from it: none up to 3 minutes,
+  one per minute above, at most 30). Without it the model is instantaneous.
+- `dilution`, `jitter` -- a value (fixed), a prior (`PriorSpec` or the wire's
+  `{"type": ...}` dict), or an `instrument => value` mapping, for
+  `dilution_<instrument>` and `jitter_<instrument>`. `"default"` / absent
+  leaves the default prior. Giving the same parameter here and in `priors`
+  is an error (checked in `_target_from`).
+- `limb_darkening` (`quadratic` / `kipping`: one model, sampled in Kipping's
+  (q1, q2)), `gravity_darkening` (false), `supersample` (absent): the only
+  values the model has. Anything else throws; they used to be ignored.
+"""
 function _phot_namedtuple(ch::AbstractDict)
+    ld = get(ch, "limb_darkening", "quadratic")
+    Symbol(ld) in (:quadratic, :kipping) || throw(ArgumentError(
+        "transit channel: limb_darkening = $(repr(ld)) is not implemented; " *
+        "the transit model is quadratic, sampled in Kipping's (q1, q2)"))
+    get(ch, "gravity_darkening", false) == false || throw(ArgumentError(
+        "transit channel: gravity_darkening was never read, and this entry point " *
+        "does not build a gravity-darkened transit; use run_job with " *
+        "planet_modes = [\"PM_GD\"]"))
+    get(ch, "supersample", nothing) === nothing || throw(ArgumentError(
+        "transit channel: there is no explicit supersampling count. Set " *
+        "`exposure_time` (seconds) and the sub-sample count follows from it " *
+        "(none up to 3 minutes, one per minute above, at most 30)"))
     data = get(ch, "data", Dict())
     names = Tuple(Symbol.(collect(keys(data))))
-    return NamedTuple{names}(Tuple((data = data[String(n)],) for n in names))
+    per(v, nm) = (v isa AbstractDict && !haskey(v, "type")) ?
+                 get(v, String(nm), nothing) : v
+    vals = Tuple(begin
+        pairs_ = Pair{Symbol,Any}[:data => data[String(n)]]
+        ex = per(get(ch, "exposure_time", nothing), n)
+        ex === nothing || push!(pairs_, :exposure_time => ex)
+        for key in ("dilution", "jitter")
+            v = per(get(ch, key, nothing), n)
+            (v === nothing || v == "default") && continue
+            push!(pairs_, Symbol(key) => _as_prior(v))
+        end
+        NamedTuple(pairs_)
+    end for n in names)
+    return NamedTuple{names}(vals)
 end
 
 """
@@ -550,6 +840,12 @@ than hard-coded: period from twice the median cadence to three baselines,
 semi-amplitude from 0.1 m/s to ten times the RV scatter. A user who wants
 something else passes `priors`; a user who just wants a fit should not have to
 invent numbers to get one.
+
+It names no time anchor: the fit's `time_anchor` (default the transit phase
+`phic`, see `ParametrizationConfig`) picks the slot, and `default_priors` gives
+it its one-period prior, `phic_k` on U(−π, π) or `Mo_k` on U(0, 2π). A block
+that named one would leave a prior on a slot the model does not have whenever
+another anchor is asked for.
 """
 function default_rv_planet(t::AbstractVector, rv::AbstractVector)
     base   = maximum(t) - minimum(t)
@@ -560,19 +856,25 @@ function default_rv_planet(t::AbstractVector, rv::AbstractVector)
     return (P      = LogUniformPrior(P_lo, P_hi),
             K      = LogUniformPrior(0.1, K_hi),
             sesinw = UniformPrior(-1.0, 1.0),
-            secosw = UniformPrior(-1.0, 1.0),
-            Mo     = UniformPrior(0.0, 2pi))
+            secosw = UniformPrior(-1.0, 1.0))
 end
 
-"""Default a+M_sec block for an astrometric companion."""
+"""
+Default a+M_sec block for an astrometric companion. Like `default_rv_planet`
+it names no time anchor: the fit's `time_anchor` picks it.
+"""
 default_astrom_planet(; a_lo = 0.1, a_hi = 100.0, m_lo = 1e-4, m_hi = 1.0) =
     (a      = LogUniformPrior(a_lo, a_hi),
      M_sec  = LogUniformPrior(m_lo, m_hi),
      sesinw = UniformPrior(-1.0, 1.0),
      secosw = UniformPrior(-1.0, 1.0),
-     Mo     = UniformPrior(0.0, 2pi),
      inc    = SinePrior(),
      Omega  = UniformPrior(0.0, 2pi))
+
+# Engines that run the model in ρ★ and (e, ω) whatever its `density`: the
+# trans-dimensional samplers (`sample_pt` included, which runs the trans-dim
+# path with every planet on) and ESS. See `without_density_reparam`.
+const _DENSITY_FREE_ENGINES = ("pt", "transdim_pt_emcee", "moms", "daedalus", "rjmcmc", "ess")
 
 """
     _normalize(raw) -> (chains, log_z, extra)
@@ -598,7 +900,8 @@ function _normalize(raw)
                             "railed" => raw.railed,
                             "railed_params" => raw.railed_params,
                             "n_basins" => raw.n_basins,
-                            "log_posterior" => raw.log_posterior)
+                            "log_posterior" => raw.log_posterior,
+                            "log_z" => "Laplace approximation at the MAP")
         return nothing, getproperty(raw, :log_evidence_laplace), extra
     end
     # nuts, ensemble, ess and ofti return a BARE MCMCChains.Chains rather than
@@ -608,10 +911,13 @@ function _normalize(raw)
     # diagnostics, from a run that had sampled perfectly well.
     raw isa MCMCChains.Chains && return raw, NaN, extra
     ch = hasproperty(raw, :chains) ? raw.chains : nothing
-    lz = hasproperty(raw, :log_evidence) ? raw.log_evidence : NaN
+    lz = _ns_evidence("", raw)
+    lz = lz !== nothing ? lz[1] :
+         hasproperty(raw, :log_evidence) ? raw.log_evidence : NaN
     for f in (:acceptance_within, :acceptance_swap, :betas, :n_evals)
         hasproperty(raw, f) && (extra[String(f)] = getproperty(raw, f))
     end
+    _stop_to_summary!(extra, raw)
     return ch, lz, extra
 end
 
@@ -627,7 +933,9 @@ function _summarise_params(chains, params)
     out = Dict{String,Any}()
     chains === nothing && return out
     names_in = Set(MCMCChains.names(chains, :parameters))
-    for name in params.layout.unfrozen_names
+    # Under the photo-eccentric reparametrization, ρ★ and the e-coordinates it
+    # derives are reported as they were when sampled (src/density.jl).
+    for name in vcat(params.layout.unfrozen_names, density_derived_names(params))
         sym = Symbol(name)
         sym in names_in || continue
         v = _draws(chains, sym)
@@ -760,28 +1068,14 @@ _as_td(td, max_k) = throw(ArgumentError(
     "got $(typeof(td))"))
 
 """Run the engine, then assemble the standard result."""
-function _finish(target, engine, stopping, output_dir; op::String,
+function _finish(target, engine, stopping, output_dir; op::String, stop_file = nothing,
                 science::Bool = true, output = nothing,
                  transdim = nothing, plots = nothing, plot_kwargs = nothing,
-                 save_pdf::Bool = false, star = Dict{Symbol,Any}())
+                 save_pdf::Bool = false, star = Dict{Symbol,Any}(),
+                 iad_outliers = nothing, gaia = nothing)
     t0 = time()
-    # `Stopping` is exported, documented, and plumbed all the way through the
-    # Python client -- and NOTHING in the package consumes it. Not _finish, not
-    # run_engine, not run_job. `Stopping(max_seconds=3600)` produced an
-    # unbounded run, silently. Until it is implemented, say so: run_engine
-    # already throws on an unknown engine option because "a typo'd `n_round`
-    # that quietly does nothing is how you lose a day", and this is that same
-    # failure one level up. The convergence half IS reachable today under
-    # engine-specific names, so point at them.
-    if stopping !== nothing
-        throw(ArgumentError(
-            "`stopping` is not implemented and was being ignored silently. " *
-            "For a convergence gate use the engine's own options: " *
-            "pt_emcee takes `convergence_stop=true` with `rhat_threshold` and " *
-            "`tail_ess_threshold`; the nested family takes `dlogz`. " *
-            "There is no wall-clock cap in Nereus -- `max_seconds` has no " *
-            "implementation anywhere."))
-    end
+    # `Stopping` and `stop_file` are folded into the engine's own options below,
+    # once the engine is known; a field the engine cannot honour throws.
     # The star as a job's star block holds it: M★ and R★ from the target, the
     # rest (T_eff, magnitudes, albedo, σ's) from the entry point's keywords.
     # Built before the engine runs, so a bad σ fails here and not after it.
@@ -806,8 +1100,27 @@ function _finish(target, engine, stopping, output_dir; op::String,
         spec["options"] = o
     end
     spec_name = String(get(spec, "engine", "pt_emcee"))
+    # `Stopping` and `stop_file` become the engine's own options. A file's
+    # default is `<output_dir>/STOP`; with no output_dir only an explicit one.
+    let o = _stopping_options(spec_name, stopping, get(spec, "options", Dict()))
+        sf = stop_file !== nothing ? String(stop_file) :
+             (output_dir !== nothing ? joinpath(String(output_dir), "STOP") : nothing)
+        if sf !== nothing
+            if haskey(ENGINES, spec_name) && :stop_file in _kwarg_names(ENGINES[spec_name])
+                haskey(o, :stop_file) || (o[:stop_file] = sf)
+            elseif stop_file !== nothing
+                throw(ArgumentError(
+                    "`stop_file` is honoured by $(join(_engines_with(:stop_file), ", ")); " *
+                    "engine \"$spec_name\" cannot be stopped early."))
+            end
+        end
+        isempty(o) || (spec["options"] = o)
+    end
     spec_opts = Dict{String,Any}(String(k) => v
                                  for (k, v) in pairs(get(spec, "options", Dict())))
+    # Engines that cannot run the photo-eccentric reparametrization run the same
+    # model in ρ★ and (e, ω) (src/density.jl); the summary reads their names.
+    spec_name in _DENSITY_FREE_ENGINES && (target = without_density_reparam(target))
     raw = run_engine(target, spec)
     chains, log_z, extra = _normalize(raw)
     # The re-chart run_job does (src/circular.jl), before sampler_diagnostics,
@@ -825,6 +1138,13 @@ function _finish(target, engine, stopping, output_dir; op::String,
         "elapsed_sec" => time() - t0,
     )
     merge!(summary, extra)
+    # What `clip_outliers` took out of the data, so a client that never sees
+    # the Julia log still sees how many abscissae went, and which.
+    (iad_outliers === nothing || isempty(iad_outliers)) ||
+        (summary["iad_outliers"] = _iad_outlier_summary(iad_outliers))
+    # Where the parallax prior came from, when it was looked up.
+    (gaia === nothing || isempty(gaia)) ||
+        (summary["star"] = Dict{String,Any}("gaia" => _gaia_summary(gaia[1])))
     # Run health, per engine. Harvested from whatever the engine actually
     # returned plus, where the chain structure supports it, R-hat and ESS --
     # which pt_emcee has always computed for the progress bar and thrown away.
@@ -833,6 +1153,7 @@ function _finish(target, engine, stopping, output_dir; op::String,
     catch err
         summary["diagnostics"] = Dict{String,Any}("error" => sprint(showerror, err))
     end
+    summary["provenance"] = provenance_block(spec_name, target.params)
     summary["params"] = _summarise_params(chains, target.params)
     _n_planets_posterior!(summary, chains)
     try
@@ -850,10 +1171,14 @@ function _finish(target, engine, stopping, output_dir; op::String,
         summary["derived"] = chains === nothing ? Dict() :
             summarize_derived(chains, target.params;
                               M_s   = st.M_s, R_s = st.R_s, T_eff = st.T_eff,
-                              J_mag = st.J_mag, K_mag = st.K_mag, Ab = st.Ab)
+                              J_mag = st.J_mag, K_mag = st.K_mag, Ab = st.Ab,
+                              t_ref = target.data.t_ref)
     catch err
         summary["derived_error"] = sprint(showerror, err)
     end
+    # The data measure the spin axis but not its sense: ψ is folded to the axis
+    # angle in the derived block, i★ and λ are one representative of two.
+    spin_flip(target.params) === nothing || (summary["spin_sense"] = SPIN_SENSE_NOTE)
     if get(get(summary, "map", Dict()), "railed", false)
         summary["status"] = "railed"
         summary["error"] = "MAP railed against a prior bound on: " *
@@ -902,7 +1227,7 @@ function _finish(target, engine, stopping, output_dir; op::String,
             # Manifest: logical name -> path, relative to plots/ without the
             # extension, exactly as run_job builds it. A bare scan also picks
             # up figures an EARLIER fit into the same output_dir left behind,
-            # so `plots = ["corner"]` came back advertising three figures with
+            # so a fit asking for one figure came back advertising three with
             # no way to tell which were this run's. `_png_mtimes` snapshots
             # the tree first and only files this call created or rewrote are
             # reported; the rest stay on disk untouched.
@@ -956,12 +1281,13 @@ function _finish(target, engine, stopping, output_dir; op::String,
                 # A bare log_z is not quotable: the tempered stack shares one
                 # mean_logL array, so its four variants agreeing is not a
                 # cross-check and they can sit >100 nats low together.
-                _evidence_block!(summary, raw)
+                _evidence_block!(summary, raw; engine = spec_name)
                 # The tempered stack sits >100 nats low on a signal-locked
                 # posterior while its four variants agree with each other to a
                 # decimal, so a bridge cross-check is not optional.
                 _augment_evidence!(summary, target.params, target.data, chains;
-                                   show_progress = show_pf, timings = bridge_t)
+                                   show_progress = show_pf, timings = bridge_t,
+                                   _postfit_rule_kw(spec_opts, target.data)...)
                 _postfit_stage!(pf, "science")
                 # Conditioned, unit-tagged fitted/derived + model_selection +
                 # run_info, and tables/ in json, csv, ecsv, dat and TEX.
@@ -1019,42 +1345,28 @@ end
 # does support them. The signature stays technique-shaped; the config is an
 # implementation detail the caller never sees.
 
+"""
+    _ns_evidence(engine, raw) -> Union{Nothing, Tuple{Float64, Float64}}
+
+A nested engine's log Z and its error (src/samplers/ns_error.jl), from what
+`sample_nested` (a tuple), `sample_nested_ins` or `sample_nested_dynamic`
+returned; `nothing` for any other engine.
+"""
+function _ns_evidence(engine::AbstractString, raw)
+    raw isa INSResult && return (raw.log_z_ns, raw.log_z_ns_err)
+    raw isa DynamicNSResult && return (raw.log_z, raw.log_z_err)
+    engine == "nested" && raw isa Tuple && length(raw) >= 3 &&
+        return (Float64(raw[2]), Float64(raw[3]))
+    return nothing
+end
+
 """Every evidence estimate the sampler produced, with its error, and which one
 `log_z` reports. Mirrors the block `_populate_summary!` builds for run_job."""
-function _evidence_block!(summary::AbstractDict, result)
+function _evidence_block!(summary::AbstractDict, result; engine::AbstractString = "")
     result === nothing && return
-    ev = Dict{String,Any}()
-    for (key, fld) in ("bridge" => :log_evidence_bridge,
-                       "mode_laplace" => :log_evidence_laplace)
-        hasproperty(result, fld) || continue
-        v = getproperty(result, fld)
-        v isa Real && isfinite(v) && (ev[key] = Float64(v))
-    end
-    for rf in (:evidence, :evidence_report)
-        hasproperty(result, rf) || continue
-        rep = getproperty(result, rf)
-        for (key, fld) in ("ti" => :ti, "ti_plus" => :ti_plus,
-                           "ss_plus" => :ss_plus, "hybrid" => :hybrid)
-            hasproperty(rep, fld) || continue
-            t = getproperty(rep, fld)
-            (t isa Tuple && length(t) == 2 && isfinite(t[1])) || continue
-            ev[key] = Dict("log_z" => Float64(t[1]), "se" => Float64(t[2]))
-        end
-        hasproperty(rep, :hybrid_beta_star) &&
-            (ev["hybrid_beta_star"] = Float64(getproperty(rep, :hybrid_beta_star)))
-        break
-    end
-    isempty(ev) && return
-    lz = get(summary, "log_z", NaN)
-    which = "tempered"
-    if lz isa Real && isfinite(lz)
-        for (k, v) in ev
-            val = v isa Dict ? get(v, "log_z", NaN) : v
-            (val isa Real && isfinite(val) && val ≈ lz) && (which = k; break)
-        end
-    end
-    ev["reported"] = which
-    summary["evidence"] = ev
+    ev = _evidence_summary(result, get(summary, "log_z", NaN);
+                           nested = _ns_evidence(engine, result))
+    ev === nothing || (summary["evidence"] = ev)
     return
 end
 

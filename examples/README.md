@@ -1,7 +1,9 @@
 # Nereus examples
 
-Two worked tutorials on Gaia DR4 (pre-release) epoch astrometry. Run them in
-order — the second assumes the first.
+Four worked tutorials. Notebooks 01 and 02 are Julia tutorials on Gaia DR4
+(pre-release) epoch astrometry; run them in order, the second assumes the
+first. Notebooks 03 and 04 are Python tutorials (`astronereus`), described
+below.
 
 | notebook | system | channels | what it shows |
 |---|---|---|---|
@@ -12,7 +14,7 @@ HD 114762 b was the first exoplanet candidate ever announced (Latham et al.
 1989). Radial velocities give `M sin i ~ 11 M_Jup`; the joint fit shows the
 orbit is nearly face-on and the companion is a ~0.1 M_sun star.
 
-## Running them
+## Running notebooks 01 and 02
 
 Both need only Nereus. Data is handled for you: the DR4 VOTable is fetched to
 the Nereus cache on first use, and the HD 114762 radial velocities ship with the
@@ -36,29 +38,25 @@ julia --project -t auto -e 'using NBInclude; @nbinclude("01_gaia4_astrometry_onl
 
 ## Cost
 
-Both fit with parallel tempering, where `n_rounds` doubles the sample count each
-round — so the cost roughly doubles per round too.
+Both fit with `sample_pt_emcee` and run `n_steps` steps (3000 by default, burn-in
+included; burn-in is `min(1500, n_steps ÷ 2)`), so the cost is roughly linear in
+the step count. Both notebooks default to production settings and expose the step
+count through an environment variable (`GAIA4_STEPS`, `HD114762_STEPS`) so you
+can smoke-test deliberately rather than by accident.
 
-| rounds | Gaia-4 | use |
-|---|---|---|
-| 3–4 | ~1 min | smoke test: does it run |
-| 12 | ~1 h | a result you would quote |
-
-**The short settings do not give a usable posterior.** On HD 114762 at 4 rounds
-the inclination rails toward zero, the RV chi-squared per point sits near 59,
-and the credible intervals come out grossly asymmetric — while the headline mass
-still lands near the published value. That combination is the trap: a short run
-that agrees with the answer you expected is not evidence of anything. Both
-notebooks default to production settings and expose the round count through an
-environment variable (`GAIA4_ROUNDS`, `HD114762_ROUNDS`) so you can smoke-test
-deliberately rather than by accident.
+**A short run does not give a usable posterior.** Short chains can leave the
+inclination railing, the RV chi-squared per point far above 1 and the credible
+intervals grossly asymmetric, while the headline mass still lands near the
+published value. That combination is the trap: a short run that agrees with the
+answer you expected is not evidence of anything.
 
 ## Figures
 
 Every plot takes `(chains, params, data)` and a directory as `output`; Nereus
 names the files and puts model figures under `models/`. The two notebooks
 produce along-scan residuals, the epoch-astrometry orbit, the sky-plane orbit,
-RV time series and phase folds, and the posterior corner plot.
+RV time series and phase folds, and the posterior corner plots (one per
+companion, and one of the noise model when it has two or more parameters).
 
 ## 03 — Python tutorial (`astronereus`)
 
@@ -75,3 +73,21 @@ straight into two systems:
 
 Runs on a stock Python install: `pip install astronereus numpy`. The runtime is
 fetched on first use.
+
+## 04 — Python tutorial: RVs, transits and astrometry
+
+`04_tutorial_rv_transits_astrometry.ipynb` starts from installation and fits one
+system per combination of channels, every fit with `PTEmcee`:
+
+- **NGTS-6 b**: CORALIE and FEROS velocities alone (Vines et al. 2019), then
+  jointly with five sectors of TESS 2-min photometry.
+- **Gaia-4 b**: Gaia DR4 epoch astrometry alone, then jointly with the HPF, NEID
+  and FIES velocities.
+- **HD 114762 b**: velocities alone, then with DR4. The joint fit puts the orbit
+  at i = 3.5° and the companion at 0.2 M_sun.
+
+Needs `pip install "astronereus[diagnostics,lightcurves]"` (xarray to read the
+chains, lightkurve for TESS) and `unzip` on the PATH for the DR4 download. A full
+run takes about 15 minutes with 16 threads. `NEREUS_TUTORIAL_QUICK=1` cuts every
+chain to 600 steps, to check that the notebook runs end to end; what it prints
+then is not a result.

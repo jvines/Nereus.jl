@@ -188,6 +188,12 @@ diagnostics, or one-off access — the hot path uses block accessors.
 """
 function get_param(theta::Theta, name::AbstractString)
     idx = theta.params.layout.name_to_idx[name]
+    d = theta.params.layout.density
+    # A coordinate the photo-eccentric reparametrization derives: its value at
+    # the sampled point, not the slot's stale contents.
+    if d.mode !== :none && idx in d.derived && _density_sampled_ok(theta)
+        density_physical!(theta)
+    end
     return theta.values[idx]
 end
 
@@ -199,6 +205,19 @@ diagnostics only.
 """
 function set_param!(theta::Theta, name::AbstractString, value::Real)
     idx = theta.params.layout.name_to_idx[name]
+    d = theta.params.layout.density
+    # Under the photo-eccentric reparametrization a coordinate it derives (ρ★,
+    # the e-coordinates of an η planet) is written as the physical coordinate
+    # it is: the sampled ρ_circ / η follow it, the other derived coordinates
+    # held (taken from the sampled point when that is one, else from their
+    # slots, so a physical point can be written name by name, in layout order).
+    # A sampled slot is written as is.
+    if d.mode !== :none && idx in d.derived
+        _density_sampled_ok(theta) && density_physical!(theta)
+        theta.values[idx] = value
+        density_from_physical!(theta)
+        return theta
+    end
     theta.values[idx] = value
     return theta
 end
@@ -355,9 +374,12 @@ end
     planet_e_w(theta, k) -> (e, ω)
 
 Eccentricity and argument of periastron, decoded from whatever
-parametrization is in use (`:sesinw`, `:esinw`, or `:ew`).
+parametrization is in use (`:sesinw`, `:esinw`, or `:ew`), or for a planet
+sampling `eta_k` under the photo-eccentric reparametrization from its
+(ρ_circ, η) at the model's ρ★ (`DensityReparam`).
 """
 @inline function planet_e_w(theta::Theta, k::Int)
+    _is_eta_planet(theta.params.layout.density, k) && return _eta_planet_e_w(theta, k)
     block = theta.params.layout.planet_blocks[k]
     x1 = theta.values[block.e1]
     x2 = theta.values[block.e2]
@@ -415,9 +437,13 @@ under `:r1r2` they are `(r1, r2)`. Conversion helpers live in
 """
     planet_inc(theta, k) -> i
 
-Orbital inclination of planet `k` in radians.
+Orbital inclination of planet `k` in radians, in `[0, π]`.
 
-- For `RVASBlock`: read directly from the sampled `inc` slot.
+- For `RVASBlock` (and an astrometric `SB2Block`): the sampled `inc` slot
+  folded with [`fold_inclination`](@ref), `|x|` reduced through `x ≡ x + 2π`.
+  The slot is sampled on a circle under a Sine prior (`WrappedSinePrior`), so
+  `x`, `-x` and `x + 2π` must be one orbit for every likelihood; this accessor
+  is what makes them one. A value in `[0, π]` is returned bit for bit.
 - For `RVPMASBlock`: **derived** from the transit impact parameter `b`
   via the geometric relation
   `cos i = b · (1 + e sin ω) / ((a/R★) · (1 − e²))`. The arccos
@@ -429,42 +455,25 @@ Raises `ArgumentError` for the non-AS block types.
 @inline planet_inc(theta::Theta, k::Int) =
     _planet_inc(theta.params.layout.planet_blocks[k], theta)
 
-@inline _planet_inc(block::RVASBlock, theta::Theta) = theta.values[block.inc]
-@inline _planet_inc(block::SB2Block, theta::Theta) = theta.values[block.inc]
+@inline _planet_inc(block::RVASBlock, theta::Theta) =
+    fold_inclination(theta.values[block.inc])
+@inline _planet_inc(block::SB2Block, theta::Theta) =
+    fold_inclination(theta.values[block.inc])
 
-# RVPMASBlock: i is derived from b, not sampled.
+# RVPMASBlock: i is derived from b, not sampled. cos i comes out of
+# `planet_geometry`, which solves it together with a/R★ and the companion mass
+# (a/R★ carries the planet through M★ + M_p, the mass function carries sin i).
 @inline function _planet_inc(block::RVPMASBlock, theta::Theta)
-    parametrization = theta.params.config.parametrization
-
-    # Decode b from the sampled (b, rr) or (r1, r2) pair — mirrors
-    # the decoding in transit_likelihood.jl.
-    b_raw = theta.values[block.b]
-    rr_raw = theta.values[block.r]
-    b = parametrization.geom === :r1r2 ?
-        b_raw * (1 - rr_raw) / 2 :
-        b_raw
-
-    # Eccentricity / argument of periastron.
-    e = _ecc_from_block(block, theta)
-    sinw = _sinw_from_block(block, theta)
-
-    # a/R*: prefer rho_s when available; otherwise fall back to
-    # M_s, R_s (config) via Kepler's third law. Mirrors the logic in
-    # transit_likelihood.jl. The period slot holds a under :a_driven, so the
-    # period comes from planet_P whenever the block can be located.
+    # The period slot holds a under :a_driven, so the period comes from
+    # planet_P whenever the block can be located.
     k_blk = findfirst(b -> b === block, theta.params.layout.planet_blocks)
     P = k_blk === nothing ? theta.values[block.P] : planet_P(theta, k_blk)
-    ai = (k_blk === nothing || isempty(theta.params.layout.systemic.a_Rs)) ? 0 :
-         theta.params.layout.systemic.a_Rs[k_blk]
-    a_Rs = ai > 0 ? theta.values[ai] : _a_Rs_for_inc(theta, P)
-
-    # Geometric relation: cos i = b * (1 + e sin ω) / (a_Rs * (1 - e²))
-    one_minus_e2 = 1 - e * e
-    denom = a_Rs * one_minus_e2
-    # Guard against pathological numerical states (e≥1 should already
-    # be rejected upstream, but be defensive here).
-    cos_i = b * (1 + e * sinw) / denom
-    cos_i = clamp(cos_i, -one(cos_i), one(cos_i))
+    a_Rs, _, cos_i = _planet_geometry(block, theta, k_blk === nothing ? 0 : k_blk, P)
+    if isnan(a_Rs)
+        throw(ArgumentError(
+            "RVPMASBlock requires either parametrization.use_rho_s=true " *
+            "or finite (M_s, R_s) in config to derive inclination from b"))
+    end
     return acos(cos_i)
 end
 
@@ -499,27 +508,6 @@ end
     else  # :ew — x2 is ω directly
         return sin(x2)
     end
-end
-
-# Internal: a/R* for the planet, used by the inclination derivation.
-# Pulls from rho_s when active, else uses (M_s, R_s) via Kepler 3.
-@inline function _a_Rs_for_inc(theta::Theta{T}, P) where {T}
-    parametrization = theta.params.config.parametrization
-    if parametrization.use_rho_s
-        return rho_s_to_a_Rs(rho_s(theta), P)
-    end
-    M_s = theta.params.config.M_s
-    R_s = theta.params.config.R_s
-    if isnan(M_s) || isnan(R_s) || R_s <= 0
-        throw(ArgumentError(
-            "RVPMASBlock requires either parametrization.use_rho_s=true " *
-            "or finite (M_s, R_s) in config to derive inclination from b"))
-    end
-    # Mirror the formula in transit_likelihood.jl.
-    P_s = P * T(86400.0)
-    GM = T(GM_SUN_CGS) * M_s         # GM_sun * M_s [cm³/s²]
-    a_cm = cbrt(GM * P_s * P_s / (4 * T(π)^2))
-    return a_cm / (R_s * T(R_SUN_CM))
 end
 
 @inline _planet_inc(::RVOnlyBlock, ::Theta) =
@@ -588,16 +576,21 @@ Stellar projected rotation. Returns `0.0` if no planet has RM enabled
 end
 
 """
-    system_i_star(theta) -> i_* (rad)
+    system_i_star(theta) -> i_* (rad), in [0, π]
 
-Stellar inclination, 90° = equator-on. Returns `π/2` when the slot is
-absent, which makes the gravity-darkened model reduce to the standard one
-for any code path that asks without a `:GD` planet present.
+Stellar inclination, 90° = equator-on: the sampled `i_star` slot folded with
+[`fold_inclination`](@ref), `|x|` reduced through `x ≡ x + 2π`. The slot is a
+polar angle sampled on its circle under a prior on the whole of `[0, π]`
+(`polar_lift`), so `x`, `-x` and `x + 2π` must be one star for every model;
+this accessor, the only reader of the slot, is what makes them one. A value
+in `[0, π]` is returned bit for bit. Returns `π/2` when the slot is absent,
+which makes the gravity-darkened model reduce to the standard one for any
+code path that asks without a `:GD` planet present.
 """
 @inline function system_i_star(theta::Theta{T}) where {T}
     idx = theta.params.layout.systemic.i_star
     idx == 0 && return T(π / 2)
-    return theta.values[idx]
+    return fold_inclination(theta.values[idx])
 end
 
 """
@@ -670,7 +663,15 @@ ForwardDiff-clean.
         P     = planet_P(theta, k)
         e, _  = planet_e_w(theta, k)
         M_pri = astrom_M_pri(theta)
-        sin_i = if block isa Union{RVASBlock, RVPMASBlock}
+        if block isa RVPMBlock
+            # Transit geometry fixes sin i: mass and inclination solved together
+            # with a/R★ (`planet_geometry`). Without stellar information for
+            # a/R★ the transit says nothing, and this is the minimum mass.
+            _, q, _ = _planet_geometry(block, theta, k, P)
+            isnan(q) || return q * M_pri
+            return msec_from_K(K, P, e, one(K), M_pri)
+        end
+        sin_i = if block isa RVASBlock || block isa RVPMASBlock
             sin(_planet_inc(block, theta))
         else
             one(K)   # edge-on assumption (no astrometry → no i constraint)
@@ -821,6 +822,24 @@ round-trip).
     return theta.values[slot]
 end
 
+"""
+    iad_jitter(theta, ins_idx) -> Real
+
+Additive along-scan jitter (mas) for intermediate-astrometry instrument
+`ins_idx` (`IADData.inst`), added in quadrature to that instrument's abscissa
+errors: `σ_i² → σ_i² + s_m²`.
+
+Exactly `0` for an instrument without a `sigma_iad_<name>` slot -- the default
+for every instrument, see `InstrumentConfig`'s `iad`.
+"""
+@inline function iad_jitter(theta::Theta{T}, ins_idx::Int) where {T<:Real}
+    slots = theta.params.layout.systemic.iad_jitter
+    (ins_idx < 1 || ins_idx > length(slots)) && return zero(T)
+    slot = slots[ins_idx]
+    slot == 0 && return zero(T)
+    return theta.values[slot]
+end
+
 # =====================================================================
 # RV trend accessors
 # =====================================================================
@@ -916,23 +935,104 @@ end
 """
     planet_a_Rs(theta, k, P) -> a/R★
 
-Scaled semi-major axis of planet `k` at period `P`, from whichever source the
-parametrization uses, in order: the sampled `a_Rs_k<k>` slot
-(`sample_a_Rs`), the shared stellar density `rho_s` (`use_rho_s`), or
-`(M_s, R_s)` through Kepler's third law. `NaN` when none is available.
+Scaled semi-major axis of planet `k` at period `P`: first element of
+[`planet_geometry`](@ref). `NaN` when no stellar information is available.
 """
-@inline function planet_a_Rs(theta::Theta{T}, k::Int, P) where {T}
-    ai = a_Rs_slot(theta, k)
-    ai > 0 && return theta.values[ai]
+@inline planet_a_Rs(theta::Theta, k::Int, P) = first(planet_geometry(theta, k, P))
+
+"""
+    planet_geometry(theta, k, P) -> (a_Rs, q, cos_i)
+
+Scaled semi-major axis `a/R★`, companion mass ratio `q = M_p / M★` and `cos i` of
+planet `k` at period `P`, with the mass in Kepler's third law and the mass
+function both exact (no `M_p << M★`).
+
+`a/R★` comes from the first source that exists: the sampled `a_Rs_k<k>` slot
+(`sample_a_Rs`; taken as final), the shared density `rho_s` (`use_rho_s`),
+or `(M★, R★)` through Kepler III. The last two are the value for a massless
+companion times `(1 + q)^{1/3}`:
+
+    (a/R★)³ = G ρ★ P² (1 + q) / (3π)  =  G M★ (1 + q) P² / (4π² R★³).
+
+`M★` is `astrom_M_pri(theta)`: the sampled `M_pri` slot, else `config.M_s`; for
+a `rho_s` model with neither, ρ★ R★³ if `config.R_s` is set. This is the same
+`M★` the RV mass function uses (`planet_M_sec`), so the transit and the RV
+agree on the star.
+
+`q` is determinable only when the planet has transit geometry AND an RV
+amplitude (`RVPMBlock`, `RVPMASBlock`). Under `:K_driven` it is solved with the
+inclination implied by `b` and `a/R★` ([`coupled_geometry`](@ref)); under
+`:M_sec_driven` / `:a_driven` it is the sampled `M_sec / M★` and `a/R★` follows
+directly. A transit-only planet has no mass to insert (`q = 0`): the light curve
+then measures `ρ★ (1 + q)`, not `ρ★`.
+
+`cos_i` is `b (1 + e sin ω) / ((a/R★)(1 − e²))` clamped to `[-1, 1]`, `NaN`
+for a planet without transit geometry.
+"""
+@inline planet_geometry(theta::Theta, k::Int, P) =
+    _planet_geometry(theta.params.layout.planet_blocks[k], theta, k, P)
+
+# Host mass [M_sun] for the mass-bearing part of the geometry; NaN if unknown.
+@inline function _geometry_M_pri(theta::Theta{T}) where {T}
     cfg = theta.params.config
-    if cfg.parametrization.use_rho_s
-        return rho_s_to_a_Rs(theta.values[theta.params.layout.systemic.rho_s], P)
+    M = astrom_M_pri(theta)
+    if isnan(M) && cfg.parametrization.use_rho_s && !isnan(cfg.R_s) && cfg.R_s > 0
+        rho = _rho_star(theta)
+        M = rho * T(RHO_SUN_CGS) * (4 * T(π) / 3) * (cfg.R_s * T(R_SUN_CM))^3 / T(M_SUN_G)
     end
-    M_s, R_s = cfg.M_s, cfg.R_s
-    (!isnan(M_s) && !isnan(R_s) && R_s > 0) || return convert(T, NaN)
-    P_s = P * T(86400.0)
-    GM  = T(GM_SUN_CGS) * M_s
-    return cbrt(GM * P_s^2 / (4 * T(π)^2)) / (R_s * T(R_SUN_CM))
+    return M
+end
+
+@inline function _geometry_b(block, theta::Theta)
+    b_raw  = theta.values[block.b]
+    rr_raw = theta.values[block.r]
+    return theta.params.config.parametrization.geom === :r1r2 ?
+           b_raw * (1 - rr_raw) / 2 : b_raw
+end
+
+function _planet_geometry(block::PlanetBlock, theta::Theta{T}, k::Int, P) where {T}
+    cfg = theta.params.config
+    parametrization = cfg.parametrization
+    nan = convert(T, NaN)
+    ai = (k == 0 || isempty(theta.params.layout.systemic.a_Rs) ||
+          k > length(theta.params.layout.systemic.a_Rs)) ? 0 :
+         theta.params.layout.systemic.a_Rs[k]
+    scale = true
+    if ai > 0
+        a0 = theta.values[ai]
+        scale = false
+    elseif parametrization.use_rho_s
+        a0 = rho_s_to_a_Rs(_rho_star(theta), P)
+    else
+        M_pri = astrom_M_pri(theta)
+        R_s = cfg.R_s
+        (!isnan(M_pri) && !isnan(R_s) && R_s > 0) || return (nan, nan, nan)
+        P_s = P * T(86400.0)
+        a0 = cbrt(T(GM_SUN_CGS) * M_pri * P_s^2 / (4 * T(π)^2)) / (R_s * T(R_SUN_CM))
+    end
+
+    (block isa Union{PMOnlyBlock, RVPMBlock, RVPMASBlock}) ||
+        return (a0, zero(T), nan)
+    b = _geometry_b(block, theta)
+    e, sinw = _is_eta_planet(theta.params.layout.density, k) ?
+              _eta_planet_e_sinw(theta, k) :
+              (_ecc_from_block(block, theta), _sinw_from_block(block, theta))
+    M_pri = _geometry_M_pri(theta)
+
+    if block isa PMOnlyBlock || isnan(M_pri)
+        a, q, ci = coupled_geometry(a0, b, e, sinw, zero(T), one(T); scale_a = scale)
+        return (a, q, ci)
+    end
+    mode = parametrization.mass
+    if mode === :K_driven
+        f = mass_function(max(theta.values[block.K], zero(T)), P, e)
+        return coupled_geometry(a0, b, e, sinw, f, M_pri; scale_a = scale)
+    else   # :M_sec_driven / :a_driven: the slot holds M_sec
+        q = theta.values[block.K] / M_pri
+        a = scale ? a0 * cbrt(1 + q) : a0
+        ci = clamp(b * (1 + e * sinw) / (a * (1 - e * e)), -one(T), one(T))
+        return (a, q, ci)
+    end
 end
 
 # =====================================================================
@@ -943,13 +1043,15 @@ end
     rho_s(theta) -> value
 
 Shared stellar density. Errors if `parametrization.use_rho_s` is
-false (in which case the slot does not exist in the layout).
+false (in which case the slot does not exist in the layout). Under the
+photo-eccentric reparametrization's `:anchor` mode it is derived from the
+anchor planet's ρ_circ and (e, ω) (`_rho_star`).
 """
 @inline function rho_s(theta::Theta)
     idx = theta.params.layout.systemic.rho_s
     idx == 0 && throw(ArgumentError(
         "rho_s is not in use (parametrization.use_rho_s == false)"))
-    return theta.values[idx]
+    return _rho_star(theta)
 end
 
 # =====================================================================
@@ -969,15 +1071,23 @@ hot path that autodiff gradients flow through.
 
 The return type tracks `eltype(theta)` — for a `Theta{Dual{…}}`
 the output is a `Dual`, for `Theta{Float64}` it's a `Float64`.
+
+Under the photo-eccentric reparametrization the sampled `rho_circ_k` / `eta_k`
+slots carry surrogate priors, and `density_logprior_correction` turns their sum
+into the model's prior on ρ★ and (e, ω) carried through the map: the prior, and
+so the posterior, of the physical coordinates is the one the model states.
 """
 function log_prior(theta::Theta{T}) where {T}
     if theta.td === nothing
         # Fixed-dim: evaluate all unfrozen priors (hot path, Enzyme-compatible)
-        return log_prior_packed(
+        lp = log_prior_packed(
             theta.values,
             theta.params.layout.unfrozen_idx,
             theta.params.layout.packed_priors,
         )
+        theta.params.layout.density.mode === :none && return lp
+        isfinite(lp) || return lp
+        return lp + density_logprior_correction(theta)
     else
         # Trans-dim: skip priors for inactive planet/noise slots
         return _log_prior_transdim(theta)
@@ -1038,11 +1148,7 @@ function _log_prior_transdim(theta::Theta{T}) where {T}
         slot in skip_slots && continue
         x = theta.values[slot]
         tid = packed.type_ids[i]
-        p1 = packed.params[i, 1]
-        p2 = packed.params[i, 2]
-        lo = packed.lowers[i]
-        hi = packed.uppers[i]
-        lp = eval_packed_logpdf(x, tid, p1, p2, lo, hi)
+        lp = eval_packed_logpdf(x, packed, i)
         if !isfinite(lp)
             return convert(T, -Inf)
         end

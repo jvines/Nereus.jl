@@ -69,6 +69,8 @@ function _sci_sym(name)
         base == "Tc" && return "T_{\\mathrm{c},$k}"
         base == "b"  && return "b_{$k}"
         base == "rr" && return "(R_p/R_\\star)_{$k}"
+        base == "rho_circ" && return "\\rho_{\\mathrm{circ},$k}"
+        base == "eta"      && return "\\eta_{$k}"
         return _sym_sub(base, k)
     end
     for (pre, sym) in (("gamma","\\gamma"), ("sigma","\\sigma"), ("jitter","\\sigma"))
@@ -155,6 +157,8 @@ function _sci_sym_u(name)
         base == "Tc" && return "Tc," * ks
         base == "b"  && return "b" * ks
         base == "rr" && return "Rₚ/R⋆ " * ks
+        base == "rho_circ" && return "ρcirc," * ks
+        base == "eta"      && return "η" * ks
         return _sym_sub_u(base) * ks
     end
     for (pre, sym) in (("gamma","γ"), ("sigma","σ"), ("jitter","σ"))
@@ -204,6 +208,8 @@ function _param_owner(params)
             owner[layout.unfrozen_names[uf]] = k
         end
     end
+    # ρ_circ, η and the e-coordinates they derive (src/density.jl)
+    merge!(owner, density_planet_names(params))
     return owner
 end
 
@@ -217,7 +223,7 @@ function _thin_for_plot(chains, max_draws)
     idx = round.(Int, range(1, n; length = max_draws))
     mat = Matrix{Float64}(undef, length(idx), length(syms))
     for (j, s) in enumerate(syms)
-        mat[:, j] = _draws(chains, s)[idx]
+        mat[:, j] = _draws_view(chains, s)[idx]     # copies the kept draws only
     end
     return MCMCChains.Chains(mat, syms)
 end
@@ -257,7 +263,7 @@ end
 # Sampled, non-fixed parameter names (optionally restricted to one planet).
 function _sci_post_names(chains, params, owner; planet=nothing)
     cn = Set(names(chains, :parameters))
-    nm = [n for n in params.layout.unfrozen_names if Symbol(n) in cn]
+    nm = [n for n in reported_param_names(params) if Symbol(n) in cn]
     nm = [n for n in nm if (v = _draws(chains, Symbol(n)); maximum(v) - minimum(v) > 1e-12)]
     planet !== nothing && (nm = [n for n in nm if get(owner, n, 0) == planet])
     return nm
@@ -304,7 +310,7 @@ function plot_posteriors_raw(chains, params; credmass::Real=0.85,
             vlines!(ax, [med];  color=_TAB.purple, linewidth=1.8, label="median")
             vlines!(ax, [vmax]; color=_TAB.red,    linewidth=1.8, label="max")
             axislegend(ax; position=:rb, framevisible=false, labelsize=11)
-            figs[nm] = fig
+            _keep_fig!(figs, nm, fig)
             if outdir !== nothing
                 gd = joinpath(outdir, _param_group(nm, owner, noise_set)); mkpath(gd)
                 _save_plot(joinpath(gd, "raw_$(nm).$fmt"), fig; save_pdf=save_pdf, px_per_unit=2)
@@ -347,7 +353,7 @@ function plot_posteriors_parameters(chains, params; credmass::Real=0.85,
             vlines!(ax, [med];  color=_TAB.purple, linewidth=1.8, label="median")
             vlines!(ax, [vmax]; color=_TAB.red,    linewidth=1.8, label="max")
             axislegend(ax; position=:rb, framevisible=false, labelsize=11)
-            figs[nm] = fig
+            _keep_fig!(figs, nm, fig)
             if outdir !== nothing
                 gd = joinpath(outdir, _param_group(nm, owner, noise_set)); mkpath(gd)
                 _save_plot(joinpath(gd, "param_$(nm).$fmt"), fig; save_pdf=save_pdf, px_per_unit=2)
@@ -397,7 +403,7 @@ function plot_posteriors_histograms(chains, params; credmass::Real=0.85,
                   "skew = $(round(skew,sigdigits=3))\nkurt = $(round(kurt,sigdigits=3))"
             text!(ax, 0.97, 0.97; text=txt, align=(:right,:top), space=:relative,
                   fontsize=13, color=:black)
-            figs[nm] = fig
+            _keep_fig!(figs, nm, fig)
             if outdir !== nothing
                 gd = joinpath(outdir, _param_group(nm, owner, noise_set)); mkpath(gd)
                 _save_plot(joinpath(gd, "hist_$(nm).$fmt"), fig; save_pdf=save_pdf, px_per_unit=2)
@@ -433,7 +439,7 @@ function plot_traces_grouped(chains, params; output::Union{Nothing,String}=nothi
         if !haskey(gidx, g); push!(groups, g => String[]); gidx[g] = length(groups); end
         push!(groups[gidx[g]].second, n)
     end
-    for n in layout.unfrozen_names
+    for n in reported_param_names(params)
         Symbol(n) in cn || continue
         k = get(owner, n, 0)
         g = k > 0 ? "planet_K$k" : (n in noise_set ? "noise" : _instr(n) ? "instrument" : "other")
@@ -446,24 +452,30 @@ function plot_traces_grouped(chains, params; output::Union{Nothing,String}=nothi
     # by `n_walkers`. Each walker is drawn separately with low alpha so the
     # overlap grays out and you can see where the walkers converge — NOT the
     # walkers flattened into one jumpy line.
+    # Views into the chain: only the <= 1500 points drawn per walker are copied
+    # (and turned into degrees for an angle, as labelled -- `_sci_values`).
+    # Copied whole, as `_sci_values` does, each panel held its parameter twice
+    # over, 92 MB at 5.8M draws, to draw 1500 points of every walker.
     function _walker_series(name)
-        a = _sci_values(chains, name, params)   # degrees for angles, as labelled
+        a = _iter_chain_view(chains, Symbol(name))
         if ndims(a) == 2 && size(a, 2) > 1
-            return [collect(view(a, :, c)) for c in 1:size(a, 2)]
+            return [view(a, :, c) for c in 1:size(a, 2)]
         end
         v = vec(a)
         if n_walkers !== nothing && n_walkers > 1 && length(v) % n_walkers == 0
-            return [v[w:n_walkers:length(v)] for w in 1:n_walkers]   # walker = fast index
+            return [view(v, w:n_walkers:length(v)) for w in 1:n_walkers]   # walker = fast index
         end
         return [v]
     end
     function _draw!(ax, name)
         series = _walker_series(name)
+        deg = last(sci_param_unit(name, params))
         nw = length(series)
         α = nw == 1 ? 0.85 : clamp(6.0 / nw, 0.02, 0.35)
         for s in series
             xs = length(s) > 1500 ? (1:cld(length(s),1500):length(s)) : (1:length(s))
-            lines!(ax, collect(xs), s[xs]; color=(:black, α), linewidth=0.4,
+            ys = deg ? rad2deg.(s[xs]) : s[xs]
+            lines!(ax, collect(xs), ys; color=(:black, α), linewidth=0.4,
                    rasterize = nw > 20 ? 2 : false)
         end
     end
@@ -485,7 +497,7 @@ function plot_traces_grouped(chains, params; output::Union{Nothing,String}=nothi
             end
             linkxaxes!(axs...)               # shared iteration axis
             rowgap!(fig.layout, 0)           # glued panels, no vertical space
-            figs[g] = fig
+            _keep_fig!(figs, g, fig)
             outdir !== nothing && _save_plot(joinpath(outdir, "trace_$(g).$fmt"), fig;
                                              save_pdf=save_pdf, px_per_unit=2)
         end

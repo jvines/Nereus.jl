@@ -10,7 +10,7 @@ The choices are bundled in `ParametrizationConfig` and `PlanetDataSources`.
 !!! note "Two ways in"
     Everything below is the Julia `Params(...)` / `ParametrizationConfig(...)`
     API. When you drive Nereus through `Nereus.run_job(cfg)` (the JSON/Dict
-    entry point — see [`docs/JOB_CONFIG.md`](https://github.com/) and
+    entry point — see [`docs/JOB_CONFIG.md`](../JOB_CONFIG.md) and
     `src/runner.jl`), the same options live in the `model` block, but the
     run_job schema currently exposes a **strict subset** of them. Each section
     flags what is reachable from run_job and what is Julia-API-only.
@@ -94,15 +94,17 @@ for the per-mode parameter list, and the `PlanetBlock` subtypes
 
 ### run_job equivalent
 
-In the `model.planet_modes` array (`src/runner.jl:1084`), pass the
+In the `model.planet_modes` array, pass the
 constant **names** as strings. The schema validator
-(`src/runner.jl:276`) recognises exactly:
+(`_KNOWN_PLANET_MODES` in `src/runner.jl`) recognises exactly:
 
 ```
 RV_ONLY, PM_ONLY, RVPM, RVAS, RVPMAS,
 RVPM_RM, RVPMAS_RM, RVPM_RM_R, RVPMAS_RM_R,
 RVPM_TTV, RVPMAS_TTV, RVPM_RM_TTV, PM_TTV,
-RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB
+RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB,
+RVPM_RM_A, RVPMAS_RM_A, RVPM_GD, RVPM_RM_GD, PM_GD,
+BINARY, BINARY_RV, PM_DT
 ```
 
 ```json
@@ -114,18 +116,24 @@ RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB
 ```julia
 ParametrizationConfig(;
     ew                = :sesinw,
-    time              = :Mo,
+    time              = :auto,       # resolved by Params: see below
     geom              = :b_rr,
     use_rho_s         = false,
     mass              = :K_driven,
     obs_prior         = false,
     marginalize_gamma = false,
+    sample_a_Rs       = false,       # sample a/R★ per transiting planet
+    t_ref_c           = NaN,         # phic epoch; NaN = taken from the data
+    density           = :rho_circ,   # :rho_circ | :rho_star: see below
 )
 ```
 
-Defined in `src/model.jl:623`–`669`. The keyword constructor validates
-`ew`, `time`, `geom`, and `mass` and throws an `ArgumentError` on any
-unknown value, so a typo fails fast at construction.
+Defined in `src/model.jl` (`struct ParametrizationConfig`). The keyword
+constructor validates `ew`, `time`, `geom`, `mass` and `density` and throws an
+`ArgumentError` on any unknown value, so a typo fails fast at construction.
+`use_rho_s` and `sample_a_Rs` are mutually exclusive: a/R★ is derived from the
+stellar density or sampled directly, not both. `t_ref_c` is read only under
+`time = :phic`.
 
 ### `ew::Symbol` — eccentricity parametrisation
 
@@ -161,12 +169,62 @@ clamp never changes the `e` a likelihood evaluates.
 ### `time::Symbol` — orbital time anchor
 
 The single time slot (`t`) is named and decoded per this choice
-(`src/model.jl:1505`; conversions `src/orbit.jl:175`–`236`):
+(`src/model.jl:1505`; conversions `src/orbit.jl:175`–`236`). With no
+anchor given, `ParametrizationConfig` holds `:auto`, and `Params` resolves it
+when it is built (`resolve_time_anchor`), the same way in `build_target`, the
+`fit_*` functions and run_job: the anchor the priors name (`Mo_k1`, `Tp_k1`,
+...; in `build_target` also the planet blocks), else `:phic`, the default
+(`:Mo` under `obs_prior`). So a setup written for the old default with an
+`Mo_k1` prior still samples `Mo`, with or without a `ParametrizationConfig`
+of its own. Priors naming two anchors are an error: a model samples one. A
+`Params` never holds `:auto`: it stores the resolved anchor, so a checkpoint
+written by a fit whose anchor was resolved to `:Mo` resumes into one given
+`time = :Mo` explicitly, and refuses a `:phic` one. With an explicit anchor, a
+prior left on another anchor's slot is reported as such.
 
-- `:Mo` (the default, in the Julia API and run_job) — sample mean anomaly `M₀` at the
-  reference epoch `t_ref` (= `data.t_ref`, the data median). Best
-  conditioning for poorly-constrained periods (mid-baseline anchor
-  reduces P–Tp covariance). `mo_to_tp` (`src/orbit.jl:193`).
+!!! note "Why the transit phase is the default"
+    At low `e` the data pin the mean longitude `λ = M₀ + ω`, not `M₀` and
+    `ω` apart. Sampled as `(M₀, √e sin ω, √e cos ω)` that is a thin ridge,
+    a helix in the sampler's coordinates; chains mix badly along it, each
+    holding its own `ω`, and that biases `e`. On an RV + Hipparcos IAD target
+    with a circular orbit, `pt_emcee` in `M₀` gave a median `e` of 0.0097
+    against 0.0081 in `φ_c` at `i = 45°`, and `rjmcmc` 0.0019 against
+    0.0061 at 89.5°. `φ_c` has no such ridge: at `e = 0` it is `π/2 − λ`.
+    For fixed `(P, e, ω)` the map `M₀ → φ_c` is a shift, so a uniform `φ_c`
+    is the same prior as a uniform `M₀` and the posterior is unchanged; only
+    the geometry the sampler sees differs. It is also the natural anchor of a
+    transit fit. `M₀`, `Tp` and `Tc` are reported per draw in the derived
+    table (`Mo_deg`, `Tp`, `Tc`). The one exception is the O'Neil `obs_prior`
+    (below), which keeps `:Mo`.
+
+- `:phic` (the default) — sample the transit phase `φ_c = 2π (Tc − t_ref_c) / P`
+  (`phic_k<k>`, rad, default prior `U(−π, π)`). It is `Tc` measured in
+  phase: it has no `e` or `ω` in it, so the transit pins it directly, as it
+  does `Tc`, and it lives on a circle, so its window is one period at every
+  `P` (`Tc ∈ [t_ref_c − P/2, t_ref_c + P/2)`). A uniform `φ_c` is uniform
+  transit phase, `p(Tc | P) = 1/P`. Without a transit it is still defined
+  (`Tc` is the inferior conjunction, `f = π/2 − ω`) and is the mean
+  longitude in disguise, which is why it suits RV and astrometric orbits too.
+  `Tc` is reported per draw as the derived `Tc` (`phic_to_tc`), so its
+  covariance with `P` is exact, and `Tp` and `M₀` (`Mo_deg`, at `data.t_ref`)
+  alongside it.
+  `t_ref_c` (`ParametrizationConfig(t_ref_c = …)`, run_job
+  `parametrization.t_ref_c`) defaults to the median photometric time, where
+  `Tc` is least correlated with `P`; without photometry it is `data.t_ref`.
+  `Params` fixes it with the parametrization, so every draw means the same
+  `Tc` whatever subset of the data a likelihood later sees; a `Params` built
+  without `data` needs `t_ref_c` (or another anchor) and says so.
+  `chains.nc` records the anchor and this epoch (attributes `time_anchor`
+  and `t_ref_c`), so a sampled `phic_k<k>` decodes without the data.
+  Like `Mo`, `φ_c` is not treated as circular when TTVs or the O'Neil
+  `obs_prior` are on: a 2π shift relabels the transit epochs there.
+- `:Mo` — sample mean anomaly `M₀` at the
+  reference epoch `t_ref` (= `data.t_ref`, the data median). The default
+  until the transit phase replaced it, and still the default under
+  `obs_prior = true`: the O'Neil prior is a density over one fixed period of
+  `Tp`, which `M₀ ∈ [0, 2π)` spans (`Tp ∈ (t_ref − P, t_ref]`) and the
+  `φ_c` window, which moves with `(e, ω)`, does not. `mo_to_tp`
+  (`src/orbit.jl:193`).
 - `:Tp` — sample time of periastron passage. Natural for visual orbits
   where Tp has direct geometric meaning. `tp_to_mo` (`src/orbit.jl:202`).
 - `:Tc` — sample time of transit centre (inferior conjunction). Right
@@ -174,22 +232,6 @@ The single time slot (`t`) is named and decoded per this choice
   `Tc` directly, and `Tp` becomes derived via `tc_to_tp`
   (`src/orbit.jl:212`, transit at `f = π/2 − ω`). The `ttv_oc` plot and
   the per-transit Tc measurements need `:Tc` or `:phic`.
-- `:phic` — sample the transit phase `φ_c = 2π (Tc − t_ref_c) / P`
-  (`phic_k<k>`, rad, default prior `U(−π, π)`). It is `Tc` measured in
-  phase: it has no `e` or `ω` in it, so the transit pins it directly, as it
-  does `Tc`, and it lives on a circle, so its window is one period at every
-  `P` (`Tc ∈ [t_ref_c − P/2, t_ref_c + P/2)`). A uniform `φ_c` is uniform
-  transit phase, `p(Tc | P) = 1/P`. Use it for a transiting planet whose `P`
-  prior is wider than a fixed `Tc` window can follow: single transits, RV
-  plus a weak transit, automated configs. `Tc` is reported per draw as the
-  derived `Tc` (`phic_to_tc`), so its covariance with `P` is exact.
-  `t_ref_c` (`ParametrizationConfig(t_ref_c = …)`, run_job
-  `parametrization.t_ref_c`) defaults to the median photometric time, where
-  `Tc` is least correlated with `P`; without photometry it is `data.t_ref`.
-  `Params` fixes it with the parametrization, so every draw means the same
-  `Tc` whatever subset of the data a likelihood later sees.
-  Like `Mo`, `φ_c` is not treated as circular when TTVs or the O'Neil
-  `obs_prior` are on: a 2π shift relabels the transit epochs there.
 
 !!! warning "Keep a Tp or Tc prior within one period"
     The likelihood repeats every period, so a `Tp`/`Tc` prior wider than
@@ -198,7 +240,7 @@ The single time slot (`t`) is named and decoded per this choice
     copies: on a 12.3 d RV target with a 929 d window the walkers spread
     over 46 copies and R-hat stayed at 1.9–5 with every walker in the mode.
     `Params` warns when a window is wider than the shortest period the `P`
-    prior allows. Use `Mo`, `phic` for a transiting planet, or a prior no
+    prior allows. Use `phic` (the default) or `Mo`, or a prior no
     wider than one period around a known epoch. The `Tc` window also fails
     the other way: when `P` is longer than the baseline, `U(t_min, t_max)`
     forbids transit times outside the data, which `phic` does not.
@@ -221,11 +263,12 @@ The two transit-geometry slots (present only for PM planets,
 ### `use_rho_s::Bool` — stellar-density parametrisation
 
 - `false` (default) — each transiting planet's `a/R_⋆` is derived from
-  `P + M_⋆ + R_⋆` via Kepler III (so `M_s` and `R_s` must be set on
-  `Params`).
-- `true` — a single **shared** stellar density `rho_s` slot is sampled
-  (`src/model.jl:1832`) and `a/R_⋆` is derived from `rho_s + P` for
-  every transiting planet (`rho_s_to_a_Rs`). Use for multi-planet
+  `P + M_⋆ + R_⋆` via Kepler III with the total mass `M_⋆ + M_p` (so `M_s` and
+  `R_s` must be set on `Params`).
+- `true` — a single **shared** stellar density `rho_s` slot is declared
+  and `a/R_⋆` is derived from `rho_s + P` for
+  every transiting planet (`rho_s_to_a_Rs`, with the total mass:
+  `(a/R_⋆)³ = G ρ_⋆ P² (1 + q)/(3π)`, `q = M_p/M_⋆`). Use for multi-planet
   transiting systems: `rho_s` is one physical quantity shared across
   the system, and sampling it directly trades N per-planet
   density-equivalent parameters for one. Standard for TESS-style
@@ -233,9 +276,78 @@ The two transit-geometry slots (present only for PM planets,
   Table 7 convention). The RM `a/R_⋆` also prefers the `rho_s` path
   when present (`src/rm.jl:360`).
 
+  `rho_s` is a *sampled* slot only when the density reparametrization below
+  does not take it over. Under the default `density = :rho_circ`, a transiting
+  planet with a free eccentricity samples `rho_circ_k<k>` instead, and `rho_s`
+  becomes a derived quantity (still in the chain, the tables and the corner). It
+  stays sampled under `density = :rho_star`, for a model with no such planet,
+  and for every engine that runs in ρ★ and (e, ω) (see below). A `rho_s` prior
+  that is fixed makes ρ★ *given*, which is the case where every eligible planet
+  samples `eta_k<k>`.
+
 ```julia
 parametrization = ParametrizationConfig(time = :Tc, geom = :b_rr, use_rho_s = true)
 priors["rho_s"] = NormalPrior(2.241, 0.479, 0.1, 10.0)   # ARIADNE-derived
+```
+
+### `density::Symbol` — the photo-eccentric (ρ_circ) reparametrization
+
+A transit measures its duration, and the duration fixes the
+circular-equivalent density
+
+```
+ρ_circ = ρ★ · g³,     g = (1 + e sin ω) / √(1 − e²)
+```
+
+(Kipping 2010; Dawson & Johnson 2012). With a free eccentricity and no density
+prior, the posterior in `(ρ★, e, ω)` is a thin curved sheet along constant
+`ρ_circ` that reaches high `e`; an ensemble crosses it over thousands of steps
+without R-hat, ESS or the drift check noticing. Sampling `ρ_circ` lays the sheet
+along an axis. The posterior is the same distribution: the prior the model states
+on `(ρ★, e, ω)` is carried through the Jacobian (`src/density.jl`), so a prior on
+`rho_s`, `sesinw_k<k>` or `secosw_k<k>` still means what it said.
+
+- `:rho_circ` (default). **Eligible** planets are those with transit photometry,
+  transit geometry and both eccentricity coordinates free (not fixed). A model
+  with none, or with `sample_a_Rs = true`, or with no usable ρ★ (no `rho_s`
+  prior under `use_rho_s`, or no `M_s` and `R_s`), is not reparametrized: the
+  option is inert.
+  - **Anchor case.** When ρ★ is sampled (`use_rho_s = true` and a `rho_s` prior
+    that is not fixed), the *first* eligible planet samples `rho_circ_k<k>` in
+    place of `rho_s`; its `(e, ω)` coordinates stay sampled, and ρ★ = ρ_circ/g³ is
+    derived.
+  - **η case.** Every other eligible planet samples `rho_circ_k<k>` **and**
+    `eta_k<k>`, and its `e` and `ω` are derived. This is every eligible planet
+    when ρ★ is *given*: a fixed `rho_s`, or `M_s`/`R_s` (the host mass, sampled
+    `M_pri` or not, over the fixed radius). At the model's ρ★, `g = (ρ_circ/ρ★)^{1/3}`
+    and the orbits of that `g` fill an ellipse in the `(e cos ω, e sin ω)` disc,
+    which `η ∈ (−π/2, 3π/2)` parametrizes (a bijection onto `e < 1`; where the
+    `e` prior stops short of 1, `η` is sampled on the arc that holds it).
+  - **The cap.** `DENSITY_G = 100` bounds `g` to `[1/100, 100]`, so the box of
+    `ρ_circ` is `[ρ★_min/10⁶, ρ★_max·10⁶]`. That excludes orbits with
+    `e > 1 − 2/G² = 0.9998`, whose periastron lies inside the star (about
+    3/(4G²) ≈ 7.5×10⁻⁵ of the prior mass under a uniform `e`). A wider box costs
+    nested sampling: at `G = 10⁶` the two-planet log Z ran 1.3 nats low.
+  - **Priors on the new slots.** None are yours to give: `rho_circ_k<k>` and
+    `eta_k<k>` carry the prior on ρ★ and `(e, ω)`. They are not in
+    `summary.provenance.priors`, which lists the priors you set.
+  - **Output.** The derived coordinates (`rho_s`, `e`/`ω` of the η planets) are
+    added back to the chain, so `chains.nc`, the tables and the corner show ρ★
+    and `(e, ω)` as before, plus the new `rho_circ_k<k>` / `eta_k<k>` columns.
+- `:rho_star` — sample ρ★ (or `a/R★`) and `(e, ω)` as before.
+
+**Engines that keep the old coordinates.** `pt`, `transdim_pt_emcee`, `moms`,
+`daedalus`, `rjmcmc` and `ess` run the model in ρ★ and `(e, ω)` whatever
+`density` says (`without_density_reparam`; `src/runner.jl` swaps the model and
+its parameters before the sampler runs), and so does the optimisation inside
+`sample_map`, which returns its point in the layout's own coordinates. Their
+chains therefore have no `rho_circ_k<k>` or `eta_k<k>` columns. Every other
+engine run through `run_job` (`pt_emcee`, `pt_hmc`, the nested family, `nuts`,
+…) samples `ρ_circ`.
+
+```julia
+ParametrizationConfig(use_rho_s = true)                     # default: anchor + η planets
+ParametrizationConfig(use_rho_s = true, density = :rho_star) # the old coordinates
 ```
 
 ### `mass::Symbol` — mass / first-two-slot parametrisation
@@ -267,6 +379,58 @@ and `a_kN` (AU) under `:a_driven`. The second RV slot is named `K_kN`
 Accessors `planet_P`, `planet_K`, `planet_M_sec`, `planet_a` decode
 all three modes and derive missing quantities on the fly. All are
 ForwardDiff-clean.
+
+What is not sampled is still reported, in the **derived** table (never in the
+fitted one, so `K_k1` of the two tables cannot be confused):
+
+| derived key | unit | reported when |
+|---|---|---|
+| `P_days` (and `P_yr` in the science table) | d (yr) | `P` is not a slot: `:a_driven` |
+| `K` | m/s | `K` is not a slot and the planet has RV: `:M_sec_driven`, `:a_driven` |
+| `a_mas` | mas | the planet carries astrometry (`RVAS`, `RVPMAS`): `a·ϖ`, the relative orbit as an angle |
+| `alpha_star_uas` | μas | same: `a·ϖ·M_sec/(M_pri+M_sec)`, the host's reflex orbit (astrometric signature) |
+
+Each is evaluated per draw with `planet_P` / `planet_K` / `planet_a` /
+`planet_M_sec` / `astrom_M_pri` / `astrom_plx`, so all three modes agree with
+the likelihood; under `:K_driven` the companion mass behind `alpha_star_uas`
+comes from the mass function with the sampled inclination.
+
+None of the derived masses or separations uses the `M_p << M_★` approximation:
+
+| derived key | how it is computed |
+|---|---|
+| `msini_*` | companion mass at i = 90° from the exact mass function `(M_p sin i)³/(M_★+M_p)² = f(K,P,e)`, solved with `msec_from_K` and the table's per-draw M_★ |
+| `mass_*` | the same inversion at the draw's `sin i` (transit planets); for astrometric planets with a sampled K, the model's own `planet_M_sec` per draw |
+| `a_au` | Kepler III with the total mass `M_★ + M_p` (M_p the true mass, or the exact minimum mass when no inclination exists); for astrometric planets the model's `planet_a`, so `a_au·ϖ = a_mas`; where a/R★ comes from the transit model, `a_au = (a/R★)·R★` |
+
+A brown dwarf (0.08 M_⊙ about 0.5 M_⊙) was 9 % off in `msini` with the closed
+form; a Jupiter about a Sun-like star moves by 0.07 %.
+
+The mass function is solved analytically. In `x = M_p/M_⋆` and
+`F = f/(M_⋆ sin³i)` it is `x³ − F x² − 2F x − F = 0`; its discriminant,
+`−F²(4F + 27)`, is negative for every `F > 0`, so there is exactly one real
+root and Cardano's formula gives it (`mass_ratio_from_F`) with no cancellation
+anywhere, to ≈ 4·10⁻¹⁶ relative over `F = 10⁻¹⁶ … 10⁴`.
+
+**The transit and the companion's mass.** The planet is in the transit through
+Kepler III, so a light curve measures `ρ_⋆(1 + q)`, not `ρ_⋆`. Where the planet's
+mass is determinable (a transiting planet with a sampled `K` or `M_sec`:
+`RVPM`, `RVPMAS`) the model solves `q`, `a/R_⋆` and `cos i` together
+(`planet_geometry`, `coupled_geometry`):
+
+    a/R_⋆ = a₀ (1 + q)^(1/3),   cos i = b(1 + e sin ω)/((a/R_⋆)(1 − e²)),
+    q = x( f / (M_⋆ sin³i) ),
+
+a fixed point started at `q = 0` that contracts at about `q/3` per pass (twenty
+passes at `q = 0.5`; two or three for a planet). `a₀` is the value for a massless
+companion, from `ρ_⋆` or from `(M_⋆, R_⋆)`. `M_⋆` is `astrom_M_pri` (the sampled
+`M_pri`, else `M_s`; for a `rho_s` model with neither, `ρ_⋆ R_⋆³`), the same star
+the RV mass function uses. A **transit-only** planet has no mass to put in: `q = 0`,
+and the fitted `rho_s` is then, strictly, `ρ_⋆(1 + q)` (invisible for a
+planet, 10⁻³ for a Jupiter; not for a brown dwarf or a stellar companion).
+`a_Rs`, `a_au`, `inc_deg`-dependent quantities (`T14`, `Teq`, `S_earth`, density,
+TSM/ESM) follow from the coupled `a/R_⋆`, and `rho_star_transit` is
+`ρ_⋆` once `1 + q` is divided out where `q` is known.
 
 ### `obs_prior::Bool` — O'Neil 2019 observation-based prior
 
@@ -305,17 +469,19 @@ evidence) and the RV likelihood uses the γ-marginalised path
 
 ### run_job coverage of `ParametrizationConfig`
 
-The `model.parametrization` block in run_job (`src/runner.jl:1089`–`1115`)
-maps only these keys, with these accepted string values:
+The `model.parametrization` block in run_job (`_build_model` in
+`src/runner.jl`) maps only these keys, with these accepted string values:
 
 | run_job key | accepted strings | maps to | default |
 |---|---|---|---|
 | `mass` | `K_driven`, `M_sec_driven`, `a_driven` | `:K_driven` / `:M_sec_driven` / `:a_driven` | `K_driven` |
-| `time` | `Tp`, `Tc`, `Mo`, `phic` | `:Tp` / `:Tc` / `:Mo` / `:phic` | `Mo` |
+| `time` | `Tp`, `Tc`, `Mo`, `phic` | `:Tp` / `:Tc` / `:Mo` / `:phic` | `phic` |
 | `t_ref_c` | a time (`phic` only) | `t_ref_c` | median photometric time |
 | `ew` | `sesinw`, `ew` | `:sesinw` / `:ew` | `sesinw` |
 | `geom` | `b_rr` | `:b_rr` | `b_rr` |
 | `marginalize_gamma` | `true` / `false` | bool | `false` |
+| `use_rho_s` | `true` / `false` | bool | `false` |
+| `density` | `rho_circ`, `rho_star` | `:rho_circ` / `:rho_star` | `rho_circ` |
 
 ```json
 "model": {
@@ -323,22 +489,22 @@ maps only these keys, with these accepted string values:
   "planet_modes": ["RVPM"],
   "parametrization": {
     "mass": "K_driven", "time": "Tc", "ew": "sesinw",
-    "geom": "b_rr", "marginalize_gamma": false
+    "geom": "b_rr", "marginalize_gamma": false,
+    "use_rho_s": true, "density": "rho_circ"
   }
 }
 ```
 
 !!! warning "run_job gaps vs the Julia API"
     Several Julia-API options are **not** reachable through run_job
-    today (`src/runner.jl:1089`):
-    - `obs_prior` is never read from the config — set it by constructing
-      `Params`/`ParametrizationConfig` directly. (`use_rho_s` IS read, from
-      `model.parametrization.use_rho_s`, default `false`.)
+    today (`_build_model`, `src/runner.jl`):
+    - `obs_prior` and `sample_a_Rs` are never read from the config — set them by
+      constructing `Params`/`ParametrizationConfig` directly. (`use_rho_s` and
+      `density` ARE read, from `model.parametrization`.)
     - `ew = :esinw` and `geom = :r1r2` are valid in Julia but **absent
-      from the run_job string maps** (`_EW_PARAM`, `_GEOM_PARAM`,
-      `src/runner.jl:1058`–`1061`).
+      from the run_job string maps** (`_EW_PARAM`, `_GEOM_PARAM`).
     - The schema validator advertises `geom = "b_r"`
-      (`src/runner.jl:291`) and the map yields `:b_r`, but
+      (`_KNOWN_PARAMETRIZATIONS`) and the map yields `:b_r`, but
       `ParametrizationConfig` only accepts `:b_rr`/`:r1r2` — passing
       `geom: "b_r"` therefore throws at model construction. Use
       `b_rr`.

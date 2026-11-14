@@ -7,8 +7,8 @@
 # (e = 0.1, 60 RVs, 2 m/s errors): circular sd 0.056 rad for λ against 0.66 for
 # each of Mo and ω -- a 12:1 ridge.
 #
-# Under the default (:Mo, :sesinw) parametrization that ridge is a HELIX in the
-# sampler's own coordinates: Mo advances while (sesinw, secosw) = √e(sin ω,
+# Under the (:Mo, :sesinw) parametrization -- the default until the transit
+# phase φ_c replaced it -- that ridge is a HELIX in the sampler's own coordinates: Mo advances while (sesinw, secosw) = √e(sin ω,
 # cos ω) rotates. The stretch move interpolates LINEARLY over all coordinates
 # at once, so a chord between two walkers Δω apart along the helix leaves it by
 # √e(1 − cos(Δω/2)) -- at √e = 0.26 and Δω = 1.3 rad that is 0.053, comparable
@@ -54,7 +54,10 @@
 # Offered only where it is defined, which saves the likelihood evaluation
 # elsewhere (correctness does not depend on the choice):
 #   * the planet exposes Mo and the sesinw/secosw pair as sampled parameters,
-#     i.e. the default (:Mo, :sesinw) parametrization. Under :ew, ω is itself a
+#     i.e. the (:Mo, :sesinw) parametrization. Under the default transit phase
+#     there is nothing to slide along: at low e φ_c = π/2 − λ, the combination
+#     the data pin, so the ridge is not in the sampler's coordinates at all
+#     and no planet is offered the move. Under :ew, ω is itself a
 #     coordinate and the slide would be a pair of translations -- not wired up,
 #     because :ew is not the default and the (e, ω) prior is not rotationally
 #     symmetric in the same way;

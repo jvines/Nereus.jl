@@ -47,6 +47,7 @@ include("params_constructor.jl") # Params() constructor (needs default_priors + 
 include("transdim/state.jl")
 include("transdim/config.jl")
 include("parameters.jl")
+include("density.jl")       # photo-eccentric reparametrization: rho_circ / eta slots, map, Jacobian, accessors
 include("transdim/proposals.jl")
 include("transdim/informed_phot.jl")  # BLS + M-R + K helpers for JointInformedBirth
 include("transdim/birth_strategies.jl")
@@ -63,6 +64,7 @@ include("astrometry/projection.jl")  # PlanetOrbits-backed sky projection (needs
 include("astrometry/likelihood.jl")  # rel + HGCA log-likelihoods (needs projection + Theta)
 include("astrometry/loaders.jl")     # FITS / orvara-format loaders for catalogs
 include("astrometry/fetchers.jl")    # ESA bundle + GOST scraper (cached)
+include("astrometry/gaia_parallax.jl")  # runtime Gaia DR3 parallax lookup (by id or name, cached)
 include("astrometry/gaia_epoch.jl")  # Gaia DR4 epoch-astrometry reader → IADData (needs IADData)
 include("astrometry/solution_ladder.jl")  # exact 5/7/9-param evidences (needs IADData)
 include("likelihood.jl")     # calls gp_log_likelihood, check_stability, astrom_log_likelihood
@@ -76,10 +78,12 @@ include("circular.jl")    # full-circle angles: the 0/2π seam is a chart, moved
 include("builder.jl")     # high-level build_target convenience over Params + Data + NereusTarget
 include("loaders_external.jl")   # TESS LC + Vizier RV CSV loaders (data prep happens in Python sidecar; Julia just ingests)
 include("progress.jl")          # ProgressBar utility used by every sampler
+include("graceful_stop.jl")     # stop file / wall-clock / interrupt: ending a PT run early with its draws
 include("checkpoint.jl")        # sampler checkpoints: write, read, resume (needs Params, Data, priors)
 include("juliacall_compat.jl") # _is_under_juliacall + @maybe_threaded — gate every Julia threading construct so production workers don't deadlock under the Python GIL
 include("samplers/nuts.jl")
 include("samplers/rjmcmc.jl")
+include("samplers/scouts.jl")   # scouted starts for the local samplers (rjmcmc, moms, cold NUTS)
 include("samplers/moms.jl")     # MoMS sampler — needs rjmcmc helpers
 include("samplers/daedalus.jl")  # Daedalus — MoMS-within-nested-sampling
 include("samplers/evidence.jl")  # reddemcee-style TI+/SS+/H+ — used by PT
@@ -87,7 +91,10 @@ include("samplers/bridge.jl")           # posterior-only evidence (bridge sampli
 include("samplers/reference_path.jl")   # evidence via a path from a fitted reference
 include("samplers/pt.jl")
 include("samplers/pt_hmc.jl")  # Hamiltonian parallel tempering (fixed-dim, differentiable)
+include("samplers/ns_error.jl")       # the error of a nested run's log Z (thread bootstrap + volumes)
 include("samplers/nested.jl")
+include("samplers/de_move.jl")   # differential-evolution move mixed into the ensemble samplers
+include("diagnostics/drift.jl")  # collective drift of an ensemble the R-hat cannot see
 include("samplers/ensemble.jl")
 include("samplers/map.jl")
 include("samplers/ess.jl")
@@ -96,6 +103,7 @@ include("samplers/pathfinder.jl")
 include("samplers/node_flip.jl") # astrometric (Ω, ω) → (Ω+π, ω+π) move for the PT ensembles
 include("samplers/lambda_slide.jl") # (Mo, ω) → (Mo+δ, ω−δ) slide along the mean-longitude ridge
 include("samplers/ladder_history.jl") # per-step T / swap rate / swap mean distance of a PT ensemble run
+include("samplers/burnin_hold.jl") # parameters the PT ensembles hold at a value early in burn-in
 include("samplers/pt_emcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
 include("samplers/transdim_pt_emcee.jl") # trans-dim PT + MoMS variable selection
 include("samplers/population_annealing.jl") # sequential-MC tempered sampler (Hukushima & Iba 2003)
@@ -150,6 +158,7 @@ include("ttv_nbody.jl")            # N-body-predicted TTVs via TTVFaster (TTV-C)
 include("ttv_nbody_full.jl")       # full ODE backend via NbodyGradient.jl
 include("sampler_diagnostics.jl") # per-engine run health, persisted into every summary
 include("engines_registry.jl")   # the ONE sampler registry; api.jl and runner.jl derive from it
+include("provenance.jl")           # summary.json provenance: engine, version, priors
 include("runner.jl")               # JSON/dict-driven batch entry point
 include("runner_obliquity.jl")     # run_job: RM-night and line-profile data blocks, model.obliquity
 include("api.jl")                  # split-by-functionality public API (fit_*)
@@ -184,6 +193,7 @@ export
     UniformPrior, NormalPrior, LogUniformPrior,
     BetaPrior, ModJeffreysPrior, FixedPrior, SinePrior,
     WrappedUniformPrior, is_wrapped,
+    WrappedSinePrior, is_cyclic_inclination, fold_inclination,
     bounds, is_fixed, fixed_value, in_support,
     prior_transform, prior_transform!,
     logpdf_sum, prior_to_dict, prior_from_dict,
@@ -209,7 +219,7 @@ export
     has_K, has_geometry, has_AS,
     ParamsConfig, ParamsLayout, Params,
     n_total, n_unfrozen, n_frozen, param_index,
-    n_rv_instruments, n_pm_instruments, n_as_instruments,
+    n_rv_instruments, n_pm_instruments, n_as_instruments, n_iad_jitters,
     # Runtime theta state
     Theta,
     set_unfrozen!, unfrozen_values, unfrozen_values!,
@@ -219,7 +229,7 @@ export
     planet_inc, planet_Omega, astrom_plx, astrom_M_pri,
     system_vsini, system_f_light,
     n_p, set_n_p!, planet_indices, is_noise_model_active,
-    rv_gamma, rv_sigma, rv_dvdt, rv_d2vdt2, as_jitter,
+    rv_gamma, rv_sigma, rv_dvdt, rv_d2vdt2, as_jitter, iad_jitter,
     pm_offset, pm_jitter, pm_dilution,
     rho_s,
     log_prior,
@@ -228,18 +238,20 @@ export
     RelAstromData, HGCAData, IADData, GOSTData, G23HData, GaiaDR3Data,
     n_relast, n_iad, n_gost, n_g23h,
     n_iad_inst, n_relast_inst, merge_iad, merge_relast, iad_for_inst,
+    clip_transit_outliers,
     jyear_to_mjd, mjd_epochs,
     relastrom_log_likelihood, hgca_log_likelihood,
-    iad_log_likelihood, gost_log_likelihood,
+    iad_log_likelihood, gost_log_likelihood, iad_sigma_eff,
     g23h_log_likelihood,
     along_scan_projection, astrom_log_likelihood,
     obs_based_log_prior,
-    mass_function, msec_from_K, a_from_P,
+    mass_function, msec_from_K, mass_ratio_from_F, a_from_P,
+    planet_geometry, coupled_geometry,
     relastrom_offset, star_reflex_offset, star_reflex_pm,
-    gost_window_avg_pm, gost_5param_fit,
+    gost_window_avg_pm, gost_5param_fit, scan_5param_fit,
     load_hgca_row, load_orvara_rv, load_orvara_relast,
     load_hip_iad, load_gost, load_gaia_dr3,
-    fetch_hip_iad, fetch_gost,
+    fetch_hip_iad, fetch_gost, fetch_gaia_parallax,
     load_tess_lc, load_vizier_rv, export_lightcurve,
     rv_log_likelihood, rv_predictions,
     transit_log_likelihood, phot_predictions,
@@ -345,7 +357,7 @@ export
     nereus_theme,
     plot_rv_timeseries, plot_rv_phasefold,
     plot_pm_timeseries, plot_pm_phasefold,
-    plot_trace, plot_posteriors, plot_histograms, plot_corner,
+    plot_trace, plot_posteriors, plot_histograms, plot_corner, plot_corners,
     plot_ladder_rates, plot_beta_ladder,
     plot_detrending, plot_transit_phasefold, plot_posteriors_lp,
     plot_orbit_skyplane, plot_pm_residuals, plot_rv_astrom_phasefold,
@@ -406,9 +418,11 @@ end
 
 
 # Public API surface (api.jl / features.jl)
-export sampler_diagnostics, chain_convergence,
+export sampler_diagnostics, chain_convergence, ensemble_drift,
        fit_rv, fit_transit, fit_astrometry, fit_rm, fit_tomography,
     fit_ttv, fit_binary, fit_joint, run_engine, Stopping, ENGINES,
     FEATURE_ACTIONS, default_rv_planet, default_astrom_planet
+
+include("plotting/precompile.jl")   # the figures, for a release build (see the file)
 
 end # module Nereus

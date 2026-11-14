@@ -34,7 +34,9 @@ function _transit_target(noise; seed = 7)
     truth = Dict("P_k1" => P0, "Tc_k1" => T0, "b_k1" => 0.3, "rr_k1" => 0.063,
                  "harm_amp_TESS_phot" => 5e-4, "night_sigma_TESS_phot" => 2e-4,
                  "studentt_nu" => 4.0)
-    for nm in tg.params.layout.unfrozen_names
+    # Sampled then derived: under density = :rho_circ the e-coordinates are
+    # derived from ρ_circ and η, and writing them (a circular orbit) sets those.
+    for nm in Nereus.reported_param_names(tg.params)
         Nereus.set_param!(th, nm, get(truth, nm, 0.0))
     end
     return tg, th

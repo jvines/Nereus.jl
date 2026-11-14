@@ -200,10 +200,11 @@
             abscissa_err = fill(1.0, 5),
             psi          = [0.0, π/6, π/3, π/2, 2π/3],
         )
-        # 4 fake Gaia GOST transits across the DR3 window
+        # 6 fake Gaia GOST transits across the DR3 window (a five-parameter
+        # fit needs 5; `Data` refuses fewer when HGCA depends on them)
         gost = GOSTData(
-            t   = [57000.0, 57100.0, 57200.0, 57300.0],
-            psi = [0.1, 0.5, 1.0, 1.5],
+            t   = [57000.0, 57100.0, 57200.0, 57300.0, 57450.0, 57600.0],
+            psi = [0.1, 0.5, 1.0, 1.5, 2.1, 2.7],
         )
 
         data = Data(
@@ -213,7 +214,7 @@
         )
 
         params = Params(
-            max_kplanet = 1,
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
             planet_modes = [RVAS],
             instruments = instruments,
             data = data,
@@ -228,7 +229,7 @@
         @test data.iad isa IADData
         @test data.gost isa GOSTData
         @test n_iad(data.iad) == 5
-        @test n_gost(data.gost) == 4
+        @test n_gost(data.gost) == 6
         @test has_astrometry(data)
     end
 
@@ -311,7 +312,7 @@
                       rv_err = [1.0, 1.0],
                       relastrom = relast, hgca = hgca, gost = gost)
         params = Params(
-            max_kplanet = 1, planet_modes = [RVAS],
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
             instruments = instruments,
             data = data_A, stability = :none, M_s = 1.0,
         )
@@ -341,7 +342,7 @@
         t_rv = [55000.0, 55100.0]
         data = Data(t_rv = t_rv, rv = [1.0, -1.0], rv_err = [1.0, 1.0])
         params = Params(
-            max_kplanet = 1,
+            parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
             planet_modes = [RV_ONLY],
             instruments = instruments,
             data = data,
@@ -420,7 +421,7 @@
             data = Data(t_rv = [55000.0, 55100.0], rv = [0.0, 0.0],
                         rv_err = [1.0, 1.0], g23h = g23h)
             params = Params(
-                max_kplanet = 1, planet_modes = [RVAS],
+                parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]),
                 data = data, stability = :none, M_s = 1.0,
             )
@@ -451,14 +452,19 @@
             epochs5 = mjd_epochs((1991.25, 2004.6, 2015.0, 2015.5, 2016.0))
             pmra_true = Tuple(zeros(5)); pmdec_true = Tuple(zeros(5))
             σ = 0.05
-            pmra_obs = ntuple(5) do ie
-                μra, _ = Nereus.star_reflex_pm(orb, epochs5[ie], M_sec)
-                μra + σ * randn(rng)
+            # G23H's own definitions, as `_g23h_model_pm` evaluates them with
+            # no scan geometry: instantaneous reflex at the Hipparcos, DR2 and
+            # DR3 epochs; Hip→Gaia and DR3−DR2 as positional differences over
+            # the epoch differences (they were instantaneous proper motions).
+            off(t) = Nereus.star_reflex_offset(orb, t, M_sec)
+            dpos(a, b) = (off(epochs5[b]) .- off(epochs5[a])) ./
+                         ((epochs5[b] - epochs5[a]) / 365.25)
+            μ_true = ntuple(5) do ie
+                ie == 2 ? dpos(1, 5) : ie == 4 ? dpos(3, 5) :
+                          Nereus.star_reflex_pm(orb, epochs5[ie], M_sec)
             end
-            pmdec_obs = ntuple(5) do ie
-                _, μdec = Nereus.star_reflex_pm(orb, epochs5[ie], M_sec)
-                μdec + σ * randn(rng)
-            end
+            pmra_obs  = ntuple(ie -> μ_true[ie][1] + σ * randn(rng), 5)
+            pmdec_obs = ntuple(ie -> μ_true[ie][2] + σ * randn(rng), 5)
             cov = zeros(10, 10)
             for ie in 1:5
                 cov[2*ie - 1, 2*ie - 1] = σ^2
@@ -474,7 +480,7 @@
                 max_kplanet = 1, planet_modes = [RVAS],
                 instruments = InstrumentConfig(rv = ["X"]),
                 data = data, stability = :none, M_s = M_pri,
-                parametrization = ParametrizationConfig(mass = :a_driven),
+                parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
                 priors = Dict{String, PriorSpec}(
                     "n_p"=>FixedPrior(1.0),
                     "a_k1"=>LogUniformPrior(0.5, 100.0),
@@ -578,7 +584,7 @@
             max_kplanet = 1, planet_modes = [RVAS],
             instruments = InstrumentConfig(rv = ["X"]),
             data = data, stability = :none, M_s = M_pri,
-            parametrization = ParametrizationConfig(mass = :a_driven),
+            parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
             priors = Dict{String, PriorSpec}(
                 "n_p"        => FixedPrior(1.0),
                 "a_k1"       => LogUniformPrior(0.5, 100.0),
@@ -659,7 +665,7 @@
             max_kplanet = 1, planet_modes = [RVAS],
             instruments = InstrumentConfig(rv = ["X"]),
             data = data_short, stability = :none, M_s = M_pri,
-            parametrization = ParametrizationConfig(mass = :a_driven),
+            parametrization = ParametrizationConfig(time = :Mo, mass = :a_driven),
             priors = Dict{String, PriorSpec}(
                 "n_p"=>FixedPrior(1.0),
                 "a_k1"=>LogUniformPrior(0.5, 100.0),

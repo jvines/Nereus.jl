@@ -15,11 +15,11 @@ two entry points:
 The page then walks three end-to-end fits — single-planet RV, a
 trans-dim planet search, and a joint RV + transit photometry fit with
 activity — followed by the new Rossiter–McLaughlin and ActivityGP
-features. Nereus is version `0.2.0`.
+features. Nereus is version `0.9.0`.
 
 ## Installation
 
-Nereus requires Julia ≥ 1.11. Get it from
+Nereus declares Julia ≥ 1.10 (`[compat]` in `Project.toml`); CI and the runtime bundles run Julia 1.13.3, the version `Manifest.toml` was resolved with. Get it from
 [julialang.org](https://julialang.org/downloads/).
 
 Clone the repo and activate the package environment:
@@ -66,7 +66,7 @@ target = build_target(
             K      = ModJeffreysPrior(0.1, 200.0),  # m/s
             sesinw = UniformPrior(-1.0, 1.0),
             secosw = UniformPrior(-1.0, 1.0),
-            Mo     = UniformPrior(0.0, 2π),
+            phic   = UniformPrior(-π, π),       # transit phase (the default anchor)
         ),
     ),
     rv = (
@@ -103,7 +103,9 @@ TI / TI+ / SS+ / H+ stack is in `res.evidence`.
       `M_sec`, `:M_sec_driven` if `P` + `M_sec` (no `K`), else
       `:K_driven` (`P` + `K`).
     - The time anchor from the first planet's params: `:Tc` if `Tc`
-      declared, `:Tp` if `Tp`, else `:Mo`.
+      declared, `:phic` if `phic`, `:Tp` if `Tp`, `:Mo` if `Mo`, else the
+      anchor the other planets' params or `priors` name, else the default
+      `:phic` (see [Parametrizations](parametrizations.md)).
     - Per-key namespacing: planet params get `_kN`, instrument params
       get `_NAME`.
 
@@ -143,7 +145,7 @@ cfg = Dict(
   "model" => Dict(
      "max_kplanet"  => 1,
      "planet_modes" => ["RV_ONLY"],
-     "parametrization" => Dict("mass" => "K_driven", "time" => "Mo",
+     "parametrization" => Dict("mass" => "K_driven", "time" => "phic",
                                "ew" => "sesinw", "geom" => "b_rr")),
 
   # Optional — auto-generated priors are used for any key you omit.
@@ -171,7 +173,8 @@ The returned `summary` (and `summary.json`) carries:
 - `n_planets_posterior` — `P(N_p = k)` (trans-dim runs only).
 - `ppc`, `loo`, `detection_limits`, `fit_health` blocks (all
   fail-soft — a failure here is logged and recorded, never aborts the
-  run). `detection_limits` only runs for PT-family samplers.
+  run). `detection_limits` runs by default only for `pt_emcee`, `transdim_pt_emcee`
+  and `pt` (`output.detection_limits = true` forces it for another sampler).
 - `figures` — a manifest mapping each rendered PNG's logical name
   (path under `plots/` without extension, e.g.
   `"models/rv_timeseries"`, `"transdim/occupancy"`) to its file path.
@@ -183,7 +186,7 @@ Science tables are also written under `tables/` in `csv`, `json`,
 
 ### `run_job` config schema (essentials)
 
-Full reference: [`docs/JOB_CONFIG.md`](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md).
+Full reference: [`docs/JOB_CONFIG.md`](../JOB_CONFIG.md).
 Keys accept either string or symbol form; the validator collects **all**
 schema errors and reports them in one message before any heavy work.
 
@@ -203,25 +206,32 @@ schema errors and reports them in one message before any heavy work.
 
 **`model`** — `max_kplanet` (required), `planet_modes`,
 `parametrization` (`mass` ∈ {`K_driven`, `M_sec_driven`, `a_driven`};
-`time` ∈ {`Tp`, `Tc`, `Mo`}; `ew` ∈ {`sesinw`, `ew`}; `geom` ∈
-{`b_rr`, `b_r`}; `marginalize_gamma` bool), `stability` ∈ {`none`,
-`amd`, `gladman`}, `trend_order` / `phot_trend_order` ∈ {0, 1, 2},
+`time` ∈ {`phic` (the default), `Mo`, `Tp`, `Tc`}, omitted = the anchor
+your priors name (an `Mo_k1` prior selects `Mo`), else `phic`; `t_ref_c`;
+`ew` ∈ {`sesinw`, `ew`}; `geom` = `b_rr` (the validator also lists `b_r`,
+which `ParametrizationConfig` rejects); `marginalize_gamma`, `use_rho_s`
+bool; `density` ∈ {`rho_circ` (the default), `rho_star`}), `stability` ∈
+{`none`, `amd`, `gladman`}, `trend_order` / `phot_trend_order` ∈ {0, 1, 2},
 `ttv_n_transits`, `ttv_backend`.
 
 **`planet_modes`** (known values): `RV_ONLY`, `PM_ONLY`, `RVPM`,
 `RVAS`, `RVPMAS`, `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`,
-`RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`, `RVPM_TTV_NB`,
-`RVPMAS_TTV_NB`, `PM_TTV_NB`.
+`RVPM_RM_A`, `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`,
+`PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`,
+`RVPM_RM_GD`, `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 
 **`priors`** — `{ "<name>": {"type": "<PriorType>", "args": [...]} }`.
 Types: `UniformPrior`, `LogUniformPrior`, `ModJeffreysPrior`,
-`NormalPrior`, `FixedPrior`, `SinePrior`, `BetaPrior`. Any prior you
+`NormalPrior`, `TruncNormalPrior`, `FixedPrior`, `SinePrior`, `BetaPrior`,
+`WrappedUniformPrior` (case, `_`, `-` and the `Prior` suffix are ignored; see
+`PRIOR_ALIASES` for the other spellings). Any prior you
 omit is auto-generated from the data bounds.
 
 **`sampler`** — `{ "name": "<sampler>", "kwargs": {...} }`. Names:
 `pt_emcee`, `transdim_pt_emcee`, `pt`, `pt_hmc`, `rjmcmc`, `moms`,
 `daedalus`, `nested`, `nested_ins`, `nested_dynamic`, `pa`, `smc`,
-`pt_whitening`, `nuts`, `ofti`. The trans-dim samplers
+`pt_whitening`, `nuts`, `ofti`, `ensemble`, `ess`. (`map` is not available
+through `run_job`: it returns a point, not a posterior.) The trans-dim samplers
 (`transdim_pt_emcee`, `rjmcmc`, `moms`, `daedalus`) require a top-level
 `transdim` block. JSON strings in `kwargs` that name Julia symbols
 (e.g. `"prior"` for `init_strategy`) are coerced automatically;
@@ -244,7 +254,8 @@ ESS at a wrong orbit. See [Samplers](samplers.md).
 **`noise_models`** — list of `{ "kind": "<Kind>", ... }`. Kinds:
 `CeleriteRotation`, `CeleriteSHO`, `CeleriteRotationFM17`,
 `ActivityDecorrelation`, `ARModel`, `MAModel`, `ActivityJitter`,
-`ActivityGP`. Each entry takes a `channel`, `instruments`, and a
+`ActivityGP`, `ErrorScale`, `NightlyOffset`, `HarmonicBlock`, `StudentT`,
+`MaternGP`, `IndicatorFloor`. Each entry takes a `channel`, `instruments`, and a
 `kwargs` sub-dict (see the ActivityGP section below).
 
 **`output`** — `plots` (list, or `["auto"]`), `plot_kwargs`,
@@ -415,7 +426,7 @@ under a GP activity model.
 # Cleaned LC from a sidecar — see Preprocessing for the multi-sector
 # detrending pipeline.
 using DelimitedFiles
-lc = readdlm("HD18599_cleaned_lc.csv", ',', Float64; skipstart=15)
+lc = readdlm("HD18599_cleaned_lc.csv", ',', Float64; skipstart=16)  # 15 "#" lines + header
 t_phot   = lc[:, 1]
 flux     = lc[:, 2]
 flux_err = lc[:, 3]
@@ -459,14 +470,14 @@ params = Params(;
 )
 target = NereusTarget(params, data; unconstrained = true)
 
-# pt_emcee is the default engine, and the right one here. Its stretch move
-# is built from the difference between two walkers, so it follows the local
-# correlation — which is what a joint RV+phot+GP posterior needs.
+# pt_emcee is the default engine, and the right one here. Its stretch and
+# DE moves are built from differences between walkers, so they follow the
+# local correlation — which is what a joint RV+phot+GP posterior needs.
 res = sample_pt_emcee(target, target.data;
     n_temps       = 16,       # 24 for joint absolute astrometry
     n_walkers     = 100,
-    n_steps       = 3000,
-    n_burnin      = 1500,
+    n_steps       = 12000,    # at 6000, one seed in two short of R-hat 1.1
+    n_burnin      = 6000,
     init_strategy = :prior,
     seed          = 42,
 )
@@ -620,4 +631,4 @@ Two `run_job` robustness notes:
 - One-page sampler comparison + when to use each: [Samplers](samplers.md).
 - Full worked recipes: [Worked examples](examples.md).
 - The complete `run_job` config schema:
-  [`docs/JOB_CONFIG.md`](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md).
+  [`docs/JOB_CONFIG.md`](../JOB_CONFIG.md).

@@ -115,6 +115,34 @@ end
         @test s["log_z"] == -12.5 && s["n_evals"] == 1000
         @test !haskey(s, "params") && !haskey(s, "derived")
     end
+
+    @testset "a nested engine's log Z is quoted with its error" begin
+        # run_job's summary (src/runner.jl) and the facade's (src/api.jl).
+        res = (log_evidence = -12.5, log_evidence_err = 0.31, n_evals = 1000,
+               acceptance_within = Float64[], acceptance_swap = Float64[])
+        s = Dict{String, Any}()
+        _populate_summary!(s, res, nothing, ch)
+        @test s["evidence"]["nested"] == Dict("log_z" => -12.5, "se" => 0.31)
+        @test s["evidence"]["reported"] == "nested"
+        ins = Nereus.INSResult(ch, -12.5, 0.31, NaN, 10, 1000)
+        dyn = Nereus.DynamicNSResult(ch, -12.5, 0.31, -12.6, -12.4, 5, 5, 1000, 0.0, Inf)
+        for (engine, raw) in (("nested", (ch, -12.5, 0.31)), ("nested_ins", ins),
+                              ("nested_dynamic", dyn))
+            _, lz, _ = Nereus._normalize(raw)
+            @test lz == -12.5                  # was NaN for INS and dynamic
+            s = Dict{String, Any}("log_z" => lz)
+            Nereus._evidence_block!(s, raw; engine)
+            @test s["evidence"]["nested"] == Dict("log_z" => -12.5, "se" => 0.31)
+            @test s["evidence"]["reported"] == "nested"
+            @test Nereus.sampler_diagnostics(engine, raw, ch)[
+                engine == "nested" ? "log_evidence_err" :
+                engine == "nested_ins" ? "log_z_ns_err" : "log_z_err"] == 0.31
+        end
+        # daedalus's third slot is its strategy, not an error
+        s = Dict{String, Any}("log_z" => -12.5)
+        Nereus._evidence_block!(s, (ch, -12.5, :adapt); engine = "daedalus")
+        @test !haskey(s, "evidence")
+    end
 end
 
 # ---------------------------------------------------------------------------

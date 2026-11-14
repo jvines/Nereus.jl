@@ -188,8 +188,11 @@ end
                  "secosw_k1" => sqrt(e) * cos(ω), "b_k1" => 0.3, "rr_k1" => 0.1,
                  "q1_TESS" => 0.3, "q2_TESS" => 0.2)
         function at_truth(params)
-            th = Theta{Float64}(params); ix = params.layout.name_to_idx
-            for (k, v) in truth; th.values[ix[k]] = v; end
+            # set_param!, not raw slots: under density = :rho_circ the
+            # e-coordinates are derived from ρ_circ and η (src/density.jl), and
+            # writing them sets those.
+            th = Theta{Float64}(params)
+            for (k, v) in truth; Nereus.set_param!(th, k, v); end
             return th
         end
         d0, p0 = mk(ones(n))

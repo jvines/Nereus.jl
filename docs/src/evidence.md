@@ -31,8 +31,7 @@ reported as a single `EvidenceReport`
 
 For **nested samplers**, `log Z` is produced natively by the
 algorithm — see [`sample_nested`](samplers.md) and friends, which
-return the Skilling estimator and (for `sample_nested_ins`) the Feroz
-importance estimator `log_z_ins`. Those do **not** use the β-ladder
+return the Skilling estimator. Those do **not** use the β-ladder
 estimators on this page.
 
 Separately, `bridge_evidence` estimates log Z from **posterior samples
@@ -52,11 +51,11 @@ Every parallel-tempering sampler feeds the same
 
 | Sampler | Trans-dim? | log Z field | Full stack field | log Z headline |
 |---|---|---|---|---|
-| `sample_pt` | both | 2nd tuple element | — | TI+ (`pt.jl:790`) |
-| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_emcee.jl:1157`) |
-| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if finite, else TI+, else TI (`transdim_pt_emcee.jl:2168`) |
-| `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if finite, else TI+, else TI (`pt_whitening.jl:731`) |
-| `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | TI+ (`pt_hmc.jl:447`) |
+| `sample_pt` | both | 2nd tuple element | — | TI+ if quotable, else `NaN` |
+| `sample_pt_emcee` → `PTemceeResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | bridge if usable, else H+ if quotable and within `laplace_switch_tol` of mode-Laplace, else mode-Laplace (warned); `NaN` only with none of them |
+| `sample_transdim_pt_emcee` → `TransDimPTemceeResult` | trans-dim | `.log_evidence` | `.evidence_report` | H+ if quotable, else `NaN` |
+| `sample_pt_whitening` → `PTWhiteningResult` | fixed-dim | `.log_evidence` | `.evidence::EvidenceReport` | H+ if quotable, else `NaN` |
+| `sample_pt_hmc` | fixed-dim | 2nd tuple element | 3rd tuple element (`EvidenceReport`) | bridge if usable, else SS+ if quotable and within `laplace_switch_tol` of mode-Laplace, else mode-Laplace (warned); `NaN` only with none of them (`_pt_hmc_evidence`) |
 
 Notes for a production reader:
 
@@ -66,11 +65,48 @@ Notes for a production reader:
   as `.evidence_report` (typed `Any`, `transdim_pt_emcee.jl:45`). The
   tuple-returning samplers (`sample_pt`, `sample_pt_hmc`) put the
   scalar `log_evidence` in the tuple; `sample_pt_hmc` additionally
-  returns the full `EvidenceReport` as a third element.
-- **Headline estimator differs.** The in-house ensemble samplers
-  (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`) pick **H+** as the
-  headline `log_evidence` (falling back TI+ → TI when H+ is non-finite).
-  `sample_pt` and `sample_pt_hmc` report **TI+** as the headline.
+  returns the full `EvidenceReport` as a third element, and as a fourth
+  the bridge and mode-Laplace values, whether SS+ is quotable and why not,
+  which one it reported, the ladder and the swap acceptance per rung pair.
+- **Quotable** means what `_tempered_quotable` (`src/samplers/evidence.jl`)
+  checks: the ladder reaches β = 0, or the `[0, β_min]` head is not in the
+  integral, and every adjacent pair of rungs swapped at least `swap_min` (5%)
+  of the time, or their ratio rests on too little overlap. Otherwise the
+  tempered value is not quoted: `sample_pt_emcee` and `sample_pt_hmc` fall
+  back on mode-Laplace (Jose's rule, below) and the samplers without one
+  return `NaN`, each with a warning saying why; the raw stack stays in the report, and summary.json
+  carries it only when
+  it is quotable (`"tempered_check": {"quotable": false, "why": ...}` otherwise).
+  The default ladders of `pt_emcee`, `transdim_pt_emcee` and `pt_whitening`
+  stop at `beta_min`, so their tempered values are quoted only from `betas`
+  given with a 0 rung. On an RV + Hipparcos-IAD companion whose bridge log Z
+  is 163.88, pt_emcee's SS+ read 157.85 from 8 rungs.
+- **Headline estimator differs.** `sample_pt_emcee` reports bridge sampling
+  on its cold chain when it is usable. Otherwise Jose's rule: H+ when it is
+  quotable and agrees with mode-Laplace within `laplace_switch_tol` (the
+  Laplace non-Gaussian bias), else mode-Laplace, with a warning — a tempered
+  value that is not quotable counts as broken. `NaN` only when none of them is
+  available. Under `untemper_transit` with photometry the tempered value is
+  relative and mode-Laplace absolute, so there is no switch and both are kept.
+  mode-Laplace, a Gaussian approximation at the mode, is written in
+  summary.json as `mode_laplace` (a number), with `mode_laplace_check` beside
+  it holding that label and its distance from bridge; a warning fires when it
+  is further from bridge than bridge's standard error + 1 nat (1.1 to 1.2
+  nats above bridge on the companion before the Laplace fix below, within
+  0.25 after it). `transdim_pt_emcee` and `pt_whitening`
+  report **H+** and `sample_pt` **TI+**, each only when quotable: they have
+  no mode-Laplace to fall back on, so otherwise `NaN` with a warning, written
+  as `null` in summary.json. `sample_pt_hmc` applies the same rule with SS+
+  as its tempered value: bridge sampling on its cold chain when the chain has
+  converged and the reference has the effective samples it needs
+  (`_bridge_guard`), else SS+ when its ladder starts at
+  β = 0, every adjacent pair of rungs swaps at least `swap_min` (5%) of the
+  time and it is within `laplace_switch_tol` of mode-Laplace, else
+  mode-Laplace with a warning, else `NaN` with a warning saying why. Its
+  ladder is β = 0 and a geometric run
+  from `beta_min`: from β = 0 the integrand climbs through four decades in
+  the first segment, which TI+ does not resolve (1 to 4 nats low at 8 to 12
+  rungs) and SS+ does (within 0.3 of an exact log Z).
   Whichever you trust, all four numbers are always in the report — read
   the one that suits your posterior (see
   [Practical guidance](#practical-guidance)).
@@ -246,9 +282,11 @@ Pull the full stack off the result struct (pt_emcee / pt_whitening):
 
 ```julia
 res = sample_pt_emcee(target, data; n_temps = 12)
-res.log_evidence            # headline scalar (H+, or TI+/TI fallback)
-ev  = res.evidence          # the EvidenceReport
+res.log_evidence            # bridge if usable, else a quotable H+ within laplace_switch_tol
+                            # of mode-Laplace, else mode-Laplace (with a warning)
+ev  = res.evidence          # the EvidenceReport (raw, quotable or not)
 ev.ti_plus, ev.ss_plus      # (log_Z, σ) pairs to compare
+Nereus._tempered_quotable(res.betas, res.acceptance_swap)   # (ok, why)
 ev.hybrid_beta_star         # where H+ switched TI+→SS+
 ```
 
@@ -256,7 +294,7 @@ For the trans-dim ensemble sampler the field is named differently:
 
 ```julia
 res = sample_transdim_pt_emcee(target, data; td = td)
-res.log_evidence            # headline scalar
+res.log_evidence            # H+ if quotable, else NaN
 ev  = res.evidence_report   # EvidenceReport (field typed Any)
 ```
 
@@ -265,13 +303,13 @@ For the tuple-returning samplers:
 ```julia
 chains, log_z          = sample_pt(target)            # TI+ headline
 chains, log_z, n_evals = sample_pt(target; td = td)   # trans-dim 3-tuple
-chains, log_z, report  = sample_pt_hmc(target)        # report is EvidenceReport
+chains, log_z, report, ev = sample_pt_hmc(target)    # report is EvidenceReport
 ```
 
 ### Through `run_job`
 
 When you drive Nereus via `Nereus.run_job` (the JSON/Dict
-dispatcher — see [JOB_CONFIG.md](https://github.com/jvines/Nereus.jl/blob/main/Nereus.jl/docs/JOB_CONFIG.md)),
+dispatcher — see [JOB_CONFIG.md](../JOB_CONFIG.md)),
 every sampler result is normalised so `log_evidence` is always present,
 and the run summary surfaces it as the JSON key **`log_z`**
 (`src/runner.jl:2683`). Samplers with no evidence at all (e.g.
@@ -299,11 +337,18 @@ is `nothing` and `sample_pt_emcee` skips bridge — every job silently fell
 through to the tempered stack, the one estimator that can sit >100 nats low
 while its four variants agree to a decimal. Bridge is now recomputed after the
 fit against an unconstrained target built from the same `params` and `data`
-(chains untouched), and `log_z` is promoted to it **only when the chain
-carries the effective sample size its reference needs**; otherwise bridge is
-recorded with `bridge_not_reported` saying why. Trans-dim chains are skipped —
-a single Gaussian reference over a fixed `R^n` is undefined across mixed
-dimensions.
+(chains untouched), and `log_z` is promoted to it **only when the chain has
+converged and carries the effective sample size its reference needs**
+(`_bridge_guard`, below); otherwise bridge is
+recorded with `bridge_not_reported` saying why. mode-Laplace is computed there
+too, on the same unconstrained target (the bounded target the sampler ran on
+has none), and `log_z` is then chosen by Jose's rule: the tempered value
+already reported if it is quotable and within `laplace_switch_tol` of
+mode-Laplace, else mode-Laplace with a warning, `NaN` only with neither. A
+nested headline, or a bridge the engine already reported, is kept; under
+`untemper_transit` with photometry the tempered value is kept, as in
+`sample_pt_emcee`. Trans-dim chains are skipped — a single Gaussian reference
+over a fixed `R^n` is undefined across mixed dimensions.
 
 Measured on five HD 18599 fixed configurations: four shift by ≤ 6 nats between
 tempered and bridge, and ActivityGP shifts by **59.9** (−1234.6 → −1174.7) —
@@ -340,9 +385,8 @@ ladder give the same numbers, and log Z stays negative
 (`test_evidence_gaussian.jl:71-74`).
 
 Independent cross-validation: TI+/SS+/H+ agree with the analytic
-log Z to `< 0.01` nats on the 2D-Gaussian × box, and PT's SS+ agrees
-with `sample_nested_ins`'s `log_z_ins` to ~5 log units on the 22-d
-HD 18599 RVPM posterior. Earlier HD 18599 disagreements were
+log Z to `< 0.01` nats on the 2D-Gaussian × box. Earlier HD 18599
+disagreements were
 sampling/ladder-resolution effects, **not** estimator bugs — use
 `≥ 10` PT temperatures for trustworthy numbers.
 
@@ -358,18 +402,35 @@ Worse for model selection, the bias is *model-dependent* — it lives on the
 model that contains the signal, not the noise-only null — so it does **not**
 cancel in a `Δ log Z` Bayes factor.
 
-`sample_pt_emcee` therefore also computes a **mode-anchored Laplace** estimate
-from its own cold chain:
+`sample_pt_emcee` and `sample_pt_hmc` therefore also compute a
+**mode-anchored Laplace** estimate from their own cold chain (and run_job
+after the fit):
 
 ```
 log Z ≈ log q(mode) + (d/2)·log 2π + ½·logdet Σ_local
 ```
 
-anchored on the max-`lp` cold sample (the *mode*, not the mean — a multimodal
-mean falls in a density valley), with `Σ_local` the sample covariance of the
-closest fraction of draws in unconstrained space. It **never tempers** (immune
-to the phase transition) and uses the *sample* covariance rather than the
-Hessian (robust to railed MAPs, where a Hessian Laplace goes singular / NaN).
+all in the unconstrained space: `log q` is the log posterior density there,
+the bounded one plus the log-Jacobian of the map, anchored on the max-`log q`
+cold sample (the *mode*, not the mean — a multimodal mean falls in a density
+valley), with `Σ_local` the sample covariance of the closest 30% of draws,
+divided by the factor `c = F_{d+2}(q)/F_d(q)` (`F_k` the χ²_k CDF, `q` the cut's
+squared Mahalanobis radius) by which that cut shrinks a Gaussian's
+covariance. It **never tempers** (immune to the phase transition) and uses
+the *sample* covariance rather than the Hessian (robust to railed MAPs, where
+a Hessian Laplace goes singular / NaN). The chain's `:lp` may hold either
+density (pt_emcee's is the bounded one, pt_hmc's and NUTS's the unconstrained
+one); which is checked against a full evaluation at a few draws, and without
+`:lp` every draw is evaluated.
+
+Until 2026-11-12 both corrections were missing. On an RV + Hipparcos-IAD
+companion (bridge 163.88 at i = 89.5°, 165.51 at 5°, 162.08 with e free)
+pt_emcee's value sat 1.1 nats above bridge — the missing Jacobian (−3.7
+nats at the mode) less the shrunk covariance (−2.6 nats for d = 6) — and
+pt_hmc's, whose `:lp` carries the Jacobian, 2.6 to 3.1 below; with both
+corrected the two sit within 0.25 nats of bridge. On 51 Peg (d = 15,
+converged at 15 000 steps) it sits 5.5 nats above bridge and
+reference-path, which agree to 0.07.
 It carries an `O(100)`-log-unit non-Gaussian bias on pathological (railed,
 multimodal) posteriors — negligible for a strong detection, worth a nested
 cross-check for a marginal one.
@@ -384,15 +445,19 @@ res.log_evidence             # the one to USE (see rule below)
 mode_laplace_evidence(target, res.chains)   # standalone, any cold chain
 ```
 
-**Selection rule** (`laplace_switch_tol`, default 50 log units): if the
-tempered best and the Laplace value **agree**, the tempered one is validated —
-keep it (it is exact when it works). If they **disagree** by more than the
-tolerance, the tempered estimator has hit a phase transition — `log_evidence`
-auto-switches to `log_evidence_laplace` and a warning fires (reporting the
-minimum swap acceptance as the corroborating signature). This keeps
-`res.log_evidence` trustworthy for model selection at ensemble-PT speed. A
-tiny `minimum(res.acceptance_swap)` that will not rise with more temperatures
-is the independent tell-tale of the phase transition.
+**Selection rule** (Jose's rule; `laplace_switch_tol`, default 50 log units).
+Bridge comes first when it is usable. Otherwise, if the tempered best and the
+Laplace value **agree**, the tempered one is validated — keep it (it is exact
+when it works). If they **disagree** by more than the tolerance, the tempered
+estimator has hit a phase transition — `log_evidence` switches to
+`log_evidence_laplace` and a warning fires (reporting the minimum swap
+acceptance as the corroborating signature). A tempered value from a ladder
+that cannot carry it (no β = 0 rung, or a pair of rungs swapping less than
+`swap_min`) is broken in the same way, and Laplace takes over. A tiny
+`minimum(res.acceptance_swap)` that will not rise with more temperatures is
+the independent tell-tale of the phase transition. When bridge is the
+headline, a warning fires if Laplace is further from it than bridge's
+standard error + 1 nat.
 
 ## Bridge sampling — evidence from the posterior alone
 
@@ -463,14 +528,92 @@ aliases — use nested sampling, which explores modes natively, or supply a
 mixture reference. Diagnose it directly: look at the marginal of the parameter
 you suspect (period, usually) and check it is not simply reproducing its prior.
 
-⚠ **Bridge also needs an adequate *effective* sample size, and it fails
-quietly without one.** It fits `q` from the posterior draws, so when those
-draws are strongly autocorrelated the reference is estimated from far fewer
-independent points than the draw count suggests — a `d`-dimensional Gaussian
-reference has `d + d(d+1)/2` free parameters (135 at `d = 15`), and fitting
-that from ~20 effective points gives a near-singular, badly wrong `q`.
-Measured on a curved 15-dimensional target with an **exactly known** log Z,
-varying only the chain's autocorrelation:
+⚠ **Bridge needs a converged chain and an adequate *effective* sample size,
+and it fails quietly without either.** Both biases are one-sided (always
+*low*) and neither shows in bridge's own diagnostics (`overlap` reads ~1,
+`se` is a bootstrap over draws that are not independent). Every bridge
+headline — `sample_pt_emcee`, `sample_pt_hmc`, run_job's post-fit — therefore
+goes through one guard, `_bridge_guard`, which refuses it unless
+
+1. **the chain has converged**: the worst rank-normalised split R-hat over
+   parameters (on the folded draws, as bridge reads them) is at most 1.1;
+2. **`q` has the effective draws it needs**: the least bulk ESS is at least
+   `q`'s `d + d(d+1)/2` free parameters (135 at `d = 15`).
+
+A refused bridge is still written to summary.json, with
+`bridge_not_reported` naming the condition that failed and its value.
+
+*Convergence.* `q` is fitted to the draws, and bridge treats them as the
+posterior's. When the walkers have not reached it, they are not: on the easy
+single-planet RV fixture of the tests (12.3 d on `LogUniform(0.1, 3000)`), 32
+walkers on two rungs had not found the period after 60 to 3000 steps, and
+bridge read **70 to 90 nats low** while ESS cleared the old bound — walkers
+that do not move still count as about one effective draw each, so a
+32-walker ensemble has an ESS floor near 32 to 64:
+
+| steps | min ESS (need 35) | worst R-hat | bridge | truth |
+|------:|------------------:|------------:|-------:|------:|
+| 60 | 54 | 6.50 | −242.01 | −153.75 |
+| 200 | 36 | 5.03 | −229.57 | |
+| 400 | 38 | 2.83 | −223.96 | |
+| 3000 | 110 | 2.39 | −222.91 | |
+| 10 000 | 1222 | 1.04 | −153.77 | |
+| defaults, 2 seeds | 19 800, 21 100 | 1.004 | −153.755, −153.749 | |
+
+(Truth: bridge and reference-path on the converged runs, which agree to 0.02;
+mode-Laplace −153.49. The unconverged runs sit near −223, a secondary
+solution — `nested_ins` also returned −222.9 there.) Nothing built from such
+draws can be trusted: reference-path read −144 to −223 on them, and
+mode-Laplace −222 to −166. Only a longer run fixes it.
+
+51 Peg as the quickstart above runs it (d = 15, 60 walkers, 3000 steps) is the
+same case at scale: R-hat 1.97 and 1.74 for two seeds, ESS 215 and 230
+against 135, and bridge −8720.6 and −8776.4. At 15 000 steps (R-hat 1.016
+and 1.014, ESS 4300 and 4440) bridge reads −5893.86 and −5893.91, and
+reference-path −5893.79 and −5893.88.
+
+On Gaussians with exactly known log Z, chains started overdispersed and kept
+from the first step (so still moving in) give, per worst R-hat:
+
+| target | R-hat | bridge error |
+|---|---:|---:|
+| Gaussian, d = 7, starts at 10σ | 1.8 to 5.1 | **−23 to −37** (min ESS 1.0 to 2.4 × need) |
+| Gaussian, d = 7, starts at 3σ | 2.7 / 1.34 / 1.15 / 1.05 | −0.40 / −0.10 / −0.10 / −0.05 |
+| Gaussian, d = 15, starts at 3σ | 4.5 / 1.94 / 1.36 / 1.15 / 1.08 | −4.0 / −1.3 / −0.60 / −0.32 / −0.24 |
+| curved, d = 15, starts at 3σ | 5.3 / 2.0 / 1.71 / 1.28 | −8.8 / −4.9 / −2.0 / −0.70 |
+
+At R-hat ≤ 1.1 the worst error measured is 0.26 nats. Converged runs sit
+well below the bound: R-hat 1.008 to 1.017 for pt_emcee and 1.001 to 1.005
+for pt_hmc on the RV + Hipparcos-IAD companion (i = 5°, 89.5°, e free; ESS
+1150 to 4200 against 27 to 44), 1.014 to 1.019 on 51 Peg (ESS 3300 to 4400
+against 65 and 135), 1.004 on the easy RV fixture with run_job's defaults.
+
+*Effective sample size.* When the draws are strongly autocorrelated the
+reference is estimated from far fewer independent points than the draw count
+suggests. From stationary chains (32 walkers of random-walk Metropolis started
+at exact draws, the autocorrelation dialled by the step size), bridge's error
+against the ratio of the least ESS to `q`'s parameter count, and the worst
+R-hat (each row a mean of 3 chains; ✓ = reported by the guard):
+
+| target | ESS / need | R-hat | bridge error | |
+|---|---:|---:|---:|:-:|
+| Gaussian, d = 5 | 90 / 24 / 5.2 / 3.3 | 1.02 / 1.07 / 1.53 / 7.6 | −0.004 / −0.013 / −0.080 / −0.56 | ✓ ✓ · · |
+| Gaussian, d = 10 | 12.6 / 3.5 / 1.3 / 0.52 | 1.04 / 1.16 / 1.98 / 7.3 | −0.022 / −0.072 / −0.29 / −0.61 | ✓ · · · |
+| Gaussian, d = 15 | 3.8 / 1.15 / 0.55 / 0.25 | 1.06 / 1.26 / 2.46 / 8.4 | −0.064 / −0.22 / −1.03 / −1.85 | ✓ · · · |
+| curved, d = 15 | 1.9 / 0.96 / 0.55 / 0.25 | 1.13 / 1.34 / 2.56 / 9.2 | −0.033 / −0.23 / −0.96 / −1.90 | · · · · |
+| Gaussian, d = 30 | 0.50 / 0.22 / 0.14 / 0.07 | 1.14 / 1.48 / 3.1 / 5.1 | −0.46 / −1.53 / −5.6 / −7.4 | · · · · |
+| Gaussian, d = 15, longer | 18 / 9.0 / 8.3 / 4.2 | 1.015 / 1.030 / 1.035 / 1.071 | −0.014 / −0.038 / −0.050 / −0.082 | ✓ ✓ ✓ ✓ |
+| curved, d = 15, longer | 9.1 / 5.4 / 4.7 / 3.2 | 1.026 / 1.052 / 1.056 / 1.124 | −0.019 / −0.024 / −0.021 / −0.067 | ✓ ✓ ✓ · |
+| Gaussian, d = 30, longer | 2.65 / 1.16 / 1.14 / 0.73 | 1.031 / 1.070 / 1.077 / 1.166 | −0.15 / −0.29 / −0.31 / −0.68 | ✓ ✓ ✓ · |
+
+The ESS of walkers that barely move has a floor near the walker count (the
+d = 5 row at 3.3 is 32 nearly frozen walkers), so the ratio alone does not
+catch them; R-hat does. The worst error the guard lets through, over every
+chain in the tables of this section, is 0.36 nats (d = 30 at 1.15 × need);
+fitting `q` on half the walkers removes even that (−0.02, below).
+
+Measured earlier on the curved target, thinning one chain to a fixed number
+of draws:
 
 | `n_eff` | bridge error | reference-path error |
 |--------:|-------------:|---------------------:|
@@ -479,22 +622,25 @@ varying only the chain's autocorrelation:
 | 146 | −0.400 | −0.008 |
 | 22 | **−3.217** | +0.174 |
 
-The bias is one-sided (always *low*) and reaches several nats before anything
-in the returned diagnostics looks wrong.
+**Where bridge is refused on stationary draws**, reference-path is the better
+number: on the chains above, its mean error stays within 0.11 nats in every
+row at d ≤ 15 (single chains within 0.19; d = 15 at ratio 0.25: −0.04
+against −1.85), and at d = 30 within 0.06 down to ratio 0.14 (single chains
+within 0.28; −0.01 against −1.53 at 0.22, +0.03 against −5.6 at 0.14); below
+that it fails too (−0.31 to +3.3). On the overdispersed Gaussians it held to
+0.21 at d = 7 where bridge was 23 to 37 nats low, but read +25 to +30 at
+d = 15 from 10σ starts. It is not reported automatically (the headline order
+is Jose's rule); call `reference_path_evidence(target, chains)`. It does not
+rescue a chain that never reached the posterior (above).
 
-Two things this is **not**. It is not the estimator re-using its training
-draws: a split-sample variant, which fits `q` on one half and evaluates on
-the other, still errs by −2.784 at `n_eff = 22`. And it is not mere
-*displacement* of the reference — bridge is robust to that, absorbing a `q`
-shifted by 1σ or mis-scaled from ×0.6 to ×2.5 with no measurable error. The
-failure is specifically a `q` that is **poorly estimated**, and it hits
-bridge and not reference-path because reference-path anneals *away* from `q`
-along a β-path and so recovers from a bad reference, while bridge consumes
-`q` directly.
-
-**Check the chain's ESS before quoting a bridge value**, and prefer
-[reference-path](#reference-path-evidence--thermodynamic-integration-without-the-prior)
-when `n_eff` is not comfortably above `d(d+3)/2`.
+What the ESS bias is: re-use of the draws `q` was fitted to. Fitting `q` on
+half the walkers and evaluating bridge on the other half (independent
+halves) removes much of it at ratios 0.2 to 0.55 (d = 15 at 0.55: +0.007
+against −1.03; d = 30 at 0.22: −0.03 against −1.53; curved at 0.48 with the
+slowest walkers: −0.92 against −2.40), and overshoots at the lowest (+2 to +9
+at d = 30, ratio 0.07 to 0.13). A split in time, where both halves come from
+the same autocorrelated walkers, did not (−2.784 at `n_eff = 22`). It is not *displacement* of the reference — bridge absorbs a
+`q` shifted by 1σ or mis-scaled from ×0.6 to ×2.5 with no measurable error.
 
 ⚠ **Adequate ESS is necessary, not sufficient — and there is an open
 discrepancy on real targets.** On the analytic target above the two estimators
@@ -516,6 +662,11 @@ on a real multi-instrument RV posterior treat **a few nats as the systematic
 floor** on any single prior-free log Z, quote which estimator produced it, and
 do not read a Bayes factor of that size as meaningful unless both estimators
 agree on it.
+
+That run's R-hat was not recorded. Two 15 000-step runs of the quickstart
+configuration (R-hat 1.016 and 1.014, ESS 4300 and 4440) give bridge
+−5893.86 and −5893.91 against reference-path −5893.79 and −5893.88: within
+0.07, and near the reference-path value above rather than the bridge one.
 
 **Validation.** Error of **0.003 nats** against an analytic 22-dimensional
 target. On the real HD 18599 RVPM posterior, `log_z = 11466.13 ± 0.02` with
@@ -623,13 +774,19 @@ nats and reference-path is stable in particle count (ESS 1929/2048).
 That residual 3.8 nats between bridge and reference-path is unexplained: both
 report sigma ~ 0.03 and both are stable, so it is not sampling noise. Treat a
 Bayes factor resting on less than ~5 nats from either of them with suspicion
-until it is resolved.
+until it is resolved. Two converged runs of the quickstart configuration
+(15 000 steps, R-hat 1.016 and 1.014) put them within 0.07 (bridge −5893.86
+and −5893.91, reference-path −5893.79 and −5893.88), which points at that
+run rather than the estimators; its R-hat was not recorded. On them
+mode-Laplace sits 5.5 nats above both, and the tempered stack, on the
+quickstart's 8 rungs, 93 to 112 nats (TI+, H+) and 55 to 66 (SS+) below.
 
 ## Practical guidance
 
-- **Fixed-dim PT on a single posterior**: take H+ (the ensemble samplers'
-  default headline) — or TI+ from `sample_pt`/`sample_pt_hmc` — as the
-  reported value.
+- **Fixed-dim PT on a single posterior**: take `res.log_evidence`, which is
+  bridge where the sampler computes it, a tempered value only when its ladder
+  is quotable (and, for `sample_pt_emcee`, it agrees with mode-Laplace), and
+  otherwise mode-Laplace with a warning (see the table above).
 
   ⚠ **But mutual agreement between TI/TI+/SS+/H+ is NOT evidence that they are
   right.** All four read the same shared `mean_logL[k]` array, so a bias in
@@ -640,14 +797,18 @@ until it is resolved.
   especially for a Bayes factor.
 - **Trans-dim PT**: the TI+ Richardson term blows up (PCHIP can't
   track the ⟨log L⟩(β) curvature when the integrand averages over
-  multiple configs). **Trust SS+** (`res.evidence_report.ss_plus[1]`).
-  A spread of ~1 000 log units across estimators is normal on hard
-  trans-dim targets; the SS+ value is the calibrated one to report.
-- **NS log Z cross-check**: compare PT's SS+ to `sample_nested_ins`'s
-  `log_z_ins` as an independent estimate. Agreement to a few log units
-  is confidence-building; large disagreement on a curved RV posterior
-  usually means NS is the biased one (its rslice can't mix the thin
-  e–ω–M₀ ridge) — see [sampler validation](sampler_validation.md).
+  multiple configs). SS+ (`res.evidence_report.ss_plus[1]`) is the
+  calibrated one, and only from a quotable ladder (β = 0 reached, every
+  pair swapping); `res.log_evidence` is `NaN` otherwise. A spread of
+  ~1 000 log units across estimators is normal on hard trans-dim targets.
+- **NS log Z cross-check**: compare PT's evidence to `sample_nested`'s
+  log Z, an independent estimate. NS under-decorrelated by too few slices
+  or walks per replacement comes out **high**: its live points descend
+  from too few parents, so each iteration shrinks the prior volume by
+  more than the `1/n_live` NS credits, and the high likelihoods get too
+  much of it. See the `slices` / `n_walks` defaults in
+  [the samplers page](samplers.md). `sample_nested_ins`'s `log_z_ins` is
+  not an evidence (`INSResult`).
 - **Ladder length matters.** Use `≥ 10` temperatures; a too-coarse
   ladder inflates TI quadrature error and destabilises the SS+ pairs.
   `sample_pt_hmc` and `sample_pt_emcee`/`sample_pt_whitening` support
@@ -659,9 +820,10 @@ until it is resolved.
   SS+). Through `run_job`, compare the `log_z` summary keys. **If either
   run involves a high-SNR signal** (a strong planet vs. a noise-only null),
   the tempered estimators are biased *asymmetrically* and the factor is
-  wrong — use `res.log_evidence` (which auto-switches to the mode-Laplace
-  cross-check) or `res.log_evidence_laplace` directly; see
-  [Mode-Laplace](#mode-laplace--a-phase-transition-immune-cross-check).
+  wrong — use bridge (`res.log_evidence_bridge`, the headline of
+  `sample_pt_emcee` and `sample_pt_hmc` when usable) or, failing it,
+  `res.log_evidence` (which then switches to the mode-Laplace cross-check);
+  see [Mode-Laplace](#mode-laplace--a-phase-transition-immune-cross-check).
 
 For per-configuration evidence in trans-dim noise-model selection, see
 [Trans-dimensional](transdim.md) — the joint (N\_p, noise-config)

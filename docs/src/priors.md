@@ -99,6 +99,22 @@ chain escapes into face-on (`i ≈ 0` or `π`) modes where huge `M_sec`
 priors["inc_k1"] = SinePrior()
 ```
 
+On a polar angle -- an orbital inclination (`inc_k<N>`) or the stellar
+inclination (`i_star`) -- the samplers treat it as cyclic: `i` and `-i` (and
+`i + 2π`) are the same orbit or star, so the inclination is sampled on a circle
+with density `|sin x|/4`, where `0` and `π` are points a sampler passes
+through, and every draw is folded back to `[0, π]` before it is reported. A
+retrograde, nearly face-on orbit therefore samples freely through `i = 180°`
+instead of piling up against it, and `fit_health` does not report it railed
+there. The circle is sampled on a chart of one period, whose seam the samplers
+move to where the posterior and its mirror image `-i` are thinnest: a pole for
+an edge-on posterior, the mirror image of `i = 90°` for a face-on or inclined
+one. The induced prior on the folded inclination is still `sin(i)/2`, and
+`config.priors` keeps `SinePrior()` as written. Any other prior over all of
+`[0, π]` on a polar angle (a `UniformPrior(0, π)`, a Normal truncated to
+`[0, π]`) is lifted the same way, its density reflected at both poles; a prior
+on part of `[0, π]` keeps its walls.
+
 ### `FixedPrior(value)`
 
 Parameter held at a constant. Not sampled, not in the sampler vector,
@@ -205,12 +221,12 @@ depend on the `parametrization` (see [Parametrizations](parametrizations.md)).
 | `sesinw_k1`, `secosw_k1` | √e·sin/cos ω (`ew = :sesinw`, default) | `UniformPrior(-1, 1)` |
 | `esinw_k1`, `ecosw_k1` | e·sin/cos ω (`ew = :esinw`) | `UniformPrior(-1, 1)` |
 | `ecc_k1`, `w_k1` | direct e, ω (`ew = :ew`) | `NormalPrior(0, 0.3, 0, 1)`, `UniformPrior(-π, π)` |
-| `Mo_k1` | Mean anomaly at `t_ref` (`time = :Mo`, default) | `UniformPrior(0, 2π)` |
+| `Mo_k1` | Mean anomaly at `t_ref` (`time = :Mo`) | `UniformPrior(0, 2π)` |
 | `Tp_k1` | Time of periastron (`time = :Tp`) | `UniformPrior(t_min, t_max)` |
 | `Tc_k1` | Time of transit centre (`time = :Tc`) | `UniformPrior(t_min, t_max)` |
-| `phic_k1` | Transit phase 2π(Tc − t_ref_c)/P (`time = :phic`) | `UniformPrior(-π, π)` |
+| `phic_k1` | Transit phase 2π(Tc − t_ref_c)/P (`time = :phic`, default) | `UniformPrior(-π, π)` |
 | `rr_k1`, `b_k1` | radius ratio, impact param (`geom = :b_rr`) | `UniformPrior(0.001, 1)`, `UniformPrior(0, 1)` |
-| `r1_k1`, `r2_k1` | Espinoza (2018) reparam (`geom = :b_r`) | `UniformPrior(0, 1)` each |
+| `r1_k1`, `r2_k1` | Espinoza (2018) reparam (`geom = :r1r2`; Julia API) | `UniformPrior(0, 1)` each |
 | `inc_k1` | Inclination — AS planet, not RVPM+AS | `SinePrior()` |
 | `Omega_k1` | Longitude of ascending node — AS planet | `UniformPrior(0, 2π)` |
 | `lambda_k1` | Sky-projected obliquity (rad) — RM planet | `UniformPrior(-π, π)` |
@@ -282,13 +298,22 @@ plots are RM-consistent. Render the in-transit anomaly with the
 | `jitter_<INST>` | extra photometric scatter (flux units) | `ModJeffreysPrior(1e-4, 1e-1)` |
 | `dilution_<INST>` | transit dilution / third light | `FixedPrior(0.0)` (override to free it) — **auto-frees to `UniformPrior(0, 0.9)`** when an SB2 `BINARY*` binary is present (the transit is diluted by the companion's light) |
 | `q1_<INST>`, `q2_<INST>` | Kipping (2013) limb-darkening reparam | `UniformPrior(0, 1)` |
-| `rho_s` | stellar density (when `use_rho_s = true`) | `LogUniformPrior(0.001, 100.0)` |
+| `rho_s` | stellar density in solar units (when `use_rho_s = true`). Sampled unless the ρ_circ reparametrization takes it over (see below), in which case it is derived | `LogUniformPrior(0.001, 100.0)` |
+| `a_Rs_k<k>` | scaled semi-major axis a/R★ of transiting planet `k` (`sample_a_Rs = true`) | `LogUniformPrior(1.2, 500.0)` |
+| `rho_circ_k<k>` | circular-equivalent density ρ★·g³ (solar units), sampled under `density = :rho_circ` for a transiting planet with free e | `LogUniformPrior(ρ★_min/G³, ρ★_max·G³)`, `G = 100`; set by the model, not by you |
+| `eta_k<k>` | angle on the orbits of one g, replacing that planet's `e` and `ω` (every eligible planet but the anchor) | `UniformPrior(-π/2, 3π/2)`, narrowed to the arc that holds `e ≤ e_max` where the `e` prior stops short of 1; set by the model, not by you |
+
+`rho_circ_k<k>` and `eta_k<k>` carry the prior on `rho_s` (or the host mass) and
+on the eccentricity coordinates through the Jacobian of the change of variables,
+so the posterior is the one those priors define. A prior given for either name is
+refused; put it on `rho_s` / `M_pri` and on `sesinw_k<k>`, `secosw_k<k>` instead, or
+set `density = :rho_star` (see [`parametrizations.md`](parametrizations.md)).
 
 ### Astrometry systemic (AS planets present)
 
 | Parameter | Meaning | Default |
 |---|---|---|
-| `plx` | parallax (mas) | `NormalPrior(μ, σ, lo, hi)` from the HGCA parallax (±10σ, floored at 0.001) if `data.hgca` is set; else `LogUniformPrior(0.1, 1000.0)` |
+| `plx` | parallax (mas) | `NormalPrior(μ, σ, lo, hi)` from, in order, the Gaia DR3 parallax looked up through `star.gaia_id` / `star.name` (`fetch_gaia_parallax`), the HGCA parallax if `data.hgca` is set, the G23H parallax if `data.g23h` is set (±10σ, floored at 0.001); else `LogUniformPrior(0.1, 1000.0)`. A `priors["plx"]` replaces all of these |
 | `M_pri` | primary mass (M_sun) | `FixedPrior(config.M_s)` if `M_s` set; else `LogUniformPrior(0.05, 5.0)`. Override with a `NormalPrior` to propagate stellar-mass uncertainty into the companion mass |
 
 ### TTV per-transit offsets

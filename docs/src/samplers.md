@@ -18,21 +18,23 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 
 | `sampler.name` | function | fixed/trans-dim | needs `transdim` block | gives log Z |
 |---|---|:---:|:---:|:---:|
-| `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (TI⁺/SS⁺/H⁺) |
+| `pt_emcee`          | `sample_pt_emcee`          | fixed | — | yes (bridge / H⁺ / mode-Laplace) |
 | `transdim_pt_emcee` | `sample_transdim_pt_emcee` | trans | **required** | occupancy |
-| `pt`               | `sample_pt`               | both  | optional (`td`) | yes (TI⁺) |
-| `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (TI⁺) |
+| `pt`               | `sample_pt`               | both  | optional (`td`) | quotable TI⁺ |
+| `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (bridge / SS⁺ / mode-Laplace) |
 | `pt_whitening`     | `sample_pt_whitening`     | fixed | — | yes |
 | `rjmcmc`           | `sample_rjmcmc`           | trans | **required** | — (NaN) |
 | `moms`             | `sample_moms`             | trans | **required** | — (NaN) |
 | `daedalus`          | `sample_daedalus`          | trans | **required** | yes (NS) |
 | `nested`           | `sample_nested`           | fixed | — | yes (NS) |
-| `nested_ins`       | `sample_nested_ins`       | fixed | — | yes (INS) |
+| `nested_ins`       | `sample_nested_ins`       | fixed | — | yes (NS) |
 | `nested_dynamic`   | `sample_nested_dynamic`   | fixed | — | yes (dynamic NS) |
 | `pa`               | `sample_pa`               | fixed | — | yes (PA) |
 | `smc`              | `sample_smc`              | fixed | — | yes (→ PA) |
 | `nuts`             | `sample_nuts`             | fixed | — | — (NaN) |
 | `ofti`             | `ofti_sample`             | fixed | — | — (NaN) |
+| `ensemble`         | `sample_ensemble`         | fixed | — | — (NaN) |
+| `ess`              | `sample_ess`              | fixed | — | — (NaN) |
 
 `_SAMPLERS_REQUIRE_TD = {transdim_pt_emcee, rjmcmc, moms, daedalus}` — these
 error at dispatch if no `transdim` block is present. `pt` also accepts
@@ -42,18 +44,19 @@ trans-dim (a `td=` `TransDimConfig`); the rest are fixed-dim.
     `run_job` coerces **every** string in `sampler.kwargs` to a Julia
     `Symbol` (no sampler declares a `String` kwarg), so `"proposal":
     "rslice"` arrives as `:rslice`. It also validates kwargs against the
-    dispatched function's signature for samplers in `_SAMPLER_FNS` and
-    raises an actionable error listing the valid kwargs. (`pt_hmc` is in
-    `_KNOWN_SAMPLERS` but **not** in `_SAMPLER_FNS`, so its kwargs are not
-    pre-validated — they pass straight through.)
+    dispatched function's signature (`_SAMPLER_FNS` is `ENGINES`, so every
+    `run_job` sampler, `pt_hmc` included, is checked) and raises an
+    actionable error listing the valid kwargs.
 
 ### Library-only samplers (not `run_job`-dispatchable)
 
-These are exported and callable from Julia but have **no** `sampler.name`
-and cannot be selected from a job config:
+`map` is in the engine registry (`ENGINES`, so `fit_*` and `run_engine` reach it)
+but `run_job` refuses it: it returns a point estimate with no chains, and
+summarising one point as a posterior would be wrong. `sample_ensemble` (`ensemble`)
+and `sample_ess` (`ess`) are `run_job`-dispatchable, in the table above.
+Both are exported and callable from Julia, and neither can be selected
+from a job config:
 
-- `sample_ensemble` — affine-invariant ensemble (emcee-style).
-- `sample_ess` — elliptical slice sampling.
 - `sample_map` — L-BFGS MAP + Laplace evidence.
 - `pathfinder_init` — Pathfinder warmstart / approximate posterior draws.
 
@@ -69,7 +72,7 @@ directly.
 | Problem | Use |
 |---|---|
 | Characterise a known planet, fixed N\_p, multimodal/weak signal | `sample_pt_emcee` |
-| Same, with gradients available, want clean TI⁺ evidence | `sample_pt_hmc` |
+| Same, with gradients available, tempered evidence checked against bridge | `sample_pt_hmc` |
 | Same, smooth/unimodal, gradients available | `sample_nuts` |
 | Same, GP-heavy nuisance, Gaussian-ish prior | `sample_ess` |
 | Same, emcee-style single-temperature ensemble | `sample_ensemble` |
@@ -80,14 +83,18 @@ directly.
 | Trans-dim + per-config evidence (Bayes-factor matrix) | `sample_daedalus` |
 | Lightweight trans-dim baseline | `sample_rjmcmc` |
 | Clean fixed-dim log Z (single run) | `sample_nested` |
-| Evidence cross-check with INS / dynamic allocation | `sample_nested_ins` / `sample_nested_dynamic` |
+| NS evidence from Nereus's own loop / dynamic allocation | `sample_nested_ins` / `sample_nested_dynamic` |
 | Visual-orbit fit (rel-astrom only, sparse arc, `:a_driven`) | `ofti_sample` |
 | Quick MAP / Laplace evidence / seed for PT | `sample_map` / `pathfinder_init` |
 
-For evidence on curved RV posteriors (eccentric ridges), prefer the PT/TI
-stack (`sample_pt_emcee`, `sample_pt_hmc`) over NS — ellipsoidal NS bounds
-cannot conform to a strongly-curved likelihood ridge and the log Z bias is
-structural there. See [Evidence](evidence.md).
+On curved RV posteriors (eccentric ridges) `sample_nested` with `:rslice`
+and its default chain length gives pt_emcee's log Z (within 0.06 nats on an
+eccentric RV fit): the slices take only their directions from the
+ellipsoidal bound, so it does not have to conform to the ridge. An earlier
+note here called the NS bias there structural; it was measured while every
+chain step restarted from the copied live point. `:rwalk`'s value there
+is the highest of the defaults, 0.18 nats high (see the defaults table
+below). See [Evidence](evidence.md).
 
 ---
 
@@ -143,13 +150,17 @@ are moved onto the mode (`prune_stranded`); the recorded chain is ordinary MCMC.
 
 ```julia
 res = sample_pt_emcee(target, data;
-    n_temps        = 5,
+    n_temps        = 16,
     n_walkers      = 100,              # auto-raised to ≥ 2·n_dim+2, made even
     n_steps        = 3000,
     n_burnin       = 2000,
     prune_stranded = true,             # burn-in only; see the docstring
-    betas          = nothing,          # default: Vines+ (1/√5)^i, descending β[1]=1
+    node_flip      = 0.1,              # per-step probability of the (Ω, ω) -> (Ω+π, ω+π) mirror of astrometry-only planets
+    swap_min       = 0.05,             # least adjacent swap rate at which a tempered log Z is quoted
+    betas          = nothing,          # default: geometric from β = 1 down to beta_min
+    beta_min       = 1e-4,             # hottest β; β_i = beta_min^(i/(n_temps-1)), i = 0..n_temps-1
     stretch_a      = 2.0,
+    de_move        = 0.5,              # share of within-rung moves that are DE (below)
     init           = nothing,          # bounded-space point; else init_strategy
     init_strategy  = :prior,           # :prior | :pathfinder | :map_scatter
     pf_n_runs      = 2,                # only used by :pathfinder
@@ -167,6 +178,9 @@ res = sample_pt_emcee(target, data;
     n_converged_checks  = 3,
     min_steps           = 0,
     diag_every          = 0,
+    max_seconds         = Inf,         # wall-clock limit, ends production gracefully
+    max_evals           = Inf,         # likelihood-evaluation limit, likewise
+    stop_file           = nothing,     # a file whose appearance stops the run
 )
 ```
 
@@ -181,15 +195,82 @@ res = sample_pt_emcee(target, data;
 - `:map_scatter` — `sample_map` MAP + small Gaussian scatter. Only safe
   when the posterior is approximately Gaussian around the MAP.
 
-Returns a `PTemceeResult` with fields `chains`, `log_evidence` (best of
-TI/TI⁺/SS⁺/H⁺), `evidence::EvidenceReport`, `acceptance_within`,
-`acceptance_swap`, `n_evals`, and `ladder::LadderHistory` — the ladder, swap
+Any other value is an `ArgumentError`.
+
+`de_move`: per walker and step, the probability of a differential-evolution
+move (ter Braak 2006), x' = x + γ(x_j − x_k) + ε with j ≠ k from the other half
+of the walkers at the same temperature, in place of the stretch move. The
+stretch move proposes along the chord through two walkers, which leaves a thin
+curved ridge almost always: walkers that burn-in left on the constant-duration
+ridge of a transit fit stayed there, all together, with R-hat at 1.0002. The
+difference of two walkers on the ridge points along it. The default share,
+0.5, gave 1.09 ± 0.02 times the stretch-only ESS per likelihood evaluation on
+transit-only, two-planet RV and RV + Hipparcos ridge fits (shares 0.1–0.3:
+1.01–1.03; tuning γ, or adding the DE-snooker, gained nothing), and a DE step
+costs no more than a stretch step. The move keeps the ridge from filling
+during burn-in; an ensemble already stranded on it drains only slowly (from
+48 % of the walkers to a quarter over 2000 more steps), which is what the
+drift check below is for. `0` is the stretch-only kernel, draw for draw. The
+same move, on each sampler's own coordinates, is in `sample_transdim_pt_emcee`,
+`sample_pt_whitening`, `sample_ensemble` and `sample_pa`'s stretch mutation.
+
+Every ensemble sampler also checks its β = 1 walkers for a drift they share
+(`ensemble_drift`): per parameter, the trend through the recorded steps of the
+walkers' mean rank, against its autocorrelation-corrected standard error. A
+drift every walker shares is what R-hat and ESS cannot see; the run warns,
+names the parameters, and records the test under `drift` in the summary's
+diagnostics. The remedy is a longer run or another start, and the DE move
+when the run had it off.
+
+Returns a `PTemceeResult` with fields `chains`, `log_evidence` (bridge
+sampling on the cold chain when usable; else H⁺ when its ladder is quotable —
+β = 0 reached and every adjacent pair swapping at least `swap_min`, 5% — and
+it agrees with mode-Laplace within `laplace_switch_tol`; else
+`log_evidence_laplace`, with a warning), `evidence::EvidenceReport` (raw),
+`acceptance_within`, `acceptance_de`,
+`acceptance_swap`, `n_evals`, `drift`, and `ladder::LadderHistory` — the ladder, swap
 acceptance and swap mean distance at every step, plus `⟨log L⟩` per rung,
 which `plot_ladder_rates` and `plot_beta_ladder` draw. Bump `n_temps` to 15+ when log-likelihood
 spans more than ~2000 log units between prior bulk and posterior peak
 (needed for tight evidence-estimator agreement).
 
 **Target must be `unconstrained = false`** (bounded space).
+
+#### Stopping a run early
+
+Production can be ended before `n_steps` without losing the draws. The run stops
+at the last fully recorded step and finishes as usual (evidence, chains, and
+from `run_job`/`fit_*` the plots, tables and summary). The result's
+`stop = (; stopped, step, n_steps, n_draws, stop_file)` and the summary's
+`"stopped"` say how it ended:
+
+| `stopped` | what ended it |
+|---|---|
+| `"steps"` | nothing: it ran to `n_steps` (the default outcome) |
+| `"converged"` | `convergence_stop`: worst split-R̂ below `rhat_threshold` and worst tail-ESS above `tail_ess_threshold` for `n_converged_checks` consecutive diagnostics |
+| `"interrupted"` | Ctrl-C (an `InterruptException`) after burn-in; the step in flight is dropped whole, so no partial row is kept |
+| `"requested"` | the `stop_file` appeared. Looked for about every 5 s of wall clock, and at every diagnostic, never per step. The sampler never deletes it. `run_job` and `fit_*` with an output directory watch `<output_dir>/STOP` unless told otherwise |
+| `"max_seconds"`, `"max_evals"` | the limit was reached |
+
+One line says so on stdout, with the progress bar:
+`stopping early: <reason> at step N/M (K draws kept)`.
+
+Before the end of burn-in there are no draws to keep, so there the same events
+do not stop the run gracefully: an interrupt aborts, a stop file or a limit is
+an error that says so. A second interrupt while a graceful stop is winding up
+aborts as it always did. `Stopping` (see [API](api.md)) sets these from the
+`fit_*` entry points. The covered engines are `pt_emcee` and
+`transdim_pt_emcee`; the others abort on an interrupt, as before.
+
+`transdim_pt_emcee` takes the same `convergence_stop`, `rhat_threshold`,
+`tail_ess_threshold`, `n_converged_checks`, `min_steps`, `diag_every` and
+`science_params`, and prints the same live `Rhat`/`ESS` readout. Its gating set
+is the model index `n_planets`, every planet-slot parameter and `rho_s`: the
+slot parameters are assessed only over the draws where the slot is active, with
+the slots relabelled in period order so label switching is not read as
+non-convergence (the statistics of `convergence_report`). A slot active in
+under half the draws gates on R̂ only, and one active in under 1 % is not
+assessed.
 
 ### `sample_transdim_pt_emcee` — `name: "transdim_pt_emcee"` (requires `transdim`)
 
@@ -213,12 +294,15 @@ res = sample_transdim_pt_emcee(target, data; td = td,
     betas                   = nothing,
     beta_min                = 1e-4,     # geometric ladder β_i = beta_min^(i/(N-1))
     stretch_a               = 2.0,
+    de_move                 = 0.5,      # as in sample_pt_emcee
     seed                    = 1,
     thin                    = 1,
     show_progress           = true,
     noise_swap              = true,     # post-burn-in DB-correct noise-model swap
     noise_swap_rate         = 0.5,
-    adapt_ladder            = false,
+    adapt_ladder            = true,     # equalise swap rates during burn-in, then freeze
+    swap_min                = 0.05,     # least adjacent swap rate at which log Z is quoted
+    node_flip               = 0.1,      # (Ω, ω) -> (Ω+π, ω+π) mirror of astrometry-only planets
     ladder_adapt_window     = 50,
     ladder_adapt_ν0         = 10.0,
     ladder_adapt_K          = 1.0,
@@ -310,7 +394,9 @@ adaptation). The β-ladder is fixed and quadratic (β₁ = 0, β_i =
 `sample_pt` struggles on ultra-sharp curved ridges where `sample_pt_emcee`'s
 affine-invariant ensemble does not. Returned log Z is the TI⁺ (PCHIP) estimate
 from the reddemcee-style accumulator, which starts after `n_rounds ÷ 2` warmup
-rounds; TI, SS⁺ and H⁺ are logged alongside it — see [Evidence](evidence.md).
+rounds, and only when every adjacent pair of chains swapped at least `swap_min`
+(5%) of the time after the warmup; otherwise `NaN`, with a warning. TI, SS⁺
+and H⁺ are logged alongside it — see [Evidence](evidence.md).
 Run with `julia -t auto` — PT parallelises chains over threads;
 single-threaded it runs the chains serially (`sample_pt` warns).
 
@@ -334,10 +420,20 @@ standard result tuple, surfacing `(chains, log_evidence)`.
 
 Hamiltonian parallel tempering: NUTS-within-parallel-tempering for
 fixed-dim, ForwardDiff-differentiable models. Returns the cold-chain
-`Chains` (with `:lp`), the TI⁺ log-evidence, and the `EvidenceReport`.
+`Chains` (with `:lp`), the log-evidence, the `EvidenceReport`, and a named
+tuple of the evidence estimates (`bridge`, `laplace`, `tempered`,
+`tempered_ok`, `tempered_why`, `reported`, `betas`, `swap_acc`).
+
+The log-evidence is chosen as `sample_pt_emcee` chooses it (Jose's rule):
+bridge sampling on the cold chain when its reference has the effective
+samples it needs; else SS⁺ when the ladder starts at β = 0, every adjacent
+pair of rungs swapped at least `swap_min` of the time and it is within
+`laplace_switch_tol` of mode-Laplace; else mode-Laplace, with a warning;
+`NaN`, with a warning that says why, only when none of them is available.
+See [Evidence](evidence.md).
 
 ```julia
-chains, log_ev, report = sample_pt_hmc(target;
+chains, log_ev, report, ev = sample_pt_hmc(target;
     n_temps            = 12,
     n_sweeps           = 1500,
     n_warmup           = 400,
@@ -346,17 +442,30 @@ chains, log_ev, report = sample_pt_hmc(target;
     target_accept      = 0.8,
     adapt_ladder       = true,          # pilot → re-grid β by √Var(logL) → final
     betas              = nothing,       # custom ladder; disables adaptation
+    beta_min           = 1e-4,          # default ladder: β = 0, then geometric on [beta_min, 1]
+    swap_min           = 0.05,          # least adjacent swap rate at which SS⁺ is quoted
+    evidence_tol       = 2.0,           # nats; warn when a quotable SS⁺ disagrees with bridge
+    laplace_switch_tol = 50.0,          # nats; a quotable SS⁺ further from mode-Laplace is broken
+    bridge_n           = 20_000,        # bridge proposal draws; 0 skips bridge
     warm_start         = true,
+    n_scouts           = 16,            # warm_start = false: scouted prior draws
     seed               = 1,
     progress           = true,
 )
 ```
 
+With `warm_start = false` the chains start from scouted prior draws (as in
+`sample_nuts`). Each chain's kernel is frozen at the end of its warm-up, so a
+warm-up run on a plateau far below the mode leaves the β = 1 chain unable to
+move once a swap brings it there.
+
 `adapt_ladder` runs a short pilot, re-grids β by thermodynamic length
-(√Var logL), then the final run — minimising TI discretisation error.
+(√Var logL), keeping β = 0, then the final run — minimising TI discretisation
+error.
 **The target is internally forced to `unconstrained = true`** (it rebuilds
 the target with `PackedTransforms` if needed), so you can pass either.
-`run_job` surfaces `(chains, log_evidence)`.
+`run_job` surfaces the chains, the log-evidence, bridge, Laplace and the
+`EvidenceReport` (summary.json's evidence block).
 
 ### `sample_pt_whitening` — `name: "pt_whitening"`
 
@@ -376,19 +485,21 @@ res = sample_pt_whitening(target, data;
     n_burnin       = 500,
     betas          = nothing,           # default: (1/√5)^i geometric (same as pt_emcee)
     stretch_a      = 2.0,
+    de_move        = 0.5,               # as in sample_pt_emcee
     proposal_scale = 0.05,              # accepted but UNUSED (ensemble stretch move)
     warmup_swaps   = 200,               # identity swap until whitening kicks in
     whiten_window  = 100,               # sliding window for the per-temp (μ,σ)
     whiten_refresh = 10,                # recompute (μ,σ) every N steps
-    init_strategy  = :prior,
+    init_strategy  = :prior,            # the only one implemented; others throw
     seed           = 1,
     thin           = 1,
     show_progress  = true,
 )
 ```
 
-Returns a `WhiteningPTResult` (`chains`, `log_evidence`, `acceptance_within`,
-`acceptance_swap`, `n_evals`). The whitening flow gives a 2–5× swap-
+Returns a `WhiteningPTResult` (`chains`, `log_evidence` — H⁺ only from a
+quotable ladder, which the default (1/√5)^i one is not, else `NaN` —
+`acceptance_within`, `acceptance_swap`, `n_evals`). The whitening flow gives a 2–5× swap-
 acceptance bump on multimodal posteriors with differently-scaled β
 distributions. Experimental: the diagonal flow doesn't capture full
 posterior correlation, so for paper-grade fits prefer `sample_pt_emcee` /
@@ -409,13 +520,13 @@ The production single-run NS path for fixed-dim log Z. Importance-resampled
 posterior from dead points.
 
 ```julia
-chains, log_evidence = sample_nested(target, data;
+chains, log_evidence, log_evidence_err = sample_nested(target, data;
     n_live     = 1500,                  # deliberately large; small n_live mis-resolves
     bounds     = :multi,                # :multi | :single | :none | :mlfriends
     proposal   = :rslice,               # :rwalk | :rstagger | :slice | :rslice | :unif | :hslice
     walk_scale = 1.0,
-    n_walks    = nothing,               # nothing → max(25, 2·n_dim) for walk kernels
-    slices     = nothing,               # nothing → max(5, 2·n_dim) for :rslice
+    n_walks    = nothing,               # nothing → max(25, 10·n_dim) for :rwalk / :rstagger
+    slices     = nothing,               # nothing → max(5, 5·n_dim) :rslice, max(5, 2·n_dim) :hslice, 5 :slice
     enlarge    = 1.25,
     dlogz      = 0.1,
     seed       = 1,
@@ -433,28 +544,109 @@ chains, log_evidence = sample_nested(target, data;
     random directions through the ellipsoid axes, tracks the local
     correlation, and recovers truth. Keep `:rslice` for RV fits.
 
-`n_walks` and `slices` are dimension-scaled by default — a fixed count
-under-decorrelates as dimension grows and biases log Z low. `:mlfriends`
+    Those `:rwalk` failures were measured while every step of a walk or
+    slice chain restarted from the live point it copied, so the new point
+    was one step from it whatever `n_walks` or `slices` said. The vendored
+    fork chains the steps now. On an RM obliquity fit `:rslice` then matches
+    pt_emcee (before: λ sd 1.6–2.1° against 2.1–2.5°), and so do `:rwalk`
+    and `:rstagger`.
+
+A new live point is the end of a chain of `slices` slices or `n_walks` walk
+steps from a live point inside the constraint. Too short a chain leaves it
+near its start, the live points descend from too few parents, and log Z
+comes out **high**, or scatters between runs far beyond the NS error. Each
+default is the smallest multiple of `n_dim` whose log Z, averaged over 4–9
+seeds, came within the NS error of pt_emcee's on an RM obliquity fit at
+λ = 0° and 180° (10 parameters), an eccentric RV fit (7) and a
+gravity-darkening fit (2), with the mean known to better than that error:
+
+| proposal | default | log Z − pt_emcee's (RM 0°, RM 180°, RV, GD) |
+|---|---|---|
+| `:rslice` | `max(5, 5·n_dim)` | +0.02, +0.13, +0.06, +0.02 (at `2·n_dim` and `3·n_dim`: +0.35 and +0.23 on RM 180°) |
+| `:slice` | 5 | +0.13, +0.09, −0.01, −0.04 |
+| `:hslice` | `max(5, 2·n_dim)` | +0.13, +0.06, +0.06, −0.08 |
+| `:rwalk`, `:rstagger` | `max(25, 10·n_dim)` | +0.07, +0.04, +0.05, −0.04 (at `5·n_dim`: +0.26 on RM 0° and RV, −0.21 on GD) |
+| `sample_nested_ins` `:rwalk` | `max(25, 5·n_dim)` | +0.15, −0.12, +0.15, −0.05 (at `2·n_dim` the mean passed but runs on RM 0° ranged from −1.5 to +1.1) |
+| `sample_nested_ins` `:slice` | `max(25, 2·n_dim)` | +0.09, −0.03, +0.08, +0.03 |
+| `sample_nested_dynamic` `:rwalk` | `max(25, 10·n_dim)` | −0.17, +0.22, −0.04, −0.11 (at `5·n_dim`: −0.37 on RM 0°) |
+| `sample_nested_dynamic` `:slice` | `max(25, 5·n_dim)` | +0.03, +0.10, −0.11, −0.01 (at `2·n_dim`: −0.39 and −0.49 on RM 0° and 180°) |
+
+The NS error in that choice is sqrt(H/n_live): 0.17–0.22 for `sample_nested`
+(500 live points, 300 on the GD fit), 0.17–0.24 for `sample_nested_ins` (400)
+and 0.20–0.35 for `sample_nested_dynamic` (200 then 400), whose log Z carries
+the baseline's error: at the defaults its batch refines only the top of the
+likelihood. `:rwalk`'s RV value is over 25 seeds, its walks threaded (three
+at a time); with them run one at a time (`parallel = false`) it was +0.06
+over 20 seeds, a difference of −0.01 ± 0.07.
+
+Each engine quotes the error of its log Z: `sample_nested`'s third value,
+`log_z_ns_err`, `log_z_err`, and `evidence.nested.se` in a run's summary.
+It is dynesty's: the spread of log Z over 200 realisations of the run, its
+threads resampled and its prior volumes drawn afresh (`src/samplers/ns_error.jl`).
+sqrt(H/n_live) counts the volumes alone, under perfect sampling, which a
+chain of walks or slices is not. The scatter of log Z between seeds on the
+four fits above (5 seeds each, with the earlier ones at the same settings:
+34–57 degrees of freedom per engine), in units of each error:
+
+| engine | scatter / quoted error | scatter / sqrt(H/n_live) |
+|---|---|---|
+| `sample_nested` `:rslice` | 0.62 | 0.87 |
+| `sample_nested` `:rwalk` (threaded) | 0.75 | 1.06 |
+| `sample_nested_ins` `:rwalk` | 0.84 | 1.19 |
+| `sample_nested_ins` `:slice` | 0.80 | 1.12 |
+| `sample_nested_dynamic` `:rwalk` | 0.95 | 1.31 |
+| `sample_nested_dynamic` `:slice` | 0.78 | 1.12 |
+
+The quoted error is about 1.4 times sqrt(H/n_live) and covers every engine's
+scatter. Where the sampler is close to perfect it is conservative, `:rslice`'s
+by 1.6: there, as on passes simulated in the prior volume, either source alone
+accounts for the scatter, and the two together count it twice.
+
+A seed repeats a run on the same target. A run moves the angles' charts and
+leaves them moved, with its draws in them; each run starts again from the
+charts the layout gave them.
+
+The MultiEllipsoid bound is split by dynesty's rule. A walk or slice takes
+its metric from the ellipsoid holding its start, so with the constrained
+region cut into many ellipsoids where a chain ended depended on where it
+started; split when its children halved its volume, the bound cut the RM
+fit into 15 ellipsoids (1–5 now) and log Z came out 0.35–0.5 high however
+long the chains. `:unif` draws from the bound itself, so its bound is
+expanded by dynesty's bootstrap until it covers the constrained region
+(before, it missed 12–22% of the RM fit's and log Z came out 2 nats high).
+On a curved posterior in more than a few dimensions that expansion leaves
+so little of the bound inside the constraint that a new point can take more
+than 100 000 likelihood calls, and the run stops with an error: four RM runs
+of six did, after 17–24 minutes (the other two came within 0.33 and 0.10 of
+pt_emcee's log Z). Three RV runs of three finished, +0.18 on average, in
+4–25 minutes against 2 for `:rslice`; the GD fit matches pt_emcee. Use
+`:unif` in low dimension only.
+
+`:mlfriends`
 (from the Nereus NestedSamplers fork) pairs only with `:unif`/`:rslice`/
 `:slice`; the random-walk kernels are auto-redirected to `:rslice`.
 
 With `parallel = true`, each iteration removes the `batch_size` lowest-
 likelihood live points and replaces them via concurrent constrained walks
-(`@threads :static`). `batch_size = 1` reproduces the serial sampler
-bit-for-bit; keep `batch_size ≤ n_live/20` so the O(`batch_size`/`n_live`)
-evidence bias stays well inside `logzerr`. `parallel` defaults to
-`!_is_under_juliacall()` — it threads in a pure-Julia process but falls back
-to serial under juliacall (Julia threads can deadlock on the Python GIL).
+(`@threads :static`), each started at a live point above the highest of
+them. The j-th point removed shrinks the prior volume as `n_live − j + 1`
+live points do, so the batch adds no evidence bias (crediting each with
+`1/n_live` put log Z `(batch_size − 1)·H/(2·n_live)` high: 0.58 nats with
+16 of 100 live points on a 2-d Gaussian). `batch_size = 1` runs the serial
+sampler; `:slice`, `:rslice` and `:hslice` always run serially. `parallel`
+defaults to `!_is_under_juliacall()` — it threads in a pure-Julia process
+but falls back to serial under juliacall (Julia threads can deadlock on the
+Python GIL).
 
 **Target must be `unconstrained = false`.**
 
 ### `sample_nested_ins` — `name: "nested_ins"`
 
-Importance Nested Sampling
-([Feroz+ 2019](https://ui.adsabs.harvard.edu/abs/2019OJAp....2E..10F/abstract)).
-Operates in **unit-cube space**; every likelihood eval (incl. rejected)
-contributes to the importance estimator `log Z_INS`, giving a second NS
-log Z value beyond standard `log Z_NS`.
+Nested sampling with Nereus's own loop and kernels, in **unit-cube space**.
+It records every likelihood evaluation, rejected ones included, for an
+importance sum after
+[Feroz+ 2019](https://ui.adsabs.harvard.edu/abs/2019OJAp....2E..10F/abstract),
+`log_z_ins`, but that sum is not an evidence (below); `log_z_ns` is.
 
 ```julia
 res = sample_nested_ins(target, data;
@@ -464,7 +656,7 @@ res = sample_nested_ins(target, data;
     dlogz                 = 0.01,
     max_iter              = 200_000,
     bound_update_interval = 50,
-    n_walks               = nothing,    # nothing → max(25, 2·n_dim)
+    n_walks               = nothing,    # nothing → max(25, 5·n_dim) :rwalk, max(25, 2·n_dim) :slice
     walk_scale            = 1.0,
     proposal              = :rwalk,     # :rwalk | :slice | :unif
     min_X_shrinkage       = 10.0,
@@ -473,10 +665,21 @@ res = sample_nested_ins(target, data;
 )
 ```
 
-Returns `INSResult(chains, log_z_ns, log_z_ins, n_iters, n_evals)`. These
-are Nereus's own accumulator-aware kernels (NestedSamplers' proposals can't
-feed the per-eval INS estimator). `run_job` surfaces `log_z_ins` as the
-sampler's `log_evidence`. When `n_eff < 200` (peaked posterior), the chain
+Returns `INSResult(chains, log_z_ns, log_z_ns_err, log_z_ins, n_iters,
+n_evals)`. The
+kernels are Nereus's own, not NestedSamplers'. `:slice` runs each slice along
+a random direction through the axes of the bound's ellipsoid holding the
+chain's start, as `sample_nested`'s `:rslice` does; its directions used to be
+isotropic in the unit cube, and on an RM obliquity fit the posterior widths
+then scattered by 15–25% between seeds (b's sd 0.019–0.037 against
+pt_emcee's 0.027–0.028). `run_job` surfaces
+`log_z_ns` as the sampler's `log_evidence`. `log_z_ins` is `NaN` unless
+`proposal = :unif` and is not an evidence even then: each term estimates
+the evidence inside the bound its point was drawn from, which shrinks as
+the run goes on, so the sum comes out low (the unbiased form, Feroz et al.
+2013, weighs every point by all the bounds that contain it). With
+`:rwalk` it was reported as the evidence and came out up to 3.4 nats above
+pt_emcee's on RM and RV fits. When `n_eff < 200` (peaked posterior), the chain
 falls back to top-N dead points by weight rather than systematic resampling
 — bump `n_live` to 2000+ for full posterior coverage.
 
@@ -488,7 +691,10 @@ Dynamic NS
 ([Higson+ 2019](https://ui.adsabs.harvard.edu/abs/2019S&C....29..891H/abstract)).
 Two-pass: a baseline pass with `n_live_init`, then an importance-targeted
 batch pass with `n_live_batch` live points concentrated in the flagged
-likelihood band.
+likelihood band. The batch's live points are drawn inside `L > L_lo` by
+chains of the proposal from the baseline's points there, as dynesty seeds
+its batches, and the merged run counts at each likelihood the live points of
+every pass alive there.
 
 ```julia
 res = sample_nested_dynamic(target, data;
@@ -503,7 +709,7 @@ res = sample_nested_dynamic(target, data;
     pad                   = 1,
     max_iter              = 50_000,     # per pass
     bound_update_interval = 50,
-    n_walks               = nothing,    # nothing → max(25, 2·n_dim)
+    n_walks               = nothing,    # nothing → max(25, 10·n_dim) :rwalk, max(25, 5·n_dim) :slice
     walk_scale            = 1.0,
     proposal              = :rwalk,     # :rwalk | :slice | :unif
     seed                  = 1,
@@ -519,8 +725,9 @@ res = sample_nested_dynamic(target, data;
   log Z variance lives. **Use this when the run is for evidence.**
 - `pfrac = 0.8` — dynesty's posterior-leaning default.
 
-Returns `DynamicNSResult(chains, log_z, log_z_baseline, log_z_batch,
-n_iters_baseline, n_iters_batch, n_evals, target_L_lo, target_L_hi)`.
+Returns `DynamicNSResult(chains, log_z, log_z_err, log_z_baseline,
+log_z_batch, n_iters_baseline, n_iters_batch, n_evals, target_L_lo,
+target_L_hi)`.
 Same peaked-posterior resampling caveats as INS.
 
 **Target must be `unconstrained = false`.**
@@ -533,27 +740,36 @@ Same peaked-posterior resampling caveats as INS.
 
 Population annealing
 ([Hukushima & Iba 2003](https://ui.adsabs.harvard.edu/abs/2003AIPC..690..200H/abstract)).
-Tempered sequential Monte Carlo: at each β-step the population is reweighted,
-resampled, and MCMC-mutated. Adaptive β-schedule via an ESS target.
+Tempered sequential Monte Carlo: at each β-step the population is reweighted
+and MCMC-mutated, and resampled when the ESS of its weights falls below
+`resample_ess` × N (and at β = 1). The β-schedule targets the conditional ESS
+of each reweighting; the mutation sweeps until the replicas have decorrelated
+from where they started.
 
 ```julia
 res = sample_pa(target, data;
-    n_replicas        = 500,
+    n_replicas        = 2000,          # biased high at small N across a phase transition
     n_mcmc            = 10,             # MINIMUM mutation sweeps per anneal step
     ess_target        = 0.9,           # adaptive β picks ESS/N = this (conservative crawl)
     max_steps         = 200,
     step_scale        = 0.05,          # :rwm only — RWM step as fraction of prior
     mutation_kernel   = :stretch,      # :stretch | :rwm | :adaptive_cov
     stretch_a         = 2.0,           # :stretch only
-    mcmc_target_moves = 5.0,           # adaptive: sweep until each replica has ≥ this accepts
-    max_mcmc_mult     = 12,            # cap: ≤ max_mcmc_mult × n_mcmc sweeps per β
+    de_move           = 0.5,           # :stretch only; as in sample_pt_emcee
+    mcmc_target_moves = 5.0,           # floor: sweep until each replica has ≥ this accepts
+    decorrelation     = 0.2,           # then until no parameter keeps a rank correlation above this
+    max_mcmc_mult     = 30,            # cap: ≤ max_mcmc_mult × n_mcmc sweeps per β
+    resample_ess      = 0.5,           # resample when ESS/N of the weights falls below this
     seed              = 1,
     show_progress     = true,
 )
 ```
 
 Returns `PAResult(chains, log_evidence, log_evidence_history, beta_history,
-ess_history, acceptance, n_evals)`.
+ess_history, acceptance, n_evals, sweep_history, corr_history, resampled)`.
+
+A free e near 0 leaves the e-ω-M₀ ridge undecorrelated by the stretch move,
+and every step there runs to the `max_mcmc_mult` cap.
 
 | `mutation_kernel` | Best for |
 |---|---|
@@ -573,15 +789,15 @@ lets the gradient-free mutation re-diversify the resampled population.
 
 SMC family interface
 ([Del Moral, Doucet & Jasra 2006](https://ui.adsabs.harvard.edu/abs/2006JRSSB..68..411D/abstract)).
-Currently a thin wrapper over `sample_pa` that takes an explicit β sequence
-and delegates. Only `length(betas)` is used (as a step count); the values
-themselves are ignored because PA's ESS-adaptive scheduler picks the
-β-spacing (the function `@info`-logs this). The `betas` must start at 0.0,
-end at 1.0, and be sorted ascending.
+A thin wrapper over `sample_pa`. Without `betas` (the default) it is
+`sample_pa`. With `betas`, only `length(betas)` is used, as the step count;
+the values themselves are ignored because PA's ESS-adaptive scheduler picks
+the β-spacing (the function `@info`-logs this). The `betas` must start at
+0.0, end at 1.0, and be sorted ascending.
 
 ```julia
 res = sample_smc(target, data;
-    betas           = range(0.0, 1.0; length = 51),  # default; only its length matters
+    betas           = nothing,          # default; a vector caps the steps at its length − 1
     n_replicas      = 200,
     mutation_kernel = :adaptive_cov,
     seed            = 1,
@@ -617,6 +833,7 @@ chains, n_evals, strategy = sample_moms(target, data; td = td,
     show_progress           = true,
     within_model            = :slice,   # :slice | :rwm
     informed_birth_fraction = 0.0,      # data-informed births (BLS+LS)
+    n_scouts                = 16,       # td.planets = false: scouted start (see sample_rjmcmc)
 )
 ```
 
@@ -637,10 +854,11 @@ sampling. NS bridging over the joint parameter+activation space gives
 construction).
 
 ```julia
-chains, log_z, strategy = sample_daedalus(target, data; td = td,
+chains, log_z, strategy, log_z_err = sample_daedalus(target, data; td = td,
     n_live                  = 200,
     dlogz                   = 0.5,
-    n_mcmc                  = 25,       # constrained-MCMC steps per dead-point replace
+    n_mcmc                  = 25,       # least constrained-walk steps per dead-point replace
+    decorrelation           = 16.0,     # walk length: squared jumps summing to this × d
     init_scale              = 1.0,      # × IQR-stddev
     inclusion_prior         = 0.5,      # spike-and-slab γ-prior (log-Z normalisation)
     seed                    = 1,
@@ -652,6 +870,11 @@ chains, log_z, strategy = sample_daedalus(target, data; td = td,
     warm_start_points       = nothing,  # e.g. from pathfinder_warmstart_daedalus
 )
 ```
+
+Each replacement walk moves every active coordinate at once, shaped by the
+live points' covariance, at a scale adapted between walks toward half the
+steps accepted, for as many steps as decorrelate it from its donor.
+`log_z_err` is Skilling's √(H / n_live).
 
 Slower than `sample_moms` on a single fit (NS overhead), but the output is a
 calibrated Bayes-factor matrix over candidate models. Noise toggling is
@@ -683,12 +906,23 @@ chains, n_evals = sample_rjmcmc(target, data; td = td,
     initial_scale = 0.01,              # initial Gaussian proposal scale
     target_accept = 0.234,             # within-model acceptance target
     within_model  = :slice,            # :slice | :rwm
+    n_scouts      = 16,                # td.planets = false: scouted start; 0 = one prior draw
     show_progress = true,
 )
 ```
 
 Multi-chain returns a single `Chains` with a populated `:chain` axis so R̂/ESS
 work. `run_job` surfaces `log_evidence = NaN`.
+
+With a fixed set of planets (`td.planets = false`) each chain starts from the
+best-supported of `n_scouts` prior draws: every draw is moved by slice updates
+until it stops climbing, the ones the stranded-walker bound shows to sit where
+the posterior cannot carry mass are dropped, and the chain starts at one of the
+rest, picked at random (`src/samplers/scouts.jl`). From a single draw, a chain
+that fell outside a narrow mode's basin settled on a plateau tens of thousands
+of nats below it and stayed there; the scouts keep it off such regions, not
+out of a second mode of comparable mass, which a local sampler still cannot
+cross. `sample_moms` starts the same way.
 
 **Target must be `unconstrained = false`.**
 
@@ -714,9 +948,14 @@ chains = sample_nuts(target;
     warm_start    = true,              # pt_emcee pre-search (disjoint-mode fix)
     warm_temps    = 6, warm_walkers = 40, warm_steps = 400, warm_burnin = 200,
     init          = nothing,           # bounded-space point; overrides warm_start
+    n_scouts      = 16,                # warm_start = false: scouted prior draws
     progress      = true,
 )
 ```
+
+With `warm_start = false` the chains start from scouted prior draws (as in
+`sample_rjmcmc`), each from a different one at random, rather than from one
+prior draw each.
 
 `ad_backend`: `:ForwardDiff` (fastest ≤ 15 params), `:Enzyme` (reverse-mode,
 better for many params / GP models), `:ReverseDiff` (needs `import
@@ -729,11 +968,14 @@ Per-chain divergences / step size / tree depth attach to `chains.info`.
 `run_job` surfaces `log_evidence = NaN`. **Target must be `unconstrained =
 true`** (auto-rebuilt internally if needed).
 
-### `sample_ensemble` *(library-only)*
+### `sample_ensemble` — `name: "ensemble"`
 
-Affine-invariant ensemble MCMC (Goodman & Weare 2010) via
-AffineInvariantMCMC.jl. Single-temperature — won't break mode trapping; for
-multimodal use `sample_pt_emcee`. Works in unconstrained space.
+Affine-invariant ensemble MCMC (Goodman & Weare 2010): AffineInvariantMCMC.jl's
+stretch move, step for step, mixed with the differential-evolution move of
+`sample_pt_emcee` (`de_move`; `0` is the package's algorithm, draw for draw).
+Single-temperature — won't break mode trapping; for multimodal use
+`sample_pt_emcee`. Works in unconstrained space. The drift check of each
+chain's walkers is in `chains.info.drift`.
 
 ```julia
 chains = sample_ensemble(target;
@@ -742,12 +984,19 @@ chains = sample_ensemble(target;
     n_burnin  = 1000,
     thinning  = 1,
     init      = nothing,               # else prior-draw walkers (EMPEROR-style)
+    n_scouts  = 16,                    # scouts in place of up to half the prior-drawn walkers
+    de_move   = 0.5,                   # as in sample_pt_emcee
     seed      = 1,
     n_chains  = 1,                     # parallel chains via Threads.@spawn
 )
 ```
 
-### `sample_ess` *(library-only)*
+The burn-in pruning moves stranded walkers onto those that found the mode, so
+it can do nothing for a chain none of whose walkers did. Without `init`, up to
+half the prior-drawn walkers are replaced by scouts (as in `sample_rjmcmc`),
+which the bound has kept off regions that cannot carry posterior mass.
+
+### `sample_ess` — `name: "ess"`
 
 Elliptical slice sampling
 ([Murray, Adams & MacKay 2010](https://ui.adsabs.harvard.edu/abs/2010arXiv1001.0175M/abstract))
@@ -846,8 +1095,13 @@ result = pathfinder_init(target;
     n_draws = 100,                     # samples after ESS reweighting
     seed    = 42,
     quiet   = true,                    # one-line summary instead of chatty PSIS @warn
+    n_scouts = 16,                     # L-BFGS starts: scouted prior draws; 0 = Pathfinder's own
 )
 ```
+
+The runs start from scouted prior draws (as `sample_rjmcmc`'s chains do), each
+from one of those that may carry posterior mass; from Pathfinder's own uniform
+starts every run could stop on the same plateau far below the mode.
 
 Returns a NamedTuple with `draws` (IS-reweighted), `per_run_draws` (one draw
 per L-BFGS run — preserves basin diversity even when `pareto_shape > 0.7`),

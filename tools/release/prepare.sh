@@ -38,6 +38,11 @@ say "gates"
   || die "Nereus.jl tree is dirty. A bundle built from it would match no commit."
 [ -z "$(git -C "$PY_ROOT" status --porcelain --untracked-files=no)" ] \
   || die "nereus-py tree is dirty."
+# The suite runs in ci/Dockerfile's Julia and the bundles ship the config's. Two
+# different versions would certify one Julia and release another.
+ci_julia=$(sed -n 's/^FROM julia:\([0-9.]*\)$/\1/p' "$JL_ROOT/ci/Dockerfile")
+[ "$ci_julia" = "$CFG_JULIA" ] \
+  || die "ci/Dockerfile runs julia '$ci_julia' but the release config ships '$CFG_JULIA'."
 
 have=$(jl_version "$JL_ROOT")
 [ "$have" = "$JL_VER" ] || die "Project.toml says $have, you asked for $JL_VER. Bump it first."
@@ -90,17 +95,18 @@ mkdir -p "$OUT"
 # Three platforms, three machines. pkgimages are native code: portable across
 # CPUs of one architecture, never across architectures, so each is built where
 # it will run. The two local ones run concurrently; the x86_64 build is driven
-# over ssh on whichever candidate the coordinator can give us.
+# over ssh on whichever candidate the coordinator can give us. All three build
+# the config's Julia: the build scripts' own default is only for hand builds.
 say "building runtime bundles"
 
 build_local_mac() {
   ( cd "$PY_ROOT" && OUT_DIR="$OUT" NEREUS_JL="$JL_ROOT" NEREUS_PY="$PY_ROOT" \
-      WORK="$CFG_STAGE/work-macos" tools/build_bundle.sh ) \
+      JULIA_VER="$CFG_JULIA" WORK="$CFG_STAGE/work-macos" tools/build_bundle.sh ) \
     >"$OUT/build-macos-arm64.log" 2>&1
 }
 build_local_docker_arm() {
   ( cd "$PY_ROOT" && OUT_DIR="$OUT" NEREUS_JL="$JL_ROOT" NEREUS_PY="$PY_ROOT" \
-      tools/build_bundle_docker.sh linux/arm64 ) \
+      JULIA_VER="$CFG_JULIA" tools/build_bundle_docker.sh linux/arm64 ) \
     >"$OUT/build-linux-aarch64.log" 2>&1
 }
 
@@ -123,6 +129,14 @@ wait "$x86_pid" || { warn "linux-x86_64 build failed (see build-linux-x86_64.log
 say "verifying the bundles"
 n=$(ls "$OUT"/nereus-runtime-*.tar.zst 2>/dev/null | wc -l | tr -d ' ')
 [ "$n" -eq 3 ] || die "expected 3 bundles, found $n"
+# The wheel pins one Julia for all three platforms, so a bundle built with any
+# other Julia would install and then fail to load its pkgimages.
+for f in "$OUT"/nereus-runtime-*.tar.zst; do
+  case "$(basename "$f")" in
+    "nereus-runtime-$CFG_JULIA-"*) ;;
+    *) die "$(basename "$f") was not built with the release config's Julia $CFG_JULIA" ;;
+  esac
+done
 for f in "$OUT"/nereus-runtime-*.tar.zst; do
   info "$(basename "$f")  $(du -h "$f" | cut -f1)"
 done

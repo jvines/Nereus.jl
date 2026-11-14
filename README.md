@@ -89,7 +89,7 @@ target = build_target(
                     M_sec  = LogUniformPrior(0.001, 0.05),  # M_sun
                     sesinw = UniformPrior(-1.0, 1.0),
                     secosw = UniformPrior(-1.0, 1.0),
-                    Mo     = UniformPrior(0.0, 2π),
+                    phic   = UniformPrior(-π, π),   # transit phase, the default anchor
                     inc    = SinePrior(),
                     Omega  = UniformPrior(0.0, 2π)),),
     rv      = (HPF = (data = hpf,), NEID = (data = neid,)),
@@ -116,7 +116,6 @@ reading the architecture.
 | `src/noise/` | correlated-noise models and their likelihoods |
 | `src/astrometry/` | IAD, HGCA, GOST, Gaia DR4 epoch data, solution ladder |
 | `src/diagnostics/` | PPC, LOO, detection limits, fit-health guards |
-| `test/validation/` | falsifiable science gates, separate from unit tests |
 
 ## Testing
 
@@ -124,10 +123,10 @@ reading the architecture.
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-`test/` holds unit and correctness tests. `test/validation/` holds the science
-gates — recovery of injected signals and the reference-free symmetry
-benchmarks. Those are deliberately outside the unit suite: they take minutes
-to hours and answer "is the inference right", not "does the code run".
+`test/` holds unit and correctness tests. The science gates (recovery of
+injected signals and the reference-free symmetry benchmarks) are kept outside
+the repository: they take minutes to hours and answer "is the inference
+right", not "does the code run".
 
 ## Vendored dependencies
 

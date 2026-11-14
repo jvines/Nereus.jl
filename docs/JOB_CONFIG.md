@@ -35,17 +35,24 @@ output_dir/
 ├── chains.nc                  # MCMCChains NetCDF (always)
 ├── summary.json               # machine-readable contract (always)
 ├── ppc.png / ppc.json         # posterior predictive check (default on)
-├── detection_limits.png       # K_lim(P) curve (PT samplers, default on)
+├── detection_limits.png       # K_lim(P) curve (pt_emcee, transdim_pt_emcee, pt; default on)
 ├── detection_limits.nc        # per-bin arrays sidecar
 ├── tables/                    # science tables (fitted/derived, multi-format)
 │   ├── fitted.{json,csv,ecsv,dat,tex}
 │   └── derived.{json,csv,ecsv,dat,tex}
 └── plots/                     # all figures (configurable)
+    ├── corner_K<k>.png        # one corner per planet slot (its parameters)
+    ├── corner_noise.png       # one corner of the noise model (jitters, GP hyperparameters, …)
     ├── models/                # rv_timeseries, pm_phasefold, rm_anomaly, …
     ├── posteriors/            # raw/, parameters/, histograms/
     ├── traces/
     └── transdim/occupancy.png
 ```
+
+There is no single `corner.png`: the `corner` plot kind writes one corner per
+planet and one for the noise model. A group with fewer than two parameters gets
+no corner, per-transit TTV shifts are in none, and on a trans-dimensional chain
+a planet's corner holds only the draws in which it is live.
 
 `run_job` exits 0 on success. Any uncaught exception during the fit writes
 `{"status":"failed","error":…,"traceback":…}` to `summary.json` **and**
@@ -54,9 +61,9 @@ rethrows (non-zero exit) so the dispatcher can pick it up
 fit-health) are **fail-soft**: they record a `"failed"`/`"skipped"` entry in
 the summary and never abort the job.
 
-> **Version**: the current schema version is **`0.2.0`** (see `Project.toml`).
-> `version` is echoed back as `summary.config_version` but is **not**
-> validated against a whitelist; supply `"0.2.0"`.
+> **Version**: `version` is a free-form label, not a schema number. The runner
+> does not validate it and echoes it as `summary.config_version` (default `"1.0"`).
+> The Nereus release that wrote a run is in `summary.provenance.nereus_version`.
 
 ---
 
@@ -134,12 +141,14 @@ rather than a single number trusted.
 
 ```jsonc
 {
-  "version": "0.2.0",                      // echoed to summary.config_version (default "1.0")
+  "version": "1.0",                      // echoed to summary.config_version (default "1.0")
   "seed":   42,                            // RNG seed; controls every sampler (default 1)
   "output_dir": "/work/out",               // REQUIRED
   "n_threads": null,                       // logged only; actual threading honours
                                            //   JULIA_NUM_THREADS (src/runner.jl:82-85)
   "timeout_sec": 3600,                     // optional wall-clock watchdog (see below)
+  "stop_file": "/work/out/STOP",           // optional; a file whose appearance ends pt_emcee /
+                                           //   transdim_pt_emcee at the last recorded step (see below)
 
   // ---- Star (NamedTuple; src/runner.jl:1016-1040) --------------------
   "star": {
@@ -157,7 +166,17 @@ rather than a single number trusted.
     // Must be finite and >= 0; 0 holds that quantity fixed.
     "sigma_M_s": null,                     // M_sun
     "sigma_R_s": null,                     // R_sun
-    "sigma_T_eff": null                    // K
+    "sigma_T_eff": null,                   // K
+    // Gaia DR3 parallax at runtime, for the default `plx` prior of an
+    // astrometric fit. `gaia_id`: the DR3 source_id (integer, digits, or
+    // "Gaia DR3 <id>"). `name`: a Simbad-resolvable name, mapped to its DR3
+    // source_id (`gaia_id` wins if both are given). Queried only when a
+    // planet has astrometry AND `priors.plx` is absent; a failed query stops
+    // the job. Prior: Gaussian at the raw DR3 parallax (no zero-point
+    // correction), +-10 sigma truncated, ahead of the HGCA/G23H value.
+    // Recorded in summary.star.gaia. Cached under $NEREUS_DATA_CACHE/gaia.
+    "gaia_id": null,
+    "name": null
   },
 
   // ---- Data (at least ONE of these; src/runner.jl:574-663) ----------
@@ -201,6 +220,7 @@ rather than a single number trusted.
       "to":   "2025-01-15T00:00:00"
     },
     "hgca":      { "fits": "/work/in/HGCA_vEDR3.fits", "hip_id": 24205 },  // Brandt eDR3 HGCA, OR `hip_id` alone, OR `values`
+    // "hip_scans": false,             // Hipparcos scans of the HGCA Hipparcos epoch: default fetched by hip_id; false = instantaneous
     "relastrom": { "csv": "/work/in/relastrom.csv" },             // direct-imaging, OR `values`
     "gaia_dr3":  { "params": [86.5, 1.2, 35.2, 12.1, -5.4],       // [α, δ, ϖ, μα*, μδ]
                    "cov": [[/* 5×5 */]], "t_ref": 2016.0 }
@@ -232,21 +252,35 @@ rather than a single number trusted.
     //   See "SB2 double-lined binaries" below for the component RV column + derived masses.
     "planet_modes": ["RV_ONLY", "RVAS"],
 
-    "parametrization": {                   // src/runner.jl:287-292,419-427,1089-1113, _KNOWN_PARAMETRIZATIONS
+    "parametrization": {                   // src/runner.jl: _KNOWN_PARAMETRIZATIONS, _build_model
       "mass": "K_driven",                  // K_driven | M_sec_driven | a_driven
-      "time": "Mo",                        // Mo (default) | Tp | Tc | phic. Tp/Tc: keep the prior within one period.
+      "time": "phic",                      // phic (default) | Mo | Tp | Tc. Tp/Tc: keep the prior within one period.
                                            //   phic: transit phase 2π(Tc − t_ref_c)/P, one period at
-                                           //   every P; Tc is reported as a derived quantity
+                                           //   every P; Tc, Tp and Mo (Mo_deg) are reported as derived
+                                           //   quantities. The default because Mo has a low-e ridge
+                                           //   with ω (the data pin λ = Mo + ω) that biases e; φ_c is
+                                           //   π/2 − λ there. Same posterior: uniform φ_c ≡ uniform Mo.
+                                           //   Omitted with priors on one anchor (e.g. Mo_k1): that anchor.
       "t_ref_c": 2459000.0,                // phic only: the epoch φ_c is measured from. Omit it to
                                            //   use the median photometric time (else data t_ref)
       "ew":   "sesinw",                    // sesinw | ew
-      "geom": "b_rr",                      // b_rr | b_r
+      "geom": "b_rr",                      // b_rr only. The library also has :r1r2 (Julia API), which
+                                           //   run_job's validation does not accept; "b_r" passes the
+                                           //   validation but ParametrizationConfig rejects it.
+      "density": "rho_circ",               // rho_circ (default) | rho_star. A transiting planet with a free
+                                           //   eccentricity samples rho_circ_k<k> = ρ⋆·g³,
+                                           //   g = (1 + e sin ω)/√(1 − e²), the density its transit
+                                           //   measures, and ρ⋆ or (e, ω) become derived; same posterior
+                                           //   (see parametrizations.md). "rho_star" samples ρ⋆ and (e, ω)
+                                           //   as before. Inert with no such planet. pt, transdim_pt_emcee,
+                                           //   moms, daedalus, rjmcmc and ess run in ρ⋆ / (e, ω) whatever
+                                           //   this says, and their chains carry those columns.
       "marginalize_gamma": false,          // analytic γ marginalisation (default false)
       "use_rho_s": false                   // sample stellar density ρ⋆ instead of deriving
                                            //   a/R★ from M_s×R_s (default false). ρ⋆ is what
                                            //   transits actually constrain — the standard
                                            //   transit parametrization. ρ⋆ is in SOLAR units
-                                           //   (ρ⋆/ρ☉, ρ☉ = 1.411 g/cm³), as are its prior
+                                           //   (ρ⋆/ρ☉, ρ☉ = 1.4098 g/cm³, from the nominal M☉ and R☉), as are its prior
                                            //   and the fitted table's `rho_s` (unit "rho_sun");
                                            //   the derived `rho_star_transit_k<n>` is g/cm³.
                                            //   Enabling auto-adds a
@@ -492,6 +526,22 @@ rather than a single number trusted.
   `juliacall`** (the GIL deadlocks the watchdog) — enforce the timeout on the
   Python side there.
 
+### `stop_file`
+A path watched while the sampler runs (`pt_emcee`, `transdim_pt_emcee`).
+Default `<output_dir>/STOP`. When the file appears after burn-in, the sampler
+ends production at the last fully recorded step and the job finishes normally
+(chains, plots, tables, summary), printing
+`stopping early: stop requested at step N/M (K draws kept)` on stdout. Before
+the end of burn-in there are no draws to keep and the job fails with an error
+saying so. The file is looked for about every 5 s of wall clock and at every
+diagnostic (`sampler.kwargs.diag_every`), never per step, and is never deleted
+by Nereus. Naming `stop_file` with a sampler that cannot stop early is an
+error. `summary.json` records how the run ended: `"stopped"` (`"steps"`,
+`"converged"`, `"interrupted"`, `"requested"`, `"max_seconds"`, `"max_evals"`),
+`"stopped_at_step"`, `"n_steps"`, `"n_draws_kept"` and `"stop_file"`. The same
+sampler also takes `max_seconds`, `max_evals` and, for `transdim_pt_emcee`,
+`convergence_stop` with its thresholds, in `sampler.kwargs`.
+
 ### `data`
 The `data` block must contain at least one of `rv`, `transit_photometry`,
 `iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3`, `rm_nights`, `tomography`
@@ -515,6 +565,24 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   Instrument names are sorted-unique → integer indices.
 - **`iad`** — `hip_id` (auto-fetches the Hipparcos IAD bundle) or `values`
   (`t`, `abscissa`, `abscissa_err`, `psi`, `parallax_factor`, `pm_factor`).
+  Two opt-in keys per block, both off by default:
+  `"jitter": true` adds a `sigma_iad_<name>` along-scan jitter (mas, added in
+  quadrature to that instrument's abscissa errors; default prior
+  ModJeffreys with the knee at the median reported error, capped at 10×);
+  `"clip_outliers": true` (or a number of σ, default 5) drops the CCD abscissae
+  that disagree with the other CCDs of their own field-of-view transit
+  (`clip_transit_outliers`) — model-independent, so it cannot touch an orbit
+  signal. What it dropped is in `summary.json` as `iad_outliers`. `<name>` is
+  the block's `instrument`, else `HIP<hip_id>` / `GaiaDR4_<source_id>`.
+  A jitter as large as the reflex is a second mode, "noise instead of orbit",
+  and from the prior it is the cheaper way up: on HD 114762 (RV + DR4) every
+  pt_emcee run drawn from the prior ended there, 470-970 nats below an orbit
+  no walker found. So the PT ensemble samplers (`pt_emcee`,
+  `transdim_pt_emcee`, `pt_whitening`) hold every `sigma_iad_<name>` at 0 for
+  at least the first half of burn-in, where the likelihood is the unjittered
+  one, until that fit stops climbing, then draw it from its prior walker by
+  walker (`sampler.kwargs.burnin_hold`, below).
+  Other samplers do not; start them from the unjittered fit (`init`).
 - **`gost`** — `{ra_deg, dec_deg, from?, to?}` (auto-fetches the Gaia GOST scan
   plan) or `values` (`t`, `psi`, `parallax_factor`). **GOST is an AUXILIARY,
   not a standalone measurement** — `gost_log_likelihood` returns 0; GOST only
@@ -525,7 +593,16 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
   and pulls the row — the VALIDATED Hipparcos–Gaia path, recovers the orvara
   orbit on HD 159062), or `{fits, hip_id}` for a local copy of the catalogue, or `values`
   (exactly 3 epochs: `t`, `pmra`, `pmdec`, `cov_ep`, plus `plx`, `plx_err`,
-  `hip_id`). Pair with `gost` for the Mode-B Gaia epoch.
+  `hip_id`, and optionally the per-coordinate central epochs `epochs_ra` /
+  `epochs_dec`). Pair with `gost` for the Gaia epoch (a fit through the DR3
+  window). The Hipparcos epoch is a fit through the Hipparcos scans:
+  Hipparcos IAD in `iad` if present, else fetched by `hip_id` (see
+  `hip_scans`).
+- **`hip_scans`** — the Hipparcos scan geometry of the HGCA Hipparcos epoch.
+  Absent: automatic (the IAD's scans, else fetched by the `hgca` row's
+  `hip_id`; ~350 MB bundle on first use, then cached). `false`: none, and the
+  Hipparcos epoch is the instantaneous reflex (warned). `{hip_id}` or `values`
+  (`t`, `psi`, `parallax_factor`, `abscissa_err`).
 - **`relastrom`** — `{csv}` or `values` (`t`, `ra_off`, `dec_off`, `ra_err`,
   `dec_err`, `planet_idx?`).
 - **`gaia_dr3`** — `{params:[α,δ,ϖ,μα*,μδ], cov:5×5, t_ref}`.
@@ -637,10 +714,45 @@ prior when that degeneracy is present.
   for cross-checks only — it is not a sampler name and cannot be reached from
   a job config.
 - Evidence is surfaced as `summary.log_z` per sampler: PT-family and the nested
-  family return real `log_evidence`; `rjmcmc`/`moms`/`nuts`/`ofti` write
-  `NaN` (no evidence estimator). `nested_ins` reports the INS estimate,
-  `nested_dynamic` the dynamic-NS estimate, `daedalus` its nested evidence
-  (`src/runner.jl:1499-1606`).
+  family return real `log_evidence`; `rjmcmc`/`moms`/`nuts`/`ofti`/`ensemble`/`ess`
+  have no evidence estimator, so `log_z` is `null` in `summary.json` (the
+  summary `run_job` returns in memory keeps the `NaN`). Every non-finite number
+  in `summary.json` is written as `null`, not `NaN` or `Infinity`, so strict
+  JSON parsers read it. `nested_ins` reports the INS estimate,
+  `nested_dynamic` the dynamic-NS estimate, `daedalus` its nested evidence.
+- **Which evidence `log_z` is, for the tempered samplers** (`pt_emcee`,
+  `pt_hmc` and the other fixed-dimension fits that carry a `summary.evidence`
+  block; a chain whose planet count or noise models vary, as in
+  `transdim_pt_emcee`, is not re-selected and keeps its sampler's own value):
+  1. **Bridge sampling** on the cold chain, when it is usable: worst R-hat
+     ≤ 1.1 and the least ESS reaches the floor the reference density needs
+     (`_bridge_guard`). A chain that fails the guard records why in
+     `summary.evidence.bridge_not_reported`.
+  2. Otherwise the **tempered** estimate (H+ for `pt_emcee`), when it is
+     quotable (the ladder reaches β = 0 and every adjacent pair swapped at least
+     `swap_min` = 5 % of the time) and lies within `laplace_switch_tol`
+     (default 50 nats) of the mode-Laplace value.
+  3. Otherwise **mode-Laplace**, with a warning. `log_z` is `NaN` (`null` on
+     disk) only when none of the three is available.
+  `summary.evidence.reported` names the one used (`"bridge"`, `"hybrid"`,
+  `"ti_plus"`, `"ss_plus"`, `"mode_laplace"`, `"nested"`, `"none"`). The nested
+  family reports its own evidence and is not re-selected.
+- **`burnin_hold`** (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`) —
+  parameters held at one value, shared by every walker of every rung, for at
+  least the first `burnin_hold_frac` (default 0.5) of burn-in, then until the
+  β = 1 rung stops climbing (its median log L rising by less than d/2 over 50
+  steps; three quarters of burn-in at the latest), then drawn from their
+  priors walker by walker. Released while the fit without them still climbs,
+  a jitter takes up the misfit: on HD 114762 RV + Hipparcos + DR4 one seed,
+  released at half of burn-in 3300 nats below the top of the held fit, lost
+  the orbit and did not converge. Absent (or `true`): every IAD jitter
+  `sigma_iad_<name>` at 0 (see `iad` above), nothing for a model without one,
+  so those runs are unchanged. `false` holds nothing; an object
+  `{"<param>": value}` holds those instead (not a full-circle angle, nor a
+  coordinate the node flip, the λ slide or a trans-dim move changes). The
+  stretch move leaves a coordinate every walker shares where it is, so the
+  held phase is the fit without that parameter. Burn-in only: the recorded
+  chain is ordinary MCMC (`src/samplers/burnin_hold.jl`).
 - Unknown kwargs are rejected with an actionable error listing the valid set
   (`src/runner.jl:1425-1439,1466-1475`); every JSON-string kwarg value is coerced to a Julia
   `Symbol` so `"multi"`, `"rslice"`, `"stretch"`, etc. work as expected.
@@ -673,13 +785,37 @@ numbers live under `fitted` / `derived`
 ```jsonc
 {
   "status":         "ok",                  // "ok" | "failed"  (failed adds error+traceback)
-  "config_version": "0.2.0",
+  "config_version": "1.0",
   "chains_path":    "chains.nc",
   "config_path":    "/work/in/config.json",
   "elapsed_sec":    612.3,
+  "star": {"gaia": {"source_id": 6774368627975155968, "plx": 14.36,   // only when a Gaia
+                    "plx_err": 0.02, "release": "DR3",                // parallax was looked up
+                    "resolved_from": "name", "name": "HIP 103836"}},
+
+  // ---- Provenance: what produced this fit, and the priors it was given ----
+  "provenance": {
+    "engine":         "pt_emcee",             // the sampler as selected
+    "nereus_version": "0.9.0",                // pkgversion of the Nereus that ran
+    "nereus_commit":  "abcd123…",             // null unless Nereus is a git checkout
+    "priors": {                               // in the model's parameter (layout) order; the sampled
+                                              //   rho_circ_k*/eta_k* slots are not listed (the priors on
+                                              //   rho_s and (e, ω) that they carry are)
+      "P_k1": { "family": "loguniform", "fixed": false, "lo": 1.0, "hi": 1000.0 },
+      "e_k1": { "family": "beta", "fixed": false, "lo": 0.0, "hi": 1.0, "a": 0.867, "b": 3.03 },
+      "gamma_HARPS": { "family": "normal", "fixed": false, "lo": null, "hi": null,
+                       "mu": 0.0, "sigma": 5.0 },       // lo/hi null where unbounded
+      "rho_s": { "family": "fixed", "fixed": true, "value": 1.2 }
+    },
+    "external_priors": [                      // only when the model has any
+      { "quantity": "rho_s", "per_planet": false, "family": "normal", "fixed": false,
+        "lo": null, "hi": null, "mu": 1.2, "sigma": 0.1 }
+    ]
+  },
 
   // ---- Evidence + sampler metrics (_populate_summary!) ----
-  "log_z":   12345.67,                      // NaN for rjmcmc/moms/nuts/ofti
+  "log_z":   12345.67,                      // null (non-finite) for rjmcmc/moms/nuts/ofti/ensemble/ess;
+                                            //   which estimator, see "Which evidence log_z is" above
   "n_evals": 4501500,
   "sampler": {
     "acceptance_within":   [0.32, 0.28, /*…*/],
@@ -712,6 +848,8 @@ numbers live under `fitted` / `derived`
     "conditioning": { "n_planets": 1, "planet_slots": [1], "stellar": { /*…*/ } },
     "parameters": {
       "msini_earth_k1": { /*…*/ }, "a_au_k1": { /*…*/ }, "Teq_k1": { /*…*/ },
+      // not-sampled quantities: P_days_k1 / P_yr_k1 (:a_driven), K_k1 (m/s; :a_driven and
+      // :M_sec_driven), and for astrometric planets a_mas_k1 (mas) and alpha_star_uas_k1 (μas)
       "density_gcc_k1": { /*…*/ }, "TSM_k1": { /*…*/ }, "ESM_k1": { /*…*/ }
     }
   },
@@ -859,7 +997,7 @@ The smallest valid RV-only config (a single CSV, one planet, fixed-dim PT):
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "1.0",
   "seed": 42,
   "output_dir": "/work/out",
   "star": { "M_s": 1.02 },
@@ -887,7 +1025,7 @@ block:
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "1.0",
   "output_dir": "/work/out",
   "star": { "M_s": 1.02 },
   "data": { "rv": { "csv": "/work/in/rvs.csv" } },
