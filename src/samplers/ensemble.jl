@@ -78,6 +78,14 @@ Works in unconstrained space (with transforms) by default.
   the draws the run was going to record. Still split there, the run records
   anyway and warns with the split it measured and the parameter that separates
   the modes. See `sample_pt_emcee`.
+- `trim_burnin::Bool=false` — opt-in, as in `sample_pt_emcee`, on the one rung:
+  drop the kept draws during which walkers were still settling into the main
+  mode, on their log densities in the sampling coordinates. The test runs on
+  every run and only warns when the option is off. With `n_chains > 1` it reads
+  the walkers of every chain together, and every chain drops the same draws.
+  Counted in saved draws: `chains.info.n_burnin_used` includes the dropped
+  ones, `chains.info.n_trimmed` says how many, and `chains.info.burnin_trim`
+  holds the finding (see `PTemceeResult`).
 - `n_scouts::Int=16` — without `init`, the walkers drawn from the prior are
   joined by up to `n_walkers ÷ 2` scouts in place of as many of them: prior
   draws moved by slice updates until they stop climbing, less those the bound
@@ -120,6 +128,7 @@ function sample_ensemble(
     prune_stranded::Bool = true,
     extend_burnin::Bool = false,
     max_burnin::Union{Nothing,Real} = nothing,
+    trim_burnin::Bool = false,
     n_scouts::Int = 16,
     de_move::Real = DE_MOVE_DEFAULT,
 )
@@ -173,6 +182,7 @@ function sample_ensemble(
         # draws, as many as the shortest has, and recording began, for all of
         # them, at the latest end of burn-in. Rows are steps × walkers.
         cubes = [c.info.walker_cube for c in chs]
+        lps = [c.info.kept_lp for c in chs]
         n_used = maximum(c.info.n_burnin_used for c in chs)
         n_min = minimum(size(q, 1) for q in cubes)
         for c in eachindex(chs)
@@ -181,22 +191,43 @@ function sample_ensemble(
             chs[c] = MCMCChains.setrange(chs[c][((k - n_min) * nwc + 1):(k * nwc), :, :],
                                          1:1:(n_min * nwc))
             cubes[c] = cubes[c][(k - n_min + 1):k, :, :]
+            lps[c] = lps[c][(k - n_min + 1):k, :]
+        end
+        # The settling test on the walkers of every chain together, over the
+        # draws all of them kept: chains in another mode than the rest are what
+        # it is for. With `trim_burnin` every chain drops the same draws
+        # (src/samplers/burnin_trim.jl).
+        burnin_trim, n_trimmed = _ens_trim(reduce(hcat, lps),
+            reduce(vcat, [permutedims(q[end, :, :]) for q in cubes]),
+            length(target.params.layout.unfrozen_idx), target.params;
+            trim = trim_burnin, n_burnin_used = n_used, extend = extend_burnin,
+            who = "walkers (all $n_chains chains)", show_progress)
+        if n_trimmed > 0
+            for c in eachindex(chs)
+                nwc = size(cubes[c], 3)
+                chs[c] = MCMCChains.setrange(
+                    chs[c][(n_trimmed * nwc + 1):(n_min * nwc), :, :],
+                    1:1:((n_min - n_trimmed) * nwc))
+                cubes[c] = cubes[c][(n_trimmed + 1):end, :, :]
+            end
+            n_used += n_trimmed
         end
         # The drift check runs on each chain's walkers (one ensemble each) and
         # reports them together, once.
         drift = _ensemble_drift_chains(cubes, target.params; sampler = "ensemble",
                                        de_move = p_de)
         out = MCMCChains.chainscat([_strip_walker_cube(c) for c in chs]...)
-        show_progress && n_used > n_burnin &&
+        show_progress && n_used - n_trimmed > n_burnin &&
             @info "ensemble: with several chains, each keeps its last $n_min saved " *
                   "draw(s), as many as the chain whose extended burn-in ran longest " *
                   "recorded."
-        return MCMCChains.setinfo(out, (; drift, n_burnin_used = n_used))
+        return MCMCChains.setinfo(out, (; drift, n_burnin_used = n_used, n_trimmed,
+                                        burnin_trim))
     end
     return _ensemble_chain(target, n_walkers, n_steps, n_burnin, thinning, init,
                            seed, n_chains, show_progress, ck_path, ck_every, resume;
                            prune_stranded, n_scouts, de_move = p_de, extend_burnin,
-                           max_burnin)
+                           max_burnin, trim_burnin)
 end
 
 # Chain `c`'s state file in a multi-chain run: "dir/ensemble_state.jls" ->
@@ -412,7 +443,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
                          rendezvous::Union{Nothing,_Rendezvous} = nothing,
                          prune_stranded::Bool = true, n_scouts::Int = 16,
                          de_move::Float64 = DE_MOVE_DEFAULT, check_drift::Bool = true,
-                         extend_burnin::Bool = false, max_burnin = nothing)
+                         extend_burnin::Bool = false, max_burnin = nothing,
+                         trim_burnin::Bool = false)
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -449,6 +481,9 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     lastll = Vector{Float64}(undef, n_walkers)
     n_saved = div(n_steps, thinning)
     kept = Array{Float64}(undef, n_dim, n_walkers, max(n_saved - n_burnin, 0))
+    # Their log densities, for the settling test (src/samplers/burnin_trim.jl);
+    # NaN for draws restored from a checkpoint written before they were kept.
+    kept_lp = Matrix{Float64}(undef, n_walkers, size(kept, 3))
     # The stranded-walker pruning's record of its last pass (`_pt_prune_stranded!`).
     prune_mem = PruneMemory(1, n_walkers, n_dim)
     # The extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl), in
@@ -519,6 +554,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         copy!(rng, ck.rng::MersenneTwister)
         ck_kept = ck.kept::Array{Float64, 3}
         kept[:, :, 1:size(ck_kept, 3)] .= ck_kept
+        kept_lp[:, 1:size(ck_kept, 3)] .= hasproperty(ck, :kept_lp) ? ck.kept_lp : NaN
         _prune_restore!(prune_mem, ck)
         b_end, b_last, b_passes = _burnin_resume(ck, step0, b_nom, b_cap, ext_on;
                                                  thin = thinning)
@@ -587,6 +623,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         # Kept from the step after `b_end`, every `thinning`-th.
         if step > b_end && (step - b_end) % thinning == 0
             kept[:, :, (step - b_end) ÷ thinning] .= x
+            kept_lp[:, (step - b_end) ÷ thinning] .= lastll
         end
         update!(pb; n_done = step)
 
@@ -594,7 +631,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         if ck_path !== nothing && (step == n_steps || time() - last_ck >= ck_every)
             n_kept = max(div(step - b_end, thinning), 0)
             write_checkpoint(ck_path, "ensemble", ck_fp, (; step, x, lastll, rng,
-                kept = kept[:, :, 1:n_kept], windows = circular_windows(params),
+                kept = kept[:, :, 1:n_kept], kept_lp = kept_lp[:, 1:n_kept],
+                windows = circular_windows(params),
                 spin_axis = copy(params.layout.spin_axis),
                 prune_mem = _prune_saved(prune_mem),
                 burnin_ext = (b_end, b_last, b_passes)))
@@ -635,17 +673,31 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
 
     # The drift check reads each walker's own sequence: (step, param, walker).
     cube = permutedims(reshape(mat, n_walkers, n_keep, n_dim), (2, 3, 1))
+    # The walkers' log densities at the kept draws (kept draw × walker).
+    L = permutedims(kept_lp[:, 1:n_keep])
     if check_drift
+        # One chain: the settling test, and with `trim_burnin` the trim, here
+        # (src/samplers/burnin_trim.jl). n_burnin_used counts the dropped draws.
+        burnin_trim, n_trimmed = _ens_trim(L, permutedims(cube[end, :, :]), n_dim,
+                                           params; trim = trim_burnin, n_burnin_used,
+                                           extend = extend_burnin, show_progress)
+        if n_trimmed > 0
+            mat = mat[(n_trimmed * n_walkers + 1):end, :]
+            cube = cube[(n_trimmed + 1):end, :, :]
+            n_burnin_used += n_trimmed
+        end
         drift = _ensemble_drift_chains([cube], params; sampler = "ensemble", de_move)
         return with_density_columns(MCMCChains.Chains(mat, param_names;
-                                                      info = (; drift, n_burnin_used)),
+                                                      info = (; drift, n_burnin_used,
+                                                              n_trimmed, burnin_trim)),
                                     params)
     end
     # Several chains: `sample_ensemble` checks them together, and drops this.
     # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
     return with_density_columns(MCMCChains.Chains(mat, param_names;
                                                   info = (; walker_cube = cube,
-                                                          n_burnin_used)), params)
+                                                          n_burnin_used, kept_lp = L)),
+                                params)
 end
 
 # A chain without the walker cube `_ensemble_chain` hands `sample_ensemble`.
