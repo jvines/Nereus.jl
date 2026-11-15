@@ -326,6 +326,23 @@ end
         @test transit_times_log_likelihood(th, dm) ≈ -sum(log.(2π .* σ .^ 2)) / 2
     end
 
+    @testset "PM_TTV_NB refused: no RV, no masses" begin
+        ep, tc, σ = _tt_linear(MersenneTwister(5); n = 10, span = 100)
+        d = Data(; transit_times = [TransitTimeSet(; planet = 1, epoch = ep, tc,
+                                                   tc_err = σ)])
+        e = _tt_err(() -> Params(; max_kplanet = 2, planet_modes = [PM_TTV_NB, PM_TTV_NB],
+                                 instruments = InstrumentConfig(), data = d,
+                                 M_s = 1.0, R_s = 1.0, stability = :none))
+        @test e isa ArgumentError && occursin("RVPM_TTV_NB", e.msg) &&
+              occursin("PM_TTV", e.msg) && occursin("planet 1", e.msg)
+        e = _tt_err(() -> Nereus._validate_config(Dict{String, Any}(
+            "output_dir" => mktempdir(), "sampler" => _tt_sampler(),
+            "model" => Dict{String, Any}("max_kplanet" => 1, "planet_modes" => ["PM_TTV_NB"]),
+            "data" => Dict{String, Any}("transit_times" => [_tt_block(ep, tc, σ)]))))
+        @test e isa ArgumentError && occursin("PM_TTV_NB", e.msg) &&
+              occursin("RVPM_TTV_NB", e.msg)
+    end
+
     @testset "fit: linear ephemeris from transit times alone" begin
         rng = MersenneTwister(2026)
         ep, tc, σ = _tt_linear(rng; n = 40, span = 2000)

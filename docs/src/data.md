@@ -690,7 +690,7 @@ per-planet blocks:
 
 `time_system` must be `BJD_TDB`; the arrays must have one entry per transit;
 `tc_err > 0`; the planet must exist and its mode contain `PM` (`PM_ONLY`,
-`RVPM`, `PM_TTV`, `PM_TTV_NB`, …). The epochs are labels: the likelihood numbers
+`RVPM`, `PM_TTV`, `RVPM_TTV_NB`, …). The epochs are labels: the likelihood numbers
 transits from the model's own transit time and never reads the reference
 ephemeris. Transit times may be the only data. Optional keys: `values.use`,
 `exclude_sources`, `jitter` (adds `sigma_tt_k<planet>`, days, LogUniform prior)

@@ -51,7 +51,7 @@ collated error message if any is wrong — see `_validate_config` in
 - **`planet_modes`**: `RV_ONLY`, `PM_ONLY`, `RVPM`, `RVAS`, `RVPMAS`,
   `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`, `RVPM_RM_A`,
   `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`,
-  `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`, `RVPM_RM_GD`,
+  `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `RVPM_GD`, `RVPM_RM_GD`,
   `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 - **`parametrization.mass`**: `K_driven`, `M_sec_driven`, `a_driven`.
   **`.time`**: `phic` (the default), `Mo`, `Tp`, `Tc`. **`.ew`**: `sesinw`, `ew`.
@@ -554,8 +554,9 @@ summary = run_job(cfg)
 
 `ttv_oc` renders the O−C diagram. For the **dynamical (N-body) TTV**
 case — two or more planets whose mutual perturbations drive the timing
-variations — use the `*_TTV_NB` modes (`RVPM_TTV_NB`, `RVPMAS_TTV_NB`,
-`PM_TTV_NB`) and pick the integrator with
+variations — use the `*_TTV_NB` modes (`RVPM_TTV_NB`, `RVPMAS_TTV_NB`; the
+masses come from the RV amplitudes, so `PM_TTV_NB`, without RV, is refused)
+and pick the integrator with
 `model.ttv_backend => "ttvfaster"` (perturbative 1st-order series,
 default) or `"nbody"` (full ODE integration; use for high-mass / high-e /
 strongly-resonant systems). With ≥ 2 transiting planets the `ttv_oc`

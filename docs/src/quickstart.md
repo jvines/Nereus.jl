@@ -218,7 +218,7 @@ bool; `density` ∈ {`rho_circ` (the default), `rho_star`}), `stability` ∈
 **`planet_modes`** (known values): `RV_ONLY`, `PM_ONLY`, `RVPM`,
 `RVAS`, `RVPMAS`, `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`,
 `RVPM_RM_A`, `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`,
-`PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`,
+`PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `RVPM_GD`,
 `RVPM_RM_GD`, `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 
 **`priors`** — `{ "<name>": {"type": "<PriorType>", "args": [...]} }`.

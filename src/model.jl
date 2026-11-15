@@ -427,8 +427,9 @@ Planet model driven by:
   - transit photometry
   - N-body-predicted TTVs (TTV-C, TTVFaster)
 
-Pass through `planet_modes=` to state which observables constrain a
-given planet; the set decides which parameter block is built for it.
+Refused by `Params`: the N-body TTVs need the planet's mass, which comes from
+its RV semi-amplitude, so without RV the planet is massless. Use RVPM_TTV_NB,
+or PM_TTV with free per-transit offsets.
 """
 const PM_TTV_NB      = PlanetDataSources(PM_SOURCE, TTV_NB_SOURCE)
 
@@ -1897,10 +1898,10 @@ end
 function _tt_mode_error(k::Int, modes::PlanetDataSources)
     rv = has_rv(modes)
     fix = rv ? "Set its planet_mode to one with a transit: RVPM (RV + transit), or " *
-               "RVPM_TTV / RVPM_TTV_NB for TTVs; without RV, PM_ONLY, PM_TTV or " *
-               "PM_TTV_NB." :
-               "Set its planet_mode to PM_ONLY (linear ephemeris), PM_TTV (free " *
-               "per-transit offsets) or PM_TTV_NB (N-body TTVs)."
+               "RVPM_TTV / RVPM_TTV_NB for TTVs; without RV, PM_ONLY or PM_TTV." :
+               "Set its planet_mode to PM_ONLY (linear ephemeris) or PM_TTV (free " *
+               "per-transit offsets); N-body TTVs (RVPM_TTV_NB) need RV for the " *
+               "masses."
     return "transit times are given for planet $k, whose model ($(modes)) has no " *
            "transit, so it predicts no mid-transit times. $fix A planet with :PM " *
            "needs no photometry: its mid-transit times come from its period, time " *

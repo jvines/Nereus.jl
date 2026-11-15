@@ -266,7 +266,8 @@ rather than a single number trusted.
     //   RVPM_RM_TTV    — RVPM + RM + free TTV offsets
     //   RVPM_TTV_NB    — RVPM + N-body-predicted TTVs (no free offsets; ≥2 NB planets)
     //   RVPMAS_TTV_NB  — RVPMAS + N-body-predicted TTVs
-    //   PM_TTV_NB      — photometry-only + N-body-predicted TTVs
+    //   PM_TTV_NB      — REFUSED: N-body TTVs need the masses, which come from RV;
+    //                    use RVPM_TTV_NB, or PM_TTV with free offsets
     //   BINARY_RV      — SB2 double-lined binary orbit, RV only              [slots K_A_k<k>, K_B_k<k>]
     //   BINARY         — SB2 double-lined binary + astrometry (absolute masses) [+ inc_k<k>, Omega_k<k>, f_light]
     //   See "SB2 double-lined binaries" below for the component RV column + derived masses.
@@ -651,7 +652,7 @@ them).
 - `tc` finite; `tc_err` finite and > 0 (days, 1σ); `epoch` integers.
 - `planet` is 1-based and must exist (`≤ model.max_kplanet`).
 - The planet's mode must predict a mid-transit time, i.e. contain `PM`:
-  `PM_ONLY`, `RVPM`, `PM_TTV`, `RVPM_TTV`, `PM_TTV_NB`, `RVPM_TTV_NB`, … An
+  `PM_ONLY`, `RVPM`, `PM_TTV`, `RVPM_TTV`, `RVPM_TTV_NB`, … An
   `RV_ONLY` planet (the default when `planet_modes` is omitted) is refused
   with the mode to set instead (`RV_ONLY` → `RVPM`; no planet modes → `PM_ONLY`).
   A `PM` mode needs no photometry: without it the impact parameter and radius

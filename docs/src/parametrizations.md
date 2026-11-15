@@ -40,7 +40,7 @@ cleanly. Nereus exports the common combinations as named constants
 | `PM_TTV` | photometry + TTV | Transit-only with free TTVs |
 | `RVPM_TTV_NB` | RV + photometry + N-body TTV | TTVs **predicted** from mutual gravity (TTVFaster / N-body) |
 | `RVPMAS_TTV_NB` | … + astrometry | Above, plus astrometry |
-| `PM_TTV_NB` | photometry + N-body TTV | Transit-only N-body TTVs |
+| `PM_TTV_NB` | photometry + N-body TTV | **Refused**: without RV the planet has no mass, so its N-body TTVs are zero. Use `RVPM_TTV_NB`, or `PM_TTV` with free offsets |
 | `BINARY_RV` | RV (double-lined) | SB2 spectroscopic binary — one Keplerian, **two** amplitudes `K_A`/`K_B` |
 | `BINARY` | RV + astrometry (double-lined) | SB2 binary with absolute astrometry → absolute component masses |
 
@@ -102,7 +102,7 @@ constant **names** as strings. The schema validator
 RV_ONLY, PM_ONLY, RVPM, RVAS, RVPMAS,
 RVPM_RM, RVPMAS_RM, RVPM_RM_R, RVPMAS_RM_R,
 RVPM_TTV, RVPMAS_TTV, RVPM_RM_TTV, PM_TTV,
-RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB,
+RVPM_TTV_NB, RVPMAS_TTV_NB,
 RVPM_RM_A, RVPMAS_RM_A, RVPM_GD, RVPM_RM_GD, PM_GD,
 BINARY, BINARY_RV, PM_DT
 ```

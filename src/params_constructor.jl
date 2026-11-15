@@ -150,6 +150,19 @@ function Params(;
         "ttv_backend must be :ttvfaster or :nbody; got :$ttv_backend"))
 
     modes_vec = Vector{PlanetDataSources}(planet_modes)
+    # N-body TTVs come from the planets' masses, and a planet's mass comes from
+    # its RV semi-amplitude: a :TTV_NB planet without :RV (PM_TTV_NB) has mass
+    # ratio 0 in the integration, pulls on nothing, and with no RV planet
+    # beside it the predicted TTVs are zero -- a linear ephemeris, silently.
+    for (k, m) in enumerate(modes_vec)
+        (has_ttv_nb(m) && !has_rv(m)) || continue
+        throw(ArgumentError(
+            "planet $k has N-body TTVs without RV ($m): the N-body TTVs need the " *
+            "planets' masses, and its mass comes from its RV semi-amplitude, so it " *
+            "would be massless and the TTVs it causes zero. Add RV data and use " *
+            "RVPM_TTV_NB (or RVPMAS_TTV_NB), or use PM_TTV (free per-transit offsets, " *
+            "with model.ttv_n_transits)."))
+    end
     tt_jit = tt_jitter !== nothing ? sort!(unique(Int.(collect(tt_jitter)))) :
              data === nothing ? Int[] :
              sort!([s.planet for s in data.transit_times if s.jitter])

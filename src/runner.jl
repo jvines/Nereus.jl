@@ -448,6 +448,12 @@ function _validate_config(cfg::AbstractDict)
             for m in _get(mdl, :planet_modes)
                 String(m) in _KNOWN_PLANET_MODES || push!(errs,
                     "unknown planet_mode `$m` (known: $(join(_KNOWN_PLANET_MODES, ", ")))")
+                # Kept in the list so the message can say why (Params refuses it).
+                String(m) == "PM_TTV_NB" && push!(errs,
+                    "planet_mode PM_TTV_NB: the N-body TTVs need the planets' masses, " *
+                    "which come from RV; without RV the planet is massless and its TTVs " *
+                    "zero. Add RV data and use RVPM_TTV_NB, or use PM_TTV (free " *
+                    "per-transit offsets, with model.ttv_n_transits).")
             end
         end
         if _has(mdl, :parametrization)
