@@ -666,7 +666,9 @@ selection on planet count.
   carries mass through the Occam factor. The test runs within each model (the
   pattern of active planet slots and noise models), with that model's free
   dimension and the best walker's median in that model over the last tenth of
-  the run as its reference; a model absent from the last tenth flags nothing.
+  the run as its reference; a draw in a model is settling when it comes before
+  that walker's first entry into that model's band, and a model absent from
+  the last tenth flags nothing.
   `result.n_trimmed` and `result.burnin_trim` say what it found and did. See
   src/samplers/burnin_trim.jl.
 - `betas::Union{Nothing,Vector{Float64}} = nothing`

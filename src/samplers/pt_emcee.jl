@@ -132,10 +132,10 @@ Container for a `sample_pt_emcee` run.
   main mode during the recorded run, run whether or not `trim_burnin` is on:
   `(; applied, verdict, cut_step, n_recorded, n_walkers, n_walkers_settling,
   delta_lnp, n_trimmed, status, message)`. `verdict` is `"settling"`,
-  `"short_tail"`, `"split"`, `"mixing"`, `"clean"` or `"not_assessed"`;
-  `cut_step` is the last recorded step (of `n_recorded`, counted before any
-  trim) at which a walker was still below the main mode; `delta_lnp` how far
-  below, in ln p. See `trim_burnin`.
+  `"short_tail"`, `"split"`, `"clean"` or `"not_assessed"`; `cut_step` is the
+  last recorded step (of `n_recorded`, counted before any trim) before the last
+  walker to arrive first reached the main mode; `delta_lnp` how far below it,
+  in ln p, those draws sat. See `trim_burnin`.
 """
 struct PTemceeResult
     chains::MCMCChains.Chains
@@ -1176,16 +1176,17 @@ in place.
   (on the flat scale), each walker's level at a recorded step is the median of
   a centred window of its draws (51 in a long run, fewer in a short one, so a
   brief dip into a tail does not count); the reference is the best walker's
-  median over the last tenth of the run; a walker is below when its level
-  sits more than the pruning's allowance under the reference (the 1 - 1e-6
-  quantile of a Gaussian's drop over the free dimensions). The cut is the last
-  recorded step at which any walker is below, rounded up to a block of 50
-  steps. Modes of comparable height are within the allowance and never cut.
-  Nothing is dropped, and a warning says why, when walkers are still below at
-  the end of the run and were never in the main mode (the run ends split), or
-  when the cut would leave fewer than a quarter of the recorded steps. Walkers
-  that move from the main mode into a lower region and are still there at the
-  end are taken as posterior mass, and nothing is flagged. With the option off,
+  median over the last tenth of the run; a walker is in the main band when its
+  level is within the pruning's allowance of the reference (the 1 - 1e-6
+  quantile of a Gaussian's drop over the free dimensions). A walker is settling
+  from the start of recording until its first recorded step in the band; the
+  cut is the last settling step of any walker, rounded up to a block of 50
+  steps. Time below the band after a walker's first entry, however long and
+  however late, is posterior mass and never sets the cut; modes of comparable
+  height are within the allowance of each other. Nothing is dropped, and a
+  warning says why, when walkers never in the band are below it at the end of
+  the run (the run ends split), or when the cut would leave fewer than a
+  quarter of the recorded steps. With the option off,
   a run whose walkers settled during recording gets one warning: how many, until
   which recorded step, how far below in ln p, and the n_burnin that would have
   covered it. Composes with `extend_burnin` (the trim runs on what was

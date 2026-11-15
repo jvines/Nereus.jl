@@ -25,33 +25,37 @@
 #   a peak, and so is every level it is compared with below; taking the best
 #   walker's keeps the reference where it should be however many walkers end
 #   the run in another mode.
-# - Level: a walker is below at a recorded step when most of the draws in a
-#   centred window about it are more than the allowance below the reference,
-#   i.e. when the window's median is (`_trim_halfwidth` gives the window). One
-#   healthy walker dipping into a heavy tail for a few draws moves no median;
-#   a walker that has left a mode for good flips once, at the crossing.
-# - Cut: the last recorded step at which any walker is below.
+# - Band: a walker is in the main band at a recorded step when most of the draws
+#   in a centred window about it are within the allowance of the reference, i.e.
+#   when the window's median is (`_trim_halfwidth` gives the window).
+# - Settling: a walker's draws from the start of recording up to, not including,
+#   its first recorded step in the band; none if it starts in it, or if those
+#   draws sit, on median, in the band themselves (a window cut short at the
+#   start reaches forward only, into a tail excursion just after it).
+# - Cut: the last settling draw of any walker.
 #
-# Two outcomes need no trim and get no warning. Modes of comparable height sit
-# within the allowance, so neither is below the other. A region far below the
-# best walker that the walkers move into from the main mode, and are still in at
-# the end, is posterior mass, not burn-in: a correct kernel takes a walker out of
-# a mode into a region of negligible mass with negligible probability. (A low,
-# wide mode -- a weak signal's undetected plateau -- can carry real mass far below
-# the peak; the pruning's mass bound exists for that case, and this is the
-# trim's version of it.)
+# Time below the band after a walker's first entry is posterior mass, not
+# burn-in, however long it lasts and whether or not the walker is back by the
+# end: a correct kernel takes a walker out of the main mode into a region of
+# negligible mass with negligible probability, so where it goes from there the
+# posterior goes. A stationary run whose walkers wander into a heavy tail for
+# longer than the window, late in the run as much as early, has nothing to trim.
+# (A low, wide mode -- a weak signal's undetected plateau -- can carry real mass
+# far below the peak; the pruning's mass bound exists for that case, and this is
+# the trim's version of it.) Modes of comparable height sit within the
+# allowance, so neither is below the other.
 #
-# Two outcomes are refused, with a warning. Walkers still below the reference at
-# the end of the run that were never in the main mode: the run ends split, and
-# dropping draws cannot rescue it. A cut that would leave fewer than a quarter of
-# the recorded steps.
+# Two outcomes are refused, with a warning. Walkers never in the band that are
+# below it at the end of the run: the run ends split, and dropping draws cannot
+# rescue it. A cut that would leave fewer than a quarter of the recorded steps.
 #
 # Trans-dim (`sample_transdim_pt_emcee`): log densities of different models are
 # never compared. A model with fewer planets sits lower in ln p and still carries
 # mass through the Occam factor, so the rule runs within each model (the
 # pattern of active planet slots and noise models), with that model's free
-# dimension and its own reference; a model absent from the final tenth has no
-# reference and flags nothing.
+# dimension and its own reference, per walker and model: a draw in a model is
+# settling when it comes before that walker's first entry into that model's
+# band. A model absent from the final tenth has no reference and flags nothing.
 #
 # The trimmed result is the run as if recording had started at the cut: the
 # draws, log densities and derived columns, the evidence (bridge and Laplace
@@ -87,17 +91,19 @@ dimension and `model` (same shape as `L`) each draw's model, or `nothing` for
 one model. Returns `(; verdict, cut, n_rec, n_walkers, n_settling, delta,
 stuck, halfwidth, final)`:
 
-- `verdict` -- `:settling` (walkers below until `cut`, and at least a quarter
-  of the recorded steps after it), `:short_tail` (the same, with fewer after
-  it), `:split` (walkers below at the end that were never in the main mode;
-  `stuck` lists them and `stuck_model` the model each is stuck in), `:mixing`
-  (walkers below at the end that came from the
-  main mode: posterior mass), `:clean`, or `:not_assessed` (fewer than
-  `_TRIM_MIN_ROWS` recorded steps, or a non-number in `L`).
-- `cut` -- the last recorded step at which a walker was below (0 if none).
-- `n_settling` -- the walkers below at some step (`:split`: the stuck ones).
-- `delta` -- how far below the reference, in ln p: the median over the draws
-  flagged (`:split`: over the stuck walkers' final medians).
+- `verdict` -- `:settling` (walkers reached the main band only during the
+  recorded run, the last at `cut`, with at least a quarter of the recorded
+  steps after it), `:short_tail` (the same, with fewer after it), `:split`
+  (walkers never in the band and below it at the end; `stuck` lists them and
+  `stuck_model` the model each is stuck in), `:clean`, or `:not_assessed`
+  (fewer than `_TRIM_MIN_ROWS` recorded steps, or a non-number in `L`).
+- `cut` -- the last settling draw's recorded step: the latest, over walkers
+  (and models), of the step before a walker's first entry into the band (0 if
+  every walker starts in it). A walker whose draws before that entry sit, on
+  median, in the band has none.
+- `n_settling` -- the walkers with settling draws (`:split`: the stuck ones).
+- `delta` -- how far below the reference, in ln p: the median over the
+  settling draws (`:split`: over the stuck walkers' final medians).
 """
 function _trim_detect(L::AbstractMatrix{<:Real}, ds::AbstractVector{<:Integer};
                       model::Union{Nothing,AbstractMatrix{<:Integer}} = nothing)
@@ -140,11 +146,12 @@ function _trim_detect(L::AbstractMatrix{<:Real}, ds::AbstractVector{<:Integer};
     end
     thr = [isfinite(ref[m]) ? ref[m] - _prune_allow(max(Int(ds[m]), 1)) : -Inf
            for m in 1:M]
-    # Each walker's level along its own draws in each model.
-    lastlow = zeros(Int, M)               # the last step below, per model
-    low_w = falses(M, n_w)                # whether a walker was ever below
-    drops = [Float64[] for _ in 1:M]      # reference minus log density, below
-    mixing = falses(M)
+    # Each walker along its own draws in each model: settling up to its first
+    # draw whose window is not mostly below the band (its first entry), never
+    # after it.
+    cut = 0                               # the last settling draw's step
+    set_w = falses(n_w)                   # walkers with settling draws
+    drops = Float64[]                     # reference minus log density, settling
     stuck = Tuple{Int,Int}[]
     cs = Int[]
     for w in 1:n_w
@@ -160,39 +167,43 @@ function _trim_detect(L::AbstractMatrix{<:Real}, ds::AbstractVector{<:Integer};
                 c += !(L[I[j], w] >= thr[m])
                 cs[j] = c
             end
-            was_in = false; back = false
+            f = n + 1                     # the first entry into the band
             for j in 1:n
                 lo, hi = max(1, j - h), min(n, j + h)
-                k = cs[hi] - (lo > 1 ? cs[lo - 1] : 0)
-                if 2k > hi - lo + 1
-                    lastlow[m] = max(lastlow[m], I[j])
-                    low_w[m, w] = true
-                    push!(drops[m], ref[m] - L[I[j], w])
-                    was_in && (back = true)
-                else
-                    was_in = true
+                if 2 * (cs[hi] - (lo > 1 ? cs[lo - 1] : 0)) <= hi - lo + 1
+                    f = j
+                    break
                 end
             end
-            # Below at the end: from the main mode (posterior mass), or never in it.
-            if medf[m, w] < thr[m]
-                back ? (mixing[m] = true) : push!(stuck, (w, m))
+            f == 1 && continue            # in the band from the start
+            # Never in the band and below it at the end: the run is split.
+            if f > n && medf[m, w] < thr[m]
+                push!(stuck, (w, m))
+                continue
             end
+            # Its draws before the first entry sitting, on median, in the band:
+            # not a climb but a tail excursion that began just after recording
+            # did, which the first windows, cut short at the start, reach
+            # forward into.
+            empty!(buf)
+            for j in 1:(f - 1)
+                push!(buf, L[I[j], w])
+            end
+            median(buf) >= thr[m] && continue
+            set_w[w] = true
+            cut = max(cut, I[f - 1])
+            append!(drops, ref[m] .- buf)
         end
     end
-    filter!(s -> !mixing[s[2]], stuck)
     if !isempty(stuck)
         ws = unique(first.(stuck))
         delta = median([ref[m] - medf[m, w] for (w, m) in stuck])
         return out(:split; n_settling = length(ws), delta, stuck = first.(stuck),
                    stuck_model = last.(stuck))
     end
-    keep = findall(!, mixing)
-    cut = maximum((lastlow[m] for m in keep); init = 0)
-    cut == 0 && return out(any(mixing) ? :mixing : :clean)
-    n_set = count(w -> any(m -> low_w[m, w], keep), 1:n_w)
-    delta = median(reduce(vcat, (drops[m] for m in keep)))
+    cut == 0 && return out(:clean)
     verdict = 4 * (n_rec - cut) < n_rec ? :short_tail : :settling
-    return out(verdict; cut, n_settling = n_set, delta)
+    return out(verdict; cut, n_settling = count(set_w), delta = median(drops))
 end
 
 # The recorded log densities as a matrix (recorded step × walker), from a
@@ -339,10 +350,6 @@ function _trim_report(sampler::AbstractString, rec; trim::Bool, rows::Integer,
               "posterior mixes two modes and no trim can rescue it" *
               "$(trim ? "; trim_burnin = true has dropped nothing" : "")." *
               sentence * todo
-    elseif v === :mixing
-        msg = "$sampler: some $who move between the main mode and a region more " *
-              "than the allowance below it, and are there at the end: posterior " *
-              "mass, not burn-in. Nothing to trim."
     elseif v === :clean
         msg = "$sampler: no $who were settling into the main mode during the " *
               "recorded run."
