@@ -87,7 +87,8 @@ function run_job(cfg::AbstractDict)
         # --- Build data + star + params --------------------------------
         data, inst_names_rv, inst_names_pm, inst_names_as, inst_names_iad,
             iad_outliers = _build_data(_get(cfg, :data; default = Dict());
-                                       obliquity = _obliquity_cfg(cfg))
+                                       obliquity = _obliquity_cfg(cfg),
+                                       pm_planets = _cfg_pm_planets(cfg))
         isempty(iad_outliers) ||
             (summary["iad_outliers"] = _iad_outlier_summary(iad_outliers))
         star       = _build_star(_get(cfg, :star; default = Dict()))
@@ -366,11 +367,12 @@ function _validate_config(cfg::AbstractDict)
         data_cfg = _get(cfg, :data)
         has_any = any(_has(data_cfg, k) for k in
             (:rv, :transit_photometry, :iad, :gost, :hgca, :relastrom, :gaia_dr3,
-             :rm_nights, :tomography))
+             :rm_nights, :tomography, :transit_times))
         has_any || push!(errs,
             "`data` block must contain at least one of " *
             "rv, transit_photometry, iad, gost, hgca, relastrom, gaia_dr3, " *
-            "rm_nights, tomography")
+            "rm_nights, tomography, transit_times")
+        _validate_transit_times!(errs, cfg)
         if (_has(data_cfg, :rm_nights) || _has(data_cfg, :tomography)) &&
            _obliquity_cfg(cfg) === nothing
             push!(errs, "`data.rm_nights` / `data.tomography` are read by an obliquity " *
@@ -597,11 +599,114 @@ function _validate_config(cfg::AbstractDict)
     return nothing
 end
 
+# `data.transit_times`: a list of per-planet blocks, as Argus sends them
+# (docs/JOB_CONFIG.md). Everything that can be checked from the config alone,
+# collected with the rest: the shape, the time system, the array lengths, the
+# errors, the planet index and that planet's mode (it must have a transit to
+# predict mid-transit times). The epochs against the times are checked when the
+# block is parsed (`TransitTimeSet`).
+function _validate_transit_times!(errs, cfg)
+    data_cfg = _get(cfg, :data)
+    _has(data_cfg, :transit_times) || return nothing
+    blocks = _get(data_cfg, :transit_times)
+    shape = "a list of per-planet blocks {planet, time_system, values: {epoch, tc, " *
+            "tc_err, source}, reference_ephemeris}"
+    if !(blocks isa AbstractVector)
+        push!(errs, "`data.transit_times` must be $shape; got a $(typeof(blocks))")
+        return nothing
+    end
+    isempty(blocks) && (push!(errs, "`data.transit_times` is an empty list; drop it"); return nothing)
+    mdl = _get(cfg, :model; default = Dict())
+    obliq = _has(mdl, :obliquity)
+    max_k = obliq ? 1 : _has(mdl, :max_kplanet) ? Int(_get(mdl, :max_kplanet)) : nothing
+    modes = obliq ? nothing :
+            _has(mdl, :planet_modes) ? String.(collect(_get(mdl, :planet_modes))) :
+            max_k === nothing ? nothing : fill("RV_ONLY", max_k)
+    seen = Int[]
+    for (i, b) in enumerate(blocks)
+        at = "`data.transit_times[$i]`"
+        if !(b isa AbstractDict)
+            push!(errs, "$at must be an object; `data.transit_times` is $shape")
+            continue
+        end
+        p = _get(b, :planet; default = nothing)
+        if p === nothing || !(p isa Real && isinteger(p))
+            push!(errs, "$at: `planet` must be the 1-based index of a planet of the " *
+                        "model; got $(repr(p))")
+        else
+            p = Int(p)
+            if p < 1 || (max_k !== nothing && p > max_k)
+                push!(errs, "$at: planet $p does not exist; the model has " *
+                            "$(something(max_k, "?")) planet(s) and `planet` is 1-based")
+            elseif modes !== nothing && p <= length(modes) && haskey(_PLANET_MODES, modes[p]) &&
+                   !has_pm(_PLANET_MODES[modes[p]])
+                push!(errs, "$at (model.planet_modes[$p] = $(modes[p])): " *
+                            _tt_mode_error(p, _PLANET_MODES[modes[p]]))
+            end
+            p in seen && push!(errs, "$at: a second block for planet $p; merge each " *
+                                     "planet's transit times into one block")
+            push!(seen, p)
+        end
+        ts = _get(b, :time_system; default = nothing)
+        if ts === nothing
+            push!(errs, "$at: missing `time_system`; it must be \"BJD_TDB\"")
+        elseif String(ts) != "BJD_TDB"
+            push!(errs, "$at: time_system \"$ts\" is not accepted, only \"BJD_TDB\" " *
+                        "is. Convert the times to BJD_TDB.")
+        end
+        vals = _get(b, :values; default = nothing)
+        if vals === nothing || !(vals isa AbstractDict)
+            push!(errs, "$at: missing `values` {epoch, tc, tc_err, source}")
+        else
+            lens = Pair{String, Int}[]
+            for k in ("epoch", "tc", "tc_err", "source", "use")
+                if _has(vals, k)
+                    v = _get(vals, k)
+                    v isa AbstractVector ? push!(lens, k => length(v)) :
+                        push!(errs, "$at.values.$k must be an array")
+                elseif k in ("epoch", "tc", "tc_err")
+                    push!(errs, "$at.values.$k is required")
+                end
+            end
+            length(unique(last.(lens))) <= 1 || push!(errs,
+                "$at.values: the arrays have different lengths (" *
+                join(("$k = $n" for (k, n) in lens), ", ") * "); give one entry per " *
+                "transit in each")
+            e = _get(vals, :tc_err; default = nothing)
+            if e isa AbstractVector
+                bad = findall(x -> !(x isa Real && isfinite(x) && x > 0), collect(e))
+                isempty(bad) || push!(errs, "$at.values.tc_err must be finite and > 0; " *
+                                            "entries $(bad) (1-based) are not")
+            end
+        end
+        po = _get(b, :photometry_overlap; default = "drop")
+        String(po) in ("drop", "keep") || push!(errs,
+            "$at: photometry_overlap must be \"drop\" (the default) or \"keep\"; got \"$po\"")
+        _get(b, :jitter; default = false) isa Bool || push!(errs,
+            "$at: jitter must be true or false")
+        ex = _get(b, :exclude_sources; default = String[])
+        ex isa AbstractVector || push!(errs,
+            "$at: exclude_sources must be a list of source strings")
+    end
+    return nothing
+end
+
+# The planets whose mode has a transit (`:PM`): the ones whose transit the
+# photometry models. `nothing` for an obliquity model or without a model block.
+function _cfg_pm_planets(cfg)
+    mdl = _get(cfg, :model; default = nothing)
+    (mdl === nothing || _has(mdl, :obliquity)) && return nothing
+    max_k = Int(_get(mdl, :max_kplanet; default = 1))
+    modes = String.(collect(_get(mdl, :planet_modes; default = fill("RV_ONLY", max_k))))
+    return Set(k for (k, m) in enumerate(modes)
+               if haskey(_PLANET_MODES, m) && has_pm(_PLANET_MODES[m]))
+end
+
 # =====================================================================
 # Data builder
 # =====================================================================
 
-function _build_data(data_cfg; obliquity = nothing)
+function _build_data(data_cfg; obliquity = nothing, pm_planets = nothing)
     inst_names_rv = String[]
     inst_names_pm = String[]
     # Relative-astrometry imager names. Only these get `sigma_as_<name>`
@@ -707,6 +812,10 @@ function _build_data(data_cfg; obliquity = nothing)
     end
     if _has(data_cfg, :gaia_dr3)
         kw[:gaia_dr3] = _parse_gaia_dr3_block(_get(data_cfg, :gaia_dr3))
+    end
+    if _has(data_cfg, :transit_times)
+        kw[:transit_times] = _parse_transit_times_blocks(_get(data_cfg, :transit_times);
+                                 t_phot = get(kw, :t_phot, Float64[]), pm_planets)
     end
     # Obliquity: RM nights become RV instruments, line-profile stacks become
     # residual maps (see runner_obliquity.jl).
@@ -861,6 +970,56 @@ function _parse_rv_csv(block)
         end
     end
     return t, v, σ, inst_idx, inst_names, indicators, indicator_errs, comp
+end
+
+# ---- Transit times -----------------------------------------------------
+# One `TransitTimeSet` per block. A transit time whose transit is in the fitted
+# photometry of a planet the photometry models (`pm_planets`) is left out of the
+# likelihood (`_drop_photometry_overlap`), so that each transit counts once,
+# unless the block says `photometry_overlap: "keep"`. `pm_planets = nothing`
+# (the model is not known here) skips that check.
+function _parse_transit_times_blocks(blocks; t_phot = Float64[], pm_planets = nothing)
+    sets = TransitTimeSet[]
+    blocks isa AbstractVector || throw(ArgumentError(
+        "`data.transit_times` must be a list of per-planet blocks (docs/JOB_CONFIG.md)"))
+    for b in blocks
+        vals = _get(b, :values; required = true)
+        p = Int(_get(b, :planet; required = true))
+        ref = _get(b, :reference_ephemeris; default = nothing)
+        refnt = ref === nothing ? nothing :
+            (t0 = Float64(_get(ref, :t0; required = true)),
+             period = Float64(_get(ref, :period; required = true)),
+             epoch_zero = _get(ref, :epoch_zero; default = 0))
+        src = _get(vals, :source; default = nothing)
+        use = _get(vals, :use; default = nothing)
+        s = TransitTimeSet(; planet = p, name = String(_get(b, :name; default = "")),
+                time_system = String(_get(b, :time_system; default = "")),
+                epoch = collect(_get(vals, :epoch; required = true)),
+                tc = Float64.(collect(_get(vals, :tc; required = true))),
+                tc_err = Float64.(collect(_get(vals, :tc_err; required = true))),
+                source = src === nothing ? nothing : collect(src),
+                use = use === nothing ? nothing : Bool.(collect(use)),
+                reference = refnt,
+                exclude_sources = String.(collect(_get(b, :exclude_sources;
+                                                       default = String[]))),
+                jitter = Bool(_get(b, :jitter; default = false)))
+        keep = String(_get(b, :photometry_overlap; default = "drop")) == "keep"
+        if pm_planets !== nothing && p in pm_planets && !keep && !isempty(t_phot)
+            s, nd = _drop_photometry_overlap(s, t_phot)
+            if nd > 0
+                ep = s.epoch[s.excluded .== "photometry_overlap"]
+                @warn "data.transit_times: $nd transit time(s) of planet $p (epoch(s) " *
+                      "$(join(first(ep, 10), ", "))$(length(ep) > 10 ? ", ..." : "")) " *
+                      "fall inside the fitted photometry, which already contains those " *
+                      "transits. They are left out of the likelihood so that each transit " *
+                      "counts once, and reported in summary.json with excluded = " *
+                      "\"photometry_overlap\". If they were measured from other data than " *
+                      "this photometry, set `photometry_overlap: \"keep\"` on the block."
+            end
+        end
+        push!(sets, s)
+    end
+    return sets
 end
 
 # ---- Photometry blocks ------------------------------------------------

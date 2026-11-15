@@ -114,7 +114,9 @@ _hash_skip(x::ParametrizationConfig, f::Symbol) =
     (f === :sample_a_Rs && !x.sample_a_Rs) || f === :density
 # No Hipparcos scan geometry: the HGCA/G23H Hipparcos epoch is instantaneous,
 # as it was in every run before the field existed.
-_hash_skip(x::Data, f::Symbol) = f === :hip_scans && x.hip_scans === nothing
+# No measured transit times: the model of every run before the field existed.
+_hash_skip(x::Data, f::Symbol) = (f === :hip_scans && x.hip_scans === nothing) ||
+                                 (f === :transit_times && isempty(x.transit_times))
 # Per-coordinate epochs equal to `epochs`: the epochs every HGCA had before.
 _hash_skip(x::HGCAData, f::Symbol) =
     (f === :epochs_ra && x.epochs_ra == x.epochs) ||
