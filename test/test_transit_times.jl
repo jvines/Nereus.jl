@@ -110,6 +110,16 @@ end
         @test occursin("photometry_overlap", m)
         c = cfg([_tt_block(ep, tc, σ)]); c["data"]["transit_times"] = Dict("planet" => 1)
         @test occursin("list of per-planet blocks", msg(c))
+        # The TTV slot keys map planets to a count or a list of transits.
+        c = cfg([_tt_block(ep, tc, σ)]; modes = ["PM_TTV"])
+        c["model"]["ttv_n_transits"] = Dict(); c["model"]["ttv_epochs"] = Dict("1" => [0, 4])
+        @test Nereus._validate_config(c) === nothing
+        c["model"]["ttv_epochs"] = [0, 4]
+        @test occursin("model.ttv_epochs must map planet indices", msg(c))
+        c["model"]["ttv_epochs"] = Dict("1" => [0.5])
+        @test occursin("model.ttv_epochs must map planet indices", msg(c))
+        c["model"]["ttv_epochs"] = Dict("1" => [0, 4]); c["model"]["ttv_n_transits"] = Dict("b" => 3)
+        @test occursin("model.ttv_n_transits must map planet indices", msg(c))
     end
 
     @testset "TransitTimeSet / Data validation" begin
@@ -471,34 +481,37 @@ end
         @test r.summary["status"] == "ok"
         @test r.summary["transit_times"]["status"] == "ok"
         @test only(r.summary["transit_times"]["planets"])["n_points"] == length(tc)
-        # One free offset per transit of the span: max − min + 1 epochs.
-        @test isempty(_tt_draws(out, "ttv_k1_t24")) == false
+        # run_job's default: one free offset per transit time, on its transit.
         ch = Nereus.load_chains(joinpath(out, "chains.nc"))
         ch = ch isa Tuple ? first(ch) : ch
-        @test !(Symbol("ttv_k1_t25") in names(ch))
+        @test Symbol("ttv_k1_t$(length(ep))") in names(ch)
+        @test !(Symbol("ttv_k1_t$(length(ep) + 1)") in names(ch))
+        sl = only(r.summary["ttv_slots"]["planets"])
+        @test sl["source"] == "default"
+        @test sl["epochs"] == ep .- ep[1]
+        @test sl["transit_times_epoch"] == ep
+        @test sl["slots"][end] == "ttv_k1_t$(length(ep))"
 
-        # The count: explicit (a Dict or one Int), else from the epochs used,
-        # widened over the photometry by their ephemeris; refused for photometry
-        # with nothing to count from.
+        # The keys: explicit (one Int, or a Dict), else left to run_job's
+        # default; refused for a planet with photometry and no transit times.
         blk = _tt_block(ep, tc, σ)
-        dc = Dict{String, Any}("transit_times" => [blk])
-        @test Nereus._fit_ttv_slots(dc, 1, nothing, false) == Dict("1" => 24)
-        use = trues(length(ep)); use[[1, end]] .= false
-        blk_u = deepcopy(blk); blk_u["values"]["use"] = use
-        @test Nereus._fit_ttv_slots(Dict{String, Any}("transit_times" => [blk_u]), 1,
-                                    nothing, false) == Dict("1" => ep[end-1] - ep[2] + 1)
-        @test Nereus._fit_ttv_slots(dc, 2, 7, false) == Dict("1" => 7, "2" => 7)
-        @test Nereus._fit_ttv_slots(dc, 1, Dict(1 => 30), false) == Dict("1" => 30)
-        tph = collect(range(TT_T0 - 2TT_P - 0.1, TT_T0 - 2TT_P + 0.1; length = 50))
-        dp = Dict{String, Any}("transit_photometry" => [Dict("instrument" => "TESS",
-                 "values" => Dict("bjd" => tph, "flux" => ones(50),
-                                  "flux_err" => fill(1e-3, 50)))])
-        e = _tt_err(() -> Nereus._fit_ttv_slots(dp, 1, nothing, true))
-        @test e isa ArgumentError && occursin("ttv_n_transits = Dict(1 => N)", e.msg)
-        dp["transit_times"] = [blk]      # photometry two transits before epoch 0
-        @test Nereus._fit_ttv_slots(dp, 1, nothing, true) == Dict("1" => 26)
-        e = _tt_err(() -> Nereus._fit_ttv_slots(dp, 2, nothing, true))
+        m = Nereus._fit_ttv_slots!(Dict{String, Any}(), 1, nothing, nothing, [blk], false)
+        @test !haskey(m, "ttv_n_transits") && !haskey(m, "ttv_epochs")
+        m = Nereus._fit_ttv_slots!(Dict{String, Any}(), 2, 7, nothing, [blk], false)
+        @test m["ttv_n_transits"] == Dict("1" => 7, "2" => 7)
+        m = Nereus._fit_ttv_slots!(Dict{String, Any}(), 1, Dict(1 => 30), nothing, [blk], false)
+        @test m["ttv_n_transits"] == Dict("1" => 30)
+        m = Nereus._fit_ttv_slots!(Dict{String, Any}(), 1, nothing, Dict(1 => [0, 5]),
+                                   nothing, true)
+        @test m["ttv_epochs"] == Dict("1" => [0, 5])
+        e = _tt_err(() -> Nereus._fit_ttv_slots!(Dict{String, Any}(), 1, nothing, nothing,
+                                                 nothing, true))
+        @test e isa ArgumentError && occursin("ttv_n_transits = Dict(1 => N)", e.msg) &&
+              occursin("ttv_epochs", e.msg)
+        e = _tt_err(() -> Nereus._fit_ttv_slots!(Dict{String, Any}(), 2, nothing, nothing,
+                                                 [blk], true))
         @test e isa ArgumentError && occursin("planet(s) 2", e.msg)
+        tph = collect(range(TT_T0 - 2TT_P - 0.1, TT_T0 - 2TT_P + 0.1; length = 50))
         e = _tt_err(() -> Nereus.fit_ttv(; phot = Dict("TESS" => (t = tph,
                          flux = ones(50), flux_err = fill(1e-3, 50))), planets = 1))
         @test e isa ArgumentError && occursin("ttv_n_transits", e.msg)
@@ -509,11 +522,189 @@ end
                                          rv = Dict("H" => (t = [1.0, 2.0], rv = [0.0, 0.0],
                                                            rv_err = [1.0, 1.0])),
                                          ttv_n_transits = 5))
-        @test e isa ArgumentError && occursin("Drop ttv_n_transits", e.msg)
+        @test e isa ArgumentError && occursin("Drop them", e.msg)
         # The engine's options reach the sampler.
         @test Nereus._sampler_block(nothing) == Dict{String, Any}()
         @test Nereus._sampler_block(Dict("engine" => "pt_emcee",
                                          "options" => Dict("n_steps" => 5))) ==
               Dict{String, Any}("name" => "pt_emcee", "kwargs" => Dict("n_steps" => 5))
+    end
+
+    @testset "ttv_epochs: slots on listed transits" begin
+        # The slot lookup.
+        @test Nereus.ttv_slot(7, 3, [0, 7, 30]) == 2
+        @test Nereus.ttv_slot(30, 3, [0, 7, 30]) == 3
+        @test Nereus.ttv_slot(8, 3, [0, 7, 30]) == 0
+        @test Nereus.ttv_slot(-1, 3, [0, 7, 30]) == 0
+        @test Nereus.ttv_slot(2, 3, Int[]) == 3
+        @test Nereus.ttv_slot(3, 3, Int[]) == 0
+        @test Nereus.ttv_slot(-1, 3, Int[]) == 0
+
+        ep = [100, 107, 130, 150]
+        tc = TT_T0 .+ TT_P .* (ep .- 100)
+        σ = fill(TT_MIN, 4)
+        data = Data(; transit_times = [TransitTimeSet(; planet = 1, epoch = ep, tc, tc_err = σ)])
+        mk(; kw...) = Params(; max_kplanet = 1, planet_modes = [PM_TTV],
+                               instruments = InstrumentConfig(), data,
+                               parametrization = ParametrizationConfig(time = :Tc),
+                               stability = :none, kw...)
+        p = mk(ttv_epochs = Dict(1 => [0, 7, 30]))
+        @test [n for n in p.layout.unfrozen_names if startswith(n, "ttv_")] ==
+              ["ttv_k1_t1", "ttv_k1_t2", "ttv_k1_t3"]
+        @test p.config.ttv_n_transits[1] == 3
+        @test Nereus.ttv_slot_epochs(p.config, 1) == [0, 7, 30]
+        @test Nereus.ttv_name_epoch(p.config, "ttv_k1_t2") == 7
+        @test Nereus.ttv_name_epoch(p.config, "ttv_k1_t4") === nothing
+        @test Nereus.ttv_name_epoch(p.config, "P_k1") === nothing
+        # Offsets on the three listed transits; the fourth has none.
+        th = Theta{Float64}(p)
+        Nereus.set_param!(th, "P_k1", TT_P); Nereus.set_param!(th, "Tc_k1", TT_T0)
+        Nereus.set_param!(th, "sesinw_k1", 0.0); Nereus.set_param!(th, "secosw_k1", 0.0)
+        off = [3.0, -2.0, 4.0] .* TT_MIN
+        for i in 1:3
+            Nereus.set_param!(th, "ttv_k1_t$i", off[i])
+        end
+        m = only(transit_times_model(th, data))
+        @test m.model .- tc ≈ [off; 0.0] atol = 1e-9
+        # ttv_n_transits = N is ttv_epochs = 0:N-1.
+        q = mk(ttv_n_transits = Dict(1 => 3))
+        @test Nereus.ttv_slot_epochs(q.config, 1) == [0, 1, 2]
+        @test Nereus.ttv_name_epoch(q.config, "ttv_k1_t3") == 2
+        # Refused: both keys, unsorted, repeated, before the first transit.
+        for (kw, msg) in ((Dict(:ttv_n_transits => Dict(1 => 3),
+                                :ttv_epochs => Dict(1 => [0, 7])), "in both"),
+                          (Dict(:ttv_epochs => Dict(1 => [7, 0])), "strictly increasing"),
+                          (Dict(:ttv_epochs => Dict(1 => [0, 7, 7])), "strictly increasing"),
+                          (Dict(:ttv_epochs => Dict(1 => [-1, 7])), "first observed"))
+            e = _tt_err(() -> mk(; kw...))
+            @test e isa ArgumentError && occursin(msg, e.msg)
+        end
+        # The fingerprint of a model without listed epochs is the old one.
+        @test isempty(q.config.ttv_epochs)
+        @test Nereus._hash_skip(q.config, :ttv_epochs)
+        @test !Nereus._hash_skip(p.config, :ttv_epochs)
+    end
+
+    @testset "runner default: offsets on the observed transits" begin
+        ep = [0, 1, 2, 5, 8, 9, 13, 20]
+        σ = fill(0.5TT_MIN, length(ep))
+        tc = TT_T0 .+ TT_P .* ep
+        blk = _tt_block(ep, tc, σ)
+        use = trues(length(ep)); use[end] = false
+        blk_u = deepcopy(blk); blk_u["values"]["use"] = use
+        # A light curve two transits before epoch 0 (one transit window), and
+        # one spanning epochs 3 and 4 (the transit at 5 has a transit time).
+        tph = vcat(collect(range(TT_T0 - 2TT_P - 0.1, TT_T0 - 2TT_P + 0.1; length = 50)),
+                   collect(range(TT_T0 + 2.6TT_P, TT_T0 + 4.4TT_P; length = 300)))
+        phot = [Dict("instrument" => "TESS", "values" => Dict("bjd" => tph,
+                     "flux" => ones(length(tph)), "flux_err" => fill(1e-3, length(tph))))]
+        data_of(dc) = first(Nereus._build_data(dc; pm_planets = [1]))
+        mdl = Dict{String, Any}("planet_modes" => ["PM_TTV"])
+        # Transit times alone: the transits of those in the likelihood.
+        d1 = data_of(Dict{String, Any}("transit_times" => [blk_u]))
+        c, e = @test_logs (:info, r"7 free transit-time offsets") Nereus._ttv_slot_kwargs(mdl, d1, [PM_TTV])
+        @test isempty(c) && e[1] == ep[1:end-1]
+        # With photometry: its transit windows too, numbered from the first.
+        d2 = data_of(Dict{String, Any}("transit_times" => [blk], "transit_photometry" => phot))
+        c, e = @test_logs (:info, r"3 more in the photometry") Nereus._ttv_slot_kwargs(mdl, d2, [PM_TTV])
+        @test e[1] == sort(vcat([-2, 3, 4], ep)) .+ 2
+        # An empty dict names no planet (Argus sends "ttv_n_transits": {}).
+        c, e = @test_logs (:info,) Nereus._ttv_slot_kwargs(
+            Dict{String, Any}("ttv_n_transits" => Dict(), "ttv_epochs" => Dict()), d1, [PM_TTV])
+        @test e[1] == ep[1:end-1]
+        # A planet the config names keeps what it says, with no message.
+        c, e = @test_logs Nereus._ttv_slot_kwargs(
+            Dict{String, Any}("ttv_n_transits" => Dict("1" => 4)), d1, [PM_TTV])
+        @test c == Dict(1 => 4) && isempty(e)
+        c, e = @test_logs Nereus._ttv_slot_kwargs(
+            Dict{String, Any}("ttv_epochs" => Dict("1" => [0, 3])), d1, [PM_TTV])
+        @test isempty(c) && e[1] == [0, 3]
+        # Photometry only: a linear ephemeris, said so.
+        d3 = data_of(Dict{String, Any}("transit_photometry" => phot))
+        c, e = @test_logs (:warn, r"linear ephemeris.*ttv_n_transits.*ttv_epochs") Nereus._ttv_slot_kwargs(mdl, d3, [PM_TTV])
+        @test isempty(c) && isempty(e)
+        # No analytic TTVs, no default.
+        c, e = @test_logs Nereus._ttv_slot_kwargs(mdl, d1, [PM_ONLY])
+        @test isempty(c) && isempty(e)
+    end
+
+    @testset "fit: ttv_n_transits and ttv_epochs = 0:N-1 give the same draws" begin
+        rng = MersenneTwister(21)
+        N = 8
+        ep = collect(0:N-1)
+        σ = fill(0.5TT_MIN, N)
+        tc = TT_T0 .+ TT_P .* ep .+ 2TT_MIN .* sin.(ep) .+ σ .* randn(rng, N)
+        pri = merge(_TT_FIXED_GEOM, Dict(
+            "ttv_k1_t$i" => Dict("type" => "truncnorm", "args" => [0.0, 10TT_MIN, -0.05, 0.05])
+            for i in 1:N))
+        function run(slots)
+            out = mktempdir()
+            s = Nereus.run_job(Dict{String, Any}("seed" => 4, "output_dir" => out,
+                "data" => Dict("transit_times" => [_tt_block(ep, tc, σ)]),
+                "model" => merge(Dict{String, Any}("max_kplanet" => 1,
+                                                   "planet_modes" => ["PM_TTV"]), slots),
+                "priors" => pri,
+                "sampler" => _tt_sampler(n_walkers = 32, n_steps = 400, n_burnin = 200),
+                "output" => _TT_OUT))
+            return s, out
+        end
+        s1, o1 = run(Dict("ttv_n_transits" => Dict("1" => N)))
+        s2, o2 = run(Dict("ttv_epochs" => Dict("1" => ep)))
+        @test s1["status"] == "ok" && s2["status"] == "ok"
+        for nm in vcat(["P_k1", "phic_k1"], ["ttv_k1_t$i" for i in 1:N])
+            @test _tt_draws(o1, nm) == _tt_draws(o2, nm)
+        end
+        @test s1["ttv_slots"]["planets"][1]["source"] == "ttv_n_transits"
+        @test s2["ttv_slots"]["planets"][1]["source"] == "ttv_epochs"
+        @test s1["ttv_slots"]["planets"][1]["epochs"] == s2["ttv_slots"]["planets"][1]["epochs"] == ep
+        # Both keys for one planet: refused.
+        e = _tt_err(() -> run(Dict("ttv_n_transits" => Dict("1" => N),
+                                   "ttv_epochs" => Dict("1" => ep))))
+        @test e isa ArgumentError && occursin("in both", e.msg)
+    end
+
+    @testset "fit: sparse transit times, one offset per observed transit" begin
+        # 40 transit times over 3000 epochs (an ExoClock-like record), a
+        # sinusoidal TTV on them. With neither ttv key, PM_TTV gets 40 slots on
+        # the observed transits, not 3000.
+        rng = MersenneTwister(33)
+        ep = Int[]
+        while length(ep) < 40
+            ep = sort(unique(vcat(ep, rand(rng, 0:3000, 40 - length(ep)))))
+        end
+        A, Pttv, φ = 5TT_MIN, 137.3, 0.9
+        inj = A .* sin.(2π .* ep ./ Pttv .+ φ)
+        σ = fill(0.5TT_MIN, 40)
+        tc = TT_T0 .+ TT_P .* ep .+ inj .+ σ .* randn(rng, 40)
+        out = mktempdir()
+        pri = merge(_TT_FIXED_GEOM, Dict(
+            "ttv_k1_t$i" => Dict("type" => "truncnorm", "args" => [0.0, 10TT_MIN, -0.05, 0.05])
+            for i in 1:40))
+        cfg = Dict{String, Any}("seed" => 5, "output_dir" => out,
+            "data" => Dict("transit_times" => [_tt_block(ep, tc, σ)]),
+            "model" => Dict("max_kplanet" => 1, "planet_modes" => ["PM_TTV"],
+                            "ttv_n_transits" => Dict()),
+            "priors" => pri,
+            "sampler" => _tt_sampler(n_walkers = 128, n_steps = 6000, n_burnin = 3000),
+            "output" => _TT_OUT)
+        s = @test_logs (:info, r"40 free transit-time offsets") match_mode = :any Nereus.run_job(cfg)
+        @test s["status"] == "ok"
+        sl = only(s["ttv_slots"]["planets"])
+        @test sl["epochs"] == ep .- ep[1] && sl["transit_times_epoch"] == ep
+        @test sl["source"] == "default"
+        ch = Nereus.load_chains(joinpath(out, "chains.nc"))
+        ch = ch isa Tuple ? first(ch) : ch
+        @test !(Symbol("ttv_k1_t41") in names(ch))
+        δ = [median(_tt_draws(out, "ttv_k1_t$i")) for i in 1:40]
+        # The offsets carry the TTV less a linear ephemeris (Tc and P absorb
+        # it): a sinusoid plus a line, at the observed epochs.
+        X = hcat(ones(40), ep, sin.(2π .* ep ./ Pttv), cos.(2π .* ep ./ Pttv))
+        c = X \ δ
+        amp, ph = hypot(c[3], c[4]), atan(c[4], c[3])
+        @info "transit times, sparse PM_TTV" amp_min = amp / TT_MIN A_min = A / TT_MIN phase = ph φ
+        @test isapprox(amp, A; rtol = 0.1)
+        @test abs(mod(ph - φ + π, 2π) - π) < 0.1
+        @test std(δ .- X * c) < 1.5 * 0.5TT_MIN
+        @test 0.0 < only(s["transit_times"]["planets"])["red_chi2"] < 2.0
     end
 end
