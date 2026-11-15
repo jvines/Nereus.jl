@@ -320,12 +320,19 @@ rather than a single number trusted.
                                            //   ttvfaster: Agol & Deck 2016 1st-order, autodiff-clean
                                            //   nbody:     NbodyGradient.jl (AHL21); strips Duals →
                                            //              use a gradient-free sampler
-    // ttv_n_transits: free per-transit offset counts for *_TTV modes.
-    //   Keys are 1-based planet indices as strings. Offset ttv_k<k>_t<i> is the
-    //   (i−1)-th transit after planet k's first observed one (the transit nearest
-    //   the earliest photometric cadence or measured transit time), under every
-    //   time anchor.
+    // ttv_n_transits / ttv_epochs: the free per-transit offsets of *_TTV modes
+    //   (see "Free TTV offsets" below). Keys are 1-based planet indices as
+    //   strings. Transits are numbered from planet k's first observed one (0),
+    //   under every time anchor.
+    //   ttv_n_transits: N → ttv_k<k>_t1..tN on transits 0..N−1.
+    //   ttv_epochs: a strictly increasing list → ttv_k<k>_t<I> on transit
+    //     list[I]; every other transit has no offset. For sparse transit times.
+    //   One key per planet (both is an error); an empty dict names no planet.
+    //   A *_TTV planet named by neither gets one offset per observed transit
+    //   when it has transit times, and none (a linear ephemeris, with a
+    //   warning) when it has photometry only.
     "ttv_n_transits": { "1": 30 },
+    "ttv_epochs": { "2": [0, 17, 18, 412, 2950] },
 
     // ---- external_priors: priors on DERIVED (non-sampled) quantities ----
     // `priors` above keys on sampled slots; these act on values computed FROM
@@ -672,9 +679,8 @@ from the planet's orbit as the photometry computes it, so it is correct under
 every time anchor (`phic`, `Tc`, `Mo`, `Tp`) and at any eccentricity:
 - linear / Keplerian modes (`PM_ONLY`, `RVPM`, …): `T(n) = Tc + n·P` (Nereus has
   no dP/dN parameter, so there is no quadratic term);
-- `:TTV` modes: plus the free offset of that transit, as in the photometry
-  (`model.ttv_n_transits`; slot `i` is the `(i − 1)`-th transit after the
-  planet's first observed one, in the photometry or the transit times);
+- `:TTV` modes: plus the free offset of that transit, as in the photometry, or
+  none when no slot holds it (see "Free TTV offsets" below);
 - `:TTV_NB` modes: plus the N-body offset from the same solver the photometric
   TTV path uses (TTVFaster, or NbodyGradient under `ttv_backend: "nbody"`),
   integrated over the photometry and the transit times together.
@@ -719,6 +725,42 @@ photometry, both stay as they were.
 **Engines.** Every engine that evaluates the RV likelihood gets the term.
 `ad_backend = :Enzyme` refuses a target with transit times (it would drop the
 term); use ForwardDiff.
+
+### Free TTV offsets (`model.ttv_n_transits`, `model.ttv_epochs`)
+
+A `*_TTV` planet (`PM_TTV`, `RVPM_TTV`, …) fits a free time offset
+`ttv_k<k>_t<I>` on each of a chosen set of transits, in the photometry and the
+transit times alike; every other transit sits on the linear ephemeris.
+
+**Numbering.** Transits are counted from the planet's first observed transit,
+0: the transit of the earliest photometric cadence or measured transit time
+that lies within a quarter period of a predicted centre
+(`|frac((t − Tc)/P)| < 1/4`). Transit times sit at centres and count at once.
+It is found again at every evaluation, so a transit keeps its slot whatever Tc
+a draw has, under every time anchor. A light curve cropped to ±P/2 around its
+transits starts half a period from one, and that cadence does not count: the
+next one in the window does.
+
+**Keys** (per planet, as strings):
+- `ttv_n_transits: {"1": N}` — slots on transits 0..N−1.
+- `ttv_epochs: {"1": [e1, e2, …]}` — slots on the transits listed, strictly
+  increasing and ≥ 0: `ttv_k1_t<I>` is transit `e_I`. Tens of transit times
+  over thousands of epochs need tens of slots, not thousands.
+- `ttv_n_transits = N` is `ttv_epochs = [0, …, N−1]` and gives the same fit.
+  Naming one planet in both is an error. An empty dict names no planet (Argus
+  sends `"ttv_n_transits": {}`).
+
+**Default.** A `*_TTV` planet that neither key names:
+- with transit times: one slot per observed transit, those of its transit times
+  in the likelihood and, with photometry, each transit with a cadence within a
+  quarter period of its centre, placed by the transit times' least-squares
+  ephemeris. One Info line says how many and where they came from.
+- with photometry only: no slots, so a linear ephemeris, with a warning naming
+  both keys. `fit_ttv` refuses this case instead.
+
+`summary.json` lists each slot's transit in `ttv_slots` (below), and the fitted
+tables carry it as `epoch` (JSON, `.dat`, `.tex`, ECSV meta); corner and trace
+labels show it.
 
 ### `model.planet_modes` and Rossiter-McLaughlin
 - One mode per planet slot. The `*_RM` / `*_RM_R` modes add the in-transit RM
@@ -1094,6 +1136,25 @@ numbers live under `fitted` / `derived`
                                                        // "" | "use" | "exclude_sources"
                                                        //   | "photometry_overlap"
         }
+      }
+    ]
+  },
+
+  // ---- free TTV offsets (only when a *_TTV planet has them) ----
+  "ttv_slots": {
+    "status": "ok",                         // "failed" + "error": never raised
+    "planets": [
+      {
+        "planet": 1,
+        "slots":  ["ttv_k1_t1", "ttv_k1_t2", "ttv_k1_t3"],
+        "epochs": [0, 2, 870],              // each slot's transit, counted from the
+                                            //   planet's first observed transit (0)
+        "numbering": "transit number counted from the planet's first observed transit (0)",
+        "source": "default",                // "ttv_n_transits" | "ttv_epochs" | "default"
+        "draw": "max_lp",
+        "t_lin": [2457010.5123, 2457012.6951, 2457958.0071],   // linear-ephemeris time, BJD_TDB
+        "transit_times_epoch": [0, 2, 870]  // the transit's label in the transit
+                                            //   times' numbering (planets with them)
       }
     ]
   },

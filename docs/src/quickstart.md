@@ -213,7 +213,7 @@ your priors name (an `Mo_k1` prior selects `Mo`), else `phic`; `t_ref_c`;
 which `ParametrizationConfig` rejects); `marginalize_gamma`, `use_rho_s`
 bool; `density` ∈ {`rho_circ` (the default), `rho_star`}), `stability` ∈
 {`none`, `amd`, `gladman`}, `trend_order` / `phot_trend_order` ∈ {0, 1, 2},
-`ttv_n_transits`, `ttv_backend`.
+`ttv_n_transits`, `ttv_epochs`, `ttv_backend`.
 
 **`planet_modes`** (known values): `RV_ONLY`, `PM_ONLY`, `RVPM`,
 `RVAS`, `RVPMAS`, `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`,

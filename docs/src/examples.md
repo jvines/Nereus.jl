@@ -504,18 +504,21 @@ for the Reloaded model).
 ## 7. Transit-timing variations — `RVPM_TTV`
 
 Single transiting planet with a non-linear ephemeris: per-transit
-timing offsets are free parameters (`ttv_k1_t<i>`). Declare the
-per-planet transit count with `model.ttv_n_transits` (a map
-`planet → n_transits`). The default per-offset prior is
-`NormalPrior(0, 1 d, ±10 d)`. The offsets are numbered from the planet's
-first observed transit, the transit nearest the earliest time in its data
-(first photometric cadence or first measured transit time): `ttv_k1_t<i>`
-is the `(i − 1)`-th transit after it, so `n_transits` is the number of
-transits from the first observed one to the last. The numbering is the same
-under every time anchor and wherever `Tc` sits. The `ttv_oc` and
-`transit_overlay` plots number transits from `Tc` (0 at `Tc`, negative
-before it); the offset of their transit `N` is `ttv_k1_t<N − n0 + 1>`, `n0`
-the plots' number of the first observed transit.
+timing offsets are free parameters (`ttv_k1_t<i>`). Transits are numbered
+from the planet's first observed transit, 0: the transit of the earliest
+photometric cadence or measured transit time within a quarter period of a
+predicted centre. Choose the transits that get an offset with
+`model.ttv_n_transits` (`planet → N`: transits 0..N−1) or `model.ttv_epochs`
+(`planet → [transit numbers]`, strictly increasing: `ttv_k1_t<i>` is the
+`i`-th transit listed, and every other transit has no offset — for tens of
+transit times spread over thousands of epochs). Without either, a planet
+with measured transit times gets one offset per observed transit (its
+transit times', and its photometric transits'), and a planet with photometry
+only none, with a warning. The default per-offset prior is
+`NormalPrior(0, 1 d, ±10 d)`. The numbering is the same under every time
+anchor and wherever `Tc` sits. The `ttv_oc` and `transit_overlay` plots
+number transits from `Tc` (0 at `Tc`, negative before it); `summary.json`'s
+`ttv_slots` gives each offset's transit and its linear-ephemeris time.
 
 ```julia
 using Nereus
@@ -534,7 +537,7 @@ cfg = Dict(
      "planet_modes"    => ["RVPM_TTV"],
      "parametrization" => Dict("mass" => "K_driven", "time" => "Tc",
                                "ew" => "sesinw", "geom" => "b_rr"),
-     "ttv_n_transits"  => Dict("1" => 12),      # planet 1 has 12 observed transits
+     "ttv_n_transits"  => Dict("1" => 12),      # offsets on transits 0..11 from the first observed one
      "stability"       => "none"),
   "priors" => Dict(
      "P_k1"  => Dict("type" => "NormalPrior",  "args" => [3.6, 0.01, 3.4, 3.8]),

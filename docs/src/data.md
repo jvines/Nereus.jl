@@ -695,8 +695,12 @@ transits from the model's own transit time and never reads the reference
 ephemeris. Transit times may be the only data. Optional keys: `values.use`,
 `exclude_sources`, `jitter` (adds `sigma_tt_k<planet>`, days, LogUniform prior)
 and `photometry_overlap` (`"drop"`, the default, leaves out a transit time whose
-transit is in the fitted photometry; `"keep"`). The full reference, including
-the `summary.json` block, is in `docs/JOB_CONFIG.md`.
+transit is in the fitted photometry; `"keep"`). A `*_TTV` planet (`PM_TTV`, …)
+with transit times and neither `model.ttv_n_transits` nor `model.ttv_epochs`
+gets one free offset per observed transit, on the transits of its transit times
+(and of its photometry); `model.ttv_epochs` lists them by hand, counted from
+the planet's first observed transit. The full reference, including the
+`summary.json` blocks, is in `docs/JOB_CONFIG.md`.
 
 From Julia:
 

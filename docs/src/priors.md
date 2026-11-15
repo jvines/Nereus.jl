@@ -318,13 +318,14 @@ set `density = :rho_star` (see [`parametrizations.md`](parametrizations.md)).
 
 ### TTV per-transit offsets
 
-For a planet with a TTV source and `ttv_n_transits[k] = n`, slots
-`ttv_k<k>_t<i>` (`i = 1..n`) default to `NormalPrior(0.0, 1.0, -10.0, 10.0)`
-(days). Slot `i` is the `(i − 1)`-th transit after the planet's first
-observed transit: the transit nearest the earliest time in its data (the
-first photometric cadence, or its first measured transit time, whichever is
-earlier). The numbering does not depend on the time anchor or on where `Tc`
-sits, so transits before `Tc` have offsets too. A planet with measured
+For a planet with a TTV source and `ttv_n_transits[k] = n` (or
+`ttv_epochs[k]`, a list of `n` transits), slots `ttv_k<k>_t<i>`
+(`i = 1..n`) default to `NormalPrior(0.0, 1.0, -10.0, 10.0)` (days). Slot
+`i` is the `(i − 1)`-th transit after the planet's first observed transit
+(the `i`-th transit of the `ttv_epochs` list): the transit of the earliest
+photometric cadence or measured transit time within a quarter period of a
+predicted centre. The numbering does not depend on the time anchor or on
+where `Tc` sits, so transits before `Tc` have offsets too. A planet with measured
 transit times (`data.transit_times`) gets `NormalPrior(0, 5 × max(RMS, median
 tc_err), ±P/4)` instead, RMS and P from the least-squares ephemeris of its
 transit times. Tighten with `NormalPrior(0, minutes_in_days, ±tight)` when you
