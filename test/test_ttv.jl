@@ -324,7 +324,10 @@ end
     Tp = tc_to_tp(Tc, P, e, ω)
     @test 0.45 * P < Tc - Tp < 0.5 * P          # the transit is ~P/2 from Tp
     t_ref = 2_450_005.0
-    t_phot = collect(range(Tc - 0.5 * P, Tc + 4.5 * P; step = 2 / 1440))
+    # The light curve starts 0.4 P before transit 0, outside every transit's
+    # quarter-period window: the first observed transit is transit 0 by that
+    # rule, not by which way a rounding tie at -P/2 breaks.
+    t_phot = collect(range(Tc - 0.4 * P, Tc + 4.5 * P; step = 2 / 1440))
     n_tr = 5                                     # transits 0..4 → slots 1..5
     data = Data(; t_phot, flux = ones(length(t_phot)),
                   flux_err = fill(1e-3, length(t_phot)),
@@ -348,6 +351,7 @@ end
         for i in 1:n_tr
             th.values[ix["ttv_k1_t$i"]] = 0.0
         end
+        @test Nereus._decode_ttv_state(th, planet_indices(th), data)[2].n0s[1] == 0
         pred0 = phot_predictions(th, data)[1]
         @test count(<(1), pred0) > 100                   # it transits
         for n in 0:(n_tr - 1), δ in (0.03, -0.02)
@@ -669,4 +673,67 @@ end
         Nereus.set_param!(thc, "Tc_k1", T0 + n_at * P)
         @test phot_predictions(thc, data)[1] ≈ flux atol = 1e-9
     end
+end
+
+# The first observed transit is the first point within a quarter period of a
+# predicted centre. It was the transit nearest the earliest point, and a light
+# curve cropped to ±P/2 around its transits starts half a period from one: the
+# rounding then tied, and draws on either side of the tie numbered every
+# transit one apart, so one slot held one transit in some draws and the next
+# in others.
+@testset "TTV-A: the first observed transit does not tie at half a period" begin
+    P, T0, b, rr = 3.5, 2_450_000.4, 0.2, 0.1
+    n_tr = 4
+    t_phot = collect(range(T0 - P / 2, T0 + (n_tr - 0.5) * P; step = 2 / 1440))
+    nobs = length(t_phot)
+    data = Data(; t_phot, flux = ones(nobs), flux_err = fill(1e-4, nobs),
+                  phot_inst = ones(Int, nobs))
+    params = Params(; max_kplanet = 1, planet_modes = [PM_TTV],
+                      instruments = InstrumentConfig(pm = ["TESS"]), data,
+                      parametrization = ParametrizationConfig(time = :Tc),
+                      M_s = 1.0, R_s = 1.0, stability = :none,
+                      ttv_n_transits = Dict(1 => n_tr))
+    ix = params.layout.name_to_idx
+    th = Theta{Float64}(params)
+    for (k, v) in ("P_k1" => P, "sesinw_k1" => 0.0, "secosw_k1" => 0.0,
+                   "b_k1" => b, "rr_k1" => rr, "q1_TESS" => 0.3, "q2_TESS" => 0.2)
+        Nereus.set_param!(th, k, v)
+    end
+    for i in 1:n_tr
+        th.values[ix["ttv_k1_t$i"]] = 0.0
+    end
+    epoch = round.(Int, (t_phot .- T0) ./ P)
+    for ε in (-1e-4, 1e-4)                       # Tc either side of the tie
+        Tc = T0 + ε
+        # The old rule: the transit nearest the first cadence.
+        @test round(Int, (t_phot[1] - Tc) / P) == (ε < 0 ? 0 : -1)
+        Nereus.set_param!(th, "Tc_k1", Tc)
+        @test Nereus._decode_ttv_state(th, planet_indices(th), data)[2].n0s[1] == 0
+        # Slot 1 moves transit 0 and nothing else, on both sides.
+        pred0 = phot_predictions(th, data)[1]
+        th.values[ix["ttv_k1_t1"]] = 0.02
+        pred1 = phot_predictions(th, data)[1]
+        th.values[ix["ttv_k1_t1"]] = 0.0
+        here = epoch .== 0
+        @test any(pred1[here] .!= pred0[here])
+        @test all(pred1[.!here] .== pred0[.!here])
+    end
+
+    # The scan itself.
+    ts = collect(range(0.0, 10.0; step = 0.01))          # starts on a centre
+    @test Nereus.ttv_first_transit(ts, Inf, 0.0, 1.0) == 0
+    @test Nereus.ttv_first_transit(ts .+ 0.5, Inf, 0.0, 1.0) == 1    # tie at 1/2
+    @test Nereus.ttv_first_transit(ts .+ 0.6, Inf, 0.0, 1.0) == 1
+    # A cadence exactly on a window's edge does not stall the scan.
+    @test Nereus.ttv_first_transit([0.75, 0.8], Inf, 0.0, 1.0) == 1
+    @test Nereus.ttv_first_transit([0.75], Inf, 0.0, 1.0) === nothing
+    # A gap over whole windows: the first cadence near a centre after it.
+    @test Nereus.ttv_first_transit([0.4, 0.45, 5.9, 6.0], Inf, 0.0, 1.0) == 6
+    # A transit time earlier than the first qualifying cadence wins; a later
+    # one does not.
+    @test Nereus.ttv_first_transit([0.4, 0.45, 5.9, 6.0], 3.02, 0.0, 1.0) == 3
+    @test Nereus.ttv_first_transit([0.4, 0.45, 5.9, 6.0], 7.0, 0.0, 1.0) == 6
+    @test Nereus.ttv_first_transit(Float64[], 3.02, 0.0, 1.0) == 3
+    # Nothing near a centre, and no transit time.
+    @test Nereus.ttv_first_transit([0.3, 0.4, 0.6, 0.7], Inf, 0.0, 1.0) === nothing
 end

@@ -111,6 +111,10 @@ struct Data
     # (src/transit_times_data.jl). Empty unless given; the transit-time term
     # then contributes exactly zero.
     transit_times::Vector{TransitTimeSet}
+    # `t_phot` in time order (the same vector when it already is): the free TTV
+    # offsets are numbered from the first cadence near a transit, found by a
+    # scan of it at every evaluation (`_ttv_first_transit`, src/ttv.jl).
+    t_phot_sorted::Vector{Float64}
 end
 
 """
@@ -456,13 +460,15 @@ function Data(;
 
     hip_geom = _resolve_hip_scans(iad, hip_scans, hgca !== nothing || g23h !== nothing)
 
+    t_phot_vec = Vector{Float64}(t_phot)
     return Data(
         Vector{Float64}(t_rv), Vector{Float64}(rv),
         Vector{Float64}(rv_err), rv_inst_vec, rv_comp_vec,
         t_ref_val, ind_dict, ind_err_dict, deriv_dict,
-        Vector{Float64}(t_phot), Vector{Float64}(flux),
+        t_phot_vec, Vector{Float64}(flux),
         Vector{Float64}(flux_err), phot_inst_vec, exp_vec,
         relastrom, hgca, iad, gost, g23h, gaia_dr3, tomo, hip_geom, tt_sets,
+        issorted(t_phot_vec) ? t_phot_vec : sort(t_phot_vec),
     )
 end
 
