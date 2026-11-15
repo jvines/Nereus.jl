@@ -200,6 +200,8 @@ function run_job(cfg::AbstractDict)
         end
         _postfit_stage!(pf, "summary")
         _populate_summary!(summary, result, params, chains)
+        isempty(data.transit_times) ||
+            (summary["transit_times"] = _transit_times_summary(chains, params, data))
         summary["provenance"] = provenance_block(_job_sampler_name(cfg), params)
         _postfit_stage!(pf, "evidence")
         bridge_t = Dict{String, Any}()
@@ -2661,6 +2663,93 @@ function _iad_fit_summary(chains, params::Params, data::Data; bf_cutoff::Real = 
         @debug "IAD χ² summary failed" exception = err
         return nothing
     end
+end
+
+# summary.json's `transit_times` block: per planet with measured transit times,
+# the fit of the transit-time term and the O−C at the draw the IAD χ² uses (the
+# max-lp draw of the best-fit cluster), and the posterior ephemeris from every
+# draw with the planet active (thinned to at most `max_draws`).
+#
+#   n_points, n_excluded -- in / out of the likelihood
+#   chi2, red_chi2       -- Σ (residual/σ)² over the points in the likelihood,
+#                           σ² = tc_err² + σ_tt² (jitter included), and χ²/N, as
+#                           the IAD and PPC summaries report it
+#   sigma_tt             -- the jitter at that draw (days), null without one
+#   oc                   -- per point: epoch, tc, tc_err, model, residual
+#                           (tc − model), source, used, excluded (the reason)
+#   ephemeris            -- t0 (the model's linear ephemeris at the labels'
+#                           epoch `epoch`: the reference ephemeris' epoch_zero,
+#                           else 0) and period, median and the 16/84 percentile
+#                           distances, days
+#
+# Fail-soft: a failure is reported in the block, never raised.
+function _transit_times_summary(chains, params::Params, data::Data;
+                                bf_cutoff::Real = 10.0, max_draws::Int = 20_000)
+    try
+        theta = _theta_best_lp(chains, params;
+                               active_idx = _top_lp_draw_pool(chains; bf_cutoff))
+        mods = transit_times_model(theta, data)
+        planets = Any[]
+        for (s, m) in zip(data.transit_times, mods)
+            u = s.used
+            z2 = (m.residual[u] ./ m.sigma[u]) .^ 2
+            chi2 = isempty(u) ? NaN : sum(z2)
+            k = s.planet
+            slots = params.layout.systemic.tt_jitter
+            has_jit = k <= length(slots) && slots[k] > 0
+            push!(planets, Dict{String, Any}(
+                "planet" => k, "name" => s.name,
+                "n_points" => length(u), "n_excluded" => length(s.tc) - length(u),
+                "chi2" => chi2, "red_chi2" => isempty(u) ? NaN : chi2 / length(u),
+                "sigma_tt" => has_jit ? tt_jitter_value(theta, k) : nothing,
+                "ambiguous_epochs" => m.ambiguous,
+                "draw" => "max_lp",
+                "ephemeris" => _tt_posterior_ephemeris(chains, params, data, s; max_draws),
+                "oc" => Dict{String, Any}(
+                    "epoch" => s.epoch, "tc" => s.tc, "tc_err" => s.tc_err,
+                    "model" => m.model, "residual" => m.residual, "source" => s.source,
+                    "used" => isempty.(s.excluded), "excluded" => s.excluded)))
+        end
+        return Dict{String, Any}("status" => "ok", "planets" => planets)
+    catch err
+        @warn "transit_times summary failed (continuing)" exception = (err, catch_backtrace())
+        return Dict{String, Any}("status" => "failed", "error" => sprint(showerror, err))
+    end
+end
+
+# The posterior linear ephemeris of a set's planet in the set's own labels:
+# t0 = Tc + (Δ + E0)·P per draw, the model's time of epoch label E0 (the
+# reference ephemeris' epoch_zero, 0 without one, so t0 compares with its t0),
+# Δ the label offset of that draw (`_tt_match` on the linear ephemeris): a draw
+# whose Tc sits in another copy of the orbit lands on the same t0. `nothing`
+# when no draw has the planet.
+function _tt_posterior_ephemeris(chains, params::Params, data::Data, s::TransitTimeSet;
+                                 max_draws::Int = 20_000)
+    n_tt(s) == 0 && return nothing
+    pool = _planet_present_idx(chains, params, s.planet)
+    isempty(pool) && return nothing
+    rows = pool[1:cld(length(pool), max_draws):end]
+    tdc = _td_cols(chains, params)
+    cols = _chain_cols(chains, params)
+    ref = s.tc[s.used[1]]                     # offsets keep the BJD digits
+    E0 = s.reference === nothing ? 0 : s.reference.epoch_zero
+    dt0 = Float64[]; Ps = Float64[]
+    for row in rows
+        th = _theta_from_chain_row(chains, params, row; tdc, cols)
+        tp = _tt_tc_P(th, data, s.planet)
+        tp === nothing && continue
+        Tc, P = tp
+        Δ = _tt_match(s, Tc, P, nothing, 0)
+        Δ === nothing && continue
+        push!(dt0, (Tc - ref) + (Δ + E0) * P); push!(Ps, P)
+    end
+    isempty(Ps) && return nothing
+    qt, qP = quantile(dt0, (0.16, 0.5, 0.84)), quantile(Ps, (0.16, 0.5, 0.84))
+    return Dict{String, Any}(
+        "t0" => ref + qt[2], "t0_err_minus" => qt[2] - qt[1], "t0_err_plus" => qt[3] - qt[2],
+        "period" => qP[2], "period_err_minus" => qP[2] - qP[1],
+        "period_err_plus" => qP[3] - qP[2],
+        "epoch" => E0, "n_draws" => length(Ps))
 end
 
 # =====================================================================
