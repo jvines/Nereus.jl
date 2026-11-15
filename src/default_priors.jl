@@ -449,6 +449,17 @@ function default_priors(config::ParamsConfig, data::Data; gaia_plx = nothing)
         # they have a-priori knowledge of TTV amplitude.
         sigma_ttv = 1.0   # days
         bound     = 10.0  # days
+        # A planet with measured transit times: the transit-time likelihood is
+        # -Inf for a transit more than P/4 from its point, so 1 d offsets put
+        # nearly every draw from the prior there (with 20 transits, all 20
+        # inside P/4 of a 3 d planet has probability ~1e-6) and an ensemble
+        # cannot start. Instead: 5 x the larger of the points' scatter about
+        # their least-squares ephemeris (which holds any TTV they show) and
+        # their median error, bounded at ±P/4.
+        win = _tt_offset_prior(tt_sets, k)
+        if win !== nothing
+            sigma_ttv, bound = win
+        end
         for i in 1:n_ttv_k
             dic["ttv_k$(k)_t$i"] = NormalPrior(0.0, sigma_ttv, -bound, bound)
         end
@@ -1015,4 +1026,19 @@ function _tt_period_window(sets, k::Int)
     w = max(fit.P / max(fit.span, 1), 10 * fit.P_err)
     lo = max(fit.P - w, fit.P / 2)
     return (lo, fit.P + w)
+end
+
+# The default (σ, bound) of the free TTV offsets of planet k when it has
+# measured transit times: σ = 5 x max(RMS about their least-squares ephemeris,
+# median tc_err), bound P/4 (and σ ≤ bound). `nothing` without at least two
+# distinct epochs, where the 1 d default stays.
+function _tt_offset_prior(sets, k::Int)
+    i = findfirst(s -> s.planet == k, sets)
+    i === nothing && return nothing
+    s = sets[i]
+    fit = _tt_linear_fit(s)
+    (fit === nothing || !(fit.P > 0)) && return nothing
+    bound = fit.P / 4
+    σ = min(5 * max(fit.rms, median(s.tc_err[s.used])), bound)
+    return σ, bound
 end

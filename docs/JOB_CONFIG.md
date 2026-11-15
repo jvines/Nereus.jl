@@ -702,7 +702,11 @@ scatter the data show. Override it in `priors` like any parameter.
 
 **Defaults it informs.** With transit times, the default period prior of that
 planet is LogUniform over the least-squares period ± max(P/span, 10 σ_P)
-(span in cycles), the default Tc window covers the transit times, and the φ_c
+(span in cycles); its free TTV offsets (`:TTV` modes) default to
+Normal(0, 5 × max(RMS about that ephemeris, median tc_err)) bounded at ±P/4,
+in place of Normal(0, 1 d) bounded at ±10 d, under which nearly every draw
+puts some transit more than P/4 from its point; the default Tc window covers
+the transit times, and the φ_c
 reference epoch (`t_ref_c`, `parametrization.time = "phic"`) is the
 1/tc_err²-weighted mean of the transit times when there is no photometry. With
 photometry, both stay as they were.
