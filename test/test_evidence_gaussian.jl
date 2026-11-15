@@ -73,3 +73,37 @@ end
     @test rep_up.ss_plus[1] ≈ rep.ss_plus[1] atol = 0.05
     @test all(<(0), values(est))
 end
+
+# A non-finite log L (a replica seeded or pushed out of support) is dropped
+# from the rung's mean and count; the stepping-stone sums must drop it too, or
+# Δβ/2 · log L turns +Inf on one side of each pair and the sum goes NaN at the
+# second such draw. The sums are checked against a direct logsumexp over the
+# finite draws, for both ladder directions.
+@testset "SS+ skips non-finite log L like the rung means do" begin
+    rng = MersenneTwister(11)
+    lse(v) = isempty(v) ? -Inf : (m = maximum(v); m + log(sum(exp.(v .- m))))
+    for βs in ([1.0, 0.5, 0.25, 0.1], [0.1, 0.25, 0.5, 1.0])
+        nT = length(βs)
+        acc = EvidenceAccumulator(nT)
+        rows = Vector{Vector{Float64}}()
+        for i in 1:300
+            ll = -50 .* (1 .- βs) .- 5 .* rand(rng, nT)
+            i in (40, 41, 200) && (ll[2] = -Inf)   # twice in a row: +Inf + +Inf
+            i == 120 && (ll[3] = NaN)
+            i == 250 && (ll[1] = -Inf)
+            update_evidence!(acc, ll, βs)
+            push!(rows, ll)
+        end
+        L = reduce(hcat, rows)                     # rung × draw
+        fin(k) = filter(isfinite, L[k, :])
+        @test acc.n == [length(fin(k)) for k in 1:nT]
+        @test acc.n_nonfinite == [count(!isfinite, L[k, :]) for k in 1:nT]
+        for k in 1:(nT - 1)
+            dβh = (βs[k+1] - βs[k]) / 2
+            @test acc.ss_lse_fwd[k] ≈ lse(dβh .* fin(k)) rtol = 1e-12
+            @test acc.ss_lse_bwd[k] ≈ lse(-dβh .* fin(k + 1)) rtol = 1e-12
+        end
+        r = evidence_report(acc, βs)
+        @test isfinite(r.ss_plus[1]) && isfinite(r.hybrid[1])
+    end
+end
