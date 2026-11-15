@@ -2141,6 +2141,7 @@ function _auto_plot_kinds(chains, params, data; result = nothing)
     data.gost     !== nothing && push!(kinds, "pm_anomaly")
     (n_rv(data) > 0 && has_astrometry(data)) && push!(kinds, "rv_astrom_phasefold")
     n_phot(data) > 0 && append!(kinds, ["ttv_oc", "transit_overlay"])
+    isempty(data.transit_times) || push!(kinds, "ttv_oc")
     any(has_any_rm, params.config.planet_modes) && push!(kinds, "rm_anomaly")
     if any(nm -> nm isa ActivityGP, params.config.noise_models)
         push!(kinds, "activity_gp_latent")
@@ -2444,18 +2445,23 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
                 _kw_for(plot_pm_anomaly, kw; except = (:output, :filename, :planet_idx))...)
         end
     elseif name == "ttv_oc"
-        n_phot(data) > 0 || return nothing
+        (n_phot(data) > 0 || !isempty(data.transit_times)) || return nothing
         # The transiting planet: the first transiting slot that is ever live
-        # (not slot 1 by fiat -- it may be RV-only, or parked). The perturber:
-        # the first other slot live together with it, else none, which gives
-        # the data-only O−C (measured per-transit Tc vs the linear ephemeris).
+        # (not slot 1 by fiat -- it may be RV-only, or parked), the first with
+        # measured transit times when there are any. The perturber: the first
+        # other slot live together with it, else none, which gives the
+        # data-only O−C (measured per-transit Tc vs the linear ephemeris).
         # Explicit plot_kwargs.planet_a_k / planet_b_k still win.
         ttv_kw = copy(kw)
         modes = params.config.planet_modes
         max_k = params.config.max_kplanet
         present = k -> _planet_present_idx(chains, params, k)
         if !haskey(ttv_kw, :planet_a_k)
-            a = findfirst(k -> has_pm(modes[k]) && !isempty(present(k)), 1:max_k)
+            has_tt = k -> transit_time_set(data, k) !== nothing
+            a = isempty(data.transit_times) ? nothing :
+                findfirst(k -> has_pm(modes[k]) && has_tt(k) && !isempty(present(k)), 1:max_k)
+            a === nothing &&
+                (a = findfirst(k -> has_pm(modes[k]) && !isempty(present(k)), 1:max_k))
             a === nothing && return nothing
             ttv_kw[:planet_a_k] = a
         end
@@ -2465,6 +2471,9 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
                           1:max_k)
             ttv_kw[:planet_b_k] = b === nothing ? 0 : b
         end
+        # The figure goes to models/, which nothing else creates when ttv_oc is
+        # the only plot asked for (a transit-times-only fit).
+        mkpath(joinpath(out_dir, "models"))
         return _if_written(name, "models/ttv_oc.png", out_dir) do
             plot_ttv_oc(chains, data, params;
                         filename = joinpath(out_dir, "models", "ttv_oc.png"),
