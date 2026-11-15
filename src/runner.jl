@@ -480,6 +480,20 @@ function _validate_config(cfg::AbstractDict)
             (t == 0 || t == 1 || t == 2) || push!(errs,
                 "model.phot_trend_order must be 0, 1, or 2; got $t")
         end
+        # The free TTV offsets, keyed by planet: {"1": N} and {"1": [epochs]}.
+        for (key, what) in ((:ttv_n_transits, "a count"),
+                            (:ttv_epochs, "a list of transit numbers"))
+            _has(mdl, key) || continue
+            v = _get(mdl, key)
+            ok = v isa AbstractDict && all(pairs(v)) do (k, x)
+                tryparse(Int, string(k)) !== nothing &&
+                    (key === :ttv_n_transits ? x isa Real && isinteger(x) :
+                     x isa AbstractVector && all(e -> e isa Real && isinteger(e), x))
+            end
+            ok || push!(errs, "model.$key must map planet indices to $what, e.g. " *
+                (key === :ttv_n_transits ? "{\"1\": 30}" : "{\"1\": [0, 17, 412]}") *
+                "; got $(repr(v))")
+        end
     end
 
     # ---- priors ----
@@ -1519,11 +1533,11 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
             for (k, v) in share_cfg)
     end
 
-    ttv_cfg = _get(mdl, :ttv_n_transits; default = Dict())
-    if !isempty(ttv_cfg)
-        p_kw[:ttv_n_transits] = Dict{Int, Int}(
-            parse(Int, String(k)) => Int(v) for (k, v) in ttv_cfg)
-    end
+    # The free TTV offsets: model.ttv_n_transits / model.ttv_epochs, and the
+    # default for a PM_TTV planet that neither names (`_ttv_slot_kwargs`).
+    ttv_counts, ttv_epochs = _ttv_slot_kwargs(mdl, data, pm)
+    isempty(ttv_counts) || (p_kw[:ttv_n_transits] = ttv_counts)
+    isempty(ttv_epochs) || (p_kw[:ttv_epochs] = ttv_epochs)
     ttv_backend = _get(mdl, :ttv_backend; default = nothing)
     if ttv_backend !== nothing
         p_kw[:ttv_backend] = Symbol(ttv_backend)
@@ -2730,6 +2744,98 @@ function _transit_times_summary(chains, params::Params, data::Data;
         @warn "transit_times summary failed (continuing)" exception = (err, catch_backtrace())
         return Dict{String, Any}("status" => "failed", "error" => sprint(showerror, err))
     end
+end
+
+# ---------------------------------------------------------------------
+# Free TTV offsets: which transits carry them
+# ---------------------------------------------------------------------
+
+_ttv_planet_key(k) = k isa Integer ? Int(k) : parse(Int, String(k))
+
+"""
+    _ttv_slot_kwargs(mdl, data, planet_modes) -> (counts, epochs)
+
+`model.ttv_n_transits` and `model.ttv_epochs` keyed by planet, as `Params`
+takes them, with the default for an analytic-TTV planet (`:TTV`, e.g. PM_TTV)
+that neither names: one offset per observed transit
+(`_ttv_default_epochs`), said in one Info line. Such a planet with
+photometry and no transit times is fitted as a linear ephemeris, with a
+warning. An empty dict (`"ttv_n_transits": {}`) names no planet. run_job and
+`fit_ttv` both come through here.
+"""
+function _ttv_slot_kwargs(mdl, data::Data, modes)
+    counts = Dict{Int, Int}(_ttv_planet_key(k) => Int(v)
+                            for (k, v) in _get(mdl, :ttv_n_transits; default = Dict()))
+    epochs = Dict{Int, Vector{Any}}(_ttv_planet_key(k) => collect(Any, v)
+                                    for (k, v) in _get(mdl, :ttv_epochs; default = Dict()))
+    for (k, m) in enumerate(modes)
+        (has_ttv(m) && !haskey(counts, k) && !haskey(epochs, k)) || continue
+        s = transit_time_set(data, k)
+        d = s === nothing ? nothing : _ttv_default_epochs(s, data.t_phot_sorted)
+        if d !== nothing
+            epochs[k] = d.epochs
+            @info "planet $k ($(_mode_name(m))): $(length(d.epochs)) free transit-time " *
+                  "offsets, one per observed transit: $(d.n_tt) with measured transit " *
+                  "times, $(d.n_phot) more in the photometry; transits " *
+                  "$(first(d.epochs))-$(last(d.epochs)) counted from its first observed " *
+                  "one. Set model.ttv_epochs or model.ttv_n_transits to choose them."
+        elseif n_phot(data) > 0
+            @warn "planet $k ($(_mode_name(m))) has photometry, no measured transit " *
+                  "times, and no free transit-time offsets: it is fitted as a linear " *
+                  "ephemeris. Give it offsets with model.ttv_n_transits = " *
+                  "{\"$k\": N} (transits 0..N-1 from its first observed one) or " *
+                  "model.ttv_epochs = {\"$k\": [transit numbers]}."
+        end
+    end
+    return counts, epochs
+end
+
+# A mode's name as the configs spell it.
+_mode_name(m) = (i = findfirst(==(m), _PLANET_MODES); i === nothing ? string(m) : String(i))
+
+"""
+    _ttv_default_epochs(set, t_phot_sorted) -> NamedTuple or nothing
+
+The transits a planet's free TTV offsets default to: those of its transit times
+in the likelihood and those with a photometric cadence within a quarter period
+of their centre (`_ttv_window_transits`), both placed by the least-squares
+ephemeris of the transit times, counted from the first of them (the first
+observed transit, src/ttv.jl). `(epochs, n_tt, n_phot)`, `n_phot` counting
+the photometric transits without a transit time. `nothing` when the transit
+times give no ephemeris.
+"""
+function _ttv_default_epochs(s::TransitTimeSet, ts::AbstractVector{Float64})
+    n_tt(s) > 0 || return nothing
+    fit = _tt_linear_fit(s)
+    (fit === nothing || !(fit.P > 0)) && return nothing
+    n_t = unique(s.epoch[s.used])        # the labels are the fit's transit numbers
+    n_p = setdiff(_ttv_window_transits(ts, fit.t0, fit.P), n_t)
+    all_n = sort!(vcat(n_t, n_p))
+    return (epochs = all_n .- all_n[1], n_tt = length(n_t), n_phot = length(n_p))
+end
+
+"""
+    _ttv_window_transits(ts, Tc, P) -> Vector{Int}
+
+The transits (numbered from `Tc`) with a cadence of `ts` (sorted) within a
+quarter period of their centre, the windows `ttv_first_transit` scans.
+"""
+function _ttv_window_transits(ts::AbstractVector{Float64}, Tc::Float64, P::Float64)
+    out = Int[]
+    n = length(ts)
+    i = 1
+    while i <= n
+        x = (ts[i] - Tc) / P
+        m = round(x)
+        if abs(x - m) < 0.25
+            push!(out, Int(m))
+            nxt = m + 1
+        else
+            nxt = x < m ? m : m + 1
+        end
+        i = max(searchsortedfirst(ts, Tc + (nxt - 0.25) * P), i + 1)
+    end
+    return out
 end
 
 # The posterior linear ephemeris of a set's planet in the set's own labels:

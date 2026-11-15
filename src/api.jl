@@ -1494,18 +1494,19 @@ sends it: a list of per-planet blocks `{planet, time_system = "BJD_TDB",
 values = {epoch, tc, tc_err, source}, reference_ephemeris}`
 (docs/JOB_CONFIG.md). Any other shape is refused by the config validation.
 
-The analytic model (`nbody = false`) fits one free offset per transit,
-`ttv_n_transits` of them per planet (`Dict(planet => N)`, or one `N` for every
-planet), numbered from the planet's first observed transit. Without it, a
-planet with transit times gets max − min + 1 of the epochs in the likelihood,
-extended over the photometry's span when there is photometry too; with
-photometry and no count for some planet, it is refused rather than fitted as a
-linear ephemeris. The N-body model fits no offsets and takes no
-`ttv_n_transits`, and needs `rv`: the planets' masses come from it.
+The analytic model (`nbody = false`) fits free offsets on the transit times,
+counted from the planet's first observed transit: `ttv_n_transits` per planet
+(`Dict(planet => N)`, or one `N` for every planet) on transits 0..N−1, or
+`ttv_epochs = Dict(planet => [transit numbers])` on the transits listed. Without
+either, run_job's default applies: a planet with transit times gets one offset
+per observed transit, those of its transit times and those in the photometry.
+A planet with photometry, no transit times and neither keyword is refused
+rather than fitted as a linear ephemeris. The N-body model fits no offsets,
+takes neither keyword, and needs `rv`: the planets' masses come from it.
 """
 function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  nbody::Bool = false, planets::Int = 2,
-                 ttv_n_transits = nothing,
+                 ttv_n_transits = nothing, ttv_epochs = nothing,
                  star::AbstractDict = Dict(), priors::AbstractDict = Dict(),
                  engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
@@ -1519,9 +1520,10 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
             "masses, which come from their RV semi-amplitudes; without RV every " *
             "planet is massless and the TTVs are zero. Pass rv, or use nbody = false " *
             "(free per-transit offsets)."))
-        ttv_n_transits === nothing || throw(ArgumentError(
-            "fit_ttv: ttv_n_transits sizes the free offsets of the analytic model; " *
-            "nbody = true predicts the TTVs and fits no offsets. Drop ttv_n_transits."))
+        (ttv_n_transits === nothing && ttv_epochs === nothing) || throw(ArgumentError(
+            "fit_ttv: ttv_n_transits and ttv_epochs place the free offsets of the " *
+            "analytic model; nbody = true predicts the TTVs and fits no offsets. Drop " *
+            "them."))
     end
     mode = rv === nothing ? (nbody ? "PM_TTV_NB" : "PM_TTV") :
                             (nbody ? "RVPM_TTV_NB" : "RVPM_TTV")
@@ -1544,8 +1546,8 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
         "output"  => _output_block(plots, plot_kwargs, save_pdf, output),
         "sampler" => _sampler_block(engine))
     transit_times === nothing || (cfg["data"]["transit_times"] = transit_times)
-    nbody || (cfg["model"]["ttv_n_transits"] =
-                  _fit_ttv_slots(cfg["data"], planets, ttv_n_transits, phot !== nothing))
+    nbody || _fit_ttv_slots!(cfg["model"], planets, ttv_n_transits, ttv_epochs,
+                             transit_times, phot !== nothing)
     # Config path: the transdim BLOCK is what enables trans-dim, and
     # _dispatch_sampler defaults to transdim_pt_emcee when it sees one --
     # so these entry points stay symmetric with fit_rv/fit_joint.
@@ -1561,47 +1563,44 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
     return _run_config(cfg; op = "fit_ttv")
 end
 
-# `model.ttv_n_transits` of fit_ttv's analytic model, keyed by planet as
-# strings. An explicit count wins (a Dict, or one Int for every planet). Else a
-# planet with transit times gets max − min + 1 of its epochs in the likelihood,
-# widened to the transits of the photometry's span by the least-squares
-# ephemeris of those times (the offsets are numbered from the first observed
-# transit, photometric or not). A planet the photometry may show and nothing
-# counts would be fitted as a linear ephemeris: refused.
-function _fit_ttv_slots(data_cfg, planets::Int, given, has_phot::Bool)
-    out = Dict{Int, Int}()
-    if given isa Integer
-        for k in 1:planets
-            out[k] = Int(given)
-        end
-    elseif given !== nothing
-        for (k, v) in pairs(given)
-            out[Int(k isa AbstractString ? parse(Int, k) : k)] = Int(v)
-        end
-    elseif haskey(data_cfg, "transit_times")
-        d, = _build_data(data_cfg)
-        for s in d.transit_times
-            (s.planet <= planets && n_tt(s) > 0) || continue
-            lo, hi = extrema(s.epoch[s.used])
-            fit = _tt_linear_fit(s)
-            if fit !== nothing && fit.P > 0 && !isempty(d.t_phot)
-                lo = min(lo, round(Int, (minimum(d.t_phot) - fit.t0) / fit.P))
-                hi = max(hi, round(Int, (maximum(d.t_phot) - fit.t0) / fit.P))
-            end
-            out[s.planet] = hi - lo + 1
-        end
+# fit_ttv's `model.ttv_n_transits` / `model.ttv_epochs`: what the caller gave
+# (one Int for every planet, or a Dict), keyed by planet as strings. A planet
+# neither names gets run_job's default from its transit times
+# (`_ttv_slot_kwargs`); one with photometry and no transit times would be
+# fitted as a linear ephemeris, which run_job warns about and fit_ttv refuses.
+function _fit_ttv_slots!(model, planets::Int, ttv_n_transits, ttv_epochs,
+                         transit_times, has_phot::Bool)
+    named = Set{Int}()
+    if ttv_n_transits isa Integer
+        model["ttv_n_transits"] = Dict{String, Any}(string(k) => Int(ttv_n_transits)
+                                                    for k in 1:planets)
+        union!(named, 1:planets)
+    elseif ttv_n_transits !== nothing
+        model["ttv_n_transits"] = Dict{String, Any}(string(_ttv_planet_key(k)) => Int(v)
+                                                    for (k, v) in pairs(ttv_n_transits))
+        union!(named, (_ttv_planet_key(k) for k in keys(ttv_n_transits)))
     end
-    missing_ = [k for k in 1:planets if get(out, k, 0) <= 0]
+    if ttv_epochs !== nothing
+        model["ttv_epochs"] = Dict{String, Any}(string(_ttv_planet_key(k)) => collect(v)
+                                                for (k, v) in pairs(ttv_epochs))
+        union!(named, (_ttv_planet_key(k) for k in keys(ttv_epochs)))
+    end
+    with_tt = Set{Int}()
+    for b in something(transit_times, Any[])
+        p = b isa AbstractDict ? _get(b, :planet; default = nothing) : nothing
+        p === nothing || push!(with_tt, _ttv_planet_key(p))
+    end
+    missing_ = [k for k in 1:planets if !(k in named) && !(k in with_tt)]
     if has_phot && !isempty(missing_)
         throw(ArgumentError(
-            "fit_ttv: the analytic TTV model fits one free offset per transit, and " *
-            "nothing gives the number of transits of planet(s) $(join(missing_, ", ")), " *
-            "which would be fitted as a linear ephemeris. Pass ttv_n_transits = " *
-            "Dict($(join(("$k => N" for k in missing_), ", "))), N the number of " *
-            "transits from the planet's first observed one to its last, or pass its " *
-            "measured transit_times."))
+            "fit_ttv: the analytic TTV model fits free offsets on the transits, and " *
+            "nothing places those of planet(s) $(join(missing_, ", ")), which would be " *
+            "fitted as a linear ephemeris. Pass ttv_n_transits = " *
+            "Dict($(join(("$k => N" for k in missing_), ", "))) (transits 0..N-1 from " *
+            "the planet's first observed one), ttv_epochs = Dict(planet => [transit " *
+            "numbers]), or the planet's measured transit_times."))
     end
-    return Dict{String, Any}(string(k) => v for (k, v) in out if v > 0)
+    return model
 end
 
 """
