@@ -3054,6 +3054,8 @@ function _populate_summary!(summary, result, params, chains)
     # How the run ended: "steps", "converged", "interrupted", "requested",
     # "max_seconds" or "max_evals", with the step and the draws kept.
     _stop_to_summary!(summary, result)
+    # The burn-in the run actually took (`extend_burnin` may run it on).
+    _burnin_to_summary!(summary, result)
     summary["sampler"] = Dict{String, Any}(
         "acceptance_within" => collect(Float64.(getfield(result,
                                                             :acceptance_within))),

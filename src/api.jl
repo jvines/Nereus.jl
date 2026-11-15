@@ -911,7 +911,7 @@ function _normalize(raw)
     # (its fields are value/logevidence/name_map/info), so they were handed
     # back chains = nothing: no saved posterior, no params block, no
     # diagnostics, from a run that had sampled perfectly well.
-    raw isa MCMCChains.Chains && return raw, NaN, extra
+    raw isa MCMCChains.Chains && return raw, NaN, _burnin_to_summary!(extra, raw)
     ch = hasproperty(raw, :chains) ? raw.chains : nothing
     lz = _ns_evidence("", raw)
     lz = lz !== nothing ? lz[1] :
@@ -920,6 +920,7 @@ function _normalize(raw)
         hasproperty(raw, f) && (extra[String(f)] = getproperty(raw, f))
     end
     _stop_to_summary!(extra, raw)
+    _burnin_to_summary!(extra, raw)
     return ch, lz, extra
 end
 
