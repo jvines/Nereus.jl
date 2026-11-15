@@ -456,17 +456,60 @@ end
     end
 
     @testset "fit_ttv: transit times alone" begin
-        ep, tc, σ = _tt_linear(MersenneTwister(12); n = 20, span = 500)
+        rng = MersenneTwister(12)
+        ep = sort(setdiff(0:23, [3, 9, 15, 17]))
+        σ = fill(0.5TT_MIN, length(ep))
+        tc = TT_T0 .+ TT_P .* ep .+ σ .* randn(rng, length(ep))
+        out = mktempdir()
         r = Nereus.fit_ttv(; transit_times = [_tt_block(ep, tc, σ)], planets = 1,
-                           priors = _TT_FIXED_GEOM,
+                           priors = _TT_FIXED_GEOM, output_dir = out,
                            engine = Dict("engine" => "pt_emcee", "options" => Dict(
                                "show_progress" => false, "n_temps" => 2,
-                               "n_walkers" => 16, "n_steps" => 600, "n_burnin" => 300)),
+                               "n_walkers" => 64, "n_steps" => 600, "n_burnin" => 300)),
                            output = Dict("ppc" => false, "detection_limits" => false,
                                          "loo" => false))
         @test r.summary["status"] == "ok"
         @test r.summary["transit_times"]["status"] == "ok"
         @test only(r.summary["transit_times"]["planets"])["n_points"] == length(tc)
+        # One free offset per transit of the span: max − min + 1 epochs.
+        @test isempty(_tt_draws(out, "ttv_k1_t24")) == false
+        ch = Nereus.load_chains(joinpath(out, "chains.nc"))
+        ch = ch isa Tuple ? first(ch) : ch
+        @test !(Symbol("ttv_k1_t25") in names(ch))
+
+        # The count: explicit (a Dict or one Int), else from the epochs used,
+        # widened over the photometry by their ephemeris; refused for photometry
+        # with nothing to count from.
+        blk = _tt_block(ep, tc, σ)
+        dc = Dict{String, Any}("transit_times" => [blk])
+        @test Nereus._fit_ttv_slots(dc, 1, nothing, false) == Dict("1" => 24)
+        use = trues(length(ep)); use[[1, end]] .= false
+        blk_u = deepcopy(blk); blk_u["values"]["use"] = use
+        @test Nereus._fit_ttv_slots(Dict{String, Any}("transit_times" => [blk_u]), 1,
+                                    nothing, false) == Dict("1" => ep[end-1] - ep[2] + 1)
+        @test Nereus._fit_ttv_slots(dc, 2, 7, false) == Dict("1" => 7, "2" => 7)
+        @test Nereus._fit_ttv_slots(dc, 1, Dict(1 => 30), false) == Dict("1" => 30)
+        tph = collect(range(TT_T0 - 2TT_P - 0.1, TT_T0 - 2TT_P + 0.1; length = 50))
+        dp = Dict{String, Any}("transit_photometry" => [Dict("instrument" => "TESS",
+                 "values" => Dict("bjd" => tph, "flux" => ones(50),
+                                  "flux_err" => fill(1e-3, 50)))])
+        e = _tt_err(() -> Nereus._fit_ttv_slots(dp, 1, nothing, true))
+        @test e isa ArgumentError && occursin("ttv_n_transits = Dict(1 => N)", e.msg)
+        dp["transit_times"] = [blk]      # photometry two transits before epoch 0
+        @test Nereus._fit_ttv_slots(dp, 1, nothing, true) == Dict("1" => 26)
+        e = _tt_err(() -> Nereus._fit_ttv_slots(dp, 2, nothing, true))
+        @test e isa ArgumentError && occursin("planet(s) 2", e.msg)
+        e = _tt_err(() -> Nereus.fit_ttv(; phot = Dict("TESS" => (t = tph,
+                         flux = ones(50), flux_err = fill(1e-3, 50))), planets = 1))
+        @test e isa ArgumentError && occursin("ttv_n_transits", e.msg)
+        # N-body: no offsets, and the masses need RV.
+        e = _tt_err(() -> Nereus.fit_ttv(; transit_times = [blk], nbody = true))
+        @test e isa ArgumentError && occursin("needs rv", e.msg)
+        e = _tt_err(() -> Nereus.fit_ttv(; transit_times = [blk], nbody = true,
+                                         rv = Dict("H" => (t = [1.0, 2.0], rv = [0.0, 0.0],
+                                                           rv_err = [1.0, 1.0])),
+                                         ttv_n_transits = 5))
+        @test e isa ArgumentError && occursin("Drop ttv_n_transits", e.msg)
         # The engine's options reach the sampler.
         @test Nereus._sampler_block(nothing) == Dict{String, Any}()
         @test Nereus._sampler_block(Dict("engine" => "pt_emcee",
