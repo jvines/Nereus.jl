@@ -1274,7 +1274,7 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                 _run_loo!(cfg, chains, target.params, target.data, raw, summary)
                 _postfit_stage!(pf, "fit_health")
                 _run_fit_health!(cfg, chains, target.params, summary;
-                                 sampled_windows)
+                                 sampled_windows, burnin_trim = _burnin_trim_of(raw))
                 _postfit_stage!(pf, "evidence")
                 # The evidence spread, before augmenting it. `_augment_evidence!`
                 # AUGMENTS -- it returns early unless summary["evidence"] is
