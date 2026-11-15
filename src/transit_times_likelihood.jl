@@ -27,10 +27,12 @@
 # ephemeris); Nereus has no such parameter, so there is no quadratic term. On top
 # of T_lin:
 #
-#   * :TTV (PM_TTV, RVPM_TTV, ...): T(n) = T_lin(n) + δt_{n+1}, the free offset
-#     `ttv_k<p>_t<n+1>` of transit n counted from Tc, zero outside the configured
-#     slots -- the numbering `ttv_effective_time` gives the photometry.
-#   * :TTV_NB (PM_TTV_NB, RVPM_TTV_NB, ...): T(n) = T_lin(n) + δt_n, the N-body
+#   * :TTV (PM_TTV, RVPM_TTV, ...): T(n) = T_lin(n) + δt_{n−n0+1}, the free
+#     offset `ttv_k<p>_t<n−n0+1>`, n0 the planet's first observed transit
+#     (src/ttv.jl), zero outside the configured slots -- the numbering
+#     `ttv_effective_time` gives the photometry, so a transit has one slot in
+#     both terms.
+#   * :TTV_NB (RVPM_TTV_NB, RVPMAS_TTV_NB): T(n) = T_lin(n) + δt_n, the N-body
 #     transit n minus T_lin(n), from the same solver the photometry uses
 #     (`_apply_ttv_nb!`: TTVFaster, or NbodyGradient under ttv_backend =
 #     :nbody), integrated over the span of the photometry and the transit times
@@ -157,7 +159,7 @@ function _tt_ttv_state(theta::Theta{T}, data::Data, p_idx) where {T}
     any(s -> n_tt(s) > 0 && s.planet <= length(modes) &&
              (has_ttv(modes[s.planet]) || has_ttv_nb(modes[s.planet])),
         data.transit_times) || return nothing
-    n_ttv, state = _decode_ttv_state(theta, p_idx)
+    n_ttv, state = _decode_ttv_state(theta, p_idx, data)
     n_ttv == 0 && return nothing
     if any(state.is_nb)
         orb = _tt_transit_orbits(theta, data, p_idx)

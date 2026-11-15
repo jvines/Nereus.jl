@@ -579,3 +579,94 @@ end
               for p in ax.scene.plots if p isa M.Text]
     @test sort(labels) == sort(["transit $m" for m in -3:4])
 end
+
+# The free offsets are numbered from the planet's first observed transit, not
+# from Tc. They were numbered from Tc, and under the default anchor (φ_c, its
+# epoch the middle of the photometry) Tc is a transit in the middle of the
+# data: every transit before it fell outside the slots and was fitted with no
+# offset. Here, under that default, offsets injected on transits before and
+# after Tc are each recovered from the photometry by profiling its slot, and
+# measured transit times of the same transits read the same slots.
+@testset "TTV-A: offsets numbered from the first observed transit (default anchor)" begin
+    P, T0, b, rr = 3.5, 2_450_000.4, 0.2, 0.1
+    δ_true = [12.0, -8.0, 5.0, -15.0, 9.0, -4.0] ./ 1440      # transits 0..5, days
+    n_tr = length(δ_true)
+    t_phot = reduce(vcat, [collect(range(T0 + n * P - 0.25, T0 + n * P + 0.25;
+                                         step = 2 / 1440)) for n in 0:(n_tr - 1)])
+    nobs = length(t_phot)
+    σf = fill(1e-4, nobs)
+    data0 = Data(; t_phot, flux = ones(nobs), flux_err = σf, phot_inst = ones(Int, nobs))
+    params = Params(; max_kplanet = 1, planet_modes = [PM_TTV],
+                      instruments = InstrumentConfig(pm = ["TESS"]), data = data0,
+                      M_s = 1.0, R_s = 1.0, stability = :none,
+                      ttv_n_transits = Dict(1 => n_tr))
+    pc = params.config.parametrization
+    @test pc.time === :phic
+    trc = pc.t_ref_c
+    n_c = round(Int, (trc - T0) / P)                 # the transit Tc lands on
+    @test 2 <= n_c <= 3                              # mid-data: transits before it
+    ix = params.layout.name_to_idx
+    th = Theta{Float64}(params)
+    for (k, v) in ("P_k1" => P, "sesinw_k1" => 0.0, "secosw_k1" => 0.0,
+                   "phic_k1" => 2π * (T0 + n_c * P - trc) / P,
+                   "b_k1" => b, "rr_k1" => rr, "q1_TESS" => 0.3, "q2_TESS" => 0.2)
+        Nereus.set_param!(th, k, v)
+    end
+    for i in 1:n_tr
+        th.values[ix["ttv_k1_t$i"]] = 0.0
+    end
+    # The light curve: transit n at T0 + nP + δ_n, from the model without
+    # offsets at shifted times (independent of the slot numbering).
+    epoch = round.(Int, (t_phot .- T0) ./ P)
+    shifted = Data(; t_phot = t_phot .- δ_true[epoch .+ 1], flux = ones(nobs),
+                     flux_err = σf, phot_inst = ones(Int, nobs), t_ref = data0.t_ref)
+    flux = phot_predictions(th, shifted)[1]
+    data = Data(; t_phot, flux, flux_err = σf, phot_inst = ones(Int, nobs),
+                  t_ref = data0.t_ref)
+    # Tc is transit n_c; the first observed transit is n_c transits before it.
+    _, st = Nereus._decode_ttv_state(th, planet_indices(th), data)
+    @test st.n0s[1] == -n_c
+    # Each slot, profiled with the others at zero (the transits are disjoint):
+    # the maximum is the injected offset, before Tc as after it.
+    grid = (-30:0.25:30) ./ 1440
+    for i in 1:n_tr
+        ll = map(grid) do δ
+            th.values[ix["ttv_k1_t$i"]] = δ
+            transit_log_likelihood(th, data)
+        end
+        th.values[ix["ttv_k1_t$i"]] = 0.0
+        @test abs(grid[argmax(ll)] - δ_true[i]) < 0.13 / 1440
+    end
+    # All offsets at the truth: the model is the light curve.
+    for i in 1:n_tr
+        th.values[ix["ttv_k1_t$i"]] = δ_true[i]
+    end
+    @test phot_predictions(th, data)[1] ≈ flux atol = 1e-12
+    # Measured transit times of the same transits read the same slots.
+    tc = T0 .+ (0:(n_tr - 1)) .* P .+ δ_true
+    dtt = Data(; t_phot, flux, flux_err = σf, phot_inst = ones(Int, nobs),
+                 t_ref = data0.t_ref,
+                 transit_times = [TransitTimeSet(; planet = 1, epoch = 100:(99 + n_tr),
+                                                 tc, tc_err = fill(1 / 1440, n_tr))])
+    m = only(Nereus.transit_times_model(th, dtt))
+    @test maximum(abs.(m.residual)) < 1e-8
+    # The slots do not move with Tc: under the Tc anchor, Tc on the first
+    # transit, the middle one or the last gives the same light curve.
+    ptc = Params(; max_kplanet = 1, planet_modes = [PM_TTV],
+                   instruments = InstrumentConfig(pm = ["TESS"]), data,
+                   parametrization = ParametrizationConfig(time = :Tc),
+                   M_s = 1.0, R_s = 1.0, stability = :none,
+                   ttv_n_transits = Dict(1 => n_tr))
+    thc = Theta{Float64}(ptc)
+    for (k, v) in ("P_k1" => P, "sesinw_k1" => 0.0, "secosw_k1" => 0.0,
+                   "b_k1" => b, "rr_k1" => rr, "q1_TESS" => 0.3, "q2_TESS" => 0.2)
+        Nereus.set_param!(thc, k, v)
+    end
+    for i in 1:n_tr
+        thc.values[ptc.layout.name_to_idx["ttv_k1_t$i"]] = δ_true[i]
+    end
+    for n_at in (0, n_c, n_tr - 1)
+        Nereus.set_param!(thc, "Tc_k1", T0 + n_at * P)
+        @test phot_predictions(thc, data)[1] ≈ flux atol = 1e-9
+    end
+end

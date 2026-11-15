@@ -320,7 +320,10 @@ rather than a single number trusted.
                                            //   nbody:     NbodyGradient.jl (AHL21); strips Duals →
                                            //              use a gradient-free sampler
     // ttv_n_transits: free per-transit offset counts for *_TTV modes.
-    //   Keys are 1-based slot indices as strings (src/runner.jl:1190-1194).
+    //   Keys are 1-based planet indices as strings. Offset ttv_k<k>_t<i> is the
+    //   (i−1)-th transit after planet k's first observed one (the transit nearest
+    //   the earliest photometric cadence or measured transit time), under every
+    //   time anchor.
     "ttv_n_transits": { "1": 30 },
 
     // ---- external_priors: priors on DERIVED (non-sampled) quantities ----
@@ -668,8 +671,9 @@ from the planet's orbit as the photometry computes it, so it is correct under
 every time anchor (`phic`, `Tc`, `Mo`, `Tp`) and at any eccentricity:
 - linear / Keplerian modes (`PM_ONLY`, `RVPM`, …): `T(n) = Tc + n·P` (Nereus has
   no dP/dN parameter, so there is no quadratic term);
-- `:TTV` modes: plus the free offset `ttv_k<p>_t<n+1>` of that transit, as in
-  the photometry (`model.ttv_n_transits`);
+- `:TTV` modes: plus the free offset of that transit, as in the photometry
+  (`model.ttv_n_transits`; slot `i` is the `(i − 1)`-th transit after the
+  planet's first observed one, in the photometry or the transit times);
 - `:TTV_NB` modes: plus the N-body offset from the same solver the photometric
   TTV path uses (TTVFaster, or NbodyGradient under `ttv_backend: "nbody"`),
   integrated over the photometry and the transit times together.

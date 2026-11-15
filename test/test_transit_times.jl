@@ -378,11 +378,11 @@ end
             for i in 1:N))
         cfg = Dict{String, Any}("seed" => 9, "output_dir" => out,
             "data" => Dict("transit_times" => [_tt_block(ep, tc, σ)]),
-            # Transit-time offsets are numbered from Tc: φ_c's epoch at the
-            # first transit puts Tc there.
+            # The default anchor: φ_c's epoch, and Tc, mid-data. The offsets are
+            # numbered from the first observed transit, so slot i is epoch i − 1
+            # wherever Tc sits.
             "model" => Dict("max_kplanet" => 1, "planet_modes" => ["PM_TTV"],
-                            "ttv_n_transits" => Dict("1" => N),
-                            "parametrization" => Dict("t_ref_c" => TT_T0)),
+                            "ttv_n_transits" => Dict("1" => N)),
             "priors" => pri,
             "sampler" => _tt_sampler(n_walkers = 96, n_steps = 6000, n_burnin = 3000),
             "output" => _TT_OUT)

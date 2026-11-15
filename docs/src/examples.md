@@ -507,15 +507,15 @@ Single transiting planet with a non-linear ephemeris: per-transit
 timing offsets are free parameters (`ttv_k1_t<i>`). Declare the
 per-planet transit count with `model.ttv_n_transits` (a map
 `planet → n_transits`). The default per-offset prior is
-`NormalPrior(0, 1 d, ±10 d)`. Transits are numbered from the time of
-mid-transit `Tc` (the `Tc_k1` parameter under `time = "Tc"`; under `Tp`
-or `Mo`, the transit within half a period of periastron passage):
-`ttv_k1_t<i>` is transit `i − 1`, so put `Tc` at the first transit you
-want an offset for. Transits before `Tc` carry no free offset. The
-`ttv_oc` and `transit_overlay` plots number transits the same way. Use
-`time = "Tc"` with free offsets: under `Tp` or `Mo` the transit numbered
-0 changes, and every offset moves to the next transit, when the sampled
-`ω` carries `Tc` across `Tp ± P/2`.
+`NormalPrior(0, 1 d, ±10 d)`. The offsets are numbered from the planet's
+first observed transit, the transit nearest the earliest time in its data
+(first photometric cadence or first measured transit time): `ttv_k1_t<i>`
+is the `(i − 1)`-th transit after it, so `n_transits` is the number of
+transits from the first observed one to the last. The numbering is the same
+under every time anchor and wherever `Tc` sits. The `ttv_oc` and
+`transit_overlay` plots number transits from `Tc` (0 at `Tc`, negative
+before it); the offset of their transit `N` is `ttv_k1_t<N − n0 + 1>`, `n0`
+the plots' number of the first observed transit.
 
 ```julia
 using Nereus

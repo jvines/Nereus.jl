@@ -384,7 +384,9 @@ transiting planet, each showing that transit's photometry + the best-fit (max-lp
 transit model (x = hours from Tc). Per-transit QC — catches a single bad transit
 (spot crossing, partial/grazing, systematic) that the stacked phase-fold hides.
 Panel "transit N" is transit N counted from the planet's Tc (0 at Tc, negative
-before it), the numbering of the free TTV offsets (`ttv_k<k>_t<N+1>`).
+before it). Its free TTV offset is `ttv_k<k>_t<N − n0 + 1>`, n0 the number of
+the planet's first observed transit (the offsets are numbered from it,
+src/ttv.jl).
 Saved as `models/transit_overlay_K<k>.<fmt>`.
 """
 function plot_transit_overlay_fit(chains, params, data;

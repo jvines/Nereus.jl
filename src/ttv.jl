@@ -2,14 +2,26 @@
 #
 # Each planet with `:TTV` in its PlanetDataSources can carry N free
 # parameters `ttv_kK_tI` (I = 1..N) — additive offsets applied to the
-# i-th transit centre. Mapping: data-point time `t` near the i-th
-# transit gets corrected as
+# transit centres. Slot I is the (I − 1)-th transit after the planet's
+# FIRST OBSERVED transit: data-point time `t` near transit i gets
+# corrected as
 #
-#   t_eff = t − ttv_kK_tI(i+1)
+#   t_eff = t − ttv_kK_t(i − n0 + 1)
 #
-# where i = round((t − Tc) / P) is the integer transit number relative
-# to the FIRST transit (Tc). The 1-based slot index is `i+1` (Julia
-# arrays are 1-based; transit 0 → slot 1, transit 1 → slot 2, …).
+# where i = round((t − Tc) / P) is the integer transit number counted
+# from Tc, and n0 = round((t_first − Tc) / P) is the number of the
+# planet's first observed transit, t_first the earliest time among the
+# planet's data: the photometry's cadences and its measured transit times
+# (`ttv_first_time`). n0 is recomputed at every evaluation, so a transit
+# keeps its slot whatever Tc a draw has: the cycle count between two
+# observed times does not depend on where Tc sits. The measured transit
+# times use the same mapping (src/transit_times_likelihood.jl), so a
+# transit gets one slot from both kinds of data.
+#
+# The slots used to be numbered from Tc itself (slot I = transit I − 1
+# from Tc). Under the default anchor, φ_c, Tc is the transit nearest the
+# middle of the data, and every transit before it fell outside the slots
+# and was fitted with no offset at all.
 #
 # Tc is the time of mid-transit: the `Tc` parameter itself under the :Tc
 # time parametrization, and under :Tp and :Mo the transit within half a
@@ -58,12 +70,18 @@ Pre-decode TTV state for each TTV-enabled active planet. Returns
   layout name lookup)
 - `state.δts::Vector{Vector{T}}` — per-planet δt values, length =
   `config.ttv_n_transits[k]`
-- `state.n0s::Vector{Int}` — the transit number (from Tc) of `δts[r][1]`:
-  0 for a `:TTV` row, whose slot I is transit I − 1; for a `:TTV_NB` row,
-  set by `_apply_ttv_nb!`, the first transit of the predicted grid, which
-  reaches back before Tc when the photometry does
+- `state.n0s::Vector{Int}` — the transit number (from Tc) of `δts[r][1]`.
+  For a `:TTV` row, the planet's first observed transit,
+  `round((t_first − Tc)/P)` with `t_first = ttv_first_time(data, k)`, so slot
+  I is the (I − 1)-th transit after it; 0 (slot I = transit I − 1 from Tc)
+  without `data` or when the planet has no data. For a `:TTV_NB` row, set by
+  `_apply_ttv_nb!`, the first transit of the predicted grid, which reaches
+  back before Tc when the photometry does.
+
+Pass `data` wherever a likelihood reads the state: without it the free
+offsets are numbered from Tc.
 """
-function _decode_ttv_state(theta::Theta{T}, p_idx) where {T}
+function _decode_ttv_state(theta::Theta{T}, p_idx, data = nothing) where {T}
     config = theta.params.config
     layout = theta.params.layout
 
@@ -107,6 +125,7 @@ function _decode_ttv_state(theta::Theta{T}, p_idx) where {T}
                 vs[i] = theta.values[layout.name_to_idx["ttv_k$(k)_t$i"]]
             end
             δts[r] = vs
+            data === nothing || (n0s[r] = _ttv_first_transit(theta, data, k))
         else
             # TTV-NB row: leave δts empty until _apply_ttv_nb! fills it.
             δts[r] = T[]
@@ -116,14 +135,52 @@ function _decode_ttv_state(theta::Theta{T}, p_idx) where {T}
 end
 
 """
+    ttv_first_time(data, k) -> Float64 or nothing
+
+The earliest time among planet `k`'s data, which the free TTV offsets are
+numbered from: the first photometric cadence and planet `k`'s first measured
+transit time in the likelihood, whichever is earlier. `nothing` with neither.
+"""
+function ttv_first_time(data, k::Int)
+    t = isempty(data.t_phot) ? Inf : Float64(minimum(data.t_phot))
+    for s in data.transit_times
+        s.planet == k || continue
+        for i in s.used
+            t = min(t, s.tc[i])
+        end
+    end
+    return isfinite(t) ? t : nothing
+end
+
+# The transit number, counted from planet k's Tc at `theta`, of its first
+# observed transit: round((t_first − Tc)/P). 0 without data, or for an
+# unphysical orbit (which the likelihood refuses anyway). An integer decision,
+# taken on the values of a Dual.
+function _ttv_first_transit(theta::Theta, data, k::Int)
+    t_first = ttv_first_time(data, k)
+    t_first === nothing && return 0
+    pc = theta.params.config.parametrization
+    P = ForwardDiff_value(planet_P(theta, k))
+    e, w = planet_e_w(theta, k)
+    e, w = ForwardDiff_value(e), ForwardDiff_value(w)
+    (0 <= e < 1 && P > 0 && isfinite(P)) || return 0
+    Tp = anchor_to_tp(pc.time, ForwardDiff_value(planet_time_anchor(theta, k)), P, e, w,
+                      data.t_ref, pc.t_ref_c)
+    x = (t_first - tp_to_tc(Tp, P, e, w)) / P
+    (isfinite(x) && abs(x) < 1e9) || return 0
+    return round(Int, x)
+end
+
+"""
     ttv_effective_time(t, P, Tc, δts, n0 = 0) -> t_eff
 
 Return the TTV-corrected time at which to evaluate `sky_separation`.
-`i = round((t − Tc) / P)` is the integer transit number relative to
-the first transit at `Tc`, the time of mid-transit (not of periastron).
-`δts[1]` is the offset of transit `n0` (0, transit Tc itself, for the free
-offsets). If `i − n0 + 1` is within `[1, length(δts)]`, returns
-`t − δts[i − n0 + 1]`; otherwise returns `t` unchanged.
+`i = round((t − Tc) / P)` is the integer transit number counted from `Tc`,
+the time of mid-transit (not of periastron). `δts[1]` is the offset of
+transit `n0`: for the free offsets, the planet's first observed transit
+(`_decode_ttv_state` with `data`). If `i − n0 + 1` is within
+`[1, length(δts)]`, returns `t − δts[i − n0 + 1]`; otherwise returns `t`
+unchanged.
 """
 @inline function ttv_effective_time(t::Real, P::Real, Tc::Real,
                                       δts::AbstractVector{<:Real}, n0::Int = 0)

@@ -459,7 +459,8 @@ end
         Δt -= Ps[j] * round(Δt / Ps[j])
         abs(Δt) > T_dur_safe[j] + reach && continue
         # A TTV planet's transits are numbered from Tc (the transit nearest
-        # the cadence, as the window above folds it), not from Tp.
+        # the cadence, as the window above folds it), not from Tp; its
+        # offsets from its first observed transit (`ttv_state.n0s`).
         t_eff = r_for_j[j] > 0 ?
             ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tc_centers) : t
         use_gd = gd !== nothing && gd.on[j]
@@ -701,7 +702,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     # is not a TTV planet. Both `_decode_ttv_state` and the j-loop
     # above iterate `p_idx` skipping non-photometric planets, so the
     # j indexing matches.
-    n_ttv, ttv_state = _decode_ttv_state(theta, p_idx)
+    n_ttv, ttv_state = _decode_ttv_state(theta, p_idx, data)
     r_for_j = zeros(Int, n_transit)
     if n_ttv > 0
         @inbounds for r in 1:n_ttv
@@ -1114,7 +1115,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     gd_s, gd_c = gd_state, gd_ctxs
 
     # TTV decode (TTV-A + TTV-C) — see transit_log_likelihood for rationale.
-    n_ttv, ttv_state = _decode_ttv_state(theta, p_idx)
+    n_ttv, ttv_state = _decode_ttv_state(theta, p_idx, data)
     r_for_j = zeros(Int, n_transit)
     if n_ttv > 0
         @inbounds for r in 1:n_ttv

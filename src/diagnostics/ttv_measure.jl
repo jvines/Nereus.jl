@@ -41,8 +41,9 @@ parameters at `theta_ref`. The fit uses only the phot points within
 Returns `(cycle_idx, tc_obs, tc_lo, tc_hi, mle_dt, lo_dt, hi_dt)` where
 `*_dt` are the offsets from `tcs_predicted` in days (suitable for an
 O−C plot), and `cycle_idx` is each transit's number counted from the
-planet's `Tc` (transit 0 at `Tc`, negative before it): the numbering of
-the free TTV offsets, whose `ttv_k<k>_t<n+1>` is transit `n`.
+planet's `Tc` (transit 0 at `Tc`, negative before it). The free TTV offset
+of transit `n` is `ttv_k<k>_t<n − n0 + 1>`, n0 the number of the planet's
+first observed transit (src/ttv.jl).
 
 # Arguments
 - `data::Data` — photometric data
