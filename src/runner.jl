@@ -184,7 +184,8 @@ function run_job(cfg::AbstractDict)
         # corrupt log-post) as a logged warning + summary entry. Never
         # alters the chains or the rest of the output.
         _postfit_stage!(pf, "fit_health")
-        _run_fit_health!(cfg, chains, params, summary; sampled_windows)
+        _run_fit_health!(cfg, chains, params, summary; sampled_windows,
+                         burnin_trim = _burnin_trim_of(result))
 
         # --- Build summary ---------------------------------------------
         # Run health, per engine — same harvest fit_* gets.
@@ -2652,9 +2653,12 @@ const _ENSEMBLE_SAMPLERS = Set(("pt_emcee", "transdim_pt_emcee",
 # Post-fit "silent-wrong" guard. Fail-soft: never breaks the run, only
 # logs a verdict and records it in the summary. Builds the prior bounds
 # from the model layout so the prior-edge rail check is exercised. See
-# `src/diagnostics/fit_health.jl`.
+# `src/diagnostics/fit_health.jl`. `burnin_trim` is the sampler's settling test
+# (src/samplers/burnin_trim.jl), when it ran one: it joins the checks as
+# `burnin_settling`, a warning when walkers settled during the recorded run and
+# were not trimmed, or the run ended split.
 function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
-                          sampled_windows = nothing)
+                          sampled_windows = nothing, burnin_trim = nothing)
     out_cfg = _to_dict(_get(cfg, :output; default = Dict()))
     Bool(_get(out_cfg, :fit_health; default = true)) || return
 
@@ -2742,6 +2746,14 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
                              active = active,
                              jitter = jitter_names(params),
                              angle_range = restricted_angles(params))
+        # The sampler's settling test, measured on the walkers' own log densities
+        # before any trim (the chains here may be the trimmed ones).
+        bt = _burnin_trim_check(burnin_trim)
+        if bt !== nothing
+            checks = vcat(report.checks, bt)
+            report = FitHealthReport(_worst(c.status for c in checks), checks,
+                                     [c.message for c in checks])
+        end
 
         summary["fit_health"] = Dict{String, Any}(
             "overall"  => String(report.overall),

@@ -106,6 +106,7 @@ include("samplers/ladder_history.jl") # per-step T / swap rate / swap mean dista
 include("samplers/burnin_hold.jl") # parameters the PT ensembles hold at a value early in burn-in
 include("samplers/pt_emcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
 include("samplers/burnin_extend.jl") # burn-in that runs on while the cold rung is split (extend_burnin)
+include("samplers/burnin_trim.jl") # walkers still settling during the recorded run, and the trim (trim_burnin)
 include("samplers/transdim_pt_emcee.jl") # trans-dim PT + MoMS variable selection
 include("samplers/population_annealing.jl") # sequential-MC tempered sampler (Hukushima & Iba 2003)
 include("samplers/nested_ins.jl")            # importance nested sampling (Feroz+ 2013)

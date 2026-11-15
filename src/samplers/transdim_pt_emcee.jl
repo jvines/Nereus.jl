@@ -78,8 +78,13 @@ struct TransDimPTemceeResult
     # `nothing` when the run was too short to test.
     drift::Union{Nothing, Dict{String, Any}}
     # The steps before the recording began: `n_burnin`, or more when
-    # `extend_burnin` ran burn-in on while the β = 1 rung was split.
+    # `extend_burnin` ran burn-in on while the β = 1 rung was split, plus the
+    # steps `trim_burnin` dropped.
     n_burnin_used::Int
+    # The recorded (thinned) steps `trim_burnin` dropped, and the settling test
+    # within each model, run whether or not it is on (see `PTemceeResult`).
+    n_trimmed::Int
+    burnin_trim::NamedTuple
 end
 
 # ------------------------------------------------------------------
@@ -653,6 +658,20 @@ selection on planet count.
   says where recording started. The MoMS scale adaptation, the burn-in-only
   multi-try births and the ladder adaptation stay keyed to `n_burnin`. See
   src/samplers/burnin_extend.jl.
+- `trim_burnin::Bool = false` -- opt-in, as in `sample_pt_emcee`: drop the
+  recorded steps during which β = 1 walkers were still settling into the main
+  mode, from the draws and from the tempered evidence; the test runs on every
+  run and only warns when the option is off. Log densities of different models
+  are never compared: a model with fewer planets sits lower in ln p and still
+  carries mass through the Occam factor. Each model (the pattern of active
+  planet slots and noise models) has its own band, from its free dimension and
+  the best walker's median in that model over the last tenth of the run, and
+  each draw is held against the band of the model it is in. A walker settles
+  until its first entry into any model's band; a birth after that into
+  another model's tail is a draw from that tail and sets no cut. Draws in a
+  model absent from the last tenth flag nothing.
+  `result.n_trimmed` and `result.burnin_trim` say what it found and did. See
+  src/samplers/burnin_trim.jl.
 - `betas::Union{Nothing,Vector{Float64}} = nothing`
 - `swap_min::Real = 0.05` — `log_evidence` is the tempered value (H+), which
   is quoted only when the ladder reaches β = 0 and every adjacent pair swapped
@@ -805,6 +824,7 @@ function sample_transdim_pt_emcee(
     prune_stranded::Bool = true,
     extend_burnin::Bool = false,
     max_burnin::Union{Nothing,Real} = nothing,
+    trim_burnin::Bool = false,
     node_flip::Real = 0.1,
     lambda_slide::Real = 0.0,
     lambda_slide_sigma::Real = 0.6,
@@ -1414,6 +1434,9 @@ function sample_transdim_pt_emcee(
     keep_idx = 0
 
     evidence_acc = EvidenceAccumulator(length(βs))
+    # The same sums in blocks of recorded steps, for the evidence of the steps a
+    # burn-in trim keeps (`trim_burnin`, src/samplers/burnin_trim.jl).
+    ev_blocks = EvidenceBlocks(thin)
 
     accept_within  = zeros(Float64, n_temps)
     propose_within = zeros(Int,     n_temps)
@@ -2434,6 +2457,7 @@ function sample_transdim_pt_emcee(
         _restore_windows!(params, ck.windows, (target.transform,))
         merge!(recut_moved, ck.recut_moved)
         b_end, b_last, b_passes = _burnin_resume(ck, step0, n_burnin, b_cap, ext_on)
+        _evidence_blocks_restore!(ev_blocks, ck, evidence_acc, b_end)
         # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
         hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
@@ -2685,9 +2709,11 @@ function sample_transdim_pt_emcee(
 
         # Recording from the step after `b_end` (`extend_burnin`).
         if step > b_end
+            ev_blk = _evidence_block!(ev_blocks, step, b_end, n_temps)
             @inbounds for w in 1:n_walkers_eff
                 logL_walker = view(logL_arr, :, w)
                 update_evidence!(evidence_acc, logL_walker, βs)
+                update_evidence!(ev_blk, logL_walker, βs)
             end
             if (step - b_end) % thin == 0
                 @inbounds for w in 1:n_walkers_eff
@@ -2788,7 +2814,8 @@ function sample_transdim_pt_emcee(
                 evidence = evidence_acc, windows = circular_windows(params),
                 spin_axis = copy(params.layout.spin_axis),
                 recut_moved, burnin_ext = (b_end, b_last, b_passes),
-                informed = _informed_cache_snapshot(rngs_td, informed_keys)))
+                informed = _informed_cache_snapshot(rngs_td, informed_keys),
+                evidence_blocks = ev_blocks))
             last_ck = time()
         end
 
@@ -2849,8 +2876,26 @@ function sample_transdim_pt_emcee(
     samples    = samples[1:keep_idx, :]
     lp_samples = lp_samples[1:keep_idx]
 
+    # --- Walkers still settling into the main mode (`trim_burnin`), as in
+    # sample_pt_emcee, but within each model: log densities of different models
+    # are never compared (src/samplers/burnin_trim.jl).
+    burnin_trim, n_trimmed = _td_trim(samples, lp_samples, n_walkers_eff, n_dim, max_k,
+        noise_toggle_idx, collect(Bool, td_states[1, 1].noise_active), dim_owner,
+        flat_shift, findall(is_held); trim = trim_burnin,
+        cuts = _evidence_cuts(ev_blocks, n_burnin_used, thin), n_burnin_used, thin,
+        extend = ext_on, circ, names = layout.unfrozen_names, show_progress)
+    ev_acc = evidence_acc
+    if n_trimmed > 0
+        rows = n_trimmed * n_walkers_eff
+        samples = samples[(rows + 1):end, :]
+        lp_samples = lp_samples[(rows + 1):end]
+        keep_idx -= rows
+        ev_acc = _evidence_from(ev_blocks, n_burnin_used + n_trimmed * thin + 1, n_temps)
+        n_burnin_used += n_trimmed * thin
+    end
+
     # --- Evidence
-    ev_report = evidence_report(evidence_acc, βs)
+    ev_report = evidence_report(ev_acc, βs)
     log_z = isfinite(ev_report.hybrid[1]) ? ev_report.hybrid[1] :
             isfinite(ev_report.ti_plus[1]) ? ev_report.ti_plus[1] :
             ev_report.ti[1]
@@ -2916,8 +2961,9 @@ function sample_transdim_pt_emcee(
         copy(propose_noise_transdim), copy(accept_noise_transdim),
         copy(planet_birth_proposed), copy(planet_birth_accepted),
         copy(planet_death_proposed), copy(planet_death_accepted),
-        _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin_used),
+        _ladder_history(β_hist, swap_hist, smd_hist, ev_acc, n_done, n_burnin_used),
         _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc),
         _de_acceptance(de_accepted, de_proposed), drift, n_burnin_used,
+        n_trimmed, burnin_trim,
     )
 end
