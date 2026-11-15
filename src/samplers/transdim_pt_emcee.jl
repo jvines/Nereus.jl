@@ -77,6 +77,9 @@ struct TransDimPTemceeResult
     # The collective-drift check of the β = 1 ensemble (`ensemble_drift`), or
     # `nothing` when the run was too short to test.
     drift::Union{Nothing, Dict{String, Any}}
+    # The steps before the recording began: `n_burnin`, or more when
+    # `extend_burnin` ran burn-in on while the β = 1 rung was split.
+    n_burnin_used::Int
 end
 
 # ------------------------------------------------------------------
@@ -640,6 +643,16 @@ selection on planet count.
   running, in a region of negligible total mass, in a separate mode that
   carries next to none, or far down the mode's own flank, is drawn about a
   mode walker's parameters and takes its model. See `_td_prune_stranded!`.
+- `extend_burnin::Bool = false`, `max_burnin = nothing` -- opt-in, as in
+  `sample_pt_emcee`: while the β = 1 rung is still split at `n_burnin` (the
+  pruning's own pass at that rung, models included, would move one of its
+  walkers), burn-in runs on in 50-step pruning passes, up to `max_burnin`
+  (default `n_burnin + (n_steps - n_burnin) ÷ 2`), and recording starts after
+  the first check that finds the rung in one mode; at the cap it records anyway
+  and warns with the split. `n_steps` stays the total; `result.n_burnin_used`
+  says where recording started. The MoMS scale adaptation, the burn-in-only
+  multi-try births and the ladder adaptation stay keyed to `n_burnin`. See
+  src/samplers/burnin_extend.jl.
 - `betas::Union{Nothing,Vector{Float64}} = nothing`
 - `swap_min::Real = 0.05` — `log_evidence` is the tempered value (H+), which
   is quoted only when the ladder reaches β = 0 and every adjacent pair swapped
@@ -738,6 +751,8 @@ selection on planet count.
   an uninterrupted run of `n_steps`. Refused, with the differences listed, if
   the checkpoint came from different data, priors, parameters, walkers, rungs,
   burn-in, thinning, seed, trans-dim configuration or move settings.
+  `extend_burnin` and `max_burnin` are not fingerprinted; a resume during an
+  extension continues it, as in `sample_pt_emcee`.
 
 # Notes
 - Within-step ordering: stretch on continuous params → MoMS planet
@@ -788,6 +803,8 @@ function sample_transdim_pt_emcee(
     ladder_adapt_K::Real = 1.0,
     untemper_transit::Bool = false,
     prune_stranded::Bool = true,
+    extend_burnin::Bool = false,
+    max_burnin::Union{Nothing,Real} = nothing,
     node_flip::Real = 0.1,
     lambda_slide::Real = 0.0,
     lambda_slide_sigma::Real = 0.6,
@@ -2364,6 +2381,11 @@ function sample_transdim_pt_emcee(
     sc = StopControl(; max_seconds, max_evals, stop_file)
     stop_reason = "steps"; stop_step = 0
     cur_step = 0; step_keep0 = 0
+    # The extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl): the
+    # steps up to `b_end` are burn-in; as in `sample_pt_emcee`.
+    ext_on = extend_burnin && prune_stranded
+    b_cap = _burnin_cap(n_burnin, n_steps, max_burnin)
+    b_end = n_burnin; b_last = 0; b_passes = 0
 
     # --- Resume: put the saved run back exactly as it stopped ----------
     # In place throughout: the closures above captured these arrays (and the
@@ -2411,6 +2433,7 @@ function sample_transdim_pt_emcee(
         # Windows the saved walkers live in (moved by the burn-in re-cut).
         _restore_windows!(params, ck.windows, (target.transform,))
         merge!(recut_moved, ck.recut_moved)
+        b_end, b_last, b_passes = _burnin_resume(ck, step0, n_burnin, b_cap, ext_on)
         # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
         hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
@@ -2592,7 +2615,11 @@ function sample_transdim_pt_emcee(
         # Under the stellar spin flip (`spin_flip`) the walkers are also put in
         # one representative of the spin, the axis chosen from the cold rung;
         # before the re-cut, which then cuts λ's seam from the moved draws.
-        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
+        # A check of the extended burn-in (`extend_burnin`) is due: it folds and
+        # re-cuts as a nominal pass does (src/samplers/burnin_extend.jl).
+        b_check = ext_on && step == b_end && step >= n_burnin
+        recut_now = b_check || _pt_recut_due(step, n_burnin)
+        !isempty(cinc) && recut_now &&
             fold_cyclic_inclinations!(state, params; idx = cinc,
                                       decide_from = view(state, 1, :, :))
 
@@ -2608,6 +2635,34 @@ function sample_transdim_pt_emcee(
                                            held = any(is_held) ? hold.dims : Int[],
                                            held_logπ = any(is_held) ? held_lp : 0.0)
         end
+        # The extended burn-in, as in `sample_pt_emcee`: the record 50 steps
+        # before n_burnin, then at each check the β = 1 pass on copies (models
+        # included), taken at every rung only if it moves a walker there.
+        nnt = do_noise ? length(noise_toggle_idx) : 0
+        if ext_on && step == n_burnin - 50 &&
+           !(prune_stranded && step % 50 == 0 && step <= (3 * n_burnin) ÷ 4)
+            _td_prune_stranded!(state, td_states, logπ_arr, logL_arr, βs, flat_shift,
+                                dim_owner, nnt, rng_master; memory = prune_mem,
+                                rungs = 1:0, held = any(is_held) ? hold.dims : Int[])
+        end
+        if b_check
+            pass! = (s, tds, lp, ll, r, m, rg) -> _td_prune_stranded!(s, tds, lp, ll,
+                βs, flat_shift, dim_owner, nnt, r; evalf = prune_eval, circ,
+                memory = m, rungs = rg, held = any(is_held) ? hold.dims : Int[],
+                held_logπ = any(is_held) ? held_lp : 0.0)
+            mv = _burnin_split_pass!(pass!, (state, td_states, logπ_arr, logL_arr),
+                                     rng_master, prune_mem, n_temps;
+                                     commit = step < b_cap)
+            if mv[1] > 0 && step < b_cap
+                pruned .+= mv
+                b_last = step; b_passes += 1
+                b_end = min(step + 50, b_cap)
+            elseif mv[1] > 0
+                _td_split_warn(state, td_states, logπ_arr, logL_arr, step, n_burnin,
+                               layout, flat_shift, dim_owner, circ,
+                               any(is_held) ? hold.dims : Int[])
+            end
+        end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
         # Halfway through burn-in, while the ensemble can still merge the two
@@ -2617,7 +2672,7 @@ function sample_transdim_pt_emcee(
         # `state` at every rung.
         # thread_theta and the proposal buffers are rewritten from `state`
         # before every evaluation, so they hold nothing to relabel.
-        if !isempty(circ_groups) && _pt_recut_due(step, n_burnin)
+        if !isempty(circ_groups) && recut_now
             _td_ensemble_recut!(state, td_states, params, circ_groups, strategy,
                                 (target.transform,), recut_moved)
         end
@@ -2628,12 +2683,13 @@ function sample_transdim_pt_emcee(
                                           n_dim - length(hold.dims)) &&
             release_hold!()
 
-        if step > n_burnin
+        # Recording from the step after `b_end` (`extend_burnin`).
+        if step > b_end
             @inbounds for w in 1:n_walkers_eff
                 logL_walker = view(logL_arr, :, w)
                 update_evidence!(evidence_acc, logL_walker, βs)
             end
-            if (step - n_burnin) % thin == 0
+            if (step - b_end) % thin == 0
                 @inbounds for w in 1:n_walkers_eff
                     keep_idx += 1
                     for d in 1:n_dim
@@ -2654,7 +2710,7 @@ function sample_transdim_pt_emcee(
         end
 
         # ---- Periodic convergence diagnostic (β=1 gating set) ----
-        if step > n_burnin && (step - n_burnin) % diag_cadence == 0
+        if step > b_end && (step - b_end) % diag_cadence == 0
             diag = _td_convergence(samples, keep_idx, n_walkers_eff, diag_cols,
                                    gate_set, params; canon = AngleCanon(params))
             if diag !== nothing
@@ -2700,10 +2756,10 @@ function sample_transdim_pt_emcee(
         # burn-in, where there is nothing to keep.
         _step_hook!(step, sc)
         stop_now = _stop_check!(sc, n_evals_atomic[];
-                    force = step > n_burnin && (step - n_burnin) % diag_cadence == 0)
+                    force = step > b_end && (step - b_end) % diag_cadence == 0)
         if stop_now !== nothing
-            step <= n_burnin && throw(_stop_in_burnin_error(
-                "td-pt_emcee", stop_now, sc, step, n_burnin))
+            step <= b_end && throw(_stop_in_burnin_error(
+                "td-pt_emcee", stop_now, sc, step, b_end))
             keep_idx > 0 || (stop_now = nothing)
         end
 
@@ -2731,7 +2787,7 @@ function sample_transdim_pt_emcee(
                 samples = samples[1:keep_idx, :], lp_samples = lp_samples[1:keep_idx],
                 evidence = evidence_acc, windows = circular_windows(params),
                 spin_axis = copy(params.layout.spin_axis),
-                recut_moved,
+                recut_moved, burnin_ext = (b_end, b_last, b_passes),
                 informed = _informed_cache_snapshot(rngs_td, informed_keys)))
             last_ck = time()
         end
@@ -2748,7 +2804,7 @@ function sample_transdim_pt_emcee(
         end
     end
     catch err
-        err isa InterruptException && cur_step > n_burnin && step_keep0 > 0 ||
+        err isa InterruptException && cur_step > b_end && step_keep0 > 0 ||
             rethrow()
         keep_idx = step_keep0
         n_done = cur_step - 1
@@ -2773,6 +2829,10 @@ function sample_transdim_pt_emcee(
         "rung's mode ($(pruned[1]) at β = 1), each from a region whose total " *
         "posterior mass is bounded, or a separate mode whose own is estimated, " *
         "below e⁻¹⁰ of the mode's. The recorded chain is ordinary MCMC."
+    _burnin_extend_info("td-pt_emcee", n_burnin, b_end, b_passes, n_steps; n_done,
+                        quiet = !show_progress)
+    # The steps before recording began (`extend_burnin`).
+    n_burnin_used = min(b_end, n_done)
     @info "planet↔activity swap: proposed=$(pswap_prop[]) accepted=$(pswap_acc[])" *
           "  | PN(pl→AD) $(pn_acc[])/$(pn_prop[])  NP(AD→pl) $(np_acc[])/$(np_prop[])"
     # A silent move would leave the reader of a trace plot wondering why Mo now
@@ -2856,8 +2916,8 @@ function sample_transdim_pt_emcee(
         copy(propose_noise_transdim), copy(accept_noise_transdim),
         copy(planet_birth_proposed), copy(planet_birth_accepted),
         copy(planet_death_proposed), copy(planet_death_accepted),
-        _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
+        _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin_used),
         _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc),
-        _de_acceptance(de_accepted, de_proposed), drift,
+        _de_acceptance(de_accepted, de_proposed), drift, n_burnin_used,
     )
 end
