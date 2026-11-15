@@ -51,11 +51,15 @@
 #
 # Trans-dim (`sample_transdim_pt_emcee`): log densities of different models are
 # never compared. A model with fewer planets sits lower in ln p and still carries
-# mass through the Occam factor, so the rule runs within each model (the
-# pattern of active planet slots and noise models), with that model's free
-# dimension and its own reference, per walker and model: a draw in a model is
-# settling when it comes before that walker's first entry into that model's
-# band. A model absent from the final tenth has no reference and flags nothing.
+# mass through the Occam factor, so each model (the pattern of active planet
+# slots and noise models) has its own band, from its free dimension and its own
+# reference, and each draw is held against the band of the model it is in. A
+# walker settles until its first entry into any model's band. After that an
+# accepted trans-dim move keeps it on the posterior: a birth from one model's
+# band into another model's tail is a draw from that tail, not a climb, so
+# births late in the run set no cut. A walker never in any band and below its
+# final model's band at the end is split. Draws in a model absent from the final
+# tenth have no reference: they are passed over, neither settling nor an entry.
 #
 # The trimmed result is the run as if recording had started at the cut: the
 # draws, log densities and derived columns, the evidence (bridge and Laplace
@@ -94,13 +98,14 @@ stuck, halfwidth, final)`:
 - `verdict` -- `:settling` (walkers reached the main band only during the
   recorded run, the last at `cut`, with at least a quarter of the recorded
   steps after it), `:short_tail` (the same, with fewer after it), `:split`
-  (walkers never in the band and below it at the end; `stuck` lists them and
-  `stuck_model` the model each is stuck in), `:clean`, or `:not_assessed`
+  (walkers never in a band and below their final model's at the end; `stuck`
+  lists them and `stuck_model` that model), `:clean`, or `:not_assessed`
   (fewer than `_TRIM_MIN_ROWS` recorded steps, or a non-number in `L`).
-- `cut` -- the last settling draw's recorded step: the latest, over walkers
-  (and models), of the step before a walker's first entry into the band (0 if
-  every walker starts in it). A walker whose draws before that entry sit, on
-  median, in the band has none.
+- `cut` -- the last settling draw's recorded step: the latest, over walkers,
+  of the step before a walker's first entry into a band, each draw held
+  against the band of its own model (0 if every walker starts in one). A
+  walker whose draws before that entry sit, on median, in their bands has
+  none.
 - `n_settling` -- the walkers with settling draws (`:split`: the stuck ones).
 - `delta` -- how far below the reference, in ln p: the median over the
   settling draws (`:split`: over the stuck walkers' final medians).
@@ -146,64 +151,79 @@ function _trim_detect(L::AbstractMatrix{<:Real}, ds::AbstractVector{<:Integer};
     end
     thr = [isfinite(ref[m]) ? ref[m] - _prune_allow(max(Int(ds[m]), 1)) : -Inf
            for m in 1:M]
-    # Each walker along its own draws in each model: settling up to its first
-    # draw whose window is not mostly below the band (its first entry), never
-    # after it.
+    # Each walker along its own draws, each draw against the band of the model
+    # it is in (draws in a model without a reference are passed over): settling
+    # up to its first draw whose window is not mostly below (its first entry,
+    # into whichever model's band), never after it.
+    mdl(i, w) = model === nothing ? 1 : Int(model[i, w])
     cut = 0                               # the last settling draw's step
-    set_w = falses(n_w)                   # walkers with settling draws
+    n_set = 0                             # walkers with settling draws
     drops = Float64[]                     # reference minus log density, settling
-    stuck = Tuple{Int,Int}[]
+    stuck, stuck_model = Int[], Int[]
+    seq = Int[]                           # the walker's draws with a reference
     cs = Int[]
     for w in 1:n_w
-        bucket!(w)
-        for m in 1:M
-            isfinite(ref[m]) || continue
-            I = rows[m]
-            n = length(I)
-            n == 0 && continue
-            resize!(cs, n)
-            c = 0
-            for j in 1:n
-                c += !(L[I[j], w] >= thr[m])
-                cs[j] = c
+        empty!(seq)
+        for i in 1:n_rec
+            isfinite(ref[mdl(i, w)]) && push!(seq, i)
+        end
+        n = length(seq)
+        n == 0 && continue
+        resize!(cs, n)
+        c = 0
+        for j in 1:n
+            i = seq[j]
+            c += !(L[i, w] >= thr[mdl(i, w)])
+            cs[j] = c
+        end
+        f = n + 1                         # the first entry into a band
+        for j in 1:n
+            lo, hi = max(1, j - h), min(n, j + h)
+            if 2 * (cs[hi] - (lo > 1 ? cs[lo - 1] : 0)) <= hi - lo + 1
+                f = j
+                break
             end
-            f = n + 1                     # the first entry into the band
-            for j in 1:n
-                lo, hi = max(1, j - h), min(n, j + h)
-                if 2 * (cs[hi] - (lo > 1 ? cs[lo - 1] : 0)) <= hi - lo + 1
-                    f = j
-                    break
-                end
+        end
+        f == 1 && continue                # in a band from the start
+        # Never in a band and below its final model's at the end: split. The
+        # final model is the last draw's, or, with too few draws in it for a
+        # final-window median, the one the walker spent most of the window in.
+        if f > n
+            ml = mdl(seq[n], w)
+            if !isfinite(medf[ml, w])
+                nb = [count(i -> mdl(i, w) == m, f0:n_rec) for m in 1:M]
+                ml = argmax(m -> isfinite(medf[m, w]) ? nb[m] : -1, 1:M)
             end
-            f == 1 && continue            # in the band from the start
-            # Never in the band and below it at the end: the run is split.
-            if f > n && medf[m, w] < thr[m]
-                push!(stuck, (w, m))
+            if medf[ml, w] < thr[ml]
+                push!(stuck, w)
+                push!(stuck_model, ml)
                 continue
             end
-            # Its draws before the first entry sitting, on median, in the band:
-            # not a climb but a tail excursion that began just after recording
-            # did, which the first windows, cut short at the start, reach
-            # forward into.
-            empty!(buf)
-            for j in 1:(f - 1)
-                push!(buf, L[I[j], w])
-            end
-            median(buf) >= thr[m] && continue
-            set_w[w] = true
-            cut = max(cut, I[f - 1])
-            append!(drops, ref[m] .- buf)
+        end
+        # Its draws before the first entry sitting, on median, in their models'
+        # bands: not a climb but a tail excursion that began just after
+        # recording did, which the first windows, cut short at the start, reach
+        # forward into.
+        empty!(buf)
+        for j in 1:(f - 1)
+            i = seq[j]
+            push!(buf, L[i, w] - thr[mdl(i, w)])
+        end
+        median(buf) >= 0 && continue
+        n_set += 1
+        cut = max(cut, seq[f - 1])
+        for j in 1:(f - 1)
+            i = seq[j]
+            push!(drops, ref[mdl(i, w)] - L[i, w])
         end
     end
     if !isempty(stuck)
-        ws = unique(first.(stuck))
-        delta = median([ref[m] - medf[m, w] for (w, m) in stuck])
-        return out(:split; n_settling = length(ws), delta, stuck = first.(stuck),
-                   stuck_model = last.(stuck))
+        delta = median([ref[m] - medf[m, w] for (w, m) in zip(stuck, stuck_model)])
+        return out(:split; n_settling = length(stuck), delta, stuck, stuck_model)
     end
     cut == 0 && return out(:clean)
     verdict = 4 * (n_rec - cut) < n_rec ? :short_tail : :settling
-    return out(verdict; cut, n_settling = count(set_w), delta = median(drops))
+    return out(verdict; cut, n_settling = n_set, delta = median(drops))
 end
 
 # The recorded log densities as a matrix (recorded step × walker), from a
