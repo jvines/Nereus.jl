@@ -1267,7 +1267,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         # ExternalPrior(:rho_s, ...).
         use_rho_s = Bool(_get(par, :use_rho_s; default = false)),
         # Epoch the transit phase is measured from (time = "phic"). Absent:
-        # Params takes the median photometric time.
+        # Params takes the 1/σ²-weighted mean photometric time.
         t_ref_c = Float64(_get(par, :t_ref_c; default = NaN)),
         # "rho_circ" (default): a transiting planet with a free eccentricity
         # samples the circular-equivalent density its transit measures;

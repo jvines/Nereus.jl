@@ -753,12 +753,30 @@ end
     phic_reference_epoch(data) -> Float64
 
 The epoch the transit phase φ_c (`time = :phic`) is measured from when
-`t_ref_c` is not given: the median photometric time, so Tc is reported near
-the middle of the transits, where it is least correlated with P. Without
-photometry it is `data.t_ref`.
+`t_ref_c` is not given: the photometric times averaged with weights 1/σ², σ
+each point's quoted flux error. If a transit is equally likely at any time,
+that is the epoch where Tc is least correlated with P, so P and φ_c sample as
+near-independent coordinates. Points without a finite positive error are left
+out; if none has one, it is the median photometric time. Without photometry it
+is `data.t_ref`.
+
+The median of the times, used before, follows wherever the densest light
+curves are. On a P = 9.48 d planet with 11 light curves over ten years, the
+recent 200 s TESS sectors put it 1170 d after the epoch that decorrelates P
+and Tc, and the converged posterior had corr(P, φ_c) = 0.61; the weighted mean
+gives 0.14. What remains came from a light curve taken on a transit, which a
+pre-fit weight cannot know about.
 """
-phic_reference_epoch(data) =
-    isempty(data.t_phot) ? Float64(data.t_ref) : Float64(median(data.t_phot))
+function phic_reference_epoch(data)
+    t = data.t_phot
+    isempty(t) && return Float64(data.t_ref)
+    σ = data.flux_err
+    ok = isfinite.(t) .& isfinite.(σ) .& (σ .> 0)
+    any(ok) || return Float64(median(t))
+    t0 = Float64(t[findfirst(ok)])          # average offsets: BJDs lose digits
+    w = 1 ./ Float64.(σ[ok]) .^ 2
+    return t0 + sum(w .* (Float64.(t[ok]) .- t0)) / sum(w)
+end
 
 """
     resolve_time_anchor(pc, priors) -> ParametrizationConfig

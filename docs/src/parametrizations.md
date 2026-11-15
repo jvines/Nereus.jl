@@ -209,8 +209,9 @@ prior left on another anchor's slot is reported as such.
   covariance with `P` is exact, and `Tp` and `M₀` (`Mo_deg`, at `data.t_ref`)
   alongside it.
   `t_ref_c` (`ParametrizationConfig(t_ref_c = …)`, run_job
-  `parametrization.t_ref_c`) defaults to the median photometric time, where
-  `Tc` is least correlated with `P`; without photometry it is `data.t_ref`.
+  `parametrization.t_ref_c`) defaults to the photometric times averaged with
+  weights 1/σ² (`phic_reference_epoch`), where `Tc` is least correlated with `P`
+  if a transit is equally likely at any time; without photometry it is `data.t_ref`.
   `Params` fixes it with the parametrization, so every draw means the same
   `Tc` whatever subset of the data a likelihood later sees; a `Params` built
   without `data` needs `t_ref_c` (or another anchor) and says so.
@@ -476,7 +477,7 @@ The `model.parametrization` block in run_job (`_build_model` in
 |---|---|---|---|
 | `mass` | `K_driven`, `M_sec_driven`, `a_driven` | `:K_driven` / `:M_sec_driven` / `:a_driven` | `K_driven` |
 | `time` | `Tp`, `Tc`, `Mo`, `phic` | `:Tp` / `:Tc` / `:Mo` / `:phic` | `phic` |
-| `t_ref_c` | a time (`phic` only) | `t_ref_c` | median photometric time |
+| `t_ref_c` | a time (`phic` only) | `t_ref_c` | 1/σ²-weighted mean photometric time |
 | `ew` | `sesinw`, `ew` | `:sesinw` / `:ew` | `sesinw` |
 | `geom` | `b_rr` | `:b_rr` | `b_rr` |
 | `marginalize_gamma` | `true` / `false` | bool | `false` |
