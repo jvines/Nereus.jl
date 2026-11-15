@@ -1482,8 +1482,14 @@ end
 """
     fit_ttv(; phot, transit_times, rv, nbody, ...)
 
-Transit timing variations. Needs photometry (or measured transit times);
+Transit timing variations. Needs photometry or measured transit times, or both;
 `nbody=true` selects the N-body model (TTV_NB_SOURCE) over the analytic one.
+Every one of the `planets` gets that mode.
+
+`transit_times` is the `data.transit_times` block of the job config, as Argus
+sends it: a list of per-planet blocks `{planet, time_system = "BJD_TDB",
+values = {epoch, tc, tc_err, source}, reference_ephemeris}`
+(docs/JOB_CONFIG.md). Any other shape is refused by the config validation.
 """
 function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  nbody::Bool = false, planets::Int = 2,
@@ -1500,8 +1506,10 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
         "output_dir" => output_dir === nothing ? mktempdir() : String(output_dir),
         "star" => Dict{String,Any}(star),
         "data" => _data_block(; rv, phot),
+        # One mode per planet. It was `[mode]`, one entry for `planets` (2 by
+        # default) planets, which Params refuses.
         "model" => Dict{String,Any}("max_kplanet" => planets,
-                                    "planet_modes" => [mode],
+                                    "planet_modes" => fill(mode, planets),
                                     "stability" => "none"),
         "priors" => Dict{String,Any}(priors),
         # The `output` block. It was MISSING on all three config-route fits,
@@ -1575,11 +1583,22 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
 end
 
 """JOB_CONFIG sampler block from an engine spec."""
+# The `sampler` block of the config-route fits (fit_rm, fit_ttv, fit_binary).
+# `nothing`, their default, leaves the engine to run_job (pt_emcee, or
+# transdim_pt_emcee with a transdim block); it raised a MethodError from
+# `String(nothing)`, so none of the three ran without an explicit engine. The
+# options go to `sampler.kwargs`, the only place run_job reads them; they were
+# written beside `name`, where nothing read them, and were dropped silently.
 function _sampler_block(engine)
-    e = engine isa AbstractDict ? engine : Dict("engine" => String(engine))
-    b = Dict{String,Any}("name" => String(get(e, "engine", "pt")))
-    for (k, v) in pairs(get(e, "options", Dict()))
-        b[String(k)] = v
+    engine === nothing && return Dict{String,Any}()
+    e = engine isa AbstractDict ?
+        Dict{String,Any}(String(k) => v for (k, v) in pairs(engine)) :
+        Dict{String,Any}("engine" => String(engine))
+    b = Dict{String,Any}()
+    haskey(e, "engine") && (b["name"] = String(e["engine"]))
+    opts = get(e, "options", nothing)
+    if opts !== nothing && !isempty(opts)
+        b["kwargs"] = Dict{String,Any}(String(k) => v for (k, v) in pairs(opts))
     end
     return b
 end
