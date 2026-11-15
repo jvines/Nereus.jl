@@ -606,9 +606,9 @@ end
 # a moved walker's log-density is then redone through `logpost`, so the walkers
 # left alone keep theirs bit for bit. `mem` (`PruneMemory`) is the record the
 # pruning keeps between calls, its positions moved into the current charts
-# first (`_prune_rechart!`).
+# first (`_prune_rechart!`). `rungs = 1:0` only records (`extend_burnin`).
 function _ensemble_prune!(x::Matrix{Float64}, lastll::Vector{Float64},
-                          target::NereusTarget, logpost, rng, mem)
+                          target::NereusTarget, logpost, rng, mem; rungs = 1:1)
     tr = target.transform
     tr === nothing || _prune_rechart!(mem, tr, seam_indices(target.params))
     nd, nw = size(x)
@@ -622,7 +622,7 @@ function _ensemble_prune!(x::Matrix{Float64}, lastll::Vector{Float64},
     circ = target.transform === nothing ? circular_indices(target.params) : Int[]
     moved = _pt_prune_stranded!(state, lπ, lL, [1.0], rng;
                                 evalf = y -> _logdensity_parts(target, y),
-                                circ, memory = mem)
+                                circ, memory = mem, rungs)
     tr === nothing || (copyto!(mem.lo, tr.lowers); copyto!(mem.hi, tr.uppers))
     moved[1] == 0 && return 0
     for w in 1:nw

@@ -531,6 +531,10 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # the held coordinates' own log prior density on this scale (`held_logπ`, the
 # same in every walker's log π) comes out of the best walker's density: left
 # in, a held value where its prior is dense would raise the cut by as much.
+# `rungs` lists the rungs the pass works on (all of them by default); the
+# record is still taken at every rung, so `rungs = 1:0` only records. The
+# extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl) runs the
+# pass at the β = 1 rung alone, on copies, to test whether that rung is split.
 # ------------------------------------------------------------------
 """
     PruneMemory(n_temps, n_walkers, n_dim)
@@ -575,6 +579,15 @@ end
 _prune_saved(m::PruneMemory) = (seen = m.seen, med = m.med, lL = m.lL, x = m.x,
                                 out = m.out, key = m.key, lo = m.lo, hi = m.hi)
 
+# `src`'s record into `dst`, in place (an extended burn-in's check in
+# `sample_ensemble` takes the pass it ran on a copy).
+function _prune_copy!(dst::PruneMemory, src::PruneMemory)
+    dst.seen = src.seen
+    foreach(copyto!, (dst.med, dst.lL, dst.x, dst.out, dst.key, dst.lo, dst.hi),
+            (src.med, src.lL, src.x, src.out, src.key, src.lo, src.hi))
+    return dst
+end
+
 # From a checkpoint, in place. One written before the record existed has only
 # the medians: the record starts over.
 function _prune_restore!(m::PruneMemory, ck)
@@ -588,6 +601,11 @@ function _prune_restore!(m::PruneMemory, ck)
     end
     return m
 end
+
+# How far below a rung's best walker a walker may sit and still count as in
+# its mode, over `d` coordinates: the 1 - 1e-6 quantile of the drop of a
+# d-dimensional Gaussian's log density from its peak.
+_prune_allow(d::Integer) = quantile(Chisq(d), 1 - 1e-6) / 2
 
 # Rung `t`'s tempered densities at β into `ℓ`, -Inf where not finite.
 function _pt_tempered!(ℓ::Vector{Float64}, logπ_arr::Matrix{Float64},
@@ -604,13 +622,14 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
                              tau::Float64 = 10.0, evalf = nothing,
                              circ::AbstractVector{Int} = Int[],
                              memory::Union{Nothing,PruneMemory} = nothing,
-                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0)
+                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0,
+                             rungs = 1:size(state, 1))
     n_t, n_w, nd = size(state)
     moved = zeros(Int, n_t)
     free = Int[j for j in 1:nd if !(j in held)]
     d = length(free)
     d >= 1 || return moved
-    allow = quantile(Chisq(d), 1 - 1e-6) / 2
+    allow = _prune_allow(d)
     mem = memory
     known = mem !== nothing && mem.seen
     # How far each rung climbed since the last pass, at today's β (the ladder
@@ -620,7 +639,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
            fill(NaN, n_t)
     ℓ = Vector{Float64}(undef, n_w)
     y = Vector{Float64}(undef, nd)
-    for t in 1:n_t
+    for t in rungs
         known || break
         β = βs[t]
         _pt_tempered!(ℓ, logπ_arr, logL_arr, t, β)

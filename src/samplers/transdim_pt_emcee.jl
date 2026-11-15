@@ -340,6 +340,7 @@ end
 # out of the active set: every walker shares them, the climb and the draws leave
 # them, and their share of the density (`held_logπ`) comes out of the bound, as
 # in `_pt_prune_stranded!`.
+# `rungs`, as there: the rungs worked on; the record covers every rung.
 # ------------------------------------------------------------------
 function _td_prune_stranded!(state::Array{Float64,3},
                              td_states::AbstractMatrix{TransDimState},
@@ -350,7 +351,8 @@ function _td_prune_stranded!(state::Array{Float64,3},
                              tau::Float64 = 10.0, evalf = nothing,
                              circ::AbstractVector{Int} = Int[],
                              memory::Union{Nothing,PruneMemory} = nothing,
-                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0)
+                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0,
+                             rungs = 1:size(state, 1))
     n_t, n_w, n_dim = size(state)
     moved = zeros(Int, n_t)
     mem = memory
@@ -364,7 +366,7 @@ function _td_prune_stranded!(state::Array{Float64,3},
     _key(a) = hash((a.planet_active, a.noise_active, a.as_active))
     _flat(x, s) = s === nothing ? x : (x + s > 0 ? log(x + s) : -Inf)
     _dims(tds) = [d for d in 1:n_dim if _active(tds, owner[d]) && !(d in held)]
-    _allow(m) = quantile(Chisq(max(m, 1)), 1 - 1e-6) / 2
+    _allow(m) = _prune_allow(max(m, 1))
     # A slot's log π on the flat scale of its own active dims.
     function flatlπ(X, t, w)
         v = logπ_arr[t, w]
@@ -399,7 +401,7 @@ function _td_prune_stranded!(state::Array{Float64,3},
     jac(dims, yd) = sum((yd[j] for (j, d) in enumerate(dims) if flat_shift[d] !== nothing);
                         init = 0.0)
     xbuf = Vector{Float64}(undef, n_dim)
-    for t in 1:n_t
+    for t in rungs
         known || break
         β = βs[t]
         tempered!(t, β)
