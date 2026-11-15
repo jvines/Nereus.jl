@@ -2383,7 +2383,7 @@ function sample_transdim_pt_emcee(
     cur_step = 0; step_keep0 = 0
     # The extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl): the
     # steps up to `b_end` are burn-in; as in `sample_pt_emcee`.
-    ext_on = extend_burnin && prune_stranded
+    ext_on = _burnin_ext_on("transdim_pt_emcee", extend_burnin, prune_stranded)
     b_cap = _burnin_cap(n_burnin, n_steps, max_burnin)
     b_end = n_burnin; b_last = 0; b_passes = 0
 

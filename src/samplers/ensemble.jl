@@ -71,7 +71,8 @@ Works in unconstrained space (with transforms) by default.
   says where recording started. With `n_chains > 1` each chain extends on its
   own, without re-cutting after `n_burnin` (concurrent chains re-cut together,
   and extend apart), and every chain keeps its last draws, as many as the one
-  that extended longest recorded. Needs `prune_stranded`.
+  that extended longest recorded. Needs `prune_stranded`; with it off this
+  throws.
 - `max_burnin::Union{Nothing,Integer}=nothing` — the cap, in saved draws: by
   default `n_burnin + (n_steps ÷ thinning - n_burnin) ÷ 2`, at most half of
   the draws the run was going to record. Still split there, the run records
@@ -454,7 +455,7 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     # steps: those up to `b_end` are burn-in, n_burnin * thinning unless a check
     # finds the walkers split; every end it moves to is a multiple of `thinning`.
     b_nom = n_burnin * thinning
-    ext_on = extend_burnin && prune_stranded
+    ext_on = _burnin_ext_on("ensemble", extend_burnin, prune_stranded)
     b_cap = _burnin_cap(n_burnin, n_saved, max_burnin) * thinning
     b_end = b_nom; b_last = 0; b_passes = 0
 

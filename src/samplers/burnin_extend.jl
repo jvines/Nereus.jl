@@ -52,6 +52,18 @@
 # extension takes comes out of the recorded ones: n_steps stays the total.
 # ------------------------------------------------------------------
 
+# Whether the extended burn-in runs. Its split test is the stranded-walker
+# pruning's own pass, so with the pruning off there is nothing to test with,
+# and asking for both is a contradiction, not a request to do nothing.
+function _burnin_ext_on(engine::AbstractString, extend_burnin::Bool, prune_stranded::Bool)
+    extend_burnin && !prune_stranded && throw(ArgumentError(
+        "$engine: extend_burnin = true needs prune_stranded = true. The test " *
+        "for walkers split between modes at the end of burn-in is the " *
+        "stranded-walker pruning's own pass, so with the pruning off nothing " *
+        "would extend. Turn prune_stranded back on, or drop extend_burnin."))
+    return extend_burnin
+end
+
 # The last step an extended burn-in may run to: `max_burnin`, or by default
 # n_burnin plus half the steps after it. Not cut at n_steps: a run that ends
 # inside its extension has decided nothing, and a resume with more steps

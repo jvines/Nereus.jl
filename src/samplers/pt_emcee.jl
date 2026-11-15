@@ -1138,8 +1138,8 @@ in place.
   recorded step fewer; `result.n_burnin_used` says where recording started.
   The circular re-cut runs with every check, as with every nominal pass, and the
   last one fixes the chart for the recorded steps; the ladder adaptation and
-  `burnin_hold` stay keyed to `n_burnin`. Needs `prune_stranded`; without it
-  this does nothing. See src/samplers/burnin_extend.jl.
+  `burnin_hold` stay keyed to `n_burnin`. Needs `prune_stranded` (on by
+  default); with it off this throws. See src/samplers/burnin_extend.jl.
 - `max_burnin::Union{Nothing,Integer}=nothing` — the last step the extended
   burn-in may run to. By default `n_burnin + (n_steps - n_burnin) ÷ 2`: the
   extension takes at most half of the steps the run was going to record, so at
@@ -1797,7 +1797,7 @@ function sample_pt_emcee(
     # steps up to `b_end` are burn-in. It starts at n_burnin and moves only at a
     # check (step == b_end) that finds the β = 1 rung split; `b_last` is the step
     # of the last pass an extension took and `b_passes` their count.
-    ext_on = extend_burnin && prune_stranded
+    ext_on = _burnin_ext_on("pt_emcee", extend_burnin, prune_stranded)
     b_cap = _burnin_cap(n_burnin, n_steps, max_burnin)
     b_end = n_burnin; b_last = 0; b_passes = 0
 

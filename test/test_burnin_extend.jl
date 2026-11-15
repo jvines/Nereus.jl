@@ -393,3 +393,17 @@ end
     @test s["n_burnin_used"] >= 100
     @test s["n_draws_kept"] == (300 - s["n_burnin_used"]) * 20
 end
+
+# On without the pruning the split test would have nothing to run: an error
+# naming the fix, not a silent no-op.
+@testset "extended burn-in needs the pruning" begin
+    tg = _be_target()
+    @test_throws "needs prune_stranded = true" sample_pt_emcee(tg, tg.data;
+        _BE_KW..., n_steps = 400, extend_burnin = true, prune_stranded = false)
+    reset_transdim_caches!()
+    @test_throws "needs prune_stranded = true" sample_transdim_pt_emcee(tg, tg.data;
+        _BE_TD_KW..., n_steps = 400, extend_burnin = true, prune_stranded = false)
+    @test_throws "needs prune_stranded = true" sample_ensemble(tg; _BE_ENS_KW...,
+        n_steps = 400, extend_burnin = true, prune_stranded = false)
+    @test Nereus._burnin_ext_on("x", false, false) === false
+end
