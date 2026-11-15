@@ -150,22 +150,9 @@ function _burnin_split_warn(sampler::AbstractString, step::Integer, n_burnin::In
                             extra::AbstractString = "", cmp = out)
     n = length(ℓ)
     b = argmax(ℓ)
-    inn = setdiff(1:n, out)
     k = length(out)
     drop = k > 0 ? ℓ[b] - median(ℓ[out]) : NaN
-    jb, sb, vo, vi = 0, -Inf, NaN, NaN
-    if !isempty(cmp) && !isempty(inn)
-        for j in dims
-            off = [j in circ ? rem2pi(Y[w, j] - Y[b, j], RoundNearest) : Y[w, j] - Y[b, j]
-                   for w in 1:n]
-            mo, mi = median(off[cmp]), median(off[inn])
-            sd = max(_burnin_mad(off[cmp], mo), _burnin_mad(off[inn], mi))
-            s = abs(mo - mi) / sd
-            if isfinite(s) && s > sb
-                jb, sb, vo, vi = j, s, Y[b, j] + mo, Y[b, j] + mi
-            end
-        end
-    end
+    jb, sb, vo, vi = _split_coordinate(ℓ, out, Y, dims, circ; cmp)
     todo = if jb > 0
         nm = names[jb]
         " The two groups sit furthest apart, against their own spread, in $nm " *
@@ -185,6 +172,31 @@ function _burnin_split_warn(sampler::AbstractString, step::Integer, n_burnin::In
           "would still move them.$extra Recording anyway, so the posterior mixes " *
           "the modes and its R-hat will show it.$todo"
     return nothing
+end
+
+# The coordinate of `_burnin_split_warn` (also the burn-in trim's,
+# src/samplers/burnin_trim.jl): `(j, s, vo, vi)`, the coordinate, the gap
+# between the two groups' medians against their larger scaled MAD, and the two
+# medians on the walkers' scale; `j = 0` when there is no group to compare.
+function _split_coordinate(ℓ::AbstractVector{Float64}, out::AbstractVector{Int},
+                           Y::AbstractMatrix{Float64}, dims, circ; cmp = out)
+    n = length(ℓ)
+    b = argmax(ℓ)
+    inn = setdiff(1:n, out)
+    jb, sb, vo, vi = 0, -Inf, NaN, NaN
+    if !isempty(cmp) && !isempty(inn)
+        for j in dims
+            off = [j in circ ? rem2pi(Y[w, j] - Y[b, j], RoundNearest) : Y[w, j] - Y[b, j]
+                   for w in 1:n]
+            mo, mi = median(off[cmp]), median(off[inn])
+            sd = max(_burnin_mad(off[cmp], mo), _burnin_mad(off[inn], mi))
+            s = abs(mo - mi) / sd
+            if isfinite(s) && s > sb
+                jb, sb, vo, vi = j, s, Y[b, j] + mo, Y[b, j] + mi
+            end
+        end
+    end
+    return jb, sb, vo, vi
 end
 
 # The one line an extension prints at the end of the run (`n_done` steps),
@@ -271,6 +283,9 @@ function _burnin_to_summary!(summary::AbstractDict, result)
         hasproperty(result, :chains) && result.chains isa MCMCChains.Chains ?
             get(result.chains.info, :n_burnin_used, nothing) : nothing
     v === nothing || (summary["n_burnin_used"] = v)
+    # The settling test and the trim (src/samplers/burnin_trim.jl), applied or not.
+    t = _burnin_trim_of(result)
+    t === nothing || (summary["burnin_trim"] = _burnin_trim_summary(t))
     return summary
 end
 
