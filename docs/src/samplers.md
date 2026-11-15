@@ -225,10 +225,12 @@ when the run had it off.
 
 The same samplers (`sample_pt_emcee`, `sample_transdim_pt_emcee`,
 `sample_pt_whitening`, `sample_ensemble`) test whether their β = 1 walkers were
-still settling into the main mode during the recorded run: a walker counts as
-below while most of its draws in a window of up to 51 recorded steps sit more
-than the pruning's allowance below the best walker's median over the last tenth
-of the run. Walkers that crossed over during recording put their climb in the
+still settling into the main mode during the recorded run: a walker settles
+from the start of recording until the first recorded step at which most of its
+draws in a window of up to 51 recorded steps sit within the pruning's allowance
+of the best walker's median over the last tenth of the run. Time below after
+that first entry, however long and however late, is posterior mass and never
+counts. Walkers that crossed over during recording put their climb in the
 posterior; the run warns with the step they reached the mode by and what to do.
 `trim_burnin = true` (default `false`) drops the recorded steps up to that
 point, rounded up to the next 50-step block for the tempered samplers, and
@@ -239,7 +241,7 @@ option on. Nothing is dropped when walkers are still out of the main mode at
 the end of the run and never were in it (the run is split; the warning names
 the parameter that separates the modes), or when the cut would leave under a
 quarter of the recorded steps. Trans-dim runs compare each model only with
-itself. `result.burnin_trim` (`chains.info.burnin_trim` for `sample_ensemble`)
+itself, per walker and model. `result.burnin_trim` (`chains.info.burnin_trim` for `sample_ensemble`)
 records the test; see `src/samplers/burnin_trim.jl`.
 
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (bridge
