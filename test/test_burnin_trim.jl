@@ -183,15 +183,43 @@ _bt_report(rec; trim = false, cuts = nothing, kw...) =
         M3[1:100, 1:4] .= 3
         L3[1:100, 1:4] .= -5000
         @test _trim_detect(L3, [5, 8, 3]; model = M3).verdict === :clean
-        # Settling within one model is still found, at that model's last draw below.
+        # A walker below the band of whichever model it is in until step 150:
+        # settling, cut at its last draw before its first entry.
         L4 = copy(L)
-        for i in 1:150
-            model[i, 1] == 2 && (L4[i, 1] -= 1000)
-        end
+        L4[1:150, 1] .-= 1000
         rec = _trim_detect(L4, [5, 8]; model)
-        @test rec.verdict === :settling
-        @test rec.cut == maximum(i for i in 1:150 if model[i, 1] == 2)
-        @test rec.n_settling == 1
+        @test rec.verdict === :settling && rec.cut == 150 && rec.n_settling == 1
+        # Below only in model 2 until 150, in model 1's band in between: its first
+        # entry is into model 1's band, at its first hop (step 37), and its later
+        # stretches below model 2's band are draws from that model's tail.
+        L5 = copy(L)
+        for i in 1:150
+            model[i, 1] == 2 && (L5[i, 1] -= 1000)
+        end
+        rec = _trim_detect(L5, [5, 8]; model)
+        @test findfirst(==(1), model[:, 1]) == 37
+        @test rec.verdict === :settling && rec.cut == 36 && rec.n_settling == 1
+        # Births late in the run, from model 1's band into model 2 below its
+        # band, set no cut: walker 2 is there for steps 400-460, walker 3 from
+        # 560 to the end, which is not split either.
+        M6, L6 = copy(model), copy(L)
+        for (w, r) in ((2, 400:460), (3, 560:n3))
+            M6[:, w] .= 1
+            L6[:, w] .= -100 .- rand(rng, Chisq(5), n3) ./ 2
+            M6[r, w] .= 2
+            L6[r, w] .= -1000 .- rand(rng, Chisq(8), length(r)) ./ 2
+        end
+        rec = _trim_detect(L6, [5, 8]; model = M6)
+        @test rec.verdict === :clean && rec.cut == 0
+        t = @test_logs _bt_report(rec; trim = true)
+        @test !t.applied && t.status == "ok"
+        # A walker never in any model's band, below its final model's at the end:
+        # split, in that model.
+        L7 = copy(L)
+        L7[:, 5] .-= 1000
+        rec = _trim_detect(L7, [5, 8]; model)
+        @test rec.verdict === :split && rec.stuck == [5]
+        @test rec.stuck_model == [model[n3, 5]]
     end
 end
 
