@@ -155,6 +155,7 @@ res = sample_pt_emcee(target, data;
     n_steps        = 3000,
     n_burnin       = 2000,
     prune_stranded = true,             # burn-in only; see the docstring
+    trim_burnin    = false,            # drop recorded steps of walkers still settling (below)
     node_flip      = 0.1,              # per-step probability of the (Ω, ω) -> (Ω+π, ω+π) mirror of astrometry-only planets
     swap_min       = 0.05,             # least adjacent swap rate at which a tempered log Z is quoted
     betas          = nothing,          # default: geometric from β = 1 down to beta_min
@@ -221,6 +222,25 @@ drift every walker shares is what R-hat and ESS cannot see; the run warns,
 names the parameters, and records the test under `drift` in the summary's
 diagnostics. The remedy is a longer run or another start, and the DE move
 when the run had it off.
+
+The same samplers (`sample_pt_emcee`, `sample_transdim_pt_emcee`,
+`sample_pt_whitening`, `sample_ensemble`) test whether their β = 1 walkers were
+still settling into the main mode during the recorded run: a walker counts as
+below while most of its draws in a window of up to 51 recorded steps sit more
+than the pruning's allowance below the best walker's median over the last tenth
+of the run. Walkers that crossed over during recording put their climb in the
+posterior; the run warns with the step they reached the mode by and what to do.
+`trim_burnin = true` (default `false`) drops the recorded steps up to that
+point, rounded up to the next 50-step block for the tempered samplers, and
+reports the run as if recording had begun there: draws, R-hat and ESS, the
+evidence and `n_burnin_used`. The run's state and its checkpoint are not
+changed, so a finished run can be resumed at the same `n_steps` with the
+option on. Nothing is dropped when walkers are still out of the main mode at
+the end of the run and never were in it (the run is split; the warning names
+the parameter that separates the modes), or when the cut would leave under a
+quarter of the recorded steps. Trans-dim runs compare each model only with
+itself. `result.burnin_trim` (`chains.info.burnin_trim` for `sample_ensemble`)
+records the test; see `src/samplers/burnin_trim.jl`.
 
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (bridge
 sampling on the cold chain when usable; else H⁺ when its ladder is quotable —
@@ -291,6 +311,7 @@ res = sample_transdim_pt_emcee(target, data; td = td,
     n_steps                 = 3000,
     n_burnin                = 2000,
     prune_stranded          = true,     # burn-in only; moves the model too
+    trim_burnin             = false,    # as in sample_pt_emcee; within each model
     betas                   = nothing,
     beta_min                = 1e-4,     # geometric ladder β_i = beta_min^(i/(N-1))
     stretch_a               = 2.0,
@@ -491,6 +512,7 @@ res = sample_pt_whitening(target, data;
     whiten_window  = 100,               # sliding window for the per-temp (μ,σ)
     whiten_refresh = 10,                # recompute (μ,σ) every N steps
     init_strategy  = :prior,            # the only one implemented; others throw
+    trim_burnin    = false,             # as in sample_pt_emcee
     seed           = 1,
     thin           = 1,
     show_progress  = true,
@@ -986,6 +1008,7 @@ chains = sample_ensemble(target;
     init      = nothing,               # else prior-draw walkers (EMPEROR-style)
     n_scouts  = 16,                    # scouts in place of up to half the prior-drawn walkers
     de_move   = 0.5,                   # as in sample_pt_emcee
+    trim_burnin = false,               # as in sample_pt_emcee; saved draws, all chains alike
     seed      = 1,
     n_chains  = 1,                     # parallel chains via Threads.@spawn
 )

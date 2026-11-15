@@ -770,6 +770,27 @@ prior when that degeneracy is present.
   `summary.json` records `"n_burnin_used"`, the step recording started after
   (`n_burnin` unless the extension ran on); `"n_draws_kept"` counts from there.
   Needs `prune_stranded` (on by default). See `src/samplers/burnin_extend.jl`.
+- **`trim_burnin`** (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`,
+  `ensemble`; default `false`) — every run tests whether its β = 1 walkers were
+  still settling into the main mode during the recorded run (a walker below
+  while most of its draws in a window of up to 51 recorded steps sit more than
+  the stranded-walker pruning's allowance below the best walker's median over
+  the last tenth of the run). Off, a run that finds walkers crossing over warns
+  with the recorded step they reached the mode by and the fixes: this option,
+  `n_burnin` at least that step, or `extend_burnin`. `true` drops the recorded
+  steps up to that point (rounded up to the next 50-step block for the tempered
+  samplers; `ensemble` counts saved draws and drops every chain's alike) and
+  reports the rest as the run: draws, diagnostics, the evidence and the
+  evidence-selection rule, and `"n_burnin_used"`, which counts the dropped
+  steps. Nothing is dropped, with a warning, when walkers still out of the main
+  mode at the end of the run were never in it (a split run; the warning names
+  the parameter that separates the modes), or when the cut would leave fewer
+  than a quarter of the recorded steps. Modes within the allowance of each
+  other, and a low region walkers move into from the main mode and stay in, are
+  not settling and get no warning. `transdim_pt_emcee` compares each model
+  only with itself. The run's checkpoint is not changed: a finished run resumed
+  at the same `n_steps` with the option on trims on resume. Runs after an
+  extended burn-in, on what was recorded. See `src/samplers/burnin_trim.jl`.
 - Unknown kwargs are rejected with an actionable error listing the valid set
   (`src/runner.jl:1425-1439,1466-1475`); every JSON-string kwarg value is coerced to a Julia
   `Symbol` so `"multi"`, `"rslice"`, `"stretch"`, etc. work as expected.
@@ -944,7 +965,30 @@ numbers live under `fitted` / `derived`
   // ---- Post-fit health guard (output.fit_health, default on) ----
   "fit_health": {
     "overall": "ok",                        // "ok" | "warn" | "fail"
-    "checks": { "disjoint_modes": { "status": "ok", "message": "…" }, /*…*/ }
+    "checks": { "disjoint_modes": { "status": "ok", "message": "…" }, /*…*/
+                // the samplers' settling test (sampler.kwargs.trim_burnin):
+                // "warn" when walkers settled during recording and were not
+                // trimmed, the run ended split, or a trim was refused
+                "burnin_settling": { "status": "ok", "message": "…" } }
+  },
+
+  // ---- Walkers still settling into the main mode during recording ----
+  // pt_emcee, transdim_pt_emcee, pt_whitening and ensemble; written whether or
+  // not sampler.kwargs.trim_burnin was on. Steps are recorded steps (saved draws
+  // for ensemble), counted from the start of recording before any trim.
+  "burnin_trim": {
+    "applied": true,              // draws were dropped
+    "verdict": "settling",        // "settling" | "short_tail" (a cut would leave under a
+                                  // quarter: refused) | "split" (walkers never in the main
+                                  // mode at the end: refused) | "mixing" | "clean" | "not_assessed"
+    "cut_step": 18565,            // the last recorded step a walker was below (0: none)
+    "n_recorded": 29000,
+    "n_walkers": 150,
+    "n_walkers_settling": 150,    // "split": the walkers stuck at the end
+    "delta_lnp": 970.8,           // median Δln p below the best walker's level of the
+                                  // draws flagged (null when none)
+    "n_trimmed": 18600            // recorded steps dropped: cut_step rounded up to a
+                                  // 50-step block, or 0; also counted in n_burnin_used
   },
 
   // ---- Where the post-fit time went (seconds; observability, not science) ----
