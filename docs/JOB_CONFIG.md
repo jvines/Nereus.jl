@@ -757,6 +757,19 @@ prior when that degeneracy is present.
   stretch move leaves a coordinate every walker shares where it is, so the
   held phase is the fit without that parameter. Burn-in only: the recorded
   chain is ordinary MCMC (`src/samplers/burnin_hold.jl`).
+- **`extend_burnin`** (`pt_emcee`, `transdim_pt_emcee`, `ensemble`; default
+  `false`) — `true` tests at `n_burnin` whether the β = 1 rung is still split
+  between modes (the stranded-walker pruning's own pass would move one of its
+  walkers) and, while it is, runs burn-in on in 50-step pruning passes;
+  recording starts after the first check that finds the rung in one mode. The
+  extension comes out of `n_steps`, so such a run records fewer draws; a run in
+  one mode at `n_burnin` draws exactly what it does without the option.
+  **`max_burnin`** caps it (default, or `null`: `n_burnin` plus half of the
+  steps after it). Still split at the cap, the run records anyway and warns with
+  the split it measured, the parameter that separates the modes, and what to do.
+  `summary.json` records `"n_burnin_used"`, the step recording started after
+  (`n_burnin` unless the extension ran on); `"n_draws_kept"` counts from there.
+  Needs `prune_stranded` (on by default). See `src/samplers/burnin_extend.jl`.
 - Unknown kwargs are rejected with an actionable error listing the valid set
   (`src/runner.jl:1425-1439,1466-1475`); every JSON-string kwarg value is coerced to a Julia
   `Symbol` so `"multi"`, `"rslice"`, `"stretch"`, etc. work as expected.
