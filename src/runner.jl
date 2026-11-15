@@ -202,6 +202,8 @@ function run_job(cfg::AbstractDict)
         _populate_summary!(summary, result, params, chains)
         isempty(data.transit_times) ||
             (summary["transit_times"] = _transit_times_summary(chains, params, data))
+        slots = _ttv_slots_summary(cfg, chains, params, data)
+        slots === nothing || (summary["ttv_slots"] = slots)
         summary["provenance"] = provenance_block(_job_sampler_name(cfg), params)
         _postfit_stage!(pf, "evidence")
         bridge_t = Dict{String, Any}()
@@ -2836,6 +2838,59 @@ function _ttv_window_transits(ts::AbstractVector{Float64}, Tc::Float64, P::Float
         i = max(searchsortedfirst(ts, Tc + (nxt - 0.25) * P), i + 1)
     end
     return out
+end
+
+"""
+    _ttv_slots_summary(cfg, chains, params, data) -> Dict or nothing
+
+summary.json's `ttv_slots`: per planet with free TTV offsets, each slot's name,
+its transit counted from the planet's first observed transit (`epochs`), where
+that came from (`source`: "ttv_n_transits", "ttv_epochs" or "default"), and at
+the max-lp draw the slot's linear-ephemeris time (`t_lin`, BJD_TDB) and, for a
+planet with transit times, the epoch label of that transit in their numbering
+(`transit_times_epoch`). `nothing` without such a planet. Fail-soft.
+"""
+function _ttv_slots_summary(cfg, chains, params::Params, data::Data)
+    c = params.config
+    ks = [k for k in 1:c.max_kplanet if !isempty(ttv_slot_epochs(c, k))]
+    isempty(ks) && return nothing
+    mdl = _get(cfg, :model; default = Dict())
+    given(key, k) = any(kk -> _ttv_planet_key(kk) == k,
+                        keys(_get(mdl, key; default = Dict())))
+    planets = Any[]
+    try
+        for k in ks
+            ep = ttv_slot_epochs(c, k)
+            src = given(:ttv_epochs, k) ? "ttv_epochs" :
+                  given(:ttv_n_transits, k) ? "ttv_n_transits" : "default"
+            d = Dict{String, Any}(
+                "planet" => k, "slots" => ["ttv_k$(k)_t$i" for i in eachindex(ep)],
+                "epochs" => ep, "source" => src,
+                "numbering" => "transit number counted from the planet's first " *
+                               "observed transit (0)")
+            pool = _planet_present_idx(chains, params, k)
+            if !isempty(pool)
+                th = _theta_best_lp(chains, params; active_idx = pool)
+                tp = _tt_tc_P(th, data, k)
+                if tp !== nothing
+                    Tc, P = tp
+                    n0 = _ttv_first_transit(th, data, k)
+                    d["draw"] = "max_lp"
+                    d["t_lin"] = Tc .+ (ep .+ n0) .* P
+                    s = transit_time_set(data, k)
+                    if s !== nothing && n_tt(s) > 0
+                        Δ = _tt_match(s, Tc, P, nothing)
+                        Δ === nothing || (d["transit_times_epoch"] = ep .+ n0 .- Δ)
+                    end
+                end
+            end
+            push!(planets, d)
+        end
+        return Dict{String, Any}("status" => "ok", "planets" => planets)
+    catch err
+        @warn "ttv_slots summary failed (continuing)" exception = (err, catch_backtrace())
+        return Dict{String, Any}("status" => "failed", "error" => sprint(showerror, err))
+    end
 end
 
 # The posterior linear ephemeris of a set's planet in the set's own labels:
