@@ -103,26 +103,45 @@ _bt_report(rec; trim = false, cuts = nothing, kw...) =
         end
     end
 
-    @testset "short dips into the tail are not settling" begin
+    @testset "excursions after reaching the main mode are posterior mass" begin
+        # A stationary posterior whose walkers wander into a heavy tail, past the
+        # allowance, for far longer than the window: mid-run, late, and one still
+        # out at the end. Nothing settled, so no cut and no warning.
         n2 = 2000                              # half-width 25
         L = _bt_levels(rng, n2, nw, d)
+        @test _prune_allow(d) < 30
         L[500:524, 2] .-= 1000                 # 25 draws, under half the window
         L[1:7:n2, 4] .-= 1000                  # every 7th draw
+        L[800:1000, 5] .-= 60                  # 201 draws mid-run
+        L[1700:1850, 6] .-= 60                 # 151 draws late
+        L[1900:n2, 7] .-= 60                   # out at the end: 101 of the final 200
+        L[1200:n2, 8] .-= 1000                 # out for the last 40% of the run
         rec = _trim_detect(L, [d])
         @test rec.halfwidth == 25
-        @test rec.verdict === :clean
-        # Held for longer than half the window, the same dip is a crossing.
-        L[500:560, 2] .-= 1000
-        @test _trim_detect(L, [d]).verdict === :settling
-    end
-
-    @testset "a low region walkers move into from the main mode: posterior mass" begin
-        L = _bt_levels(rng, n, nw, d)
-        L[201:end, 3] .-= 1000                 # in the main mode, then out to the end
-        rec = _trim_detect(L, [d])
-        @test rec.verdict === :mixing && rec.cut == 0
+        @test rec.verdict === :clean && rec.cut == 0 && rec.n_settling == 0
         t = @test_logs _bt_report(rec; trim = true)
         @test !t.applied && t.status == "ok"
+        # The same stretch at the start of recording, before the walker first
+        # reached the main mode, is settling: cut at its last draw.
+        L[1:61, 3] .-= 1000
+        rec = _trim_detect(L, [d])
+        @test rec.verdict === :settling && rec.cut == 61 && rec.n_settling == 1
+        @test 990 < rec.delta < 1015
+    end
+
+    @testset "an excursion just after recording begins is not settling" begin
+        # The first windows are cut short and reach forward only: a walker in the
+        # band for its first 4 draws, then below for 15, has its first 4 windows
+        # mostly below. Its draws before its first entry sit in the band, so it
+        # was not climbing.
+        L = _bt_levels(rng, 2000, nw, d)
+        L[5:19, 9] .-= 60
+        rec = _trim_detect(L, [d])
+        @test rec.verdict === :clean && rec.cut == 0
+        # Below from the first draw, the same walker is settling.
+        L[1:4, 9] .-= 60
+        rec = _trim_detect(L, [d])
+        @test rec.verdict === :settling && rec.cut > 0 && rec.n_settling == 1
     end
 
     @testset "walkers never in the main mode: split, refused" begin
@@ -630,7 +649,7 @@ end
         disk = JSON3.read(read(joinpath(cfg["output_dir"], "summary.json"), String);
                           allow_inf = true)
         b = disk["burnin_trim"]
-        @test b["verdict"] in ("clean", "mixing", "settling", "short_tail", "split",
+        @test b["verdict"] in ("clean", "settling", "short_tail", "split",
                                "not_assessed")
         @test b["n_recorded"] == 200 && b["n_walkers"] == 20
         @test b["applied"] == (b["n_trimmed"] > 0)
