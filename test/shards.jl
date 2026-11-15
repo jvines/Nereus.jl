@@ -115,6 +115,9 @@ const TEST_UNITS = [
     # The opt-in extended burn-in in the three samplers and through run_job.
     # Measured locally (arm64, 4 threads), not yet on the CI runner.
     (name = "test_burnin_extend.jl", seconds = 200, files = ["test_burnin_extend.jl"]),
+    # The post-hoc burn-in trim: the rule on synthetic levels, the four samplers
+    # and run_job. Measured locally (arm64, 4 threads), not yet on the CI runner.
+    (name = "test_burnin_trim.jl", seconds = 150, files = ["test_burnin_trim.jl"]),
     (name = "test_pt_resume.jl", seconds = 43, files = ["test_pt_resume.jl"]),
     (name = "test_pt_hmc_resume.jl", seconds = 84, files = ["test_pt_hmc_resume.jl"]),
     (name = "test_pt_whitening_resume.jl", seconds = 9, files = ["test_pt_whitening_resume.jl"]),
