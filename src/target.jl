@@ -39,7 +39,7 @@ function with_phic_epoch(params::Params, data::Data)
                        c.planet_modes, c.instruments, c.priors, c.trend_order,
                        c.phot_trend_order, c.noise_models, c.stability, c.M_s, c.R_s,
                        c.external_priors, c.sharing, c.ttv_n_transits,
-                       c.ttv_backend, c.obliquity, c.tt_jitter)
+                       c.ttv_backend, c.obliquity, c.tt_jitter, c.ttv_epochs)
     return Params(cfg, params.layout)
 end
 

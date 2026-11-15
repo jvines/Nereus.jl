@@ -2754,7 +2754,7 @@ function _tt_posterior_ephemeris(chains, params::Params, data::Data, s::TransitT
         tp = _tt_tc_P(th, data, s.planet)
         tp === nothing && continue
         Tc, P = tp
-        Δ = _tt_match(s, Tc, P, nothing, 0)
+        Δ = _tt_match(s, Tc, P, nothing)
         Δ === nothing && continue
         push!(dt0, (Tc - ref) + (Δ + E0) * P); push!(Ps, P)
     end

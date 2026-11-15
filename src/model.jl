@@ -1489,7 +1489,8 @@ struct ParamsConfig
     sharing::Dict{Symbol, Vector{Vector{String}}}
     # Per-planet TTV transit count: planet_k → N (number of free
     # per-transit time offsets to allocate). Only consulted for planets
-    # with :TTV in their PlanetDataSources. Defaults to empty.
+    # with :TTV in their PlanetDataSources. Defaults to empty. A planet in
+    # `ttv_epochs` has its list's length here.
     ttv_n_transits::Dict{Int, Int}
     # TTV-NB backend selector — `:ttvfaster` (perturbative 1st-order
     # series, default) or `:nbody` (full ODE integration via
@@ -1504,6 +1505,12 @@ struct ParamsConfig
     # `sigma_tt_k<p>` jitter, sorted. Empty by default: no slot is allocated
     # and the transit-time likelihood uses the quoted errors as they are.
     tt_jitter::Vector{Int}
+    # The transits that carry the free offsets of a `:TTV` planet, when they
+    # are listed (`Params(; ttv_epochs)`): planet_k → sorted transit numbers
+    # counted from its first observed transit, slot I holding `epochs[I]`. A
+    # planet not in it, with `ttv_n_transits[k] = N`, has transits 0..N−1.
+    # Empty by default.
+    ttv_epochs::Dict{Int, Vector{Int}}
 end
 
 # The positional form from before `tt_jitter`: no transit-time jitter.
@@ -1515,6 +1522,15 @@ ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
                  trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
                  external_priors, sharing, ttv_n_transits, ttv_backend, obliquity,
                  Int[])
+# The positional form from before `ttv_epochs`: offsets on transits 0..N−1.
+ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
+             trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
+             external_priors, sharing, ttv_n_transits, ttv_backend,
+             obliquity::ObliquityConfig, tt_jitter::AbstractVector{<:Integer}) =
+    ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
+                 trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
+                 external_priors, sharing, ttv_n_transits, ttv_backend, obliquity,
+                 Vector{Int}(tt_jitter), Dict{Int, Vector{Int}}())
 
 const _VALID_SHARING_CATEGORIES = (
     :sigma, :gamma,                          # RV

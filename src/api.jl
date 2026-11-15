@@ -221,7 +221,8 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       density = nothing,
                       use_rho_s::Bool = false, R_s = NaN, phot_trend_order = 0, as_names = String[],
                       sharing = nothing, transdim_noise = false,
-                      ttv_n_transits = nothing, ttv_backend = nothing,
+                      ttv_n_transits = nothing, ttv_epochs = nothing,
+                      ttv_backend = nothing,
                       # Collects `clip_transit_outliers` reports, when given.
                       iad_reports = nothing,
                       # The star's Gaia identity, for the default `plx` prior of
@@ -360,6 +361,8 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     transdim_noise && (kw[:transdim_noise] = true)
     ttv_n_transits === nothing || (kw[:ttv_n_transits] =
         Dict{Int,Int}(Int(k) => Int(v) for (k, v) in pairs(ttv_n_transits)))
+    ttv_epochs === nothing || (kw[:ttv_epochs] =
+        Dict{Int,Vector{Int}}(Int(k) => Int.(collect(v)) for (k, v) in pairs(ttv_epochs)))
     ttv_backend === nothing || (kw[:ttv_backend] = Symbol(ttv_backend))
     M_pri === nothing || (kw[:M_pri] = M_pri)
     isnan(M_s) || (kw[:M_s] = M_s)

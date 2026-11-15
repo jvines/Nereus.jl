@@ -2,15 +2,17 @@
 #
 # Each planet with `:TTV` in its PlanetDataSources can carry N free
 # parameters `ttv_kK_tI` (I = 1..N) — additive offsets applied to the
-# transit centres. Slot I is the (I − 1)-th transit after the planet's
-# FIRST OBSERVED transit: data-point time `t` near transit i gets
+# transit centres. Transits are counted from the planet's FIRST OBSERVED
+# transit, m = i − n0, and data-point time `t` near transit i gets
 # corrected as
 #
-#   t_eff = t − ttv_kK_t(i − n0 + 1)
+#   t_eff = t − ttv_kK_tI,   I = the slot of transit m (`ttv_slot`)
 #
 # where i = round((t − Tc) / P) is the integer transit number counted
-# from Tc. Slot indices outside [1, N] are treated as δt = 0 (no
-# correction).
+# from Tc. Slot I holds transit m = I − 1 (`ttv_n_transits = N`: transits
+# 0..N−1) or m = epochs[I] (`ttv_epochs`, a sorted list: the sparse
+# transits that measured transit times sample). Every other transit has
+# no offset.
 #
 # n0 is the transit number (from Tc) of the earliest point of the
 # planet's data that lies within a quarter period of a predicted centre,
@@ -46,8 +48,9 @@ export _decode_ttv_state, ttv_effective_time
     _has_active_ttv(theta, p_idx) -> Bool
 
 Cheap predicate: does any active planet in `p_idx` have `:TTV` with
-`ttv_n_transits[k] > 0`? Used by `transit_log_likelihood` to bypass
-the orbit-only workspace flux-cache when TTV offsets are in play.
+`ttv_n_transits[k] > 0` (which a `ttv_epochs` entry also sets)? Used by
+`transit_log_likelihood` to bypass the orbit-only workspace flux-cache when
+TTV offsets are in play.
 """
 @inline function _has_active_ttv(theta::Theta, p_idx)
     config = theta.params.config
@@ -74,6 +77,9 @@ Pre-decode TTV state for each TTV-enabled active planet. Returns
   layout name lookup)
 - `state.δts::Vector{Vector{T}}` — per-planet δt values, length =
   `config.ttv_n_transits[k]`
+- `state.epochs::Vector{Vector{Int}}` — the transit (counted from `n0s[r]`)
+  of each δt: `config.ttv_epochs[k]` when listed, else empty, which means
+  0..N−1 (`ttv_slot`)
 - `state.n0s::Vector{Int}` — the transit number (from Tc) of `δts[r][1]`.
   For a `:TTV` row, the planet's first observed transit
   (`_ttv_first_transit`), so slot I is the (I − 1)-th transit after it; 0
@@ -108,6 +114,7 @@ function _decode_ttv_state(theta::Theta{T}, p_idx, data = nothing) where {T}
     δts      = Vector{Vector{T}}(undef, n_ttv)
     is_nb    = Vector{Bool}(undef, n_ttv)
     n0s      = zeros(Int, n_ttv)
+    epochs   = Vector{Vector{Int}}(undef, n_ttv)
 
     r = 0
     j = 0
@@ -122,6 +129,7 @@ function _decode_ttv_state(theta::Theta{T}, p_idx, data = nothing) where {T}
         j_active[r] = j
         k_planet[r] = k
         is_nb[r]    = is_nb_k
+        epochs[r]   = is_a ? get(config.ttv_epochs, k, _TTV_CONTIGUOUS) : _TTV_CONTIGUOUS
         if is_a
             N  = get(config.ttv_n_transits, k, 0)
             vs = Vector{T}(undef, N)
@@ -135,7 +143,63 @@ function _decode_ttv_state(theta::Theta{T}, p_idx, data = nothing) where {T}
             δts[r] = T[]
         end
     end
-    return (n_ttv, (; j_active, k_planet, δts, is_nb, n0s))
+    return (n_ttv, (; j_active, k_planet, δts, is_nb, n0s, epochs))
+end
+
+# The `epochs` of a planet whose slots are transits 0..N−1. Shared and never
+# written to.
+const _TTV_CONTIGUOUS = Int[]
+
+"""
+    ttv_slot(m, N, epochs) -> Int
+
+The slot (1..N) of the free offset of transit `m`, counted from the planet's
+first observed transit, or 0 when no slot holds it (no offset). `epochs` empty:
+slot I is transit I − 1 (`ttv_n_transits = N`). Otherwise slot I is transit
+`epochs[I]` (`ttv_epochs`, strictly increasing), found by binary search.
+"""
+@inline function ttv_slot(m::Int, N::Int, epochs::Vector{Int})
+    if isempty(epochs)
+        s = m + 1
+        return 1 <= s <= N ? s : 0
+    end
+    j = searchsortedfirst(epochs, m)
+    return (j <= length(epochs) && @inbounds(epochs[j]) == m) ? j : 0
+end
+
+"""
+    ttv_slot_epochs(config, k) -> Vector{Int}
+
+The transit of each free offset `ttv_k<k>_t<I>` of planet `k`, counted from its
+first observed transit: `config.ttv_epochs[k]` when listed, else
+0..N−1 for `N = config.ttv_n_transits[k]`. Empty for a planet without them.
+"""
+function ttv_slot_epochs(config, k::Int)
+    has_ttv(config.planet_modes[k]) || return Int[]
+    haskey(config.ttv_epochs, k) && return copy(config.ttv_epochs[k])
+    return collect(0:(get(config.ttv_n_transits, k, 0) - 1))
+end
+
+const _TTV_SLOT_NAME = r"^ttv_k(\d+)_t(\d+)$"
+
+"""
+    ttv_name_epoch(config, name) -> Int or nothing
+
+The transit, counted from planet `k`'s first observed transit, that the free
+offset `name = "ttv_k<k>_t<I>"` holds (`ttv_slot_epochs`); `nothing` for any
+other name.
+"""
+function ttv_name_epoch(config, name::AbstractString)
+    m = match(_TTV_SLOT_NAME, name)
+    m === nothing && return nothing
+    k, I = parse(Int, m.captures[1]), parse(Int, m.captures[2])
+    (1 <= k <= length(config.planet_modes) && has_ttv(config.planet_modes[k])) ||
+        return nothing
+    if haskey(config.ttv_epochs, k)
+        ep = config.ttv_epochs[k]
+        return 1 <= I <= length(ep) ? ep[I] : nothing
+    end
+    return 1 <= I <= get(config.ttv_n_transits, k, 0) ? I - 1 : nothing
 end
 
 # Planet k's earliest measured transit time in the likelihood; Inf without.
@@ -223,22 +287,23 @@ function _ttv_first_transit(theta::Theta, data, k::Int)
 end
 
 """
-    ttv_effective_time(t, P, Tc, δts, n0 = 0) -> t_eff
+    ttv_effective_time(t, P, Tc, δts, n0 = 0, epochs = Int[]) -> t_eff
 
 Return the TTV-corrected time at which to evaluate `sky_separation`.
 `i = round((t − Tc) / P)` is the integer transit number counted from `Tc`,
-the time of mid-transit (not of periastron). `δts[1]` is the offset of
-transit `n0`: for the free offsets, the planet's first observed transit
-(`_decode_ttv_state` with `data`). If `i − n0 + 1` is within
-`[1, length(δts)]`, returns `t − δts[i − n0 + 1]`; otherwise returns `t`
-unchanged.
+the time of mid-transit (not of periastron), and `m = i − n0` the number
+counted from transit `n0`: for the free offsets, the planet's first observed
+transit (`_decode_ttv_state` with `data`). Returns `t − δts[I]` for the slot
+`I = ttv_slot(m, length(δts), epochs)` of that transit (with `epochs` empty,
+`I = m + 1`), and `t` unchanged when no slot holds it.
 """
 @inline function ttv_effective_time(t::Real, P::Real, Tc::Real,
-                                      δts::AbstractVector{<:Real}, n0::Int = 0)
+                                      δts::AbstractVector{<:Real}, n0::Int = 0,
+                                      epochs::Vector{Int} = _TTV_CONTIGUOUS)
     isempty(δts) && return t
     i = Int(round((t - Tc) / P))     # transit number (can be negative)
-    slot = i - n0 + 1                 # 1-based slot
-    1 <= slot <= length(δts) || return t
+    slot = ttv_slot(i - n0, length(δts), epochs)
+    slot == 0 && return t
     return t - δts[slot]
 end
 
@@ -259,5 +324,6 @@ extract `j_active[r]` instead of doing the `findfirst` per obs.
                                          Ps::AbstractVector,
                                          Tcs::AbstractVector)
     j = ttv_state.j_active[r]
-    return ttv_effective_time(t, Ps[j], Tcs[j], ttv_state.δts[r], ttv_state.n0s[r])
+    return ttv_effective_time(t, Ps[j], Tcs[j], ttv_state.δts[r], ttv_state.n0s[r],
+                              ttv_state.epochs[r])
 end

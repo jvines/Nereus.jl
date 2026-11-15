@@ -107,7 +107,8 @@ end
 _hash_skip(x, f::Symbol) = false
 _hash_skip(x::ParamsConfig, f::Symbol) =
     (f === :obliquity && is_default_obliquity(x.obliquity)) ||
-    (f === :tt_jitter && isempty(x.tt_jitter))
+    (f === :tt_jitter && isempty(x.tt_jitter)) ||
+    (f === :ttv_epochs && isempty(x.ttv_epochs))
 # `density` is carried by the fingerprint's own entry (`density_chart_key`),
 # present only where the reparametrization is active: a model it leaves alone
 # is the model it was, under either value.

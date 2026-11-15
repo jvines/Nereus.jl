@@ -63,6 +63,14 @@ fallback bounds are used.
 - `tt_jitter` — planets whose measured transit times (`data.transit_times`) get
   a `sigma_tt_k<p>` jitter. `nothing` (the default) takes them from the sets'
   own `jitter` flags.
+- `ttv_n_transits::Dict{Int,Int}` — free per-transit time offsets of a `:TTV`
+  planet: `N` gives `ttv_k<p>_t1..tN` on transits 0..N−1, counted from the
+  planet's first observed transit (src/ttv.jl).
+- `ttv_epochs::Dict{Int,<:AbstractVector{<:Integer}}` — the same, on the
+  transits listed (strictly increasing, ≥ 0, counted the same way): slot
+  `ttv_k<p>_t<I>` holds transit `epochs[I]`, and every unlisted transit has no
+  offset. For sparse transit times. `ttv_n_transits = N` is
+  `ttv_epochs = 0:N-1`; naming a planet in both is an error.
 
 # Examples
 
@@ -96,6 +104,7 @@ function Params(;
     sharing::Dict{Symbol, Vector{Vector{String}}} = Dict{Symbol, Vector{Vector{String}}}(),
     transdim_noise::Bool = false,
     ttv_n_transits::Dict{Int, Int} = Dict{Int, Int}(),
+    ttv_epochs::AbstractDict = Dict{Int, Vector{Int}}(),
     ttv_backend::Symbol = :ttvfaster,
     obliquity::ObliquityConfig = ObliquityConfig(),
     gaia_plx = nothing,
@@ -163,6 +172,7 @@ function Params(;
             "RVPM_TTV_NB (or RVPMAS_TTV_NB), or use PM_TTV (free per-transit offsets, " *
             "with model.ttv_n_transits)."))
     end
+    ttv_n_transits, ttv_ep = _ttv_slot_config(ttv_n_transits, ttv_epochs)
     tt_jit = tt_jitter !== nothing ? sort!(unique(Int.(collect(tt_jitter)))) :
              data === nothing ? Int[] :
              sort!([s.planet for s in data.transit_times if s.jitter])
@@ -207,7 +217,7 @@ function Params(;
                           instruments, Dict{String, PriorSpec}(),
                           trend_order, phot_trend_order, nm_vec, stability, M_s, R_s,
                           external_priors, sharing, ttv_n_transits,
-                          ttv_backend, obliquity, tt_jit)
+                          ttv_backend, obliquity, tt_jit, ttv_ep)
 
     # Generate defaults from data (or use generic fallbacks)
     data_for_priors = data !== nothing ? data :
@@ -241,7 +251,41 @@ function Params(;
     config = ParamsConfig(max_kplanet, parametrization, modes_vec,
                           instruments, defaults, trend_order, phot_trend_order, nm_vec,
                           stability, M_s, R_s, external_priors, sharing,
-                          ttv_n_transits, ttv_backend, obliquity, tt_jit)
+                          ttv_n_transits, ttv_backend, obliquity, tt_jit, ttv_ep)
     layout = _build_layout(config; data=data)
     return Params(config, layout)
+end
+
+"""
+    _ttv_slot_config(ttv_n_transits, ttv_epochs) -> (counts, epochs)
+
+The free TTV offsets per planet as `ParamsConfig` holds them: `counts[k]` the
+number of slots of planet `k` (a listed planet's list length), `epochs[k]` its
+transits when listed. Throws for a planet named in both, and for a list that
+is not strictly increasing or has a transit before the first observed one.
+"""
+function _ttv_slot_config(ttv_n_transits::AbstractDict, ttv_epochs::AbstractDict)
+    counts = Dict{Int, Int}(Int(k) => Int(v) for (k, v) in ttv_n_transits)
+    epochs = Dict{Int, Vector{Int}}()
+    for (k0, ep0) in ttv_epochs
+        k = Int(k0)
+        haskey(counts, k) && throw(ArgumentError(
+            "planet $k is in both ttv_n_transits and ttv_epochs. Give one: " *
+            "ttv_n_transits = N means ttv_epochs = 0:N-1 (transits counted from " *
+            "the planet's first observed one)."))
+        ep = Int[(x isa Real && isinteger(x)) ? Int(x) : throw(ArgumentError(
+                 "ttv_epochs of planet $k: $x is not an integer transit number."))
+                 for x in ep0]
+        bad = findfirst(i -> ep[i] <= ep[i - 1], 2:length(ep))
+        bad === nothing || throw(ArgumentError(
+            "ttv_epochs of planet $k must be strictly increasing (sorted, no " *
+            "repeats); it has $(ep[bad]) then $(ep[bad + 1]). Slot ttv_k$(k)_t<I> " *
+            "is the I-th transit of the list."))
+        (isempty(ep) || ep[1] >= 0) || throw(ArgumentError(
+            "ttv_epochs of planet $k starts at $(ep[1]); transits are counted from " *
+            "the planet's first observed one, 0, and none before it has data."))
+        counts[k] = length(ep)
+        isempty(ep) || (epochs[k] = ep)
+    end
+    return counts, epochs
 end

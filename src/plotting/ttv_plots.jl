@@ -257,7 +257,7 @@ end
 function _ttv_oc_transit_times(data::Data, k::Int, Tc::Real, P::Real)
     s = transit_time_set(data, k)
     (s === nothing || n_tt(s) == 0) && return nothing
-    Δ = _tt_match(s, Tc, P, nothing, 0)
+    Δ = _tt_match(s, Tc, P, nothing)
     Δ === nothing && return nothing
     u = s.used
     cycle = s.epoch[u] .+ Δ
@@ -384,9 +384,10 @@ transiting planet, each showing that transit's photometry + the best-fit (max-lp
 transit model (x = hours from Tc). Per-transit QC — catches a single bad transit
 (spot crossing, partial/grazing, systematic) that the stacked phase-fold hides.
 Panel "transit N" is transit N counted from the planet's Tc (0 at Tc, negative
-before it). Its free TTV offset is `ttv_k<k>_t<N − n0 + 1>`, n0 the number of
-the planet's first observed transit (the offsets are numbered from it,
-src/ttv.jl).
+before it). Its free TTV offset, if it has one, is `ttv_k<k>_t<I>` with
+`I = ttv_slot(N − n0, N_slots, epochs)`, n0 the number of the planet's first
+observed transit (the offsets are numbered from it, src/ttv.jl;
+`ttv_slot_epochs` lists each slot's transit).
 Saved as `models/transit_overlay_K<k>.<fmt>`.
 """
 function plot_transit_overlay_fit(chains, params, data;

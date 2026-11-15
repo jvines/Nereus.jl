@@ -27,11 +27,11 @@
 # ephemeris); Nereus has no such parameter, so there is no quadratic term. On top
 # of T_lin:
 #
-#   * :TTV (PM_TTV, RVPM_TTV, ...): T(n) = T_lin(n) + δt_{n−n0+1}, the free
-#     offset `ttv_k<p>_t<n−n0+1>`, n0 the planet's first observed transit
-#     (src/ttv.jl), zero outside the configured slots -- the numbering
-#     `ttv_effective_time` gives the photometry, so a transit has one slot in
-#     both terms.
+#   * :TTV (PM_TTV, RVPM_TTV, ...): T(n) = T_lin(n) + δt_I, the free offset
+#     `ttv_k<p>_t<I>` of the slot I that holds transit n − n0 (`ttv_slot`; n0
+#     the planet's first observed transit, src/ttv.jl), zero for a transit no
+#     slot holds -- the numbering `ttv_effective_time` gives the photometry, so
+#     a transit has one slot in both terms.
 #   * :TTV_NB (RVPM_TTV_NB, RVPMAS_TTV_NB): T(n) = T_lin(n) + δt_n, the N-body
 #     transit n minus T_lin(n), from the same solver the photometry uses
 #     (`_apply_ttv_nb!`: TTVFaster, or NbodyGradient under ttv_backend =
@@ -90,16 +90,17 @@ end
     return Tc, P
 end
 
-# Model time of transit n: T_lin(n) plus the offset of the slot it falls in.
-@inline function _tt_model_time(Tc, P, n::Int, δts, n0::Int)
-    slot = n - n0 + 1
-    off = (δts === nothing || slot < 1 || slot > length(δts)) ? zero(Tc) : δts[slot]
-    return Tc + n * P + off
+# Model time of transit n: T_lin(n) plus the offset of the slot that holds it
+# (`off` from `_tt_offsets`; `nothing` for none).
+@inline function _tt_model_time(Tc, P, n::Int, off)
+    off === nothing && return Tc + n * P
+    slot = ttv_slot(n - off.n0, length(off.δts), off.epochs)
+    return Tc + n * P + (slot == 0 ? zero(Tc) : off.δts[slot])
 end
 
 # The integer Δ (n_i = epoch_i + Δ) of a set at (Tc, P, offsets); `nothing`
 # when Tc or P is unusable.
-function _tt_match(s::TransitTimeSet, Tc, P, δts, n0::Int)
+function _tt_match(s::TransitTimeSet, Tc, P, off)
     Tcv, Pv = ForwardDiff_value(Tc), ForwardDiff_value(P)
     (isfinite(Tcv) && isfinite(Pv) && Pv > 0) || return nothing
     iref = s.used[1]
@@ -113,19 +114,20 @@ function _tt_match(s::TransitTimeSet, Tc, P, δts, n0::Int)
     nc = round(Int, x)
     best, bd = nc, Inf
     for n in (nc - 1, nc, nc + 1)
-        d = abs(s.tc[iref] - ForwardDiff_value(_tt_model_time(Tc, P, n, δts, n0)))
+        d = abs(s.tc[iref] - ForwardDiff_value(_tt_model_time(Tc, P, n, off)))
         d < bd && (best = n; bd = d)
     end
     return best - s.epoch[iref]
 end
 
-# Planet k's transit offsets and the transit number of the first, from the TTV
-# state; `(nothing, 0)` for a planet without TTVs.
+# Planet k's transit offsets from the TTV state, `(; δts, n0, epochs)`: the
+# offsets, the transit number (from Tc) the slots count from, and the transit
+# of each slot (`ttv_slot`). `nothing` for a planet without TTVs.
 function _tt_offsets(ttv_state, k::Int)
-    ttv_state === nothing && return (nothing, 0)
+    ttv_state === nothing && return nothing
     r = findfirst(==(k), ttv_state.k_planet)
-    r === nothing && return (nothing, 0)
-    return ttv_state.δts[r], ttv_state.n0s[r]
+    r === nothing && return nothing
+    return (δts = ttv_state.δts[r], n0 = ttv_state.n0s[r], epochs = ttv_state.epochs[r])
 end
 
 # The orbits of the transiting planets in `p_idx` (`has_pm`), in the order
@@ -198,13 +200,13 @@ function transit_times_log_likelihood(theta::Theta{T}, data::Data) where {T}
         tp = _tt_tc_P(theta, data, k)
         tp === nothing && return convert(T, -Inf)
         Tc, P = tp
-        δts, n0 = _tt_offsets(state, k)
-        Δ = _tt_match(s, Tc, P, δts, n0)
+        off = _tt_offsets(state, k)
+        Δ = _tt_match(s, Tc, P, off)
         Δ === nothing && return convert(T, -Inf)
         σj2 = tt_jitter_value(theta, k)^2
         quarter = P / 4
         @inbounds for i in s.used
-            r = s.tc[i] - _tt_model_time(Tc, P, s.epoch[i] + Δ, δts, n0)
+            r = s.tc[i] - _tt_model_time(Tc, P, s.epoch[i] + Δ, off)
             abs(r) > quarter && return convert(T, -Inf)
             v = s.tc_err[i]^2 + σj2
             ll -= (r * r / v + log(two_pi * v)) / 2
@@ -240,9 +242,9 @@ function transit_times_model(theta::Theta{Float64}, data::Data)
             continue
         end
         Tc, P = tp
-        δts, n0 = _tt_offsets(state === false ? nothing : state, k)
-        Δ = _tt_match(s, Tc, P, δts, n0)
-        model = [_tt_model_time(Tc, P, s.epoch[i] + Δ, δts, n0) for i in 1:n]
+        off = _tt_offsets(state === false ? nothing : state, k)
+        Δ = _tt_match(s, Tc, P, off)
+        model = [_tt_model_time(Tc, P, s.epoch[i] + Δ, off) for i in 1:n]
         res = s.tc .- model
         σ = sqrt.(s.tc_err .^ 2 .+ tt_jitter_value(theta, k)^2)
         amb = any(i -> abs(res[i]) > P / 4, s.used)
