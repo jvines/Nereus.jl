@@ -223,7 +223,27 @@ rather than a single number trusted.
     // "hip_scans": false,             // Hipparcos scans of the HGCA Hipparcos epoch: default fetched by hip_id; false = instantaneous
     "relastrom": { "csv": "/work/in/relastrom.csv" },             // direct-imaging, OR `values`
     "gaia_dr3":  { "params": [86.5, 1.2, 35.2, 12.1, -5.4],       // [α, δ, ϖ, μα*, μδ]
-                   "cov": [[/* 5×5 */]], "t_ref": 2016.0 }
+                   "cov": [[/* 5×5 */]], "t_ref": 2016.0 },
+
+    "transit_times": [                     // measured mid-transit times, one block per planet
+      {
+        "planet": 1,                       // 1-based slot; its mode must contain PM
+        "name": "WASP-12 b",               // optional label
+        "time_system": "BJD_TDB",          // REQUIRED; anything else is refused
+        "values": {
+          "epoch":  [0, 1, 2, 870],        // integer cycle labels (only differences are read)
+          "tc":     [2457010.512, 2457011.603, 2457012.694, 2457958.007],   // BJD_TDB
+          "tc_err": [0.0003, 0.0004, 0.0003, 0.0002],                       // days, 1σ, > 0
+          "source": ["ETD:123", "ETD:124", "EXOCLOCK:9", "TESS:S45"],
+          "use":    [true, true, true, true]      // optional per-point mask
+        },
+        "reference_ephemeris": { "t0": 2457010.512, "period": 1.0914203, "epoch_zero": 0 },
+                                           // or null; provenance only, never read by the fit
+        "exclude_sources": ["ETD"],        // optional: drops "ETD" and every "ETD:..." point
+        "jitter": false,                   // optional: true adds sigma_tt_k<planet> (days)
+        "photometry_overlap": "drop"       // optional: "drop" (default) | "keep"
+      }
+    ]
   },
 
   // ---- Model (src/runner.jl:1079-1216) -------------------------------
@@ -547,9 +567,11 @@ sampler also takes `max_seconds`, `max_evals` and, for `transdim_pt_emcee`,
 
 ### `data`
 The `data` block must contain at least one of `rv`, `transit_photometry`,
-`iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3`, `rm_nights`, `tomography`
-(`src/runner.jl:350-356`). The last two belong to an obliquity fit and need a
-`model.obliquity` block — see [obliquity_jobs.md](src/obliquity_jobs.md).
+`iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3`, `rm_nights`, `tomography`,
+`transit_times` (`_validate_config`). `rm_nights` and `tomography` belong to an
+obliquity fit and need a `model.obliquity` block — see
+[obliquity_jobs.md](src/obliquity_jobs.md). `transit_times` alone is a complete
+fit (a linear or TTV ephemeris from published mid-times).
 
 - **`rv`** — `csv` (column-named) or inline `values`. Inline `values` requires
   `bjd`, `rv`, `rv_err`, `instrument`; any other key is an activity indicator.
@@ -610,6 +632,84 @@ The `data` block must contain at least one of `rv`, `transit_photometry`,
 - **`relastrom`** — `{csv}` or `values` (`t`, `ra_off`, `dec_off`, `ra_err`,
   `dec_err`, `planet_idx?`).
 - **`gaia_dr3`** — `{params:[α,δ,ϖ,μα*,μδ], cov:5×5, t_ref}`.
+- **`transit_times`** — measured mid-transit times, as Argus sends them: a list
+  of per-planet blocks (schema above). See "Transit times" below.
+
+### Transit times (`data.transit_times`)
+
+Each block holds one planet's mid-transit times; several planets give several
+blocks, one per planet (a second block for the same planet is refused: merge
+them).
+
+**Validation** (all errors name the block and what to change):
+- `time_system` must be `"BJD_TDB"`; anything else is refused, not converted.
+- `values.epoch`, `values.tc`, `values.tc_err` are required, and they and the
+  optional `values.source` / `values.use` must have the same length.
+- `tc` finite; `tc_err` finite and > 0 (days, 1σ); `epoch` integers.
+- `planet` is 1-based and must exist (`≤ model.max_kplanet`).
+- The planet's mode must predict a mid-transit time, i.e. contain `PM`:
+  `PM_ONLY`, `RVPM`, `PM_TTV`, `RVPM_TTV`, `PM_TTV_NB`, `RVPM_TTV_NB`, … An
+  `RV_ONLY` planet (the default when `planet_modes` is omitted) is refused
+  with the mode to set instead (`RV_ONLY` → `RVPM`; no planet modes → `PM_ONLY`).
+  A `PM` mode needs no photometry: without it the impact parameter and radius
+  ratio are constrained by their priors only.
+- The epochs must agree with the times: a point more than a quarter period from
+  the least-squares ephemeris through the points (three or more distinct
+  epochs) is refused as mislabelled, naming its epoch and source.
+- `reference_ephemeris` (`{t0, period, epoch_zero}` or `null`) needs a finite
+  `t0` and `period > 0`. It is kept for provenance and for reporting the
+  posterior ephemeris at its `epoch_zero`; the likelihood never reads it.
+
+**Likelihood.** An independent Gaussian term per planet,
+`ln L_tt = −½ Σ [(tc_i − T(n_i))²/s_i² + ln(2π s_i²)]`, `s_i² = tc_err_i² +
+σ_tt²`, added to the total beside the astrometry. `T(n)` is the model's own
+mid-transit time (inferior conjunction, true anomaly `f = π/2 − ω`) computed
+from the planet's orbit as the photometry computes it, so it is correct under
+every time anchor (`phic`, `Tc`, `Mo`, `Tp`) and at any eccentricity:
+- linear / Keplerian modes (`PM_ONLY`, `RVPM`, …): `T(n) = Tc + n·P` (Nereus has
+  no dP/dN parameter, so there is no quadratic term);
+- `:TTV` modes: plus the free offset `ttv_k<p>_t<n+1>` of that transit, as in
+  the photometry (`model.ttv_n_transits`);
+- `:TTV_NB` modes: plus the N-body offset from the same solver the photometric
+  TTV path uses (TTVFaster, or NbodyGradient under `ttv_backend: "nbody"`),
+  integrated over the photometry and the transit times together.
+
+The epoch labels are matched to the model's transits once per planet and
+evaluation: the point nearest the model's Tc goes to its nearest predicted
+conjunction, and every point is then transit `epoch + Δ`. A point more than
+`P/4` from its transit means the labels and the model disagree on which transit
+it is, and ln L = −Inf, so a period that would re-count the cycles between the
+points (an alias) is refused rather than fitted.
+
+**Photometry overlap.** A transit that is also in the fitted
+`transit_photometry` would be counted twice. For a planet whose mode contains
+`PM`, a transit time with a photometric cadence within `min(0.5 d, P/10)` of it
+is left out of the likelihood, with a warning listing the epochs, and reported
+with `excluded: "photometry_overlap"`. Set `"photometry_overlap": "keep"` on the
+block when those times were measured from other data than this photometry.
+
+**Excluding points.** `values.use[i] = false` or a source matched by
+`exclude_sources` (an exact match, or the entry followed by `:`) leaves a point
+out of the likelihood. Excluded points are still reported in `summary.json`,
+with their model time and residual.
+
+**Jitter.** `"jitter": true` adds `sigma_tt_k<planet>` (days) in quadrature to
+`tc_err`. Off by default. Default prior LogUniform from 10⁻³ × the median
+`tc_err` up to 10 × the larger of the median `tc_err` and the RMS of the points
+about their least-squares ephemeris: the lower edge is negligible next to every
+error bar, so a jitter of zero is reachable, and the upper edge covers any
+scatter the data show. Override it in `priors` like any parameter.
+
+**Defaults it informs.** With transit times, the default period prior of that
+planet is LogUniform over the least-squares period ± max(P/span, 10 σ_P)
+(span in cycles), the default Tc window covers the transit times, and the φ_c
+reference epoch (`t_ref_c`, `parametrization.time = "phic"`) is the
+1/tc_err²-weighted mean of the transit times when there is no photometry. With
+photometry, both stay as they were.
+
+**Engines.** Every engine that evaluates the RV likelihood gets the term.
+`ad_backend = :Enzyme` refuses a target with transit times (it would drop the
+term); use ForwardDiff.
 
 ### `model.planet_modes` and Rossiter-McLaughlin
 - One mode per planet slot. The `*_RM` / `*_RM_R` modes add the in-transit RM
@@ -804,7 +904,8 @@ prior when that degeneracy is present.
 - `auto` expands to the applicable set from the data + model present
   (`src/runner.jl:1760-1791`): always the posterior/trace/corner family; RV →
   `rv_timeseries`+`rv_phasefold` (+`rv_components` when ≥2 planets or a GP/AGP);
-  photometry → `pm_*`+`ttv_oc`+`transit_overlay`; astrometry → the astrometry
+  photometry → `pm_*`+`ttv_oc`+`transit_overlay`; transit times → `ttv_oc`;
+  astrometry → the astrometry
   plots; any `*_RM` mode → `rm_anomaly`; an ActivityGP → `activity_gp_latent`
   + `activity_gp_decomposition`; a `:n_planets` chain → `transdim_occupancy`;
   an engine that records a ladder history (`pt_emcee`, `transdim_pt_emcee`) →
@@ -814,7 +915,11 @@ prior when that degeneracy is present.
 - `ttv_oc` renders for single-planet fits too — it shows the data-only O−C
   (measured per-transit `Tc` vs the linear ephemeris) via `planet_b_k=0`; with
   ≥2 planets it defaults to the perturber-driven envelope (`planet_b_k=2`,
-  `src/runner.jl:2076-2102`).
+  `src/runner.jl:2076-2102`). With `data.transit_times` it draws the planet's
+  measured transit times (the points in the likelihood, with their `tc_err`)
+  against the linear ephemeris, and needs no photometry; it picks the first
+  `PM` planet with transit times. With photometry as well, the two kinds of
+  point get their own marker and a legend.
 
 ---
 
@@ -946,6 +1051,42 @@ numbers live under `fitted` / `derived`
     "iad_red_chi2_total":          1.38,
     "iad_red_chi2_per_inst":       { "IAD": 1.38 },  // the jitter name when it has one
     "iad_n":                       824
+  },
+
+  // ---- Measured transit times (data.transit_times; absent without them) ----
+  // Fail-soft: {"status": "failed", "error": "..."} instead of raising.
+  "transit_times": {
+    "status": "ok",
+    "planets": [
+      {
+        "planet": 1, "name": "WASP-12 b",
+        "n_points": 2, "n_excluded": 2,     // in / out of the likelihood
+        // at the max-lp draw (the draw the IAD χ² uses); σ² = tc_err² + σ_tt²
+        "chi2": 1.80, "red_chi2": 0.90,     // Σ (residual/σ)², χ²/N over the points used
+        "sigma_tt": null,                   // jitter at that draw (days); null without one
+        "ambiguous_epochs": false,          // a used point > P/4 from its transit
+        "draw": "max_lp",
+        // posterior linear ephemeris over every draw with the planet active, in the
+        // block's labels: t0 is the time of epoch `epoch` (the reference ephemeris'
+        // epoch_zero, else 0); median and 16/84-percentile distances, days
+        "ephemeris": { "t0": 2457010.51231, "t0_err_minus": 0.00011, "t0_err_plus": 0.00010,
+                       "period": 1.09142034, "period_err_minus": 2.1e-7,
+                       "period_err_plus": 2.0e-7, "epoch": 0, "n_draws": 12800 },
+        // O−C, one entry per point, excluded points included
+        "oc": {
+          "epoch":    [0, 1, 2, 870],
+          "tc":       [2457010.512, 2457011.603, 2457012.694, 2457958.007],
+          "tc_err":   [0.0003, 0.0004, 0.0003, 0.0002],
+          "model":    [2457010.5123, 2457011.6037, 2457012.6951, 2457958.0071],
+          "residual": [-0.0003, -0.0007, -0.0011, -0.0001],   // tc − model, days
+          "source":   ["ETD:123", "ETD:124", "EXOCLOCK:9", "TESS:S45"],
+          "used":     [false, false, true, true],
+          "excluded": ["exclude_sources", "exclude_sources", "", ""]
+                                                       // "" | "use" | "exclude_sources"
+                                                       //   | "photometry_overlap"
+        }
+      }
+    ]
   },
 
   // ---- PSIS-LOO + WAIC (output.loo, default on; "skipped" for the joint ActivityGP) ----

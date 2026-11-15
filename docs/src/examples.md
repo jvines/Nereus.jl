@@ -34,7 +34,7 @@ A config is a `Dict` (or a JSON file passed to
 | Key | Required | Notes |
 |-----|----------|-------|
 | `output_dir`    | ✅ | directory for `summary.json`, `chains.nc`, `plots/`, `tables/` |
-| `data`          | ✅ | at least one of `rv`, `transit_photometry`, `iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3` |
+| `data`          | ✅ | at least one of `rv`, `transit_photometry`, `iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3`, `transit_times` |
 | `model`         | ✅ | `max_kplanet`, `planet_modes`, `parametrization`, `stability`, `trend_order` … |
 | `sampler`       | ✅ | `{name, kwargs}` |
 | `priors`        | optional | per-parameter `{type, args}`; unset params get sensible defaults |

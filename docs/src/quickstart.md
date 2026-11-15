@@ -203,6 +203,7 @@ schema errors and reports them in one message before any heavy work.
 | `hgca` | `hip_id` (auto-fetch Brandt eDR3) **or** `{fits, hip_id}` (local `HGCA_vEDR3.fits`) **or** inline 3-epoch `values` |
 | `relastrom` | `csv` **or** inline `values` |
 | `gaia_dr3` | `params`, `cov`, `t_ref` |
+| `transit_times` | list of per-planet blocks: `planet`, `time_system` (`BJD_TDB` only), `values` (`epoch`, `tc`, `tc_err`, `source`), `reference_ephemeris` or null; the planet's mode must contain `PM` |
 
 **`model`** — `max_kplanet` (required), `planet_modes`,
 `parametrization` (`mass` ∈ {`K_driven`, `M_sec_driven`, `a_driven`};
