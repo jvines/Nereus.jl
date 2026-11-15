@@ -241,8 +241,10 @@ option on. Nothing is dropped when walkers are still out of the main mode at
 the end of the run and never were in it (the run is split; the warning names
 the parameter that separates the modes), or when the cut would leave under a
 quarter of the recorded steps. Trans-dim runs compare each model only with
-itself, per walker and model. `result.burnin_trim` (`chains.info.burnin_trim` for `sample_ensemble`)
-records the test; see `src/samplers/burnin_trim.jl`.
+itself: a walker settles until its first entry into any model's band, and a
+birth after that into another model's tail sets no cut. `result.burnin_trim`
+(`chains.info.burnin_trim` for `sample_ensemble`) records the test; see
+`src/samplers/burnin_trim.jl`.
 
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (bridge
 sampling on the cold chain when usable; else H⁺ when its ladder is quotable —

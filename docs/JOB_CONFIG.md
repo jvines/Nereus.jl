@@ -790,7 +790,10 @@ prior when that degeneracy is present.
   first reached the main mode, however long and however late, is posterior
   mass: it never sets the cut and gets no warning. Modes within the allowance
   of each other are not settling either. `transdim_pt_emcee` compares each
-  model only with itself, per walker and model. The run's checkpoint is not changed: a finished run resumed
+  model only with itself: each draw is held against the band of the model it
+  is in, a walker settles until its first entry into any model's band, and a
+  birth after that into another model's tail sets no cut. The run's checkpoint
+  is not changed: a finished run resumed
   at the same `n_steps` with the option on trims on resume. Runs after an
   extended burn-in, on what was recorded. See `src/samplers/burnin_trim.jl`.
 - Unknown kwargs are rejected with an actionable error listing the valid set
