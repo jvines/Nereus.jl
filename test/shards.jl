@@ -112,6 +112,9 @@ const TEST_UNITS = [
     (name = "test_pt_emcee_stranded.jl", seconds = 98, files = ["test_pt_emcee_stranded.jl"]),
     (name = "test_pt_emcee_resume.jl", seconds = 19, files = ["test_pt_emcee_resume.jl"]),
     (name = "test_burnin_hold.jl", seconds = 100, files = ["test_burnin_hold.jl"]),
+    # The opt-in extended burn-in in the three samplers and through run_job.
+    # Measured locally (arm64, 4 threads), not yet on the CI runner.
+    (name = "test_burnin_extend.jl", seconds = 200, files = ["test_burnin_extend.jl"]),
     (name = "test_pt_resume.jl", seconds = 43, files = ["test_pt_resume.jl"]),
     (name = "test_pt_hmc_resume.jl", seconds = 84, files = ["test_pt_hmc_resume.jl"]),
     (name = "test_pt_whitening_resume.jl", seconds = 9, files = ["test_pt_whitening_resume.jl"]),

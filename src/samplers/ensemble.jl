@@ -61,6 +61,23 @@ Works in unconstrained space (with transforms) by default.
   from an RM λ constrained to ±2°, or at the seam of its window, where the
   logit's plateau holds it for good. Burn-in only: every recorded step is
   ordinary MCMC.
+- `extend_burnin::Bool=false` — opt-in, as in `sample_pt_emcee`, on the one
+  rung: at the end of burn-in, test whether the walkers are still split between
+  modes (the pruning's own pass would move one of them), and while they are, run
+  burn-in on in 50-step passes of the pruning; recording starts after the first
+  check that finds them in one mode. A run in one mode at `n_burnin` draws
+  exactly what it does without the option. Counted in saved draws, like
+  `n_burnin`, and taken out of the recorded ones; `chains.info.n_burnin_used`
+  says where recording started. With `n_chains > 1` each chain extends on its
+  own, without re-cutting after `n_burnin` (concurrent chains re-cut together,
+  and extend apart), and every chain keeps its last draws, as many as the one
+  that extended longest recorded. Needs `prune_stranded`; with it off this
+  throws.
+- `max_burnin::Union{Nothing,Integer}=nothing` — the cap, in saved draws: by
+  default `n_burnin + (n_steps ÷ thinning - n_burnin) ÷ 2`, at most half of
+  the draws the run was going to record. Still split there, the run records
+  anyway and warns with the split it measured and the parameter that separates
+  the modes. See `sample_pt_emcee`.
 - `n_scouts::Int=16` — without `init`, the walkers drawn from the prior are
   joined by up to `n_walkers ÷ 2` scouts in place of as many of them: prior
   draws moved by slice updates until they stop climbing, less those the bound
@@ -101,6 +118,8 @@ function sample_ensemble(
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
     prune_stranded::Bool = true,
+    extend_burnin::Bool = false,
+    max_burnin::Union{Nothing,Real} = nothing,
     n_scouts::Int = 16,
     de_move::Real = DE_MOVE_DEFAULT,
 )
@@ -142,23 +161,42 @@ function sample_ensemble(
                     n_burnin, thinning, init, seed + c - 1, n_chains,
                     show_progress && c == 1, ck_c, ck_every, resume;
                     pre = (fp = fps[c], ck = cks[c]), rendezvous = rv, prune_stranded,
-                    n_scouts, de_move = p_de, check_drift = false)
+                    n_scouts, de_move = p_de, check_drift = false, extend_burnin,
+                    max_burnin)
             finally
                 rv === nothing || _rendezvous_leave!(rv)
             end
         end
         chs = [fetch(t) for t in tasks]
+        # An extended burn-in ends where each chain's walkers first sat in one
+        # mode, so the chains can record different lengths: each keeps its last
+        # draws, as many as the shortest has, and recording began, for all of
+        # them, at the latest end of burn-in. Rows are steps × walkers.
+        cubes = [c.info.walker_cube for c in chs]
+        n_used = maximum(c.info.n_burnin_used for c in chs)
+        n_min = minimum(size(q, 1) for q in cubes)
+        for c in eachindex(chs)
+            k, nwc = size(cubes[c], 1), size(cubes[c], 3)
+            k == n_min && continue
+            chs[c] = MCMCChains.setrange(chs[c][((k - n_min) * nwc + 1):(k * nwc), :, :],
+                                         1:1:(n_min * nwc))
+            cubes[c] = cubes[c][(k - n_min + 1):k, :, :]
+        end
         # The drift check runs on each chain's walkers (one ensemble each) and
         # reports them together, once.
-        drift = _ensemble_drift_chains([c.info.walker_cube for c in chs],
-                                       target.params; sampler = "ensemble",
+        drift = _ensemble_drift_chains(cubes, target.params; sampler = "ensemble",
                                        de_move = p_de)
         out = MCMCChains.chainscat([_strip_walker_cube(c) for c in chs]...)
-        return MCMCChains.setinfo(out, (; drift))
+        show_progress && n_used > n_burnin &&
+            @info "ensemble: with several chains, each keeps its last $n_min saved " *
+                  "draw(s), as many as the chain whose extended burn-in ran longest " *
+                  "recorded."
+        return MCMCChains.setinfo(out, (; drift, n_burnin_used = n_used))
     end
     return _ensemble_chain(target, n_walkers, n_steps, n_burnin, thinning, init,
                            seed, n_chains, show_progress, ck_path, ck_every, resume;
-                           prune_stranded, n_scouts, de_move = p_de)
+                           prune_stranded, n_scouts, de_move = p_de, extend_burnin,
+                           max_burnin)
 end
 
 # Chain `c`'s state file in a multi-chain run: "dir/ensemble_state.jls" ->
@@ -373,7 +411,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
                          resume::Bool; pre = nothing,
                          rendezvous::Union{Nothing,_Rendezvous} = nothing,
                          prune_stranded::Bool = true, n_scouts::Int = 16,
-                         de_move::Float64 = DE_MOVE_DEFAULT, check_drift::Bool = true)
+                         de_move::Float64 = DE_MOVE_DEFAULT, check_drift::Bool = true,
+                         extend_burnin::Bool = false, max_burnin = nothing)
     params = target.params
     layout = params.layout
     n_dim = length(layout.unfrozen_idx)
@@ -412,6 +451,13 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     kept = Array{Float64}(undef, n_dim, n_walkers, max(n_saved - n_burnin, 0))
     # The stranded-walker pruning's record of its last pass (`_pt_prune_stranded!`).
     prune_mem = PruneMemory(1, n_walkers, n_dim)
+    # The extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl), in
+    # steps: those up to `b_end` are burn-in, n_burnin * thinning unless a check
+    # finds the walkers split; every end it moves to is a multiple of `thinning`.
+    b_nom = n_burnin * thinning
+    ext_on = _burnin_ext_on("ensemble", extend_burnin, prune_stranded)
+    b_cap = _burnin_cap(n_burnin, n_saved, max_burnin) * thinning
+    b_end = b_nom; b_last = 0; b_passes = 0
 
     if ck === nothing
         # Initialize walkers
@@ -474,6 +520,8 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         ck_kept = ck.kept::Array{Float64, 3}
         kept[:, :, 1:size(ck_kept, 3)] .= ck_kept
         _prune_restore!(prune_mem, ck)
+        b_end, b_last, b_passes = _burnin_resume(ck, step0, b_nom, b_cap, ext_on;
+                                                 thin = thinning)
         # Windows (and spin axis) the saved walkers live in, moved by the re-cut;
         # with several chains put back, once for all, by `sample_ensemble`.
         if pre === nothing && hasproperty(ck, :windows)
@@ -498,8 +546,29 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         # rung at β = 1. Before the re-cut, so the seam is cut from the cleaned
         # walkers. On the unconstrained target the walkers' coordinates are the
         # logit's, a line for every parameter: no angle is offset on a circle.
-        prune_stranded && step % 50 == 0 && step <= (3 * n_burnin * thinning) ÷ 4 &&
-            _ensemble_prune!(x, lastll, target, logpost, rng, prune_mem)
+        nominal = prune_stranded && step % 50 == 0 && step <= (3 * n_burnin * thinning) ÷ 4
+        nominal && _ensemble_prune!(x, lastll, target, logpost, rng, prune_mem)
+        # ---- The extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl),
+        # as in `sample_pt_emcee`: the record 50 steps before the end of burn-in,
+        # then at each check the pass on copies, taken only if it moves a walker.
+        # One rung, so the copy that moved is the pass. A check after the nominal
+        # end re-cuts only a lone chain: concurrent chains extend apart and cannot
+        # meet at a rendezvous.
+        b_check = ext_on && step == b_end && step >= b_nom
+        ext_on && step == b_nom - 50 && !nominal &&
+            _ensemble_prune!(x, lastll, target, logpost, rng, prune_mem; rungs = 1:0)
+        if b_check
+            x1, l1, r1, m1 = copy(x), copy(lastll), copy(rng), deepcopy(prune_mem)
+            if _ensemble_prune!(x1, l1, target, logpost, r1, m1) > 0
+                if step < b_cap
+                    x .= x1; lastll .= l1; copy!(rng, r1); _prune_copy!(prune_mem, m1)
+                    b_last = step; b_passes += 1
+                    b_end = min(cld(step + 50, thinning) * thinning, b_cap)
+                else
+                    _ensemble_split_warn(x, target, div(step, thinning), n_burnin)
+                end
+            end
+        end
         # ---- Burn-in re-cut (src/circular.jl): on pt_emcee's schedule, the
         # walkers folded, spin-flipped and every full-circle seam moved to the
         # emptiest arc, so a mode across a seam is not split between two walls
@@ -508,34 +577,42 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
         # Concurrent chains share `params`, whose windows a re-cut moves: they
         # re-cut together, at a rendezvous (`_ensemble_recut!`), or -- after a
         # resume that left them out of step -- not at all.
-        if step <= n_burnin * thinning && _pt_recut_due(step, n_burnin * thinning) &&
+        if (step <= b_nom && _pt_recut_due(step, b_nom) || b_check && n_chains == 1) &&
            (n_chains == 1 || rendezvous !== nothing) &&
            _ensemble_recut!(x, params, target.transform, rendezvous)
             for j in 1:n_walkers
                 lastll[j] = logpost(x[:, j])
             end
         end
-        if step % thinning == 0
-            k = div(step, thinning) - n_burnin
-            k > 0 && (kept[:, :, k] .= x)
+        # Kept from the step after `b_end`, every `thinning`-th.
+        if step > b_end && (step - b_end) % thinning == 0
+            kept[:, :, (step - b_end) ÷ thinning] .= x
         end
         update!(pb; n_done = step)
 
         # ---- Checkpoint: every `checkpoint_interval` s and on the last step
         if ck_path !== nothing && (step == n_steps || time() - last_ck >= ck_every)
-            n_kept = max(div(step, thinning) - n_burnin, 0)
+            n_kept = max(div(step - b_end, thinning), 0)
             write_checkpoint(ck_path, "ensemble", ck_fp, (; step, x, lastll, rng,
                 kept = kept[:, :, 1:n_kept], windows = circular_windows(params),
                 spin_axis = copy(params.layout.spin_axis),
-                prune_mem = _prune_saved(prune_mem)))
+                prune_mem = _prune_saved(prune_mem),
+                burnin_ext = (b_end, b_last, b_passes)))
             last_ck = time()
         end
     end
     show_progress && finish!(pb)
 
-    # Discard burn-in and flatten across walkers
-    n_keep = n_saved - n_burnin
-    n_keep > 0 || throw(ArgumentError(
+    # Discard burn-in and flatten across walkers. `n_burnin_used`: the saved
+    # draws before recording began, n_burnin unless `extend_burnin` ran on.
+    n_burnin_used = b_end ÷ thinning
+    show_progress && b_end <= n_steps &&
+        _burnin_extend_info("ensemble", n_burnin, n_burnin_used, b_passes, n_saved)
+    n_keep = n_saved - n_burnin_used
+    n_keep > 0 || throw(ArgumentError(b_end > b_nom ?
+        "the run ended at step $n_steps inside its extended burn-in (the walkers " *
+        "were still split between modes; next check at step $b_end), so nothing " *
+        "was recorded. Resume it with a larger n_steps, or raise n_burnin." :
         "n_burnin ($n_burnin) ≥ total steps ($n_saved)"))
 
     # Back-transform to bounded space and flatten
@@ -560,13 +637,15 @@ function _ensemble_chain(target::NereusTarget, n_walkers::Int, n_steps::Int,
     cube = permutedims(reshape(mat, n_walkers, n_keep, n_dim), (2, 3, 1))
     if check_drift
         drift = _ensemble_drift_chains([cube], params; sampler = "ensemble", de_move)
-        return with_density_columns(MCMCChains.Chains(mat, param_names; info = (; drift)),
+        return with_density_columns(MCMCChains.Chains(mat, param_names;
+                                                      info = (; drift, n_burnin_used)),
                                     params)
     end
     # Several chains: `sample_ensemble` checks them together, and drops this.
     # ρ★ and (e, ω) beside ρ_circ and η (src/density.jl).
     return with_density_columns(MCMCChains.Chains(mat, param_names;
-                                                  info = (; walker_cube = cube)), params)
+                                                  info = (; walker_cube = cube,
+                                                          n_burnin_used)), params)
 end
 
 # A chain without the walker cube `_ensemble_chain` hands `sample_ensemble`.
@@ -606,9 +685,9 @@ end
 # a moved walker's log-density is then redone through `logpost`, so the walkers
 # left alone keep theirs bit for bit. `mem` (`PruneMemory`) is the record the
 # pruning keeps between calls, its positions moved into the current charts
-# first (`_prune_rechart!`).
+# first (`_prune_rechart!`). `rungs = 1:0` only records (`extend_burnin`).
 function _ensemble_prune!(x::Matrix{Float64}, lastll::Vector{Float64},
-                          target::NereusTarget, logpost, rng, mem)
+                          target::NereusTarget, logpost, rng, mem; rungs = 1:1)
     tr = target.transform
     tr === nothing || _prune_rechart!(mem, tr, seam_indices(target.params))
     nd, nw = size(x)
@@ -622,7 +701,7 @@ function _ensemble_prune!(x::Matrix{Float64}, lastll::Vector{Float64},
     circ = target.transform === nothing ? circular_indices(target.params) : Int[]
     moved = _pt_prune_stranded!(state, lπ, lL, [1.0], rng;
                                 evalf = y -> _logdensity_parts(target, y),
-                                circ, memory = mem)
+                                circ, memory = mem, rungs)
     tr === nothing || (copyto!(mem.lo, tr.lowers); copyto!(mem.hi, tr.uppers))
     moved[1] == 0 && return 0
     for w in 1:nw
