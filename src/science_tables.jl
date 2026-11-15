@@ -19,6 +19,7 @@ import JSON3
 # base param name → (unit, is_angle_in_radians). Angles are converted to deg.
 const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "P" => ("d", false),          "K" => ("m/s", false),
+    "sigma_tt" => ("d", false),   # transit-time jitter (`sigma_tt_k<n>`), days
     "K_A" => ("m/s", false),      "K_B" => ("m/s", false),   # SB2 amplitudes
     "sesinw" => ("", false),      "secosw" => ("", false),
     "esinw" => ("", false),       "ecosw" => ("", false),

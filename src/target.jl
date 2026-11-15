@@ -39,7 +39,7 @@ function with_phic_epoch(params::Params, data::Data)
                        c.planet_modes, c.instruments, c.priors, c.trend_order,
                        c.phot_trend_order, c.noise_models, c.stability, c.M_s, c.R_s,
                        c.external_priors, c.sharing, c.ttv_n_transits,
-                       c.ttv_backend, c.obliquity)
+                       c.ttv_backend, c.obliquity, c.tt_jitter)
     return Params(cfg, params.layout)
 end
 
@@ -408,6 +408,7 @@ function EnzymeGradientConfig(target::NereusTarget{PackedTransforms})
     isempty(target.data.tomo) || push!(dropped, "Doppler tomography")
     isempty(cfg.noise_models) || push!(dropped, "noise models")
     isempty(target.data.t_phot) || push!(dropped, "transit photometry")
+    isempty(target.data.transit_times) || push!(dropped, "measured transit times")
     isempty(dropped) || throw(ArgumentError(
         "ad_backend = :Enzyme differentiates only the prior and the white-noise " *
         "RV likelihood, and this target also has " * join(dropped, ", ") *

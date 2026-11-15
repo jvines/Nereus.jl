@@ -60,6 +60,9 @@ fallback bounds are used.
 - `obliquity::ObliquityConfig` — RM / Doppler-tomography model options
   (per-night CCF widths, occulted-flux formula, spectroscopic limb darkening,
   shared shadow amplitude). The default is the pre-option model.
+- `tt_jitter` — planets whose measured transit times (`data.transit_times`) get
+  a `sigma_tt_k<p>` jitter. `nothing` (the default) takes them from the sets'
+  own `jitter` flags.
 
 # Examples
 
@@ -96,6 +99,7 @@ function Params(;
     ttv_backend::Symbol = :ttvfaster,
     obliquity::ObliquityConfig = ObliquityConfig(),
     gaia_plx = nothing,
+    tt_jitter::Union{Nothing, AbstractVector{<:Integer}} = nothing,
 )
     # `time = :auto` (no anchor given): the anchor the priors name, else the
     # default. Resolved first, so everything below -- and the Params, its
@@ -146,6 +150,9 @@ function Params(;
         "ttv_backend must be :ttvfaster or :nbody; got :$ttv_backend"))
 
     modes_vec = Vector{PlanetDataSources}(planet_modes)
+    tt_jit = tt_jitter !== nothing ? sort!(unique(Int.(collect(tt_jitter)))) :
+             data === nothing ? Int[] :
+             sort!([s.planet for s in data.transit_times if s.jitter])
     nm_vec = Vector{NoiseModel}(noise_models)
     if !isempty(nm_vec)
         validate_noise_models(nm_vec; transdim=transdim_noise)
@@ -187,7 +194,7 @@ function Params(;
                           instruments, Dict{String, PriorSpec}(),
                           trend_order, phot_trend_order, nm_vec, stability, M_s, R_s,
                           external_priors, sharing, ttv_n_transits,
-                          ttv_backend, obliquity)
+                          ttv_backend, obliquity, tt_jit)
 
     # Generate defaults from data (or use generic fallbacks)
     data_for_priors = data !== nothing ? data :
@@ -221,7 +228,7 @@ function Params(;
     config = ParamsConfig(max_kplanet, parametrization, modes_vec,
                           instruments, defaults, trend_order, phot_trend_order, nm_vec,
                           stability, M_s, R_s, external_priors, sharing,
-                          ttv_n_transits, ttv_backend, obliquity)
+                          ttv_n_transits, ttv_backend, obliquity, tt_jit)
     layout = _build_layout(config; data=data)
     return Params(config, layout)
 end

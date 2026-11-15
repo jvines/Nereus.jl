@@ -132,11 +132,19 @@ function default_priors(config::ParamsConfig, data::Data; gaia_plx = nothing)
         min_cadence_pm = 1.0 / (60 * 24)
     end
 
-    baseline = max(baseline_rv, baseline_pm, 100.0)  # floor at 100 days
+    # Measured transit times widen the span the time anchors and P are drawn
+    # over, as the photometry does. Absent, nothing changes.
+    tt_sets = hasproperty(data, :transit_times) ? data.transit_times : TransitTimeSet[]
+    tt_t = reduce(vcat, (s.tc[s.used] for s in tt_sets); init = Float64[])
+    baseline_tt = isempty(tt_t) ? 0.0 : maximum(tt_t) - minimum(tt_t)
+
+    baseline = max(baseline_rv, baseline_pm, baseline_tt, 100.0)  # floor at 100 days
     t_min_cand = min(length(data.t_rv) > 0 ? t_min_rv : Inf,
-                     length(data.t_phot) > 0 ? t_min_pm : Inf)
+                     length(data.t_phot) > 0 ? t_min_pm : Inf,
+                     isempty(tt_t) ? Inf : minimum(tt_t))
     t_max_cand = max(length(data.t_rv) > 0 ? t_max_rv : -Inf,
-                     length(data.t_phot) > 0 ? t_max_pm : -Inf)
+                     length(data.t_phot) > 0 ? t_max_pm : -Inf,
+                     isempty(tt_t) ? -Inf : maximum(tt_t))
     # Fallback if no actual data
     t_min = isfinite(t_min_cand) ? t_min_cand : 0.0
     t_max = isfinite(t_max_cand) ? t_max_cand : 1000.0
@@ -154,7 +162,9 @@ function default_priors(config::ParamsConfig, data::Data; gaia_plx = nothing)
             # Log-flat prior on a, 0.5–1000 AU (orvara default).
             dic["a_k$k"] = LogUniformPrior(0.5, 1000.0)
         else
-            dic["P_k$k"] = LogUniformPrior(0.1, 3 * baseline)
+            win = _tt_period_window(tt_sets, k)
+            dic["P_k$k"] = win === nothing ? LogUniformPrior(0.1, 3 * baseline) :
+                                             LogUniformPrior(win...)
         end
 
         # Second slot: K (m/s) under :K_driven, M_sec (M_sun)
@@ -345,6 +355,16 @@ function default_priors(config::ParamsConfig, data::Data; gaia_plx = nothing)
                data.iad.abscissa_err[data.iad.inst .== m] : Float64[]
         knee = isempty(errs) ? 1.0 : max(median(errs), 1e-3)
         dic["sigma_iad_$label"] = ModJeffreysPrior(knee, 10 * knee)
+    end
+
+    # --- Transit-time jitter (per planet, opt-in) ---
+    # Log-uniform, as a jitter whose scale is unknown over decades. From
+    # 1e-3 x the median quoted error, where the jitter is negligible against
+    # every point, up to 10 x the larger of that median and the RMS of the
+    # times about their least-squares ephemeris: an excess scatter beyond ten
+    # times the one the data show is not a jitter. Days, as tc_err.
+    for k in config.tt_jitter
+        dic["sigma_tt_k$k"] = _tt_jitter_prior(tt_sets, k)
     end
 
     # --- PM instrumental (sharing-aware) ---
@@ -962,4 +982,37 @@ function _default_noise_priors!(dic, m::ActivityGP,
         dic["gp_act_jit_$(ch)$s"] = LogUniformPrior(0.05 * med_err,
                                                      30.0 * med_err)
     end
+end
+
+# The default prior of planet k's transit-time jitter `sigma_tt_k<k>` (days):
+# log-uniform from 1e-3 x the median tc_err to 10 x max(median tc_err, RMS of
+# the times about their least-squares ephemeris). Without the set (a Params
+# built without data), 1e-6 d to 1 d.
+function _tt_jitter_prior(sets, k::Int)
+    i = findfirst(s -> s.planet == k, sets)
+    (i === nothing || n_tt(sets[i]) == 0) && return LogUniformPrior(1e-6, 1.0)
+    s = sets[i]
+    med = median(s.tc_err[s.used])
+    fit = _tt_linear_fit(s)
+    scatter = fit === nothing ? med : max(med, fit.rms)
+    return LogUniformPrior(1e-3 * med, 10 * scatter)
+end
+
+# The default period prior of a planet with measured transit times, `(lo, hi)`,
+# or `nothing` for one without (or with fewer than two distinct epochs). The
+# transit-time likelihood is -Inf wherever the model's period puts some point
+# more than P/4 from its transit, and between two points E epochs apart that
+# confines P to |P - P_ls| <~ P/(2E) about the least-squares period P_ls: a
+# window far narrower than any broad default, which an ensemble drawn from
+# such a default would never find. The prior covers twice that, P_ls ± P_ls/E,
+# and at least ±10σ of P_ls; outside it the likelihood is zero, so the
+# posterior is the one a broad prior gives.
+function _tt_period_window(sets, k::Int)
+    i = findfirst(s -> s.planet == k, sets)
+    i === nothing && return nothing
+    fit = _tt_linear_fit(sets[i])
+    (fit === nothing || !(fit.P > 0)) && return nothing
+    w = max(fit.P / max(fit.span, 1), 10 * fit.P_err)
+    lo = max(fit.P - w, fit.P / 2)
+    return (lo, fit.P + w)
 end

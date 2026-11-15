@@ -711,8 +711,9 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         # N-body prediction; rows are no-ops for `:TTV` (free-offset)
         # planets, which keep their layout-decoded δts.
         if any(ttv_state.is_nb)
-            t_max = isempty(data.t_phot) ? zero(T) : T(maximum(data.t_phot))
-            t_min = isempty(data.t_phot) ? zero(T) : T(minimum(data.t_phot))
+            # The photometry's span, and the transit times' with it when there
+            # are any, so the two terms read one integration (`_ttv_nb_span`).
+            t_min, t_max = _ttv_nb_span(T, data)
             _apply_ttv_nb!(ttv_state, theta, p_idx,
                             Ps, es, ws, Tps, bs, a_Rs, t_max; t_phot_min = t_min)
         end
@@ -1120,8 +1121,9 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
             r_for_j[ttv_state.j_active[r]] = r
         end
         if any(ttv_state.is_nb)
-            t_max = isempty(data.t_phot) ? zero(T) : T(maximum(data.t_phot))
-            t_min = isempty(data.t_phot) ? zero(T) : T(minimum(data.t_phot))
+            # The photometry's span, and the transit times' with it when there
+            # are any, so the two terms read one integration (`_ttv_nb_span`).
+            t_min, t_max = _ttv_nb_span(T, data)
             _apply_ttv_nb!(ttv_state, theta, p_idx,
                             Ps, es, ws, Tps, bs, a_Rs, t_max; t_phot_min = t_min)
         end

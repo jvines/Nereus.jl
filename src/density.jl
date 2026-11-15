@@ -776,7 +776,7 @@ function without_density_reparam(params::Params, data = nothing)
                        c.planet_modes, c.instruments, pr, c.trend_order,
                        c.phot_trend_order, c.noise_models, c.stability, c.M_s, c.R_s,
                        c.external_priors, c.sharing, c.ttv_n_transits,
-                       c.ttv_backend, c.obliquity)
+                       c.ttv_backend, c.obliquity, c.tt_jitter)
     return Params(cfg, _build_layout(cfg; data = data))
 end
 

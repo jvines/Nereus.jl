@@ -70,6 +70,7 @@ include("astrometry/gaia_epoch.jl")  # Gaia DR4 epoch-astrometry reader → IADD
 include("astrometry/solution_ladder.jl")  # exact 5/7/9-param evidences (needs IADData)
 include("likelihood.jl")     # calls gp_log_likelihood, check_stability, astrom_log_likelihood
 include("transit_likelihood.jl")
+include("transit_times_likelihood.jl")  # measured mid-transit times (data.transit_times)
 include("diagnostics/rank_diag.jl")  # rank-normalised ESS / R-hat, once per parameter per run
 include("reporting.jl")
 include("science_tables.jl")  # model-conditioned, unit-tagged science tables (needs reporting.jl)

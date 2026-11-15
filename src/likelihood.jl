@@ -128,7 +128,13 @@ function rv_log_likelihood(theta::Theta{T}, data::Data) where {T}
     ll_ifloor = indicator_floor_log_likelihood(theta, data)
     isfinite(ll_ifloor) || return convert(T, -Inf)
 
-    return ll + lp_ext + ll_astrom + ll_ifloor
+    # Measured mid-transit times (src/transit_times_likelihood.jl). Exactly
+    # zero without `data.transit_times`. Here, beside the astrometry, so every
+    # engine that reads this function gets it.
+    ll_tt = transit_times_log_likelihood(theta, data)
+    isfinite(ll_tt) || return convert(T, -Inf)
+
+    return ll + lp_ext + ll_astrom + ll_ifloor + ll_tt
 end
 
 """
@@ -674,7 +680,12 @@ function rv_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     ll_ifloor = indicator_floor_log_likelihood(theta, data, ws)
     isfinite(ll_ifloor) || return convert(T, -Inf)
 
-    return ll + lp_ext + ll_astrom + ll_ifloor
+    # Measured mid-transit times; exactly zero without them (see the method
+    # above).
+    ll_tt = transit_times_log_likelihood(theta, data)
+    isfinite(ll_tt) || return convert(T, -Inf)
+
+    return ll + lp_ext + ll_astrom + ll_ifloor + ll_tt
 end
 
 """
