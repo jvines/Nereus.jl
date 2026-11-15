@@ -2,7 +2,7 @@
 #
 # The dimensionality is deliberate: 22, the same as the HD 18599 joint
 # RV+transit fit where the beta-path estimators (TI/TI+/SS+/H+) miss by 118
-# nats. An estimator that only works in 2-D would prove nothing here.
+# in ln Z. An estimator that only works in 2-D would prove nothing here.
 using Test
 using Nereus
 using Nereus: _bridge_iterate
@@ -40,7 +40,7 @@ using LinearAlgebra, Statistics, Random
     @test converged
     @test iters < 50                       # the fixed point is fast; 4-7 in practice
     @test isfinite(logz)
-    # 0.05 nats is ~4 orders of magnitude tighter than TI manages on the real
+    # 0.05 in ln Z is ~4 orders of magnitude tighter than TI manages on the real
     # 22-D target, and the observed error here is ~0.003.
     @test abs(logz - truth) < 0.05
 

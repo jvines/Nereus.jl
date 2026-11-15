@@ -85,7 +85,7 @@ depending on the target:
 and `build_target` hands you the second. Feeding it bounded values — which is
 what every chain stores — returns `-Inf` for every point, with no error and no
 hint why. That has cost real hours: a ridge walk, a claimed prior violation and
-a claimed million-nat gap, all computed by reading bounded vectors as
+a claimed gap of a million in ln L, all computed by reading bounded vectors as
 unconstrained ones.
 
 Note this returns the posterior WITHOUT the change-of-variables Jacobian, which

@@ -196,7 +196,7 @@ end
     # 50 posterior draws per proposal draw, as in production (5.8M : 20k is 290):
     # the stuck clump then sets the pace, 160 steps a solve.
     slow = _bb_ratios(20_000, 400; stuck = 0.02, shift = 6.0, seed = 2)
-    # Extreme ratios: thousands of nats apart on both sides.
+    # Extreme ratios: thousands in ln Z apart on both sides.
     ext = let (a, b) = _bb_ratios(3_000, 800; seed = 3)
         a[1:7:end] .+= 900.0; a[2:11:end] .-= 1200.0; b[1:5:end] .-= 700.0
         a, b
@@ -606,7 +606,7 @@ end
                                 use_lp)
             @test rs.n_post == rr.N1 && length(rs.l1) == length(rr.l1) &&
                   length(rs.l2) == length(rr.l2) && rs.overlap == rr.overlap
-            tol = use_lp ? 1e-6 : 1e-12              # :lp is log p* to ~1e-9 nats
+            tol = use_lp ? 1e-6 : 1e-12              # :lp is log p* to ~1e-9
             @test maximum(abs.(rs.l1 .- rr.l1) ./ max.(1, abs.(rr.l1))) < tol
             @test maximum(abs.(rs.l2 .- rr.l2) ./ max.(1, abs.(rr.l2))) < 1e-12
         end

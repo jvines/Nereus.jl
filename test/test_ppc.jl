@@ -85,6 +85,9 @@ using Random: MersenneTwister
 
     @test haskey(ppc.summary, "rv_red_chi2_total")
     @test haskey(ppc.summary, "rv_red_chi2_per_inst")
+    # summary.json names the instrument; the struct keeps its index.
+    @test collect(keys(ppc.summary["rv_red_chi2_per_inst"])) == ["SIM"]
+    @test ppc.summary["rv_red_chi2_per_inst"]["SIM"] == ppc.rv_red_chi2_per_inst[1]
     @test haskey(ppc.summary, "rv_red_chi2_per_draw_p16")
     @test haskey(ppc.summary, "rv_red_chi2_per_draw_p50")
     @test haskey(ppc.summary, "rv_red_chi2_per_draw_p84")

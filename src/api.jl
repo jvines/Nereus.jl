@@ -232,7 +232,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     phot  = NamedTuple()
     iad = hgca = gost = relast = nothing
     hip_spec = nothing
-    iad_names = String[]          # per IAD instrument; "" = no jitter
+    iad_names = String[]          # per IAD instrument; "" = no jitter, _IAD_AUTO_NAME = auto-named
     for ch in channels
         src = String(get(ch, "source", ""))
         if src == "RV"
@@ -349,7 +349,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                           :external_priors => _as_external(external_priors),
                           :phot_trend_order => phot_trend_order,
                           :as_names => as_names,
-                          :iad_names => any(!isempty, iad_names) ? iad_names : String[])
+                          :iad_names => iad_names)
     use_rho_s && (kw[:use_rho_s] = true)
     parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
     time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
@@ -554,12 +554,14 @@ resolve_astrometry(spec) = first(_resolve_iad(spec))
 
 `resolve_astrometry`, plus the two per-instrument options a spec may carry:
 
-    Dict("catalogue" => "gaia_dr4", "source_id" => ..., "jitter" => true,
+    Dict("catalogue" => "gaia_dr4", "source_id" => ..., "jitter" => false,
          "clip_outliers" => true)
 
-- `"jitter" => true` gives this instrument a `sigma_iad_<name>` along-scan
-  jitter (`InstrumentConfig`'s `iad`). `jitter_names` has one entry per
-  instrument of the resolved `iad`, `""` for those without.
+- `"jitter"` (default `true`) gives this instrument a `sigma_iad_<name>`
+  along-scan jitter (`InstrumentConfig`'s `iad`); `"jitter" => false` opts it
+  out. `jitter_names` has one entry per instrument of the resolved `iad`, `""`
+  for those without. An already-built `IADData` gets the auto name (`IAD`, or
+  `IAD<m>` when several instruments are merged).
 - `"clip_outliers" => true` (or a number of σ, default 5) runs
   [`clip_transit_outliers`](@ref) on this instrument before it is merged;
   its report is returned in `outlier_reports`, tagged with the name.
@@ -578,7 +580,7 @@ function _resolve_iad(spec)
                 reduce(vcat, [p[3] for p in parts]))
     end
     if !(spec isa AbstractDict)                    # already an IADData
-        return (spec, spec isa IADData ? fill("", n_iad_inst(spec)) : String[], Any[])
+        return (spec, spec isa IADData ? fill(_IAD_AUTO_NAME, n_iad_inst(spec)) : String[], Any[])
     end
     iad = _load_iad_spec(spec)
     name = _iad_block_name(spec, 1)
@@ -588,7 +590,7 @@ function _resolve_iad(spec)
         iad, rep = clip_transit_outliers(iad; nsigma = nsig, label = name)
         push!(reports, merge((instrument = name,), rep))
     end
-    jit = _iad_jitter_flag(_get(spec, :jitter; default = false))
+    jit = _iad_jitter_flag(_get(spec, :jitter; default = true))
     return (iad, fill(jit ? name : "", n_iad_inst(iad)), reports)
 end
 
@@ -1280,9 +1282,9 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                 # the call in place. run_job gets this from _populate_summary!.
                 # A bare log_z is not quotable: the tempered stack shares one
                 # mean_logL array, so its four variants agreeing is not a
-                # cross-check and they can sit >100 nats low together.
+                # cross-check and they can sit low by >100 in ln Z together.
                 _evidence_block!(summary, raw; engine = spec_name)
-                # The tempered stack sits >100 nats low on a signal-locked
+                # The tempered stack sits low by >100 in ln Z on a signal-locked
                 # posterior while its four variants agree with each other to a
                 # decimal, so a bridge cross-check is not optional.
                 _augment_evidence!(summary, target.params, target.data, chains;

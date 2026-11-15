@@ -9,7 +9,7 @@
 # RV + Hipparcos-IAD companion (circular, 0.05 mas per scan, a on
 # LogUniform(0.8, 2), M_sec on LogUniform(0.003, 0.03)): a chain that started
 # at the wrong period settled with M_sec on the lower edge of its prior, where
-# any orbital signal only hurts the fit, 23,000 to 46,000 nats below the mode.
+# any orbital signal only hurts the fit, Δln p = 23,000 to 46,000 below the mode.
 # At i = 45° 3 of 8 single chains of each of rjmcmc, moms and cold NUTS did,
 # and of four chains one or two; the run reported their pooled draws as the
 # posterior: i = 36.7 ± 8.1° against 44.6 ± 0.9°.
@@ -38,7 +38,7 @@
 # The ensemble (src/samplers/ensemble.jl) takes the survivors as up to half
 # its walkers: its burn-in pruning moves stranded walkers onto those that
 # found the mode, and had nothing to move them to when none had. One chain of
-# four at i = 5° sat at i = 161°, 1,500 nats below the mode, for the whole run.
+# four at i = 5° sat at i = 161°, Δln p = 1,500 below the mode, for the whole run.
 # Cold pt_hmc and pathfinder_init start from them through `_cold_starts`
 # (src/samplers/nuts.jl): pt_hmc freezes each chain's kernel where its warm-up
 # ended, and a β = 1 warm-up on the plateau left a kernel that could not move
@@ -137,7 +137,7 @@ end
 # by construction, so the two tests the pruning makes of a walker over two
 # passes it has already passed. On the eccentric RV planet of
 # test/test_angles_never_rail.jl half the scouts settled in its circular-orbit
-# mode, 27-37 nats down in log L but above a cut set 37 down by A's Occam
+# mode, 27-37 down in log L but above a cut set 37 down by A's Occam
 # factor; they then made up to half an ensemble's walkers. The scouts the cut
 # keeps outside A are taken in turn from the highest, each one not yet placed
 # followed to the top of its mode, and every such scout inside that mode shares

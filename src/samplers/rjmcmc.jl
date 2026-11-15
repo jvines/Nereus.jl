@@ -68,7 +68,7 @@ Run a standalone RJMCMC sampler for trans-dimensional inference.
   by the bound of the stranded-walker pruning, and the chain starts at one of
   the rest, picked at random (src/samplers/scouts.jl). A chain started at one
   draw that fell outside a narrow mode's basin stayed on a plateau tens of
-  thousands of nats below it for the whole run. `0` starts from one draw.
+  thousands in ln p below it for the whole run. `0` starts from one draw.
   With planet births on the chain starts without planets, and the births
   search for them.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole

@@ -91,7 +91,7 @@ Population Annealing sequential MC sampler.
   inclination's median from 1.9 rad to 0.09), and up to there no parameter
   decorrelates within `max_mcmc_mult × n_mcmc` sweeps. The few
   replicas that seed the corner are cloned into an under-dispersed population
-  that over-weights the next increments: log Z was +0.44 and +0.51 nats from
+  that over-weights the next increments: log Z was +0.44 and +0.51 from
   bridge (σ 0.005) and reference-path at 500 replicas, +0.12 at 1000, +0.01 and
   -0.05 at 2000. All of it accrues between β = 1e-3 and 1e-2, with each of the three
   kernels; a slower schedule (`ess_target = 0.97`) or a stricter
@@ -134,7 +134,7 @@ Population Annealing sequential MC sampler.
   population returned at β = 1 had a least ESS of 179-182 with i = 89.5° and
   16 with e free at i = 45°; with this and `resample_ess` it has 201-236 and
   98-163, for 10-30 times the likelihood evaluations. On a 1-planet RV with
-  free e, log Z came out 10-17 nats below nested INS and is now within 2.
+  free e, log Z came out 10-17 below nested INS and is now within 2.
   Where a parameter cannot decorrelate (the e-ω-M₀ ridge of a free e near 0)
   each step runs to the `max_mcmc_mult` cap. `0` disables it.
 - `mcmc_target_moves::Float64=5.0` — a second floor: keep sweeping until each

@@ -112,7 +112,7 @@ to an arbitrary basis.
 
 **This is the single most consequential choice in the comparison.** Widening
 the acceleration prior by a decade costs ~log(10) per added parameter — about
-**4.6 nats for the two acceleration terms, a factor of 100 in odds per decade**.
+**4.6 in ln Z for the two acceleration terms, a factor of 100 in odds per decade**.
 Measured across five decades of prior width on the twelve DR4 pre-release
 sources, one of twelve changes its preferred rung.
 
@@ -165,7 +165,7 @@ log Z:  -1,839,105.7  ->  -495,854.5  ->  -334,302.6
 chi2/dof:      6652.7        1788.3        1140.1      <-- adequate = FALSE
 ```
 
-A crushing 9p "detection" with a 1.5-million-nat evidence improvement, and
+A crushing 9p "detection" with an evidence improvement of 1.5 million in ln Z, and
 χ²/dof = 1140. The ladder is faithfully picking the least hopeless of three
 hopeless models, because a 33 M☉ companion produces an orbit no polynomial in
 time describes.
@@ -248,12 +248,12 @@ On Gaia-4 that gives:
 ```
 raw abscissae : P = [0.000, 0.014, 0.986], best 9p, chi2/dof = [3.50, 3.39, 3.38], adequate = FALSE
 after Kepler  : P = [0.993, 0.006, 0.001], best 5p, chi2/dof = [1.41, 1.41, 1.41], adequate = TRUE
-delta logZ(5p) = +858.0 nats
+delta logZ(5p) = +858.0
 ```
 
 "9p, and none of them fit" becomes "5p, P = 0.993, adequate". The orbit
-likelihood independently gives +857.9 nats for the same comparison —
-**agreement to 0.1 nat by a completely different route**, one a closed-form
+likelihood independently gives +857.9 in ln L for the same comparison —
+**agreement to 0.1 in ln L by a completely different route**, one a closed-form
 Gaussian evidence and one an MCMC-marginalised likelihood. That is a real
 correctness check, and it is a self-contained argument that the curvature is
 Keplerian rather than generic polynomial drift.

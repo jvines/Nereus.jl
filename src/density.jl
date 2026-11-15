@@ -21,7 +21,7 @@ using MCMCChains
 # g ∈ [1/G, G]: the sampled box of ρ_circ is [ρ★_min/G³, ρ★_max·G³]. The orbits
 # it leaves out have e > 1 − 2/G² (0.9998 here; old-prior mass ≈ 3/(4G²) under a
 # uniform e, 7.5e-5), with periastron inside the star. A wider box costs nested
-# sampling: at G = 1e6 the two-planet log Z ran 1.3 nats low, at twice the scatter.
+# sampling: at G = 1e6 the two-planet log Z ran low by 1.3, at twice the scatter.
 const DENSITY_G = 100.0
 
 # η's interval: both ends are the point e = 1, ω = -90° of every ellipse, where
@@ -517,7 +517,7 @@ end
 # the plateau the replacements land on it as often as it fills the cube, and
 # each such iteration is credited a 1/n_live shrink of a volume that does not
 # shrink: log Z comes out low by about (1 - p)/p + log p for a finite share p,
-# whatever n_live. That was 7 nats on a one-planet transit fit with ρ★ sampled
+# whatever n_live. That was 7 in ln Z on a one-planet transit fit with ρ★ sampled
 # and 21 on a two-planet one, with the posterior right. `density_ns_floor` gives
 # those points a value below every real one that rises toward the support, a
 # slope the run descends at the rate it credits, not a plateau.

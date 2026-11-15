@@ -1,11 +1,11 @@
 # Scouted starts (src/samplers/scouts.jl). An RV + Hipparcos-IAD companion on a
 # circular orbit, 0.05 mas per scan, a on LogUniform(0.8, 2) AU and M_sec on
 # LogUniform(0.003, 0.03): a chain that starts at the wrong period settles with
-# M_sec on the lower edge of its prior, 23,000+ nats below the mode, and no
+# M_sec on the lower edge of its prior, 23,000+ in ln p below the mode, and no
 # local move leaves. rjmcmc, moms and cold NUTS started each chain at one prior
 # draw, and the ensemble every walker; 3 of 8 single chains of each of the
 # first three stranded at i = 45°, two of four NUTS chains, and one ensemble of
-# four at i = 5° (at 161°, 1,500 nats down). Cold pt_hmc froze its β = 1
+# four at i = 5° (at 161°, Δln p = 1,500 down). Cold pt_hmc froze its β = 1
 # chain, and Pathfinder's runs all stopped on the plateau, the same way.
 #
 # Pinned: the scouts the bound drops are the stranded ones and only those; a
@@ -32,7 +32,7 @@ function _sc_build(w, rv; unconstrained, efree = false,
            sesinw = efree ? UniformPrior(-1.0, 1.0) : FixedPrior(0.0),
            secosw = efree ? UniformPrior(-1.0, 1.0) : FixedPrior(0.0), inc = SinePrior(),
            Omega = UniformPrior(0.0, 2π), Mo = UniformPrior(0.0, 2π))
-    tg = build_target(M_pri = 0.644, planets = (b = blk,), iad = iad,
+    tg = build_target(M_pri = 0.644, planets = (b = blk,), iad = iad, iad_names = String[],
                       rv = (HARPS = (data = (t = _SC_TRV, rv = rv, rv_err = fill(5.0, 40)),
                                      sigma = 0.0, gamma = UniformPrior(-50.0, 50.0)),),
                       plx = 13.6, M_s = 0.644)
@@ -42,7 +42,7 @@ end
 # The companion at inclination `inc_deg` (efree: √e sin ω and √e cos ω sampled
 # on U(-1, 1), the truth still circular). signal = false: no companion in the
 # data, which still carry the parallax the model holds at 13.6 mas (without it
-# every point sits ~3e6 nats down, in local optima 1e5 nats apart), and M_sec
+# every point sits ~3e6 down in ln p, in local optima 1e5 apart), and M_sec
 # on LogUniform(1e-6, 0.03), down to masses the data cannot see. Held at 0.003
 # or more the companion is detectable at any orbit (~0.07 mas against 0.05 a
 # scan), and there is no plateau.
@@ -163,10 +163,10 @@ end
 
 # The width search behind the bound (`_pt_axis_widths`, shared with the pruning
 # of pt_emcee and transdim). Its step is ×4 until the drop lies in [1/8, 2]
-# nats and ÷4 when it overshoots; a drop that grows by more than 16 per ×4 (a
+# in ln p and ÷4 when it overshoots; a drop that grows by more than 16 per ×4 (a
 # wall, a support edge) stepped back and forth until the iterations ran out and
 # returned `nothing`, and `_scouts_supported` then kept every scout. Two scouts
-# in four of an RV + Hipparcos run started on a plateau 24,000 nats down.
+# in four of an RV + Hipparcos run started on a plateau Δln p = 24,000 down.
 @testset "axis widths: a drop that jumps over the window" begin
     # |x|^6: a ×4 step multiplies the drop by 4096.
     ℓ6 = y -> -abs(y[1])^6
@@ -187,7 +187,7 @@ end
     σ = Nereus._pt_axis_widths(ℓe, [0.0], 0.0, [0.02])
     @test σ !== nothing && σ[1] > 0
 
-    # Where no h lands in the window (a jump from 0 to 50 nats at 0.3) the
+    # Where no h lands in the window (a jump from 0 to 50 in ln p at 0.3) the
     # width at the narrowest overshoot is returned, not `nothing`.
     ℓj = y -> abs(y[1]) > 0.3 ? -50.0 : 0.0
     σ = Nereus._pt_axis_widths(ℓj, [0.0], 0.0, [0.1])

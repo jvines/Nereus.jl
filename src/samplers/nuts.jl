@@ -371,7 +371,7 @@ size / tree depth are attached to `chains.info` (see
   climbing, less those the bound of the stranded-walker pruning shows to be
   where the posterior cannot carry mass; each chain from a different one at
   random (src/samplers/scouts.jl). From one prior draw each, two of four
-  chains on an RV + IAD companion settled 23,000-45,000 nats below the mode,
+  chains on an RV + IAD companion settled Δln p = 23,000-45,000 below the mode,
   on a plateau no trajectory leaves. `0` starts each chain from one draw.
 - `warm_temps`, `warm_walkers`, `warm_steps`, `warm_burnin` : pt_emcee
   pre-search budget (defaults 6 / 40 / 400 / 200).
@@ -709,7 +709,7 @@ taken at the point where it was recorded (LogDensityProblemsAD records it at
 zeros(dim)) at every other point, and every Nereus log density branches on
 the parameter values. On an eccentric orbit whose zeros(dim) is e = 0,
 Kepler's solver takes no Newton step there, so the tape took none anywhere;
-its log density was off by hundreds of nats and its gradients by as much as
+its log density was off by hundreds and its gradients by as much as
 the gradients themselves (test/test_nuts_reversediff.jl).
 """
 function _nuts_logdensity_fns(target::NereusTarget, ad_backend::Symbol)

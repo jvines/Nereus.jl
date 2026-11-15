@@ -58,7 +58,7 @@ using LinearAlgebra, Statistics, Random
 
         @test ok
         # Observed |error| <= 0.09 for both across b = 0 .. 1. The bar is set an
-        # order of magnitude above that, and three below the ~176 nats by which
+        # order of magnitude above that, and three below the ~176 in ln Z by which
         # the beta-path estimators miss a real signal-locked posterior.
         @test abs(bz - truth) < 0.5
         @test abs(rp.log_z_ais - truth) < 0.5
@@ -101,7 +101,7 @@ using LinearAlgebra, Statistics, Random
     # STICKY chain: a tiny step scale, no thinning. n_eff collapses to ~20,
     # far below the d + d(d+1)/2 = 135 parameters of the Gaussian reference,
     # so `q` is estimated from too few independent points to be usable.
-    # Bridge consumes `q` directly and goes several nats LOW (observed
+    # Bridge consumes `q` directly and goes LOW by several in ln Z (observed
     # -3.2); reference-path anneals away from `q` and survives (observed
     # +0.17). Splitting the sample does NOT rescue bridge (-2.8), so this is
     # a badly ESTIMATED reference, not training-set re-use. Documented in

@@ -12,16 +12,16 @@
 # bridge, which is validated against exact truth on curved 15-D targets.
 #
 # Measured on 51 Peg -- unimodal, tightly determined, its friendliest real case
-# -- converged, it sits 5.5 nats above bridge (an earlier run, before the fixes
+# -- converged, it sits Δln Z = 5.5 above bridge (an earlier run, before the fixes
 # below, put it 24 below). That is why it is reported, and headlined only when
 # there is neither a usable bridge nor a corroborated tempered value.
 #
-# On an RV + Hipparcos-IAD companion pt_emcee's value sat about 1.1 nats above
+# On an RV + Hipparcos-IAD companion pt_emcee's value sat about Δln Z = 1.1 above
 # bridge and pt_hmc's 2.6 to 3.1 below, on the same target: pt_emcee's `:lp`, the
 # bounded log posterior, was read as the unconstrained one without the map's
-# log-Jacobian (-3.7 nats at the mode), and both used the covariance of the
+# log-Jacobian (-3.7 in ln Z at the mode), and both used the covariance of the
 # draws nearest the mode as it came, which a cut to the inner 30% shrinks
-# (-2.6 nats for d = 6). With both corrected, both land within 0.25 of bridge.
+# (-2.6 in ln Z for d = 6). With both corrected, both land within 0.25 of bridge.
 using Test
 using Nereus
 using Random, Statistics, LinearAlgebra
@@ -69,9 +69,9 @@ end
 
     # Its premise: where the posterior is near-Gaussian, Laplace tracks the
     # validated estimator, and does not depend on how many of the draws nearest
-    # the mode its covariance is taken from. Measured: 0.03 to 0.15 nats from
+    # the mode its covariance is taken from. Measured: Δln Z = 0.03 to 0.15 from
     # bridge at mode_frac 0.1 to 1 (seeds 11, 12; e = 0.3 and 0.5). Before the
-    # Jacobian and the cut's shrink were put in, the bar here was 40 nats.
+    # Jacobian and the cut's shrink were put in, the bar here was 40 in ln Z.
     @test abs(lap - br) < 0.5
     lf = [mode_laplace_evidence(target, res.chains; mode_frac = f) for f in (0.1, 0.5, 1.0)]
     @test maximum(lf) - minimum(lf) < 0.3
@@ -79,7 +79,7 @@ end
     # Where it is not: the pure sine, e near 0, where the posterior in
     # (√e cos ω, √e sin ω) is flat-topped (log L is quartic in them there) and
     # Mo follows ω around. The value then climbs with mode_frac, from 1.6 to
-    # 4.0 nats above bridge (2.7 at the default 0.3). The bias of a Gaussian
+    # Δln Z = 4.0 above bridge (2.7 at the default 0.3). The bias of a Gaussian
     # approximation, not of the estimator; the uncorrected formula sat 0.4 below
     # here only because its two errors cancelled.
     tc = _ml_target(0.0)

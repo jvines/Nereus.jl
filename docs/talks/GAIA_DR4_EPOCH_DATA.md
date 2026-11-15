@@ -450,7 +450,7 @@ prior** (3.7). Therefore adding any exact 5-parameter linear signal to the absci
 change the likelihood.
 
 Verified directly: adding q = (123.4, -56.7, 8.9, -1.23, 4.56) through the design matrix to
-Gaia-4's abscissae changed the log-likelihood by **3.6e-7 nats out of 574.95** — float noise.
+Gaia-4's abscissae changed the log-likelihood by **3.6e-7 (out of 574.95)** — float noise.
 
 So whether the abscissa is a raw absolute position (Gaia: the fit returns plx = 25.65 mas) or
 a pre-subtracted residual (Hipparcos: the fit returns dplx = 0.0023 mas) is **invisible to the
@@ -534,10 +534,10 @@ Now the orbit side, on Gaia-4 (824 abscissae):
 - no reflex: log L = **-163.982** (correct psi) vs **-163.980** (swapped) — identical to 2e-3,
   because both bases span the same 2-D plane.
 - best over a 181-point mean-anomaly grid at the published elements: log L = **+574.951**
-  (correct) vs **-458.009** (swapped) — **1033 nats lost.**
+  (correct) vs **-458.009** (swapped) — **1033 in ln L lost.**
 
 That is the whole argument for why this convention matters, in two numbers: **a 5-parameter
-fit cannot detect the error, and an orbit fit loses a thousand nats to it.**
+fit cannot detect the error, and an orbit fit loses a thousand in ln L to it.**
 
 > **[INFERENCE]** That DR4's `scan_pos_angle` is *documented* as North-through-East was not
 > checked against ESA material. The convention was established empirically here, which is a
@@ -655,7 +655,7 @@ With a0_max = 5 mas over accel_yr = 10 yr: sigma_acc = **0.1 mas/yr^2**, sigma_j
 which is the hypothesis being tested.
 
 **This is the single most consequential choice in the comparison.** Widening the acceleration
-prior by a decade costs ~log(10) per added parameter, **~4.6 nats for the two acceleration
+prior by a decade costs ~log(10) per added parameter, **~4.6 in ln Z for the two acceleration
 terms — a factor of 100 in odds per decade of prior width.** Measured across 5 decades of
 prior width on the 12 RC3 sources, 1 of 12 changes its preferred rung.
 
@@ -685,7 +685,7 @@ Three teaching points, all visible in that table.
 
 - **All three known orbital systems land in the INADEQUATE column.** A model-probability
   computation normalises over the rungs you gave it and **cannot tell you whether any of them
-  fits.** Gaia BH3 gets P(9p) = 1.000 with a **1.5-million-nat** evidence improvement and
+  fits.** Gaia BH3 gets P(9p) = 1.000 with an evidence improvement of **1.5 million in ln Z** and
   chi2/dof = **1140**: the ladder faithfully picks the least hopeless of three hopeless models,
   on precisely the source that matters most. **Always read a goodness-of-fit alongside the
   probability.**
@@ -935,11 +935,11 @@ tell which node is ascending without radial velocities."
 
 **i -> 180-i is NOT degenerate in epoch astrometry.** At fixed (Omega, omega, M0):
 delta log L = -582. Re-maximising over (Omega, omega, M0) on a 41^3 grid at each inclination:
-log L = 689.75 at i = 116.9 deg vs 112.51 at i = 63.1 deg — a penalty of **hundreds of nats**.
+log L = 689.75 at i = 116.9 deg vs 112.51 at i = 63.1 deg — a penalty of **hundreds in ln L**.
 Time-resolved astrometry sees the *sense* of the reflex motion on the sky, and DR4's scan-angle
 coverage (-167 to +173 deg) resolves it.
 
-> Quote this as "hundreds of nats", not a precise figure: the measurement held (a, M_sec, e) at
+> Quote this as "hundreds in ln L", not a precise figure: the measurement held (a, M_sec, e) at
 > published values and re-maximised only three angles on a grid. A full re-fit at the mirror
 > inclination would reduce the penalty by an unmeasured amount.
 
@@ -973,7 +973,7 @@ plx =  13.628 mas  ->  logL = -163.980656
 plx = 500.000 mas  ->  logL = -163.980660
 ```
 
-A 1000x change moves the likelihood by 4e-6 nats. **On an epoch-astrometry-only fit, the
+A 1000x change moves the likelihood by 4e-6. **On an epoch-astrometry-only fit, the
 parallax posterior is the prior, full stop.**
 
 The degeneracy itself, on the real abscissae, walking the ridge M_sec x plx = const with `a`
@@ -988,7 +988,7 @@ re-derived each step so the *period* stays at 571.3 d:
 4.00     54.5120    0.002816     1.16531    0.276562   563.36
 ```
 
-A factor of **16 in companion mass costs 9.5 nats.** Essentially flat.
+A factor of **16 in companion mass costs 9.5 in ln L.** Essentially flat.
 
 Control — move plx alone, so a0 is not compensated:
 
@@ -998,7 +998,7 @@ plx = 13.628 mas  a0 = 0.2742 mas   logL =   565.62
 plx = 27.256 mas  a0 = 0.5484 mas   logL =  -667.23
 ```
 
-A factor of 2 in plx costs **1233 nats**. **The abscissae pin a0 ferociously and are blind to
+A factor of 2 in plx costs **1233 in ln L**. **The abscissae pin a0 ferociously and are blind to
 its factorisation into M_c and plx.** The astrometry measures an angle; only the parallax prior
 turns it into a mass.
 
@@ -1055,7 +1055,7 @@ i[deg]  M_sec[MJ] Msini[MJ]    K[m/s]    a0[mas]     logL_RV    logL_AST  logL_j
 ```
 
 **The RV column is identical to every printed digit across a 54x range in true mass; the
-astrometry column swings 5e4 nats and peaks at i = 4.84 deg.** HD 114762 b at
+astrometry column swings 5e4 in ln L and peaks at i = 4.84 deg.** HD 114762 b at
 M sin i = 12 M_J is a 0.10-0.14 Msun **star**.
 
 > Absolute values are meaningless here — omega, M0 and Omega are held at plausible-but-unfitted
@@ -1259,10 +1259,10 @@ RMS drops 0.1543 -> 0.1017 mas (34%); scatter now 1.24x the median per-CCD sigma
   pmra*[mas/yr] -75.55114      -75.52927      0.02186
   pmdec[mas/yr]  17.94038       17.96491      0.02452
 
-log-likelihood: single star = -163.98 ; with orbit = 693.94 ; delta = +857.92 nats
+log-likelihood: single star = -163.98 ; with orbit = 693.94 ; delta = +857.92 in ln L
 ```
 
-delta chi2 / 2 = 858.0 and the log-likelihood difference is 857.9 — **agreement to 0.1 nat**, an
+delta chi2 / 2 = 858.0 and the log-likelihood difference is 857.9 — **agreement to 0.1 in ln L**, an
 internal check that the marginalisation is doing nothing unexpected.
 
 **The bottom table is the underrated one.** Including the orbit moves pmdec by 0.025 mas/yr and
@@ -1280,11 +1280,11 @@ per-transit attitude error, or the 0.119 mas excess noise not added in quadratur
 ```
 ladder on raw abscissae : P = [0.000, 0.014, 0.986], best 9p, chi2/dof = [3.50, 3.39, 3.38], adequate = false
 ladder after the Kepler : P = [0.993, 0.006, 0.001], best 5p, chi2/dof = [1.41, 1.41, 1.41], adequate = true
-delta logZ(5p) from removing the Keplerian = +858.0 nats
+delta logZ(5p) from removing the Keplerian = +858.0
 ```
 
-Before: "9p, and none of them fit." After: "5p, P = 0.993, adequate." +858 nats — matching the
-likelihood difference of 4.4 to 0.1 nat **by a completely independent route** (closed-form
+Before: "9p, and none of them fit." After: "5p, P = 0.993, adequate." +858 in ln Z — matching the
+likelihood difference of 4.4 to 0.1 in ln L **by a completely independent route** (closed-form
 Gaussian evidence at 22.5 microseconds versus an MCMC-marginalised likelihood).
 
 That is a self-contained argument that the curvature in Gaia-4's abscissae is **Keplerian, not
@@ -1462,7 +1462,7 @@ factorisations each is a very different proposition from an MCMC each.
    within a transit; the data are consistent with that but do not exclude a ~20% correlated
    component. N is not the figure of merit — angular coverage is (HD 114762: 558 abscissae, 70
    distinct angles, a genuine 60-degree hole).
-7. **The scan-angle convention is invisible to a 5-parameter fit and worth 1033 nats to an
+7. **The scan-angle convention is invisible to a 5-parameter fit and worth 1033 in ln L to an
    orbit.** Certify it against published proper motions in *both* components before fitting
    anything (4.6). For Hipparcos IAD it is `atan2(CPSI, SPSI)`, against the column names.
 8. **Model probabilities normalise over the rungs you supply and cannot say whether any of them
@@ -1470,10 +1470,10 @@ factorisations each is a very different proposition from an MCMC each.
 9. **Never read `best` without `prob`.** Three near-identical evidences make the argmax noise
    (source 60730287810150016: best = 9p at P = 0.34).
 10. **Bayes factors between rungs need proper priors.** A flat improper prior on the linear
-    block gives undefined model comparison, and the prior width moves the answer by ~4.6 nats
+    block gives undefined model comparison, and the prior width moves the answer by ~4.6 in ln Z
     per decade.
 11. **The parallax prior sets the mass scale**, not the abscissae: a0 = a_rel M_sec/M_tot plx,
-    and a factor 16 in mass along the ridge costs 9.5 nats.
+    and a factor 16 in mass along the ridge costs 9.5 in ln L.
 12. **An unmodelled orbit biases the catalogue parameters**, it does not just inflate the
     residuals — 8 sigma on Gaia-4's proper motion, 1.6 mas/yr on HD 114762's pmDec.
 13. **RC3 has no duplicate `transit_id`.** Do not repeat a "the pre-release ships duplicates"
@@ -1499,14 +1499,14 @@ uniformly (Gaia-4: 101 distinct angles, full coverage; HD 114762: 70 angles with
 x = (sin psi, cos psi, p_AL, sin psi dt, cos psi dt), same marginalised 5-vector, same
 likelihood. The one structural difference — Hipparcos ships residuals, DR4 ships absolute
 positions — is *provably* invisible: adding an arbitrary 5-parameter linear signal changes
-log L by 3.6e-7 nats out of 575, because the 5-vector carries a flat improper prior. What
+log L by 3.6e-7 (out of 575), because the 5-vector carries a flat improper prior. What
 changed is the numbers: for HD 114762, 53 -> 558 points, 2.29 -> 0.125 mas, and a cumulative
 reflex S/N of 4 -> 220. **A factor 55, on the same star with the same model.**
 
 **3. The astrometry measures an angle; only the parallax prior turns it into a mass.**
 a0 = a_rel M_sec/(M_pri+M_sec) plx. Walking the ridge M_sec x plx = const at fixed period costs
-**9.5 nats over a factor of 16 in companion mass**; moving plx alone by a factor of 2 costs
-**1233 nats**. The parallax that scales the reflex never even enters the data term — the
+**9.5 in ln L over a factor of 16 in companion mass**; moving plx alone by a factor of 2 costs
+**1233 in ln L**. The parallax that scales the reflex never even enters the data term — the
 parallactic signal in the abscissae is one of the five marginalised nuisances. Adding RV closes
 it: across an order of magnitude in true mass K moves 8% while a0 moves 11x, which is how
 HD 114762's M sin i = 12.27 M_J becomes M = 0.139 Msun at i = 4.84 deg.
@@ -1524,7 +1524,7 @@ computation.
 ```
 ladder on raw abscissae : P = [0.000, 0.014, 0.986], best 9p, chi2/dof = [3.50, 3.39, 3.38], adequate = FALSE
 ladder after the Kepler : P = [0.993, 0.006, 0.001], best 5p, chi2/dof = [1.41, 1.41, 1.41], adequate = TRUE
-delta logZ(5p) = +858.0 nats     [the orbit likelihood gives +857.9 - agreement to 0.1 nat]
+delta logZ(5p) = +858.0     [the orbit likelihood gives +857.9 - agreement to 0.1 in ln Z]
 ```
 
 It lands three separate points in one slide.
@@ -1533,12 +1533,12 @@ It lands three separate points in one slide.
 time cannot absorb it, and a Kepler orbit restores the star to "5-parameter, adequate".
 
 (ii) Two completely independent routes — a closed-form Gaussian evidence at 22.5 microseconds
-and an MCMC-marginalised likelihood — agree to 0.1 nat. That is a real correctness check, not a
+and an MCMC-marginalised likelihood — agree to 0.1 in ln Z. That is a real correctness check, not a
 plot.
 
 (iii) The `adequate = FALSE` in the "before" row is the honest half: **model probabilities
 normalise over the rungs you gave them and cannot tell you whether any of them fits.** Gaia BH3
-gets P(9p) = 1.000 with a 1.5-million-nat evidence improvement and chi2/dof = 1140 — the ladder
+gets P(9p) = 1.000 with an evidence improvement of 1.5 million in ln Z and chi2/dof = 1140 — the ladder
 confidently picks the least hopeless of three hopeless models on precisely the source that
 matters most.
 

@@ -199,7 +199,7 @@ end
                 x = [Float64(vec(Array(ds[nm]))[end]) for nm in p.layout.unfrozen_names
                      if haskey(ds, nm)]
                 # pt_emcee, pt_whitening and nuts store the bounded log-posterior;
-                # with the maps missing it would be off by thousands of nats.
+                # with the maps missing it would be off by thousands in ln p.
                 if length(x) == length(p.layout.unfrozen_names) &&
                    name in ("pt_emcee", "pt_whitening", "nuts")
                     @test vec(Array(ds["lp"]))[end] ≈ Nereus.logdensity_bounded(tgt, x) rtol = 1e-8

@@ -327,7 +327,7 @@ on `(ρ★, e, ω)` is carried through the Jacobian (`src/density.jl`), so a pri
     `ρ_circ` is `[ρ★_min/10⁶, ρ★_max·10⁶]`. That excludes orbits with
     `e > 1 − 2/G² = 0.9998`, whose periastron lies inside the star (about
     3/(4G²) ≈ 7.5×10⁻⁵ of the prior mass under a uniform `e`). A wider box costs
-    nested sampling: at `G = 10⁶` the two-planet log Z ran 1.3 nats low.
+    nested sampling: at `G = 10⁶` the two-planet log Z ran low by 1.3.
   - **Priors on the new slots.** None are yours to give: `rho_circ_k<k>` and
     `eta_k<k>` carry the prior on ρ★ and `(e, ω)`. They are not in
     `summary.provenance.priors`, which lists the priors you set.

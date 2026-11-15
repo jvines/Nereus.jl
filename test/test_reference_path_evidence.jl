@@ -2,7 +2,7 @@
 #
 # Same 22-D target as test_bridge_evidence.jl, and for the same reason: the
 # beta-path estimators (TI/TI+/SS+/H+) miss the real 22-D HD 18599 posterior by
-# ~118 nats, so an estimator that only works in 2-D would prove nothing.
+# ~118 in ln Z, so an estimator that only works in 2-D would prove nothing.
 using Test
 using Nereus
 using Nereus: _reference_path_core
@@ -26,7 +26,7 @@ using LinearAlgebra, Statistics, Random
                              n_steps = 8, proposal = :gaussian, seed = 3)
 
     @test isfinite(r.log_z_ais)
-    # 0.05 nats against TI's ~118-nat miss on the real target of this size.
+    # 0.05 in ln Z against TI's miss of ~118 in ln Z on the real target of this size.
     @test abs(r.log_z_ais - truth) < 0.05
     @test abs(r.log_z_ti  - truth) < 0.05
     # With a reference this well matched the two estimators must agree; a gap

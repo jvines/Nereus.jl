@@ -366,7 +366,7 @@ end
         # density_ns_floor: finite, below every real log L, and rising toward the
         # old prior's support. One value there was a plateau the threshold sat on,
         # and log Z came out low by (1 - p)/p + log p for the share p of the cube
-        # inside the support (~15 nats for the anchor below).
+        # inside the support (~15 in ln Z for the anchor below).
         pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0)))
         ta = _dr_target(; pri, use_rho_s = true); pa = ta.params; da = pa.layout.density
         th = Theta{Float64}(pa); Nereus.set_unfrozen!(th, Nereus._draw_from_prior(ta, MersenneTwister(2)))
@@ -402,7 +402,7 @@ end
         @test Nereus.density_support_distance(th) == 0
 
         # And the evidence: the anchor's log Z is the one sampling ρ★ gives, where
-        # the plateau put it ~15 nats low. Seeded; 4 is four times the scatter
+        # the plateau put it low by ~15 in ln Z. Seeded; 4 is four times the scatter
         # of the difference at this n_live.
         pri = merge(_DR_PRI1, Dict("rho_s" => LogUniformPrior(0.1, 10.0)))
         lz = map((:rho_circ, :rho_star)) do density
@@ -435,7 +435,7 @@ end
         lse(v) = (m = maximum(v); isfinite(m) ? m + log(sum(x -> exp(x - m), v)) : m)
         a, b = log(0.1), log(10.0)
         tg = range(a, b; length = 4001); tpk = tg[argmax(ll.(tg, 0.0, 0.0))]
-        W, M, N = 0.25, 120, 60       # the log ρ★ peak at fixed e is ±0.17 wide 60 nats down
+        W, M, N = 0.25, 120, 60       # the log ρ★ peak at fixed e is ±0.17 wide, 60 down in ln p
         du = 2 / N
         cells = Float64[]
         for i in 1:N, j in 1:N

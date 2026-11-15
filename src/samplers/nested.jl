@@ -42,7 +42,7 @@ The target must use `unconstrained=false` (bounded space).
   fit three of three finished (+0.18 on average, 4–25 minutes each; `:rslice`
   takes 2), and on a 2-parameter gravity-darkening fit it matches pt_emcee.
   Before the expansion its bounds missed 12–22% of an RM fit's constrained
-  region and log Z came out 2 nats high.
+  region and log Z came out high by 2.
   DEFAULT IS `:rslice`, NOT `:rwalk`. RWalk takes isotropic steps scaled
   by a single scalar inside the bounding ellipsoid; on the correlated RV
   ridges it cannot traverse the correlation, its acceptance collapses, the
@@ -74,7 +74,7 @@ The target must use `unconstrained=false` (bounded space).
   The walk and slice proposals take only their directions and scale from
   the bound and move by the likelihood constraint itself, so a bound that
   does not conform to a curved (e.g. eccentric-RV) ridge does not bias
-  their log Z: `:rslice` at its default came within 0.06 nats of pt_emcee's
+  their log Z: `:rslice` at its default came within 0.06 of pt_emcee's
   on an eccentric RV fit. (An earlier note here called that bias
   structural; it was measured while every chain step restarted from the
   copied live point.)

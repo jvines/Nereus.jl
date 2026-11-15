@@ -182,7 +182,7 @@ function propose_noise_birth(theta::Theta{T}, rng::AbstractRNG,
     # length(active_toggle). Counting count(new_td.noise_active) instead folds
     # in always-on non-toggleable models (e.g. IndicatorFloor), which the death
     # never selects, breaking birth↔death symmetry and adding a spurious
-    # +log((k+1)/k) "model-on" bias per always-on model (measured +0.21 nat
+    # +log((k+1)/k) "model-on" bias per always-on model (measured +0.21 in ln p
     # with one floor in toy_ad_ols_birth_gate.jl).
     n_inactive = length(inactive)
     n_active_after = count(toggleable) do nm
