@@ -228,3 +228,11 @@ end
     @test rho_s_to_a_Rs(1.0, 10.0, q) ≈
           cbrt(Nereus.GM_SUN_CGS * (1 + q) * (10 * 86400.0)^2 / (4π^2)) / Nereus.R_SUN_CM rtol = 1e-14
 end
+
+@testset "derived inclination: the likelihood's cos i, eccentric and clamped" begin
+    @test inclination_deg(0.5, 10.0) ≈ acosd(0.05)
+    # eccentric: cos i = b (1 + e sin ω) / ((a/R*) (1 − e²)), as planet_geometry has it
+    @test inclination_deg(0.5, 10.0, 0.3, 1.0) ≈ acosd(0.5 * 1.3 / (10.0 * (1 - 0.09)))
+    # b beyond a/R* (a grazing draw at small a/R*) reads i = 0 instead of throwing
+    @test inclination_deg(1.1, 1.05) == 0.0
+end
