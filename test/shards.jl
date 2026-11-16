@@ -228,6 +228,8 @@ const TEST_UNITS = [
     (name = "test_nested_progress.jl", seconds = 30, files = ["test_nested_progress.jl"]),
     (name = "test_ns_proposals.jl", seconds = 16, files = ["test_ns_proposals.jl"]),
     (name = "test_ppc_residual_acf.jl", seconds = 2, files = ["test_ppc_residual_acf.jl"]),
+    (name = "test_candidate_gate.jl", seconds = 5, files = ["test_candidate_gate.jl"]),
+    (name = "test_spectral_window.jl", seconds = 5, files = ["test_spectral_window.jl"]),
     (name = "test_pm_fold_rv_only_slot.jl", seconds = 30, files = ["test_pm_fold_rv_only_slot.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 3, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_posteriors_thinning.jl", seconds = 5, files = ["test_plot_posteriors_thinning.jl"]),

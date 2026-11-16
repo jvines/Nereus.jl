@@ -14,7 +14,8 @@
     CandidateVerdict
 
 Per-veto verdicts + the overall promotion decision from [`vet_candidate`](@ref).
-Each veto is `:pass`, `:fail`, or `:inapplicable` (data absent). `decision` is
+Each veto is `:pass`, `:fail`, or `:inapplicable` (data absent, or a baseline too
+short to search). `decision` is
 `:candidate` (all applicable vetoes pass), `:reject` (a hard veto fails), or
 `:flagged` (ambiguous — e.g. the coherence test is toothless on a short
 baseline). `reasons` lists the failing/ambiguous vetoes.
@@ -88,14 +89,19 @@ function vet_candidate(t::AbstractVector{<:Real}, rv::AbstractVector{<:Real},
 
     # 2. Activity-indicator veto — a significant peak at P (or harmonics) in ANY
     #    indicator kills it. Presence disproves; absence is not proof (a veto).
+    #    The search reaches P and every harmonic `_period_matches` tests (down to
+    #    P/2), so its floor drops below 1 d for P < 2 d; it runs up to the baseline.
+    T = Float64(maximum(t) - minimum(t))
+    ind_pmin = min(1.0, P / 2 * (1 - P_tol))
     activity_indicator = :inapplicable
     flagged_inds = String[]
-    if !isempty(indicators)
+    if !isempty(indicators) && T > ind_pmin
         activity_indicator = :pass
         for (nm, vals) in indicators
             v = Float64.(collect(vals))
             length(v) == length(t) || continue
             pg = gls_periodogram(collect(Float64, t), v, Float64.(collect(rv_err));
+                                  period_min = ind_pmin,
                                   fap_levels = [ind_fap], fap_method = :analytic,
                                   samples_per_peak = 10)
             for pk in pg.peaks
@@ -122,17 +128,18 @@ function vet_candidate(t::AbstractVector{<:Real}, rv::AbstractVector{<:Real},
     end
 
     # 4. Alias veto — power at P in the spectral WINDOW ⇒ P may be a sampling
-    #    alias of another signal, not intrinsic.
-    win = ones(length(t))
-    pgw = gls_periodogram(collect(Float64, t), win, ones(length(t));
-                           fap_levels = [ind_fap], fap_method = :analytic,
-                           samples_per_peak = 10)
-    alias = :pass
-    for pk in pgw.peaks
-        if _period_matches(pk.period, P; frac = P_tol) && pk.period > 1.5
-            alias = :fail
-            push!(reasons, "period coincides with a window-function peak")
-            break
+    #    alias of another signal, not intrinsic. Searched from 1 d to the baseline;
+    #    a baseline no longer than 1 d leaves nothing to search.
+    alias = :inapplicable
+    if T > 1.0
+        pgw = _spectral_window_pgram(t; period_min = 1.0, samples_per_peak = 10)
+        alias = :pass
+        for pk in pgw.peaks
+            if _period_matches(pk.period, P; frac = P_tol) && pk.period > 1.5
+                alias = :fail
+                push!(reasons, "period coincides with a window-function peak")
+                break
+            end
         end
     end
 

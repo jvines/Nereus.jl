@@ -55,7 +55,8 @@ Fields:
   - `rv_err_med` — sqrt of per-point variance at the median-parameter model (incl. jitter)
   - `rv_chi2_per_inst`, `rv_dof_per_inst`, `rv_red_chi2_per_inst` — at median model
   - `rv_chi2_per_draw::Vector{Float64}` — total RV χ² for each posterior draw
-  - `rv_pgram` — `GLSPgram` of median-model residuals (or `nothing` if too few points)
+  - `rv_pgram` — `GLSPgram` of median-model residuals (`nothing` with fewer than 16 points,
+    or when the RV baseline is no longer than `pgram_period_min`)
   - `rv_acf_lags`, `rv_acf` — autocorrelation of median-model residuals (binned uniformly, occupied bins only; NaN at lags no pair reaches)
 - PM block — analogous fields for photometry.
 - `summary::Dict{String, Any}` — flat dictionary of summary stats for `summary.json`.
@@ -266,8 +267,11 @@ function posterior_predictive_check(chains, params::Params, data::Data;
 
     # ---- Residual GLS / ACF — driven by the median-model residual -------
     rv_pgram = nothing
-    if pgram && n_rv_obs >= 16
-        T = maximum(data.t_rv) - minimum(data.t_rv)
+    T = n_rv_obs > 0 ? maximum(data.t_rv) - minimum(data.t_rv) : 0.0
+    # The search runs from pgram_period_min up to the baseline. A baseline no longer
+    # than pgram_period_min (one RM night against the 1 d default) leaves no period
+    # to search, so the periodogram is skipped, as with too few points.
+    if pgram && n_rv_obs >= 16 && (pgram_period_max !== nothing || T > pgram_period_min)
         Pmax = pgram_period_max === nothing ? T : Float64(pgram_period_max)
         # This is a "is there leftover periodicity?" DIAGNOSTIC, not a publication
         # periodogram. The default bootstrap FAP (1000 resamples) over a

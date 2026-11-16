@@ -558,24 +558,23 @@ function _validate_config(cfg::AbstractDict)
 
     # ---- sampler ----
     if _has(cfg, :sampler)
-        smp = _get(cfg, :sampler)
-        if !_has(smp, :name)
-            push!(errs, "missing `sampler.name`")
+        # A block without `name` runs the default by shape, as run_job does
+        # (_job_sampler_name): pt_emcee, or transdim_pt_emcee with a transdim
+        # block. It was refused here, so fit_rm, fit_ttv and fit_binary, which
+        # send such a block when no engine is given, never ran without one.
+        name = _job_sampler_name(cfg)
+        if name in _RUNNER_UNSUPPORTED
+            push!(errs,
+                "sampler `$name` is a point estimator, not a posterior " *
+                "sampler: it returns no chains, and run_job would report " *
+                "median +- 1/2/3-sigma computed from a single point. " *
+                "Use fit_* or run_engine for it.")
         else
-            name = String(_get(smp, :name))
-            if name in _RUNNER_UNSUPPORTED
-                push!(errs,
-                    "sampler `$name` is a point estimator, not a posterior " *
-                    "sampler: it returns no chains, and run_job would report " *
-                    "median +- 1/2/3-sigma computed from a single point. " *
-                    "Use fit_* or run_engine for it.")
-            else
-                name in _KNOWN_SAMPLERS || push!(errs,
-                    "unknown sampler.name=`$name` (known: $(join(_KNOWN_SAMPLERS, ", ")))")
-            end
-            if name in _SAMPLERS_REQUIRE_TD && !_has(cfg, :transdim)
-                push!(errs, "sampler `$name` requires a top-level `transdim` block")
-            end
+            name in _KNOWN_SAMPLERS || push!(errs,
+                "unknown sampler.name=`$name` (known: $(join(_KNOWN_SAMPLERS, ", ")))")
+        end
+        if name in _SAMPLERS_REQUIRE_TD && !_has(cfg, :transdim)
+            push!(errs, "sampler `$name` requires a top-level `transdim` block")
         end
     end
 
@@ -2956,6 +2955,21 @@ function _run_detection_limits!(cfg, chains, params::Params, data::Data,
                                 default = 0.95))
     planet = Int(_get(out_cfg, :detection_limits_planet; default = 1))
     save_pdf = Bool(_get(out_cfg, :save_pdf; default = false))
+
+    # Limits bound one planet's K. A photometry-only planet has none, and a
+    # binary orbit has two (K_A, K_B), so there is nothing to compute, asked or not.
+    blk = planet <= length(params.layout.planet_blocks) ?
+          params.layout.planet_blocks[planet] : nothing
+    if blk !== nothing && (!has_K(blk) || is_sb2(blk))
+        summary["detection_limits"] = Dict{String, Any}(
+            "status" => "skipped",
+            "reason" => is_sb2(blk) ?
+                "planet $planet is a binary orbit with two amplitudes, K_A and " *
+                "K_B; detection limits bound a planet's K." :
+                "planet $planet has no RV amplitude (photometry only); " *
+                "detection limits bound a planet's K.")
+        return
+    end
 
     # Unasked, only a chain that explored the period prior gets limits. A fit
     # that found the planet holds P to a sliver of it -- 1% on a transiting

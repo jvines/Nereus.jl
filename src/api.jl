@@ -1475,6 +1475,13 @@ function _run_config(cfg::AbstractDict; op::String)
     return (; chains = nothing, log_z = get(s, "log_z", NaN), summary = s)
 end
 
+# fit_rm's parametrization. No `time`: the default anchor applies (φ_c, or the
+# one the priors name), as in every other fit. A string names the mass mode.
+const _RM_PARAMETRIZATION = Dict{String,Any}("mass" => "K_driven", "ew" => "sesinw",
+                                             "geom" => "b_rr", "use_rho_s" => true)
+_rm_parametrization(p::AbstractDict) = Dict{String,Any}(String(k) => v for (k, v) in pairs(p))
+_rm_parametrization(p) = merge(_RM_PARAMETRIZATION, Dict{String,Any}("mass" => String(p)))
+
 """
     fit_rm(; rv, phot, star, flavour, priors, engine, output_dir, ...)
 
@@ -1492,9 +1499,7 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
                 engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, output_dir = nothing,
-                parametrization = Dict("mass" => "K_driven", "time" => "Tc",
-                                       "ew" => "sesinw", "geom" => "b_rr",
-                                       "use_rho_s" => true),
+                parametrization = _RM_PARAMETRIZATION,
                 extra::AbstractDict = Dict(), kwargs...)
     haskey(_RM_MODE, flavour) || throw(ArgumentError(
         "flavour must be one of :rm, :reloaded, :arome; got $(repr(flavour))"))
@@ -1504,10 +1509,7 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
         "data" => _data_block(; rv, phot),
         "model" => Dict{String,Any}("max_kplanet" => planets,
                                     "planet_modes" => [_RM_MODE[flavour]],
-                                    "parametrization" => parametrization isa AbstractDict ? parametrization :
-                                        Dict{String,Any}("mass" => String(parametrization),
-                                            "time" => "Tc", "ew" => "sesinw",
-                                            "geom" => "b_rr", "use_rho_s" => true),
+                                    "parametrization" => _rm_parametrization(parametrization),
                                     "stability" => "none"),
         "priors" => _cfg_priors(priors),
         # The `output` block. It was MISSING on all three config-route fits,
