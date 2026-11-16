@@ -242,7 +242,9 @@ intractable on real long-baseline RV (a ~19-yr ε Eri set drives
 wall-clock). So inside PPC the grid is **capped at 20 000 frequencies**
 (`clamp(…, 64, 20_000)`) and the **analytic FAP** is used
 (`fap_method = :analytic`, ≈3× over-confident — fine for a flag). The
-period range defaults to `[pgram_period_min=1.0 day, baseline]`.
+period range defaults to `[pgram_period_min=1.0 day, baseline]`; with fewer
+than 16 RV points, or a baseline no longer than `pgram_period_min` (one RM
+night), there is no range to search and `rv_pgram` is `nothing`.
 Explicit periodogram *plots* still use the full bootstrap path.
 
 Trans-dim chains are handled transparently — `n_planets` is read per
