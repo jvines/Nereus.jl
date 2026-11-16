@@ -1486,12 +1486,13 @@ end
     fit_ttv(; phot, transit_times, rv, nbody, ...)
 
 Transit timing variations. Needs photometry or measured transit times, or both;
-`nbody=true` selects the N-body model (TTV_NB_SOURCE) over the analytic one.
+`nbody=true` selects the N-body model (TTV_NB_SOURCE) over the analytic one; it
+needs `rv`, whose amplitudes give the masses.
 Every one of the `planets` gets that mode.
 
-`transit_times` is the `data.transit_times` block of the job config, as Argus
-sends it: a list of per-planet blocks `{planet, time_system = "BJD_TDB",
-values = {epoch, tc, tc_err, source}, reference_ephemeris}`
+`transit_times` is the `data.transit_times` block of the job config: a list of
+per-planet blocks `{planet, time_system = "BJD_TDB", values = {epoch, tc, tc_err,
+source}, reference_ephemeris}`
 (docs/JOB_CONFIG.md). Any other shape is refused by the config validation.
 
 The analytic model (`nbody = false`) fits free offsets on the transit times,
@@ -1525,8 +1526,7 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
             "analytic model; nbody = true predicts the TTVs and fits no offsets. Drop " *
             "them."))
     end
-    mode = rv === nothing ? (nbody ? "PM_TTV_NB" : "PM_TTV") :
-                            (nbody ? "RVPM_TTV_NB" : "RVPM_TTV")
+    mode = rv === nothing ? "PM_TTV" : (nbody ? "RVPM_TTV_NB" : "RVPM_TTV")
     cfg = Dict{String,Any}("version" => "1.0",
         "output_dir" => output_dir === nothing ? mktempdir() : String(output_dir),
         "star" => Dict{String,Any}(star),

@@ -300,7 +300,6 @@ const _KNOWN_PLANET_MODES   = ("RV_ONLY", "PM_ONLY", "RVPM", "RVAS",
                                 "RVPM_TTV", "RVPMAS_TTV",
                                 "RVPM_RM_TTV", "PM_TTV",
                                 "RVPM_TTV_NB", "RVPMAS_TTV_NB",
-                                "PM_TTV_NB",
                                 "RVPM_RM_R", "RVPMAS_RM_R",
                                 "RVPM_RM_A", "RVPMAS_RM_A",
                                 "RVPM_GD", "RVPM_RM_GD", "PM_GD",  # gravity darkening
@@ -450,12 +449,6 @@ function _validate_config(cfg::AbstractDict)
             for m in _get(mdl, :planet_modes)
                 String(m) in _KNOWN_PLANET_MODES || push!(errs,
                     "unknown planet_mode `$m` (known: $(join(_KNOWN_PLANET_MODES, ", ")))")
-                # Kept in the list so the message can say why (Params refuses it).
-                String(m) == "PM_TTV_NB" && push!(errs,
-                    "planet_mode PM_TTV_NB: the N-body TTVs need the planets' masses, " *
-                    "which come from RV; without RV the planet is massless and its TTVs " *
-                    "zero. Add RV data and use RVPM_TTV_NB, or use PM_TTV (free " *
-                    "per-transit offsets, with model.ttv_n_transits).")
             end
         end
         if _has(mdl, :parametrization)
@@ -623,7 +616,7 @@ function _validate_config(cfg::AbstractDict)
     return nothing
 end
 
-# `data.transit_times`: a list of per-planet blocks, as Argus sends them
+# `data.transit_times`: a list of per-planet blocks
 # (docs/JOB_CONFIG.md). Everything that can be checked from the config alone,
 # collected with the rest: the shape, the time system, the array lengths, the
 # errors, the planet index and that planet's mode (it must have a transit to
@@ -1404,7 +1397,6 @@ const _PLANET_MODES = Dict(
     "RVPM_TTV" => RVPM_TTV, "RVPMAS_TTV" => RVPMAS_TTV,
     "RVPM_RM_TTV" => RVPM_RM_TTV, "PM_TTV" => PM_TTV,
     "RVPM_TTV_NB" => RVPM_TTV_NB, "RVPMAS_TTV_NB" => RVPMAS_TTV_NB,
-    "PM_TTV_NB" => PM_TTV_NB,
     "RVPM_RM_R" => RVPM_RM_R, "RVPMAS_RM_R" => RVPMAS_RM_R,
     "RVPM_RM_A" => RVPM_RM_A, "RVPMAS_RM_A" => RVPMAS_RM_A,
     # Gravity-darkened transits: the only route to i_star, hence to psi, when

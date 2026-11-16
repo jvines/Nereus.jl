@@ -10,7 +10,7 @@ const TT_P = 2.7182818
 const TT_T0 = 2_458_000.25
 const TT_MIN = 1 / 1440                       # one minute, days
 
-# A `data.transit_times` block as Argus sends it.
+# A `data.transit_times` block in the job-config format.
 function _tt_block(ep, tc, err; planet = 1, time_system = "BJD_TDB", source = nothing,
                    ref = Dict("t0" => TT_T0, "period" => TT_P, "epoch_zero" => 0),
                    extra...)
@@ -336,11 +336,13 @@ end
         @test transit_times_log_likelihood(th, dm) ≈ -sum(log.(2π .* σ .^ 2)) / 2
     end
 
-    @testset "PM_TTV_NB refused: no RV, no masses" begin
+    @testset "PM_TTV_NB: not exported, not a config mode, refused by Params" begin
+        @test !(:PM_TTV_NB in names(Nereus))
         ep, tc, σ = _tt_linear(MersenneTwister(5); n = 10, span = 100)
         d = Data(; transit_times = [TransitTimeSet(; planet = 1, epoch = ep, tc,
                                                    tc_err = σ)])
-        e = _tt_err(() -> Params(; max_kplanet = 2, planet_modes = [PM_TTV_NB, PM_TTV_NB],
+        nb = Nereus.PM_TTV_NB
+        e = _tt_err(() -> Params(; max_kplanet = 2, planet_modes = [nb, nb],
                                  instruments = InstrumentConfig(), data = d,
                                  M_s = 1.0, R_s = 1.0, stability = :none))
         @test e isa ArgumentError && occursin("RVPM_TTV_NB", e.msg) &&
@@ -349,8 +351,9 @@ end
             "output_dir" => mktempdir(), "sampler" => _tt_sampler(),
             "model" => Dict{String, Any}("max_kplanet" => 1, "planet_modes" => ["PM_TTV_NB"]),
             "data" => Dict{String, Any}("transit_times" => [_tt_block(ep, tc, σ)]))))
-        @test e isa ArgumentError && occursin("PM_TTV_NB", e.msg) &&
-              occursin("RVPM_TTV_NB", e.msg)
+        @test e isa ArgumentError && occursin("unknown planet_mode `PM_TTV_NB`", e.msg)
+        @test !("PM_TTV_NB" in Nereus._KNOWN_PLANET_MODES) &&
+              !haskey(Nereus._PLANET_MODES, "PM_TTV_NB")
     end
 
     @testset "fit: linear ephemeris from transit times alone" begin
@@ -608,7 +611,7 @@ end
         d2 = data_of(Dict{String, Any}("transit_times" => [blk], "transit_photometry" => phot))
         c, e = @test_logs (:info, r"3 more in the photometry") Nereus._ttv_slot_kwargs(mdl, d2, [PM_TTV])
         @test e[1] == sort(vcat([-2, 3, 4], ep)) .+ 2
-        # An empty dict names no planet (Argus sends "ttv_n_transits": {}).
+        # An empty dict names no planet ("ttv_n_transits": {}).
         c, e = @test_logs (:info,) Nereus._ttv_slot_kwargs(
             Dict{String, Any}("ttv_n_transits" => Dict(), "ttv_epochs" => Dict()), d1, [PM_TTV])
         @test e[1] == ep[1:end-1]

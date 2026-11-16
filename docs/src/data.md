@@ -676,7 +676,7 @@ All three keys are required.
 
 ### `transit_times` — measured mid-transit times
 
-Published mid-transit times (Argus sends them in this form), a list of
+Published mid-transit times, a list of
 per-planet blocks:
 
 ```jsonc
