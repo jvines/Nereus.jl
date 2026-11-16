@@ -43,7 +43,14 @@ interfaces to one engine, not three engines.
 `fit_rm`, `fit_ttv` and `fit_binary` route through the config layer rather than
 `build_target`, because RM, TTV and SB2 are not expressible as `build_target`
 keywords. That is an implementation detail: the signatures stay
-technique-shaped and you never see a config.
+technique-shaped and you never see a config. Besides their own arguments they
+take the star's keywords (`M_s`, `R_s`, `T_eff`, `J_mag`, `K_mag`, `Ab`,
+`sigma_M_s`, `sigma_R_s`, `sigma_T_eff`), `stability`, `phot_trend_order`,
+`sharing`, `ttv_backend`, `time_anchor` and `parametrization`, and put them in
+the config; any other keyword is refused with a pointer to `run_job`. `priors`
+is `nothing` or a dict of prior objects (or job-config prior dicts). `fit_rm`
+uses the default time anchor, φ_c, unless `time_anchor` or a prior names
+another.
 
 `fit_tomography` is not a sampler at all — see [Obliquity](obliquity.md).
 
