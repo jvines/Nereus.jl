@@ -427,9 +427,9 @@ Planet model driven by:
   - transit photometry
   - N-body-predicted TTVs (TTV-C, TTVFaster)
 
-Refused by `Params`: the N-body TTVs need the planet's mass, which comes from
-its RV semi-amplitude, so without RV the planet is massless. Use RVPM_TTV_NB,
-or PM_TTV with free per-transit offsets.
+Not exported, and refused by `Params`: the N-body TTVs need the planet's mass,
+which comes from its RV semi-amplitude, so without RV the planet is massless. Use
+RVPM_TTV_NB, or PM_TTV with free per-transit offsets.
 """
 const PM_TTV_NB      = PlanetDataSources(PM_SOURCE, TTV_NB_SOURCE)
 

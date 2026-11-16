@@ -1526,8 +1526,7 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
             "analytic model; nbody = true predicts the TTVs and fits no offsets. Drop " *
             "them."))
     end
-    mode = rv === nothing ? (nbody ? "PM_TTV_NB" : "PM_TTV") :
-                            (nbody ? "RVPM_TTV_NB" : "RVPM_TTV")
+    mode = rv === nothing ? "PM_TTV" : (nbody ? "RVPM_TTV_NB" : "RVPM_TTV")
     cfg = Dict{String,Any}("version" => "1.0",
         "output_dir" => output_dir === nothing ? mktempdir() : String(output_dir),
         "star" => Dict{String,Any}(star),

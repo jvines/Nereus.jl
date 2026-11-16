@@ -336,11 +336,13 @@ end
         @test transit_times_log_likelihood(th, dm) ≈ -sum(log.(2π .* σ .^ 2)) / 2
     end
 
-    @testset "PM_TTV_NB refused: no RV, no masses" begin
+    @testset "PM_TTV_NB: not exported, not a config mode, refused by Params" begin
+        @test !(:PM_TTV_NB in names(Nereus))
         ep, tc, σ = _tt_linear(MersenneTwister(5); n = 10, span = 100)
         d = Data(; transit_times = [TransitTimeSet(; planet = 1, epoch = ep, tc,
                                                    tc_err = σ)])
-        e = _tt_err(() -> Params(; max_kplanet = 2, planet_modes = [PM_TTV_NB, PM_TTV_NB],
+        nb = Nereus.PM_TTV_NB
+        e = _tt_err(() -> Params(; max_kplanet = 2, planet_modes = [nb, nb],
                                  instruments = InstrumentConfig(), data = d,
                                  M_s = 1.0, R_s = 1.0, stability = :none))
         @test e isa ArgumentError && occursin("RVPM_TTV_NB", e.msg) &&
@@ -349,8 +351,9 @@ end
             "output_dir" => mktempdir(), "sampler" => _tt_sampler(),
             "model" => Dict{String, Any}("max_kplanet" => 1, "planet_modes" => ["PM_TTV_NB"]),
             "data" => Dict{String, Any}("transit_times" => [_tt_block(ep, tc, σ)]))))
-        @test e isa ArgumentError && occursin("PM_TTV_NB", e.msg) &&
-              occursin("RVPM_TTV_NB", e.msg)
+        @test e isa ArgumentError && occursin("unknown planet_mode `PM_TTV_NB`", e.msg)
+        @test !("PM_TTV_NB" in Nereus._KNOWN_PLANET_MODES) &&
+              !haskey(Nereus._PLANET_MODES, "PM_TTV_NB")
     end
 
     @testset "fit: linear ephemeris from transit times alone" begin

@@ -558,7 +558,7 @@ summary = run_job(cfg)
 `ttv_oc` renders the O−C diagram. For the **dynamical (N-body) TTV**
 case — two or more planets whose mutual perturbations drive the timing
 variations — use the `*_TTV_NB` modes (`RVPM_TTV_NB`, `RVPMAS_TTV_NB`; the
-masses come from the RV amplitudes, so `PM_TTV_NB`, without RV, is refused)
+masses come from the RV amplitudes, so both need RV)
 and pick the integrator with
 `model.ttv_backend => "ttvfaster"` (perturbative 1st-order series,
 default) or `"nbody"` (full ODE integration; use for high-mass / high-e /

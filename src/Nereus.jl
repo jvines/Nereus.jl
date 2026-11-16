@@ -208,7 +208,7 @@ export
     PlanetDataSources, has_rv, has_pm, has_as, has_rm, has_ttv,
     RV_ONLY, PM_ONLY, RVPM, RVAS, RVPMAS, RVPM_RM, RVPMAS_RM,
     RVPM_TTV, RVPMAS_TTV, RVPM_RM_TTV, PM_TTV,
-    RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB,
+    RVPM_TTV_NB, RVPMAS_TTV_NB,
     RVPM_RM_R, RVPMAS_RM_R,
     RVPM_RM_A, RVPMAS_RM_A,
     SB_SOURCE, BINARY, BINARY_RV, has_sb,

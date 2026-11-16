@@ -266,8 +266,6 @@ rather than a single number trusted.
     //   RVPM_RM_TTV    — RVPM + RM + free TTV offsets
     //   RVPM_TTV_NB    — RVPM + N-body-predicted TTVs (no free offsets; ≥2 NB planets)
     //   RVPMAS_TTV_NB  — RVPMAS + N-body-predicted TTVs
-    //   PM_TTV_NB      — REFUSED: N-body TTVs need the masses, which come from RV;
-    //                    use RVPM_TTV_NB, or PM_TTV with free offsets
     //   BINARY_RV      — SB2 double-lined binary orbit, RV only              [slots K_A_k<k>, K_B_k<k>]
     //   BINARY         — SB2 double-lined binary + astrometry (absolute masses) [+ inc_k<k>, Omega_k<k>, f_light]
     //   See "SB2 double-lined binaries" below for the component RV column + derived masses.
