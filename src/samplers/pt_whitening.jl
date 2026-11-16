@@ -108,6 +108,10 @@ export sample_pt_whitening, WhiteningPTResult
 - `whitening_active_after::Int` — iteration after which whitening swaps started
 - `drift` — the collective-drift check of the β=1 ensemble
   ([`ensemble_drift`](@ref)), or `nothing` when the run was too short to test
+- `n_burnin_used::Int` — the steps before the recording began: `n_burnin`,
+  plus the steps `trim_burnin` dropped
+- `n_trimmed::Int` — the recorded (thinned) steps `trim_burnin` dropped
+- `burnin_trim::NamedTuple` — the settling test, as in `PTemceeResult`
 """
 struct WhiteningPTResult
     chains::MCMCChains.Chains
@@ -120,6 +124,9 @@ struct WhiteningPTResult
     n_evals::Int
     whitening_active_after::Int
     drift::Union{Nothing, Dict{String, Any}}
+    n_burnin_used::Int
+    n_trimmed::Int
+    burnin_trim::NamedTuple
 end
 
 """
@@ -180,6 +187,11 @@ the distinguishing feature of this sampler.
   drawn from its prior walker by walker, so the
   jitter cannot absorb the reflex before the orbit is found. `false` turns it
   off. The whitened swap maps a held coordinate to itself.
+- `trim_burnin::Bool=false` — opt-in, as in `sample_pt_emcee`: drop the
+  recorded steps during which β = 1 walkers were still settling into the main
+  mode, from the draws and from the tempered evidence. The test runs on every
+  run and only warns when the option is off. Here the walkers move in x, and
+  the test reads their log densities there.
 - `checkpoint=nothing` — path of a state file. The sampler writes its whole
   state there (every rung's walkers, every RNG stream, the whitening ring
   buffer and its (μ, σ), the step whitening started, the counters, the evidence
@@ -221,6 +233,7 @@ function sample_pt_whitening(
     node_flip::Real = 0.1,
     burnin_hold = nothing,
     burnin_hold_frac::Real = 0.5,
+    trim_burnin::Bool = false,
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
@@ -487,6 +500,9 @@ function sample_pt_whitening(
 
     # reddemcee TI+/SS+/H+ accumulators (same evidence stack as pt_emcee).
     evidence_acc = EvidenceAccumulator(length(βs))
+    # The same sums in blocks of recorded steps, for the evidence of the steps a
+    # burn-in trim keeps (`trim_burnin`, src/samplers/burnin_trim.jl).
+    ev_blocks = EvidenceBlocks(thin)
 
     accept_within  = zeros(Float64, n_temps)
     propose_within = zeros(Int, n_temps)
@@ -667,6 +683,7 @@ function sample_pt_whitening(
         for f in fieldnames(EvidenceAccumulator)
             setfield!(evidence_acc, f, getfield(ck.evidence, f))
         end
+        _evidence_blocks_restore!(ev_blocks, ck, evidence_acc, n_burnin)
         # Windows the saved walkers live in (moved by the burn-in re-cut), with
         # the bounds exactly as saved. `set_circular_window!` sets hi = lo +
         # span, and once a window has moved twice that sum can round an ulp off
@@ -851,9 +868,11 @@ function sample_pt_whitening(
 
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
         if step > n_burnin
+            ev_blk = _evidence_block!(ev_blocks, step, n_burnin, n_temps)
             @inbounds for w in 1:n_walkers_eff
                 logL_walker = view(logL_arr, :, w)
                 update_evidence!(evidence_acc, logL_walker, βs)
+                update_evidence!(ev_blk, logL_walker, βs)
             end
             if (step - n_burnin) % thin == 0
                 @inbounds for w in 1:n_walkers_eff
@@ -893,7 +912,8 @@ function sample_pt_whitening(
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
                 windows = circular_windows(params),
                 spin_axis = copy(params.layout.spin_axis), recut_moved,
-                hold_on = any(is_held), hold_med = hold_med[]))
+                hold_on = any(is_held), hold_med = hold_med[],
+                evidence_blocks = ev_blocks))
             last_ck = time()
         end
     end
@@ -905,8 +925,27 @@ function sample_pt_whitening(
     samples    = samples[1:keep_idx, :]
     lp_samples = lp_samples[1:keep_idx]
 
+    # --- Walkers still settling into the main mode (`trim_burnin`), as in
+    # sample_pt_emcee; the walkers move in x here, and so does the test
+    # (src/samplers/burnin_trim.jl).
+    n_burnin_used = min(n_burnin, n_steps)
+    burnin_trim, n_trimmed = _pt_trim("pt_whitening", samples, lp_samples,
+        n_walkers_eff, n_dim - count(is_held); trim = trim_burnin,
+        cuts = _evidence_cuts(ev_blocks, n_burnin, thin), n_burnin_used, thin,
+        extend = nothing, circ = circular_indices(params),
+        names = layout.unfrozen_names, show_progress)
+    ev_acc = evidence_acc
+    if n_trimmed > 0
+        rows = n_trimmed * n_walkers_eff
+        samples = samples[(rows + 1):end, :]
+        lp_samples = lp_samples[(rows + 1):end]
+        keep_idx -= rows
+        ev_acc = _evidence_from(ev_blocks, n_burnin + n_trimmed * thin + 1, n_temps)
+        n_burnin_used += n_trimmed * thin
+    end
+
     # --- Evidence report (TI + TI+ + SS+ + H+) ------------------------
-    ev_report = evidence_report(evidence_acc, βs)
+    ev_report = evidence_report(ev_acc, βs)
     log_z = isfinite(ev_report.hybrid[1]) ? ev_report.hybrid[1] :
             isfinite(ev_report.ti_plus[1]) ? ev_report.ti_plus[1] :
             ev_report.ti[1]
@@ -950,6 +989,7 @@ function sample_pt_whitening(
     return WhiteningPTResult(
         chains, log_z, ev_report, acc_within,
         _de_acceptance(de_accepted, de_proposed), acc_swap, βs,
-        n_evals_atomic[], whitening_active_after, drift,
+        n_evals_atomic[], whitening_active_after, drift, n_burnin_used, n_trimmed,
+        burnin_trim,
     )
 end

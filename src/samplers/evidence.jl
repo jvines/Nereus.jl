@@ -100,12 +100,18 @@ function update_evidence!(acc::EvidenceAccumulator,
             acc.n_nonfinite[k] += 1
         end
     end
+    # The stepping-stone sums drop the same draws, so each still matches the
+    # count `ss_plus` divides it by (acc.n of its rung). Kept, a -Inf log L
+    # makes ±Δβ/2 · log L = +Inf on one side of the pair, whichever way the
+    # ladder runs, and the second such draw turns the sum NaN.
     @inbounds for k in 1:(n_chains - 1)
         dβ_half = (betas[k+1] - betas[k]) / 2
         L_k     = Float64(log_L_per_chain[k])
         L_k1    = Float64(log_L_per_chain[k+1])
-        acc.ss_lse_fwd[k] = _logaddexp(acc.ss_lse_fwd[k],  dβ_half * L_k)
-        acc.ss_lse_bwd[k] = _logaddexp(acc.ss_lse_bwd[k], -dβ_half * L_k1)
+        isfinite(L_k) &&
+            (acc.ss_lse_fwd[k] = _logaddexp(acc.ss_lse_fwd[k],  dβ_half * L_k))
+        isfinite(L_k1) &&
+            (acc.ss_lse_bwd[k] = _logaddexp(acc.ss_lse_bwd[k], -dβ_half * L_k1))
     end
     return acc
 end

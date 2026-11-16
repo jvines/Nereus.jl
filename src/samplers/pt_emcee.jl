@@ -122,6 +122,20 @@ Container for a `sample_pt_emcee` run.
   the walkers' mean through the recorded steps and the parameters over the
   threshold -- a drift every walker shares, which R-hat and ESS cannot see --
   or `nothing` when the run was too short to test.
+- `n_burnin_used::Int` — the steps before the recording began: `n_burnin`, or
+  more when `extend_burnin` ran burn-in on while the β = 1 rung was split
+  between modes, plus the steps `trim_burnin` dropped. The chain holds the
+  steps from `n_burnin_used + 1` to the last, thinned.
+- `n_trimmed::Int` — the recorded (thinned) steps `trim_burnin` dropped; 0
+  when it is off or found nothing to drop.
+- `burnin_trim::NamedTuple` — the test for walkers still settling into the
+  main mode during the recorded run, run whether or not `trim_burnin` is on:
+  `(; applied, verdict, cut_step, n_recorded, n_walkers, n_walkers_settling,
+  delta_lnp, n_trimmed, status, message)`. `verdict` is `"settling"`,
+  `"short_tail"`, `"split"`, `"clean"` or `"not_assessed"`; `cut_step` is the
+  last recorded step (of `n_recorded`, counted before any trim) before the last
+  walker to arrive first reached the main mode; `delta_lnp` how far below it,
+  in ln p, those draws sat. See `trim_burnin`.
 """
 struct PTemceeResult
     chains::MCMCChains.Chains
@@ -137,6 +151,9 @@ struct PTemceeResult
     ladder::LadderHistory
     stop::NamedTuple
     drift::Union{Nothing, Dict{String, Any}}
+    n_burnin_used::Int
+    n_trimmed::Int
+    burnin_trim::NamedTuple
 end
 
 """
@@ -531,6 +548,10 @@ _pt_recut_due(step::Integer, n_burnin::Integer) =
 # the held coordinates' own log prior density on this scale (`held_logπ`, the
 # same in every walker's log π) comes out of the best walker's density: left
 # in, a held value where its prior is dense would raise the cut by as much.
+# `rungs` lists the rungs the pass works on (all of them by default); the
+# record is still taken at every rung, so `rungs = 1:0` only records. The
+# extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl) runs the
+# pass at the β = 1 rung alone, on copies, to test whether that rung is split.
 # ------------------------------------------------------------------
 """
     PruneMemory(n_temps, n_walkers, n_dim)
@@ -575,6 +596,15 @@ end
 _prune_saved(m::PruneMemory) = (seen = m.seen, med = m.med, lL = m.lL, x = m.x,
                                 out = m.out, key = m.key, lo = m.lo, hi = m.hi)
 
+# `src`'s record into `dst`, in place (an extended burn-in's check in
+# `sample_ensemble` takes the pass it ran on a copy).
+function _prune_copy!(dst::PruneMemory, src::PruneMemory)
+    dst.seen = src.seen
+    foreach(copyto!, (dst.med, dst.lL, dst.x, dst.out, dst.key, dst.lo, dst.hi),
+            (src.med, src.lL, src.x, src.out, src.key, src.lo, src.hi))
+    return dst
+end
+
 # From a checkpoint, in place. One written before the record existed has only
 # the medians: the record starts over.
 function _prune_restore!(m::PruneMemory, ck)
@@ -588,6 +618,11 @@ function _prune_restore!(m::PruneMemory, ck)
     end
     return m
 end
+
+# How far below a rung's best walker a walker may sit and still count as in
+# its mode, over `d` coordinates: the 1 - 1e-6 quantile of the drop of a
+# d-dimensional Gaussian's log density from its peak.
+_prune_allow(d::Integer) = quantile(Chisq(d), 1 - 1e-6) / 2
 
 # Rung `t`'s tempered densities at β into `ℓ`, -Inf where not finite.
 function _pt_tempered!(ℓ::Vector{Float64}, logπ_arr::Matrix{Float64},
@@ -604,13 +639,14 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
                              tau::Float64 = 10.0, evalf = nothing,
                              circ::AbstractVector{Int} = Int[],
                              memory::Union{Nothing,PruneMemory} = nothing,
-                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0)
+                             held::AbstractVector{Int} = Int[], held_logπ::Float64 = 0.0,
+                             rungs = 1:size(state, 1))
     n_t, n_w, nd = size(state)
     moved = zeros(Int, n_t)
     free = Int[j for j in 1:nd if !(j in held)]
     d = length(free)
     d >= 1 || return moved
-    allow = quantile(Chisq(d), 1 - 1e-6) / 2
+    allow = _prune_allow(d)
     mem = memory
     known = mem !== nothing && mem.seen
     # How far each rung climbed since the last pass, at today's β (the ladder
@@ -620,7 +656,7 @@ function _pt_prune_stranded!(state::Array{Float64,3}, logπ_arr::Matrix{Float64}
            fill(NaN, n_t)
     ℓ = Vector{Float64}(undef, n_w)
     y = Vector{Float64}(undef, nd)
-    for t in 1:n_t
+    for t in rungs
         known || break
         β = βs[t]
         _pt_tempered!(ℓ, logπ_arr, logL_arr, t, β)
@@ -1015,7 +1051,8 @@ in place.
   with `stop.stopped == "interrupted"`; the row being written when it arrives
   is dropped. During burn-in, or a second interrupt while the run is being
   wound up, it aborts as before.
-- `n_burnin::Int=2000` — burn-in discarded from posterior + evidence.
+- `n_burnin::Int=2000` — burn-in discarded from posterior + evidence. Longer
+  when `extend_burnin` runs it on (`result.n_burnin_used`).
   Circular angles are re-charted at steps `n_burnin ÷ 2` and `n_burnin`, and
   every 50 steps through 3/4 of burn-in with the pruning (`_pt_recut_due`).
   Was 2000/1000, which is too short to find a well-measured period on a
@@ -1097,6 +1134,65 @@ in place.
   narrow mode (any well-measured period on a wide prior) fills its cold rung at
   the rate the ladder happens to rediscover it. Burn-in only: the recorded
   chain is ordinary MCMC. `false` restores the old behaviour.
+- `extend_burnin::Bool=false` — opt-in. At step `n_burnin`, test whether the
+  β = 1 rung is still split between modes, and while it is, run burn-in on in
+  50-step passes of the stranded-walker pruning; recording starts at the step
+  after the first check that finds the rung in one mode. The rung counts as
+  split only if the pruning's own pass at that rung would move one of its
+  walkers (more than its allowance below the best walker at this pass and the
+  last, and below the mass bound or in a separate mode of negligible mass, as
+  under `prune_stranded`), so a healthy posterior's tail or a separate mode the
+  bound keeps never extends anything; a run whose rung is in one mode at
+  `n_burnin` draws exactly what it does without the option. Each pass moves at
+  most as many walkers as the best mode holds, so the mode about doubles per
+  pass: 149 walkers stranded in a 2P alias against one at P need about eight
+  passes. `n_steps` stays the total, so every step of the extension is one
+  recorded step fewer; `result.n_burnin_used` says where recording started.
+  The circular re-cut runs with every check, as with every nominal pass, and the
+  last one fixes the chart for the recorded steps; the ladder adaptation and
+  `burnin_hold` stay keyed to `n_burnin`. Needs `prune_stranded` (on by
+  default); with it off this throws. See src/samplers/burnin_extend.jl.
+- `max_burnin::Union{Nothing,Integer}=nothing` — the last step the extended
+  burn-in may run to. By default `n_burnin + (n_steps - n_burnin) ÷ 2`: the
+  extension takes at most half of the steps the run was going to record, so at
+  least half of them are kept, and it scales with the run (`n_steps ÷ 2` alone
+  would leave no room at all at the default 3000/2000). Still split at the cap,
+  the run records anyway and warns with the split it measured: how many β = 1
+  walkers sit outside the best walker's mode and how far below it, and the
+  parameter that separates the two groups most against their own spread, with
+  what to do (narrow that prior, or raise `n_burnin`). `max_burnin = n_burnin`
+  extends nothing and only warns. It is not cut at `n_steps`: a run that ends
+  inside its extension records nothing, warns, and carries the extension on
+  when resumed with more steps.
+- `trim_burnin::Bool=false` — opt-in. At the end of the run, drop the recorded
+  steps during which β = 1 walkers were still settling into the main mode, so
+  that the returned result is the run as if recording had started there: the
+  draws and `:lp`, the derived columns, R-hat and ESS, the drift check, and the
+  evidence (bridge and mode-Laplace from the kept draws, the tempered stack
+  from the rungs' log L over the same steps). `n_burnin_used` counts the
+  dropped steps and `n_trimmed` says how many recorded steps went.
+  The test runs on every run, with or without the option, and only warns when
+  it is off. On the log densities as the stranded-walker pruning measures them
+  (on the flat scale), each walker's level at a recorded step is the median of
+  a centred window of its draws (51 in a long run, fewer in a short one, so a
+  brief dip into a tail does not count); the reference is the best walker's
+  median over the last tenth of the run; a walker is in the main band when its
+  level is within the pruning's allowance of the reference (the 1 - 1e-6
+  quantile of a Gaussian's drop over the free dimensions). A walker is settling
+  from the start of recording until its first recorded step in the band; the
+  cut is the last settling step of any walker, rounded up to a block of 50
+  steps. Time below the band after a walker's first entry, however long and
+  however late, is posterior mass and never sets the cut; modes of comparable
+  height are within the allowance of each other. Nothing is dropped, and a
+  warning says why, when walkers never in the band are below it at the end of
+  the run (the run ends split), or when the cut would leave fewer than a
+  quarter of the recorded steps. With the option off,
+  a run whose walkers settled during recording gets one warning: how many, until
+  which recorded step, how far below in ln p, and the n_burnin that would have
+  covered it. Composes with `extend_burnin` (the trim runs on what was
+  recorded) and with checkpoints (the checkpoint keeps every recorded step, and
+  a resumed run trims at its end). `result.burnin_trim` holds the finding. See
+  src/samplers/burnin_trim.jl.
 - `node_flip::Real=0.1` — per walker and step, the probability of proposing
   the mirror (Ω, ω) → (Ω + π, ω + π) of each astrometry-only planet, accepted
   with the tempered Metropolis-Hastings ratio (see src/samplers/node_flip.jl).
@@ -1136,6 +1232,14 @@ in place.
   an uninterrupted run of `n_steps`, at any thread count. Refused, with the
   differences listed, if the checkpoint came from different data, priors,
   parameters, walkers, rungs, burn-in, thinning, seed or move settings.
+  `extend_burnin` and `max_burnin` are not among them: like `n_steps` they set
+  how long the run goes. A run resumed after its recording began keeps
+  recording; one resumed during an extension continues it under the settings
+  it is given, from its last pass (with a larger `n_steps` the default cap
+  grows with it, so a run that had already hit its cap is not what an
+  uninterrupted run of the new length would have drawn). `trim_burnin` is not
+  among them either: it changes nothing the run draws, so a finished run can be
+  resumed at the same `n_steps` with it on to have its result trimmed.
 """
 function sample_pt_emcee(
     target::NereusTarget,
@@ -1176,6 +1280,9 @@ function sample_pt_emcee(
     evidence_postfit::Bool = false,
     untemper_transit::Bool = false,
     prune_stranded::Bool = true,
+    extend_burnin::Bool = false,
+    max_burnin::Union{Nothing,Real} = nothing,
+    trim_burnin::Bool = false,
     node_flip::Real = 0.1,
     burnin_hold = nothing,
     burnin_hold_frac::Real = 0.5,
@@ -1528,6 +1635,9 @@ function sample_pt_emcee(
     # Threshold round for evidence accumulation matches reddemcee:
     # start streaming once burn-in is past so the leading transient
     # doesn't bias <logL>_β.
+    # The same sums in blocks of recorded steps, for the evidence of the steps a
+    # burn-in trim keeps (`trim_burnin`, src/samplers/burnin_trim.jl).
+    ev_blocks = EvidenceBlocks(thin)
 
     accept_within  = zeros(Float64, n_temps)
     propose_within = zeros(Int, n_temps)
@@ -1730,6 +1840,13 @@ function sample_pt_emcee(
     sc = StopControl(; max_seconds, max_evals, stop_file)
     stop_reason = "steps"; stop_step = 0   # how the loop ended; last step kept
     cur_step = 0; step_keep0 = 0           # the step in flight; keep_idx before it
+    # The extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl): the
+    # steps up to `b_end` are burn-in. It starts at n_burnin and moves only at a
+    # check (step == b_end) that finds the β = 1 rung split; `b_last` is the step
+    # of the last pass an extension took and `b_passes` their count.
+    ext_on = _burnin_ext_on("pt_emcee", extend_burnin, prune_stranded)
+    b_cap = _burnin_cap(n_burnin, n_steps, max_burnin)
+    b_end = n_burnin; b_last = 0; b_passes = 0
 
     # --- Resume: put the saved run back exactly as it stopped ----------
     # In place throughout: the closures above captured these arrays, and
@@ -1761,6 +1878,8 @@ function sample_pt_emcee(
         # Windows the saved walkers live in (moved by the burn-in re-cut).
         _restore_windows!(params, ck.windows, (target.transform,))
         merge!(recut_moved, ck.recut_moved)
+        b_end, b_last, b_passes = _burnin_resume(ck, step0, n_burnin, b_cap, ext_on)
+        _evidence_blocks_restore!(ev_blocks, ck, evidence_acc, b_end)
         # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
         hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         n_done = step0
@@ -1880,7 +1999,11 @@ function sample_pt_emcee(
         # Under the stellar spin flip (`spin_flip`) the walkers are also put in
         # one representative of the spin, the axis chosen from the cold rung;
         # before the re-cut, which then cuts λ's seam from the moved draws.
-        !isempty(cinc) && _pt_recut_due(step, n_burnin) &&
+        # A check of the extended burn-in (`extend_burnin`) is due: it folds and
+        # re-cuts as a nominal pass does (src/samplers/burnin_extend.jl).
+        b_check = ext_on && step == b_end && step >= n_burnin
+        recut_now = b_check || _pt_recut_due(step, n_burnin)
+        !isempty(cinc) && recut_now &&
             fold_cyclic_inclinations!(state, params; idx = cinc,
                                       decide_from = view(state, 1, :, :))
 
@@ -1896,6 +2019,36 @@ function sample_pt_emcee(
                                            held = isempty(held_x) ? Int[] : hold.dims,
                                            held_logπ = isempty(held_x) ? 0.0 : held_lp)
         end
+        # The extended burn-in (`extend_burnin`, src/samplers/burnin_extend.jl).
+        # 50 steps before n_burnin the pruning's record is taken (nothing moves,
+        # nothing is drawn), so the check at n_burnin compares with one pass back.
+        # At a check, the pass at the β = 1 rung runs on copies: if it moves no
+        # walker there, burn-in ends at this step and nothing has changed; if it
+        # does, the pass is taken at every rung and burn-in runs 50 steps more, or
+        # at the cap the run records anyway and says so.
+        if ext_on && step == n_burnin - 50 &&
+           !(prune_stranded && step % 50 == 0 && step <= (3 * n_burnin) ÷ 4)
+            _pt_prune_stranded!(state, logπ_arr, logL_arr, βs, rng_master;
+                                memory = prune_mem, rungs = 1:0,
+                                held = isempty(held_x) ? Int[] : hold.dims)
+        end
+        if b_check
+            pass! = (s, lp, ll, r, m, rg) -> _pt_prune_stranded!(s, lp, ll, βs, r;
+                evalf = prune_eval, circ, memory = m, rungs = rg,
+                held = isempty(held_x) ? Int[] : hold.dims,
+                held_logπ = isempty(held_x) ? 0.0 : held_lp)
+            mv = _burnin_split_pass!(pass!, (state, logπ_arr, logL_arr), rng_master,
+                                     prune_mem, n_temps; commit = step < b_cap)
+            if mv[1] > 0 && step < b_cap
+                pruned .+= mv
+                b_last = step; b_passes += 1
+                b_end = min(step + 50, b_cap)
+            elseif mv[1] > 0
+                _pt_split_warn(state, logπ_arr, logL_arr, step, n_burnin, layout,
+                               flat_shift, circ,
+                               n_dim - (isempty(held_x) ? 0 : length(hold.dims)))
+            end
+        end
 
         # ---- Circular re-cut (serial; threads idle) ------------------
         # Halfway through burn-in, while the ensemble can still merge the
@@ -1906,7 +2059,7 @@ function sample_pt_emcee(
         # keeps the current seam unless another arc is clearly emptier).
         # Relabels `state` at every rung; logπ_arr and logL_arr stay valid,
         # see `_pt_ensemble_recut!`.
-        if !isempty(seam) && _pt_recut_due(step, n_burnin)
+        if !isempty(seam) && recut_now
             _pt_ensemble_recut!(state, params, seam, (target.transform,),
                                 recut_moved)
         end
@@ -1918,16 +2071,19 @@ function sample_pt_emcee(
             release_hold!()
 
         # ---- Post-burnin: record β=1 + feed evidence accumulator ----
-        if step > n_burnin
+        # From the step after `b_end`: n_burnin, unless an extended burn-in ran on.
+        if step > b_end
             # For each (β_k, β_{k+1}) pair, feed each walker's logL
             # to the evidence accumulator. The H+ / SS+ estimators in
             # evidence.jl average within and across walkers correctly.
+            ev_blk = _evidence_block!(ev_blocks, step, b_end, n_temps)
             @inbounds for w in 1:n_walkers_eff
                 # Pass per-temperature logL vector for this walker
                 logL_walker = view(logL_arr, :, w)
                 update_evidence!(evidence_acc, logL_walker, βs)
+                update_evidence!(ev_blk, logL_walker, βs)
             end
-            if (step - n_burnin) % thin == 0
+            if (step - b_end) % thin == 0
                 @inbounds for w in 1:n_walkers_eff
                     keep_idx += 1
                     # Back from the flat scale to x, and :lp with it.
@@ -1949,7 +2105,7 @@ function sample_pt_emcee(
         # ---- Periodic convergence diagnostic (β=1 science params) ----
         # Mean/worst R-hat and bulk/tail ESS over the gating set; drives both
         # the live readout and (optionally) the run-until-converged stop.
-        if step > n_burnin && (step - n_burnin) % diag_cadence == 0
+        if step > b_end && (step - b_end) % diag_cadence == 0
             diag = _pt_convergence(samples, keep_idx, n_walkers_eff, science_cols;
                                    canon = AngleCanon(params))
             if diag !== nothing
@@ -2001,10 +2157,10 @@ function sample_pt_emcee(
         # never per step. During burn-in there is nothing to keep: an error.
         _step_hook!(step, sc)
         stop_now = _stop_check!(sc, n_evals_atomic[];
-                    force = step > n_burnin && (step - n_burnin) % diag_cadence == 0)
+                    force = step > b_end && (step - b_end) % diag_cadence == 0)
         if stop_now !== nothing
-            step <= n_burnin && throw(_stop_in_burnin_error(
-                "pt_emcee", stop_now, sc, step, n_burnin))
+            step <= b_end && throw(_stop_in_burnin_error(
+                "pt_emcee", stop_now, sc, step, b_end))
             keep_idx > 0 || (stop_now = nothing)   # `thin`: no row recorded yet
         end
 
@@ -2022,7 +2178,8 @@ function sample_pt_emcee(
                 lp_samples = lp_samples[1:keep_idx], evidence = evidence_acc,
                 conv_run, rhat_str, ess_str, windows = circular_windows(params),
                 spin_axis = copy(params.layout.spin_axis),
-                recut_moved, hold_on = !isempty(held_x), hold_med = hold_med[]))
+                recut_moved, hold_on = !isempty(held_x), hold_med = hold_med[],
+                burnin_ext = (b_end, b_last, b_passes), evidence_blocks = ev_blocks))
             last_ck = time()
         end
 
@@ -2040,7 +2197,7 @@ function sample_pt_emcee(
         end
     end
     catch err
-        err isa InterruptException && cur_step > n_burnin && step_keep0 > 0 ||
+        err isa InterruptException && cur_step > b_end && step_keep0 > 0 ||
             rethrow()
         keep_idx = step_keep0
         n_done = cur_step - 1
@@ -2059,6 +2216,10 @@ function sample_pt_emcee(
         "($(pruned[1]) at β = 1), each from a region whose total posterior mass " *
         "is bounded, or a separate mode whose own is estimated, below e⁻¹⁰ of the " *
         "mode's. The recorded chain is ordinary MCMC."
+    _burnin_extend_info("pt_emcee", n_burnin, b_end, b_passes, n_steps; n_done,
+                        quiet = !show_progress)
+    # The steps before recording began (`extend_burnin`).
+    n_burnin_used = min(b_end, n_done)
     if convergence_stop && converged_at == 0 && stop_reason == "steps"
         @warn "pt_emcee: hit max_steps=$n_steps WITHOUT meeting the convergence gate " *
               "(Rhat<$(rhat_threshold), tail-ESS>$(tail_ess_threshold)) on science params — " *
@@ -2068,8 +2229,29 @@ function sample_pt_emcee(
     samples = samples[1:keep_idx, :]
     lp_samples = lp_samples[1:keep_idx]
 
+    # --- Walkers still settling into the main mode (`trim_burnin`) ------
+    # The test runs on every run and only warns. With `trim_burnin` the
+    # recorded steps up to the cut (rounded up to an evidence block) are dropped
+    # from the draws and from the evidence sums, and everything below is
+    # computed from the rest; n_burnin_used counts them. The run's own state and
+    # its checkpoint keep everything (src/samplers/burnin_trim.jl).
+    burnin_trim, n_trimmed = _pt_trim("pt_emcee", samples, lp_samples, n_walkers_eff,
+        n_dim - (isempty(held_x) ? 0 : length(hold.dims)); flat_shift,
+        trim = trim_burnin, cuts = _evidence_cuts(ev_blocks, n_burnin_used, thin),
+        n_burnin_used, thin, extend = ext_on, circ, names = layout.unfrozen_names,
+        show_progress)
+    ev_acc = evidence_acc
+    if n_trimmed > 0
+        rows = n_trimmed * n_walkers_eff
+        samples = samples[(rows + 1):end, :]
+        lp_samples = lp_samples[(rows + 1):end]
+        keep_idx -= rows
+        ev_acc = _evidence_from(ev_blocks, n_burnin_used + n_trimmed * thin + 1, n_temps)
+        n_burnin_used += n_trimmed * thin
+    end
+
     # --- Evidence report (TI + TI+ + SS+ + H+) ------------------------
-    ev_report = evidence_report(evidence_acc, βs)
+    ev_report = evidence_report(ev_acc, βs)
     # H+ is the reddemcee recommended estimator; fall back to TI+
     # if H+ is degenerate (β* selection failed), TI as last resort.
     log_z = isfinite(ev_report.hybrid[1]) ? ev_report.hybrid[1] :
@@ -2305,7 +2487,8 @@ function sample_pt_emcee(
         chains, log_z, log_z_laplace, log_z_bridge, ev_report, acc_within,
         _de_acceptance(de_accepted, de_proposed), acc_swap,
         βs, n_evals_atomic[],
-        _ladder_history(β_hist, swap_hist, smd_hist, evidence_acc, n_done, n_burnin),
-        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc), drift
+        _ladder_history(β_hist, swap_hist, smd_hist, ev_acc, n_done, n_burnin_used),
+        _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc), drift, n_burnin_used,
+        n_trimmed, burnin_trim
     )
 end

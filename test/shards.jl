@@ -112,6 +112,12 @@ const TEST_UNITS = [
     (name = "test_pt_emcee_stranded.jl", seconds = 98, files = ["test_pt_emcee_stranded.jl"]),
     (name = "test_pt_emcee_resume.jl", seconds = 19, files = ["test_pt_emcee_resume.jl"]),
     (name = "test_burnin_hold.jl", seconds = 100, files = ["test_burnin_hold.jl"]),
+    # The opt-in extended burn-in in the three samplers and through run_job.
+    # Measured locally (arm64, 4 threads), not yet on the CI runner.
+    (name = "test_burnin_extend.jl", seconds = 200, files = ["test_burnin_extend.jl"]),
+    # The post-hoc burn-in trim: the rule on synthetic levels, the four samplers
+    # and run_job. Measured locally (arm64, 4 threads), not yet on the CI runner.
+    (name = "test_burnin_trim.jl", seconds = 150, files = ["test_burnin_trim.jl"]),
     (name = "test_pt_resume.jl", seconds = 43, files = ["test_pt_resume.jl"]),
     (name = "test_pt_hmc_resume.jl", seconds = 84, files = ["test_pt_hmc_resume.jl"]),
     (name = "test_pt_whitening_resume.jl", seconds = 9, files = ["test_pt_whitening_resume.jl"]),
@@ -193,6 +199,8 @@ const TEST_UNITS = [
     (name = "test_summary_provenance.jl", seconds = 140, files = ["test_summary_provenance.jl"]),
     # The transit-phase time anchor (time = :phic) against the Tc one.
     (name = "test_phic_anchor.jl", seconds = 3, files = ["test_phic_anchor.jl"]),
+    # Measured mid-transit times (data.transit_times): loader, likelihood, fits.
+    (name = "test_transit_times.jl", seconds = 250, files = ["test_transit_times.jl"]),
     (name = "test_density_reparam.jl", seconds = 160, files = ["test_density_reparam.jl"]),
     # The workspace and allocating likelihoods at e up to 0.99999.
     (name = "test_high_e_workspace.jl", seconds = 15, files = ["test_high_e_workspace.jl"]),
@@ -220,6 +228,8 @@ const TEST_UNITS = [
     (name = "test_nested_progress.jl", seconds = 30, files = ["test_nested_progress.jl"]),
     (name = "test_ns_proposals.jl", seconds = 16, files = ["test_ns_proposals.jl"]),
     (name = "test_ppc_residual_acf.jl", seconds = 2, files = ["test_ppc_residual_acf.jl"]),
+    (name = "test_candidate_gate.jl", seconds = 5, files = ["test_candidate_gate.jl"]),
+    (name = "test_spectral_window.jl", seconds = 5, files = ["test_spectral_window.jl"]),
     (name = "test_pm_fold_rv_only_slot.jl", seconds = 30, files = ["test_pm_fold_rv_only_slot.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 3, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_posteriors_thinning.jl", seconds = 5, files = ["test_plot_posteriors_thinning.jl"]),

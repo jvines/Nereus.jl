@@ -107,6 +107,14 @@ struct Data
     # when the fit has Hipparcos IAD, an explicit `hip_scans` otherwise,
     # `nothing` when neither (the Hipparcos epoch is then instantaneous).
     hip_scans::Union{Nothing, IADData}
+    # Externally measured mid-transit times, one set per planet
+    # (src/transit_times_data.jl). Empty unless given; the transit-time term
+    # then contributes exactly zero.
+    transit_times::Vector{TransitTimeSet}
+    # `t_phot` in time order (the same vector when it already is): the free TTV
+    # offsets are numbered from the first cadence near a transit, found by a
+    # scan of it at every evaluation (`_ttv_first_transit`, src/ttv.jl).
+    t_phot_sorted::Vector{Float64}
 end
 
 """
@@ -159,17 +167,29 @@ function Data(;
     gaia_dr3::Union{Nothing, GaiaDR3Data} = nothing,
     tomo::Vector{TomoNight} = TomoNight[],
     hip_scans::Union{Nothing, IADData} = nothing,
+    transit_times::AbstractVector{TransitTimeSet} = TransitTimeSet[],
 )
     n_rv = length(t_rv)
     n_phot = length(t_phot)
+    tt_sets = Vector{TransitTimeSet}(transit_times)
+    tt_planets = [s.planet for s in tt_sets]
+    length(unique(tt_planets)) == length(tt_planets) || throw(ArgumentError(
+        "transit times: more than one set for planet(s) " *
+        "$(sort!(unique(filter(p -> count(==(p), tt_planets) > 1, tt_planets)))). " *
+        "Merge each planet's transit times into one set: the epochs of a set are " *
+        "counted from one epoch_zero."))
+    # Mid-transit times in the likelihood, every planet pooled.
+    tt_used_t = reduce(vcat, (s.tc[s.used] for s in tt_sets); init = Float64[])
     has_astrom = relastrom !== nothing || hgca !== nothing ||
                  iad !== nothing || gost !== nothing ||
                  g23h !== nothing || gaia_dr3 !== nothing
     # Residual maps are data in their own right: a Doppler-shadow fit has no
     # velocities, and giving it a dummy RV point to get past this check left a
     # constant offset in the likelihood and three prior-only parameters.
-    (n_rv > 0 || n_phot > 0 || has_astrom || !isempty(tomo)) || throw(ArgumentError(
-        "Data requires at least one RV, photometric, astrometric or tomographic observation"))
+    (n_rv > 0 || n_phot > 0 || has_astrom || !isempty(tomo) || !isempty(tt_used_t)) ||
+        throw(ArgumentError(
+        "Data requires at least one RV, photometric, astrometric, tomographic or " *
+        "transit-time observation"))
 
     # --- RV validation ---
     if n_rv > 0
@@ -205,8 +225,9 @@ function Data(;
             "rv_comp entries must be 1 (primary) or 2 (secondary)"))
     end
 
-    # t_ref: use RV median if available, else photometry median, else
-    # fall back to astrometry epoch (IAD → GOST → relAST → HGCA → G23H).
+    # t_ref: use RV median if available, else photometry median, else the
+    # median measured transit time, else fall back to astrometry epoch
+    # (IAD → GOST → relAST → HGCA → G23H).
     # The numeric value matters only as the zero-point for Mo/Tp time
     # anchors; for astrometry-only fits any astrometric epoch suffices.
     if t_ref !== nothing
@@ -215,6 +236,8 @@ function Data(;
         t_ref_val = Float64(median(t_rv))
     elseif n_phot > 0
         t_ref_val = Float64(median(t_phot))
+    elseif !isempty(tt_used_t)
+        t_ref_val = Float64(median(tt_used_t))
     elseif iad !== nothing && n_iad(iad) > 0
         t_ref_val = Float64(median(iad.t))
     elseif gost !== nothing && n_gost(gost) > 0
@@ -437,13 +460,15 @@ function Data(;
 
     hip_geom = _resolve_hip_scans(iad, hip_scans, hgca !== nothing || g23h !== nothing)
 
+    t_phot_vec = Vector{Float64}(t_phot)
     return Data(
         Vector{Float64}(t_rv), Vector{Float64}(rv),
         Vector{Float64}(rv_err), rv_inst_vec, rv_comp_vec,
         t_ref_val, ind_dict, ind_err_dict, deriv_dict,
-        Vector{Float64}(t_phot), Vector{Float64}(flux),
+        t_phot_vec, Vector{Float64}(flux),
         Vector{Float64}(flux_err), phot_inst_vec, exp_vec,
-        relastrom, hgca, iad, gost, g23h, gaia_dr3, tomo, hip_geom,
+        relastrom, hgca, iad, gost, g23h, gaia_dr3, tomo, hip_geom, tt_sets,
+        issorted(t_phot_vec) ? t_phot_vec : sort(t_phot_vec),
     )
 end
 
@@ -514,6 +539,25 @@ Number of photometric data points across every instrument, at native
 cadence (the light curve is never binned).
 """
 n_phot(data::Data) = length(data.t_phot)
+"""
+    n_transit_times(data::Data) -> Int
+
+Number of measured mid-transit times in the likelihood, every planet together
+(points excluded by `use`, `exclude_sources` or the photometry overlap left out).
+"""
+n_transit_times(data::Data) = sum(n_tt, data.transit_times; init = 0)
+
+"""
+    transit_time_set(data, k) -> Union{TransitTimeSet, Nothing}
+
+Planet `k`'s measured transit times, or `nothing` when it has none.
+"""
+function transit_time_set(data::Data, k::Integer)
+    for s in data.transit_times
+        s.planet == k && return s
+    end
+    return nothing
+end
 function _require_gost_window(gost::GOSTData, win::Tuple{Real, Real}, release::String)
     n_in = count(t -> win[1] <= t <= win[2], gost.t)
     n_in >= 5 || throw(ArgumentError(

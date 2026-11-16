@@ -183,6 +183,11 @@ end
 function _planet_P_K_draws(chains, params::Params, planet::Int)
     planet <= params.config.max_kplanet ||
         throw(ArgumentError("planet $planet exceeds max_kplanet"))
+    blk = params.layout.planet_blocks[planet]
+    is_sb2(blk) && throw(ArgumentError(
+        "planet $planet is a binary orbit with two amplitudes, K_A and K_B, not one K"))
+    has_K(blk) || throw(ArgumentError(
+        "planet $planet has no RV amplitude (photometry only)"))
     mass = params.config.parametrization.mass
     chain_names = Set(string.(names(chains, :parameters)))
     P_name, K_name = "P_k$planet", "K_k$planet"

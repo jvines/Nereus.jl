@@ -203,6 +203,7 @@ schema errors and reports them in one message before any heavy work.
 | `hgca` | `hip_id` (auto-fetch Brandt eDR3) **or** `{fits, hip_id}` (local `HGCA_vEDR3.fits`) **or** inline 3-epoch `values` |
 | `relastrom` | `csv` **or** inline `values` |
 | `gaia_dr3` | `params`, `cov`, `t_ref` |
+| `transit_times` | list of per-planet blocks: `planet`, `time_system` (`BJD_TDB` only), `values` (`epoch`, `tc`, `tc_err`, `source`), `reference_ephemeris` or null; the planet's mode must contain `PM` |
 
 **`model`** — `max_kplanet` (required), `planet_modes`,
 `parametrization` (`mass` ∈ {`K_driven`, `M_sec_driven`, `a_driven`};
@@ -212,12 +213,12 @@ your priors name (an `Mo_k1` prior selects `Mo`), else `phic`; `t_ref_c`;
 which `ParametrizationConfig` rejects); `marginalize_gamma`, `use_rho_s`
 bool; `density` ∈ {`rho_circ` (the default), `rho_star`}), `stability` ∈
 {`none`, `amd`, `gladman`}, `trend_order` / `phot_trend_order` ∈ {0, 1, 2},
-`ttv_n_transits`, `ttv_backend`.
+`ttv_n_transits`, `ttv_epochs`, `ttv_backend`.
 
 **`planet_modes`** (known values): `RV_ONLY`, `PM_ONLY`, `RVPM`,
 `RVAS`, `RVPMAS`, `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`,
 `RVPM_RM_A`, `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`,
-`PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`,
+`PM_TTV`, `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `RVPM_GD`,
 `RVPM_RM_GD`, `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 
 **`priors`** — `{ "<name>": {"type": "<PriorType>", "args": [...]} }`.

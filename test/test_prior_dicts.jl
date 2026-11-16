@@ -92,3 +92,76 @@ end
         "prior" => Dict{String,Any}("type" => "gaussian", "args" => [0.0, 0.3])))
     @test ext.quantity === :ecc && ext.prior.dist isa Normal
 end
+
+@testset "prior dicts: fit_rm / fit_ttv / fit_binary take nothing or prior objects" begin
+    # These three build a job config. The Python client sends `nothing` when it
+    # has no priors and prior objects when it has some; both used to fail.
+    @test Nereus._cfg_priors(nothing) == Dict{String,Any}()
+    cfg = Nereus._cfg_priors(Dict(:P_k1 => Nereus.UniformPrior(9.0, 11.0),
+                                  "e_k1" => 0.0,
+                                  "K_k1" => Dict("type" => "UniformPrior",
+                                                 "args" => [0.0, 50.0])))
+    @test cfg["P_k1"].dist isa Uniform && cfg["e_k1"].dist isa Nereus.Fixed
+    @test cfg["K_k1"] isa AbstractDict          # job-config form passes through
+    built = Nereus._build_priors(cfg)
+    @test built["P_k1"] === cfg["P_k1"] && built["e_k1"].dist isa Nereus.Fixed
+    @test built["K_k1"].dist isa Uniform && built["K_k1"].hi == 50.0
+end
+
+@testset "fit_rm / fit_ttv / fit_binary route the other fit_* keywords into the config" begin
+    cfg() = Dict{String,Any}("star" => Dict{String,Any}(),
+                             "model" => Dict{String,Any}("max_kplanet" => 1))
+    c = Nereus._cfg_route_kw!(cfg(), "fit_ttv",
+                              (M_s = 1.0, R_s = 0.9, T_eff = 5700.0, stability = :none,
+                               ttv_backend = :ttvfaster, time_anchor = :phic,
+                               parametrization = :a_driven))
+    @test c["star"] == Dict("M_s" => 1.0, "R_s" => 0.9, "T_eff" => 5700.0)
+    @test c["model"]["stability"] == "none" && c["model"]["ttv_backend"] == "ttvfaster"
+    @test c["model"]["parametrization"] == Dict("time" => "phic", "mass" => "a_driven")
+    e = try Nereus._cfg_route_kw!(cfg(), "fit_ttv", (density = :rho_star,)); nothing
+        catch err; err end
+    @test e isa ArgumentError && occursin("no keyword `density`", e.msg) &&
+          occursin("run_job", e.msg)
+    c2 = cfg(); c2["star"]["M_s"] = 1.0
+    @test_throws ArgumentError Nereus._cfg_route_kw!(c2, "fit_binary", (M_s = 1.1,))
+end
+
+@testset "fit_rm: the default time anchor applies" begin
+    # fit_rm passed time = "Tc", so its Tc window held several copies of a
+    # short-period orbit; the other fits take the default anchor (φ_c)
+    @test !haskey(Nereus._RM_PARAMETRIZATION, "time")
+    @test Nereus._rm_parametrization(:M_sec_driven) ==
+          merge(Nereus._RM_PARAMETRIZATION, Dict("mass" => "M_sec_driven"))
+    @test Nereus._rm_parametrization(Dict(:time => "Tc", :mass => "K_driven")) ==
+          Dict("time" => "Tc", "mass" => "K_driven")
+    cfg = Dict{String,Any}("star" => Dict{String,Any}(),
+        "model" => Dict{String,Any}("parametrization" =>
+                                    Nereus._rm_parametrization(Nereus._RM_PARAMETRIZATION)))
+    Nereus._cfg_route_kw!(cfg, "fit_rm", (time_anchor = :Tc,))
+    @test cfg["model"]["parametrization"]["time"] == "Tc"
+    @test !haskey(Nereus._RM_PARAMETRIZATION, "time")      # the default is not changed
+end
+
+@testset "config-route fits: no engine runs the default sampler" begin
+    # fit_rm, fit_ttv and fit_binary send a sampler block without `name` when no
+    # engine is given; the validator refused it, so none ran from Julia without one
+    rvd = Dict("SIM" => Dict("t" => [1.0, 2.0, 3.0, 4.0], "rv" => [0.0, 1.0, 0.0, -1.0],
+                             "rv_err" => ones(4)))
+    cfg(sampler; td = false) = begin
+        c = Dict{String,Any}("version" => "1.0", "output_dir" => mktempdir(),
+            "star" => Dict{String,Any}("M_s" => 1.0),
+            "data" => Nereus._data_block(; rv = rvd),
+            "model" => Dict{String,Any}("max_kplanet" => 1, "planet_modes" => ["RV_ONLY"]),
+            "sampler" => sampler)
+        td && (c["transdim"] = Dict{String,Any}("max_kplanet" => 1))
+        c
+    end
+    c = cfg(Nereus._sampler_block(nothing))
+    @test Nereus._validate_config(c) === nothing
+    @test Nereus._job_sampler_name(c) == "pt_emcee"
+    @test Nereus._job_sampler_name(cfg(Dict{String,Any}(); td = true)) == "transdim_pt_emcee"
+    @test Nereus._validate_config(cfg(Dict{String,Any}("kwargs" => Dict("seed" => 1)))) === nothing
+    e = try Nereus._validate_config(cfg(Dict{String,Any}("name" => "nope"))); nothing
+        catch err; err end
+    @test e isa ArgumentError && occursin("unknown sampler.name=`nope`", e.msg)
+end

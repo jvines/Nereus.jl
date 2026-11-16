@@ -7,7 +7,7 @@
 # doesn't catch sampler bugs — those are tested elsewhere. The job of
 # this test is the PPC machinery itself.
 
-using Nereus, Random, Statistics, Test, MCMCChains
+using Nereus, Random, Statistics, Test, MCMCChains, Logging
 using Random: MersenneTwister
 
 @testset "posterior_predictive_check — RV residuals on a tight posterior" begin
@@ -219,4 +219,29 @@ end
 
     ppc = posterior_predictive_check(chains, params, data; n_draws = n_draws)
     @test ppc.summary["rv_outliers_3sigma"] >= 1
+end
+
+@testset "posterior_predictive_check — one-night RV baseline skips the residual periodogram" begin
+    # 30 points over 6 h: the default search runs from 1 d up to the baseline,
+    # which leaves no period, so the periodogram is skipped without a warning
+    rng = MersenneTwister(11)
+    n_obs = 30
+    t = sort!(0.25 .* rand(rng, n_obs))
+    rv = randn(rng, n_obs)
+    data = Data(; t_rv = t, rv = rv, rv_err = ones(n_obs), rv_inst = ones(Int, n_obs))
+    params = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+                      instruments = InstrumentConfig(rv = ["SIM"]), data = data, M_s = 1.0)
+    fitted_names = Symbol.(params.layout.unfrozen_names)
+    arr = zeros(Float64, 100, length(fitted_names), 1)
+    for (j, nm) in enumerate(fitted_names)
+        arr[:, j, 1] .= (nm === :sigma_SIM ? 1.0 : 0.0) .+ 1e-3 .* randn(rng, 100)
+    end
+    chains = Chains(arr, fitted_names)
+
+    ppc = @test_logs min_level = Logging.Warn posterior_predictive_check(
+        chains, params, data; n_draws = 100)
+    @test ppc.rv_pgram === nothing
+    @test !haskey(ppc.summary, "rv_residual_top_peak_period")
+    @test length(ppc.rv_acf) > 1                  # the ACF still runs
+    @test isfinite(ppc.summary["rv_red_chi2_median_model"])
 end

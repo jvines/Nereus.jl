@@ -34,7 +34,7 @@ A config is a `Dict` (or a JSON file passed to
 | Key | Required | Notes |
 |-----|----------|-------|
 | `output_dir`    | ✅ | directory for `summary.json`, `chains.nc`, `plots/`, `tables/` |
-| `data`          | ✅ | at least one of `rv`, `transit_photometry`, `iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3` |
+| `data`          | ✅ | at least one of `rv`, `transit_photometry`, `iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3`, `transit_times` |
 | `model`         | ✅ | `max_kplanet`, `planet_modes`, `parametrization`, `stability`, `trend_order` … |
 | `sampler`       | ✅ | `{name, kwargs}` |
 | `priors`        | optional | per-parameter `{type, args}`; unset params get sensible defaults |
@@ -51,7 +51,7 @@ collated error message if any is wrong — see `_validate_config` in
 - **`planet_modes`**: `RV_ONLY`, `PM_ONLY`, `RVPM`, `RVAS`, `RVPMAS`,
   `RVPM_RM`, `RVPMAS_RM`, `RVPM_RM_R`, `RVPMAS_RM_R`, `RVPM_RM_A`,
   `RVPMAS_RM_A`, `RVPM_TTV`, `RVPMAS_TTV`, `RVPM_RM_TTV`, `PM_TTV`,
-  `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `PM_TTV_NB`, `RVPM_GD`, `RVPM_RM_GD`,
+  `RVPM_TTV_NB`, `RVPMAS_TTV_NB`, `RVPM_GD`, `RVPM_RM_GD`,
   `PM_GD`, `BINARY`, `BINARY_RV`, `PM_DT`.
 - **`parametrization.mass`**: `K_driven`, `M_sec_driven`, `a_driven`.
   **`.time`**: `phic` (the default), `Mo`, `Tp`, `Tc`. **`.ew`**: `sesinw`, `ew`.
@@ -504,18 +504,21 @@ for the Reloaded model).
 ## 7. Transit-timing variations — `RVPM_TTV`
 
 Single transiting planet with a non-linear ephemeris: per-transit
-timing offsets are free parameters (`ttv_k1_t<i>`). Declare the
-per-planet transit count with `model.ttv_n_transits` (a map
-`planet → n_transits`). The default per-offset prior is
-`NormalPrior(0, 1 d, ±10 d)`. Transits are numbered from the time of
-mid-transit `Tc` (the `Tc_k1` parameter under `time = "Tc"`; under `Tp`
-or `Mo`, the transit within half a period of periastron passage):
-`ttv_k1_t<i>` is transit `i − 1`, so put `Tc` at the first transit you
-want an offset for. Transits before `Tc` carry no free offset. The
-`ttv_oc` and `transit_overlay` plots number transits the same way. Use
-`time = "Tc"` with free offsets: under `Tp` or `Mo` the transit numbered
-0 changes, and every offset moves to the next transit, when the sampled
-`ω` carries `Tc` across `Tp ± P/2`.
+timing offsets are free parameters (`ttv_k1_t<i>`). Transits are numbered
+from the planet's first observed transit, 0: the transit of the earliest
+photometric cadence or measured transit time within a quarter period of a
+predicted centre. Choose the transits that get an offset with
+`model.ttv_n_transits` (`planet → N`: transits 0..N−1) or `model.ttv_epochs`
+(`planet → [transit numbers]`, strictly increasing: `ttv_k1_t<i>` is the
+`i`-th transit listed, and every other transit has no offset — for tens of
+transit times spread over thousands of epochs). Without either, a planet
+with measured transit times gets one offset per observed transit (its
+transit times', and its photometric transits'), and a planet with photometry
+only none, with a warning. The default per-offset prior is
+`NormalPrior(0, 1 d, ±10 d)`. The numbering is the same under every time
+anchor and wherever `Tc` sits. The `ttv_oc` and `transit_overlay` plots
+number transits from `Tc` (0 at `Tc`, negative before it); `summary.json`'s
+`ttv_slots` gives each offset's transit and its linear-ephemeris time.
 
 ```julia
 using Nereus
@@ -534,7 +537,7 @@ cfg = Dict(
      "planet_modes"    => ["RVPM_TTV"],
      "parametrization" => Dict("mass" => "K_driven", "time" => "Tc",
                                "ew" => "sesinw", "geom" => "b_rr"),
-     "ttv_n_transits"  => Dict("1" => 12),      # planet 1 has 12 observed transits
+     "ttv_n_transits"  => Dict("1" => 12),      # offsets on transits 0..11 from the first observed one
      "stability"       => "none"),
   "priors" => Dict(
      "P_k1"  => Dict("type" => "NormalPrior",  "args" => [3.6, 0.01, 3.4, 3.8]),
@@ -554,8 +557,9 @@ summary = run_job(cfg)
 
 `ttv_oc` renders the O−C diagram. For the **dynamical (N-body) TTV**
 case — two or more planets whose mutual perturbations drive the timing
-variations — use the `*_TTV_NB` modes (`RVPM_TTV_NB`, `RVPMAS_TTV_NB`,
-`PM_TTV_NB`) and pick the integrator with
+variations — use the `*_TTV_NB` modes (`RVPM_TTV_NB`, `RVPMAS_TTV_NB`; the
+masses come from the RV amplitudes, so both need RV)
+and pick the integrator with
 `model.ttv_backend => "ttvfaster"` (perturbative 1st-order series,
 default) or `"nbody"` (full ODE integration; use for high-mass / high-e /
 strongly-resonant systems). With ≥ 2 transiting planets the `ttv_oc`

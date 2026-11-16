@@ -38,6 +38,7 @@ include("priors.jl")
 include("packed_priors.jl")
 include("astrometry/data.jl")  # RelAstromData, HGCAData (no deps; needed by Data struct)
 include("tomography_data.jl") # TomoNight (needed by Data)
+include("transit_times_data.jl") # TransitTimeSet (needed by Data)
 include("data.jl")           # Data struct (no deps on model.jl)
 include("noise/types.jl")    # abstract types + concrete structs
 include("model.jl")          # ParamsConfig, ParamsLayout, Params (needs Data for constructor)
@@ -69,6 +70,7 @@ include("astrometry/gaia_epoch.jl")  # Gaia DR4 epoch-astrometry reader → IADD
 include("astrometry/solution_ladder.jl")  # exact 5/7/9-param evidences (needs IADData)
 include("likelihood.jl")     # calls gp_log_likelihood, check_stability, astrom_log_likelihood
 include("transit_likelihood.jl")
+include("transit_times_likelihood.jl")  # measured mid-transit times (data.transit_times)
 include("diagnostics/rank_diag.jl")  # rank-normalised ESS / R-hat, once per parameter per run
 include("reporting.jl")
 include("science_tables.jl")  # model-conditioned, unit-tagged science tables (needs reporting.jl)
@@ -105,6 +107,8 @@ include("samplers/lambda_slide.jl") # (Mo, ω) → (Mo+δ, ω−δ) slide along 
 include("samplers/ladder_history.jl") # per-step T / swap rate / swap mean distance of a PT ensemble run
 include("samplers/burnin_hold.jl") # parameters the PT ensembles hold at a value early in burn-in
 include("samplers/pt_emcee.jl") # parallel-tempered ensemble (Vousden+ 2016)
+include("samplers/burnin_extend.jl") # burn-in that runs on while the cold rung is split (extend_burnin)
+include("samplers/burnin_trim.jl") # walkers still settling during the recorded run, and the trim (trim_burnin)
 include("samplers/transdim_pt_emcee.jl") # trans-dim PT + MoMS variable selection
 include("samplers/population_annealing.jl") # sequential-MC tempered sampler (Hukushima & Iba 2003)
 include("samplers/nested_ins.jl")            # importance nested sampling (Feroz+ 2013)
@@ -204,7 +208,7 @@ export
     PlanetDataSources, has_rv, has_pm, has_as, has_rm, has_ttv,
     RV_ONLY, PM_ONLY, RVPM, RVAS, RVPMAS, RVPM_RM, RVPMAS_RM,
     RVPM_TTV, RVPMAS_TTV, RVPM_RM_TTV, PM_TTV,
-    RVPM_TTV_NB, RVPMAS_TTV_NB, PM_TTV_NB,
+    RVPM_TTV_NB, RVPMAS_TTV_NB,
     RVPM_RM_R, RVPMAS_RM_R,
     RVPM_RM_A, RVPMAS_RM_A,
     SB_SOURCE, BINARY, BINARY_RV, has_sb,
@@ -234,7 +238,8 @@ export
     rho_s,
     log_prior,
     # Data container + likelihood + target
-    Data, n_rv, n_phot, has_astrometry,
+    Data, n_rv, n_phot, has_astrometry, TransitTimeSet, n_transit_times,
+    transit_time_set, transit_times_log_likelihood,
     RelAstromData, HGCAData, IADData, GOSTData, G23HData, GaiaDR3Data,
     n_relast, n_iad, n_gost, n_g23h,
     n_iad_inst, n_relast_inst, merge_iad, merge_relast, iad_for_inst,

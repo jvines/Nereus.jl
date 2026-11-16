@@ -178,6 +178,7 @@ function build_target(;
     sharing::Dict{Symbol, Vector{Vector{String}}} = Dict{Symbol, Vector{Vector{String}}}(),
     transdim_noise::Bool = false,
     ttv_n_transits::Dict{Int, Int} = Dict{Int, Int}(),
+    ttv_epochs::AbstractDict = Dict{Int, Vector{Int}}(),
     ttv_backend::Symbol = :ttvfaster,
 )
     isempty(planets) &&
@@ -396,6 +397,7 @@ function build_target(;
         sharing         = sharing,
         transdim_noise  = transdim_noise,
         ttv_n_transits  = ttv_n_transits,
+        ttv_epochs      = ttv_epochs,
         ttv_backend     = ttv_backend,
     )
     return NereusTarget(params, data)

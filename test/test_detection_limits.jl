@@ -2,7 +2,7 @@
 # baseline noise level off-peak, the inflation at the injected-signal
 # bin, sentinel NaN for empty bins, and the coverage warning.
 
-using Nereus, Random, Statistics, Test, MCMCChains
+using Nereus, Random, Statistics, Test, MCMCChains, Logging
 using Random: MersenneTwister
 
 @testset "detection_limits — synthetic prior-seeded chain" begin
@@ -320,4 +320,43 @@ end
     dl, png = run(explored, Dict())
     @test dl["arrays_path"] == "detection_limits.nc"
     @test png
+end
+
+@testset "detection_limits — run_job skips a planet with no single K" begin
+    rng = MersenneTwister(5)
+    explored(params, n) = begin
+        fitted = Symbol.(params.layout.unfrozen_names)
+        arr = zeros(Float64, n, length(fitted), 1)
+        arr[:, findfirst(==(:P_k1), fitted), 1] .= exp.(log(100.0) .* rand(rng, n))
+        Chains(arr, fitted)
+    end
+    run(params, data, out_cfg) = mktempdir() do dir
+        summary = Dict{String, Any}()
+        cfg = Dict("sampler" => Dict("name" => "pt_emcee"), "output" => out_cfg)
+        Nereus._run_detection_limits!(cfg, explored(params, 2000), params, data, dir,
+                                      summary)
+        summary["detection_limits"]
+    end
+
+    # a double-lined binary: K_A and K_B, not one K
+    n = 30
+    data = Data(; t_rv = sort(400.0 .* rand(rng, n)), rv = zeros(n), rv_err = fill(50.0, n),
+                  rv_inst = ones(Int, n), rv_comp = [isodd(i) ? 1 : 2 for i in 1:n])
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
+                      planet_modes = [Nereus.BINARY_RV],
+                      instruments = InstrumentConfig(rv = ["I1"]), data = data, M_s = 1.0)
+    for out_cfg in (Dict(), Dict("detection_limits" => true))
+        dl = @test_logs min_level = Logging.Warn run(params, data, out_cfg)
+        @test dl["status"] == "skipped" && occursin("binary", dl["reason"])
+    end
+    @test_throws ArgumentError Nereus._planet_P_K_draws(explored(params, 10), params, 1)
+
+    # a photometry-only planet 1 next to an RV planet 2
+    data2 = Data(; t_rv = collect(0.0:5.0:200.0), rv = randn(rng, 41), rv_err = ones(41),
+                   rv_inst = ones(Int, 41))
+    params2 = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 2,
+                       planet_modes = [PM_ONLY, RV_ONLY],
+                       instruments = InstrumentConfig(rv = ["SIM"]), data = data2, M_s = 1.0)
+    dl = @test_logs min_level = Logging.Warn run(params2, data2, Dict("detection_limits" => true))
+    @test dl["status"] == "skipped" && occursin("no RV amplitude", dl["reason"])
 end

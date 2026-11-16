@@ -427,8 +427,9 @@ Planet model driven by:
   - transit photometry
   - N-body-predicted TTVs (TTV-C, TTVFaster)
 
-Pass through `planet_modes=` to state which observables constrain a
-given planet; the set decides which parameter block is built for it.
+Not exported, and refused by `Params`: the N-body TTVs need the planet's mass,
+which comes from its RV semi-amplitude, so without RV the planet is massless. Use
+RVPM_TTV_NB, or PM_TTV with free per-transit offsets.
 """
 const PM_TTV_NB      = PlanetDataSources(PM_SOURCE, TTV_NB_SOURCE)
 
@@ -753,12 +754,33 @@ end
     phic_reference_epoch(data) -> Float64
 
 The epoch the transit phase φ_c (`time = :phic`) is measured from when
-`t_ref_c` is not given: the median photometric time, so Tc is reported near
-the middle of the transits, where it is least correlated with P. Without
-photometry it is `data.t_ref`.
+`t_ref_c` is not given: the photometric times averaged with weights 1/σ², σ
+each point's quoted flux error. If a transit is equally likely at any time,
+that is the epoch where Tc is least correlated with P, so P and φ_c sample as
+near-independent coordinates. Points without a finite positive error are left
+out; if none has one, it is the median photometric time. Without photometry
+but with measured transit times (`data.transit_times`) it is their mean
+weighted by 1/tc_err², every planet's points in the likelihood together, by the
+same reasoning: for `tc = T0 + P·n` the weighted least-squares T0 and P are
+uncorrelated at the weighted mean epoch. With neither it is `data.t_ref`.
+
+The median of the times, used before, follows wherever the densest light
+curves are. On a P = 9.48 d planet with 11 light curves over ten years, the
+recent 200 s TESS sectors put it 1170 d after the epoch that decorrelates P
+and Tc, and the converged posterior had corr(P, φ_c) = 0.61; the weighted mean
+gives 0.14. What remains came from a light curve taken on a transit, which a
+pre-fit weight cannot know about.
 """
-phic_reference_epoch(data) =
-    isempty(data.t_phot) ? Float64(data.t_ref) : Float64(median(data.t_phot))
+function phic_reference_epoch(data)
+    t = data.t_phot
+    isempty(t) && return _tt_reference_epoch(data)
+    σ = data.flux_err
+    ok = isfinite.(t) .& isfinite.(σ) .& (σ .> 0)
+    any(ok) || return Float64(median(t))
+    t0 = Float64(t[findfirst(ok)])          # average offsets: BJDs lose digits
+    w = 1 ./ Float64.(σ[ok]) .^ 2
+    return t0 + sum(w .* (Float64.(t[ok]) .- t0)) / sum(w)
+end
 
 """
     resolve_time_anchor(pc, priors) -> ParametrizationConfig
@@ -777,6 +799,18 @@ function resolve_time_anchor(pc::ParametrizationConfig, priors)
     return ParametrizationConfig(pc.ew, time, pc.geom, pc.use_rho_s, pc.mass,
                                  pc.obs_prior, pc.marginalize_gamma,
                                  pc.sample_a_Rs, pc.t_ref_c, pc.density)
+end
+
+# phic_reference_epoch without photometry: the 1/tc_err²-weighted mean of the
+# measured transit times in the likelihood, else `data.t_ref`.
+function _tt_reference_epoch(data)
+    sets = hasproperty(data, :transit_times) ? data.transit_times : TransitTimeSet[]
+    t = reduce(vcat, (s.tc[s.used] for s in sets); init = Float64[])
+    isempty(t) && return Float64(data.t_ref)
+    σ = reduce(vcat, (s.tc_err[s.used] for s in sets); init = Float64[])
+    w = 1 ./ σ .^ 2
+    t0 = t[1]                               # average offsets: BJDs lose digits
+    return t0 + sum(w .* (t .- t0)) / sum(w)
 end
 
 # The same parametrization with the φ_c epoch filled in.
@@ -1195,6 +1229,9 @@ offset/jitter/dilution/rho_s slots.
                              instrument (`IADData.inst`), `0` for one without
                              a jitter; empty when none are configured
 - `rho_s::Int`             : shared stellar-density slot, or `0` if unused
+- `tt_jitter::Vector{Int}` : one entry per planet, the slot of its transit-time
+                             jitter `sigma_tt_k<k>`, `0` for none; empty when no
+                             planet has one
 
 Future extensions (GP kernels, ARMA, activity, LD groups, acceleration,
 trends) add further fields here.
@@ -1280,6 +1317,10 @@ struct SystemicIndices
     ld_u1_spec::Int    # 0 unless `ObliquityConfig.spec_ld`: quadratic
     ld_u2_spec::Int    # limb darkening of the SPECTROSCOPIC band, read by
                        # the RM anomaly and the Doppler shadow
+    tt_jitter::Vector{Int}  # one per planet: the `sigma_tt_k<k>` slot of planet
+                       # k's measured transit times (days, added in quadrature
+                       # to tc_err), 0 for none. EMPTY unless some planet asks
+                       # for one (`ParamsConfig.tt_jitter`).
 end
 
 # =====================================================================
@@ -1448,7 +1489,8 @@ struct ParamsConfig
     sharing::Dict{Symbol, Vector{Vector{String}}}
     # Per-planet TTV transit count: planet_k → N (number of free
     # per-transit time offsets to allocate). Only consulted for planets
-    # with :TTV in their PlanetDataSources. Defaults to empty.
+    # with :TTV in their PlanetDataSources. Defaults to empty. A planet in
+    # `ttv_epochs` has its list's length here.
     ttv_n_transits::Dict{Int, Int}
     # TTV-NB backend selector — `:ttvfaster` (perturbative 1st-order
     # series, default) or `:nbody` (full ODE integration via
@@ -1459,7 +1501,36 @@ struct ParamsConfig
     # RM / Doppler-tomography model options. `ObliquityConfig()` is the
     # pre-option model; see its docstring.
     obliquity::ObliquityConfig
+    # Planets whose measured transit times (`data.transit_times`) carry a
+    # `sigma_tt_k<p>` jitter, sorted. Empty by default: no slot is allocated
+    # and the transit-time likelihood uses the quoted errors as they are.
+    tt_jitter::Vector{Int}
+    # The transits that carry the free offsets of a `:TTV` planet, when they
+    # are listed (`Params(; ttv_epochs)`): planet_k → sorted transit numbers
+    # counted from its first observed transit, slot I holding `epochs[I]`. A
+    # planet not in it, with `ttv_n_transits[k] = N`, has transits 0..N−1.
+    # Empty by default.
+    ttv_epochs::Dict{Int, Vector{Int}}
 end
+
+# The positional form from before `tt_jitter`: no transit-time jitter.
+ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
+             trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
+             external_priors, sharing, ttv_n_transits, ttv_backend,
+             obliquity::ObliquityConfig) =
+    ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
+                 trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
+                 external_priors, sharing, ttv_n_transits, ttv_backend, obliquity,
+                 Int[])
+# The positional form from before `ttv_epochs`: offsets on transits 0..N−1.
+ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
+             trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
+             external_priors, sharing, ttv_n_transits, ttv_backend,
+             obliquity::ObliquityConfig, tt_jitter::AbstractVector{<:Integer}) =
+    ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
+                 trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
+                 external_priors, sharing, ttv_n_transits, ttv_backend, obliquity,
+                 Vector{Int}(tt_jitter), Dict{Int, Vector{Int}}())
 
 const _VALID_SHARING_CATEGORIES = (
     :sigma, :gamma,                          # RV
@@ -1623,8 +1694,9 @@ end
 
 Every white-noise jitter term in the layout -- a variance added in quadrature to
 the reported errors, physically ≥ 0: the per-instrument RV `sigma_<inst>`,
-photometric `jitter_<label>`, relative-astrometry `sigma_as_<imager>` and
-intermediate-astrometry `sigma_iad_<instrument>` slots,
+photometric `jitter_<label>`, relative-astrometry `sigma_as_<imager>`,
+intermediate-astrometry `sigma_iad_<instrument>` and transit-time
+`sigma_tt_k<planet>` slots,
 and the noise models' `jit_base_*`, `gp_act_jit_*` and `IndicatorFloor`'s floor
 (`ind_floor_<ch>` under its default `:white` kernel, `ind_floor_<ch>_jit` under
 `:qp`). Not jitter despite the names: `jit_act_*` (a signed activity slope), the
@@ -1643,7 +1715,7 @@ function jitter_names(params::Params)
     L = params.layout
     S = L.systemic
     out = Set{String}(L.names[i] for i in vcat(S.rv_sigma, S.pm_jitter, S.as_jitter,
-                                                S.iad_jitter)
+                                                S.iad_jitter, S.tt_jitter)
                       if i > 0)
     for n in L.names
         (startswith(n, "jit_base_") || startswith(n, "gp_act_jit_") ||
@@ -1838,6 +1910,20 @@ function _make_block(modes::PlanetDataSources, start::Int)
     end
 end
 
+# The refusal for transit times on a planet whose model has no transit.
+function _tt_mode_error(k::Int, modes::PlanetDataSources)
+    rv = has_rv(modes)
+    fix = rv ? "Set its planet_mode to one with a transit: RVPM (RV + transit), or " *
+               "RVPM_TTV / RVPM_TTV_NB for TTVs; without RV, PM_ONLY or PM_TTV." :
+               "Set its planet_mode to PM_ONLY (linear ephemeris) or PM_TTV (free " *
+               "per-transit offsets); N-body TTVs (RVPM_TTV_NB) need RV for the " *
+               "masses."
+    return "transit times are given for planet $k, whose model ($(modes)) has no " *
+           "transit, so it predicts no mid-transit times. $fix A planet with :PM " *
+           "needs no photometry: its mid-transit times come from its period, time " *
+           "anchor and orbit."
+end
+
 """
     _instrument_groups(ins_names, category_groups) -> Vector{Tuple{String, Vector{Int}}}
 
@@ -1993,6 +2079,37 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
             push!(names, "sigma_iad_$label")
             iad_jitter[m] = length(names)
         end
+    end
+
+    # Measured transit times: each set's planet must exist and must be one whose
+    # model predicts mid-transit times -- a transiting one, with :PM. An RV-only
+    # (or RV+AS, SB2) planet has no transit in the model, so nothing to compare
+    # a mid-time against.
+    if data !== nothing
+        for s in data.transit_times
+            k = s.planet
+            k <= config.max_kplanet || throw(ArgumentError(
+                "transit times are given for planet $k, but the model has " *
+                "$(config.max_kplanet) planet(s). Fix the set's `planet` (1-based) " *
+                "or raise max_kplanet."))
+            has_pm(config.planet_modes[k]) || throw(ArgumentError(
+                _tt_mode_error(k, config.planet_modes[k])))
+        end
+    end
+    # Their jitters: one `sigma_tt_k<k>` per planet that asks for one. Nothing
+    # is pushed otherwise, so every layout without one is unchanged.
+    tt_jitter = isempty(config.tt_jitter) ? Int[] : zeros(Int, config.max_kplanet)
+    for k in config.tt_jitter
+        1 <= k <= config.max_kplanet || throw(ArgumentError(
+            "tt_jitter names planet $k, but the model has $(config.max_kplanet) " *
+            "planet(s)"))
+        if data !== nothing
+            any(s -> s.planet == k, data.transit_times) || throw(ArgumentError(
+                "a transit-time jitter is configured for planet $k, which has no " *
+                "transit times in the data; drop it from tt_jitter"))
+        end
+        push!(names, "sigma_tt_k$k")
+        tt_jitter[k] = length(names)
     end
 
     pm_names = config.instruments.pm_names
@@ -2230,7 +2347,8 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
                                gd_beta_idx,
                                tomo_alpha_idx, tomo_sigma_line_idx, tomo_ell_v_idx,
                                rm_sigma_ccf_idx, rm_beta_p_idx, f_light_idx,
-                               a_Rs_idx, tomo_jit_idx, ld_u1_spec_idx, ld_u2_spec_idx)
+                               a_Rs_idx, tomo_jit_idx, ld_u1_spec_idx, ld_u2_spec_idx,
+                               tt_jitter)
 
     # --- Noise model parameters ---------------------------------------
     for nm in config.noise_models

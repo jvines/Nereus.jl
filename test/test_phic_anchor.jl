@@ -99,13 +99,27 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
     t_ref_c = pφ.config.parametrization.t_ref_c
 
     @testset "epoch, slot and default prior" begin
-        # The middle of the photometry, not the RV median the Mo anchor uses.
-        @test t_ref_c == median(data.t_phot)
+        # The 1/σ²-weighted middle of the photometry, not the RV median the
+        # Mo anchor uses.
+        w = 1 ./ data.flux_err .^ 2
+        @test t_ref_c ≈ sum(w .* data.t_phot) / sum(w) rtol = 1e-14
         @test data.t_ref == median(t_rv) && t_ref_c != data.t_ref
         @test "phic_k1" in pφ.layout.unfrozen_names
         @test !("Tc_k1" in pφ.layout.unfrozen_names)
         @test Nereus.bounds(pφ.config.priors["phic_k1"]) == (-Float64(π), Float64(π))
         @test mk(:phic; t_ref_c = TG_BJD0).config.parametrization.t_ref_c == TG_BJD0
+        # The weight follows the quoted errors, not the number of points: a
+        # dense, noisy light curve does not outweigh a sparse, precise one.
+        # Points without a finite positive error are left out; with none, the
+        # median photometric time.
+        tw = [1000.0, 1001.0, 1002.0, 2000.0, 2001.0, 2002.0, 2003.0, 2004.0, 2005.0]
+        σw = [0.001, 0.001, 0.001, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+        epoch(t, σ) = Nereus.phic_reference_epoch((; t_phot = t, flux_err = σ, t_ref = 0.0))
+        @test epoch(tw, σw) ≈ (3 * 1001.0 * 1e6 + 6 * 2002.5 * 1e4) / (3e6 + 6e4) rtol = 1e-14
+        @test epoch(tw, σw) < 1100.0 < median(tw)
+        @test epoch(vcat(tw, 5000.0, 6000.0), vcat(σw, 0.0, Inf)) ≈ epoch(tw, σw) rtol = 1e-14
+        @test epoch(tw, fill(NaN, length(tw))) == median(tw)
+        @test epoch(Float64[], Float64[]) == 0.0
         # Without photometry it falls back to the data reference epoch.
         rvd = Data(; t_rv = t_rv, rv = data.rv, rv_err = data.rv_err)
         prv = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],

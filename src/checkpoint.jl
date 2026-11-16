@@ -106,7 +106,9 @@ end
 # same model). Anything else is hashed as usual.
 _hash_skip(x, f::Symbol) = false
 _hash_skip(x::ParamsConfig, f::Symbol) =
-    f === :obliquity && is_default_obliquity(x.obliquity)
+    (f === :obliquity && is_default_obliquity(x.obliquity)) ||
+    (f === :tt_jitter && isempty(x.tt_jitter)) ||
+    (f === :ttv_epochs && isempty(x.ttv_epochs))
 # `density` is carried by the fingerprint's own entry (`density_chart_key`),
 # present only where the reparametrization is active: a model it leaves alone
 # is the model it was, under either value.
@@ -114,7 +116,11 @@ _hash_skip(x::ParametrizationConfig, f::Symbol) =
     (f === :sample_a_Rs && !x.sample_a_Rs) || f === :density
 # No Hipparcos scan geometry: the HGCA/G23H Hipparcos epoch is instantaneous,
 # as it was in every run before the field existed.
-_hash_skip(x::Data, f::Symbol) = f === :hip_scans && x.hip_scans === nothing
+# No measured transit times: the model of every run before the field existed.
+# `t_phot_sorted` is `t_phot` in time order, which `t_phot` already hashes.
+_hash_skip(x::Data, f::Symbol) = (f === :hip_scans && x.hip_scans === nothing) ||
+                                 (f === :transit_times && isempty(x.transit_times)) ||
+                                 f === :t_phot_sorted
 # Per-coordinate epochs equal to `epochs`: the epochs every HGCA had before.
 _hash_skip(x::HGCAData, f::Symbol) =
     (f === :epochs_ra && x.epochs_ra == x.epochs) ||
