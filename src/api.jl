@@ -973,6 +973,45 @@ _cfg_priors(::Nothing) = Dict{String,Any}()
 _cfg_priors(p::AbstractDict) =
     Dict{String,Any}(String(k) => (v isa AbstractDict ? v : _as_prior(v)) for (k, v) in pairs(p))
 
+# The keywords the other fit_* take, routed into the job config fit_rm, fit_ttv
+# and fit_binary build: the star's into `star`, and the model's that have a
+# config twin into `model`. Anything else is refused by name: a run_job config
+# takes every option.
+const _CFG_STAR_KW  = (:M_s, :R_s, :T_eff, :J_mag, :K_mag, :Ab,
+                       :sigma_M_s, :sigma_R_s, :sigma_T_eff)
+const _CFG_MODEL_KW = (:stability, :phot_trend_order, :sharing, :ttv_backend)
+
+function _cfg_route_kw!(cfg::AbstractDict, f::AbstractString, kw)
+    for (k, v) in pairs(kw)
+        s = String(k)
+        if k in _CFG_STAR_KW
+            haskey(cfg["star"], s) && throw(ArgumentError(
+                "$f: `$s` is given in `star` and as a keyword; give it once"))
+            cfg["star"][s] = v
+        elseif k in _CFG_MODEL_KW
+            cfg["model"][s] = v isa Symbol ? String(v) : v
+        elseif k === :time_anchor || k === :parametrization
+            par = Dict{String,Any}(String(a) => b for (a, b) in
+                                   pairs(get(cfg["model"], "parametrization", Dict())))
+            if k === :time_anchor
+                par["time"] = String(v)
+            elseif v isa AbstractDict
+                merge!(par, Dict{String,Any}(String(a) => b for (a, b) in pairs(v)))
+            else
+                par["mass"] = String(v)          # "K_driven", "M_sec_driven", "a_driven"
+            end
+            cfg["model"]["parametrization"] = par
+        else
+            throw(ArgumentError(
+                "$f has no keyword `$s`. It runs as a job config and takes the " *
+                "star's keywords ($(join(_CFG_STAR_KW, ", "))), " *
+                "$(join(_CFG_MODEL_KW, ", ")), time_anchor and parametrization; put " *
+                "any other option in a run_job config (docs/JOB_CONFIG.md)."))
+        end
+    end
+    return cfg
+end
+
 """Coerce `external_priors=` into `Vector{ExternalPrior}`.
 
 Priors on DERIVED quantities rather than sampled parameters. Only `ecc` and
@@ -1456,7 +1495,7 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
                 parametrization = Dict("mass" => "K_driven", "time" => "Tc",
                                        "ew" => "sesinw", "geom" => "b_rr",
                                        "use_rho_s" => true),
-                extra::AbstractDict = Dict())
+                extra::AbstractDict = Dict(), kwargs...)
     haskey(_RM_MODE, flavour) || throw(ArgumentError(
         "flavour must be one of :rm, :reloaded, :arome; got $(repr(flavour))"))
     cfg = Dict{String,Any}("version" => "1.0",
@@ -1465,7 +1504,10 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
         "data" => _data_block(; rv, phot),
         "model" => Dict{String,Any}("max_kplanet" => planets,
                                     "planet_modes" => [_RM_MODE[flavour]],
-                                    "parametrization" => parametrization,
+                                    "parametrization" => parametrization isa AbstractDict ? parametrization :
+                                        Dict{String,Any}("mass" => String(parametrization),
+                                            "time" => "Tc", "ew" => "sesinw",
+                                            "geom" => "b_rr", "use_rho_s" => true),
                                     "stability" => "none"),
         "priors" => _cfg_priors(priors),
         # The `output` block. It was MISSING on all three config-route fits,
@@ -1487,6 +1529,7 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
             "noise"             => td.noise,
             "transdim_fraction" => td.transdim_fraction)
     end
+    _cfg_route_kw!(cfg, "fit_rm", kwargs)
     merge!(cfg, Dict{String,Any}(extra))
     return _run_config(cfg; op = "fit_rm")
 end
@@ -1521,7 +1564,7 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, output_dir = nothing,
-                 extra::AbstractDict = Dict())
+                 extra::AbstractDict = Dict(), kwargs...)
     (phot === nothing && transit_times === nothing) && throw(ArgumentError(
         "fit_ttv needs photometry or measured transit_times"))
     if nbody
@@ -1568,6 +1611,7 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
             "noise"             => td.noise,
             "transdim_fraction" => td.transdim_fraction)
     end
+    _cfg_route_kw!(cfg, "fit_ttv", kwargs)
     merge!(cfg, Dict{String,Any}(extra))
     return _run_config(cfg; op = "fit_ttv")
 end
@@ -1623,7 +1667,7 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
                     priors = nothing, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
-                    output_dir = nothing, extra::AbstractDict = Dict())
+                    output_dir = nothing, extra::AbstractDict = Dict(), kwargs...)
     mode = secondary === nothing ? "BINARY_RV" : "SB2"
     data = _data_block(; rv)
     secondary === nothing || (data["rv_secondary"] =
@@ -1654,6 +1698,7 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
             "noise"             => td.noise,
             "transdim_fraction" => td.transdim_fraction)
     end
+    _cfg_route_kw!(cfg, "fit_binary", kwargs)
     merge!(cfg, Dict{String,Any}(extra))
     return _run_config(cfg; op = "fit_binary")
 end

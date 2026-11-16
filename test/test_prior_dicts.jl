@@ -108,3 +108,20 @@ end
     @test built["K_k1"].dist isa Uniform && built["K_k1"].hi == 50.0
 end
 
+@testset "fit_rm / fit_ttv / fit_binary route the other fit_* keywords into the config" begin
+    cfg() = Dict{String,Any}("star" => Dict{String,Any}(),
+                             "model" => Dict{String,Any}("max_kplanet" => 1))
+    c = Nereus._cfg_route_kw!(cfg(), "fit_ttv",
+                              (M_s = 1.0, R_s = 0.9, T_eff = 5700.0, stability = :none,
+                               ttv_backend = :ttvfaster, time_anchor = :phic,
+                               parametrization = :a_driven))
+    @test c["star"] == Dict("M_s" => 1.0, "R_s" => 0.9, "T_eff" => 5700.0)
+    @test c["model"]["stability"] == "none" && c["model"]["ttv_backend"] == "ttvfaster"
+    @test c["model"]["parametrization"] == Dict("time" => "phic", "mass" => "a_driven")
+    e = try Nereus._cfg_route_kw!(cfg(), "fit_ttv", (density = :rho_star,)); nothing
+        catch err; err end
+    @test e isa ArgumentError && occursin("no keyword `density`", e.msg) &&
+          occursin("run_job", e.msg)
+    c2 = cfg(); c2["star"]["M_s"] = 1.0
+    @test_throws ArgumentError Nereus._cfg_route_kw!(c2, "fit_binary", (M_s = 1.1,))
+end
