@@ -2957,6 +2957,21 @@ function _run_detection_limits!(cfg, chains, params::Params, data::Data,
     planet = Int(_get(out_cfg, :detection_limits_planet; default = 1))
     save_pdf = Bool(_get(out_cfg, :save_pdf; default = false))
 
+    # Limits bound one planet's K. A photometry-only planet has none, and a
+    # binary orbit has two (K_A, K_B), so there is nothing to compute, asked or not.
+    blk = planet <= length(params.layout.planet_blocks) ?
+          params.layout.planet_blocks[planet] : nothing
+    if blk !== nothing && (!has_K(blk) || is_sb2(blk))
+        summary["detection_limits"] = Dict{String, Any}(
+            "status" => "skipped",
+            "reason" => is_sb2(blk) ?
+                "planet $planet is a binary orbit with two amplitudes, K_A and " *
+                "K_B; detection limits bound a planet's K." :
+                "planet $planet has no RV amplitude (photometry only); " *
+                "detection limits bound a planet's K.")
+        return
+    end
+
     # Unasked, only a chain that explored the period prior gets limits. A fit
     # that found the planet holds P to a sliver of it -- 1% on a transiting
     # planet's bracketed period -- and its K quantiles per period bin would be
