@@ -125,3 +125,19 @@ end
     c2 = cfg(); c2["star"]["M_s"] = 1.0
     @test_throws ArgumentError Nereus._cfg_route_kw!(c2, "fit_binary", (M_s = 1.1,))
 end
+
+@testset "fit_rm: the default time anchor applies" begin
+    # fit_rm passed time = "Tc", so its Tc window held several copies of a
+    # short-period orbit; the other fits take the default anchor (φ_c)
+    @test !haskey(Nereus._RM_PARAMETRIZATION, "time")
+    @test Nereus._rm_parametrization(:M_sec_driven) ==
+          merge(Nereus._RM_PARAMETRIZATION, Dict("mass" => "M_sec_driven"))
+    @test Nereus._rm_parametrization(Dict(:time => "Tc", :mass => "K_driven")) ==
+          Dict("time" => "Tc", "mass" => "K_driven")
+    cfg = Dict{String,Any}("star" => Dict{String,Any}(),
+        "model" => Dict{String,Any}("parametrization" =>
+                                    Nereus._rm_parametrization(Nereus._RM_PARAMETRIZATION)))
+    Nereus._cfg_route_kw!(cfg, "fit_rm", (time_anchor = :Tc,))
+    @test cfg["model"]["parametrization"]["time"] == "Tc"
+    @test !haskey(Nereus._RM_PARAMETRIZATION, "time")      # the default is not changed
+end
