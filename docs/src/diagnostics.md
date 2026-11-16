@@ -147,14 +147,17 @@ v = vet_candidate(t, rv, rv_err, P, K, e;
                   P_rot      = 12.3,
                   occupancy  = 0.94, dlnZ = 8.1)
 
-v.decision      # :promote | :reject | :ambiguous
+v.decision      # :candidate | :reject | :flagged
 v.reasons       # which vetoes failed, in words
 ```
 
 `CandidateVerdict` reports a decision plus the individual vetoes —
 `detection`, `activity_indicator`, `rotation`, `alias`, `coherence`,
 `physicality` — so you can see *which* test killed a candidate rather than
-just that something did.
+just that something did. A veto reads `:inapplicable` when its data are absent
+or the baseline is too short to search: the alias veto needs more than 1 d, the
+indicator veto more than P/2. The indicator search reaches P and its harmonics
+down to P/2, below 1 d when P is.
 
 Two things to get right:
 
