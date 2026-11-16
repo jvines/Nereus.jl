@@ -165,3 +165,49 @@ end
         catch err; err end
     @test e isa ArgumentError && occursin("unknown sampler.name=`nope`", e.msg)
 end
+
+@testset "engine defaults: walker counts and fit-health ensembles" begin
+    # A job that leaves the engine out runs pt_emcee (transdim_pt_emcee with a
+    # transdim block); its walker count, fit-health ensemble class and
+    # diagnostics read "" for the name, so they treated it as no ensemble.
+    p2 = (layout = (unfrozen_names = ["a", "b"],),)              # 2·2 + 2 = 6
+    p60 = (layout = (unfrozen_names = string.("x", 1:60),),)     # 2·60 + 2 = 122
+    c(smp; td = false) = begin
+        d = Dict{String,Any}("sampler" => smp)
+        td && (d["transdim"] = Dict{String,Any}("max_kplanet" => 1))
+        d
+    end
+    nw(smp, p = p2; td = false) = Nereus._ensemble_n_walkers(c(smp; td), p)
+    @test nw(Dict{String,Any}()) == 100
+    @test nw(Dict{String,Any}(); td = true) == 100
+    @test Nereus._ensemble_n_walkers(Dict{String,Any}(), p2) == 100       # no block
+    @test nw(Dict("name" => "pt_emcee"), p60) == 122
+    # each ensemble's own default, and its own rounding
+    @test nw(Dict("name" => "pt_whitening")) == 40
+    @test nw(Dict("name" => "pt_whitening", "kwargs" => Dict("n_walkers" => 41))) == 42
+    @test nw(Dict("name" => "ensemble")) == 50
+    @test nw(Dict("name" => "ensemble", "kwargs" => Dict("n_walkers" => 51))) == 51
+    @test nw(Dict("name" => "ensemble", "kwargs" => Dict("n_walkers" => 7)), p60) == 122
+    for e in keys(Nereus._WALKER_ENSEMBLES)
+        @test :n_walkers in Base.kwarg_decl(first(methods(Nereus.ENGINES[e])))
+        @test Nereus._is_coupled_population(c(Dict("name" => e)))
+    end
+    # one cold chain (pt), sequential chains, resampled or nested draws: no walkers
+    for e in ("pt", "pt_hmc", "nuts", "ess", "rjmcmc", "pa", "smc", "nested")
+        @test nw(Dict("name" => e)) === nothing
+    end
+    # fit health splits coupled members: the walker ensembles and the annealed
+    # populations, not independent chains (docs/src/sampler_validation.md)
+    for e in ("pa", "smc")
+        @test Nereus._is_coupled_population(c(Dict("name" => e)))
+    end
+    for e in ("pt", "pt_hmc", "nuts", "ess", "rjmcmc", "nested")
+        @test !Nereus._is_coupled_population(c(Dict("name" => e)))
+    end
+    @test Nereus._is_coupled_population(c(Dict{String,Any}()))
+    @test Nereus._is_coupled_population(c(Dict{String,Any}(); td = true))
+    @test Nereus._is_coupled_population(Dict("sampler" => "pt_whitening"))   # bare name
+    @test Nereus._job_sampler_name(Dict("sampler" => "nuts")) == "nuts"
+    @test Nereus._job_sampler_name(Dict{String,Any}("sampler" => nothing)) == "pt_emcee"
+    @test Nereus._job_sampler_name(c(Dict{String,Any}(); td = true)) == "transdim_pt_emcee"
+end
