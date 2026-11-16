@@ -623,7 +623,7 @@ function _validate_config(cfg::AbstractDict)
     return nothing
 end
 
-# `data.transit_times`: a list of per-planet blocks, as Argus sends them
+# `data.transit_times`: a list of per-planet blocks
 # (docs/JOB_CONFIG.md). Everything that can be checked from the config alone,
 # collected with the rest: the shape, the time system, the array lengths, the
 # errors, the planet index and that planet's mode (it must have a transit to

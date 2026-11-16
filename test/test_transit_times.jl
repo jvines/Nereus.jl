@@ -10,7 +10,7 @@ const TT_P = 2.7182818
 const TT_T0 = 2_458_000.25
 const TT_MIN = 1 / 1440                       # one minute, days
 
-# A `data.transit_times` block as Argus sends it.
+# A `data.transit_times` block in the job-config format.
 function _tt_block(ep, tc, err; planet = 1, time_system = "BJD_TDB", source = nothing,
                    ref = Dict("t0" => TT_T0, "period" => TT_P, "epoch_zero" => 0),
                    extra...)
@@ -608,7 +608,7 @@ end
         d2 = data_of(Dict{String, Any}("transit_times" => [blk], "transit_photometry" => phot))
         c, e = @test_logs (:info, r"3 more in the photometry") Nereus._ttv_slot_kwargs(mdl, d2, [PM_TTV])
         @test e[1] == sort(vcat([-2, 3, 4], ep)) .+ 2
-        # An empty dict names no planet (Argus sends "ttv_n_transits": {}).
+        # An empty dict names no planet ("ttv_n_transits": {}).
         c, e = @test_logs (:info,) Nereus._ttv_slot_kwargs(
             Dict{String, Any}("ttv_n_transits" => Dict(), "ttv_epochs" => Dict()), d1, [PM_TTV])
         @test e[1] == ep[1:end-1]

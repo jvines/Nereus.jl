@@ -1,4 +1,4 @@
-# Externally measured mid-transit times (`data.transit_times`; Argus sends them).
+# Externally measured mid-transit times (`data.transit_times`).
 #
 # One `TransitTimeSet` per planet: integer epochs, mid-transit times in BJD_TDB,
 # their 1σ errors and a provenance string per point. The epochs are labels:

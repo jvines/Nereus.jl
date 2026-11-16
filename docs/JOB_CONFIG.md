@@ -643,7 +643,7 @@ fit (a linear or TTV ephemeris from published mid-times).
 - **`relastrom`** — `{csv}` or `values` (`t`, `ra_off`, `dec_off`, `ra_err`,
   `dec_err`, `planet_idx?`).
 - **`gaia_dr3`** — `{params:[α,δ,ϖ,μα*,μδ], cov:5×5, t_ref}`.
-- **`transit_times`** — measured mid-transit times, as Argus sends them: a list
+- **`transit_times`** — measured mid-transit times: a list
   of per-planet blocks (schema above). See "Transit times" below.
 
 ### Transit times (`data.transit_times`)
@@ -747,8 +747,7 @@ next one in the window does.
   increasing and ≥ 0: `ttv_k1_t<I>` is transit `e_I`. Tens of transit times
   over thousands of epochs need tens of slots, not thousands.
 - `ttv_n_transits = N` is `ttv_epochs = [0, …, N−1]` and gives the same fit.
-  Naming one planet in both is an error. An empty dict names no planet (Argus
-  sends `"ttv_n_transits": {}`).
+  Naming one planet in both is an error. An empty dict names no planet.
 
 **Default.** A `*_TTV` planet that neither key names:
 - with transit times: one slot per observed transit, those of its transit times
