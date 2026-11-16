@@ -35,7 +35,8 @@ a window function on a shared frequency grid.
   `samples_per_peak / baseline`.
 - `window_def ∈ (:gls_tt, :unit_signal)` — `:gls_tt` is GLS(t, t),
   matching the HD 18599 paper (Vines+ 2023). `:unit_signal` is the
-  canonical Roberts+ 1987 window function `GLS(t, ones)`. The two peak
+  canonical spectral window |Σ exp(2πi f tⱼ)|²/N² (Roberts+ 1987), with no
+  FAP (its thresholds and peak FAPs are NaN). The two peak
   at the same daily aliases for typical RV cadences but differ in
   low-frequency power.
 - Extra `kwargs...` forwarded to the chosen estimator (e.g. `alpha` for
@@ -92,21 +93,16 @@ function find_rv_planets(t::AbstractVector{<:Real},
         push!(inds, name => pg_i)
     end
 
-    # Window function — GLS regardless of `method`. By default GLS(t,t)
-    # matching the HD 18599 paper convention; canonical Roberts+ 1987
-    # via `window_def = :unit_signal`.
-    win_y, win_e = if window_def === :gls_tt
-        (copy(t_f), ones(length(t_f)))   # GLS(t, t) — t as the signal
-    else
-        (ones(length(t_f)), ones(length(t_f)))   # canonical unit signal
-    end
-    win = gls_periodogram(t_f, win_y, win_e;
-                           period_min = period_min,
-                           period_max = period_max,
-                           n_freqs = n_freqs,
-                           samples_per_peak = samples_per_peak,
-                           fap_levels = fap_levels,
-                           max_peaks = max_candidates)
+    # Window function, whatever `method`: GLS(t, t) by default, matching the
+    # HD 18599 paper convention; the spectral window (Roberts+ 1987) with
+    # `window_def = :unit_signal`.
+    win_kw = (; period_min = period_min, period_max = period_max, n_freqs = n_freqs,
+                samples_per_peak = samples_per_peak, fap_levels = fap_levels,
+                max_peaks = max_candidates)
+    win = window_def === :gls_tt ?
+          gls_periodogram(t_f, copy(t_f), ones(length(t_f)); win_kw..., kwargs...) :
+          _spectral_window_pgram(t_f; win_kw...,
+                                 min_log_sep = get(kwargs, :min_log_sep, 0.0))
 
     return PgramSet(method, rv_pg, inds, win, length(t_f), T)
 end

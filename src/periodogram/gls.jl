@@ -32,6 +32,23 @@ function _gls_core(t::AbstractVector{<:Real},
     return _LS.power(pg), length(t), pg, plan
 end
 
+# Frequency grid: uniform between 1/period_max (default: the baseline) and
+# 1/period_min, `n_freqs` long or `samples_per_peak` per peak width 1/T.
+function _gls_grid(t, period_min::Real, period_max, n_freqs, samples_per_peak::Int)
+    isfinite(period_min) && period_min > 0 ||
+        throw(ArgumentError("period_min must be > 0"))
+    T = Float64(maximum(t) - minimum(t))
+    T > 0 || throw(ArgumentError("time baseline must be > 0"))
+    Pmax = period_max === nothing ? T : Float64(period_max)
+    Pmax > period_min ||
+        throw(ArgumentError("period_max must be > period_min"))
+    f_min = 1.0 / Pmax
+    f_max = 1.0 / period_min
+    nf = n_freqs !== nothing ? Int(n_freqs) :
+         max(64, ceil(Int, (f_max - f_min) * T * samples_per_peak))
+    return collect(range(f_min, f_max; length = nf))
+end
+
 """
     gls_periodogram(t, y, err; period_min, period_max, n_freqs,
                      samples_per_peak, fap_levels=[0.1,0.05,0.01,0.001],
@@ -56,23 +73,7 @@ function gls_periodogram(t::AbstractVector{<:Real},
                           kwargs...)
     length(t) == length(y) == length(err) ||
         throw(ArgumentError("t, y, err length mismatch"))
-    isfinite(period_min) && period_min > 0 ||
-        throw(ArgumentError("period_min must be > 0"))
-    T = Float64(maximum(t) - minimum(t))
-    T > 0 || throw(ArgumentError("time baseline must be > 0"))
-    Pmax = period_max === nothing ? T : Float64(period_max)
-    Pmax > period_min ||
-        throw(ArgumentError("period_max must be > period_min"))
-
-    f_min = 1.0 / Pmax
-    f_max = 1.0 / period_min
-    nf = if n_freqs !== nothing
-        Int(n_freqs)
-    else
-        # samples_per_peak per intrinsic peak width Δf = 1/T
-        max(64, ceil(Int, (f_max - f_min) * T * samples_per_peak))
-    end
-    freqs = collect(range(f_min, f_max; length = nf))
+    freqs = _gls_grid(t, period_min, period_max, n_freqs, samples_per_peak)
     pwr, n_obs, ls_pg, plan = _gls_core(t, y, err, freqs)
     P = 1.0 ./ freqs
 
@@ -99,6 +100,28 @@ function gls_periodogram(t::AbstractVector{<:Real},
                            fap_func = fap_func)
     return GLSPgram(freqs, P, pwr, collect(Float64, fap_levels),
                      fap_thresh, n_obs, peaks)
+end
+
+# The spectral window of the sampling, W(f) = |Σⱼ exp(2πi f tⱼ)|² / N² (Roberts+
+# 1987), on the grid `gls_periodogram` builds from the same arguments. GLS cannot
+# give it: GLS fits and removes a mean, so a constant series has no power left
+# (≈1e-11 everywhere). A window has no false-alarm probability, so the thresholds
+# and the peaks' `fap` are NaN.
+function _spectral_window_pgram(t::AbstractVector{<:Real};
+                                period_min::Real = 1.0,
+                                period_max::Union{Nothing, Real} = nothing,
+                                n_freqs::Union{Nothing, Int} = nothing,
+                                samples_per_peak::Int = 50,
+                                fap_levels::Vector{<:Real} = [0.1, 0.05, 0.01, 0.001],
+                                max_peaks::Int = 5,
+                                min_log_sep::Real = 0.0)
+    freqs = _gls_grid(t, period_min, period_max, n_freqs, samples_per_peak)
+    pwr = _window_function(collect(Float64, t), freqs)
+    P = 1.0 ./ freqs
+    peaks = extract_peaks(freqs, P, pwr; max_peaks = max_peaks,
+                          min_log_sep = Float64(min_log_sep))
+    return GLSPgram(freqs, P, pwr, collect(Float64, fap_levels),
+                    fill(NaN, length(fap_levels)), length(t), peaks)
 end
 
 """
@@ -173,9 +196,9 @@ function gls_rotation(t::AbstractVector{<:Real},
                 min_log_sep = min_log_sep)
     sec_pg = [gls_periodogram(tv[idx], fvn[idx], evn[idx]; common...) for idx in groups]
     stitched = gls_periodogram(tv, fvn, evn; common...)
-    win_y, win_e = window_def === :gls_tt ? (copy(tv), ones(length(tv))) :
-                                            (ones(length(tv)), ones(length(tv)))
-    window = gls_periodogram(tv, win_y, win_e; common...)
+    window = window_def === :gls_tt ?
+             gls_periodogram(tv, copy(tv), ones(length(tv)); common...) :
+             _spectral_window_pgram(tv; common...)
 
     return GLSSectorSet(names, sec_pg, stitched, window, length(tv), T)
 end
