@@ -964,6 +964,15 @@ PriorSpec is a Julia type. Accept both that and an already-constructed prior.
 _as_prior(x::PriorSpec) = x
 _as_prior(::Nothing) = nothing
 _as_prior(x::Real) = FixedPrior(float(x))
+
+# The `priors` of a fit_* that runs as a job config (fit_rm, fit_ttv, fit_binary),
+# taking what the other fit_* take: nothing, prior objects (the Python client
+# sends these), numbers (fixed), or job-config dicts (`{"type", "args"}`), which
+# pass through unchanged. The config's priors block accepts prior objects.
+_cfg_priors(::Nothing) = Dict{String,Any}()
+_cfg_priors(p::AbstractDict) =
+    Dict{String,Any}(String(k) => (v isa AbstractDict ? v : _as_prior(v)) for (k, v) in pairs(p))
+
 """Coerce `external_priors=` into `Vector{ExternalPrior}`.
 
 Priors on DERIVED quantities rather than sampled parameters. Only `ecc` and
@@ -1440,7 +1449,7 @@ form, which carries known amplitude and shape error at high vsini/β and should
 only be used for methods comparison.
 """
 function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arome,
-                priors::AbstractDict = Dict(), planets::Int = 1,
+                priors = nothing, planets::Int = 1,
                 engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, output_dir = nothing,
@@ -1458,7 +1467,7 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
                                     "planet_modes" => [_RM_MODE[flavour]],
                                     "parametrization" => parametrization,
                                     "stability" => "none"),
-        "priors" => Dict{String,Any}(priors),
+        "priors" => _cfg_priors(priors),
         # The `output` block. It was MISSING on all three config-route fits,
         # which declared `plots`, `plot_kwargs` and `save_pdf` in their
         # signatures and then never referenced them -- so `_make_plots` got an
@@ -1508,7 +1517,7 @@ takes neither keyword, and needs `rv`: the planets' masses come from it.
 function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  nbody::Bool = false, planets::Int = 2,
                  ttv_n_transits = nothing, ttv_epochs = nothing,
-                 star::AbstractDict = Dict(), priors::AbstractDict = Dict(),
+                 star::AbstractDict = Dict(), priors = nothing,
                  engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, output_dir = nothing,
@@ -1536,7 +1545,7 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
         "model" => Dict{String,Any}("max_kplanet" => planets,
                                     "planet_modes" => fill(mode, planets),
                                     "stability" => "none"),
-        "priors" => Dict{String,Any}(priors),
+        "priors" => _cfg_priors(priors),
         # The `output` block. It was MISSING on all three config-route fits,
         # which declared `plots`, `plot_kwargs` and `save_pdf` in their
         # signatures and then never referenced them -- so `_make_plots` got an
@@ -1611,7 +1620,7 @@ case the component masses come from BOTH amplitudes rather than the SB1 mass
 function.
 """
 function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
-                    priors::AbstractDict = Dict(), engine = nothing, transdim = nothing,
+                    priors = nothing, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                     output_dir = nothing, extra::AbstractDict = Dict())
@@ -1625,7 +1634,7 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
         "model" => Dict{String,Any}("max_kplanet" => 1,
                                     "planet_modes" => [mode],
                                     "stability" => "none"),
-        "priors" => Dict{String,Any}(priors),
+        "priors" => _cfg_priors(priors),
         # The `output` block. It was MISSING on all three config-route fits,
         # which declared `plots`, `plot_kwargs` and `save_pdf` in their
         # signatures and then never referenced them -- so `_make_plots` got an

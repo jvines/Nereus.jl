@@ -92,3 +92,19 @@ end
         "prior" => Dict{String,Any}("type" => "gaussian", "args" => [0.0, 0.3])))
     @test ext.quantity === :ecc && ext.prior.dist isa Normal
 end
+
+@testset "prior dicts: fit_rm / fit_ttv / fit_binary take nothing or prior objects" begin
+    # These three build a job config. The Python client sends `nothing` when it
+    # has no priors and prior objects when it has some; both used to fail.
+    @test Nereus._cfg_priors(nothing) == Dict{String,Any}()
+    cfg = Nereus._cfg_priors(Dict(:P_k1 => Nereus.UniformPrior(9.0, 11.0),
+                                  "e_k1" => 0.0,
+                                  "K_k1" => Dict("type" => "UniformPrior",
+                                                 "args" => [0.0, 50.0])))
+    @test cfg["P_k1"].dist isa Uniform && cfg["e_k1"].dist isa Nereus.Fixed
+    @test cfg["K_k1"] isa AbstractDict          # job-config form passes through
+    built = Nereus._build_priors(cfg)
+    @test built["P_k1"] === cfg["P_k1"] && built["e_k1"].dist isa Nereus.Fixed
+    @test built["K_k1"].dist isa Uniform && built["K_k1"].hi == 50.0
+end
+
