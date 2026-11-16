@@ -330,9 +330,10 @@ end
         arr[:, findfirst(==(:P_k1), fitted), 1] .= exp.(log(100.0) .* rand(rng, n))
         Chains(arr, fitted)
     end
-    run(params, data, out_cfg) = mktempdir() do dir
+    run(params, data, out_cfg; sampler = Dict("name" => "pt_emcee")) = mktempdir() do dir
         summary = Dict{String, Any}()
-        cfg = Dict("sampler" => Dict("name" => "pt_emcee"), "output" => out_cfg)
+        cfg = Dict{String, Any}("output" => out_cfg)
+        sampler === nothing || (cfg["sampler"] = sampler)
         Nereus._run_detection_limits!(cfg, explored(params, 2000), params, data, dir,
                                       summary)
         summary["detection_limits"]
@@ -350,6 +351,12 @@ end
         @test dl["status"] == "skipped" && occursin("binary", dl["reason"])
     end
     @test_throws ArgumentError Nereus._planet_P_K_draws(explored(params, 10), params, 1)
+    # a job without a sampler name runs pt_emcee, so the limits are on by default:
+    # reading "" for the name turned them off
+    for smp in (Dict{String, Any}(), Dict{String, Any}("kwargs" => Dict("seed" => 1)), nothing)
+        dl = @test_logs min_level = Logging.Warn run(params, data, Dict(); sampler = smp)
+        @test dl["status"] == "skipped" && occursin("binary", dl["reason"])
+    end
 
     # a photometry-only planet 1 next to an RV planet 2
     data2 = Data(; t_rv = collect(0.0:5.0:200.0), rv = randn(rng, 41), rv_err = ones(41),
