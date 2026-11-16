@@ -92,3 +92,36 @@ end
         "prior" => Dict{String,Any}("type" => "gaussian", "args" => [0.0, 0.3])))
     @test ext.quantity === :ecc && ext.prior.dist isa Normal
 end
+
+@testset "prior dicts: fit_rm / fit_ttv / fit_binary take nothing or prior objects" begin
+    # These three build a job config. The Python client sends `nothing` when it
+    # has no priors and prior objects when it has some; both used to fail.
+    @test Nereus._cfg_priors(nothing) == Dict{String,Any}()
+    cfg = Nereus._cfg_priors(Dict(:P_k1 => Nereus.UniformPrior(9.0, 11.0),
+                                  "e_k1" => 0.0,
+                                  "K_k1" => Dict("type" => "UniformPrior",
+                                                 "args" => [0.0, 50.0])))
+    @test cfg["P_k1"].dist isa Uniform && cfg["e_k1"].dist isa Nereus.Fixed
+    @test cfg["K_k1"] isa AbstractDict          # job-config form passes through
+    built = Nereus._build_priors(cfg)
+    @test built["P_k1"] === cfg["P_k1"] && built["e_k1"].dist isa Nereus.Fixed
+    @test built["K_k1"].dist isa Uniform && built["K_k1"].hi == 50.0
+end
+
+@testset "fit_rm / fit_ttv / fit_binary route the other fit_* keywords into the config" begin
+    cfg() = Dict{String,Any}("star" => Dict{String,Any}(),
+                             "model" => Dict{String,Any}("max_kplanet" => 1))
+    c = Nereus._cfg_route_kw!(cfg(), "fit_ttv",
+                              (M_s = 1.0, R_s = 0.9, T_eff = 5700.0, stability = :none,
+                               ttv_backend = :ttvfaster, time_anchor = :phic,
+                               parametrization = :a_driven))
+    @test c["star"] == Dict("M_s" => 1.0, "R_s" => 0.9, "T_eff" => 5700.0)
+    @test c["model"]["stability"] == "none" && c["model"]["ttv_backend"] == "ttvfaster"
+    @test c["model"]["parametrization"] == Dict("time" => "phic", "mass" => "a_driven")
+    e = try Nereus._cfg_route_kw!(cfg(), "fit_ttv", (density = :rho_star,)); nothing
+        catch err; err end
+    @test e isa ArgumentError && occursin("no keyword `density`", e.msg) &&
+          occursin("run_job", e.msg)
+    c2 = cfg(); c2["star"]["M_s"] = 1.0
+    @test_throws ArgumentError Nereus._cfg_route_kw!(c2, "fit_binary", (M_s = 1.1,))
+end

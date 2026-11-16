@@ -494,6 +494,7 @@ function _validate_config(cfg::AbstractDict)
     # ---- priors ----
     if _has(cfg, :priors)
         for (name, spec) in _get(cfg, :priors)
+            spec isa PriorSpec && continue     # a prior object (fit_rm / fit_ttv / fit_binary)
             _has(spec, :type) || (push!(errs, "priors[`$name`] missing `type`"); continue)
             ptype = string(_get(spec, :type))
             is_prior_name(ptype) || push!(errs,
@@ -1584,6 +1585,7 @@ _prior_constructor(name) = _PRIOR_TYPES[canonical_prior(name)]
 function _build_priors(priors_cfg)
     out = Dict{String, PriorSpec}()
     for (name, spec) in priors_cfg
+        spec isa PriorSpec && (out[String(name)] = spec; continue)   # from fit_rm / fit_ttv / fit_binary
         T = _prior_constructor(_get(spec, :type; required = true))
         args = collect(_get(spec, :args; default = Any[]))
         out[String(name)] = T(args...)

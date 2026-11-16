@@ -336,6 +336,15 @@ end
         @test transit_times_log_likelihood(th, dm) ≈ -sum(log.(2π .* σ .^ 2)) / 2
     end
 
+    @testset "a prior object in the priors block passes validation" begin
+        ep, tc, σ = _tt_linear(MersenneTwister(6); n = 10, span = 100)
+        @test Nereus._validate_config(Dict{String, Any}(
+            "output_dir" => mktempdir(), "sampler" => _tt_sampler(),
+            "model" => Dict{String, Any}("max_kplanet" => 1, "planet_modes" => ["PM_ONLY"]),
+            "priors" => Dict{String, Any}("P_k1" => Nereus.UniformPrior(9.0, 11.0)),
+            "data" => Dict{String, Any}("transit_times" => [_tt_block(ep, tc, σ)]))) === nothing
+    end
+
     @testset "PM_TTV_NB: not exported, not a config mode, refused by Params" begin
         @test !(:PM_TTV_NB in names(Nereus))
         ep, tc, σ = _tt_linear(MersenneTwister(5); n = 10, span = 100)

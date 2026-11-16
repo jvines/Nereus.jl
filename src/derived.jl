@@ -91,11 +91,15 @@ Planet radius in Earth radii.
 planet_radius_earth(R_s::Real, rr::Real) = rr * R_s * _RS / _RE
 
 """
-    inclination_deg(b, a_Rs) -> i [degrees]
+    inclination_deg(b, a_Rs, e = 0, sinw = 0) -> i [degrees]
 
-Orbital inclination from impact parameter and a/R*.
+Orbital inclination from impact parameter and a/R*, as the likelihood has it
+(`planet_geometry`): cos i = b (1 + e sin ω) / ((a/R*) (1 − e²)), clamped to
+[-1, 1], so a draw with b beyond what a/R* allows reads i = 0 instead of
+throwing.
 """
-inclination_deg(b::Real, a_Rs::Real) = acosd(b / a_Rs)
+inclination_deg(b::Real, a_Rs::Real, e::Real = 0, sinw::Real = 0) =
+    acosd(clamp(b * (1 + e * sinw) / (a_Rs * (1 - e^2)), -1, 1))
 
 """
     semimajor_axis_au(P, M_s, M_p = 0) -> a [AU]
@@ -948,7 +952,7 @@ function compute_derived(chains, params::Params;
             derived["b"] = b_samp
 
             if haskey(derived, "a_Rs")
-                inc = inclination_deg.(b_samp, derived["a_Rs"])
+                inc = inclination_deg.(b_samp, derived["a_Rs"], e, sin.(w))
                 derived["inc_deg"] = inc
             end
         end
