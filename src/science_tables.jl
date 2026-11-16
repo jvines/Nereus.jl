@@ -19,6 +19,7 @@ import JSON3
 # base param name → (unit, is_angle_in_radians). Angles are converted to deg.
 const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "P" => ("d", false),          "K" => ("m/s", false),
+    "sigma_tt" => ("d", false),   # transit-time jitter (`sigma_tt_k<n>`), days
     "K_A" => ("m/s", false),      "K_B" => ("m/s", false),   # SB2 amplitudes
     "sesinw" => ("", false),      "secosw" => ("", false),
     "esinw" => ("", false),       "ecosw" => ("", false),
@@ -89,6 +90,7 @@ function sci_param_unit(name::AbstractString, params::Params)
         return _SCI_UNITS[m.captures[1]]
     end
     haskey(_SCI_UNITS, s) && return _SCI_UNITS[s]
+    occursin(_TTV_SLOT_NAME, s) && return ("d", false)  # free TTV offset (days)
     # γ/jitter on a PHOTOMETRIC instrument live in relative flux (dimensionless),
     # not m/s — disambiguate by which instrument the param belongs to.
     # Astrometric jitter is in mas, and it is spelled `sigma_as_<imager>`
@@ -260,6 +262,9 @@ function science_fitted(chains, params::Params)
                 "the prior restricts this angle to part of its full range " *
                 "$(restr[name]); the bound is the prior's, not the data's")
         end
+        # A free TTV offset: which transit it is (src/ttv.jl).
+        ep = ttv_name_epoch(params.config, name)
+        ep === nothing || (d["epoch"] = ep)
         push!(entries, name => d)
     end
 
@@ -270,6 +275,11 @@ function science_fitted(chains, params::Params)
         "note" => "stats conditioned on each component being active; " *
                   "occupancy field = P(component active | data)",
     )
+    ttv_rows = [k => v["epoch"] for (k, v) in entries if haskey(v, "epoch")]
+    if !isempty(ttv_rows)
+        conditioning["ttv_slot_epochs"] = ["$k=$e" for (k, e) in ttv_rows]
+        conditioning["ttv_epoch_note"] = TTV_EPOCH_NOTE
+    end
     _spin_sense_notes!(entries, conditioning, params,
                        name -> name == "i_star" || startswith(name, "lambda_k"))
     return entries, conditioning
@@ -582,16 +592,23 @@ end
 _yamlval(v) = v isa AbstractString ? "\"$v\"" :
               v isa AbstractVector ? "[" * join(string.(v), ", ") * "]" : string(v)
 
+# What a free TTV offset's `epoch` counts, for the tables that show it.
+const TTV_EPOCH_NOTE = "epoch of a ttv_k<p>_t<I> offset: the transit it holds, " *
+                       "counted from the planet's first observed transit (0)"
+
 function _write_dat(path, entries, title; note = nothing)
     open(path, "w") do io
         println(io, "# ", title)
         note === nothing || println(io, "# * ", note)
+        any(haskey(v, "epoch") for (_, v) in entries) &&
+            println(io, "# ", TTV_EPOCH_NOTE)
         @printf(io, "# %-22s %16s %14s %16s %-8s %8s\n",
                 "parameter", "value", "err_lo", "err_hi", "unit", "occ")
         for (k, v) in entries
             vs, lo, hi = _fmt3(v["value"], v["err_lo"], v["err_hi"])
             rail = (get(v, "railed", false) ? "  railed" : "") *
-                   (haskey(v, "spin_sense_note") ? "  *" : "")
+                   (haskey(v, "spin_sense_note") ? "  *" : "") *
+                   (haskey(v, "epoch") ? "  epoch $(v["epoch"])" : "")
             @printf(io, "%-24s %16s %14s %16s %-8s %8.3f%s\n",
                     k, vs, "-"*lo, "+"*hi, v["unit"], v["occupancy"], rail)
         end
@@ -620,7 +637,8 @@ function _write_tex(path, entries, caption; note = nothing)
             dag = get(v, "railed", false) ? "\\textsuperscript{\$\\dagger\$}" : ""
             any_spin && haskey(v, "spin_sense_note") &&
                 (dag *= "\\textsuperscript{\$\\ddagger\$}")
-            println(io, _texsym(k), " & ",
+            ep = haskey(v, "epoch") ? " (epoch $(v["epoch"]))" : ""
+            println(io, _texsym(k), ep, " & ",
                     "\$$(vs)^{+$(hi)}_{-$(lo)}\$", dag, " & ", _texunit(v["unit"]), " \\\\")
         end
         println(io, "\\hline")
@@ -630,6 +648,9 @@ function _write_tex(path, entries, caption; note = nothing)
                                 "treat as a limit, not a measurement.}")
         any_spin && println(io, "{\\footnotesize \$^{\\ddagger}\$ ",
                             _texnote(note), ".}")
+        any(haskey(v, "epoch") for (_, v) in entries) &&
+            println(io, "{\\footnotesize ", "epoch: the transit a TTV offset holds, counted from the planet's first " *
+                    "observed transit (0).}")
         println(io, "\\end{table}")
     end
 end

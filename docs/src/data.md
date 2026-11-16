@@ -32,12 +32,12 @@ Data(;
     phot_inst = nothing, exposure_times = Float64[],
     relastrom = nothing, hgca = nothing, iad = nothing,
     gost = nothing, g23h = nothing, gaia_dr3 = nothing,
-    hip_scans = nothing,
+    hip_scans = nothing, transit_times = TransitTimeSet[],
 )
 ```
 
 At least one observation channel must be non-empty (RV *or*
-photometry *or* astrometry), otherwise the constructor throws
+photometry *or* astrometry *or* transit times), otherwise the constructor throws
 `ArgumentError`. It validates lengths, positivity of every error bar,
 1-based `rv_inst`/`phot_inst` indices, and indicator/indicator-error
 length consistency.
@@ -47,7 +47,7 @@ length consistency.
 | `t_rv`, `rv`, `rv_err` | `Vector{Float64}` | Time, value, uncertainty per RV observation. Units are the user's choice but must match the RV-prior scales (typically days / m·s⁻¹). |
 | `rv_inst` | `Vector{Int}` | 1-based instrument index per RV point. Must match the ordering in `InstrumentConfig.rv`. Defaults to all-ones (single-instrument). |
 | `rv_comp` | `Vector{Int}` | Stellar **component** each RV point measures, for **SB2 double-lined** fits: `1` = primary (A), `2` = secondary (B). Orthogonal to `rv_inst` (γ/σ/activity stay per-spectrograph; the barycentric γ is shared across A and B). Defaults to all-ones (the normal single-star case). Used only by the `BINARY`/`BINARY_RV` modes. |
-| `t_ref` | `Float64` | Reference epoch for the `M₀`/`Tp` time anchors. Defaults to `median(t_rv)`; falls back to `median(t_phot)`, then to an astrometry epoch (IAD → GOST → relAST → HGCA midpoint → G23H DR2 epoch → Gaia DR3 `t_ref`) when RVs and photometry are absent. |
+| `t_ref` | `Float64` | Reference epoch for the `M₀`/`Tp` time anchors. Defaults to `median(t_rv)`; falls back to `median(t_phot)`, then to the median of the measured transit times, then to an astrometry epoch (IAD → GOST → relAST → HGCA midpoint → G23H DR2 epoch → Gaia DR3 `t_ref`) when RVs and photometry are absent. |
 | `indicators` | `Dict{String, Vector{Float64}}` | Activity indicator time series (BIS, CCF FWHM, S-index, Hα, log R′<sub>HK</sub>, CRX, …), one entry per indicator name. Each length must match `rv`. Consumed by `ActivityDecorrelation` and `ActivityGP`. |
 | `indicator_errs` | `Dict{String, Vector{Float64}}` | Per-indicator 1σ uncertainty. Only present for indicators where errors were supplied (entry key must have a matching `indicators` entry). **Required by `ActivityGP`** and any Rajpaul-style multivariate-GP indicator likelihood; ignored by `ActivityDecorrelation`. Entries must be strictly positive. See [The indicator-error convention](#The-indicator-error-convention). |
 | `indicator_derivs` | `Dict{String, Vector{Float64}}` | Per-instrument finite-difference time derivatives of each indicator. **Auto-computed** by the constructor (NaN-safe central differences, one-sided at endpoints, per instrument). Used by `ActivityDecorrelation(derivative=true)` (FF′ term, [Aigrain+ 2012](https://ui.adsabs.harvard.edu/abs/2012MNRAS.419.3147A/abstract)). Not a constructor argument. |
@@ -60,10 +60,12 @@ length consistency.
 | `gost` | `Union{Nothing, GOSTData}` | Gaia scanning law from the GOST tool (predicted scan epochs + angles). Auto-stage with `fetch_gost(ra, dec)`. **Auxiliary, not a standalone measurement** — GOST only window-averages (Mode B) the Gaia epoch(s) of a paired `hgca`/`gaia_dr3`/`g23h` (a five-parameter fit through the transits inside the release window); supplied alone (or only with `iad`) it is inert and the constructor warns. |
 | `g23h` | `Union{Nothing, G23HData}` | G23H five-PM Gaia DR2/DR3 + Hipparcos joint product (Thompson+ 2026, arXiv:2602.00235). |
 | `gaia_dr3` | `Union{Nothing, GaiaDR3Data}` | Gaia DR3 5-parameter astrometric solution. |
+| `transit_times` | `Vector{TransitTimeSet}` | Measured mid-transit times, one `TransitTimeSet` per planet (`planet`, integer `epoch` labels, `tc` in BJD_TDB, `tc_err` 1σ days, `source`, a `use` mask, `exclude_sources`, an optional reference ephemeris kept for provenance, and `jitter`). An independent Gaussian term per planet against the model's own transit times (`transit_times_log_likelihood`); the planet's mode must contain `PM`. See the `transit_times` subsection of [The `data` config block](#The-data-config-block) below. |
 | `hip_scans` | `Union{Nothing, IADData}` | The Hipparcos scan geometry (epochs, scan angles, parallax factors, abscissa errors) the HGCA / G23H **Hipparcos epoch** is fitted through, as the catalogue measured it. Resolved by the constructor: `iad` when it holds at least five scans inside `HIPPARCOS_WINDOW` (a fit with Hipparcos IAD uses the very same scans), else the `hip_scans` keyword (e.g. `fetch_hip_iad(hip_id)`), else `nothing`, with a warning that the Hipparcos epoch is then modelled as the instantaneous reflex. An `iad` and a `hip_scans` with different Hipparcos scans are refused. Never enters the likelihood on its own. `run_job` and the `fit_*` entry points fetch it by the catalogue row's `hip_id` (see `data.hip_scans` below). |
 
 Helper accessors:
-- `n_rv(data)`, `n_phot(data)` (defined on `Data`); `n_relast`,
+- `n_rv(data)`, `n_phot(data)`, `n_transit_times(data)` (points in the
+  likelihood), `transit_time_set(data, k)` (defined on `Data`); `n_relast`,
   `n_iad`, `n_gost`, `n_g23h` are defined on the respective astrometry
   structs.
 - `has_astrometry(data)` — true if any of the six astrometry payloads
@@ -530,7 +532,8 @@ When you drive Nereus through `Nereus.run_job(cfg)` (the production
 entry point — see [`docs/JOB_CONFIG.md`]), the `cfg["data"]` block is
 translated into a `Data` by `_build_data` (`src/runner.jl`). At least
 one of `rv`, `transit_photometry`, `iad`, `gost`, `hgca`, `relastrom`,
-`gaia_dr3` must be present.
+`gaia_dr3`, `transit_times` must be present (`rm_nights` and `tomography`
+for an obliquity fit).
 
 ### `rv` — inline values
 
@@ -670,6 +673,44 @@ channel's `"hip_scans"` key.
 ```
 
 All three keys are required.
+
+### `transit_times` — measured mid-transit times
+
+Published mid-transit times (Argus sends them in this form), a list of
+per-planet blocks:
+
+```jsonc
+"transit_times": [
+  { "planet": 1, "name": "WASP-12 b", "time_system": "BJD_TDB",
+    "values": { "epoch": [0, 1, 870], "tc": [...], "tc_err": [...],
+                "source": ["ETD:123", "EXOCLOCK:9", "TESS:S45"] },
+    "reference_ephemeris": { "t0": 2457010.512, "period": 1.0914203, "epoch_zero": 0 } }
+]
+```
+
+`time_system` must be `BJD_TDB`; the arrays must have one entry per transit;
+`tc_err > 0`; the planet must exist and its mode contain `PM` (`PM_ONLY`,
+`RVPM`, `PM_TTV`, `RVPM_TTV_NB`, …). The epochs are labels: the likelihood numbers
+transits from the model's own transit time and never reads the reference
+ephemeris. Transit times may be the only data. Optional keys: `values.use`,
+`exclude_sources`, `jitter` (adds `sigma_tt_k<planet>`, days, LogUniform prior)
+and `photometry_overlap` (`"drop"`, the default, leaves out a transit time whose
+transit is in the fitted photometry; `"keep"`). A `*_TTV` planet (`PM_TTV`, …)
+with transit times and neither `model.ttv_n_transits` nor `model.ttv_epochs`
+gets one free offset per observed transit, on the transits of its transit times
+(and of its photometry); `model.ttv_epochs` lists them by hand, counted from
+the planet's first observed transit. The full reference, including the
+`summary.json` blocks, is in `docs/JOB_CONFIG.md`.
+
+From Julia:
+
+```julia
+tt = TransitTimeSet(; planet = 1, epoch = ep, tc = tc, tc_err = tc_err,
+                    source = src)
+data = Data(; transit_times = [tt])
+params = Params(; max_kplanet = 1, planet_modes = [PM_ONLY], data = data,
+                instruments = InstrumentConfig())
+```
 
 ## External convenience loaders
 

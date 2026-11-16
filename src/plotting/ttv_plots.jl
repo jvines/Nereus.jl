@@ -126,10 +126,14 @@ End-to-end TTV O−C diagram in Nereus publication style.
 Combines:
   1. Per-transit photometric Tc measurements (data) from the phot LL
      profiled at the posterior median (via `measure_per_transit_tcs`)
-  2. TTV-C / TTVFaster N-body envelope from posterior draws (via
+  2. The measured transit times of the planet (`data.transit_times`), the
+     points in the likelihood, with their quoted `tc_err`, at the transit
+     number of the model's linear ephemeris they are matched to
+  3. TTV-C / TTVFaster N-body envelope from posterior draws (via
      `ttvc_envelope`) — median line + 16/84 CI band
 
-Both are passed to `plot_ttv_diagram` with the Nereus color scheme.
+All are passed to `plot_ttv_diagram` with the Nereus color scheme; with
+both kinds of measurement, a marker and a legend entry tell them apart.
 No fiddling required by the user: one call, publication-ready plot.
 
 # Arguments
@@ -181,43 +185,84 @@ function plot_ttv_oc(chains, data::Data, params::Params;
     # 2. Predicted Tc grid
     P_a  = theta_med.values[params.layout.name_to_idx["P_k$(planet_a_k)"]]
     Tc_a = _ttv_Tc(theta_med.values, params, planet_a_k)
-    if tcs_predicted === nothing
+    has_phot = n_phot(data) > 0
+    if tcs_predicted === nothing && has_phot
         n_lo = ceil(Int,  (minimum(data.t_phot) + 0.1 - Tc_a) / P_a)
         n_hi = floor(Int, (maximum(data.t_phot) - 0.1 - Tc_a) / P_a)
         tcs_predicted = [Tc_a + n*P_a for n in n_lo:n_hi]
     end
+    tcs_predicted === nothing && (tcs_predicted = Float64[])
 
-    # 3. Per-transit Tc measurements (data points)
-    meas = measure_per_transit_tcs(data, theta_med, params;
-                                    tcs_predicted = tcs_predicted,
-                                    half_window = half_window,
-                                    grid_min = grid_min,
-                                    ngrid = ngrid,
-                                    planet_k = planet_a_k)
+    # 3. Per-transit Tc measurements (data points): profiled from the
+    # photometry, and the measured transit times of the planet.
+    cyc = Int[]; dt = Float64[]; dlo = Float64[]; dhi = Float64[]; tlin = Float64[]
+    groups = Vector{Int}[]; labels = String[]
+    if has_phot && !isempty(tcs_predicted)
+        meas = measure_per_transit_tcs(data, theta_med, params;
+                                        tcs_predicted = tcs_predicted,
+                                        half_window = half_window,
+                                        grid_min = grid_min,
+                                        ngrid = ngrid,
+                                        planet_k = planet_a_k)
+        append!(cyc, meas.cycle_idx); append!(dt, meas.mle_dt)
+        append!(dlo, meas.lo_dt); append!(dhi, meas.hi_dt); append!(tlin, tcs_predicted)
+        push!(groups, collect(eachindex(cyc))); push!(labels, "photometry")
+    end
+    tt = _ttv_oc_transit_times(data, planet_a_k, Tc_a, P_a)
+    if tt !== nothing
+        i0 = length(cyc)
+        append!(cyc, tt.cycle); append!(dt, tt.oc)
+        append!(dlo, tt.oc .- tt.err); append!(dhi, tt.oc .+ tt.err); append!(tlin, tt.tlin)
+        push!(groups, collect((i0 + 1):length(cyc))); push!(labels, "transit times")
+    end
+    if isempty(cyc)
+        @warn "plot_ttv_oc: planet $planet_a_k has no transit in the photometry and no " *
+              "measured transit times; nothing to plot"
+        return Figure()
+    end
 
-    # 4. N-body envelope (optional)
+    # 4. N-body envelope (optional), at the linear-ephemeris time of every point
     pred = nothing; pred_lo = nothing; pred_hi = nothing
     if planet_b_k != 0
+        ord = sortperm(tlin)
         env = ttvc_envelope(chains, params;
-                              tcs_observed = tcs_predicted,
+                              tcs_observed = tlin[ord],
                               planet_a_k = planet_a_k,
                               planet_b_k = planet_b_k,
                               n_draws = n_envelope_draws,
                               seed = seed)
-        pred    = env.med
-        pred_lo = env.lo
-        pred_hi = env.hi
+        pred, pred_lo, pred_hi = similar(dt), similar(dt), similar(dt)
+        pred[ord] .= env.med; pred_lo[ord] .= env.lo; pred_hi[ord] .= env.hi
     end
 
-    # 5. Plot — data via δt_med/lo/hi, model via predicted/lo/hi
-    return plot_ttv_diagram(meas.cycle_idx,
-                              meas.mle_dt, meas.lo_dt, meas.hi_dt;
+    # 5. Plot — data via δt_med/lo/hi, model via predicted/lo/hi. One kind of
+    # measurement is drawn as before; two are told apart by marker and legend.
+    two = length(groups) > 1
+    return plot_ttv_diagram(cyc, dt, dlo, dhi;
                               predicted = pred,
                               predicted_lo = pred_lo,
                               predicted_hi = pred_hi,
+                              epoch_groups = two ? groups : nothing,
+                              epoch_labels = two ? labels : nothing,
                               filename = filename,
                               save_pdf = save_pdf,
                               kwargs...)
+end
+
+# The measured transit times of planet `k` for the O−C diagram: the points in
+# the likelihood, at transit number `cycle` of the linear ephemeris (Tc, P) --
+# the transit each is matched to, numbered from Tc as the diagram's other
+# points are -- with O − C = tc − (Tc + cycle·P) and its quoted error, days.
+# `nothing` without transit times for `k`.
+function _ttv_oc_transit_times(data::Data, k::Int, Tc::Real, P::Real)
+    s = transit_time_set(data, k)
+    (s === nothing || n_tt(s) == 0) && return nothing
+    Δ = _tt_match(s, Tc, P, nothing)
+    Δ === nothing && return nothing
+    u = s.used
+    cycle = s.epoch[u] .+ Δ
+    tlin = Tc .+ cycle .* P
+    return (cycle = cycle, oc = s.tc[u] .- tlin, err = s.tc_err[u], tlin = tlin)
 end
 
 
@@ -339,7 +384,10 @@ transiting planet, each showing that transit's photometry + the best-fit (max-lp
 transit model (x = hours from Tc). Per-transit QC — catches a single bad transit
 (spot crossing, partial/grazing, systematic) that the stacked phase-fold hides.
 Panel "transit N" is transit N counted from the planet's Tc (0 at Tc, negative
-before it), the numbering of the free TTV offsets (`ttv_k<k>_t<N+1>`).
+before it). Its free TTV offset, if it has one, is `ttv_k<k>_t<I>` with
+`I = ttv_slot(N − n0, N_slots, epochs)`, n0 the number of the planet's first
+observed transit (the offsets are numbered from it, src/ttv.jl;
+`ttv_slot_epochs` lists each slot's transit).
 Saved as `models/transit_overlay_K<k>.<fmt>`.
 """
 function plot_transit_overlay_fit(chains, params, data;

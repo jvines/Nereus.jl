@@ -459,7 +459,8 @@ end
         Δt -= Ps[j] * round(Δt / Ps[j])
         abs(Δt) > T_dur_safe[j] + reach && continue
         # A TTV planet's transits are numbered from Tc (the transit nearest
-        # the cadence, as the window above folds it), not from Tp.
+        # the cadence, as the window above folds it), not from Tp; its
+        # offsets from its first observed transit (`ttv_state.n0s`).
         t_eff = r_for_j[j] > 0 ?
             ttv_effective_time_r(t, r_for_j[j], ttv_state, Ps, Tc_centers) : t
         use_gd = gd !== nothing && gd.on[j]
@@ -701,7 +702,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     # is not a TTV planet. Both `_decode_ttv_state` and the j-loop
     # above iterate `p_idx` skipping non-photometric planets, so the
     # j indexing matches.
-    n_ttv, ttv_state = _decode_ttv_state(theta, p_idx)
+    n_ttv, ttv_state = _decode_ttv_state(theta, p_idx, data)
     r_for_j = zeros(Int, n_transit)
     if n_ttv > 0
         @inbounds for r in 1:n_ttv
@@ -711,8 +712,9 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         # N-body prediction; rows are no-ops for `:TTV` (free-offset)
         # planets, which keep their layout-decoded δts.
         if any(ttv_state.is_nb)
-            t_max = isempty(data.t_phot) ? zero(T) : T(maximum(data.t_phot))
-            t_min = isempty(data.t_phot) ? zero(T) : T(minimum(data.t_phot))
+            # The photometry's span, and the transit times' with it when there
+            # are any, so the two terms read one integration (`_ttv_nb_span`).
+            t_min, t_max = _ttv_nb_span(T, data)
             _apply_ttv_nb!(ttv_state, theta, p_idx,
                             Ps, es, ws, Tps, bs, a_Rs, t_max; t_phot_min = t_min)
         end
@@ -1113,15 +1115,16 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     gd_s, gd_c = gd_state, gd_ctxs
 
     # TTV decode (TTV-A + TTV-C) — see transit_log_likelihood for rationale.
-    n_ttv, ttv_state = _decode_ttv_state(theta, p_idx)
+    n_ttv, ttv_state = _decode_ttv_state(theta, p_idx, data)
     r_for_j = zeros(Int, n_transit)
     if n_ttv > 0
         @inbounds for r in 1:n_ttv
             r_for_j[ttv_state.j_active[r]] = r
         end
         if any(ttv_state.is_nb)
-            t_max = isempty(data.t_phot) ? zero(T) : T(maximum(data.t_phot))
-            t_min = isempty(data.t_phot) ? zero(T) : T(minimum(data.t_phot))
+            # The photometry's span, and the transit times' with it when there
+            # are any, so the two terms read one integration (`_ttv_nb_span`).
+            t_min, t_max = _ttv_nb_span(T, data)
             _apply_ttv_nb!(ttv_state, theta, p_idx,
                             Ps, es, ws, Tps, bs, a_Rs, t_max; t_phot_min = t_min)
         end

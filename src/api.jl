@@ -221,7 +221,8 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       density = nothing,
                       use_rho_s::Bool = false, R_s = NaN, phot_trend_order = 0, as_names = String[],
                       sharing = nothing, transdim_noise = false,
-                      ttv_n_transits = nothing, ttv_backend = nothing,
+                      ttv_n_transits = nothing, ttv_epochs = nothing,
+                      ttv_backend = nothing,
                       # Collects `clip_transit_outliers` reports, when given.
                       iad_reports = nothing,
                       # The star's Gaia identity, for the default `plx` prior of
@@ -360,6 +361,8 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     transdim_noise && (kw[:transdim_noise] = true)
     ttv_n_transits === nothing || (kw[:ttv_n_transits] =
         Dict{Int,Int}(Int(k) => Int(v) for (k, v) in pairs(ttv_n_transits)))
+    ttv_epochs === nothing || (kw[:ttv_epochs] =
+        Dict{Int,Vector{Int}}(Int(k) => Int.(collect(v)) for (k, v) in pairs(ttv_epochs)))
     ttv_backend === nothing || (kw[:ttv_backend] = Symbol(ttv_backend))
     M_pri === nothing || (kw[:M_pri] = M_pri)
     isnan(M_s) || (kw[:M_s] = M_s)
@@ -1482,11 +1485,28 @@ end
 """
     fit_ttv(; phot, transit_times, rv, nbody, ...)
 
-Transit timing variations. Needs photometry (or measured transit times);
+Transit timing variations. Needs photometry or measured transit times, or both;
 `nbody=true` selects the N-body model (TTV_NB_SOURCE) over the analytic one.
+Every one of the `planets` gets that mode.
+
+`transit_times` is the `data.transit_times` block of the job config, as Argus
+sends it: a list of per-planet blocks `{planet, time_system = "BJD_TDB",
+values = {epoch, tc, tc_err, source}, reference_ephemeris}`
+(docs/JOB_CONFIG.md). Any other shape is refused by the config validation.
+
+The analytic model (`nbody = false`) fits free offsets on the transit times,
+counted from the planet's first observed transit: `ttv_n_transits` per planet
+(`Dict(planet => N)`, or one `N` for every planet) on transits 0..N−1, or
+`ttv_epochs = Dict(planet => [transit numbers])` on the transits listed. Without
+either, run_job's default applies: a planet with transit times gets one offset
+per observed transit, those of its transit times and those in the photometry.
+A planet with photometry, no transit times and neither keyword is refused
+rather than fitted as a linear ephemeris. The N-body model fits no offsets,
+takes neither keyword, and needs `rv`: the planets' masses come from it.
 """
 function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  nbody::Bool = false, planets::Int = 2,
+                 ttv_n_transits = nothing, ttv_epochs = nothing,
                  star::AbstractDict = Dict(), priors::AbstractDict = Dict(),
                  engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
@@ -1494,14 +1514,27 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  extra::AbstractDict = Dict())
     (phot === nothing && transit_times === nothing) && throw(ArgumentError(
         "fit_ttv needs photometry or measured transit_times"))
+    if nbody
+        rv === nothing && throw(ArgumentError(
+            "fit_ttv(nbody = true) needs rv: the N-body TTVs come from the planets' " *
+            "masses, which come from their RV semi-amplitudes; without RV every " *
+            "planet is massless and the TTVs are zero. Pass rv, or use nbody = false " *
+            "(free per-transit offsets)."))
+        (ttv_n_transits === nothing && ttv_epochs === nothing) || throw(ArgumentError(
+            "fit_ttv: ttv_n_transits and ttv_epochs place the free offsets of the " *
+            "analytic model; nbody = true predicts the TTVs and fits no offsets. Drop " *
+            "them."))
+    end
     mode = rv === nothing ? (nbody ? "PM_TTV_NB" : "PM_TTV") :
                             (nbody ? "RVPM_TTV_NB" : "RVPM_TTV")
     cfg = Dict{String,Any}("version" => "1.0",
         "output_dir" => output_dir === nothing ? mktempdir() : String(output_dir),
         "star" => Dict{String,Any}(star),
         "data" => _data_block(; rv, phot),
+        # One mode per planet. It was `[mode]`, one entry for `planets` (2 by
+        # default) planets, which Params refuses.
         "model" => Dict{String,Any}("max_kplanet" => planets,
-                                    "planet_modes" => [mode],
+                                    "planet_modes" => fill(mode, planets),
                                     "stability" => "none"),
         "priors" => Dict{String,Any}(priors),
         # The `output` block. It was MISSING on all three config-route fits,
@@ -1513,6 +1546,8 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
         "output"  => _output_block(plots, plot_kwargs, save_pdf, output),
         "sampler" => _sampler_block(engine))
     transit_times === nothing || (cfg["data"]["transit_times"] = transit_times)
+    nbody || _fit_ttv_slots!(cfg["model"], planets, ttv_n_transits, ttv_epochs,
+                             transit_times, phot !== nothing)
     # Config path: the transdim BLOCK is what enables trans-dim, and
     # _dispatch_sampler defaults to transdim_pt_emcee when it sees one --
     # so these entry points stay symmetric with fit_rv/fit_joint.
@@ -1526,6 +1561,46 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
     end
     merge!(cfg, Dict{String,Any}(extra))
     return _run_config(cfg; op = "fit_ttv")
+end
+
+# fit_ttv's `model.ttv_n_transits` / `model.ttv_epochs`: what the caller gave
+# (one Int for every planet, or a Dict), keyed by planet as strings. A planet
+# neither names gets run_job's default from its transit times
+# (`_ttv_slot_kwargs`); one with photometry and no transit times would be
+# fitted as a linear ephemeris, which run_job warns about and fit_ttv refuses.
+function _fit_ttv_slots!(model, planets::Int, ttv_n_transits, ttv_epochs,
+                         transit_times, has_phot::Bool)
+    named = Set{Int}()
+    if ttv_n_transits isa Integer
+        model["ttv_n_transits"] = Dict{String, Any}(string(k) => Int(ttv_n_transits)
+                                                    for k in 1:planets)
+        union!(named, 1:planets)
+    elseif ttv_n_transits !== nothing
+        model["ttv_n_transits"] = Dict{String, Any}(string(_ttv_planet_key(k)) => Int(v)
+                                                    for (k, v) in pairs(ttv_n_transits))
+        union!(named, (_ttv_planet_key(k) for k in keys(ttv_n_transits)))
+    end
+    if ttv_epochs !== nothing
+        model["ttv_epochs"] = Dict{String, Any}(string(_ttv_planet_key(k)) => collect(v)
+                                                for (k, v) in pairs(ttv_epochs))
+        union!(named, (_ttv_planet_key(k) for k in keys(ttv_epochs)))
+    end
+    with_tt = Set{Int}()
+    for b in something(transit_times, Any[])
+        p = b isa AbstractDict ? _get(b, :planet; default = nothing) : nothing
+        p === nothing || push!(with_tt, _ttv_planet_key(p))
+    end
+    missing_ = [k for k in 1:planets if !(k in named) && !(k in with_tt)]
+    if has_phot && !isempty(missing_)
+        throw(ArgumentError(
+            "fit_ttv: the analytic TTV model fits free offsets on the transits, and " *
+            "nothing places those of planet(s) $(join(missing_, ", ")), which would be " *
+            "fitted as a linear ephemeris. Pass ttv_n_transits = " *
+            "Dict($(join(("$k => N" for k in missing_), ", "))) (transits 0..N-1 from " *
+            "the planet's first observed one), ttv_epochs = Dict(planet => [transit " *
+            "numbers]), or the planet's measured transit_times."))
+    end
+    return model
 end
 
 """
@@ -1575,11 +1650,22 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
 end
 
 """JOB_CONFIG sampler block from an engine spec."""
+# The `sampler` block of the config-route fits (fit_rm, fit_ttv, fit_binary).
+# `nothing`, their default, leaves the engine to run_job (pt_emcee, or
+# transdim_pt_emcee with a transdim block); it raised a MethodError from
+# `String(nothing)`, so none of the three ran without an explicit engine. The
+# options go to `sampler.kwargs`, the only place run_job reads them; they were
+# written beside `name`, where nothing read them, and were dropped silently.
 function _sampler_block(engine)
-    e = engine isa AbstractDict ? engine : Dict("engine" => String(engine))
-    b = Dict{String,Any}("name" => String(get(e, "engine", "pt")))
-    for (k, v) in pairs(get(e, "options", Dict()))
-        b[String(k)] = v
+    engine === nothing && return Dict{String,Any}()
+    e = engine isa AbstractDict ?
+        Dict{String,Any}(String(k) => v for (k, v) in pairs(engine)) :
+        Dict{String,Any}("engine" => String(engine))
+    b = Dict{String,Any}()
+    haskey(e, "engine") && (b["name"] = String(e["engine"]))
+    opts = get(e, "options", nothing)
+    if opts !== nothing && !isempty(opts)
+        b["kwargs"] = Dict{String,Any}(String(k) => v for (k, v) in pairs(opts))
     end
     return b
 end

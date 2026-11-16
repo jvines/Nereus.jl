@@ -38,6 +38,7 @@ include("priors.jl")
 include("packed_priors.jl")
 include("astrometry/data.jl")  # RelAstromData, HGCAData (no deps; needed by Data struct)
 include("tomography_data.jl") # TomoNight (needed by Data)
+include("transit_times_data.jl") # TransitTimeSet (needed by Data)
 include("data.jl")           # Data struct (no deps on model.jl)
 include("noise/types.jl")    # abstract types + concrete structs
 include("model.jl")          # ParamsConfig, ParamsLayout, Params (needs Data for constructor)
@@ -69,6 +70,7 @@ include("astrometry/gaia_epoch.jl")  # Gaia DR4 epoch-astrometry reader → IADD
 include("astrometry/solution_ladder.jl")  # exact 5/7/9-param evidences (needs IADData)
 include("likelihood.jl")     # calls gp_log_likelihood, check_stability, astrom_log_likelihood
 include("transit_likelihood.jl")
+include("transit_times_likelihood.jl")  # measured mid-transit times (data.transit_times)
 include("diagnostics/rank_diag.jl")  # rank-normalised ESS / R-hat, once per parameter per run
 include("reporting.jl")
 include("science_tables.jl")  # model-conditioned, unit-tagged science tables (needs reporting.jl)
@@ -236,7 +238,8 @@ export
     rho_s,
     log_prior,
     # Data container + likelihood + target
-    Data, n_rv, n_phot, has_astrometry,
+    Data, n_rv, n_phot, has_astrometry, TransitTimeSet, n_transit_times,
+    transit_time_set, transit_times_log_likelihood,
     RelAstromData, HGCAData, IADData, GOSTData, G23HData, GaiaDR3Data,
     n_relast, n_iad, n_gost, n_g23h,
     n_iad_inst, n_relast_inst, merge_iad, merge_relast, iad_for_inst,

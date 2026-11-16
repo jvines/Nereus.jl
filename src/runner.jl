@@ -87,7 +87,8 @@ function run_job(cfg::AbstractDict)
         # --- Build data + star + params --------------------------------
         data, inst_names_rv, inst_names_pm, inst_names_as, inst_names_iad,
             iad_outliers = _build_data(_get(cfg, :data; default = Dict());
-                                       obliquity = _obliquity_cfg(cfg))
+                                       obliquity = _obliquity_cfg(cfg),
+                                       pm_planets = _cfg_pm_planets(cfg))
         isempty(iad_outliers) ||
             (summary["iad_outliers"] = _iad_outlier_summary(iad_outliers))
         star       = _build_star(_get(cfg, :star; default = Dict()))
@@ -199,6 +200,10 @@ function run_job(cfg::AbstractDict)
         end
         _postfit_stage!(pf, "summary")
         _populate_summary!(summary, result, params, chains)
+        isempty(data.transit_times) ||
+            (summary["transit_times"] = _transit_times_summary(chains, params, data))
+        slots = _ttv_slots_summary(cfg, chains, params, data)
+        slots === nothing || (summary["ttv_slots"] = slots)
         summary["provenance"] = provenance_block(_job_sampler_name(cfg), params)
         _postfit_stage!(pf, "evidence")
         bridge_t = Dict{String, Any}()
@@ -366,11 +371,12 @@ function _validate_config(cfg::AbstractDict)
         data_cfg = _get(cfg, :data)
         has_any = any(_has(data_cfg, k) for k in
             (:rv, :transit_photometry, :iad, :gost, :hgca, :relastrom, :gaia_dr3,
-             :rm_nights, :tomography))
+             :rm_nights, :tomography, :transit_times))
         has_any || push!(errs,
             "`data` block must contain at least one of " *
             "rv, transit_photometry, iad, gost, hgca, relastrom, gaia_dr3, " *
-            "rm_nights, tomography")
+            "rm_nights, tomography, transit_times")
+        _validate_transit_times!(errs, cfg)
         if (_has(data_cfg, :rm_nights) || _has(data_cfg, :tomography)) &&
            _obliquity_cfg(cfg) === nothing
             push!(errs, "`data.rm_nights` / `data.tomography` are read by an obliquity " *
@@ -444,6 +450,12 @@ function _validate_config(cfg::AbstractDict)
             for m in _get(mdl, :planet_modes)
                 String(m) in _KNOWN_PLANET_MODES || push!(errs,
                     "unknown planet_mode `$m` (known: $(join(_KNOWN_PLANET_MODES, ", ")))")
+                # Kept in the list so the message can say why (Params refuses it).
+                String(m) == "PM_TTV_NB" && push!(errs,
+                    "planet_mode PM_TTV_NB: the N-body TTVs need the planets' masses, " *
+                    "which come from RV; without RV the planet is massless and its TTVs " *
+                    "zero. Add RV data and use RVPM_TTV_NB, or use PM_TTV (free " *
+                    "per-transit offsets, with model.ttv_n_transits).")
             end
         end
         if _has(mdl, :parametrization)
@@ -469,6 +481,20 @@ function _validate_config(cfg::AbstractDict)
             t = _get(mdl, :phot_trend_order)
             (t == 0 || t == 1 || t == 2) || push!(errs,
                 "model.phot_trend_order must be 0, 1, or 2; got $t")
+        end
+        # The free TTV offsets, keyed by planet: {"1": N} and {"1": [epochs]}.
+        for (key, what) in ((:ttv_n_transits, "a count"),
+                            (:ttv_epochs, "a list of transit numbers"))
+            _has(mdl, key) || continue
+            v = _get(mdl, key)
+            ok = v isa AbstractDict && all(pairs(v)) do (k, x)
+                tryparse(Int, string(k)) !== nothing &&
+                    (key === :ttv_n_transits ? x isa Real && isinteger(x) :
+                     x isa AbstractVector && all(e -> e isa Real && isinteger(e), x))
+            end
+            ok || push!(errs, "model.$key must map planet indices to $what, e.g. " *
+                (key === :ttv_n_transits ? "{\"1\": 30}" : "{\"1\": [0, 17, 412]}") *
+                "; got $(repr(v))")
         end
     end
 
@@ -597,11 +623,114 @@ function _validate_config(cfg::AbstractDict)
     return nothing
 end
 
+# `data.transit_times`: a list of per-planet blocks, as Argus sends them
+# (docs/JOB_CONFIG.md). Everything that can be checked from the config alone,
+# collected with the rest: the shape, the time system, the array lengths, the
+# errors, the planet index and that planet's mode (it must have a transit to
+# predict mid-transit times). The epochs against the times are checked when the
+# block is parsed (`TransitTimeSet`).
+function _validate_transit_times!(errs, cfg)
+    data_cfg = _get(cfg, :data)
+    _has(data_cfg, :transit_times) || return nothing
+    blocks = _get(data_cfg, :transit_times)
+    shape = "a list of per-planet blocks {planet, time_system, values: {epoch, tc, " *
+            "tc_err, source}, reference_ephemeris}"
+    if !(blocks isa AbstractVector)
+        push!(errs, "`data.transit_times` must be $shape; got a $(typeof(blocks))")
+        return nothing
+    end
+    isempty(blocks) && (push!(errs, "`data.transit_times` is an empty list; drop it"); return nothing)
+    mdl = _get(cfg, :model; default = Dict())
+    obliq = _has(mdl, :obliquity)
+    max_k = obliq ? 1 : _has(mdl, :max_kplanet) ? Int(_get(mdl, :max_kplanet)) : nothing
+    modes = obliq ? nothing :
+            _has(mdl, :planet_modes) ? String.(collect(_get(mdl, :planet_modes))) :
+            max_k === nothing ? nothing : fill("RV_ONLY", max_k)
+    seen = Int[]
+    for (i, b) in enumerate(blocks)
+        at = "`data.transit_times[$i]`"
+        if !(b isa AbstractDict)
+            push!(errs, "$at must be an object; `data.transit_times` is $shape")
+            continue
+        end
+        p = _get(b, :planet; default = nothing)
+        if p === nothing || !(p isa Real && isinteger(p))
+            push!(errs, "$at: `planet` must be the 1-based index of a planet of the " *
+                        "model; got $(repr(p))")
+        else
+            p = Int(p)
+            if p < 1 || (max_k !== nothing && p > max_k)
+                push!(errs, "$at: planet $p does not exist; the model has " *
+                            "$(something(max_k, "?")) planet(s) and `planet` is 1-based")
+            elseif modes !== nothing && p <= length(modes) && haskey(_PLANET_MODES, modes[p]) &&
+                   !has_pm(_PLANET_MODES[modes[p]])
+                push!(errs, "$at (model.planet_modes[$p] = $(modes[p])): " *
+                            _tt_mode_error(p, _PLANET_MODES[modes[p]]))
+            end
+            p in seen && push!(errs, "$at: a second block for planet $p; merge each " *
+                                     "planet's transit times into one block")
+            push!(seen, p)
+        end
+        ts = _get(b, :time_system; default = nothing)
+        if ts === nothing
+            push!(errs, "$at: missing `time_system`; it must be \"BJD_TDB\"")
+        elseif String(ts) != "BJD_TDB"
+            push!(errs, "$at: time_system \"$ts\" is not accepted, only \"BJD_TDB\" " *
+                        "is. Convert the times to BJD_TDB.")
+        end
+        vals = _get(b, :values; default = nothing)
+        if vals === nothing || !(vals isa AbstractDict)
+            push!(errs, "$at: missing `values` {epoch, tc, tc_err, source}")
+        else
+            lens = Pair{String, Int}[]
+            for k in ("epoch", "tc", "tc_err", "source", "use")
+                if _has(vals, k)
+                    v = _get(vals, k)
+                    v isa AbstractVector ? push!(lens, k => length(v)) :
+                        push!(errs, "$at.values.$k must be an array")
+                elseif k in ("epoch", "tc", "tc_err")
+                    push!(errs, "$at.values.$k is required")
+                end
+            end
+            length(unique(last.(lens))) <= 1 || push!(errs,
+                "$at.values: the arrays have different lengths (" *
+                join(("$k = $n" for (k, n) in lens), ", ") * "); give one entry per " *
+                "transit in each")
+            e = _get(vals, :tc_err; default = nothing)
+            if e isa AbstractVector
+                bad = findall(x -> !(x isa Real && isfinite(x) && x > 0), collect(e))
+                isempty(bad) || push!(errs, "$at.values.tc_err must be finite and > 0; " *
+                                            "entries $(bad) (1-based) are not")
+            end
+        end
+        po = _get(b, :photometry_overlap; default = "drop")
+        String(po) in ("drop", "keep") || push!(errs,
+            "$at: photometry_overlap must be \"drop\" (the default) or \"keep\"; got \"$po\"")
+        _get(b, :jitter; default = false) isa Bool || push!(errs,
+            "$at: jitter must be true or false")
+        ex = _get(b, :exclude_sources; default = String[])
+        ex isa AbstractVector || push!(errs,
+            "$at: exclude_sources must be a list of source strings")
+    end
+    return nothing
+end
+
+# The planets whose mode has a transit (`:PM`): the ones whose transit the
+# photometry models. `nothing` for an obliquity model or without a model block.
+function _cfg_pm_planets(cfg)
+    mdl = _get(cfg, :model; default = nothing)
+    (mdl === nothing || _has(mdl, :obliquity)) && return nothing
+    max_k = Int(_get(mdl, :max_kplanet; default = 1))
+    modes = String.(collect(_get(mdl, :planet_modes; default = fill("RV_ONLY", max_k))))
+    return Set(k for (k, m) in enumerate(modes)
+               if haskey(_PLANET_MODES, m) && has_pm(_PLANET_MODES[m]))
+end
+
 # =====================================================================
 # Data builder
 # =====================================================================
 
-function _build_data(data_cfg; obliquity = nothing)
+function _build_data(data_cfg; obliquity = nothing, pm_planets = nothing)
     inst_names_rv = String[]
     inst_names_pm = String[]
     # Relative-astrometry imager names. Only these get `sigma_as_<name>`
@@ -707,6 +836,10 @@ function _build_data(data_cfg; obliquity = nothing)
     end
     if _has(data_cfg, :gaia_dr3)
         kw[:gaia_dr3] = _parse_gaia_dr3_block(_get(data_cfg, :gaia_dr3))
+    end
+    if _has(data_cfg, :transit_times)
+        kw[:transit_times] = _parse_transit_times_blocks(_get(data_cfg, :transit_times);
+                                 t_phot = get(kw, :t_phot, Float64[]), pm_planets)
     end
     # Obliquity: RM nights become RV instruments, line-profile stacks become
     # residual maps (see runner_obliquity.jl).
@@ -861,6 +994,56 @@ function _parse_rv_csv(block)
         end
     end
     return t, v, σ, inst_idx, inst_names, indicators, indicator_errs, comp
+end
+
+# ---- Transit times -----------------------------------------------------
+# One `TransitTimeSet` per block. A transit time whose transit is in the fitted
+# photometry of a planet the photometry models (`pm_planets`) is left out of the
+# likelihood (`_drop_photometry_overlap`), so that each transit counts once,
+# unless the block says `photometry_overlap: "keep"`. `pm_planets = nothing`
+# (the model is not known here) skips that check.
+function _parse_transit_times_blocks(blocks; t_phot = Float64[], pm_planets = nothing)
+    sets = TransitTimeSet[]
+    blocks isa AbstractVector || throw(ArgumentError(
+        "`data.transit_times` must be a list of per-planet blocks (docs/JOB_CONFIG.md)"))
+    for b in blocks
+        vals = _get(b, :values; required = true)
+        p = Int(_get(b, :planet; required = true))
+        ref = _get(b, :reference_ephemeris; default = nothing)
+        refnt = ref === nothing ? nothing :
+            (t0 = Float64(_get(ref, :t0; required = true)),
+             period = Float64(_get(ref, :period; required = true)),
+             epoch_zero = _get(ref, :epoch_zero; default = 0))
+        src = _get(vals, :source; default = nothing)
+        use = _get(vals, :use; default = nothing)
+        s = TransitTimeSet(; planet = p, name = String(_get(b, :name; default = "")),
+                time_system = String(_get(b, :time_system; default = "")),
+                epoch = collect(_get(vals, :epoch; required = true)),
+                tc = Float64.(collect(_get(vals, :tc; required = true))),
+                tc_err = Float64.(collect(_get(vals, :tc_err; required = true))),
+                source = src === nothing ? nothing : collect(src),
+                use = use === nothing ? nothing : Bool.(collect(use)),
+                reference = refnt,
+                exclude_sources = String.(collect(_get(b, :exclude_sources;
+                                                       default = String[]))),
+                jitter = Bool(_get(b, :jitter; default = false)))
+        keep = String(_get(b, :photometry_overlap; default = "drop")) == "keep"
+        if pm_planets !== nothing && p in pm_planets && !keep && !isempty(t_phot)
+            s, nd = _drop_photometry_overlap(s, t_phot)
+            if nd > 0
+                ep = s.epoch[s.excluded .== "photometry_overlap"]
+                @warn "data.transit_times: $nd transit time(s) of planet $p (epoch(s) " *
+                      "$(join(first(ep, 10), ", "))$(length(ep) > 10 ? ", ..." : "")) " *
+                      "fall inside the fitted photometry, which already contains those " *
+                      "transits. They are left out of the likelihood so that each transit " *
+                      "counts once, and reported in summary.json with excluded = " *
+                      "\"photometry_overlap\". If they were measured from other data than " *
+                      "this photometry, set `photometry_overlap: \"keep\"` on the block."
+            end
+        end
+        push!(sets, s)
+    end
+    return sets
 end
 
 # ---- Photometry blocks ------------------------------------------------
@@ -1352,11 +1535,11 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
             for (k, v) in share_cfg)
     end
 
-    ttv_cfg = _get(mdl, :ttv_n_transits; default = Dict())
-    if !isempty(ttv_cfg)
-        p_kw[:ttv_n_transits] = Dict{Int, Int}(
-            parse(Int, String(k)) => Int(v) for (k, v) in ttv_cfg)
-    end
+    # The free TTV offsets: model.ttv_n_transits / model.ttv_epochs, and the
+    # default for a PM_TTV planet that neither names (`_ttv_slot_kwargs`).
+    ttv_counts, ttv_epochs = _ttv_slot_kwargs(mdl, data, pm)
+    isempty(ttv_counts) || (p_kw[:ttv_n_transits] = ttv_counts)
+    isempty(ttv_epochs) || (p_kw[:ttv_epochs] = ttv_epochs)
     ttv_backend = _get(mdl, :ttv_backend; default = nothing)
     if ttv_backend !== nothing
         p_kw[:ttv_backend] = Symbol(ttv_backend)
@@ -1980,6 +2163,7 @@ function _auto_plot_kinds(chains, params, data; result = nothing)
     data.gost     !== nothing && push!(kinds, "pm_anomaly")
     (n_rv(data) > 0 && has_astrometry(data)) && push!(kinds, "rv_astrom_phasefold")
     n_phot(data) > 0 && append!(kinds, ["ttv_oc", "transit_overlay"])
+    isempty(data.transit_times) || push!(kinds, "ttv_oc")
     any(has_any_rm, params.config.planet_modes) && push!(kinds, "rm_anomaly")
     if any(nm -> nm isa ActivityGP, params.config.noise_models)
         push!(kinds, "activity_gp_latent")
@@ -2283,18 +2467,23 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
                 _kw_for(plot_pm_anomaly, kw; except = (:output, :filename, :planet_idx))...)
         end
     elseif name == "ttv_oc"
-        n_phot(data) > 0 || return nothing
+        (n_phot(data) > 0 || !isempty(data.transit_times)) || return nothing
         # The transiting planet: the first transiting slot that is ever live
-        # (not slot 1 by fiat -- it may be RV-only, or parked). The perturber:
-        # the first other slot live together with it, else none, which gives
-        # the data-only O−C (measured per-transit Tc vs the linear ephemeris).
+        # (not slot 1 by fiat -- it may be RV-only, or parked), the first with
+        # measured transit times when there are any. The perturber: the first
+        # other slot live together with it, else none, which gives the
+        # data-only O−C (measured per-transit Tc vs the linear ephemeris).
         # Explicit plot_kwargs.planet_a_k / planet_b_k still win.
         ttv_kw = copy(kw)
         modes = params.config.planet_modes
         max_k = params.config.max_kplanet
         present = k -> _planet_present_idx(chains, params, k)
         if !haskey(ttv_kw, :planet_a_k)
-            a = findfirst(k -> has_pm(modes[k]) && !isempty(present(k)), 1:max_k)
+            has_tt = k -> transit_time_set(data, k) !== nothing
+            a = isempty(data.transit_times) ? nothing :
+                findfirst(k -> has_pm(modes[k]) && has_tt(k) && !isempty(present(k)), 1:max_k)
+            a === nothing &&
+                (a = findfirst(k -> has_pm(modes[k]) && !isempty(present(k)), 1:max_k))
             a === nothing && return nothing
             ttv_kw[:planet_a_k] = a
         end
@@ -2304,6 +2493,9 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
                           1:max_k)
             ttv_kw[:planet_b_k] = b === nothing ? 0 : b
         end
+        # The figure goes to models/, which nothing else creates when ttv_oc is
+        # the only plot asked for (a transit-times-only fit).
+        mkpath(joinpath(out_dir, "models"))
         return _if_written(name, "models/ttv_oc.png", out_dir) do
             plot_ttv_oc(chains, data, params;
                         filename = joinpath(out_dir, "models", "ttv_oc.png"),
@@ -2502,6 +2694,238 @@ function _iad_fit_summary(chains, params::Params, data::Data; bf_cutoff::Real = 
         @debug "IAD χ² summary failed" exception = err
         return nothing
     end
+end
+
+# summary.json's `transit_times` block: per planet with measured transit times,
+# the fit of the transit-time term and the O−C at the draw the IAD χ² uses (the
+# max-lp draw of the best-fit cluster), and the posterior ephemeris from every
+# draw with the planet active (thinned to at most `max_draws`).
+#
+#   n_points, n_excluded -- in / out of the likelihood
+#   chi2, red_chi2       -- Σ (residual/σ)² over the points in the likelihood,
+#                           σ² = tc_err² + σ_tt² (jitter included), and χ²/N, as
+#                           the IAD and PPC summaries report it
+#   sigma_tt             -- the jitter at that draw (days), null without one
+#   oc                   -- per point: epoch, tc, tc_err, model, residual
+#                           (tc − model), source, used, excluded (the reason)
+#   ephemeris            -- t0 (the model's linear ephemeris at the labels'
+#                           epoch `epoch`: the reference ephemeris' epoch_zero,
+#                           else 0) and period, median and the 16/84 percentile
+#                           distances, days
+#
+# Fail-soft: a failure is reported in the block, never raised.
+function _transit_times_summary(chains, params::Params, data::Data;
+                                bf_cutoff::Real = 10.0, max_draws::Int = 20_000)
+    try
+        theta = _theta_best_lp(chains, params;
+                               active_idx = _top_lp_draw_pool(chains; bf_cutoff))
+        mods = transit_times_model(theta, data)
+        planets = Any[]
+        for (s, m) in zip(data.transit_times, mods)
+            u = s.used
+            z2 = (m.residual[u] ./ m.sigma[u]) .^ 2
+            chi2 = isempty(u) ? NaN : sum(z2)
+            k = s.planet
+            slots = params.layout.systemic.tt_jitter
+            has_jit = k <= length(slots) && slots[k] > 0
+            push!(planets, Dict{String, Any}(
+                "planet" => k, "name" => s.name,
+                "n_points" => length(u), "n_excluded" => length(s.tc) - length(u),
+                "chi2" => chi2, "red_chi2" => isempty(u) ? NaN : chi2 / length(u),
+                "sigma_tt" => has_jit ? tt_jitter_value(theta, k) : nothing,
+                "ambiguous_epochs" => m.ambiguous,
+                "draw" => "max_lp",
+                "ephemeris" => _tt_posterior_ephemeris(chains, params, data, s; max_draws),
+                "oc" => Dict{String, Any}(
+                    "epoch" => s.epoch, "tc" => s.tc, "tc_err" => s.tc_err,
+                    "model" => m.model, "residual" => m.residual, "source" => s.source,
+                    "used" => isempty.(s.excluded), "excluded" => s.excluded)))
+        end
+        return Dict{String, Any}("status" => "ok", "planets" => planets)
+    catch err
+        @warn "transit_times summary failed (continuing)" exception = (err, catch_backtrace())
+        return Dict{String, Any}("status" => "failed", "error" => sprint(showerror, err))
+    end
+end
+
+# ---------------------------------------------------------------------
+# Free TTV offsets: which transits carry them
+# ---------------------------------------------------------------------
+
+_ttv_planet_key(k) = k isa Integer ? Int(k) : parse(Int, String(k))
+
+"""
+    _ttv_slot_kwargs(mdl, data, planet_modes) -> (counts, epochs)
+
+`model.ttv_n_transits` and `model.ttv_epochs` keyed by planet, as `Params`
+takes them, with the default for an analytic-TTV planet (`:TTV`, e.g. PM_TTV)
+that neither names: one offset per observed transit
+(`_ttv_default_epochs`), said in one Info line. Such a planet with
+photometry and no transit times is fitted as a linear ephemeris, with a
+warning. An empty dict (`"ttv_n_transits": {}`) names no planet. run_job and
+`fit_ttv` both come through here.
+"""
+function _ttv_slot_kwargs(mdl, data::Data, modes)
+    counts = Dict{Int, Int}(_ttv_planet_key(k) => Int(v)
+                            for (k, v) in _get(mdl, :ttv_n_transits; default = Dict()))
+    epochs = Dict{Int, Vector{Any}}(_ttv_planet_key(k) => collect(Any, v)
+                                    for (k, v) in _get(mdl, :ttv_epochs; default = Dict()))
+    for (k, m) in enumerate(modes)
+        (has_ttv(m) && !haskey(counts, k) && !haskey(epochs, k)) || continue
+        s = transit_time_set(data, k)
+        d = s === nothing ? nothing : _ttv_default_epochs(s, data.t_phot_sorted)
+        if d !== nothing
+            epochs[k] = d.epochs
+            @info "planet $k ($(_mode_name(m))): $(length(d.epochs)) free transit-time " *
+                  "offsets, one per observed transit: $(d.n_tt) with measured transit " *
+                  "times, $(d.n_phot) more in the photometry; transits " *
+                  "$(first(d.epochs))-$(last(d.epochs)) counted from its first observed " *
+                  "one. Set model.ttv_epochs or model.ttv_n_transits to choose them."
+        elseif n_phot(data) > 0
+            @warn "planet $k ($(_mode_name(m))) has photometry, no measured transit " *
+                  "times, and no free transit-time offsets: it is fitted as a linear " *
+                  "ephemeris. Give it offsets with model.ttv_n_transits = " *
+                  "{\"$k\": N} (transits 0..N-1 from its first observed one) or " *
+                  "model.ttv_epochs = {\"$k\": [transit numbers]}."
+        end
+    end
+    return counts, epochs
+end
+
+# A mode's name as the configs spell it.
+_mode_name(m) = (i = findfirst(==(m), _PLANET_MODES); i === nothing ? string(m) : String(i))
+
+"""
+    _ttv_default_epochs(set, t_phot_sorted) -> NamedTuple or nothing
+
+The transits a planet's free TTV offsets default to: those of its transit times
+in the likelihood and those with a photometric cadence within a quarter period
+of their centre (`_ttv_window_transits`), both placed by the least-squares
+ephemeris of the transit times, counted from the first of them (the first
+observed transit, src/ttv.jl). `(epochs, n_tt, n_phot)`, `n_phot` counting
+the photometric transits without a transit time. `nothing` when the transit
+times give no ephemeris.
+"""
+function _ttv_default_epochs(s::TransitTimeSet, ts::AbstractVector{Float64})
+    n_tt(s) > 0 || return nothing
+    fit = _tt_linear_fit(s)
+    (fit === nothing || !(fit.P > 0)) && return nothing
+    n_t = unique(s.epoch[s.used])        # the labels are the fit's transit numbers
+    n_p = setdiff(_ttv_window_transits(ts, fit.t0, fit.P), n_t)
+    all_n = sort!(vcat(n_t, n_p))
+    return (epochs = all_n .- all_n[1], n_tt = length(n_t), n_phot = length(n_p))
+end
+
+"""
+    _ttv_window_transits(ts, Tc, P) -> Vector{Int}
+
+The transits (numbered from `Tc`) with a cadence of `ts` (sorted) within a
+quarter period of their centre, the windows `ttv_first_transit` scans.
+"""
+function _ttv_window_transits(ts::AbstractVector{Float64}, Tc::Float64, P::Float64)
+    out = Int[]
+    n = length(ts)
+    i = 1
+    while i <= n
+        x = (ts[i] - Tc) / P
+        m = round(x)
+        if abs(x - m) < 0.25
+            push!(out, Int(m))
+            nxt = m + 1
+        else
+            nxt = x < m ? m : m + 1
+        end
+        i = max(searchsortedfirst(ts, Tc + (nxt - 0.25) * P), i + 1)
+    end
+    return out
+end
+
+"""
+    _ttv_slots_summary(cfg, chains, params, data) -> Dict or nothing
+
+summary.json's `ttv_slots`: per planet with free TTV offsets, each slot's name,
+its transit counted from the planet's first observed transit (`epochs`), where
+that came from (`source`: "ttv_n_transits", "ttv_epochs" or "default"), and at
+the max-lp draw the slot's linear-ephemeris time (`t_lin`, BJD_TDB) and, for a
+planet with transit times, the epoch label of that transit in their numbering
+(`transit_times_epoch`). `nothing` without such a planet. Fail-soft.
+"""
+function _ttv_slots_summary(cfg, chains, params::Params, data::Data)
+    c = params.config
+    ks = [k for k in 1:c.max_kplanet if !isempty(ttv_slot_epochs(c, k))]
+    isempty(ks) && return nothing
+    mdl = _get(cfg, :model; default = Dict())
+    given(key, k) = any(kk -> _ttv_planet_key(kk) == k,
+                        keys(_get(mdl, key; default = Dict())))
+    planets = Any[]
+    try
+        for k in ks
+            ep = ttv_slot_epochs(c, k)
+            src = given(:ttv_epochs, k) ? "ttv_epochs" :
+                  given(:ttv_n_transits, k) ? "ttv_n_transits" : "default"
+            d = Dict{String, Any}(
+                "planet" => k, "slots" => ["ttv_k$(k)_t$i" for i in eachindex(ep)],
+                "epochs" => ep, "source" => src,
+                "numbering" => "transit number counted from the planet's first " *
+                               "observed transit (0)")
+            pool = _planet_present_idx(chains, params, k)
+            if !isempty(pool)
+                th = _theta_best_lp(chains, params; active_idx = pool)
+                tp = _tt_tc_P(th, data, k)
+                if tp !== nothing
+                    Tc, P = tp
+                    n0 = _ttv_first_transit(th, data, k)
+                    d["draw"] = "max_lp"
+                    d["t_lin"] = Tc .+ (ep .+ n0) .* P
+                    s = transit_time_set(data, k)
+                    if s !== nothing && n_tt(s) > 0
+                        Δ = _tt_match(s, Tc, P, nothing)
+                        Δ === nothing || (d["transit_times_epoch"] = ep .+ n0 .- Δ)
+                    end
+                end
+            end
+            push!(planets, d)
+        end
+        return Dict{String, Any}("status" => "ok", "planets" => planets)
+    catch err
+        @warn "ttv_slots summary failed (continuing)" exception = (err, catch_backtrace())
+        return Dict{String, Any}("status" => "failed", "error" => sprint(showerror, err))
+    end
+end
+
+# The posterior linear ephemeris of a set's planet in the set's own labels:
+# t0 = Tc + (Δ + E0)·P per draw, the model's time of epoch label E0 (the
+# reference ephemeris' epoch_zero, 0 without one, so t0 compares with its t0),
+# Δ the label offset of that draw (`_tt_match` on the linear ephemeris): a draw
+# whose Tc sits in another copy of the orbit lands on the same t0. `nothing`
+# when no draw has the planet.
+function _tt_posterior_ephemeris(chains, params::Params, data::Data, s::TransitTimeSet;
+                                 max_draws::Int = 20_000)
+    n_tt(s) == 0 && return nothing
+    pool = _planet_present_idx(chains, params, s.planet)
+    isempty(pool) && return nothing
+    rows = pool[1:cld(length(pool), max_draws):end]
+    tdc = _td_cols(chains, params)
+    cols = _chain_cols(chains, params)
+    ref = s.tc[s.used[1]]                     # offsets keep the BJD digits
+    E0 = s.reference === nothing ? 0 : s.reference.epoch_zero
+    dt0 = Float64[]; Ps = Float64[]
+    for row in rows
+        th = _theta_from_chain_row(chains, params, row; tdc, cols)
+        tp = _tt_tc_P(th, data, s.planet)
+        tp === nothing && continue
+        Tc, P = tp
+        Δ = _tt_match(s, Tc, P, nothing)
+        Δ === nothing && continue
+        push!(dt0, (Tc - ref) + (Δ + E0) * P); push!(Ps, P)
+    end
+    isempty(Ps) && return nothing
+    qt, qP = quantile(dt0, (0.16, 0.5, 0.84)), quantile(Ps, (0.16, 0.5, 0.84))
+    return Dict{String, Any}(
+        "t0" => ref + qt[2], "t0_err_minus" => qt[2] - qt[1], "t0_err_plus" => qt[3] - qt[2],
+        "period" => qP[2], "period_err_minus" => qP[2] - qP[1],
+        "period_err_plus" => qP[3] - qP[2],
+        "epoch" => E0, "n_draws" => length(Ps))
 end
 
 # =====================================================================

@@ -51,6 +51,8 @@ end
 # LaTeX math symbol (no $) for a parameter name.
 function _sci_sym(name)
     s = String(name)
+    (mt = match(_TTV_SLOT_NAME, s)) !== nothing &&
+        return "\\delta t_{$(mt.captures[1]),$(mt.captures[2])}"
     m = match(r"^(.*)_k(\d+)$", s)
     if m !== nothing
         base, k = m.captures[1], m.captures[2]
@@ -109,6 +111,9 @@ end
 # Single-line axis label `$symbol$ (unit)` — for x-axes.
 function _sci_label(name, params)
     sym = _sci_sym(name)
+    # A free TTV offset says which transit it holds (src/ttv.jl).
+    ep = ttv_name_epoch(params.config, String(name))
+    ep === nothing || (sym *= "\\;[\\mathrm{epoch}\\;$ep]")
     u = _sci_unit_latex(first(sci_param_unit(name, params)))
     return latexstring(u == "" ? sym : sym * "\\;(" * u * ")")
 end
@@ -139,6 +144,8 @@ _utxt(s) = replace(_abbr(String(s)), "_" => " ")
 
 function _sci_sym_u(name)
     s = String(name)
+    (mt = match(_TTV_SLOT_NAME, s)) !== nothing &&
+        return "δt" * _subn(mt.captures[1]) * "," * _subn(mt.captures[2])
     m = match(r"^(.*)_k(\d+)$", s)
     if m !== nothing
         base, k = m.captures[1], m.captures[2]; ks = _subn(k)
@@ -182,6 +189,8 @@ end
 
 function _sci_ylabel(name, params)
     sym = _sci_sym_u(name)
+    ep = ttv_name_epoch(params.config, String(name))
+    ep === nothing || (sym *= " [epoch $ep]")
     u = first(sci_param_unit(name, params))
     return u == "" ? sym : sym * "\n(" * u * ")"
 end

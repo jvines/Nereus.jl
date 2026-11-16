@@ -840,6 +840,21 @@ for every instrument, see `InstrumentConfig`'s `iad`.
     return theta.values[slot]
 end
 
+"""
+    tt_jitter_value(theta, k) -> Real
+
+The jitter (days) of planet `k`'s measured transit times, added in quadrature
+to their `tc_err`: `s_i² = tc_err_i² + σ_tt,k²`. Exactly `0` for a planet
+without a `sigma_tt_k<k>` slot, the default.
+"""
+@inline function tt_jitter_value(theta::Theta{T}, k::Int) where {T<:Real}
+    slots = theta.params.layout.systemic.tt_jitter
+    (k < 1 || k > length(slots)) && return zero(T)
+    slot = slots[k]
+    slot == 0 && return zero(T)
+    return theta.values[slot]
+end
+
 # =====================================================================
 # RV trend accessors
 # =====================================================================

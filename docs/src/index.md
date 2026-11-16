@@ -35,7 +35,8 @@ This is version `0.9.0`.
 
 ## What's in Nereus
 
-- **Data models** for RVs, transit photometry, relative astrometry,
+- **Data models** for RVs, transit photometry, measured mid-transit
+  times, relative astrometry,
   HGCA (Gaia–Hipparcos proper-motion anomaly), Hipparcos IAD, Gaia
   GOST scans, Gaia DR3 five-parameter solutions, and activity
   indicator time series. The `Data` container ingests all of these

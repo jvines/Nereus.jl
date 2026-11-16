@@ -199,6 +199,8 @@ const TEST_UNITS = [
     (name = "test_summary_provenance.jl", seconds = 140, files = ["test_summary_provenance.jl"]),
     # The transit-phase time anchor (time = :phic) against the Tc one.
     (name = "test_phic_anchor.jl", seconds = 3, files = ["test_phic_anchor.jl"]),
+    # Measured mid-transit times (data.transit_times): loader, likelihood, fits.
+    (name = "test_transit_times.jl", seconds = 250, files = ["test_transit_times.jl"]),
     (name = "test_density_reparam.jl", seconds = 160, files = ["test_density_reparam.jl"]),
     # The workspace and allocating likelihoods at e up to 0.99999.
     (name = "test_high_e_workspace.jl", seconds = 15, files = ["test_high_e_workspace.jl"]),
