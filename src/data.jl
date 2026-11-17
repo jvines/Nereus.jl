@@ -395,34 +395,29 @@ function Data(;
     # (HGCA / Gaia DR3 / G23H). Supplied alone (or only with IAD, whose Gaia
     # joint needs `gaia_dr3`), it contributes NOTHING. Warn so it can't be
     # silently inert.
-    # The published Gaia five-parameter solution plays exactly the role of a
-    # second, absolute instrument: `iad_log_likelihood` puts the two on a
-    # common catalogue origin and shares ϖ and μ between them. An IAD source
-    # that stores O−C residuals but cannot say what they are residuals
-    # AGAINST breaks that — its ϖ column means "correction to the catalogue
-    # parallax" while Gaia's means "the parallax", and the fit silently
-    # absorbs the ~μ·Δt difference into the orbit. Measured on a 180 mas/yr
-    # star: ln L of −9.2e6 where −109 is correct, and a spurious mass.
-    #
-    # The most common way to get here is a 7p/9p/VIM Hipparcos source, whose
-    # residuals are against the full higher-order solution — a five-vector
-    # cannot reconstruct them, so `_parse_van_leeuwen_iad` leaves the
-    # reference at zero and warns. Those are exactly the binaries this is
-    # used for, so fail loudly rather than return a number.
-    if iad !== nothing && gaia_dr3 !== nothing && gost !== nothing
+    # An IAD source that stores O−C residuals must say what they are
+    # residuals AGAINST before it is fitted. The likelihood samples the
+    # parallax and models ϖ − ref_params[3] (`_iad_residuals!`), so against an
+    # all-zero reference the catalogue parallax, already subtracted from the
+    # data, is subtracted again and the IAD drags ϖ toward zero. Next to the
+    # published Gaia five-parameter solution, which plays the role of a
+    # second, absolute instrument, a shared ϖ and μ would also compare a
+    # correction to a full quantity, and the fit silently absorbs the ~μ·Δt
+    # difference into the orbit. Measured on a 180 mas/yr star: ln L of
+    # −9.2e6 where −109 is correct, and a spurious mass.
+    if iad !== nothing
         for m in 1:n_iad_inst(iad)
             (iad.abscissa_kind[m] === :residual &&
              all(==(0.0), iad.ref_params[m])) && throw(ArgumentError(
                 "Data: IAD instrument $m stores :residual abscissae with an " *
-                "all-zero ref_params, and a Gaia DR3 five-parameter solution " *
-                "(+ GOST) is also supplied. The joint likelihood shares ϖ and " *
-                "μ between them, which is only meaningful once both mean the " *
-                "same thing — a catalogue CORRECTION and a full quantity " *
-                "cannot be shared. Supply the catalogue solution the " *
-                "residuals were formed against (`ref_params`), or mark the " *
-                "abscissae `:absolute` if they are already full, or drop " *
-                "`gaia_dr3`. For a 7p/9p/VIM Hipparcos source no five-vector " *
-                "reconstruction exists — use the Hipparcos data alone."))
+                "all-zero ref_params. Residuals are fitted against the " *
+                "catalogue solution they were formed against: the likelihood " *
+                "models ϖ − ref_params[3], so without it the catalogue " *
+                "parallax is subtracted twice. Supply that solution " *
+                "(`load_hip_iad(path; ref_params = (0, 0, ϖ, μα*, μδ))`, or " *
+                "`ref_params` in a config's `values`), or mark the abscissae " *
+                "`:absolute` if nothing was subtracted. `fetch_hip_iad` reads " *
+                "it from the record's own header."))
         end
     end
 
