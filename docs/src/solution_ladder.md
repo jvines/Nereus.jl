@@ -264,8 +264,9 @@ This is a hook, not a workflow — there is no wrapper that does it for you.
 
 ## Boundaries
 
-- **No joint orbit + acceleration fit.** `iad_log_likelihood` always
-  marginalises exactly five nuisance parameters, never seven or nine.
+- **No joint orbit + acceleration fit.** `iad_log_likelihood` samples the
+  parallax and marginalises the zero point and proper motion, never an
+  acceleration or jerk.
   "Keplerian plus a long-period companion's acceleration" is not expressible.
 - **No reader for a published 7p/9p catalogue row.** You can *fit* one from
   epoch data, but no likelihood term consumes a published (acc_ra, acc_dec)

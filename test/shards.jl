@@ -49,6 +49,7 @@ const TEST_UNITS = [
     (name = "astrometry/test_obs_prior.jl", seconds = 11, files = ["astrometry/test_obs_prior.jl"]),
     (name = "astrometry/test_ofti.jl", seconds = 19, files = ["astrometry/test_ofti.jl"]),
     (name = "astrometry/test_iad_gost.jl", seconds = 8, files = ["astrometry/test_iad_gost.jl"]),
+    (name = "astrometry/test_hip_iad_solution_types.jl", seconds = 6, files = ["astrometry/test_hip_iad_solution_types.jl"]),
     (name = "astrometry/test_iad_multi_instrument.jl", seconds = 10, files = ["astrometry/test_iad_multi_instrument.jl"]),
     (name = "astrometry/test_gost_dr_windows.jl", seconds = 8, files = ["astrometry/test_gost_dr_windows.jl"]),
     # measured standalone (16.8 s, 2026-11-10, arm64), not in a five-shard CI run

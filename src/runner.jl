@@ -192,9 +192,8 @@ function run_job(cfg::AbstractDict)
         # Run health, per engine — same harvest fit_* gets.
         _postfit_stage!(pf, "diagnostics")
         try
-            summary["diagnostics"] = sampler_diagnostics(
-                String(_get(_get(cfg, :sampler; default = Dict()), :name;
-                            default = "pt_emcee")), result, chains)
+            summary["diagnostics"] = sampler_diagnostics(_job_sampler_name(cfg),
+                                                         result, chains)
         catch err
             summary["diagnostics"] = Dict{String,Any}("error" => sprint(showerror, err))
         end
@@ -273,19 +272,39 @@ end
 _to_dict(x::AbstractDict) = x
 _to_dict(x) = x  # JSON3.Object behaves dict-like
 
-# Effective ensemble walker count for the active-conditional convergence gate
-# (matches the sampler's n_walkers_eff = max(NW, 2·n_dim+2), even). Returns
-# `nothing` for non-ensemble samplers, where walker-reshape R̂ doesn't apply.
+# The walker ensembles: engine => (its default `n_walkers`, whether it rounds the
+# effective count up to even). Their chains hold one trace per walker, on the
+# chain axis or interleaved with the walker as the fast index, and the
+# convergence gate and the trace plots split them per walker. `pt` and `pt_hmc`
+# keep one cold chain; `nuts`, `ess`, `rjmcmc` and `moms` independent sequential
+# chains; the nested samplers, `pa`, `smc` and `ofti` independent or resampled
+# draws.
+const _WALKER_ENSEMBLES = Dict{String, Tuple{Int, Bool}}(
+    "pt_emcee"          => (100, true),   # src/samplers/pt_emcee.jl
+    "transdim_pt_emcee" => (100, true),   # src/samplers/transdim_pt_emcee.jl
+    "pt_whitening"      => (40,  true),   # src/samplers/pt_whitening.jl
+    "ensemble"          => (50,  false))  # src/samplers/ensemble.jl
+
+# Coupled populations: the walker ensembles and the annealed populations (`pa`,
+# `smc`). Their members are not independent chains, so fit health splits each
+# member's own trace instead of comparing members (docs/src/sampler_validation.md).
+const _COUPLED_ENGINES = union(Set(keys(_WALKER_ENSEMBLES)), Set(("pa", "smc")))
+
+_is_coupled_population(cfg) = _job_sampler_name(cfg) in _COUPLED_ENGINES
+
+# Effective walker count for the active-conditional convergence gate and the
+# per-walker trace plots: the sampler's own max(n_walkers, 2·n_dim + 2), rounded
+# up to even where the sampler does so. `nothing` for an engine that is not a
+# walker ensemble, where a per-walker split does not apply.
 function _ensemble_n_walkers(cfg, params)
+    spec = get(_WALKER_ENSEMBLES, _job_sampler_name(cfg), nothing)
+    spec === nothing && return nothing
+    nw_default, even = spec
     s = _get(cfg, :sampler; default = Dict())
-    name = String(_get(s, :name; default = ""))
-    name in ("pt_emcee", "transdim_pt_emcee", "pt", "pt_whitening") ||
-        return nothing
-    kw = _get(s, :kwargs; default = Dict())
-    nw = Int(_get(kw, :n_walkers; default = 100))
-    ndim = length(params.layout.unfrozen_names)
-    neff = max(nw, 2 * ndim + 2)
-    return isodd(neff) ? neff + 1 : neff
+    kw = s isa AbstractDict ? _get(s, :kwargs; default = Dict()) : nothing
+    nw = kw === nothing ? nw_default : Int(_get(kw, :n_walkers; default = nw_default))
+    neff = max(nw, 2 * length(params.layout.unfrozen_names) + 2)
+    return even && isodd(neff) ? neff + 1 : neff
 end
 
 # =====================================================================
@@ -1116,10 +1135,9 @@ function _parse_iad_block(block)
             psi            = Float64.(_get(vals, :psi; required = true)),
             parallax_factor = Float64.(_get(vals, :parallax_factor; required = true)),
             pm_factor      = Float64.(_get(vals, :pm_factor; required = true)),
-            # Defaults to a full abscissa. Say `abscissa_kind: "residual"`
-            # and give `ref_params` if these are O−C against a catalogue
-            # solution, otherwise they cannot be combined with another
-            # instrument (merge_iad refuses rather than guess).
+            # Defaults to a full abscissa. O−C against a catalogue solution
+            # says `abscissa_kind: "residual"` and gives that solution as
+            # `ref_params`; `Data` refuses a residual without it.
             ref_params     = _has(vals, :ref_params) ?
                              [Tuple(Float64.(_get(vals, :ref_params)))] : nothing,
             abscissa_kind  = Symbol(_get(vals, :abscissa_kind; default = "absolute")),
@@ -1790,9 +1808,16 @@ end
 # failing.
 const _SAMPLER_FNS = ENGINES
 
-# The engine a job config names, with `_dispatch_sampler`'s defaults.
+# The engine a job config names, with `_dispatch_sampler`'s defaults: a block
+# without `name`, or no block, runs transdim_pt_emcee when a `transdim` block is
+# present and pt_emcee otherwise. A bare string is the name itself. Everything
+# that depends on the engine (diagnostics, fit health, the walker count,
+# detection limits) reads it here, so a job that leaves the name out is treated
+# as the engine it runs.
 function _job_sampler_name(cfg)
     smp = _get(cfg, :sampler; default = Dict())
+    smp isa AbstractString && return String(smp)
+    smp === nothing && (smp = Dict())
     td = _get(cfg, :transdim; default = nothing) !== nothing
     return String(_get(smp, :name; default = td ? "transdim_pt_emcee" : "pt_emcee"))
 end
@@ -2934,9 +2959,7 @@ const _PT_PRIOR_SEEDED = Set(("pt_emcee", "transdim_pt_emcee", "pt"))
 function _run_detection_limits!(cfg, chains, params::Params, data::Data,
                                  out_dir::AbstractString, summary::Dict)
     out_cfg = _to_dict(_get(cfg, :output; default = Dict()))
-    sampler_name = String(_get(_to_dict(_get(cfg, :sampler;
-                                              default = Dict())),
-                                 :name; default = ""))
+    sampler_name = _job_sampler_name(cfg)
 
     # User can force on/off explicitly; default ON for PT samplers when the
     # chain explored the period prior (below), OFF otherwise.
@@ -3075,13 +3098,6 @@ function _run_loo!(cfg, chains, params::Params, data::Data, result,
     end
 end
 
-# Ensemble samplers store correlated walkers along the chain axis, so
-# `assess_fit` must split each walker's own trace rather than treat
-# walkers as independent chains.
-const _ENSEMBLE_SAMPLERS = Set(("pt_emcee", "transdim_pt_emcee",
-                                 "pt_whitening", "pa", "smc",
-                                 "ensemble", "ess"))
-
 # Post-fit "silent-wrong" guard. Fail-soft: never breaks the run, only
 # logs a verdict and records it in the summary. Builds the prior bounds
 # from the model layout so the prior-edge rail check is exercised. See
@@ -3114,14 +3130,12 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
             s === nothing || (log_scale[Symbol(nm)] = s)
         end
 
-        # `sampler` config is a block ({name, kwargs}), not a bare string — pull
-        # the name out (tolerate a bare string too). The old String(::Dict) threw
-        # for every job, so fit_health was silently dropped from the contract.
-        sampler_cfg = _get(cfg, :sampler; default = "")
-        sampler = sampler_cfg isa AbstractDict ?
-                  String(_get(_to_dict(sampler_cfg), :name; default = "")) :
-                  String(sampler_cfg)
-        is_ensemble = sampler in _ENSEMBLE_SAMPLERS
+        # A coupled population's members are correlated, so `assess_fit` splits
+        # each member's own trace rather than treat them as independent chains.
+        # The engine is the one that ran, defaults included: a block without
+        # `name` runs pt_emcee, and reading "" here assessed its walkers as
+        # independent.
+        is_ensemble = _is_coupled_population(cfg)
 
         # Trans-dim: a planet's or noise model's parameters are posterior draws
         # only where that component is active; elsewhere the column holds a
