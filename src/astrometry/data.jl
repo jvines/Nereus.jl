@@ -402,17 +402,17 @@ displacement is
                                   same order as the design columns. Added
                                   back by the likelihood to recover a full
                                   abscissa. All-zeros when nothing was
-                                  subtracted.
+                                  subtracted, or on a `:residual`
+                                  instrument whose solution is not known:
+                                  that one can be read, and fitted for its
+                                  own parallax ([`astrom_solution`](@ref)),
+                                  but not merged or used in a fit.
 - `abscissa_kind::Vector{Symbol}` : ONE entry per instrument, `:absolute`
                                   or `:residual`. `:absolute` means
                                   `abscissa` is already a full along-scan
                                   coordinate (Gaia `centroid_pos_al`);
                                   `:residual` means it is O−C against
-                                  `ref_params` (Hipparcos `RES`). The
-                                  distinction cannot be inferred from
-                                  `ref_params` — a Hipparcos file read
-                                  without its header has zeros there and
-                                  is still a residual.
+                                  `ref_params` (Hipparcos `RES`).
 
 # Invariants
 - All per-transit vectors have matching length.
@@ -425,9 +425,10 @@ displacement is
   call.
 - `ref_params` and `abscissa_kind` have one entry per instrument.
 - With more than one instrument, a `:residual` instrument must carry a
-  non-zero `ref_params`: without it its abscissae cannot be put on the
-  same footing as an `:absolute` instrument's, and sharing ϖ and μ across
-  the two would be comparing a correction to a full quantity.
+  non-zero `ref_params`: a shared ϖ and μ would otherwise compare a
+  catalogue correction to a full quantity. Alone it may not either, once
+  it is fitted: the likelihood samples the parallax and models
+  `ϖ − ref_params[3]`, so [`Data`](@ref) refuses it.
 """
 struct IADData
     t::Vector{Float64}
@@ -623,9 +624,9 @@ function IADData(;
     # to the catalogue parallax" while the other's means "the parallax".
     # Sharing ϖ and μ across the two would then be comparing different
     # quantities — the exact error this container exists to prevent. Alone
-    # it is harmless (the marginalisation projects the whole catalogue
-    # solution out), so only reject it when there is something to combine
-    # it WITH.
+    # it can still be read and fitted for its own parallax (the solution
+    # ladder), so only reject it here when there is something to combine it
+    # WITH; `Data` refuses it for a fit.
     if n_inst > 1
         for m in 1:n_inst
             (kind_vec[m] === :residual && all(==(0.0), ref_vec[m])) && throw(ArgumentError(

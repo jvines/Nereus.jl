@@ -1135,10 +1135,9 @@ function _parse_iad_block(block)
             psi            = Float64.(_get(vals, :psi; required = true)),
             parallax_factor = Float64.(_get(vals, :parallax_factor; required = true)),
             pm_factor      = Float64.(_get(vals, :pm_factor; required = true)),
-            # Defaults to a full abscissa. Say `abscissa_kind: "residual"`
-            # and give `ref_params` if these are O−C against a catalogue
-            # solution, otherwise they cannot be combined with another
-            # instrument (merge_iad refuses rather than guess).
+            # Defaults to a full abscissa. O−C against a catalogue solution
+            # says `abscissa_kind: "residual"` and gives that solution as
+            # `ref_params`; `Data` refuses a residual without it.
             ref_params     = _has(vals, :ref_params) ?
                              [Tuple(Float64.(_get(vals, :ref_params)))] : nothing,
             abscissa_kind  = Symbol(_get(vals, :abscissa_kind; default = "absolute")),

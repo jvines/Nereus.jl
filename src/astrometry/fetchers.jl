@@ -332,26 +332,45 @@ to MJD via `jyear_to_mjd(1991.25 + EPOCH)`.
 # The catalogue reference solution (header line 11)
 
 `RES` is O−C **against the catalogue solution tabulated in the file's
-third header line** — not a full abscissa. Alone that does not matter:
-the marginalisation projects the whole catalogue solution out. It
-matters the moment this data is combined with a mission whose abscissae
-ARE full (Gaia `centroid_pos_al`), because then a shared ϖ would be
-asked to mean "a correction" for one instrument and "the parallax" for
-the other. So the parser reads that line and stores
-`ref_params = [(0.0, 0.0, Plx, pm_RA, pm_DE)]` with
-`abscissa_kind = [:residual]`; `iad_log_likelihood` adds it back when
-there is more than one instrument. The position is `(0, 0)` by
-construction — the residuals are measured from `(RAdeg, DEdeg)`, so that
-IS this instrument's frame origin, and how far it sits from another
-mission's is exactly what the per-instrument zero point absorbs.
+third header line**, not a full abscissa. The likelihood samples the
+parallax and marginalises only the zero point and proper motion, so it
+must know that solution: the model's parallax term is `ϖ − Plx`, and a
+combined fit puts these abscissae on the same footing as a mission whose
+abscissae ARE full (Gaia `centroid_pos_al`). So the parser reads that line
+and stores `ref_params = [(0.0, 0.0, Plx, pm_RA, pm_DE)]` with
+`abscissa_kind = [:residual]`. The position is `(0, 0)` by construction:
+the residuals are measured from `(RAdeg, DEdeg)`, so that IS this
+instrument's frame origin, and how far it sits from another mission's is
+exactly what the per-instrument zero point absorbs.
 
-**Non-5p solutions.** For `isol_n mod 10 ∈ (1, 3, 7, 9)` — stochastic,
-VIM, 7-parameter and 9-parameter sources — the README is explicit that
-"the residuals are relative to the full 7 parameter, 9 parameter, or VIM
-solutions", so a five-vector cannot reconstruct them. The parser then
-warns and leaves `ref_params` at zero, which still reads correctly on
-its own and makes [`merge_iad`](@ref) refuse to combine the source
-rather than silently produce wrong full abscissae.
+**Solution types** (`isol_n mod 10`, README "Line 11"):
+
+- **5** and **1** (stochastic): `RES` is against the five-parameter sky
+  path. A stochastic solution's cosmic dispersion `var` is not read: across
+  the bundle it is 0.18 mas at the median (1.09 at most) against a median
+  `SRES` of 4.3 mas, and the IAD jitter, on by default, fits any excess.
+- **7** and **9**: `RES` is against the full solution, whose higher-order
+  terms are on line 11 — `dpmRA`, `dpmDE` (mas/yr²) and, for 9, `ddpmRA`,
+  `ddpmDE` (mas/yr³). In the Taylor convention of the catalogue (and of
+  htof and [`astrom_design`](@ref)), the sky path is
+  `α* + μα*·t + gα*·t²/2 + ġα*·t³/6` with `t = EPOCH`. The parser adds
+  those terms back along scan,
+
+      RES + (gα*·t²/2 + ġα*·t³/6)·sin ψ + (gδ·t²/2 + ġδ·t³/6)·cos ψ,
+
+  so every source's abscissae are O−C against its five-parameter sky path.
+  For a 7p or 9p source that curvature is the companion's reflex. Left
+  subtracted, an orbit fit would see data with it removed, and the
+  likelihood marginalises no acceleration to take it back out.
+- **3** (VIM): `RES` is against the five-parameter path plus the
+  variability-induced photocentre motion (`upsRA`, `upsDE`). That term
+  scales with each transit's brightness, which the record does not carry,
+  so it stays removed. It is photometric, not orbital, and no Nereus
+  model includes it.
+
+A record without line 11 cannot be read at all: its residuals would be
+taken against a zero solution, and the catalogue parallax, already
+subtracted from `RES`, would be subtracted again by the model.
 """
 function _parse_van_leeuwen_iad(path::AbstractString)
     isfile(path) || throw(ArgumentError("IAD file not found: $path"))
@@ -369,11 +388,10 @@ function _parse_van_leeuwen_iad(path::AbstractString)
     # inside their declared fields in the real files (Plx `35.25` sits at
     # columns 29-33 of a declared 29-36 field), so split on whitespace
     # rather than slicing bytes. Unused fields are the literal `---`, never
-    # blank, so the token count is stable.
-    ref_plx  = 0.0
-    ref_pmra = 0.0
-    ref_pmdec = 0.0
-    isol_n   = 0
+    # blank, so the token count is stable (23 on every record of the
+    # bundle).
+    ref_toks  = nothing
+    isol_n    = nothing
     want_ref  = false
     want_isol = false
 
@@ -384,14 +402,10 @@ function _parse_van_leeuwen_iad(path::AbstractString)
             toks = split(strip(lstrip(s, '#')))
             if want_ref
                 want_ref = false
-                if length(toks) >= 5
-                    ref_plx   = something(tryparse(Float64, toks[3]), 0.0)
-                    ref_pmra  = something(tryparse(Float64, toks[4]), 0.0)
-                    ref_pmdec = something(tryparse(Float64, toks[5]), 0.0)
-                end
+                ref_toks = toks
             elseif want_isol
                 want_isol = false
-                length(toks) >= 5 && (isol_n = something(tryparse(Int, toks[5]), 0))
+                length(toks) >= 5 && (isol_n = tryparse(Int, toks[5]))
             end
             !isempty(toks) && toks[1] == "RAdeg" && (want_ref = true)
             length(toks) >= 5 && toks[1] == "HIP" && toks[5] == "isol_n" && (want_isol = true)
@@ -433,25 +447,48 @@ function _parse_van_leeuwen_iad(path::AbstractString)
         "van Leeuwen 2007 (expected 7 whitespace columns: IORB EPOCH " *
         "PARF CPSI SPSI RES SRES)."))
 
-    # Only a 5-parameter source can be reconstructed from a 5-vector. For
-    # 7p/9p/VIM/stochastic sources the residuals are against the FULL
-    # higher-order solution (README, "Line 11"), so a five-vector would
-    # reconstruct the wrong sky path — leave the reference at zero and say
-    # so. Single-mission use is unaffected either way; `merge_iad` is where
-    # it becomes fatal, and it refuses.
+    name = basename(path)
+    isol_n === nothing && throw(ArgumentError(
+        "$name: no solution type (header line 7, `isol_n`). These are " *
+        "Hipparcos-2 residual records as the 2014 Java tool exports them, " *
+        "which is what `fetch_hip_iad` reads."))
+    # Line 11, by position: RAdeg DEdeg Plx pmRA pmDE, five errors, then
+    # dpmRA dpmDE (11, 12) and ddpmRA ddpmDE (15, 16). `---` marks a field
+    # this solution type does not have.
+    field(i) = ref_toks !== nothing && i <= length(ref_toks) ?
+               tryparse(Float64, ref_toks[i]) : nothing
+    plx, pmra, pmdec = field(3), field(4), field(5)
+    (plx === nothing || pmra === nothing || pmdec === nothing) && throw(ArgumentError(
+        "$name: no catalogue reference solution (header line 11: Plx, " *
+        "pmRA, pmDE). RES is O−C against that solution, and without it the " *
+        "catalogue parallax would be subtracted twice. These are Hipparcos-2 " *
+        "residual records as the 2014 Java tool exports them, which is what " *
+        "`fetch_hip_iad` reads."))
+
     sol_kind = isol_n % 10
-    ref = (0.0, 0.0, ref_plx, ref_pmra, ref_pmdec)
-    if sol_kind != 5 && any(!=(0.0), ref)
-        @warn("$(basename(path)): isol_n = $isol_n is a " *
-              (sol_kind == 7 ? "7-parameter" : sol_kind == 9 ? "9-parameter" :
-               sol_kind == 3 ? "VIM" : sol_kind == 1 ? "stochastic" :
-               "non-5-parameter") *
-              " solution, so its RES residuals are against that full " *
-              "solution, not against the five-parameter sky path. Dropping " *
-              "the catalogue reference solution: these abscissae stay usable " *
-              "on their own, but cannot be combined with another astrometric " *
-              "instrument (merge_iad will refuse).", maxlog = 1)
-        ref = (0.0, 0.0, 0.0, 0.0, 0.0)
+    sol_kind in (1, 3, 5, 7, 9) || throw(ArgumentError(
+        "$name: isol_n = $isol_n is not a Hipparcos-2 solution type (its " *
+        "last digit is 5, 7, 9, 3 for VIM or 1 for stochastic)."))
+
+    # 7p and 9p: RES is against the full solution. Add its higher-order terms
+    # back along scan so the abscissae are O−C against the five-parameter sky
+    # path, the reference stored below. Projected with sincos(ψ), as the
+    # likelihood and `astrom_design` project: CPSI and SPSI are printed to
+    # four decimals and are not exactly a unit vector.
+    if sol_kind in (7, 9)
+        gα, gδ = field(11), field(12)
+        jα, jδ = sol_kind == 9 ? (field(15), field(16)) : (0.0, 0.0)
+        any(isnothing, (gα, gδ, jα, jδ)) && throw(ArgumentError(
+            "$name: isol_n = $isol_n is a $(sol_kind)-parameter solution, but " *
+            "header line 11 does not give its " *
+            (sol_kind == 9 ? "dpmRA, dpmDE, ddpmRA and ddpmDE" : "dpmRA and dpmDE") *
+            ", which RES is measured against."))
+        @inbounds for j in eachindex(abscissa)
+            τ = pmf[j]
+            h2, h3 = τ^2 / 2, τ^3 / 6
+            s, c = sincos(psi_vec[j])
+            abscissa[j] += (gα * h2 + jα * h3) * s + (gδ * h2 + jδ * h3) * c
+        end
     end
 
     return IADData(;
@@ -461,7 +498,7 @@ function _parse_van_leeuwen_iad(path::AbstractString)
         psi            = psi_vec,
         parallax_factor = pxf,
         pm_factor      = pmf,
-        ref_params     = [ref],
+        ref_params     = [(0.0, 0.0, plx, pmra, pmdec)],
         abscissa_kind  = :residual,
     )
 end

@@ -275,13 +275,12 @@ columns elsewhere.
 
 Column 4 is an abscissa RESIDUAL — O−C against a catalogue solution this
 format does not carry — so `abscissa_kind` defaults to `:residual` and
-`ref_params` to zeros. Alone that is exactly right and changes nothing: the
-marginalisation projects the whole catalogue solution out. It matters only
-when this source is combined with another astrometric instrument, and there
-[`merge_iad`](@ref) will REFUSE rather than share a parallax between a
-catalogue correction and a full quantity. Pass `ref_params = (0, 0, ϖ_cat,
-μα*_cat, μδ_cat)` to make it combinable, or `abscissa_kind = :absolute` if
-your column 4 is in fact a full abscissa.
+`ref_params` to zeros. That reads, and [`astrom_solution`](@ref) fits it for
+its own parallax, but a fit needs the solution: the likelihood samples the
+parallax and models `ϖ − ref_params[3]`, so [`Data`](@ref) refuses it, as
+[`merge_iad`](@ref) does. Pass `ref_params = (0, 0, ϖ_cat, μα*_cat, μδ_cat)`
+to fit or combine it, or `abscissa_kind = :absolute` if your column 4 is in
+fact a full abscissa.
 
 [`fetch_hip_iad`](@ref) needs neither, because the van Leeuwen residual
 record carries its catalogue solution in its own header.

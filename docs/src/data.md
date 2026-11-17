@@ -355,7 +355,12 @@ Cache layout (`$NEREUS_DATA_CACHE` or `~/.nereus/`):
 `IAD/ResRec_JavaTool_2014/H273/H027321.d`. Pass
 `force_redownload = true` to refresh. The `_parse_van_leeuwen_iad`
 parser drops scans flagged rejected (`SRES < 0`) and sets
-`psi = atan2(CPSI, SPSI)`.
+`psi = atan2(CPSI, SPSI)`. It keeps every source's catalogue solution
+(header line 11) as its reference. For a 7- or 9-parameter solution, whose
+residuals are against the full solution, it adds the catalogue
+acceleration (and jerk) back along scan. Every source's abscissae are then
+O−C against its five-parameter sky path, and an orbit fit sees the
+curvature the catalogue found.
 
 There is also a `load_hip_iad(path; ...)` loader for the 6-column
 synthetic IAD format (distinct from the bundle's `IORB EPOCH PARF CPSI
