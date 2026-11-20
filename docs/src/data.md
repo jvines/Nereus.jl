@@ -403,6 +403,37 @@ source the AGIS `agis_source_excess_noise` reflects the unmodelled orbit
 itself (it is the signal, not measurement noise) and is deliberately **not**
 folded into `abscissa_err`.
 
+#### Limitation: the Hipparcos frame spin is not modelled
+
+When Hipparcos IAD and Gaia DR4 epoch astrometry share one `IADData`, the
+marginalised nuisance vector is one along-scan zero point per instrument plus
+a **single proper motion shared by both missions** (`_iad_n_q`,
+`src/astrometry/likelihood.jl`). Sharing μ is what makes the joint fit worth
+doing: any change in the apparent proper motion across the ~25 yr gap must be
+produced by the orbit.
+
+The per-instrument zero points absorb a constant offset between the two
+reference frames (and the different reference epochs, 1991.25 vs J2017.5),
+but **not a relative rotation rate**. The Hipparcos reference frame spins
+relative to Gaia-CRF at a level of order 0.1 mas/yr per axis (the Hipparcos
+catalogue quoted 0.25 mas/yr per axis as its spin uncertainty; the HGCA,
+Brandt 2018, 2021, calibrates and removes it). A spin adds a proper-motion
+offset to the Hipparcos abscissae only. That term is linear in Δt for one
+instrument, so it is not in the span of the zero-point columns and is not
+marginalised: the shared μ cannot absorb it, and the orbit does instead, as a
+spurious Hipparcos–Gaia proper-motion difference.
+
+Nothing in `src/` corrects for this. It is negligible when the orbital
+proper-motion change is ≫ 0.1 mas/yr (stellar companions at ~100 pc, most
+brown dwarfs on decade orbits), and can bias the acceleration, and hence
+the companion mass, of long-period low-mass companions or distant hosts
+whose Hipparcos–Gaia Δμ is ~1 mas/yr or less. For those, prefer the
+validated `hgca` channel, which carries the spin calibration. A fix would
+either rotate the Hipparcos abscissae by the published spin before the fit,
+or add a per-instrument proper-motion offset for Hipparcos with a Gaussian
+prior of the spin's width (still analytically marginalisable, as an extra
+column with a finite prior precision added to `A`).
+
 ### `GOSTData` — Gaia scanning law
 
 Predicted scan epochs and angles from the Gaia Observation Forecast
