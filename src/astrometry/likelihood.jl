@@ -405,6 +405,13 @@ end
 # absorbs the origin difference, and the frame offset between the two
 # reference positions, in one go.
 #
+# What it does NOT absorb is a relative SPIN of the two frames: the
+# Hipparcos frame rotates against Gaia-CRF at ~0.1 mas/yr per axis, a
+# proper-motion offset on the Hipparcos rows only (∝ Δt, not in the
+# zero-point span). It is not corrected anywhere in src/, so the orbit soaks
+# it up as a spurious Hip–Gaia Δμ. Negligible for Δμ ≫ 0.1 mas/yr; see
+# "Limitation: the Hipparcos frame spin is not modelled" in docs/src/data.md.
+#
 # Column ORDER is deliberate: instrument 1's zero point occupies columns
 # 1-2 and the shared block columns 3-5, so a single-instrument container
 # reproduces the previous hand-unrolled 5×5 layout
