@@ -25,10 +25,22 @@ Everything after this point is irreversible: a tag, a public release, a PyPI
 filename that can never be reused."
 load_config
 
-JL_ROOT=$(cd "$here/../.." && pwd)
-PY_ROOT="$CFG_NEREUS_PY"
 OUT="$CFG_STAGE/v$JL_VER"
 [ -f "$OUT/manifest.json" ] || die "nothing staged at $OUT -- run prepare.sh first"
+# The sources are the staged ones (fresh_clone). nereus-py must be prepare's
+# own clone: it holds the _runtime.py prepare rewrote for this release, which
+# step 5 commits. Nereus.jl is main as the server has it NOW -- prepare built
+# from main locally or from a pull request's head in CI, and the tree gate
+# below holds either way -- so it is brought to origin/main, or cloned.
+PY_ROOT="$OUT/src/nereus-py"
+[ -d "$PY_ROOT/.git" ] || die "no prepared nereus-py at $PY_ROOT -- run prepare.sh first"
+JL_ROOT="$OUT/src/Nereus.jl"
+if [ -d "$JL_ROOT/.git" ]; then
+  git -C "$JL_ROOT" fetch -q origin main && git -C "$JL_ROOT" merge -q --ff-only origin/main \
+    || die "the staged Nereus.jl cannot fast-forward to origin/main"
+else
+  fresh_clone "$(jl_url)" "$JL_ROOT"
+fi
 
 say "publishing Nereus $JL_VER / astronereus $PY_VER"
 

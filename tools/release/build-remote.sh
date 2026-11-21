@@ -23,7 +23,7 @@ HOST="${1:?usage: build-remote.sh <host> <out-dir> <version> [--claimed]}"
 OUT="${2:?}"; VER="${3:?}"; CLAIMED="${4:-}"
 SSHOPT="-o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 JL_ROOT=$(cd "$here/../.." && pwd)
-PY_ROOT="$CFG_NEREUS_PY"
+PY_ROOT="${NEREUS_PY_ROOT:?set by prepare.sh: the nereus-py clone to build against}"
 
 # Put one repository on the builder as exactly this commit. Only `.git` is
 # sent, then checked out there: the builder gets the same commit id and tree,
@@ -38,18 +38,18 @@ PY_ROOT="$CFG_NEREUS_PY"
 # builder unpacks into objects/pack, where git reads them as corrupt pack
 # indexes.
 ship_repo() {
-  local src="$1" name="$2" want got
+  local src="$1" name="$2" base="${3:-nereus-build-src}" want got
   [ -d "$src/.git" ] || die "$src is not a standalone clone (its .git is not a directory)"
   want=$(tree_of "$src")
   # shellcheck disable=SC2086
   COPYFILE_DISABLE=1 tar --no-xattrs -C "$src" -cf - .git | ssh $SSHOPT "$HOST" \
-    "rm -rf nereus-build-src/$name && mkdir -p nereus-build-src/$name &&
-     tar -xf - -C nereus-build-src/$name &&
-     git -C nereus-build-src/$name reset -q --hard &&
-     git -C nereus-build-src/$name clean -fdxq" \
+    "rm -rf $base/$name && mkdir -p $base/$name &&
+     tar -xf - -C $base/$name &&
+     git -C $base/$name reset -q --hard &&
+     git -C $base/$name clean -fdxq" \
     || die "could not ship $name to the builder"
   # shellcheck disable=SC2086
-  got=$(ssh $SSHOPT "$HOST" "git -C nereus-build-src/$name rev-parse 'HEAD^{tree}'") \
+  got=$(ssh $SSHOPT "$HOST" "git -C $base/$name rev-parse 'HEAD^{tree}'") \
     || die "could not read $name back on the builder"
   [ "$got" = "$want" ] || die "$name on the builder is tree $got, expected $want"
   info "$name shipped: tree $want"
@@ -90,26 +90,76 @@ fetch_bundle() {
   info "retrieved $(du -h "$OUT/$f" | cut -f1)"
 }
 
+# The full suite, in the CI image, sharded to this machine: 3 threads and about
+# 5 GB per shard, leaving room for the bundle build running beside it. Its own
+# copy of the source (nereus-suite-src), since the suite writes test outputs
+# into its tree. The depot persists on the builder between releases, so only
+# the first release on a machine precompiles from cold. The verdict goes to
+# $OUT/suite.rc, which prepare.sh reads before building anything further.
+run_suite() {
+  local rc=0 prefix
+  prefix=$(printf 'JULIA_VER=%q bash -s' "$CFG_JULIA")
+  # A subshell, so a `die` in ship_repo ends it and not the caller.
+  (
+    ship_repo "$JL_ROOT" Nereus.jl nereus-suite-src &&
+    # shellcheck disable=SC2086
+    ssh $SSHOPT "$HOST" "$prefix" <<'REMOTE'
+set -euo pipefail
+cd "$HOME/nereus-suite-src/Nereus.jl"
+depot="$HOME/.cache/nereus-suite-depot"; mkdir -p "$depot"
+cpus=$(nproc); memg=$(awk '/^MemTotal/{print int($2/1048576)}' /proc/meminfo)
+n=$(( cpus / 3 )); m=$(( (memg - 12) / 5 ))
+[ "$m" -lt "$n" ] && n=$m
+[ "$n" -lt 2 ] && n=2
+echo "remote suite: $n shards on $(uname -s)-$(uname -m), $cpus cpus, $memg GB"
+docker build -q -t "nereus-ci:julia-$JULIA_VER" ci/ >/dev/null
+run() {
+  docker run --rm --label cl.jvines.owner=nereus-release \
+    --user "$(id -u):$(id -g)" -e HOME=/tmp -e JULIA_DEPOT_PATH=/depot \
+    -v "$depot":/depot -v "$PWD":/repo -w /repo "nereus-ci:julia-$JULIA_VER" "$@"
+}
+run julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+run ci/run_tests.sh "$n" 3 3
+REMOTE
+  ) >"$OUT/suite-linux-x86_64.log" 2>&1 || rc=$?
+  echo "$rc" >"$OUT/suite.rc"
+  return 0
+}
+
+# Bundle build, and the suite beside it when prepare.sh asks (REMOTE_SUITE).
+# Both finish before the claim is given back; the suite's verdict is in
+# $OUT/suite.rc, the build's is this function's status.
+build_and_test() {
+  local spid=""
+  if [ -n "${REMOTE_SUITE:-}" ]; then run_suite & spid=$!; fi
+  local brc=0
+  run_build || brc=$?
+  [ -n "$spid" ] && wait "$spid"
+  [ "$brc" -eq 0 ] || die "remote build failed"
+  fetch_bundle
+}
+
 say "linux-x86_64 on the chosen candidate"
 if [ "$CLAIMED" = "--claimed" ]; then
-  # Already inside a fleet claim; build, fetch, return.
-  run_build || die "remote build failed"
-  fetch_bundle
+  # Already inside a fleet claim; build (and test), fetch, return.
+  build_and_test
   exit 0
 fi
 if printf '%s\n' $CFG_NOCLAIM | grep -qx "$HOST"; then
   info "always-on node: no claim needed"
-  run_build || die "remote build failed"
-  fetch_bundle
+  build_and_test
 else
   info "claiming through the coordinator for the duration of the build"
   # `fleet with` runs the command LOCALLY between claim and release, so the
   # ssh below is our own already-verified invocation rather than fleet's.
-  # TTL is sized well over the ~10-20 min build: renewal by the wrapper is not
+  # TTL is sized well over the build and the suite beside it: renewal by the wrapper is not
   # something to rely on, so the TTL is a hard outer bound with real margin.
   # Re-enters THIS script with --claimed, which skips straight to the build:
   # one script, one code path, and the claim brackets exactly this process.
-  "$CFG_FLEET" with "$HOST" --ttl 45m --reason "nereus $VER bundle build" -- \
+  # 90 minutes: the suite beside the build runs ~15 minutes on the largest
+  # candidate but over an hour on the smallest.
+  "$CFG_FLEET" with "$HOST" --ttl 90m --reason "nereus $VER bundle build and suite" -- \
+    env REMOTE_SUITE="${REMOTE_SUITE:-}" NEREUS_PY_ROOT="$PY_ROOT" \
     bash "$here/build-remote.sh" "$HOST" "$OUT" "$VER" --claimed \
     || die "remote build failed (claim released)"
 fi
