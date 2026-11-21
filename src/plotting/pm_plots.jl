@@ -75,18 +75,17 @@ function plot_pm_timeseries(chains, params, data;
             # glue the residual panel to the main one: they share the x axis
             rowgap!(ga, 0)
 
-            # Marker alpha: even on dense LCs we want the dips visible.
-            n_pts = length(t_i)
-            alpha = n_pts > 20000 ? 0.85 :
-                    n_pts > 5000  ? 0.90 :
-                    n_pts > 1000  ? 0.95 : 1.0
-
-            errorbars!(ax, t_i, flux_i, err_i;
-                        color=(NEREUS_COLORS.pm_marker, 0.6),
-                        linewidth=1)
-            scatter!(ax, t_i, flux_i;
-                      color=(NEREUS_COLORS.pm_marker, alpha),
-                      markersize=5, strokewidth=0)
+            # Limits first, so the alpha below is judged on the final axis
+            # box: the raw-cadence quantiles, widened to the model's dips
+            # (`_fold_flux_ylims` with no bins), so a transit the cadences
+            # under-sample is not clipped off the bottom.
+            flims = _fold_flux_ylims(model_at_data, Float64[], Float64[], flux_i)
+            flims === nothing || ylims!(ax, flims...)
+            _tight_ylims!(ax_r, res_ppm; pad_frac = 0.30, symmetric=true)
+            ylo, yhi = flims === nothing ? extrema(filter(isfinite, flux_i)) : flims
+            alpha, bars = _overlap_alpha(ax, t_i, flux_i, err_i, extrema(t_i), (ylo, yhi);
+                                          markersize = 5)
+            _raw_points!(ax, t_i, flux_i, err_i, alpha, bars; markersize = 5)
 
             # Model overlay as a scatter at data cadences. With many
             # short transits across a long span, drawing model lines
@@ -103,10 +102,6 @@ function plot_pm_timeseries(chains, params, data;
                       markersize=5, strokewidth=0)
             hlines!(ax_r, 0; color=NEREUS_COLORS.zero_line,
                      linestyle=:dash, linewidth=MODEL_LW)
-
-            # Tight y-axis: snug to actual data range with small pad
-            _tight_ylims!(ax,   flux_i; pad_frac = 0.10)
-            _tight_ylims!(ax_r, res_ppm; pad_frac = 0.30, symmetric=true)
 
             if output !== nothing
                 mkpath(joinpath(output, "models"))
@@ -252,18 +247,6 @@ function plot_pm_phasefold(chains, params, data;
             xlims!(ax,   ph_lo, ph_hi)
             xlims!(ax_r, ph_lo, ph_hi)
 
-            n_pts = count(mask)
-            alpha = n_pts > 20000 ? 0.75 :
-                    n_pts > 5000  ? 0.85 :
-                    n_pts > 1000  ? 0.95 : 1.0
-
-            errorbars!(ax, ph_i, flux_i, err_i;
-                        color=(NEREUS_COLORS.pm_marker, 0.45),
-                        linewidth=0.5)
-            scatter!(ax, ph_i, flux_i;
-                      color=(NEREUS_COLORS.pm_marker, alpha),
-                      markersize=4, strokewidth=0)
-
             # CI bands on a fine phase grid using active samples only
             ph_fine = collect(range(ph_lo, ph_hi; length=2000))
             t_fine = t0 .+ ph_fine .* P
@@ -281,6 +264,31 @@ function plot_pm_phasefold(chains, params, data;
                                              n_draws=min(2000,
                                                        length(active_idx)))
 
+            # Binned overlay — robust occupancy-scaled median bins over the
+            # window by default (`bin_phasefold` picks the bin count from the
+            # in-window cadence count); an explicit `n_bins` overrides, but a
+            # forced-fine grid drops below min_count and renders almost no
+            # bins (measured: n_bins=40 over ~100 in-window cadences → 1 bin).
+            nb_kw = n_bins isa Int && n_bins > 0 ? n_bins : nothing
+            xb, yb, eb = bin_phasefold(ph_i, flux_i; nbins = nb_kw,
+                                        xlo = ph_lo, xhi = ph_hi)
+            _, rb, erb = bin_phasefold(ph_i, res_ppm; nbins = nb_kw,
+                                        xlo = ph_lo, xhi = ph_hi)
+
+            # Limits BEFORE anything is drawn: the marker alpha below is set
+            # from how the points crowd this exact axis box. Framed on the
+            # model and the bins, not on the raw cadences (`_fold_flux_ylims`).
+            in_window = ph_lo .<= ph_i .<= ph_hi
+            flims = _fold_flux_ylims(ci.median, yb, eb, flux_i[in_window])
+            flims === nothing || ylims!(ax, flims...)
+            rlims = _fold_resid_ylims(rb, erb, res_ppm[in_window])
+            rlims === nothing || ylims!(ax_r, rlims...)
+
+            ylo, yhi = flims === nothing ? extrema(filter(isfinite, flux_i)) : flims
+            alpha, bars = _overlap_alpha(ax, ph_i, flux_i, err_i, (ph_lo, ph_hi), (ylo, yhi);
+                                          markersize = 4)
+            _raw_points!(ax, ph_i, flux_i, err_i, alpha, bars; markersize = 4)
+
             band!(ax, ph_fine, ci.lo3, ci.hi3;
                    color=(NEREUS_COLORS.ci, CI_ALPHA_3SIGMA))
             band!(ax, ph_fine, ci.lo2, ci.hi2;
@@ -297,15 +305,6 @@ function plot_pm_phasefold(chains, params, data;
             lines!(ax, ph_fine, ci.median;
                     color=NEREUS_COLORS.model, linewidth=MODEL_LW)
 
-            # Binned overlay — robust occupancy-scaled median bins over the
-            # window by default (`bin_phasefold` picks the bin count from the
-            # in-window cadence count); an explicit `n_bins` overrides, but a
-            # forced-fine grid drops below min_count and renders almost no
-            # bins (measured: n_bins=40 over ~100 in-window cadences → 1 bin).
-            xb, yb, eb = bin_phasefold(ph_i, flux_i;
-                                        nbins=(n_bins isa Int && n_bins > 0 ?
-                                               n_bins : nothing),
-                                        xlo=ph_lo, xhi=ph_hi)
             if !isempty(xb)
                 errorbars!(ax, xb, yb, eb;
                             color=NEREUS_COLORS.pm_bin,
@@ -321,12 +320,6 @@ function plot_pm_phasefold(chains, params, data;
             hlines!(ax_r, 0; color=NEREUS_COLORS.zero_line,
                      linestyle=:dash, linewidth=MODEL_LW)
 
-            # Tight y-axes inside the phase window
-            in_window = ph_lo .<= ph_i .<= ph_hi
-            _tight_ylims!(ax,   flux_i[in_window]; pad_frac=0.10)
-            _tight_ylims!(ax_r, res_ppm[in_window]; pad_frac=0.30,
-                                                     symmetric=true)
-
             if output !== nothing
                 mkpath(joinpath(output, "models"))
                 _save_plot(joinpath(output, "models",
@@ -335,6 +328,136 @@ function plot_pm_phasefold(chains, params, data;
             end
         end
     end
+end
+
+"""
+    _fold_flux_ylims(model, yb, eb, raw; pad_frac=0.10) -> (lo, hi) or nothing
+
+Flux limits for a transit panel, framed on what carries the signal: the
+model curve (its transit floor and its baseline) and the binned points
+(`yb ± eb`). The raw cadences set the limits only when there are no bins,
+and then the model's range is still included. Raw points may overflow the
+axis; they do not set it.
+
+Framed on the raw cadences' 2-98% quantiles, a light curve covering only
+egress (LCO Sutherland on TIC-275647095) lost the model's floor off the
+bottom of the panel, and NGTS's 10 s cadences (±2.5% scatter) made the axis
+5% tall and flattened a 1% transit.
+"""
+function _fold_flux_ylims(model::AbstractVector{<:Real}, yb::AbstractVector{<:Real},
+                          eb::AbstractVector{<:Real}, raw::AbstractVector{<:Real};
+                          pad_frac::Float64 = 0.10, q_lo::Float64 = 0.02,
+                          q_hi::Float64 = 0.98)
+    fm = filter(isfinite, model)
+    lo, hi = Inf, -Inf
+    if !isempty(yb)
+        lo = minimum(yb .- eb); hi = maximum(yb .+ eb)
+    else
+        fr = filter(isfinite, raw)
+        isempty(fr) || ((lo, hi) = (quantile(fr, q_lo), quantile(fr, q_hi)))
+    end
+    if !isempty(fm)
+        lo = min(lo, minimum(fm)); hi = max(hi, maximum(fm))
+    end
+    (isfinite(lo) && isfinite(hi) && hi > lo) || return nothing
+    span = hi - lo
+    return (lo - pad_frac * span, hi + pad_frac * span)
+end
+
+"""
+    _fold_resid_ylims(rb, erb, raw; k=4.0, pad=1.15) -> (-m, m) or nothing
+
+Symmetric residual limits. With binned residuals `rb ± erb`: `k` times their
+rms about zero, widened to show every binned point and its bar. Without
+bins: the raw residuals' 2-98% quantiles (as `_tight_ylims!`). Raw points
+may overflow; on dense noisy cadences they otherwise set an axis on which
+the residual structure the bins show is invisible.
+"""
+function _fold_resid_ylims(rb::AbstractVector{<:Real}, erb::AbstractVector{<:Real},
+                           raw::AbstractVector{<:Real}; k::Float64 = 4.0,
+                           pad::Float64 = 1.15, raw_pad::Float64 = 0.30)
+    ok = isfinite.(rb) .& isfinite.(erb)
+    if any(ok)
+        r = rb[ok]; e = erb[ok]
+        m = max(k * sqrt(sum(abs2, r) / length(r)), maximum(abs.(r) .+ e)) * pad
+        m > 0 && return (-m, m)
+    end
+    fr = filter(isfinite, raw)
+    isempty(fr) && return nothing
+    m = max(abs(quantile(fr, 0.02)), abs(quantile(fr, 0.98)))
+    m > 0 || return nothing
+    return (-m * (1 + raw_pad), m * (1 + raw_pad))
+end
+
+"""
+    _overlap_alpha(ax, x, y, err, xlims, ylims; markersize, c=1.5, α_min=0.03, q=0.9)
+        -> (alpha, draw_errorbars)
+
+Marker alpha from how much the raw points overlap ON SCREEN, not from how
+many there are. The axis box (`xlims` × `ylims`, its size read from the axis
+viewport) is cut into cells about one marker across, and each point inks the
+cell of its marker. The crowd is the `q` percentile of the counts in
+occupied cells -- a percentile, so one crowded region or a sparse edge does
+not drive it -- and `alpha = clamp(c / crowd, α_min, 1)`: about `c` opaque
+markers' worth of ink per cell. Sparse data stay at 1; a dense cloud drops
+toward `α_min`.
+
+Alpha comes from the markers' crowd. The error bars are drawn (at half the
+alpha) only while the crowd of markers plus bars -- every cell a bar crosses
+-- stays at or below `_RAW_ERRBAR_MAX_CROWD`; past it they are a solid band
+and are left out, and the binned points carry the uncertainty. On NGTS
+(10 s cadences, ±2.5% scatter, a ~2% axis) the markers inside the axis barely
+overlap, but every bar ran the full panel height: that was the solid block.
+Bar ink must not set the alpha: the bars it counts are then not drawn, and
+the markers were driven to the floor and vanished. The point-count rule
+before this never went below 0.75.
+
+Returns `(alpha, draw_errorbars::Bool)`.
+"""
+function _overlap_alpha(ax, x::AbstractVector{<:Real}, y::AbstractVector{<:Real},
+                        err::AbstractVector{<:Real}, xlims, ylims; markersize::Real,
+                        c::Float64 = 1.5, α_min::Float64 = 0.03, q::Float64 = 0.9)
+    w, h = Makie.widths(ax.scene.viewport[])
+    (xlo, xhi), (ylo, yhi) = Float64.(xlims), Float64.(ylims)
+    (w > 0 && h > 0 && xhi > xlo && yhi > ylo) || return (1.0, 1.0)
+    nx = max(1, floor(Int, w / markersize)); ny = max(1, floor(Int, h / markersize))
+    mk = zeros(Int, nx, ny); ink = zeros(Int, nx, ny)
+    row(v) = clamp(1 + floor(Int, (v - ylo) / (yhi - ylo) * ny), 1, ny)
+    @inbounds for i in eachindex(x, y, err)
+        xi, yi, ei = x[i], y[i], err[i]
+        (isfinite(xi) && isfinite(yi) && xlo <= xi <= xhi) || continue
+        ei = isfinite(ei) ? abs(ei) : 0.0
+        (yi + ei < ylo || yi - ei > yhi) && continue      # wholly off the axis
+        col = min(nx, 1 + floor(Int, (xi - xlo) / (xhi - xlo) * nx))
+        ylo <= yi <= yhi && (mk[col, row(yi)] += 1)
+        for r in row(max(yi - ei, ylo)):row(min(yi + ei, yhi))
+            ink[col, r] += 1
+        end
+    end
+    crowd(a) = (v = filter(>(0), vec(a)); isempty(v) ? 0.0 : quantile(v, q))
+    bars = crowd(ink) <= _RAW_ERRBAR_MAX_CROWD
+    d = crowd(mk)
+    d > 0 || return (1.0, bars)
+    return (clamp(c / d, α_min, 1.0), bars)
+end
+
+# Above this much ink per cell (markers + bars, `_overlap_alpha`) the raw error
+# bars are left out: they are a solid band by then, and the binned points carry the
+# uncertainty.
+const _RAW_ERRBAR_MAX_CROWD = 5.0
+
+"""
+    _raw_points!(ax, x, y, err, alpha, bars; markersize)
+
+The raw cadences of a photometry panel: markers at `alpha`, and, when
+`bars`, error bars at half of it (see `_overlap_alpha`).
+"""
+function _raw_points!(ax, x, y, err, alpha::Real, bars::Bool; markersize::Real)
+    bars && errorbars!(ax, x, y, err; color = (NEREUS_COLORS.pm_marker, 0.5 * alpha),
+                       linewidth = 0.5)
+    scatter!(ax, x, y; color = (NEREUS_COLORS.pm_marker, alpha),
+             markersize = markersize, strokewidth = 0)
+    return nothing
 end
 
 """
