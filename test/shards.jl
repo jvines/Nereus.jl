@@ -22,7 +22,8 @@
 const DEFAULT_SECONDS = 5
 
 const SLOW_UNITS = ("test_transdim_pt_emcee_defaults.jl", "test_activity_gp_lowrank.jl",
-                    "test_obliquity_runjob.jl")
+                    "test_obliquity_runjob_samplers_1.jl", "test_obliquity_runjob_samplers_2.jl",
+                    "test_obliquity_runjob_samplers_3.jl")
 
 const _FAST_TIER = let t = get(ENV, "NEREUS_TEST_TIER", "full")
     t in ("fast", "full") || error("NEREUS_TEST_TIER must be \"fast\" or \"full\", got \"$t\"")
@@ -76,8 +77,15 @@ const TEST_UNITS = [
     (name = "test_obliquity_joint_framework.jl", seconds = 3, files = ["test_obliquity_joint_framework.jl"]),
     (name = "test_obliquity_target.jl", seconds = 65, files = ["test_obliquity_target.jl"]),
     (name = "test_obliquity_parity.jl", seconds = 12, files = ["test_obliquity_parity.jl"]),
-    # Every sampler through run_job on an obliquity target; pt_hmc dominates.
-    (name = "test_obliquity_runjob.jl", seconds = 487, files = ["test_obliquity_runjob.jl"]),
+    # Obliquity through run_job: schema, end to end, resume; then every sampler,
+    # split three ways (fixtures/obliquity_runjob.jl, RJ_SAMPLER_GROUPS) -- as
+    # one file it was 805 s, the floor under any number of shards. Seconds
+    # measured on arm64 (2026-11-21), the four in one process in this order; a
+    # file alone also pays ~100 s compiling the run_job path.
+    (name = "test_obliquity_runjob.jl", seconds = 136, files = ["test_obliquity_runjob.jl"]),
+    (name = "test_obliquity_runjob_samplers_1.jl", seconds = 281, files = ["test_obliquity_runjob_samplers_1.jl"]),
+    (name = "test_obliquity_runjob_samplers_2.jl", seconds = 245, files = ["test_obliquity_runjob_samplers_2.jl"]),
+    (name = "test_obliquity_runjob_samplers_3.jl", seconds = 114, files = ["test_obliquity_runjob_samplers_3.jl"]),
     (name = "test_as_coupling_mask.jl", seconds = 2, files = ["test_as_coupling_mask.jl"]),
     (name = "test_as_coupling_move.jl", seconds = 1, files = ["test_as_coupling_move.jl"]),
     (name = "test_obliquity_joint.jl", seconds = 104, files = ["test_obliquity_joint.jl"]),
