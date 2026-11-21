@@ -24,13 +24,17 @@ load_config() {
   eval "$(printf '%s' "$raw" | python3 -c '
 import json, sys, shlex
 c = json.load(sys.stdin)
-need = ["fleet", "nereus_jl", "nereus_py", "stage", "x86_candidates", "julia_version", "forgejo_base", "github_repo"]
+need = ["fleet", "stage", "x86_candidates", "julia_version", "forgejo_base", "github_repo"]
 missing = [k for k in need if k not in c]
 if missing:
     sys.exit("config is missing: " + ", ".join(missing))
 print("CFG_FLEET=" + shlex.quote(c["fleet"]))
-print("CFG_NEREUS_JL=" + shlex.quote(c["nereus_jl"]))
-print("CFG_NEREUS_PY=" + shlex.quote(c["nereus_py"]))
+# Where the two repositories are cloned from. Optional: by default Nereus.jl
+# is the origin of the checkout running this script and nereus-py its sibling
+# on the same server. ("nereus_jl"/"nereus_py", the long-lived clones releases
+# used to build from, are no longer read.)
+print("CFG_JL_URL=" + shlex.quote(c.get("nereus_jl_url", "")))
+print("CFG_PY_URL=" + shlex.quote(c.get("nereus_py_url", "")))
 print("CFG_STAGE=" + shlex.quote(c["stage"]))
 # The suite reuses an existing CI depot when one is configured. A cold
 # depot precompiles ~636 packages, which is most of an hour before a
@@ -44,7 +48,33 @@ print("CFG_X86=" + shlex.quote(" ".join(c["x86_candidates"])))
 print("CFG_NOCLAIM=" + shlex.quote(" ".join(c.get("x86_no_claim", []))))
 ')" || die "could not parse the release config"
   [ -x "$CFG_FLEET" ] || warn "fleet not executable at the configured path; elastic candidates will be skipped"
-  [ -d "$CFG_NEREUS_PY" ] || die "nereus_py path does not exist: $CFG_NEREUS_PY"
+}
+
+# ---- release sources ------------------------------------------------------
+# Every release builds from FRESH clones of the server's main, made into the
+# release's staging directory and kept there beside the bundles they produced:
+# publish tags that Nereus.jl and commits prepare's rewritten _runtime.py from
+# that nereus-py. Releases used to build from two long-lived clones on the
+# builder, which nothing kept current: one sat two commits behind main and
+# would have built a wheel whose version was already on PyPI (0.8.0), the
+# other was parked on a long-merged branch.
+jl_url() {
+  if [ -n "$CFG_JL_URL" ]; then printf '%s' "$CFG_JL_URL"
+  else git -C "$here/../.." remote get-url origin || die "cannot read this checkout's origin"
+  fi
+}
+py_url() {
+  if [ -n "$CFG_PY_URL" ]; then printf '%s' "$CFG_PY_URL"
+  else jl_url | sed -E 's#/[^/]+$#/nereus-py.git#'
+  fi
+}
+# fresh_clone <url> <dest> [branch]: <dest> becomes a new clone of <branch>.
+fresh_clone() {
+  local url="$1" dest="$2" ref="${3:-main}"
+  rm -rf "$dest"; mkdir -p "$(dirname "$dest")"
+  git clone -q --single-branch --branch "$ref" "$url" "$dest" \
+    || die "could not clone $ref of $url"
+  info "$(basename "$dest") at $(git -C "$dest" log --oneline -1)"
 }
 
 # ---- version and contract gates -------------------------------------------

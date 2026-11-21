@@ -67,10 +67,10 @@ jobs:
         run: |
           set -euo pipefail
           jl=$(awk -F'"' '/^version *=/{print $2; exit}' Project.toml)
-          py=$(awk -F'"' '/^version *=/{print $2; exit}' \
-               "$(python3 -c 'import json,os;print(json.loads(os.environ["RELEASE_CONFIG"])["nereus_py"])')/pyproject.toml")
-          echo "preparing Nereus $jl / astronereus $py"
-          tools/release/prepare.sh "$jl" "$py"
+          echo "preparing Nereus $jl against nereus-py main"
+          # Build THIS pull request's head; prepare clones nereus-py main
+          # itself and takes the astronereus version from it.
+          NEREUS_JL_ROOT="$PWD" tools/release/prepare.sh "$jl"
 
       - name: Report on the pull request
         if: always()
@@ -99,7 +99,19 @@ jobs:
       RELEASE_CONFIG: ${{ secrets.RELEASE_CONFIG }}
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
       TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+      CI_WORKSPACE: ${{ fromJSON(vars.RUNNER_MATRIX).include[0].ci_root }}/release-publish/${{ github.run_id }}
     steps:
+      - name: Fetch main
+        run: |
+          set -euo pipefail
+          rm -rf "$CI_WORKSPACE"; mkdir -p "$CI_WORKSPACE"; cd "$CI_WORKSPACE"
+          git init -q .
+          git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
+          git -c credential.helper= \
+              -c credential.helper='!f() { echo "username=x-access-token"; echo "password=${FORGEJO_TOKEN}"; }; f' \
+              fetch -q origin main
+          git checkout -q FETCH_HEAD
+
       - name: Confirm
         run: |
           set -euo pipefail
@@ -118,6 +130,10 @@ jobs:
           # token contains whitespace, so strip all of it.
           GH_TOKEN=$(printf '%s' "$GH_TOKEN" | tr -d '[:space:]'); export GH_TOKEN
           TWINE_PASSWORD=$(printf '%s' "$TWINE_PASSWORD" | tr -d '[:space:]'); export TWINE_PASSWORD
-          cfg() { python3 -c 'import json,os,sys;print(json.loads(os.environ["RELEASE_CONFIG"])[sys.argv[1]])' "$1"; }
-          cd "$(cfg nereus_jl)"
+          # publish.sh works on the clones prepare staged with the bundles.
+          cd "$CI_WORKSPACE"
           tools/release/publish.sh "${{ inputs.nereus_version }}" "${{ inputs.astronereus_version }}" --confirm
+
+      - name: Clean up
+        if: always()
+        run: rm -rf "$CI_WORKSPACE"
