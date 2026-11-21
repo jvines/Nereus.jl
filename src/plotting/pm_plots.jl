@@ -83,9 +83,9 @@ function plot_pm_timeseries(chains, params, data;
             flims === nothing || ylims!(ax, flims...)
             _tight_ylims!(ax_r, res_ppm; pad_frac = 0.30, symmetric=true)
             ylo, yhi = flims === nothing ? extrema(filter(isfinite, flux_i)) : flims
-            alpha, bars = _overlap_alpha(ax, t_i, flux_i, err_i, extrema(t_i), (ylo, yhi);
+            alpha, alpha_bar = _overlap_alpha(ax, t_i, flux_i, err_i, extrema(t_i), (ylo, yhi);
                                           markersize = 5)
-            _raw_points!(ax, t_i, flux_i, err_i, alpha, bars; markersize = 5)
+            _raw_points!(ax, t_i, flux_i, err_i, alpha, alpha_bar; markersize = 5)
 
             # Model overlay as a scatter at data cadences. With many
             # short transits across a long span, drawing model lines
@@ -285,9 +285,9 @@ function plot_pm_phasefold(chains, params, data;
             rlims === nothing || ylims!(ax_r, rlims...)
 
             ylo, yhi = flims === nothing ? extrema(filter(isfinite, flux_i)) : flims
-            alpha, bars = _overlap_alpha(ax, ph_i, flux_i, err_i, (ph_lo, ph_hi), (ylo, yhi);
+            alpha, alpha_bar = _overlap_alpha(ax, ph_i, flux_i, err_i, (ph_lo, ph_hi), (ylo, yhi);
                                           markersize = 4)
-            _raw_points!(ax, ph_i, flux_i, err_i, alpha, bars; markersize = 4)
+            _raw_points!(ax, ph_i, flux_i, err_i, alpha, alpha_bar; markersize = 4)
 
             band!(ax, ph_fine, ci.lo3, ci.hi3;
                    color=(NEREUS_COLORS.ci, CI_ALPHA_3SIGMA))
@@ -390,36 +390,36 @@ function _fold_resid_ylims(rb::AbstractVector{<:Real}, erb::AbstractVector{<:Rea
 end
 
 """
-    _overlap_alpha(ax, x, y, err, xlims, ylims; markersize, c=1.5, α_min=0.03, q=0.9)
-        -> (alpha, draw_errorbars)
+    _overlap_alpha(ax, x, y, err, xlims, ylims; markersize, c=1.5, α_min=0.03,
+                   c_bar=3.0, α_bar_min=0.005, q=0.9) -> (alpha, alpha_bar)
 
-Marker alpha from how much the raw points overlap ON SCREEN, not from how
+Raw-cadence alphas from how much the points overlap ON SCREEN, not from how
 many there are. The axis box (`xlims` × `ylims`, its size read from the axis
-viewport) is cut into cells about one marker across, and each point inks the
-cell of its marker. The crowd is the `q` percentile of the counts in
-occupied cells -- a percentile, so one crowded region or a sparse edge does
-not drive it -- and `alpha = clamp(c / crowd, α_min, 1)`: about `c` opaque
-markers' worth of ink per cell. Sparse data stay at 1; a dense cloud drops
-toward `α_min`.
+viewport) is cut into cells about one marker across. A crowd is the `q`
+percentile of the counts in occupied cells -- a percentile, so one crowded
+region or a sparse edge does not drive it.
 
-Alpha comes from the markers' crowd. The error bars are drawn (at half the
-alpha) only while the crowd of markers plus bars -- every cell a bar crosses
--- stays at or below `_RAW_ERRBAR_MAX_CROWD`; past it they are a solid band
-and are left out, and the binned points carry the uncertainty. On NGTS
-(10 s cadences, ±2.5% scatter, a ~2% axis) the markers inside the axis barely
-overlap, but every bar ran the full panel height: that was the solid block.
-Bar ink must not set the alpha: the bars it counts are then not drawn, and
-the markers were driven to the floor and vanished. The point-count rule
-before this never went below 0.75.
+- Markers: `alpha = clamp(c / d_marker, α_min, 1)`, `d_marker` counting each
+  point in the cell of its marker -- about `c` opaque markers' worth of ink
+  per cell.
+- Error bars: `alpha_bar = clamp(c_bar / d_bar, α_bar_min, alpha / 2)`,
+  `d_bar` counting each point in every cell its bar (`y ± err`) crosses, so
+  the stack of bars in a cell carries about `c_bar` of ink.
 
-Returns `(alpha, draw_errorbars::Bool)`.
+The bars need their own crowd. On NGTS (10 s cadences, ±2.5% scatter, a ~2%
+axis) the markers inside the axis barely overlap, but every bar runs the full
+panel height: bars at half the marker alpha drew a solid block, and a single
+alpha from the bars' crowd drove the markers to the floor. The point-count
+rule before this never went below 0.75.
 """
 function _overlap_alpha(ax, x::AbstractVector{<:Real}, y::AbstractVector{<:Real},
                         err::AbstractVector{<:Real}, xlims, ylims; markersize::Real,
-                        c::Float64 = 1.5, α_min::Float64 = 0.03, q::Float64 = 0.9)
+                        c::Float64 = 1.5, α_min::Float64 = 0.03,
+                        c_bar::Float64 = 3.0, α_bar_min::Float64 = 0.005,
+                        q::Float64 = 0.9)
     w, h = Makie.widths(ax.scene.viewport[])
     (xlo, xhi), (ylo, yhi) = Float64.(xlims), Float64.(ylims)
-    (w > 0 && h > 0 && xhi > xlo && yhi > ylo) || return (1.0, 1.0)
+    (w > 0 && h > 0 && xhi > xlo && yhi > ylo) || return (1.0, 0.5)
     nx = max(1, floor(Int, w / markersize)); ny = max(1, floor(Int, h / markersize))
     mk = zeros(Int, nx, ny); ink = zeros(Int, nx, ny)
     row(v) = clamp(1 + floor(Int, (v - ylo) / (yhi - ylo) * ny), 1, ny)
@@ -435,26 +435,21 @@ function _overlap_alpha(ax, x::AbstractVector{<:Real}, y::AbstractVector{<:Real}
         end
     end
     crowd(a) = (v = filter(>(0), vec(a)); isempty(v) ? 0.0 : quantile(v, q))
-    bars = crowd(ink) <= _RAW_ERRBAR_MAX_CROWD
-    d = crowd(mk)
-    d > 0 || return (1.0, bars)
-    return (clamp(c / d, α_min, 1.0), bars)
+    d_mk, d_bar = crowd(mk), crowd(ink)
+    alpha = d_mk > 0 ? clamp(c / d_mk, α_min, 1.0) : 1.0
+    alpha_bar = d_bar > 0 ? clamp(c_bar / d_bar, α_bar_min, alpha / 2) : alpha / 2
+    return (alpha, alpha_bar)
 end
 
-# Above this much ink per cell (markers + bars, `_overlap_alpha`) the raw error
-# bars are left out: they are a solid band by then, and the binned points carry the
-# uncertainty.
-const _RAW_ERRBAR_MAX_CROWD = 5.0
-
 """
-    _raw_points!(ax, x, y, err, alpha, bars; markersize)
+    _raw_points!(ax, x, y, err, alpha, alpha_bar; markersize)
 
-The raw cadences of a photometry panel: markers at `alpha`, and, when
-`bars`, error bars at half of it (see `_overlap_alpha`).
+The raw cadences of a photometry panel: error bars at `alpha_bar` and markers
+at `alpha` (see `_overlap_alpha`).
 """
-function _raw_points!(ax, x, y, err, alpha::Real, bars::Bool; markersize::Real)
-    bars && errorbars!(ax, x, y, err; color = (NEREUS_COLORS.pm_marker, 0.5 * alpha),
-                       linewidth = 0.5)
+function _raw_points!(ax, x, y, err, alpha::Real, alpha_bar::Real; markersize::Real)
+    errorbars!(ax, x, y, err; color = (NEREUS_COLORS.pm_marker, alpha_bar),
+               linewidth = 0.5)
     scatter!(ax, x, y; color = (NEREUS_COLORS.pm_marker, alpha),
              markersize = markersize, strokewidth = 0)
     return nothing

@@ -4,7 +4,8 @@
 #     2-98% quantiles cut the model's transit floor off the panel.
 #   * NGTS 10 s cadences (±2.5% scatter, 1% transit): the same quantiles made
 #     the axis ~5% tall, and point-count alpha (never below 0.75) plus
-#     full-height error bars drew the transit as a solid block.
+#     full-height error bars at half that alpha drew the transit as a solid
+#     block. The bars stay, with an alpha set from their own on-screen stack.
 
 using Nereus, Test, Random, Statistics
 using CairoMakie
@@ -48,8 +49,8 @@ end
     rng = MersenneTwister(4)
     # Sparse: 86 points with small bars -> opaque, bars drawn.
     x = collect(range(0, 1; length = 86)); y = 1e-3 .* randn(rng, 86)
-    a, bars = _alpha_on(x, y, fill(1e-4, 86), (-5e-3, 5e-3))
-    @test a == 1.0 && bars
+    a, ab = _alpha_on(x, y, fill(1e-4, 86), (-5e-3, 5e-3))
+    @test a == 1.0 && ab == 0.5
     # Many points, still spread out on screen: count alone must not lower alpha.
     x = rand(rng, 3000); y = rand(rng, 3000)
     a, _ = _alpha_on(x, y, fill(1e-4, 3000), (0.0, 1.0))
@@ -58,8 +59,10 @@ end
     x = rand(rng, 50_000); y = 0.5 .+ 0.01 .* randn(rng, 50_000)
     a, _ = _alpha_on(x, y, fill(1e-4, 50_000), (0.0, 1.0))
     @test 0.03 <= a < 0.2
-    # Error bars spanning the panel: left out, and they do not set the alpha.
+    # Error bars spanning the panel: still drawn, faint enough that their stack
+    # is not a solid block, and they do not lower the marker alpha.
     x = rand(rng, 3000); y = rand(rng, 3000)
-    a, bars = _alpha_on(x, y, fill(2.0, 3000), (0.0, 1.0))
-    @test !bars && a == 1.0
+    a, ab = _alpha_on(x, y, fill(2.0, 3000), (0.0, 1.0))
+    @test a == 1.0
+    @test 0.005 <= ab < 0.1
 end
