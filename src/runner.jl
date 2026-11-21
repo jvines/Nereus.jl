@@ -742,6 +742,40 @@ end
 # Data builder
 # =====================================================================
 
+"""
+    _check_time_bases(kw, inst_names_rv, inst_names_pm)
+
+Throw when the RV and photometry instruments are not all on one time base:
+some in full (B)JD, near 2.4e6, and others in a reduced one -- BTJD
+(BJD - 2457000), BKJD (BJD - 2454833), MJD -- below 1e5. One orbit is fitted
+through every series, so a mixed set puts the same transit thousands of days
+apart and the fit is meaningless whatever the sampler reports. It also made
+the PPC residual ACF span 2.46e6 d (TESS sectors in BTJD with NGTS and LCO
+in BJD) and take its process past 79 GB. Times are not shifted here: which
+reduced base a series is in cannot be read off its values.
+"""
+function _check_time_bases(kw, inst_names_rv, inst_names_pm)
+    full = String[]; reduced = String[]
+    function _classify!(t, inst, names, kind)
+        for k in sort(unique(inst))
+            tk = filter(isfinite, t[inst .== k])
+            isempty(tk) && continue
+            m = median(tk)
+            label = "$kind $(k <= length(names) ? names[k] : string(k)) " *
+                    "(median t = $(round(m; digits = 2)))"
+            m > 2.0e6 ? push!(full, label) : m < 1.0e5 && push!(reduced, label)
+        end
+    end
+    haskey(kw, :t_rv)   && _classify!(kw[:t_rv], kw[:rv_inst], inst_names_rv, "RV")
+    haskey(kw, :t_phot) && _classify!(kw[:t_phot], kw[:phot_inst], inst_names_pm,
+                                      "photometry")
+    (isempty(full) || isempty(reduced)) && return nothing
+    throw(ArgumentError(
+        "data are on different time bases: full (B)JD for " * join(full, ", ") *
+        "; a reduced time (BTJD = BJD - 2457000, BKJD = BJD - 2454833, MJD, ...) " *
+        "for " * join(reduced, ", ") * ". Put every series in BJD_TDB before fitting."))
+end
+
 function _build_data(data_cfg; obliquity = nothing, pm_planets = nothing)
     inst_names_rv = String[]
     inst_names_pm = String[]
@@ -858,6 +892,7 @@ function _build_data(data_cfg; obliquity = nothing, pm_planets = nothing)
     obliquity === nothing ||
         (inst_names_rv = _add_obliquity_data!(kw, inst_names_rv, data_cfg, obliquity))
 
+    _check_time_bases(kw, inst_names_rv, inst_names_pm)
     data = Data(; kw...)
     return data, inst_names_rv, inst_names_pm, inst_names_as, inst_names_iad,
            iad_outliers
