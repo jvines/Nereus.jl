@@ -25,20 +25,15 @@ A PyPI filename can never be reused." ;;
 esac
 
 load_config
-PY_ROOT="$CFG_NEREUS_PY"
 OUT="$CFG_STAGE/astronereus-$PY_VER"
+# A fresh clone of main (see fresh_clone), beside $OUT rather than in it:
+# $OUT is emptied for the dists below, and the clone is tagged at the end.
+PY_ROOT="$OUT.src"
 say "astronereus $PY_VER against published runtime bundles ($MODE)"
 
 # ---- gates ----------------------------------------------------------------
-# The clone is the input, and it drifts: a bump merged on the server but never
-# pulled here is invisible, which is how 0.8.0 nearly shipped 0.4.27 again.
-git -C "$PY_ROOT" diff --quiet && git -C "$PY_ROOT" diff --cached --quiet \
-  || die "nereus-py tree is dirty."
-[ "$(git -C "$PY_ROOT" rev-parse --abbrev-ref HEAD)" = main ] \
-  || die "the nereus-py clone is not on main."
-git -C "$PY_ROOT" fetch -q origin && git -C "$PY_ROOT" merge -q --ff-only origin/main \
-  || die "the nereus-py clone cannot fast-forward to origin/main."
-info "nereus-py at $(git -C "$PY_ROOT" log --oneline -1)"
+say "fresh clone of nereus-py main"
+fresh_clone "$(py_url)" "$PY_ROOT"
 
 [ "$(py_version "$PY_ROOT")" = "$PY_VER" ] \
   || die "pyproject.toml says $(py_version "$PY_ROOT"), you asked for $PY_VER. Bump it first."

@@ -18,13 +18,29 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 
-JL_VER="${1:?usage: prepare.sh <nereus-version> <astronereus-version>}"
-PY_VER="${2:?usage: prepare.sh <nereus-version> <astronereus-version>}"
+JL_VER="${1:?usage: prepare.sh <nereus-version> [<astronereus-version>]}"
+PY_VER="${2:-}"
 load_config
-
-JL_ROOT=$(cd "$here/../.." && pwd)
-PY_ROOT="$CFG_NEREUS_PY"
 OUT="$CFG_STAGE/v$JL_VER"
+SRC="$OUT/src"
+
+# ---- sources --------------------------------------------------------------
+# Fresh clones of main into the staging directory (see fresh_clone). Nereus.jl
+# is cloned first and this script re-run from the clone, so the release tools
+# are the released tree's own. NEREUS_JL_ROOT names an existing checkout
+# instead: the release workflow's fetch of a pull request's head.
+if [ -z "${NEREUS_JL_ROOT:-}" ]; then
+  say "fresh clone of Nereus.jl main"
+  fresh_clone "$(jl_url)" "$SRC/Nereus.jl"
+  NEREUS_JL_ROOT="$SRC/Nereus.jl" exec bash "$SRC/Nereus.jl/tools/release/prepare.sh" "$@"
+fi
+JL_ROOT=$(cd "$NEREUS_JL_ROOT" && pwd)
+say "fresh clone of nereus-py main"
+fresh_clone "$(py_url)" "$SRC/nereus-py"
+PY_ROOT="$SRC/nereus-py"
+export NEREUS_PY_ROOT="$PY_ROOT"
+# Omitted, the astronereus version is whatever main says.
+[ -n "$PY_VER" ] || PY_VER=$(py_version "$PY_ROOT")
 
 say "release prepare: Nereus $JL_VER / astronereus $PY_VER"
 info "julia      $CFG_JULIA"
@@ -75,36 +91,22 @@ info "source tree $TREE"
 # broken: v0.4.0 shipped with test_builder.jl failing since the priors refactor
 # because nothing ran it. SKIP_TESTS is for re-running a prepare whose suite
 # already passed on this exact tree, not for skipping it on a new one.
+#
+# The suite runs on the x86_64 builder, under the same claim and alongside its
+# bundle build (build-remote.sh, REMOTE_SUITE=1), sharded to that machine's
+# size. It ran here before the bundles: five shards in a 12-CPU container on
+# the arm64 builder, about 25 minutes before the first bundle started.
+# Its verdict is checked below, before anything is built from the bundles.
 if [ -n "${SKIP_TESTS:-}" ]; then
   warn "SKIP_TESTS set -- the suite is NOT part of this verification"
+  export REMOTE_SUITE=
 else
-  say "test suite (5 shards, in the CI image)"
-  ( cd "$JL_ROOT" && docker build -q -t "nereus-ci:julia-$CFG_JULIA" ci/ >/dev/null ) || die "CI image build failed"
-  # The depot persists between releases and is only ever instantiated here or
-  # by CI, which runs on pull requests alone. A release cut without a PR met a
-  # Manifest that had gained a dependency (PrecompileTools) since the depot was
-  # last filled, and every shard died on "is required but does not seem to be
-  # installed". Instantiate and precompile first, under the lock CI takes on
-  # the same depot (lockf on macOS, flock on Linux).
-  lock=$(command -v flock || command -v lockf || true)
-  ${lock:+"$lock" "$CFG_DEPOT.lock"} docker run --rm --name "nereus-release-pre-$$" \
-    --label cl.jvines.owner=nereus-release \
-    --user "$(id -u):$(id -g)" -e HOME=/tmp \
-    -e JULIA_DEPOT_PATH=/depot -v "$CFG_DEPOT":/depot \
-    -v "$JL_ROOT":/repo -w /repo --cpus 12 --memory 24g \
-    "nereus-ci:julia-$CFG_JULIA" \
-    julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()' \
-    || die "could not instantiate the release depot"
-  docker run --rm --name "nereus-release-suite-$$" \
-    --label cl.jvines.owner=nereus-release \
-    --user "$(id -u):$(id -g)" -e HOME=/tmp \
-    -e JULIA_DEPOT_PATH=/depot -v "$CFG_DEPOT":/depot \
-    -v "$JL_ROOT":/repo -w /repo --cpus 12 --memory 24g \
-    "nereus-ci:julia-$CFG_JULIA" ci/run_tests.sh 5 3 6 \
-    || die "the suite failed; nothing is built from a red tree"
+  export REMOTE_SUITE=1
 fi
 
 mkdir -p "$OUT"
+# A verdict left by an earlier prepare of this version must never be read.
+rm -f "$OUT/suite.rc" "$OUT/suite-linux-x86_64.log"
 
 # ---- bundles --------------------------------------------------------------
 # Three platforms, three machines. pkgimages are native code: portable across
@@ -134,10 +136,16 @@ info "building linux-x86_64 on the first available candidate"
 "$here/build-remote.sh" "$X86" "$OUT" "$JL_VER" >"$OUT/build-linux-x86_64.log" 2>&1 &
 x86_pid=$!
 
+say "waiting for the bundles${REMOTE_SUITE:+ and the suite}"
 fail=0
 wait "$mac_pid" || { warn "macos-arm64 build failed (see build-macos-arm64.log)"; fail=1; }
 wait "$arm_pid" || { warn "linux-aarch64 build failed (see build-linux-aarch64.log)"; fail=1; }
 wait "$x86_pid" || { warn "linux-x86_64 build failed (see build-linux-x86_64.log)"; fail=1; }
+if [ -n "$REMOTE_SUITE" ]; then
+  [ "$(cat "$OUT/suite.rc" 2>/dev/null)" = 0 ] \
+    || die "the suite failed or did not finish on $X86 (see $OUT/suite-linux-x86_64.log); nothing is built from a red tree"
+  info "suite passed on $X86: $(grep -E '^passed:' "$OUT/suite-linux-x86_64.log" | tail -1)"
+fi
 [ "$fail" -eq 0 ] || die "at least one bundle failed to build"
 
 # ---- verify the three agree ------------------------------------------------
