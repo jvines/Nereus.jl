@@ -459,51 +459,90 @@ end
 # only: the zero-filled residual series and the occupancy mask are
 # autocorrelated separately and divided, so each lag is the mean product over
 # pairs of real bins (the gapped-ACF estimator). Lags no pair of occupied bins
-# reaches are NaN. Returns up to 25% of the binned length.
+# reaches are NaN. Returns lags up to 25% of the binned length, and at most
+# `max_lag_bins` bins.
 #
 # Empty bins used to be filled by linear interpolation. On sparse data most
 # bins are empty, the series became straight lines between the real points,
 # and lag 1 came out near 1 whatever the residuals: 0.81 on 36 RVs over 561 d
 # whose time-ordered lag-1 correlation is 0.02, and 0.997 on gapped photometry.
+#
+# The grid is never the full time span. It was: one bin per cadence from the
+# first observation to the last, so a long baseline at a short cadence
+# allocated without bound -- light curves in BTJD mixed with others in BJD
+# spanned 2.46e6 d at 200 s, 1.06e9 bins, and the FFT buffers of that grid
+# took a NEREUS daemon past 79 GB until the kernel killed it. Every gap longer
+# than the largest lag returned (L bins) is squeezed to L + 1 empty bins. A
+# pair of bins at most L apart has no such gap between them, so it keeps its
+# separation; a pair across one stays more than L apart. Every lag returned
+# is therefore exactly the full-grid value, and the grid is bounded by the
+# observations, not the span. `max_grid` bounds it outright, halving L on
+# the rare sampling that would still exceed it.
+const _ACF_MAX_LAG_BINS = 16_384
+const _ACF_MAX_GRID     = 1 << 22
+
 function _residual_acf(t::Vector{Float64}, r::Vector{Float64};
                         cadence::Union{Nothing, Float64} = nothing,
-                        max_lag_fraction::Float64 = 0.25)
+                        max_lag_fraction::Float64 = 0.25,
+                        max_lag_bins::Int = _ACF_MAX_LAG_BINS,
+                        max_grid::Int = _ACF_MAX_GRID)
     length(t) == length(r) || throw(ArgumentError("t / r length mismatch"))
     length(t) >= 8 || return (Float64[], Float64[])
-    dt = cadence === nothing ? median(diff(sort(t))) : cadence
+    keep = [i for i in eachindex(t) if isfinite(t[i]) && isfinite(r[i])]
+    length(keep) >= 2 || return (Float64[], Float64[])
+    dt = cadence === nothing ? median(diff(sort(t[keep]))) : cadence
     (dt > 0 && isfinite(dt)) || return (Float64[], Float64[])
 
-    t0 = minimum(t)
-    n_bins = max(8, Int(round((maximum(t) - t0) / dt)) + 1)
-    sums = zeros(Float64, n_bins)
-    counts = zeros(Int, n_bins)
-    @inbounds for i in eachindex(t)
-        isfinite(r[i]) || continue
-        b = clamp(Int(round((t[i] - t0) / dt)) + 1, 1, n_bins)
-        sums[b] += r[i]
-        counts[b] += 1
-    end
-    occ = counts .> 0
-    count(occ) >= 2 || return (Float64[], Float64[])
-    μ = sum(sums[occ] ./ counts[occ]) / count(occ)
-    y = [occ[i] ? sums[i] / counts[i] - μ : 0.0 for i in 1:n_bins]
+    t0 = minimum(t[keep])
+    span_bins = (maximum(t[keep]) - t0) / dt
+    span_bins < 2.0^52 || return (Float64[], Float64[])
+    n_bins = max(8, Int(round(span_bins)) + 1)
 
-    n_pad = nextpow(2, 2 * n_bins)
+    # Occupied bins only, in time order: index, mean residual.
+    raw = [clamp(Int(round((t[i] - t0) / dt)) + 1, 1, n_bins) for i in keep]
+    occ_bin = Int[]; sums = Float64[]; counts = Int[]
+    for k in sortperm(raw)
+        b = raw[k]
+        if !isempty(occ_bin) && occ_bin[end] == b
+            sums[end] += r[keep[k]]; counts[end] += 1
+        else
+            push!(occ_bin, b); push!(sums, r[keep[k]]); push!(counts, 1)
+        end
+    end
+    length(occ_bin) >= 2 || return (Float64[], Float64[])
+    vals = sums ./ counts
+    vals .-= sum(vals) / length(vals)
+
+    L = min(max(1, Int(floor(n_bins * max_lag_fraction))), max(1, max_lag_bins))
+    pos = similar(occ_bin)
+    while true
+        pos[1] = 1
+        for k in 2:length(occ_bin)
+            pos[k] = pos[k-1] + min(occ_bin[k] - occ_bin[k-1], L + 1)
+        end
+        (pos[end] <= max_grid || L == 1) && break
+        L = max(1, L ÷ 2)
+    end
+    n_grid = pos[end]
+    y = zeros(Float64, n_grid); y[pos] .= vals
+    m = zeros(Float64, n_grid); m[pos] .= 1.0
+
+    # Zero-padded past n_grid + L, so lags 0:L carry no circular wrap.
+    n_pad = nextpow(2, n_grid + L + 1)
     function _autocorr(x)
         pad = zeros(Float64, n_pad)
-        pad[1:n_bins] .= x
+        pad[1:n_grid] .= x
         F = rfft(pad)
         @inbounds for k in eachindex(F)
             F[k] = F[k] * conj(F[k])
         end
-        return irfft(F, n_pad)[1:n_bins]
+        return irfft(F, n_pad)[1:(L + 1)]
     end
     num = _autocorr(y)
-    npair = _autocorr(Float64.(occ))       # pairs of occupied bins per lag
-    ac = [npair[k] > 0.5 ? num[k] / npair[k] : NaN for k in 1:n_bins]
+    npair = _autocorr(m)                    # pairs of occupied bins per lag
+    ac = [npair[k] > 0.5 ? num[k] / npair[k] : NaN for k in 1:(L + 1)]
     ac[1] > 0 || return (Float64[], Float64[])
     ac ./= ac[1]
-    max_lag = max(1, Int(floor(length(ac) * max_lag_fraction)))
-    lags = collect(0:max_lag) .* dt
-    return (lags, ac[1:length(lags)])
+    lags = collect(0:L) .* dt
+    return (lags, ac)
 end
