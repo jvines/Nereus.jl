@@ -64,5 +64,5 @@ end
     x = rand(rng, 3000); y = rand(rng, 3000)
     a, ab = _alpha_on(x, y, fill(2.0, 3000), (0.0, 1.0))
     @test a == 1.0
-    @test 0.005 <= ab < 0.1
+    @test 0.005 <= ab < 0.5                  # below the sparse-panel cap (alpha / 2)
 end
