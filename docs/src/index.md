@@ -48,6 +48,10 @@ This is version `0.9.0`.
   **double-lined** — tag each point's stellar component with
   `Data.rv_comp` for SB2 fits. →
   [Data models](data.md)
+- **CCF line components** — fit the CCFs of a spectroscopic blend directly as
+  Gaussian components, each static or tied to a planet's orbit, alone or
+  jointly with RVs and transits through the shared orbit. →
+  [CCF line components](ccf.md)
 - **A unified prior system** — `UniformPrior`, `NormalPrior`,
   `LogUniformPrior`, `BetaPrior`, `ModJeffreysPrior`, `SinePrior`,
   `FixedPrior` — with auto-priors generated from the data bounds
