@@ -3,6 +3,19 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Added
+
+- **`detrend_notch` takes a `transit_mask`.** Same meaning as for
+  `detrend_savgol`: masked cadences are left out of every local window fit, the
+  trend is still evaluated at them, `flux_detrended = flux ./ trend`
+  everywhere, and the returned `transit_mask` echoes the input. The BIC notch
+  search runs only on unmasked cadences (not at all at masked ones). The new
+  `notch_search=false` skips the search and returns the sigma-clipped local
+  poly2 baseline. The `detrend.notch` action accepts `transit_mask`. Without a
+  mask the result is unchanged.
+
 ## 0.9.6
 
 ### Added

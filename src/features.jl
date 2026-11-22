@@ -91,6 +91,10 @@ for (name, fn) in (("savgol", :detrend_savgol), ("notch", :detrend_notch),
         _need(p, :t, :flux, :flux_err)
         t = _vec(_pget(p, :t))
         kw = _kw(p, ["t", "flux", "flux_err"])
+        if $(QuoteNode(fn)) === :detrend_notch && get(kw, :transit_mask, nothing) !== nothing
+            # JSON delivers the mask as a Vector{Any}; the kernel wants Bool.
+            kw[:transit_mask] = Bool[Bool(x) for x in kw[:transit_mask]]
+        end
         $(QuoteNode(fn)) === :detrend_savgol && !haskey(kw, :window_length) &&
             (kw[:window_length] = _savgol_window(t))
         r = $fn(t, _vec(_pget(p, :flux)), _vec(_pget(p, :flux_err)); kw...)
