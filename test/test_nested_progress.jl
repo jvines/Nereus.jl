@@ -4,7 +4,8 @@
 # bar per pass and `sample_nested_ins` one bar. Every line carries the
 # iteration, logz, the remaining evidence dlogz, the stage (how far log dlogz has
 # come toward the stopping threshold) and ncall.
-using Test, Nereus, Random, NestedSamplers, Distributions
+using Test, Nereus, Random, Distributions
+using Nereus.NestedSamplers
 
 function _np_target(seed::Int = 2027; n_obs::Int = 30)
     rng  = MersenneTwister(seed)

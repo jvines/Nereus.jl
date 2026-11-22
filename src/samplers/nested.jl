@@ -4,7 +4,7 @@
 # Uses the prior_transform from Nereus's prior system to map
 # [0,1]^n → bounded parameter space.
 
-using NestedSamplers
+using .NestedSamplers
 using Random
 using MCMCChains
 using LogExpFunctions: logaddexp

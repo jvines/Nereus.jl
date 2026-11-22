@@ -120,6 +120,7 @@ _hash_skip(x::ParametrizationConfig, f::Symbol) =
 # `t_phot_sorted` is `t_phot` in time order, which `t_phot` already hashes.
 _hash_skip(x::Data, f::Symbol) = (f === :hip_scans && x.hip_scans === nothing) ||
                                  (f === :transit_times && isempty(x.transit_times)) ||
+                                 (f === :ccf && isempty(x.ccf)) ||
                                  f === :t_phot_sorted
 # Per-coordinate epochs equal to `epochs`: the epochs every HGCA had before.
 _hash_skip(x::HGCAData, f::Symbol) =

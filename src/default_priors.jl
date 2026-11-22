@@ -496,6 +496,12 @@ function default_priors(config::ParamsConfig, data::Data; gaia_plx = nothing)
         dic["tomo_ell_v_$(nt.tag)"]      = LogUniformPrior(0.5, 60.0)  # km/s
         dic["tomo_jit_$(nt.tag)"]        = LogUniformPrior(1e-6, _tomo_scale_hi(nt))
     end
+    # CCF line components, per set (src/ccf_data.jl).
+    if data !== nothing
+        for s in data.ccf
+            _default_ccf_priors!(dic, s)
+        end
+    end
     # Spectroscopic limb darkening (quadratic u1, u2), when allocated. Broad;
     # physically valid pairs are enforced where they are read.
     if obl.spec_ld
@@ -1041,4 +1047,48 @@ function _tt_offset_prior(sets, k::Int)
     bound = fit.P / 4
     σ = min(5 * max(fit.rms, median(s.tc_err[s.used])), bound)
     return σ, bound
+end
+
+# Default priors of a CCF set, from its own velocity grids and values:
+#
+#   ccf_gamma  Uniform over the velocity range the CCFs cover (km/s);
+#   ccf_K      Uniform(−span, span), span that range's width: either sign, as a
+#              component can move with or against the orbit's reflex;
+#   ccf_fwhm   Uniform(2 grid steps, span);
+#   ccf_depth  Uniform(0, d_max), d_max 1 for continuum-normalised CCFs (an
+#              absorption line deeper than the continuum is not one), else twice
+#              the largest peak-to-peak of the set;
+#   ccf_cont   Uniform(0.95, 1.05) × the edge medians' range (1 when normalised):
+#              the edges pin the level to far better than 5%, and a box much wider
+#              than the posterior leaves walkers drawn from it a long way out;
+#   ccf_scale  Uniform(0.2, 3);
+#   ccf_jit    LogUniform(1e-6 h, h), h = max(1, 10 × the largest CCF scatter)
+#              when normalised, else 10 × that scatter.
+function _default_ccf_priors!(dic, s::CCFSet)
+    lo = minimum(first, s.v); hi = maximum(last, s.v)
+    span = hi - lo
+    dv = minimum(v -> minimum(diff(v)), s.v)
+    normalised = s.normalize_edges > 0
+    p2p = maximum(y -> maximum(y) - minimum(y), s.y)
+    scat = maximum(y -> std(y), s.y)
+    edge = [median(vcat(y[1:min(5, end)], y[max(1, end - 4):end])) for y in s.y]
+    tg = s.tag
+    for c in s.components
+        dic["ccf_gamma_$(tg)_$(c.name)"] = UniformPrior(lo, hi)
+        is_static(c) || (dic["ccf_K_$(tg)_$(c.name)"] = UniformPrior(-span, span))
+        dic["ccf_fwhm_$(tg)_$(c.name)"] = UniformPrior(min(2dv, span / 4), span)
+        dic["ccf_depth_$(tg)_$(c.name)"] = UniformPrior(0.0, normalised ? 1.0 : 2p2p)
+    end
+    clo, chi = minimum(edge), maximum(edge)
+    cpr = (clo > 0) ? UniformPrior(0.95clo, 1.05chi) :
+          UniformPrior(clo - abs(clo) - p2p, chi + abs(chi) + p2p)
+    for n in ccf_param_names(s)
+        startswith(n, "ccf_cont_$(tg)") && (dic[n] = cpr)
+        startswith(n, "ccf_scale_$(tg)") && (dic[n] = UniformPrior(0.2, 3.0))
+        if startswith(n, "ccf_jit_$(tg)")
+            h = normalised ? max(1.0, 10scat) : 10scat
+            dic[n] = LogUniformPrior(1e-6h, h)
+        end
+    end
+    return dic
 end

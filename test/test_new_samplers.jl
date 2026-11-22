@@ -18,7 +18,7 @@ using Random
 using Nereus
 using MCMCChains
 using Statistics
-using NestedSamplers
+using Nereus.NestedSamplers
 using Distributions: Uniform
 
 # ---- Shared synthetic single-planet RV target ------------------------

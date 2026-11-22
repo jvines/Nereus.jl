@@ -23,7 +23,7 @@
 # rejection-sampling NS using NestedSamplers.jl's Bounds machinery
 # (Ellipsoid / MultiEllipsoid) for the bound-fitting only.
 
-using NestedSamplers
+using .NestedSamplers
 using Random
 using MCMCChains
 using LinearAlgebra: det, dot, mul!

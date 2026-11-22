@@ -33,7 +33,7 @@
 # that region. Multi-batch is straightforward to add by iterating
 # steps 2–3 with a running n_live(L) bookkeeping.
 
-using NestedSamplers
+using .NestedSamplers
 using Random
 using MCMCChains
 using Statistics: median

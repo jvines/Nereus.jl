@@ -89,3 +89,13 @@ Changed here since the commit above, so carry them over on an update:
   seeded run depended on what the process had drawn from it.
 
 License: MIT (see LICENSE) — original authors retained.
+
+## How it is loaded
+
+It is compiled into Nereus (`include("../vendor/NestedSamplers/src/NestedSamplers.jl")` in
+`src/Nereus.jl`), so it is `Nereus.NestedSamplers`, not a Pkg dependency. A path entry in
+`[sources]` is honoured for a dependency only by Pkg 1.13; on 1.11/1.12 a `Pkg.add(url=...)`
+install resolved the registry NestedSamplers 0.9.0 (same version number, no fork API) and
+every `sampler: "nested"` job died on a `Bounds.fit` MethodError. The fork's own
+dependencies (AbstractMCMC, Clustering, NearestNeighbors, Parameters, ProgressLogging,
+StatsBase) are direct deps of Nereus. Its `Project.toml` here is kept for reference only.
