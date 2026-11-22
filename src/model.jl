@@ -1321,6 +1321,8 @@ struct SystemicIndices
                        # k's measured transit times (days, added in quadrature
                        # to tc_err), 0 for none. EMPTY unless some planet asks
                        # for one (`ParamsConfig.tt_jitter`).
+    ccf::Vector{CCFIndices}  # one per `data.ccf` set (src/ccf_data.jl); EMPTY
+                       # unless CCF profiles are given
 end
 
 # =====================================================================
@@ -1695,8 +1697,8 @@ end
 Every white-noise jitter term in the layout -- a variance added in quadrature to
 the reported errors, physically ≥ 0: the per-instrument RV `sigma_<inst>`,
 photometric `jitter_<label>`, relative-astrometry `sigma_as_<imager>`,
-intermediate-astrometry `sigma_iad_<instrument>` and transit-time
-`sigma_tt_k<planet>` slots,
+intermediate-astrometry `sigma_iad_<instrument>`, transit-time
+`sigma_tt_k<planet>` and CCF `ccf_jit_*` slots,
 and the noise models' `jit_base_*`, `gp_act_jit_*` and `IndicatorFloor`'s floor
 (`ind_floor_<ch>` under its default `:white` kernel, `ind_floor_<ch>_jit` under
 `:qp`). Not jitter despite the names: `jit_act_*` (a signed activity slope), the
@@ -1715,7 +1717,8 @@ function jitter_names(params::Params)
     L = params.layout
     S = L.systemic
     out = Set{String}(L.names[i] for i in vcat(S.rv_sigma, S.pm_jitter, S.as_jitter,
-                                                S.iad_jitter, S.tt_jitter)
+                                                S.iad_jitter, S.tt_jitter,
+                                                (ix.jit for ix in S.ccf)...)
                       if i > 0)
     for n in L.names
         (startswith(n, "jit_base_") || startswith(n, "gp_act_jit_") ||
@@ -2329,6 +2332,20 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
         push!(names, "u2_spec"); ld_u2_spec_idx = length(names)
     end
 
+    # CCF line components (src/ccf_data.jl), one block per set, named by its
+    # tag. Nothing is pushed without `data.ccf`.
+    ccf_idx = CCFIndices[]
+    if data !== nothing
+        for s in data.ccf
+            for c in s.components
+                c.planet <= config.max_kplanet || throw(ArgumentError(
+                    "CCF set \"$(s.tag)\", component \"$(c.name)\" follows planet " *
+                    "$(c.planet), but the model has $(config.max_kplanet) planet(s)"))
+            end
+            push!(ccf_idx, _push_ccf_slots!(names, s))
+        end
+    end
+
     # Luminous-companion photocenter: system-level secondary light
     # fraction f_light = L_B/(L_A+L_B) in the ASTROMETRIC band. Only when
     # an SB2 binary ALSO has astrometry (dark-companion astrometry needs
@@ -2348,7 +2365,7 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
                                tomo_alpha_idx, tomo_sigma_line_idx, tomo_ell_v_idx,
                                rm_sigma_ccf_idx, rm_beta_p_idx, f_light_idx,
                                a_Rs_idx, tomo_jit_idx, ld_u1_spec_idx, ld_u2_spec_idx,
-                               tt_jitter)
+                               tt_jitter, ccf_idx)
 
     # --- Noise model parameters ---------------------------------------
     for nm in config.noise_models
