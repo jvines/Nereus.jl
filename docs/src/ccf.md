@@ -161,7 +161,7 @@ Two components on the transit ephemeris of a previous transit+RV fit (P, Tc, e,
     "ccf_K_FEROS_B":     {"type": "uniform", "args": [-40, 40]}
   },
   "sampler": {"name": "pt_emcee",
-              "kwargs": {"n_temps": 4, "n_walkers": 160, "n_steps": 3000, "n_burnin": 3000}}
+              "kwargs": {"n_temps": 4, "n_walkers": 160, "n_steps": 6000, "n_burnin": 3000}}
 }
 ```
 
