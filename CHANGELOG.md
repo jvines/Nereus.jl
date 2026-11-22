@@ -3,6 +3,31 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Added
+
+- **Time trends on CCF component velocities.** A CCF component can take
+  `"trend": 1` (linear) or `2` (quadratic) on its γ, static or tied:
+  `γ_j + γ̇_j (t − t_ref) + ½ γ̈_j (t − t_ref)²`, with new parameters
+  `ccf_gdot_<tag>_<c>` (km/s/day) and `ccf_gddot_<tag>_<c>` (km/s/day²).
+  Default priors are Uniform(±span/baseline) and Uniform(±span/baseline²).
+  `t_ref` is the set's `trend_t_ref`, by default the mean epoch BJD. A set with
+  fewer than `trend + 2` epochs is refused. The trend is included in
+  `ccf_component_velocities` and `ccf_model`, and the new parameters appear in
+  chains.nc and the summary like the other `ccf_*` parameters.
+- **`shared_fwhm`** (per CCF set): every component shares one width,
+  `ccf_fwhm_<tag>`.
+- **`pixel_correlation = "neff"`** (per CCF set): each epoch's log-likelihood is
+  multiplied by `min(1, N_eff/N_pix)`, with `N_eff` = velocity span /
+  resolution element; the element is `resolution_kms`, or else the smallest
+  lower bound of the set's FWHM priors. This widens CCF posteriors to honest
+  sizes and **changes evidences**. `ccf_epoch_weights` gives the factors.
+
+The defaults (`trend` 0, `shared_fwhm` false, `pixel_correlation`
+`"independent"`) give the 0.9.6 model bit for bit, and checkpoints written by
+0.9.6 still resume.
+
 ## 0.9.6
 
 ### Added
