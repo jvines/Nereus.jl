@@ -389,11 +389,11 @@ function _validate_config(cfg::AbstractDict)
         data_cfg = _get(cfg, :data)
         has_any = any(_has(data_cfg, k) for k in
             (:rv, :transit_photometry, :iad, :gost, :hgca, :relastrom, :gaia_dr3,
-             :rm_nights, :tomography, :transit_times))
+             :rm_nights, :tomography, :transit_times, :ccf))
         has_any || push!(errs,
             "`data` block must contain at least one of " *
             "rv, transit_photometry, iad, gost, hgca, relastrom, gaia_dr3, " *
-            "rm_nights, tomography, transit_times")
+            "rm_nights, tomography, transit_times, ccf")
         _validate_transit_times!(errs, cfg)
         if (_has(data_cfg, :rm_nights) || _has(data_cfg, :tomography)) &&
            _obliquity_cfg(cfg) === nothing
@@ -887,6 +887,9 @@ function _build_data(data_cfg; obliquity = nothing, pm_planets = nothing)
         kw[:transit_times] = _parse_transit_times_blocks(_get(data_cfg, :transit_times);
                                  t_phot = get(kw, :t_phot, Float64[]), pm_planets)
     end
+    if _has(data_cfg, :ccf)
+        kw[:ccf] = _parse_ccf_blocks(_get(data_cfg, :ccf))
+    end
     # Obliquity: RM nights become RV instruments, line-profile stacks become
     # residual maps (see runner_obliquity.jl).
     obliquity === nothing ||
@@ -1091,6 +1094,75 @@ function _parse_transit_times_blocks(blocks; t_phot = Float64[], pm_planets = no
         push!(sets, s)
     end
     return sets
+end
+
+# ---- CCF line components -------------------------------------------------
+# `data.ccf`: one block (or a list of blocks, one per instrument), each a
+# `CCFSet` (src/ccf_data.jl). Shape:
+#
+#   {"tag": "FEROS",
+#    "components": [{"name": "A"}, {"name": "B", "planet": 1}],
+#    "epochs": [{"bjd": 2459267.59, "file": "27930.json"},          // a CCF dump
+#               {"bjd": 2459269.59, "velocities": [...], "ccf": [...],
+#                "err": [...], "label": "n2"}],                       // or inline
+#    "normalize_edges": 5, "continuum": "per_epoch", "depth_scale": "per_epoch",
+#    "ref_epoch": 1, "jitter": "per_epoch"}
+#
+# `planet` absent or 0: a static component. An epoch's label defaults to the
+# dump's `id`, else its position. `ref_epoch` is a 1-based position or a label.
+function _parse_ccf_blocks(blocks)
+    list = blocks isa AbstractVector ? blocks : [blocks]
+    isempty(list) && throw(ArgumentError("`data.ccf` is an empty list; drop it"))
+    return CCFSet[_parse_ccf_block(b, i) for (i, b) in enumerate(list)]
+end
+
+function _parse_ccf_block(b, ib::Int)
+    at = "`data.ccf`" * (ib > 1 ? "[$ib]" : "")
+    tag = String(_get(b, :tag; default = "CCF"))
+    comps_cfg = _get(b, :components; default = nothing)
+    (comps_cfg isa AbstractVector && !isempty(comps_cfg)) || throw(ArgumentError(
+        "$at needs `components`: a non-empty list of {\"name\": ..., \"planet\": k} " *
+        "(planet absent or 0 for a static component)"))
+    comps = CCFComponent[CCFComponent(String(_get(c, :name; required = true));
+                                      planet = Int(_get(c, :planet; default = 0)))
+                         for c in comps_cfg]
+    eps = _get(b, :epochs; default = nothing)
+    (eps isa AbstractVector && !isempty(eps)) || throw(ArgumentError(
+        "$at needs `epochs`: a non-empty list of {\"bjd\", \"file\"} or " *
+        "{\"bjd\", \"velocities\", \"ccf\"} objects"))
+    t = Float64[]; vs = Vector{Vector{Float64}}(); ys = similar(vs)
+    errs = Vector{Vector{Float64}}(); labels = String[]; any_err = false
+    for (i, e) in enumerate(eps)
+        _has(e, :bjd) || throw(ArgumentError("$at.epochs[$i] has no `bjd`"))
+        push!(t, Float64(_get(e, :bjd)))
+        id = nothing
+        if _has(e, :file)
+            id, v, y = load_ccf_json(String(_get(e, :file)))
+        elseif _has(e, :velocities) && _has(e, :ccf)
+            v = _ccf_float_vec(_get(e, :velocities)); y = _ccf_float_vec(_get(e, :ccf))
+        else
+            throw(ArgumentError("$at.epochs[$i] needs `file`, or `velocities` and `ccf`"))
+        end
+        if _has(e, :err)
+            push!(errs, _ccf_float_vec(_get(e, :err))); any_err = true
+        else
+            push!(errs, zeros(length(v)))
+        end
+        push!(vs, v); push!(ys, y)
+        lab = _get(e, :label; default = id === nothing ? i : id)
+        push!(labels, string(lab))
+    end
+    ref = _get(b, :ref_epoch; default = 1)
+    ref_i = ref isa Integer ? Int(ref) : findfirst(==(string(ref)), labels)
+    ref_i === nothing && throw(ArgumentError(
+        "$at: ref_epoch \"$ref\" is not an epoch label ($(join(labels, ", ")))"))
+    return CCFSet(; tag, t, v = vs, ccf = ys, err = any_err ? errs : nothing,
+                  labels, components = comps,
+                  normalize_edges = Int(_get(b, :normalize_edges; default = 5)),
+                  continuum = Symbol(String(_get(b, :continuum; default = "per_epoch"))),
+                  depth_scale = Symbol(String(_get(b, :depth_scale; default = "per_epoch"))),
+                  ref_epoch = ref_i,
+                  jitter = Symbol(String(_get(b, :jitter; default = "per_epoch"))))
 end
 
 # ---- Photometry blocks ------------------------------------------------

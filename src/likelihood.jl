@@ -134,7 +134,11 @@ function rv_log_likelihood(theta::Theta{T}, data::Data) where {T}
     ll_tt = transit_times_log_likelihood(theta, data)
     isfinite(ll_tt) || return convert(T, -Inf)
 
-    return ll + lp_ext + ll_astrom + ll_ifloor + ll_tt
+    # CCF line profiles (src/ccf_likelihood.jl); exactly zero without them.
+    ll_ccf = ccf_log_likelihood(theta, data)
+    isfinite(ll_ccf) || return convert(T, -Inf)
+
+    return ll + lp_ext + ll_astrom + ll_ifloor + ll_tt + ll_ccf
 end
 
 """
@@ -685,7 +689,11 @@ function rv_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
     ll_tt = transit_times_log_likelihood(theta, data)
     isfinite(ll_tt) || return convert(T, -Inf)
 
-    return ll + lp_ext + ll_astrom + ll_ifloor + ll_tt
+    # CCF line profiles (src/ccf_likelihood.jl); exactly zero without them.
+    ll_ccf = ccf_log_likelihood(theta, data)
+    isfinite(ll_ccf) || return convert(T, -Inf)
+
+    return ll + lp_ext + ll_astrom + ll_ifloor + ll_tt + ll_ccf
 end
 
 """

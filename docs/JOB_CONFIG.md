@@ -577,7 +577,7 @@ sampler also takes `max_seconds`, `max_evals` and, for `transdim_pt_emcee`,
 ### `data`
 The `data` block must contain at least one of `rv`, `transit_photometry`,
 `iad`, `gost`, `hgca`, `relastrom`, `gaia_dr3`, `rm_nights`, `tomography`,
-`transit_times` (`_validate_config`). `rm_nights` and `tomography` belong to an
+`transit_times`, `ccf` (`_validate_config`). `rm_nights` and `tomography` belong to an
 obliquity fit and need a `model.obliquity` block — see
 [obliquity_jobs.md](src/obliquity_jobs.md). `transit_times` alone is a complete
 fit (a linear or TTV ephemeris from published mid-times).
@@ -643,6 +643,10 @@ fit (a linear or TTV ephemeris from published mid-times).
 - **`gaia_dr3`** — `{params:[α,δ,ϖ,μα*,μδ], cov:5×5, t_ref}`.
 - **`transit_times`** — measured mid-transit times: a list
   of per-planet blocks (schema above). See "Transit times" below.
+- **`ccf`** — CCF profiles fitted as Gaussian line components, static or tied
+  to a planet's orbit: one block or a list (one per instrument). Alone it is a
+  complete fit; with other data it shares their orbit. Schema, parameters,
+  default priors and worked examples: [ccf.md](src/ccf.md).
 
 ### Transit times (`data.transit_times`)
 

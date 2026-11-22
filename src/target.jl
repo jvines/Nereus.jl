@@ -409,6 +409,7 @@ function EnzymeGradientConfig(target::NereusTarget{PackedTransforms})
     isempty(cfg.noise_models) || push!(dropped, "noise models")
     isempty(target.data.t_phot) || push!(dropped, "transit photometry")
     isempty(target.data.transit_times) || push!(dropped, "measured transit times")
+    isempty(target.data.ccf) || push!(dropped, "CCF line profiles")
     isempty(dropped) || throw(ArgumentError(
         "ad_backend = :Enzyme differentiates only the prior and the white-noise " *
         "RV likelihood, and this target also has " * join(dropped, ", ") *

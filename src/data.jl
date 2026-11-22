@@ -115,6 +115,9 @@ struct Data
     # offsets are numbered from the first cadence near a transit, found by a
     # scan of it at every evaluation (`_ttv_first_transit`, src/ttv.jl).
     t_phot_sorted::Vector{Float64}
+    # CCF profiles fitted as Gaussian line components (src/ccf_data.jl), one
+    # set per instrument. Empty unless given; the CCF term is then exactly zero.
+    ccf::Vector{CCFSet}
 end
 
 """
@@ -168,6 +171,7 @@ function Data(;
     tomo::Vector{TomoNight} = TomoNight[],
     hip_scans::Union{Nothing, IADData} = nothing,
     transit_times::AbstractVector{TransitTimeSet} = TransitTimeSet[],
+    ccf::AbstractVector{CCFSet} = CCFSet[],
 )
     n_rv = length(t_rv)
     n_phot = length(t_phot)
@@ -186,10 +190,15 @@ function Data(;
     # Residual maps are data in their own right: a Doppler-shadow fit has no
     # velocities, and giving it a dummy RV point to get past this check left a
     # constant offset in the likelihood and three prior-only parameters.
-    (n_rv > 0 || n_phot > 0 || has_astrom || !isempty(tomo) || !isempty(tt_used_t)) ||
+    ccf_sets = Vector{CCFSet}(ccf)
+    tags = [s.tag for s in ccf_sets]
+    length(unique(tags)) == length(tags) || throw(ArgumentError(
+        "CCF sets must have unique tags; got $(tags). They name the parameters"))
+    (n_rv > 0 || n_phot > 0 || has_astrom || !isempty(tomo) || !isempty(tt_used_t) ||
+     !isempty(ccf_sets)) ||
         throw(ArgumentError(
-        "Data requires at least one RV, photometric, astrometric, tomographic or " *
-        "transit-time observation"))
+        "Data requires at least one RV, photometric, astrometric, tomographic, " *
+        "transit-time or CCF observation"))
 
     # --- RV validation ---
     if n_rv > 0
@@ -252,6 +261,8 @@ function Data(;
         t_ref_val = Float64(gaia_dr3.t_ref)
     elseif !isempty(tomo)
         t_ref_val = Float64(median(reduce(vcat, (nt.t for nt in tomo))))
+    elseif !isempty(ccf_sets)
+        t_ref_val = Float64(median(reduce(vcat, (s.t for s in ccf_sets))))
     else
         throw(ArgumentError("no observations to derive t_ref from"))
     end
@@ -464,6 +475,7 @@ function Data(;
         Vector{Float64}(flux_err), phot_inst_vec, exp_vec,
         relastrom, hgca, iad, gost, g23h, gaia_dr3, tomo, hip_geom, tt_sets,
         issorted(t_phot_vec) ? t_phot_vec : sort(t_phot_vec),
+        ccf_sets,
     )
 end
 
