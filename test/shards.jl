@@ -255,6 +255,13 @@ const TEST_UNITS = [
     # 4 threads), not yet on the CI runner.
     (name = "test_graceful_stop.jl", seconds = 70, files = ["test_graceful_stop.jl"]),
     (name = "test_thread_slots.jl", seconds = 152, files = ["test_thread_slots.jl"]),
+    # CCF profiles as Gaussian line components (data.ccf): container, layout,
+    # likelihood, recovery, joint fit, resume, evidence; every engine; the
+    # NOI-101822 parity (skipped unless NEREUS_NOI101822_CCF_DIR is set).
+    # Standalone times, 4 threads, arm64 (2026-11-22), compile included.
+    (name = "test_ccf_components.jl", seconds = 820, files = ["test_ccf_components.jl"]),
+    (name = "test_ccf_runjob_samplers.jl", seconds = 280, files = ["test_ccf_runjob_samplers.jl"]),
+    (name = "test_ccf_parity_noi101822.jl", seconds = 1, files = ["test_ccf_parity_noi101822.jl"]),
 ]
 
 const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")
