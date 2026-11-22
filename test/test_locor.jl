@@ -511,3 +511,59 @@ end
     @test collect(out["trend"]) ≈ rm.trend
     @test collect(out["transit_mask"]) == collect(mask)
 end
+
+@testset "detrend_locor transit_mask reaches the notch fallback" begin
+    rng = MersenneTwister(31)
+    t = collect(0.0:(2.0 / 60 / 24):5.0)
+    n = length(t)
+    rot = 0.004 .* sin.(2π .* t ./ 2.7)
+    depth_true = 0.003
+    t0, dur = 2.5, 3.0 / 24
+    in_t = abs.(t .- t0) .< dur / 2
+    flux = 1.0 .+ rot .- depth_true .* in_t .+ 3e-4 .* randn(rng, n)
+    ferr = fill(3e-4, n)
+    tdepth(r) = 1 - mean(r.flux_detrended[in_t]) / mean(r.flux_detrended[.!in_t])
+
+    # P_rot = 2.7 d > baseline/3: whole-LC notch fallback.
+    r0 = Nereus.detrend_locor(t, flux, ferr; P_rot = 2.7)
+    @test all(r0.used_notch)
+    @test r0.transit_mask === nothing
+    rn0 = Nereus.detrend_notch(t, flux, ferr)
+    @test r0.trend == rn0.trend && r0.flux_detrended == rn0.flux_detrended
+    @test r0.outlier == rn0.outlier
+
+    rm = Nereus.detrend_locor(t, flux, ferr; P_rot = 2.7, transit_mask = in_t)
+    @test all(rm.used_notch)
+    @test rm.transit_mask == in_t
+    @test length(rm.trend) == length(rm.flux_detrended) == n
+    @test rm.flux_detrended ≈ flux ./ rm.trend
+    @test all(isfinite, rm.trend)
+    rnm = Nereus.detrend_notch(t, flux, ferr; transit_mask = in_t)
+    @test rm.trend == rnm.trend
+    @test abs(tdepth(rm) - depth_true) < 0.15 * depth_true
+    @test rm.trend != r0.trend
+
+    @test_throws ArgumentError Nereus.detrend_locor(t, flux, ferr; P_rot = 2.7,
+                                                    transit_mask = in_t[1:end-1])
+
+    # Per-segment fallback: a short second segment (<3 cycles) after a gap.
+    t2 = vcat(collect(0.0:(10 / 60 / 24):6.0), collect(8.0:(10 / 60 / 24):9.5))
+    n2 = length(t2)
+    P = 0.8
+    in2 = (t2 .>= 8.7) .& (t2 .<= 8.7 + 2.5 / 24)
+    fl2 = 1.0 .+ 0.02 .* sin.(2π .* t2 ./ P) .- 0.01 .* in2 .+ 1e-4 .* randn(rng, n2)
+    fe2 = fill(1e-4, n2)
+    rs = Nereus.detrend_locor(t2, fl2, fe2; P_rot = P, transit_mask = in2)
+    seg2 = findall(t2 .>= 8.0)
+    @test any(rs.used_notch[seg2])
+    rs0 = Nereus.detrend_locor(t2, fl2, fe2; P_rot = P)
+    @test rs.transit_mask == in2 && rs0.transit_mask === nothing
+    @test all(isfinite, rs.trend)
+
+    # Action path: JSON-style payload with a Vector{Any} mask.
+    pl = Dict("t" => t, "flux" => flux, "flux_err" => ferr, "P_rot" => 2.7,
+              "transit_mask" => Any[m for m in in_t])
+    out = Nereus.FEATURE_ACTIONS["detrend.locor"](pl)
+    @test collect(out["trend"]) ≈ rm.trend
+    @test collect(out["transit_mask"]) == collect(in_t)
+end
