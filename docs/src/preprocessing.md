@@ -304,9 +304,15 @@ modulation while leaving the transit dip intact.
     survives in `flux_detrended`. In-transit points are still reported in
     `outlier`. The intended workflow: leave it mask-free for the blind
     pre-search, then pass `transit_mask` once you have a candidate
-    ephemeris (the detrend→search→re-detrend-with-mask loop). Note the
-    whole-LC notch fallback ignores `transit_mask` (notch is mask-free and
-    takes no mask).
+    ephemeris (the detrend→search→re-detrend-with-mask loop).
+
+    The mask is also passed to [`detrend_notch`](@ref) wherever LOCoR falls
+    back to it, both the whole-LC fallback and the per-segment fallback (<3
+    cycles). There the notch semantics apply: masked cadences are left out of
+    every local window fit (poly2 seed, σ-clip, depth/χ² fit, BIC search), the
+    trend is still evaluated at them, and `flux_detrended = flux ./ trend`
+    everywhere. The result echoes the input as `transit_mask` (`nothing` when
+    none was given).
 
 ```julia
 res = detrend_locor(t, flux, flux_err;
@@ -321,7 +327,7 @@ res = detrend_locor(t, flux, flux_err;
 ```
 
 Returns a NamedTuple `(; flux_detrended, trend, phase, cycle_id,
-outlier, segments, P_rot_used, used_notch)`. `trend` is the
+outlier, segments, P_rot_used, used_notch, sector_id, transit_mask)`. `trend` is the
 reconstructed raw rotation baseline, `phase`/`cycle_id` are the
 within-cycle phase and integer cycle index per cadence, and
 `used_notch` flags cadences where LOCoR fell back to `detrend_notch`.

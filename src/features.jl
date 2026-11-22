@@ -91,7 +91,7 @@ for (name, fn) in (("savgol", :detrend_savgol), ("notch", :detrend_notch),
         _need(p, :t, :flux, :flux_err)
         t = _vec(_pget(p, :t))
         kw = _kw(p, ["t", "flux", "flux_err"])
-        if $(QuoteNode(fn)) === :detrend_notch && get(kw, :transit_mask, nothing) !== nothing
+        if $(QuoteNode(fn)) in (:detrend_notch, :detrend_locor) && get(kw, :transit_mask, nothing) !== nothing
             # JSON delivers the mask as a Vector{Any}; the kernel wants Bool.
             kw[:transit_mask] = Bool[Bool(x) for x in kw[:transit_mask]]
         end

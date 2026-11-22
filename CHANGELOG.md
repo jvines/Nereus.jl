@@ -3,6 +3,19 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## 0.9.8
+
+### Added
+
+- **`detrend_locor` passes its `transit_mask` to the notch fallbacks.** The
+  whole-LC fallback (`P_rot` non-finite or longer than a third of the baseline)
+  and the per-segment fallback (fewer than 3 cycles) used to ignore the mask.
+  They now call `detrend_notch` with it, so masked cadences are left out of
+  every local window fit while the trend is still evaluated at them. The result
+  echoes `transit_mask` (`nothing` without a mask), and the `detrend.locor`
+  action accepts it as a JSON list. Without a mask every existing field is
+  unchanged.
+
 ## 0.9.7
 
 ### Added

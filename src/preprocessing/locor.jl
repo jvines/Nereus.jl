@@ -262,7 +262,10 @@ function _locor_segment!(flux_detrended, trend, outlier, cycle_id_out, used_notc
 
     # --- fallback helper: detrend the whole segment with notch ---
     function notch_fallback!()
-        res = detrend_notch(collect(tv), collect(fluxv), collect(errv); gap_size = gap_size)
+        res = transit_mask === nothing ?
+              detrend_notch(collect(tv), collect(fluxv), collect(errv); gap_size = gap_size) :
+              detrend_notch(collect(tv), collect(fluxv), collect(errv); gap_size = gap_size,
+                            transit_mask = tmaskv)
         @inbounds for (k, i) in enumerate(seg)
             flux_detrended[i] = res.flux_detrended[k]
             trend[i] = res.trend[k]
@@ -442,10 +445,11 @@ leaving the transit dip intact. Returns a NamedTuple with:
    rotational extrapolation while the dip survives in `flux_detrended`. In-
    transit points are still reported in `outlier`.
 
-   !!! note
-       The **whole-LC notch fallback** path (below) ignores `transit_mask`:
-       [`detrend_notch`](@ref) is mask-free and takes no mask, so when LOCoR
-       falls back to notch the mask has no effect there.
+   The mask also reaches both notch fallbacks (whole-LC and per-segment, see
+   below): [`detrend_notch`](@ref) is called with the same `transit_mask`, so
+   masked cadences are left out of every local window fit and the notch search
+   there, while the trend is still evaluated at them. The returned
+   `transit_mask` echoes the input (`nothing` when none was given).
 
 # Whole-LC notch fallback
 
@@ -489,7 +493,9 @@ function detrend_locor(t::AbstractVector{<:Real}, flux::AbstractVector{<:Real},
 
     # Whole-LC notch fallback: cannot form ≥3 cycles anywhere.
     if !isfinite(P_rot) || P_rot <= 0 || P_rot > (t[end] - t[1]) / 3
-        res = detrend_notch(t, flux, flux_err; gap_size = gap_size)
+        res = tmask === nothing ?
+              detrend_notch(t, flux, flux_err; gap_size = gap_size) :
+              detrend_notch(t, flux, flux_err; gap_size = gap_size, transit_mask = tmask)
         return (; flux_detrended = res.flux_detrended,
                 trend = res.trend,
                 phase = fill(NaN, n),
@@ -498,7 +504,8 @@ function detrend_locor(t::AbstractVector{<:Real}, flux::AbstractVector{<:Real},
                 segments = res.segments,
                 P_rot_used,
                 used_notch = trues(n),
-                sector_id = sid_out)
+                sector_id = sid_out,
+                transit_mask = tmask)
     end
 
     segments = find_segments(t; gap_size = gap_size)
@@ -520,7 +527,8 @@ function detrend_locor(t::AbstractVector{<:Real}, flux::AbstractVector{<:Real},
     phase = _locor_cycles(t, P_rot, t0).phase
 
     return (; flux_detrended, trend, phase, cycle_id = cycle_id_out,
-            outlier, segments, P_rot_used, used_notch, sector_id = sid_out)
+            outlier, segments, P_rot_used, used_notch, sector_id = sid_out,
+            transit_mask = tmask)
 end
 
 """
