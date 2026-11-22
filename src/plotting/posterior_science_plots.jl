@@ -97,7 +97,12 @@ end
 # LaTeX rendering of a unit string.
 function _sci_unit_latex(u)
     u == "" && return ""
-    m = Dict("m/s"=>"\\mathrm{m\\,s^{-1}}", "d"=>"\\mathrm{d}", "deg"=>"\\mathrm{deg}",
+    m = Dict("m/s"=>"\\mathrm{m\\,s^{-1}}", "km/s"=>"\\mathrm{km\\,s^{-1}}",
+             "m/s/day"=>"\\mathrm{m\\,s^{-1}\\,d^{-1}}",
+             "m/s/day^2"=>"\\mathrm{m\\,s^{-1}\\,d^{-2}}",
+             "km/s/day"=>"\\mathrm{km\\,s^{-1}\\,d^{-1}}",
+             "km/s/day^2"=>"\\mathrm{km\\,s^{-1}\\,d^{-2}}",
+"d"=>"\\mathrm{d}", "deg"=>"\\mathrm{deg}",
              "BJD"=>"\\mathrm{BJD}", "AU"=>"\\mathrm{AU}", "yr"=>"\\mathrm{yr}",
              "K"=>"\\mathrm{K}", "g/cm3"=>"\\mathrm{g\\,cm^{-3}}",
              "rho_sun"=>"\\rho_\\odot",

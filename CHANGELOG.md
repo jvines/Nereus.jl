@@ -3,6 +3,27 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Fixed
+
+- **The RV time series draws the trend.** With `trend_order` 1 or 2 the
+  `rv_timeseries` curve was the Keplerians alone around zero, while the
+  residuals took the trend out, so on a drifting star the curve missed the data.
+  The curve is now the likelihood's mean minus γ: Keplerians plus
+  `dvdt·(t − t_ref) + d2vdt2·(t − t_ref)²`, with the likelihood's `t_ref`, from
+  one shared trend routine (`rv_trend`). It is labelled "Keplerian + trend"
+  when a trend is fitted. `rv_components` draws the trend as its own curve,
+  includes it in "total", and subtracts it from the residuals, which it used to
+  leave in. The phase-folds already subtracted the trend from the data and are
+  unchanged. A whole-model posterior band (`compute_ci_bands` without `planet`)
+  includes the trend too.
+- **Trend coefficients carry units in every table and figure label.** `dvdt`
+  is m/s/day and `d2vdt2` m/s/day^2 (they had no unit); the CCF centre
+  trends `ccf_gdot_*` / `ccf_gddot_*` are km/s/day and km/s/day^2, and
+  `ccf_gamma_*`, `ccf_K_*` and `ccf_fwhm_*` km/s. The photometric baseline
+  coefficients `phot_c*` stay dimensionless: they multiply a normalized time.
+
 ## 0.9.8
 
 ### Added
