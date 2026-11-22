@@ -1106,8 +1106,11 @@ end
 #               {"bjd": 2459269.59, "velocities": [...], "ccf": [...],
 #                "err": [...], "label": "n2"}],                       // or inline
 #    "normalize_edges": 5, "continuum": "per_epoch", "depth_scale": "per_epoch",
-#    "ref_epoch": 1, "jitter": "per_epoch"}
+#    "ref_epoch": 1, "jitter": "per_epoch",
+#    "trend_t_ref": 2459600.0, "shared_fwhm": false,
+#    "pixel_correlation": "independent", "resolution_kms": 6.2}
 #
+# A component may carry `"trend": 0 | 1 | 2` (a polynomial in time on its γ).
 # `planet` absent or 0: a static component. An epoch's label defaults to the
 # dump's `id`, else its position. `ref_epoch` is a 1-based position or a label.
 function _parse_ccf_blocks(blocks)
@@ -1124,7 +1127,8 @@ function _parse_ccf_block(b, ib::Int)
         "$at needs `components`: a non-empty list of {\"name\": ..., \"planet\": k} " *
         "(planet absent or 0 for a static component)"))
     comps = CCFComponent[CCFComponent(String(_get(c, :name; required = true));
-                                      planet = Int(_get(c, :planet; default = 0)))
+                                      planet = Int(_get(c, :planet; default = 0)),
+                                      trend = Int(_get(c, :trend; default = 0)))
                          for c in comps_cfg]
     eps = _get(b, :epochs; default = nothing)
     (eps isa AbstractVector && !isempty(eps)) || throw(ArgumentError(
@@ -1162,8 +1166,15 @@ function _parse_ccf_block(b, ib::Int)
                   continuum = Symbol(String(_get(b, :continuum; default = "per_epoch"))),
                   depth_scale = Symbol(String(_get(b, :depth_scale; default = "per_epoch"))),
                   ref_epoch = ref_i,
-                  jitter = Symbol(String(_get(b, :jitter; default = "per_epoch"))))
+                  jitter = Symbol(String(_get(b, :jitter; default = "per_epoch"))),
+                  trend_t_ref = _ccf_opt_real(_get(b, :trend_t_ref; default = nothing)),
+                  shared_fwhm = Bool(_get(b, :shared_fwhm; default = false)),
+                  pixel_correlation = Symbol(String(_get(b, :pixel_correlation;
+                                                         default = "independent"))),
+                  resolution_kms = _ccf_opt_real(_get(b, :resolution_kms; default = nothing)))
 end
+
+_ccf_opt_real(x) = x === nothing ? nothing : Float64(x)
 
 # ---- Photometry blocks ------------------------------------------------
 function _parse_photometry_blocks(lcs)

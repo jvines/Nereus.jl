@@ -122,6 +122,15 @@ _hash_skip(x::Data, f::Symbol) = (f === :hip_scans && x.hip_scans === nothing) |
                                  (f === :transit_times && isempty(x.transit_times)) ||
                                  (f === :ccf && isempty(x.ccf)) ||
                                  f === :t_phot_sorted
+# CCF options added after 0.9.6, at the values that reproduce its model: no γ
+# trend (and then no use for its reference time), independent widths and
+# pixels.
+_hash_skip(x::CCFComponent, f::Symbol) = f === :trend && x.trend == 0
+_hash_skip(x::CCFSet, f::Symbol) =
+    (f === :trend_t_ref && !has_trend(x)) ||
+    (f === :shared_fwhm && !x.shared_fwhm) ||
+    (f === :pixel_correlation && x.pixel_correlation === :independent) ||
+    (f === :resolution_kms && isnan(x.resolution_kms))
 # Per-coordinate epochs equal to `epochs`: the epochs every HGCA had before.
 _hash_skip(x::HGCAData, f::Symbol) =
     (f === :epochs_ra && x.epochs_ra == x.epochs) ||

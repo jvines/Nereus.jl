@@ -263,6 +263,9 @@ const TEST_UNITS = [
     (name = "test_ccf_components.jl", seconds = 820, files = ["test_ccf_components.jl"]),
     (name = "test_ccf_runjob_samplers.jl", seconds = 280, files = ["test_ccf_runjob_samplers.jl"]),
     (name = "test_ccf_parity_noi101822.jl", seconds = 1, files = ["test_ccf_parity_noi101822.jl"]),
+    # CCF γ trends, shared_fwhm, pixel_correlation = :neff. Standalone, 4
+    # threads, arm64 (2026-11-22), compile included.
+    (name = "test_ccf_trend_options.jl", seconds = 930, files = ["test_ccf_trend_options.jl"]),
 ]
 
 const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")

@@ -2342,7 +2342,7 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
                     "CCF set \"$(s.tag)\", component \"$(c.name)\" follows planet " *
                     "$(c.planet), but the model has $(config.max_kplanet) planet(s)"))
             end
-            push!(ccf_idx, _push_ccf_slots!(names, s))
+            push!(ccf_idx, _push_ccf_slots!(names, s, config.priors))
         end
     end
 

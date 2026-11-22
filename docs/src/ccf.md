@@ -17,8 +17,9 @@ For the CCF of epoch `n` (time `t_n`) of a set, at velocity `v_i`:
 ```
 m_ni = c_n − s_n Σ_j d_j exp(−(v_i − v_j(t_n))² / (2 σ_j²)),   σ_j = FWHM_j / (2√(2 ln 2))
 
-v_j(t) = γ_j                     static component
-       = γ_j + K_j g_k(t)        component tied to planet k
+v_j(t) = γ_j(t)                  static component
+       = γ_j(t) + K_j g_k(t)     component tied to planet k
+γ_j(t) = γ_j [+ γ̇_j (t − t_ref) [+ ½ γ̈_j (t − t_ref)²]]   optional trend
 g_k(t) = cos(f + ω) + e cos ω
 ```
 
@@ -34,8 +35,10 @@ model; on a trans-dimensional fit, ln L = −Inf while that planet is inactive.
 The likelihood is Gaussian and independent per pixel:
 
 ```
-ln L = −½ Σ_n Σ_i [ (y_ni − m_ni)² / (e_ni² + j_n²) + ln 2π (e_ni² + j_n²) ]
+ln L = −½ Σ_n w_n Σ_i [ (y_ni − m_ni)² / (e_ni² + j_n²) + ln 2π (e_ni² + j_n²) ]
 ```
+
+with `w_n = 1` unless `pixel_correlation = "neff"` (below).
 
 `e_ni` are optional per-pixel errors (zero when not given, so the jitter `j_n`
 is the whole noise). It is added to the posterior by `rv_log_likelihood`,
@@ -44,10 +47,45 @@ ForwardDiff-differentiable (NUTS, pt_hmc, Pathfinder, MAP). `ad_backend =
 :Enzyme` is refused on a target with CCFs.
 
 **Correlated pixels.** A CCF is oversampled, so neighbouring pixels are
-correlated. The likelihood treats them as independent: point estimates are not
-biased by it, but posterior widths are too narrow by roughly the square root of
-the oversampling factor. Treat CCF-only credible intervals as lower bounds, or
-compare them with an epoch bootstrap.
+correlated. By default (`pixel_correlation = "independent"`) the likelihood
+treats them as independent: point estimates are not biased by it, but posterior
+widths are too narrow by roughly the square root of the oversampling factor.
+Treat CCF-only credible intervals from it as lower bounds, or compare them with
+an epoch bootstrap.
+
+`pixel_correlation = "neff"` counts each CCF as `N_eff` independent points
+instead of `N_pix`: its log-likelihood is multiplied by
+
+```
+w_n = min(1, N_eff / N_pix),   N_eff = (v_max − v_min) / Δv_res
+```
+
+with `v_max − v_min` the velocity span of that CCF's pixels and `Δv_res` the
+resolution element: `resolution_kms` when given (e.g. c/R, 6.2 km/s for
+R = 48 000), otherwise the **smallest lower bound of the set's FWHM priors**
+(an unresolved line is no narrower than the resolution element). With the
+default FWHM prior that bound is 2 grid steps, which only halves the weight;
+give `resolution_kms`, or an FWHM prior bounded below by the instrumental
+width, for an honest correction. A prior not bounded away from zero is refused.
+The weight leaves the maximum-likelihood point where it was and widens the
+posterior by about `1/√w_n`. **It changes the evidence**: ln Z of a `neff` fit
+is not comparable with one of an `independent` fit, so compare models only
+under the same `pixel_correlation` and resolution element. `resolution_kms` is
+refused under `independent`.
+
+**γ trends.** A component given `trend = 1` gets a linear drift of its γ,
+`trend = 2` a quadratic, static or tied: e.g. the slow outer orbit of a
+hierarchical triple moving the centres of the inner pair. The reference time
+`t_ref` is the set's `trend_t_ref`, by default **the mean epoch (BJD) of the
+set**, so `γ_j` is the centre at the middle of the data (and, for a linear
+trend, uncorrelated with `γ̇_j`); it does not move when the priors or other data
+change. A trend needs at least `trend + 2` epochs at more than one time; fewer
+are refused. To test for a drift, fit with and without it and compare the
+evidences.
+
+**Shared width.** `shared_fwhm = true` gives every component of the set the
+one width `ccf_fwhm_<tag>`. When the components are lines of similar stars it
+removes a degeneracy and the label switching between them.
 
 ## Parameters
 
@@ -55,9 +93,11 @@ Per set (tag `<tag>`), per component `<c>`:
 
 | name | meaning | default prior |
 |---|---|---|
-| `ccf_gamma_<tag>_<c>` | centre (static) or systemic velocity (tied), km/s | Uniform over the velocity range of the CCFs |
+| `ccf_gamma_<tag>_<c>` | centre (static) or systemic velocity (tied), km/s, at `t_ref` when the component has a trend | Uniform over the velocity range of the CCFs |
+| `ccf_gdot_<tag>_<c>` | γ̇, km/s/day (`trend` ≥ 1) | Uniform(−span/B, span/B), B the epoch baseline in days |
+| `ccf_gddot_<tag>_<c>` | γ̈, km/s/day², the drift is ½ γ̈ (t − t_ref)² (`trend` = 2) | Uniform(−span/B², span/B²) |
 | `ccf_K_<tag>_<c>` | semi-amplitude, either sign, km/s (tied only) | Uniform(−span, span), span the width of that range |
-| `ccf_fwhm_<tag>_<c>` | FWHM, km/s | Uniform(2 grid steps, span) |
+| `ccf_fwhm_<tag>_<c>` / `ccf_fwhm_<tag>` | FWHM, km/s; one per set under `shared_fwhm` | Uniform(2 grid steps, span) |
 | `ccf_depth_<tag>_<c>` | depth at the reference epoch | Uniform(0, 1) normalised; else Uniform(0, 2 × peak-to-peak) |
 
 Per epoch `<label>` (or one per set when shared):
@@ -95,8 +135,12 @@ s = CCFSet(; tag = "FEROS", t = bjd, v = velocity_grids, ccf = ccfs,
 data = Data(; ccf = [s])            # alone, or with t_rv/rv/..., t_phot/flux/...
 ```
 
+Options: `CCFComponent("A"; trend = 1)`, and on `CCFSet` `trend_t_ref`,
+`shared_fwhm = true`, `pixel_correlation = :neff`, `resolution_kms`.
+
 `ccf_model(theta, data)` gives the model, residuals and per-pixel σ of every
-epoch; `ccf_component_velocities(theta, data)` the component centres;
+epoch; `ccf_component_velocities(theta, data)` the component centres (trends
+included); `ccf_epoch_weights(set, resolution)` the `neff` weights;
 `load_ccf_json(path)` reads a database CCF dump (`velocities`, `ccf_values`,
 `id`).
 
@@ -117,11 +161,15 @@ One block, or a list of blocks (one per instrument):
   "continuum": "per_epoch",
   "depth_scale": "per_epoch",
   "ref_epoch": 1,
-  "jitter": "per_epoch"
+  "jitter": "per_epoch",
+  "shared_fwhm": false,
+  "pixel_correlation": "independent"
 }]
 ```
 
 - `components` — `planet` absent or 0: static; `k`: tied to planet k.
+  `"trend": 1` or `2` adds a linear or quadratic drift of that component's γ
+  (default 0, none).
 - `epochs` — `bjd` (BJD_TDB, on the time base of the other data) and either a
   CCF dump `file` (JSON with `velocities`, `ccf_values`, optional `id`) or
   inline `velocities` + `ccf` (+ optional `err`). `label` defaults to the
@@ -129,6 +177,12 @@ One block, or a list of blocks (one per instrument):
 - `ref_epoch` — 1-based position or a label.
 - `continuum`, `jitter` — `"per_epoch"` or `"shared"`; `depth_scale` —
   `"per_epoch"` or `"none"`.
+- `trend_t_ref` — BJD the trends are referred to; absent or `null`: the mean
+  epoch of the set.
+- `shared_fwhm` — `true`: one `ccf_fwhm_<tag>` for every component.
+- `pixel_correlation` — `"independent"` or `"neff"`; `resolution_kms` — the
+  resolution element for `"neff"` (absent: the narrowest FWHM prior's lower
+  bound).
 
 A planet a component is tied to needs a mode with an orbit; with CCFs only, use
 `RV_ONLY` and fix what the CCFs cannot constrain (the planet's `K_k1`, and
@@ -166,7 +220,8 @@ Two components on the transit ephemeris of a previous transit+RV fit (P, Tc, e,
 ```
 
 (All 19 epochs go in `epochs`.) Component A is static here; to test whether it
-moves, make it `{"name": "A", "planet": 1}` and compare the evidences.
+moves, make it `{"name": "A", "planet": 1}` and compare the evidences. To test
+for a slow drift of A (an outer orbit), make it `{"name": "A", "trend": 1}`.
 
 ### Example: NOI-101822, joint with the transit and the RVs
 

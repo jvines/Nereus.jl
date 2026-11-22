@@ -459,3 +459,55 @@ end
     @test res.snr[1] > 0
     @test !haskey(res, :scores)
 end
+
+@testset "detrend_notch transit_mask" begin
+    rng = MersenneTwister(11)
+    t = collect(0.0:(2.0 / 60 / 24):5.0)
+    n = length(t)
+    rot = 0.004 .* sin.(2π .* t ./ 2.7)
+    depth_true = 0.003
+    t0, dur = 2.5, 3.0 / 24
+    in_t = abs.(t .- t0) .< dur / 2
+    flux = 1.0 .+ rot .- depth_true .* in_t .+ 3e-4 .* randn(rng, n)
+    ferr = fill(3e-4, n)
+    mask = in_t
+    tdepth(r) = 1 - mean(r.flux_detrended[in_t]) / mean(r.flux_detrended[.!in_t])
+    kw = (window = 0.5, durations = [1.0, 2.0, 3.0, 4.0] ./ 24)
+
+    # Default path unchanged: no mask => echo is nothing.
+    r0 = Nereus.detrend_notch(t, flux, ferr; kw...)
+    @test r0.transit_mask === nothing
+    @test Nereus.detrend_notch(t, flux, ferr; kw..., transit_mask = nothing).trend == r0.trend
+
+    # With the mask the transit depth is preserved; the plain trend-only
+    # detrender (no mask, no search) erodes it.
+    rm = Nereus.detrend_notch(t, flux, ferr; kw..., transit_mask = mask)
+    @test rm.transit_mask === mask
+    @test length(rm.trend) == length(rm.flux_detrended) == n
+    @test rm.flux_detrended ≈ flux ./ rm.trend
+    @test all(isfinite, rm.trend)
+    @test abs(tdepth(rm) - depth_true) < 0.15 * depth_true
+    @test all(rm.depth[mask] .== 0) && all(rm.delta_bic[mask] .== 0)
+    @test !any(rm.outlier[mask])
+
+    rn = Nereus.detrend_notch(t, flux, ferr; kw..., notch_search = false)
+    @test all(rn.depth .== 0) && all(rn.delta_bic .== 0)
+    @test tdepth(rn) < 0.9 * depth_true               # eroded without the mask
+    @test r0.trend != rm.trend                         # mask changes the trend
+
+    rmn = Nereus.detrend_notch(t, flux, ferr; kw..., transit_mask = mask,
+                               notch_search = false)
+    @test abs(tdepth(rmn) - depth_true) < 0.15 * depth_true
+    @test all(rmn.depth .== 0)
+
+    @test_throws ArgumentError Nereus.detrend_notch(t, flux, ferr;
+                                    transit_mask = falses(n - 1))
+
+    # Action payload (JSON-style string keys, Vector{Any} mask).
+    pl = Dict("t" => t, "flux" => flux, "flux_err" => ferr,
+              "window" => 0.5, "durations" => [1.0, 2.0, 3.0, 4.0] ./ 24,
+              "transit_mask" => Any[m for m in mask])
+    out = Nereus.FEATURE_ACTIONS["detrend.notch"](pl)
+    @test collect(out["trend"]) ≈ rm.trend
+    @test collect(out["transit_mask"]) == collect(mask)
+end

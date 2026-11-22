@@ -29,24 +29,32 @@ end
 const CS_BLEND = [("A", 0, 10.0, 0.0, 12.0, 0.15), ("B", 1, 8.0, 20.0, 18.0, 0.06)]
 
 """
-    cs_ccfs(; comps, n_epochs, noise, seed, unequal, nan, cont_sd, scale_sd)
+    cs_ccfs(; comps, n_epochs, noise, seed, unequal, nan, cont_sd, scale_sd, trend, t_ref)
 
 Synthetic CCFs: `(t, v, y, truth)`. Epoch n has continuum `cont[n]` and depth
 scale `scale[n]` (`scale[1] = 1`). `unequal`: every other epoch on a coarser,
-shifted grid. `nan`: a few pixels of epoch 2 set to NaN.
+shifted grid. `nan`: a few pixels of epoch 2 set to NaN. `trend`: name =>
+(γ̇, γ̈) adds γ̇ (t − t_ref) + ½ γ̈ (t − t_ref)² to that component's centre,
+`t_ref` (default the mean epoch) in `truth.t_ref`.
 """
 function cs_ccfs(; comps = CS_BLEND, n_epochs = 14, noise = 0.004, seed = 1,
-                 unequal = false, nan = false, cont_sd = 0.01, scale_sd = 0.15)
+                 unequal = false, nan = false, cont_sd = 0.01, scale_sd = 0.15,
+                 trend = Dict{String, NTuple{2, Float64}}(), t_ref = nothing)
     rng = MersenneTwister(seed)
     t = sort!(CS_TC .+ 40 .* rand(rng, n_epochs))
     cont = 1 .+ cont_sd .* randn(rng, n_epochs)
     scale = vcat(1.0, clamp.(1 .+ scale_sd .* randn(rng, n_epochs - 1), 0.5, 1.6))
+    tr = t_ref === nothing ? sum(t) / n_epochs : t_ref
     vs = Vector{Vector{Float64}}(); ys = similar(vs)
     for n in 1:n_epochs
         v = (unequal && iseven(n)) ? collect(-39.3:0.8:60.0) : collect(-40.0:0.5:60.0)
         m = fill(cont[n], length(v))
-        for (_, pl, γ, K, fw, d) in comps
+        for (nm, pl, γ, K, fw, d) in comps
             c = pl == 0 ? γ : γ + K * cs_kep(t[n])
+            if haskey(trend, nm)
+                dt = t[n] - tr
+                c += trend[nm][1] * dt + trend[nm][2] * dt^2 / 2
+            end
             σ = fw / (2sqrt(2log(2)))
             m .-= scale[n] * d .* exp.(-((v .- c) ./ σ) .^ 2 ./ 2)
         end
@@ -54,7 +62,7 @@ function cs_ccfs(; comps = CS_BLEND, n_epochs = 14, noise = 0.004, seed = 1,
         (nan && n == 2) && (y[[5, 50, 51]] .= NaN)
         push!(vs, v); push!(ys, y)
     end
-    return t, vs, ys, (; cont, scale, comps, noise)
+    return t, vs, ys, (; cont, scale, comps, noise, trend, t_ref = tr)
 end
 
 cs_components(comps = CS_BLEND) = [CCFComponent(c[1]; planet = c[2]) for c in comps]
