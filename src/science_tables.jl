@@ -68,6 +68,8 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "M_A_sini3" => ("M_sun", false),    "M_B_sini3" => ("M_sun", false),
     "M_A" => ("M_sun", false),          "M_B" => ("M_sun", false),
     "inc_deg" => ("deg", false),        "P_days" => ("d", false),
+    # RV trend: dvdt·(t − t_ref) + d2vdt2·(t − t_ref)², t in days
+    "dvdt" => ("m/s/day", false),      "d2vdt2" => ("m/s/day^2", false),
 )
 
 # True when an instrument/noise param's trailing instrument token names a
@@ -104,7 +106,14 @@ function sci_param_unit(name::AbstractString, params::Params)
     startswith(s, "jitter") && return (phot ? "" : "m/s", false)
     (startswith(s, "C_") || startswith(s, "ind_floor")) && return ("", false)
     startswith(s, "dilution") && return ("", false)     # flux dilution factor
-    startswith(s, "phot_c")   && return ("", false)     # phot baseline-trend coeff
+    # phot baseline-trend coeff: multiplies a NORMALIZED time, so relative flux
+    startswith(s, "phot_c")   && return ("", false)
+    # CCF line centres live on the km/s velocity grid; their trend is
+    # γ̇·(t − t_ref) + ½γ̈·(t − t_ref)², t in days (src/ccf_data.jl)
+    startswith(s, "ccf_gdot_")  && return ("km/s/day", false)
+    startswith(s, "ccf_gddot_") && return ("km/s/day^2", false)
+    (startswith(s, "ccf_gamma_") || startswith(s, "ccf_K_") ||
+     startswith(s, "ccf_fwhm_")) && return ("km/s", false)
     startswith(s, "q1_") && return ("", false)          # Kipping LD (per group)
     startswith(s, "q2_") && return ("", false)
     startswith(s, "u1_") && return ("", false)          # physical LD (per group)
@@ -546,7 +555,10 @@ _texesc(s) = replace(String(s), "_" => "\\_")
 
 # Unit string → LaTeX (proper symbols/exponents instead of escaped ASCII).
 const _TEX_UNIT = Dict(
-    "m/s"=>"m\\,s\$^{-1}\$", "M_earth"=>"\$M_\\oplus\$", "M_jup"=>"\$M_{\\rm Jup}\$",
+    "m/s"=>"m\\,s\$^{-1}\$", "m/s/day"=>"m\\,s\$^{-1}\$\\,d\$^{-1}\$",
+    "m/s/day^2"=>"m\\,s\$^{-1}\$\\,d\$^{-2}\$", "km/s"=>"km\\,s\$^{-1}\$",
+    "km/s/day"=>"km\\,s\$^{-1}\$\\,d\$^{-1}\$", "km/s/day^2"=>"km\\,s\$^{-1}\$\\,d\$^{-2}\$",
+    "M_earth"=>"\$M_\\oplus\$", "M_jup"=>"\$M_{\\rm Jup}\$",
     "R_jup"=>"\$R_{\\rm Jup}\$", "R_earth"=>"\$R_\\oplus\$", "S_earth"=>"\$S_\\oplus\$",
     "W/m2"=>"W\\,m\$^{-2}\$", "g/cm3"=>"g\\,cm\$^{-3}\$", "deg"=>"deg",
     "rho_sun"=>"\$\\rho_\\odot\$", "M_sun"=>"\$M_\\odot\$",

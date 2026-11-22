@@ -884,6 +884,36 @@ Reads the fitted value straight out of `theta` by slot index.
     return theta.values[idx]
 end
 
+"""
+    rv_trend_coeffs(theta) -> (dvdt, d2vdt2)
+
+The RV trend coefficients the likelihood uses: `dvdt` (m/s/day) when
+`trend_order >= 1` and `d2vdt2` (m/s/day²) when `trend_order >= 2`, zero
+otherwise.
+"""
+@inline function rv_trend_coeffs(theta::Theta{T}) where {T}
+    order = theta.params.config.trend_order
+    return (order >= 1 ? rv_dvdt(theta) : zero(T),
+            order >= 2 ? rv_d2vdt2(theta) : zero(T))
+end
+
+# `base + dvdt·dt + d2vdt2·dt²`, dt = t − t_ref: the trend term of the RV mean,
+# in the one order of operations every likelihood path and every plotted curve
+# uses (`base` is γ, or zero where γ is added later or marginalized).
+@inline _rv_trend_term(base, dvdt, curv, dt) = base + dvdt * dt + curv * dt * dt
+
+"""
+    rv_trend(theta, data, t) -> Vector
+
+The RV trend `dvdt·(t − t_ref) + d2vdt2·(t − t_ref)²` at times `t`, with the
+likelihood's `t_ref` (`data.t_ref`). Zero for `trend_order = 0`.
+"""
+function rv_trend(theta::Theta, data, t::AbstractVector)
+    dvdt, curv = rv_trend_coeffs(theta)
+    t_ref = data.t_ref
+    return [_rv_trend_term(zero(dvdt), dvdt, curv, ti - t_ref) for ti in t]
+end
+
 # =====================================================================
 # PM systemic accessors
 # =====================================================================

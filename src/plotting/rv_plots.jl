@@ -40,6 +40,7 @@ function plot_rv_timeseries(chains, params, data;
         rowgap!(ga, 0)
 
         inst_names = params.config.instruments.rv_names
+        has_trend = params.config.trend_order >= 1
         tmin = minimum(data.t_rv)
 
         # Median-parameter model conditioned on the **winning** model:
@@ -146,7 +147,10 @@ function plot_rv_timeseries(chains, params, data;
                                    data.t_rv, t_dense, data.rv_inst, :rv; data=data)
             catch; nothing end) : nothing
 
+            # The RV trend at the likelihood's t_ref, its own component.
+            trend_dense = has_trend ? rv_trend(theta_med, data, t_dense) : nothing
             total_dense = reduce(.+, kep_dense; init = zeros(length(t_dense)))
+            trend_dense !== nothing && (total_dense = total_dense .+ trend_dense)
             act_dense !== nothing && (total_dense = total_dense .+ act_dense)
 
             # Data (γ-subtracted) + residuals = data − Total at the data times.
@@ -160,6 +164,7 @@ function plot_rv_timeseries(chains, params, data;
                 for k in pidx
                     kep_at_i .+= compute_rv_model_planet(theta_med, data, data.t_rv[mask], k)
                 end
+                has_trend && (kep_at_i .+= rv_trend(theta_med, data, data.t_rv[mask]))
                 res_i = raw_i .- kep_at_i .- act_at_data[mask]
                 append!(frame_y, raw_i); append!(frame_e, err_i); append!(frame_r, res_i)
                 mc = inst_color(i); mk = inst_marker(i)
@@ -183,10 +188,14 @@ function plot_rv_timeseries(chains, params, data;
                            label="planet $(('a' + k))")    # star='a', first planet='b'
                 end
             end
+            trend_dense !== nothing &&
+                lines!(ax, t_dense .- tmin, trend_dense;
+                       color=NEREUS_COLORS.kep, linewidth=MODEL_LW, linestyle=:dash,
+                       label="trend")
             (act_dense !== nothing && show_activity) &&
                 lines!(ax, t_dense .- tmin, act_dense;
                        color=NEREUS_COLORS.gp, linewidth=MODEL_LW, label="activity")
-            ncomp = np_draw + (act_dense !== nothing ? 1 : 0)
+            ncomp = np_draw + (act_dense !== nothing ? 1 : 0) + (trend_dense !== nothing ? 1 : 0)
             (show_total && ncomp >= 2) &&
                 lines!(ax, t_dense .- tmin, total_dense;
                        color=NEREUS_COLORS.model, linewidth=MODEL_LW + 0.6, label="total")
@@ -223,14 +232,14 @@ function plot_rv_timeseries(chains, params, data;
             if show_keplerian
                 t_dense = collect(range(minimum(data.t_rv), maximum(data.t_rv);
                                         length = 4000))
-                kep_dense = zeros(length(t_dense))
-                # Live slots only: `compute_rv_model_planet` evaluates any slot
-                # it is given, parked ones included.
-                for k in planet_indices(theta_med)
-                    kep_dense .+= compute_rv_model_planet(theta_med, data, t_dense, k)
-                end
+                # The likelihood's mean minus γ: the live Keplerians plus the
+                # trend at the likelihood's t_ref, so the curve is the model the
+                # residuals below are taken about.
+                kep_dense = compute_rv_model_on_grid(theta_med, data, t_dense;
+                                                     include_trend = true)
                 lines!(ax, t_dense .- tmin, kep_dense;
-                       color = NEREUS_COLORS.kep, linewidth = MODEL_LW, label = "Keplerian")
+                       color = NEREUS_COLORS.kep, linewidth = MODEL_LW,
+                       label = has_trend ? "Keplerian + trend" : "Keplerian")
             end
         end
 
@@ -273,7 +282,7 @@ end
     plot_rv_components(chains, params, data; output=nothing, fmt=:png, ...)
 
 RV **component decomposition** time-series: the raw (γ-subtracted) RV with each
-Keplerian, the activity model, and their Total drawn as separate dense curves,
+Keplerian, the RV trend (when fitted), the activity model, and their Total drawn as separate dense curves,
 and a residual panel showing `data − Total`. Distinct from [`plot_rv_timeseries`]
 (@ref) (the activity-decorrelated view) — this one keeps the raw data and shows
 the model pieces. The activity curve is the GP/AGP latent in identified m/s on

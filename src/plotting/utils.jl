@@ -761,22 +761,8 @@ function compute_rv_model_on_grid(theta, data, t_grid;
         end
     end
 
-    if include_trend
-        trend_order = theta.params.config.trend_order
-        if trend_order >= 1
-            dvdt = rv_dvdt(theta)
-            for i in eachindex(t_grid)
-                model[i] += dvdt * (t_grid[i] - t_ref)
-            end
-        end
-        if trend_order >= 2
-            d2vdt2 = rv_d2vdt2(theta)
-            for i in eachindex(t_grid)
-                dt = t_grid[i] - t_ref
-                model[i] += d2vdt2 * dt * dt
-            end
-        end
-    end
+    # the likelihood's trend routine and t_ref (src/parameters.jl)
+    include_trend && (model .+= rv_trend(theta, data, t_grid))
 
     if gamma_inst !== nothing
         g = rv_gamma(theta, gamma_inst)
@@ -1283,7 +1269,8 @@ _strictly_sorted(v) = all(i -> v[i] < v[i + 1], firstindex(v):lastindex(v) - 1)
 Compute credibility interval bands from posterior samples. EMPEROR
 convention: draws come only from the best-fit cluster — samples whose
 `:lp` is within `ln(bf_cutoff)` of the maximum log-posterior.
-If `planet` is specified, computes single-planet Keplerian only.
+Without `planet` each draw is the whole RV model minus γ (Keplerians + trend,
+as the time series draws it); with `planet`, that planet's Keplerian only.
 
 `pool` (indices into `chains`) gives the draw pool instead, as a fold's
 credible region does: the band samples those of its draws with a finite
@@ -1343,7 +1330,7 @@ function compute_ci_bands(chains, params, data, t_grid;
             te .= Tc_draw .+ view(fold_phase, r) .* P_draw
             return compute_rv_model_planet!(mb, theta, data, te, planet)
         elseif planet === nothing
-            return compute_rv_model_on_grid(theta, data, t_grid)   # whole grid only
+            return compute_rv_model_on_grid(theta, data, t_grid; include_trend = true)  # whole grid only
         else
             return compute_rv_model_planet!(mb, theta, data, view(t_grid, r), planet)
         end

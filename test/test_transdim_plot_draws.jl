@@ -158,7 +158,7 @@ _fig_texts(fig) = [string(p[:text][]) for c in fig.content if c isa Nereus.Axis
     @testset "posterior bands leave parked slots out" begin
         params, data, chains, live = _rv_middeath()
         tg = collect(range(0.0, 300.0; length = 200))
-        want = Nereus.compute_rv_model_on_grid(live, data, tg)
+        want = Nereus.compute_rv_model_on_grid(live, data, tg; include_trend = true)
         b = Nereus.compute_ci_bands(chains, params, data, tg; n_draws = 20, bf_cutoff = Inf)
         # with slot 1 counted the band carries its 30 m/s
         @test maximum(abs, b.median .- want) < 1e-9
