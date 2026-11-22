@@ -235,6 +235,7 @@ const TEST_UNITS = [
     (name = "test_progress_time_fmt.jl", seconds = 0, files = ["test_progress_time_fmt.jl"]),
     (name = "test_nested_progress.jl", seconds = 35, files = ["test_nested_progress.jl"]),
     (name = "test_ns_proposals.jl", seconds = 22, files = ["test_ns_proposals.jl"]),
+    (name = "test_nested_vendored.jl", seconds = 40, files = ["test_nested_vendored.jl"]),
     (name = "test_ppc_residual_acf.jl", seconds = 0, files = ["test_ppc_residual_acf.jl"]),
     (name = "test_candidate_gate.jl", seconds = 1, files = ["test_candidate_gate.jl"]),
     (name = "test_spectral_window.jl", seconds = 49, files = ["test_spectral_window.jl"]),

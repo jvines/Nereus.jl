@@ -94,6 +94,11 @@ include("samplers/reference_path.jl")   # evidence via a path from a fitted refe
 include("samplers/pt.jl")
 include("samplers/pt_hmc.jl")  # Hamiltonian parallel tempering (fixed-dim, differentiable)
 include("samplers/ns_error.jl")       # the error of a nested run's log Z (thread bootstrap + volumes)
+# The fork of NestedSamplers.jl, compiled INTO Nereus (see vendor/NestedSamplers/VENDORED.md).
+# A dependency package's [sources] entry is only honoured by Pkg 1.13, so on 1.11/1.12 a
+# `Pkg.add(url=...)` install resolved the registry NestedSamplers 0.9.0, which lacks the
+# fork API (Bounds.fit(rng, ...), MLFriends, HSlice, sample_parallel callback).
+include("../vendor/NestedSamplers/src/NestedSamplers.jl")
 include("samplers/nested.jl")
 include("samplers/de_move.jl")   # differential-evolution move mixed into the ensemble samplers
 include("diagnostics/drift.jl")  # collective drift of an ensemble the R-hat cannot see

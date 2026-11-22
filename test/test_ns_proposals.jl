@@ -7,7 +7,8 @@
 # came out with λ sd 1.6–2.1° against pt_emcee's 2.1–2.5°). The walks also drew
 # again whenever a step left the unit cube, which favoured the middle of the
 # cube; a step out of it is now a rejected step.
-using Test, Random, Statistics, Distributions, Logging, NestedSamplers
+using Test, Random, Statistics, Distributions, Logging, Nereus
+using Nereus.NestedSamplers
 using LinearAlgebra: norm
 
 const _NSP = NestedSamplers.Proposals
