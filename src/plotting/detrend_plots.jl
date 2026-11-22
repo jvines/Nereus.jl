@@ -169,7 +169,7 @@ function _plot_detrend_broken(t::Vector{Float64}, flux::Vector{Float64},
     flux_dt = result.flux_detrended
     # Cadences to highlight as transit/dip. Result shape differs by detrender:
     # savgol/GP carry the input `transit_mask`; notch DETECTS dips (`delta_bic`>0);
-    # LOCoR carries neither (it protects via the input mask but doesn't return it).
+    # LOCoR carries the input `transit_mask` (nothing when none was given).
     mask = if hasproperty(result, :transit_mask) && result.transit_mask !== nothing
         result.transit_mask
     elseif hasproperty(result, :delta_bic)
