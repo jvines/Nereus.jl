@@ -6,11 +6,15 @@
 #
 #   m_ni = c_n − s_n Σ_j d_j exp(−(v_i − v_j(t_n))² / (2 σ_j²)),
 #   σ_j  = FWHM_j / (2√(2 ln 2)),
-#   v_j  = γ_j                    (static component)
-#        = γ_j + K_j g_k(t_n)     (component tied to planet k),
+#   v_j  = γ_j(t_n)                    (static component)
+#        = γ_j(t_n) + K_j g_k(t_n)     (component tied to planet k),
+#   γ_j(t) = γ_j + γ̇_j (t − t_ref) + ½ γ̈_j (t − t_ref)²  (trend terms optional),
 #   g_k  = cos(f + ω) + e cos ω,
 #
-#   ln L = −½ Σ_n Σ_i [ (y_ni − m_ni)² / (e_ni² + j_n²) + ln 2π(e_ni² + j_n²) ].
+#   ln L = −½ Σ_n w_n Σ_i [ (y_ni − m_ni)² / (e_ni² + j_n²) + ln 2π(e_ni² + j_n²) ],
+#
+# w_n = 1 under pixel_correlation = :independent, min(1, N_eff/N_pix) under
+# :neff (`ccf_epoch_weights`).
 #
 # g_k is the unit-amplitude Keplerian of planet k at the epoch, computed from
 # the planet's own P, time anchor, e and ω exactly as the RV model computes it
@@ -20,10 +24,11 @@
 # at f + ω = π/2 (`tc_to_tp`). K_j > 0 moves the component in phase with the
 # star's reflex, K_j < 0 in antiphase (the companion's own lines).
 #
-# The pixels of one CCF are treated as independent. A CCF is oversampled, so
-# neighbouring pixels are correlated and this likelihood is overconfident by
-# roughly the oversampling factor: posterior widths from it are lower bounds.
-# The point estimates are not biased by it.
+# Under :independent the pixels of one CCF are treated as independent. A CCF is
+# oversampled, so neighbouring pixels are correlated and this likelihood is
+# overconfident by roughly the oversampling factor: posterior widths from it
+# are lower bounds. The point estimates are not biased by it. :neff divides the
+# information of each epoch by that factor.
 
 const _FWHM_PER_SIGMA = 2 * sqrt(2 * log(2))
 
@@ -43,6 +48,15 @@ end
 # g = cos(f + ω) + e cos ω at time t.
 @inline _ccf_geom(t, orb) = rv_keplerian(t, orb[1], one(orb[1]), orb[2], orb[3],
                                          zero(orb[1]), orb[4])
+
+# γ_j(t) of component j: γ plus its trend terms, `dt = t − trend_t_ref`. γ itself
+# (not γ + 0) without a trend, so a set without trends evaluates as it always did.
+@inline function _ccf_gamma_at(γ, vals, ix::CCFIndices, j::Int, dt)
+    g = γ
+    ix.gdot[j] == 0 || (g += vals[ix.gdot[j]] * dt)
+    ix.gddot[j] == 0 || (g += vals[ix.gddot[j]] * dt * dt / 2)
+    return g
+end
 
 # Per component of set `s`: (orbit, γ, K, σ, d), the orbit unset for a static one, or `nothing` when
 # the parameters are unphysical or a tied planet is not active.
@@ -86,7 +100,6 @@ function ccf_log_likelihood(theta::Theta{T}, data::Data) where {T}
     S = theta.params.layout.systemic
     p_idx = planet_indices(theta)
     vals = theta.values
-    two_pi = T(2π)
     ll = zero(T)
     for (si, s) in enumerate(sets)
         ix = S.ccf[si]
@@ -96,29 +109,48 @@ function ccf_log_likelihood(theta::Theta{T}, data::Data) where {T}
         nc = length(γ)
         ctr = Vector{T}(undef, nc)
         for n in eachindex(s.t)
+            dt = s.t[n] - s.trend_t_ref
             for j in 1:nc
-                ctr[j] = is_static(s.components[j]) ? γ[j] : γ[j] + K[j] * _ccf_geom(s.t[n], orbs[j])
+                gj = _ccf_gamma_at(γ[j], vals, ix, j, dt)
+                ctr[j] = is_static(s.components[j]) ? gj : gj + K[j] * _ccf_geom(s.t[n], orbs[j])
             end
             c = vals[ix.cont[n]]
             sc = ix.scale[n] == 0 ? one(T) : vals[ix.scale[n]]
             sc > 0 || return convert(T, -Inf)
             jit2 = vals[ix.jit[n]]^2
-            v = s.v[n]; y = s.y[n]; e = s.err[n]
-            @inbounds for i in eachindex(v)
-                prof = zero(T)
-                for j in 1:nc
-                    z = (v[i] - ctr[j]) / σ[j]
-                    prof += d[j] * exp(-z * z / 2)
-                end
-                r = y[i] - (c - sc * prof)
-                var = e[i]^2 + jit2
-                var > 0 || return convert(T, -Inf)
-                ll -= (r * r / var + log(two_pi * var)) / 2
+            w = ix.weight[n]
+            if w == 1
+                # accumulated straight into ll: the sum of every set without
+                # :neff, pixel by pixel in the order it always was
+                ll = _ccf_epoch_ll(ll, s.v[n], s.y[n], s.err[n], ctr, σ, d, c, sc, jit2)
+            else
+                ll += w * _ccf_epoch_ll(zero(T), s.v[n], s.y[n], s.err[n], ctr, σ, d, c,
+                                        sc, jit2)
             end
+            isfinite(ll) || return convert(T, -Inf)
         end
         isfinite(ll) || return convert(T, -Inf)
     end
     return ll
+end
+
+# `acc` minus the −ln L terms of one epoch's pixels; −Inf for a total variance
+# that is not positive.
+function _ccf_epoch_ll(acc::T, v, y, e, ctr, σ, d, c, sc, jit2) where {T}
+    two_pi = T(2π)
+    nc = length(ctr)
+    @inbounds for i in eachindex(v)
+        prof = zero(T)
+        for j in 1:nc
+            z = (v[i] - ctr[j]) / σ[j]
+            prof += d[j] * exp(-z * z / 2)
+        end
+        r = y[i] - (c - sc * prof)
+        var = e[i]^2 + jit2
+        var > 0 || return convert(T, -Inf)
+        acc -= (r * r / var + log(two_pi * var)) / 2
+    end
+    return acc
 end
 
 """
@@ -126,7 +158,8 @@ end
 
 Per CCF set, the centre of every component at every epoch (km/s), an
 `n_epochs × n_components` matrix; NaN where the component's planet is not
-active or its orbit is unphysical.
+active or its orbit is unphysical. A component's γ trend
+(`ccf_gdot_*`, `ccf_gddot_*`) is included.
 """
 function ccf_component_velocities(theta::Theta, data::Data)
     S = theta.params.layout.systemic
@@ -137,15 +170,19 @@ function ccf_component_velocities(theta::Theta, data::Data)
         M = fill(NaN, n_ccf_epochs(s), length(s.components))
         for (j, c) in enumerate(s.components)
             γ = Float64(theta.values[ix.gamma[j]])
+            vals = theta.values
             if is_static(c)
-                M[:, j] .= γ
+                for n in eachindex(s.t)
+                    M[n, j] = Float64(_ccf_gamma_at(γ, vals, ix, j, s.t[n] - s.trend_t_ref))
+                end
             else
                 c.planet in p_idx || continue
                 o = _ccf_orbit(theta, data, c.planet)
                 o === nothing && continue
                 Kj = Float64(theta.values[ix.K[j]])
                 for n in eachindex(s.t)
-                    M[n, j] = γ + Kj * _ccf_geom(s.t[n], o)
+                    gj = Float64(_ccf_gamma_at(γ, vals, ix, j, s.t[n] - s.trend_t_ref))
+                    M[n, j] = gj + Kj * _ccf_geom(s.t[n], o)
                 end
             end
         end
