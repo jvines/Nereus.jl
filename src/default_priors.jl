@@ -1054,7 +1054,11 @@ end
 #   ccf_gamma  Uniform over the velocity range the CCFs cover (km/s);
 #   ccf_K      Uniform(−span, span), span that range's width: either sign, as a
 #              component can move with or against the orbit's reflex;
-#   ccf_fwhm   Uniform(2 grid steps, span);
+#   ccf_gdot   Uniform(−span/B, span/B), B the epoch baseline (days): a drift
+#              of at most the whole velocity range across the data (trend ≥ 1);
+#   ccf_gddot  Uniform(−span/B², span/B²) (trend = 2);
+#   ccf_fwhm   Uniform(2 grid steps, span), per component or, under
+#              shared_fwhm, the one `ccf_fwhm_<tag>`;
 #   ccf_depth  Uniform(0, d_max), d_max 1 for continuum-normalised CCFs (an
 #              absorption line deeper than the continuum is not one), else twice
 #              the largest peak-to-peak of the set;
@@ -1073,12 +1077,18 @@ function _default_ccf_priors!(dic, s::CCFSet)
     scat = maximum(y -> std(y), s.y)
     edge = [median(vcat(y[1:min(5, end)], y[max(1, end - 4):end])) for y in s.y]
     tg = s.tag
+    base = maximum(s.t) - minimum(s.t)
+    fwpr = UniformPrior(min(2dv, span / 4), span)
     for c in s.components
         dic["ccf_gamma_$(tg)_$(c.name)"] = UniformPrior(lo, hi)
+        c.trend >= 1 && (dic["ccf_gdot_$(tg)_$(c.name)"] = UniformPrior(-span / base, span / base))
+        c.trend >= 2 && (dic["ccf_gddot_$(tg)_$(c.name)"] =
+                         UniformPrior(-span / base^2, span / base^2))
         is_static(c) || (dic["ccf_K_$(tg)_$(c.name)"] = UniformPrior(-span, span))
-        dic["ccf_fwhm_$(tg)_$(c.name)"] = UniformPrior(min(2dv, span / 4), span)
+        s.shared_fwhm || (dic["ccf_fwhm_$(tg)_$(c.name)"] = fwpr)
         dic["ccf_depth_$(tg)_$(c.name)"] = UniformPrior(0.0, normalised ? 1.0 : 2p2p)
     end
+    s.shared_fwhm && (dic["ccf_fwhm_$(tg)"] = fwpr)
     clo, chi = minimum(edge), maximum(edge)
     cpr = (clo > 0) ? UniformPrior(0.95clo, 1.05chi) :
           UniformPrior(clo - abs(clo) - p2p, chi + abs(chi) + p2p)

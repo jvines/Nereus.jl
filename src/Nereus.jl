@@ -249,7 +249,7 @@ export
     transit_time_set, transit_times_log_likelihood,
     # CCF line components (src/ccf_data.jl, src/ccf_likelihood.jl)
     CCFSet, CCFComponent, ccf_log_likelihood, ccf_model, ccf_param_names,
-    load_ccf_json, ccf_component_velocities,
+    load_ccf_json, ccf_component_velocities, ccf_epoch_weights,
     RelAstromData, HGCAData, IADData, GOSTData, G23HData, GaiaDR3Data,
     n_relast, n_iad, n_gost, n_g23h,
     n_iad_inst, n_relast_inst, merge_iad, merge_relast, iad_for_inst,

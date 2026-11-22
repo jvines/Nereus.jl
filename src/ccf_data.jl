@@ -19,17 +19,23 @@ using JSON3
 using Statistics: median
 
 """
-    CCFComponent(name; planet = 0)
+    CCFComponent(name; planet = 0, trend = 0)
 
 One Gaussian line component of a [`CCFSet`](@ref). `planet = 0` makes it
 static (centre γ); `planet = k ≥ 1` ties its centre to planet k's orbit,
 γ + K·[cos(f + ω) + e cos ω], with K of either sign (km/s). `name` labels its
 parameters (`ccf_gamma_<tag>_<name>`, ...).
+
+`trend` adds a polynomial in time to the centre, static or tied:
+`trend = 1` adds γ̇·(t − t_ref) (`ccf_gdot_<tag>_<name>`, km/s/day),
+`trend = 2` also ½γ̈·(t − t_ref)² (`ccf_gddot_<tag>_<name>`, km/s/day²), with
+t_ref the set's `trend_t_ref`. 0 (the default) adds nothing.
 """
 struct CCFComponent
     name::String
     planet::Int
-    function CCFComponent(name::AbstractString, planet::Integer)
+    trend::Int
+    function CCFComponent(name::AbstractString, planet::Integer, trend::Integer = 0)
         isempty(name) && throw(ArgumentError("a CCF component needs a non-empty name"))
         occursin(r"^[A-Za-z0-9.\-]+$", name) || throw(ArgumentError(
             "CCF component name \"$name\" may hold only letters, digits, '.' and '-': " *
@@ -37,17 +43,23 @@ struct CCFComponent
         planet >= 0 || throw(ArgumentError(
             "CCF component \"$name\": planet = $planet; use 0 for a static component " *
             "or the 1-based index of the planet whose orbit it follows"))
-        return new(String(name), Int(planet))
+        trend in (0, 1, 2) || throw(ArgumentError(
+            "CCF component \"$name\": trend = $trend; use 0 (none), 1 (linear) or " *
+            "2 (quadratic)"))
+        return new(String(name), Int(planet), Int(trend))
     end
 end
-CCFComponent(name::AbstractString; planet::Integer = 0) = CCFComponent(name, planet)
+CCFComponent(name::AbstractString; planet::Integer = 0, trend::Integer = 0) =
+    CCFComponent(name, planet, trend)
 
 is_static(c::CCFComponent) = c.planet == 0
 
 """
     CCFSet(; t, v, ccf, components, tag = "CCF", err = nothing, labels = nothing,
            normalize_edges = 5, continuum = :per_epoch, depth_scale = :per_epoch,
-           ref_epoch = 1, jitter = :per_epoch)
+           ref_epoch = 1, jitter = :per_epoch, trend_t_ref = nothing,
+           shared_fwhm = false, pixel_correlation = :independent,
+           resolution_kms = nothing)
 
 The CCFs of one instrument, passed to `Data(; ccf = [...])`, and the line
 components they are fitted with.
@@ -75,16 +87,31 @@ components they are fitted with.
 - `jitter` -- white noise added in quadrature to `err`: `:per_epoch`
   (`ccf_jit_<tag>_<label>`) or `:shared` (`ccf_jit_<tag>`), in the units of the
   normalised CCF.
+- `trend_t_ref` -- reference time (BJD_TDB) of the components' γ trends
+  (`CCFComponent(...; trend)`). Default: the mean epoch of the set, so γ_j is
+  the centre at the middle of the data and is uncorrelated with γ̇_j.
+- `shared_fwhm` -- `true` ties every component to one width `ccf_fwhm_<tag>`
+  instead of a `ccf_fwhm_<tag>_<name>` each.
+- `pixel_correlation` -- `:independent` (every pixel a datum) or `:neff`: each
+  epoch's log-likelihood is multiplied by `min(1, N_eff / N_pix)`, with
+  `N_eff = (velocity span of that CCF) / (resolution element)`. The resolution
+  element is `resolution_kms` (km/s) when given, else the smallest lower bound
+  of the set's FWHM priors. This changes posterior widths and evidences.
+- `resolution_kms` -- the resolution element for `pixel_correlation = :neff`;
+  refused otherwise.
 
 The model of pixel i of epoch n is
 
     m_ni = c_n − s_n Σ_j d_j exp(−(v_i − v_j(t_n))² / (2 σ_j²)),
     σ_j = FWHM_j / (2√(2 ln 2)),
 
-with v_j = γ_j for a static component and γ_j + K_j g_k(t_n) for one tied to
-planet k. Throws an `ArgumentError` for mismatched lengths, a non-finite epoch time,
-fewer than 3 finite pixels in a CCF, non-increasing velocity grids, duplicate labels or component names, or an
-unknown option.
+with v_j = γ_j(t_n) for a static component and γ_j(t_n) + K_j g_k(t_n) for one
+tied to planet k, γ_j(t) = γ_j + γ̇_j (t − t_ref) + ½ γ̈_j (t − t_ref)² (the
+trend terms only when the component has them). Throws an `ArgumentError` for
+mismatched lengths, a non-finite epoch time, fewer than 3 finite pixels in a
+CCF, non-increasing velocity grids, duplicate labels or component names, a
+component with `trend` > 0 in a set with fewer than `trend + 2` epochs (or
+epochs all at one time), or an unknown option.
 """
 struct CCFSet
     tag::String
@@ -100,7 +127,13 @@ struct CCFSet
     jitter::Symbol                    # :per_epoch | :shared
     norm::Vector{Float64}             # the factor each CCF was divided by (1 if none)
     normalize_edges::Int              # 0: the CCFs are as given
+    trend_t_ref::Float64              # t_ref of the components' γ trends
+    shared_fwhm::Bool                 # one ccf_fwhm_<tag> for every component
+    pixel_correlation::Symbol         # :independent | :neff
+    resolution_kms::Float64           # :neff resolution element; NaN: from the FWHM priors
 end
+
+has_trend(s::CCFSet) = any(c -> c.trend > 0, s.components)
 
 function CCFSet(; t::AbstractVector{<:Real},
                 v::AbstractVector,
@@ -113,7 +146,11 @@ function CCFSet(; t::AbstractVector{<:Real},
                 continuum::Symbol = :per_epoch,
                 depth_scale::Symbol = :per_epoch,
                 ref_epoch::Integer = 1,
-                jitter::Symbol = :per_epoch)
+                jitter::Symbol = :per_epoch,
+                trend_t_ref::Union{Nothing, Real} = nothing,
+                shared_fwhm::Bool = false,
+                pixel_correlation::Symbol = :independent,
+                resolution_kms::Union{Nothing, Real} = nothing)
     n = length(t)
     n > 0 || throw(ArgumentError("CCFSet \"$tag\": no epochs"))
     occursin(r"^[A-Za-z0-9.\-]+$", tag) || throw(ArgumentError(
@@ -141,6 +178,29 @@ function CCFSet(; t::AbstractVector{<:Real},
         "CCFSet \"$tag\": ref_epoch = $ref_epoch is not an epoch (1..$n)"))
     normalize_edges >= 0 || throw(ArgumentError(
         "CCFSet \"$tag\": normalize_edges must be ≥ 0; got $normalize_edges"))
+    for c in components
+        c.trend == 0 && continue
+        n >= c.trend + 2 || throw(ArgumentError(
+            "CCFSet \"$tag\": component \"$(c.name)\" has trend = $(c.trend), which " *
+            "needs at least $(c.trend + 2) epochs; the set has $n"))
+        maximum(t) > minimum(t) || throw(ArgumentError(
+            "CCFSet \"$tag\": component \"$(c.name)\" has trend = $(c.trend), but " *
+            "every epoch is at the same time"))
+    end
+    t_ref = trend_t_ref === nothing ? sum(t) / n : Float64(trend_t_ref)
+    isfinite(t_ref) || throw(ArgumentError(
+        "CCFSet \"$tag\": trend_t_ref must be finite; got $trend_t_ref"))
+    pixel_correlation in (:independent, :neff) || throw(ArgumentError(
+        "CCFSet \"$tag\": pixel_correlation must be :independent or :neff; got " *
+        ":$pixel_correlation"))
+    if resolution_kms !== nothing
+        pixel_correlation === :neff || throw(ArgumentError(
+            "CCFSet \"$tag\": resolution_kms is the resolution element of " *
+            "pixel_correlation = :neff; it has no use under :$pixel_correlation"))
+        (isfinite(resolution_kms) && resolution_kms > 0) || throw(ArgumentError(
+            "CCFSet \"$tag\": resolution_kms must be finite and > 0; got $resolution_kms"))
+    end
+    res = resolution_kms === nothing ? NaN : Float64(resolution_kms)
     labs = labels === nothing ? [string(i) for i in 1:n] : [string(l) for l in labels]
     length(labs) == n || throw(ArgumentError(
         "CCFSet \"$tag\": $(length(labs)) labels for $n epochs"))
@@ -193,7 +253,8 @@ function CCFSet(; t::AbstractVector{<:Real},
     end
     return CCFSet(String(tag), Vector{Float64}(t), labs, vs, ys, es,
                   Vector{CCFComponent}(components), continuum, depth_scale,
-                  Int(ref_epoch), jitter, norm, Int(normalize_edges))
+                  Int(ref_epoch), jitter, norm, Int(normalize_edges), t_ref,
+                  shared_fwhm, pixel_correlation, res)
 end
 
 # Float64 vector of a JSON array that may hold `nothing` for a masked pixel.
@@ -206,18 +267,26 @@ n_ccf_points(s::CCFSet) = sum(length, s.y)
     CCFIndices
 
 Layout slots of one `CCFSet` (`SystemicIndices.ccf`). Per component:
-`gamma`, `K` (0 for a static component), `fwhm`, `depth`. Per epoch: `cont`,
-`scale` (0 for the reference epoch and under `depth_scale = :none`), `jit`;
-shared parameters repeat one slot.
+`gamma`, `gdot` and `gddot` (0 without that trend term), `K` (0 for a static
+component), `fwhm` (one slot repeated under `shared_fwhm`), `depth`. Per
+epoch: `cont`, `scale` (0 for the reference epoch and under `depth_scale =
+:none`), `jit`; shared parameters repeat one slot. Also per epoch, `weight`:
+the factor its log-likelihood is multiplied by (1 under `pixel_correlation =
+:independent`, `min(1, N_eff/N_pix)` under `:neff`), and `resolution`, the
+resolution element (km/s) `:neff` used (NaN under `:independent`).
 """
 struct CCFIndices
     gamma::Vector{Int}
+    gdot::Vector{Int}
+    gddot::Vector{Int}
     K::Vector{Int}
     fwhm::Vector{Int}
     depth::Vector{Int}
     cont::Vector{Int}
     scale::Vector{Int}
     jit::Vector{Int}
+    weight::Vector{Float64}
+    resolution::Float64
 end
 
 """
@@ -227,42 +296,36 @@ The parameter names `s` adds to the layout, in layout order.
 """
 function ccf_param_names(s::CCFSet)
     out = String[]
-    tg = s.tag
-    for c in s.components
-        push!(out, "ccf_gamma_$(tg)_$(c.name)")
-        is_static(c) || push!(out, "ccf_K_$(tg)_$(c.name)")
-        push!(out, "ccf_fwhm_$(tg)_$(c.name)")
-        push!(out, "ccf_depth_$(tg)_$(c.name)")
-    end
-    if s.continuum === :shared
-        push!(out, "ccf_cont_$(tg)")
-    else
-        append!(out, ("ccf_cont_$(tg)_$(l)" for l in s.labels))
-    end
-    if s.depth_scale === :per_epoch
-        append!(out, ("ccf_scale_$(tg)_$(l)" for (i, l) in enumerate(s.labels)
-                      if i != s.ref_epoch))
-    end
-    if s.jitter === :shared
-        push!(out, "ccf_jit_$(tg)")
-    else
-        append!(out, ("ccf_jit_$(tg)_$(l)" for l in s.labels))
-    end
+    _push_ccf_slots!(out, s)
     return out
 end
 
 # Allocate the slots of `s` at the end of `names` (pushing them) and return its
-# `CCFIndices`. Order matches `ccf_param_names`.
-function _push_ccf_slots!(names::Vector{String}, s::CCFSet)
+# `CCFIndices`. `priors` (name => PriorSpec, the final priors of the model)
+# give the `:neff` resolution element when `resolution_kms` is not set; without
+# them the weights are left at 1 (`ccf_param_names` only needs the names).
+function _push_ccf_slots!(names::Vector{String}, s::CCFSet, priors = nothing)
     nc = length(s.components); ne = n_ccf_epochs(s); tg = s.tag
-    gamma = zeros(Int, nc); K = zeros(Int, nc); fwhm = zeros(Int, nc); depth = zeros(Int, nc)
+    gamma = zeros(Int, nc); gdot = zeros(Int, nc); gddot = zeros(Int, nc)
+    K = zeros(Int, nc); fwhm = zeros(Int, nc); depth = zeros(Int, nc)
     for (j, c) in enumerate(s.components)
         push!(names, "ccf_gamma_$(tg)_$(c.name)"); gamma[j] = length(names)
+        if c.trend >= 1
+            push!(names, "ccf_gdot_$(tg)_$(c.name)"); gdot[j] = length(names)
+        end
+        if c.trend >= 2
+            push!(names, "ccf_gddot_$(tg)_$(c.name)"); gddot[j] = length(names)
+        end
         if !is_static(c)
             push!(names, "ccf_K_$(tg)_$(c.name)"); K[j] = length(names)
         end
-        push!(names, "ccf_fwhm_$(tg)_$(c.name)"); fwhm[j] = length(names)
+        if !s.shared_fwhm
+            push!(names, "ccf_fwhm_$(tg)_$(c.name)"); fwhm[j] = length(names)
+        end
         push!(names, "ccf_depth_$(tg)_$(c.name)"); depth[j] = length(names)
+    end
+    if s.shared_fwhm
+        push!(names, "ccf_fwhm_$(tg)"); fill!(fwhm, length(names))
     end
     cont = zeros(Int, ne); scale = zeros(Int, ne); jit = zeros(Int, ne)
     if s.continuum === :shared
@@ -285,7 +348,38 @@ function _push_ccf_slots!(names::Vector{String}, s::CCFSet)
             push!(names, "ccf_jit_$(tg)_$(l)"); jit[i] = length(names)
         end
     end
-    return CCFIndices(gamma, K, fwhm, depth, cont, scale, jit)
+    res = NaN; weight = ones(ne)
+    if s.pixel_correlation === :neff && priors !== nothing
+        res = _ccf_resolution(s, priors, unique(names[fwhm]))
+        weight = ccf_epoch_weights(s, res)
+    end
+    return CCFIndices(gamma, gdot, gddot, K, fwhm, depth, cont, scale, jit, weight, res)
+end
+
+# The `:neff` resolution element of `s`: `resolution_kms` when given, else the
+# smallest lower bound of the priors of its FWHM parameters `fwhm_names`.
+function _ccf_resolution(s::CCFSet, priors, fwhm_names)
+    isnan(s.resolution_kms) || return s.resolution_kms
+    lo = minimum(n -> priors[n].lo, fwhm_names)
+    (isfinite(lo) && lo > 0) || throw(ArgumentError(
+        "CCFSet \"$(s.tag)\": pixel_correlation = :neff takes its resolution element " *
+        "from the narrowest FWHM prior's lower bound, which is $lo; give " *
+        "`resolution_kms`, or FWHM priors bounded below by a positive width"))
+    return lo
+end
+
+"""
+    ccf_epoch_weights(s::CCFSet, resolution) -> Vector{Float64}
+
+Per epoch of `s`, the factor `pixel_correlation = :neff` multiplies its
+log-likelihood by: `min(1, N_eff / N_pix)`, with `N_eff` the velocity span of
+that CCF's (finite) pixels divided by `resolution` (km/s) and `N_pix` their
+number.
+"""
+function ccf_epoch_weights(s::CCFSet, resolution::Real)
+    (isfinite(resolution) && resolution > 0) || throw(ArgumentError(
+        "resolution must be finite and > 0; got $resolution"))
+    return [min(1.0, ((v[end] - v[1]) / resolution) / length(v)) for v in s.v]
 end
 
 """
