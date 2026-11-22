@@ -22,7 +22,8 @@ using Statistics: median, mean, std
 """
     detrend_notch(t, flux, flux_err; window=1.0,
                    durations=[1.0,2.0,3.0,4.0,6.0]./24,
-                   ie_frac=0.1, delta_bic=-1.0, niter=5, gap_size=0.5)
+                   ie_frac=0.1, delta_bic=-1.0, niter=5, gap_size=0.5,
+                   transit_mask=nothing, notch_search=true)
         -> NamedTuple
 
 Notch-filter detrending (Rizzuto+ 2017). Returns a NamedTuple with:
@@ -34,6 +35,7 @@ Notch-filter detrending (Rizzuto+ 2017). Returns a NamedTuple with:
 - `dur_best` — best-fit duration per cadence (days)
 - `outlier` — `Bool` outlier flag (set during iterative σ-clipping)
 - `segments` — segment ranges (gaps split via `find_segments`)
+- `transit_mask` — the mask used (passed through or `nothing`)
 
 # Arguments
 
@@ -58,6 +60,24 @@ Notch-filter detrending (Rizzuto+ 2017). Returns a NamedTuple with:
 - `niter::Int=5` — iterative σ-clip passes per window (3.5σ).
 - `gap_size::Real=0.5` — segment break threshold (days), passed to
    [`find_segments`](@ref).
+- `transit_mask::Union{Nothing, AbstractVector{Bool}}=nothing` — known
+   transit cadences (`true` = in transit), same meaning as in
+   [`detrend_savgol`](@ref). Masked cadences are excluded from every local
+   window fit (the poly2 trend, the σ-clip and the notch search all see only
+   unmasked points), but the trend is still evaluated at them, so
+   `flux_detrended = flux ./ trend` everywhere. The returned `transit_mask`
+   echoes the input. Build it from known `P`, `T0` and transit *durations*;
+   these are unrelated to the notch search widths in `durations` above.
+   With a mask, the BIC notch search runs only on the unmasked points, and
+   at masked cadences it is not run at all: `depth`, `delta_bic` and
+   `dur_best` are `0` and `outlier` is `false` there (the trend is a
+   σ-clipped poly2 over the window's unmasked points). `nothing` keeps the
+   default behaviour bitwise unchanged.
+- `notch_search::Bool=true` — `false` skips the BIC notch search entirely: the
+   trend in each window is a σ-clipped poly2 over the unmasked points, and
+   `depth`, `delta_bic`, `dur_best` are all `0`. Use it with `transit_mask`
+   when the transits are already known and only a clean local baseline is
+   wanted. Without a mask it is a plain sliding-window poly2 detrender.
 
 The detrended flux is a faithful preservation of transit dips: a real
 transit appears at ≈ `1 − depth` in `flux_detrended`, and `delta_bic`
@@ -75,13 +95,17 @@ function detrend_notch(t::Vector{Float64}, flux::Vector{Float64},
                         refine::Bool = true,
                         gap_size::Real = 0.5,
                         show_progress::Bool = false,
-                        sector_id::Union{Nothing, AbstractVector{<:Integer}} = nothing)
+                        sector_id::Union{Nothing, AbstractVector{<:Integer}} = nothing,
+                        transit_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+                        notch_search::Bool = true)
     n = length(t)
     n == length(flux) == length(flux_err) || throw(ArgumentError(
         "t, flux, flux_err must have the same length"))
     sector_id === nothing || length(sector_id) == n || throw(ArgumentError(
         "sector_id length $(length(sector_id)) != length(t) $n"))
     sid_out = sector_id === nothing ? nothing : Vector{Int}(sector_id)
+    transit_mask === nothing || length(transit_mask) == n || throw(ArgumentError(
+        "transit_mask length $(length(transit_mask)) != length(t) $n"))
     window > 0 || throw(ArgumentError("window must be positive"))
     isempty(durations) && throw(ArgumentError("durations must be non-empty"))
 
@@ -100,13 +124,14 @@ function detrend_notch(t::Vector{Float64}, flux::Vector{Float64},
 
     # Pass 1: detect the dips (no global masking yet). Accumulate every
     # accepted notch's in-trapezoid points into `dip_mask`.
-    dip_mask = refine ? falses(n) : nothing
+    dip_mask = (refine && notch_search) ? falses(n) : nothing
     for seg in segments
         _detrend_notch_segment!(flux_detrended, trend, depth, dbic,
                                 dur_best, outlier,
                                 t, flux, flux_err, seg, half, durs, ief,
                                 Float64(delta_bic), niter, show_progress,
-                                nothing, dip_mask, false)
+                                nothing, dip_mask, false,
+                                transit_mask, notch_search)
     end
 
     # Pass 2: re-fit every window's trend with ALL pass-1 dips excluded, so a
@@ -114,13 +139,14 @@ function detrend_notch(t::Vector{Float64}, flux::Vector{Float64},
     # local poly2 — the source of the ±0.25% detrended "shoulders" around each
     # dip. Skipped when nothing was detected (pass 2 is then identical) or
     # refine=false. Costs a second fit pass; correctness over speed.
-    if refine && any(dip_mask)
+    if dip_mask !== nothing && any(dip_mask)
         for seg in segments
             _detrend_notch_segment!(flux_detrended, trend, depth, dbic,
                                     dur_best, outlier,
                                     t, flux, flux_err, seg, half, durs, ief,
                                     Float64(delta_bic), niter, show_progress,
-                                    dip_mask, nothing, true)
+                                    dip_mask, nothing, true,
+                                    transit_mask, notch_search)
         end
         # The per-cadence local poly2 trend still JUMPS across each detected
         # transit: every window extrapolates the dip-excluded fit across the
@@ -134,14 +160,16 @@ function detrend_notch(t::Vector{Float64}, flux::Vector{Float64},
     end
 
     return (; flux_detrended, trend, depth, delta_bic = dbic,
-            dur_best, outlier, segments, sector_id = sid_out)
+            dur_best, outlier, segments, transit_mask,
+            sector_id = sid_out)
 end
 
 function _detrend_notch_segment!(flux_detrended, trend, depth, dbic,
                                  dur_best, outlier,
                                  t, flux, flux_err, seg, half, durs, ie_frac,
                                  delta_bic_thresh, niter, show_progress,
-                                 dip_in, dip_out, trend_only)
+                                 dip_in, dip_out, trend_only,
+                                 transit_mask = nothing, notch_search = true)
     seg_t = view(t, seg)
     seg_y = view(flux, seg)
     seg_e = view(flux_err, seg)
@@ -176,9 +204,37 @@ function _detrend_notch_segment!(flux_detrended, trend, depth, dbic,
         dipw = dip_in === nothing ? nothing :
                Bool[dip_in[seg[w]] for w in win]
 
+        # Window-local known-transit mask: excluded from every fit below.
+        maskw = transit_mask === nothing ? nothing :
+                Bool[transit_mask[seg[w]] for w in win]
+
+        # Trend-only path: the notch search is switched off, or this cadence is
+        # itself a masked (known-transit) one, so there is no search to run.
+        if !notch_search || (maskw !== nothing && transit_mask[i_glob])
+            excl = _union_excl(dipw, maskw, length(tw))
+            tr = _clipped_poly2_trend(tw, yw, ew, excl, niter)
+            isfinite(tr) || (tr = flux[i_glob])
+            trend[i_glob] = tr
+            flux_detrended[i_glob] = flux[i_glob] / tr
+            if !trend_only
+                depth[i_glob] = 0.0
+                dbic[i_glob] = 0.0
+                dur_best[i_glob] = 0.0
+            end
+            continue
+        end
+
         # Iterative σ-clip + alternating linear LSQ for joint poly+notch.
         result = _notch_window_fit(tw, yw, ew, durs, ie_frac,
-                                   delta_bic_thresh, niter, dipw)
+                                   delta_bic_thresh, niter, dipw, maskw)
+        if maskw !== nothing && !(result.trend_at_center > 0 &&
+                                  isfinite(result.trend_at_center))
+            # Too few unmasked points survived to identify the poly2.
+            tr = _clipped_poly2_trend(tw, yw, ew,
+                                      _union_excl(dipw, maskw, length(tw)), niter)
+            isfinite(tr) || (tr = flux[i_glob])
+            result = merge(result, (; trend_at_center = tr))
+        end
 
         trend[i_glob] = result.trend_at_center
         flux_detrended[i_glob] = flux[i_glob] / result.trend_at_center
@@ -208,6 +264,47 @@ function _detrend_notch_segment!(flux_detrended, trend, depth, dbic,
             end
         end
     end
+end
+
+# Union of the optional exclusion masks (global dips, known transits) as a
+# window-local `Vector{Bool}` (true = excluded).
+function _union_excl(dipw, maskw, nw::Int)
+    ex = falses(nw)
+    dipw === nothing || (ex .|= dipw)
+    maskw === nothing || (ex .|= maskw)
+    return collect(ex)
+end
+
+# Poly2 trend at the window centre (t = 0) from the non-excluded points, with
+# iterative 3.5σ clipping. No notch search. Returns NaN when fewer than 4
+# points are available (the caller falls back to the raw flux).
+function _clipped_poly2_trend(t::Vector{Float64}, y::Vector{Float64},
+                              e::Vector{Float64}, excl::AbstractVector{Bool},
+                              niter::Int)
+    kk = Bool[!x for x in excl]
+    count(kk) < 4 && return NaN
+    a = NaN
+    for _ in 1:max(niter, 1)
+        a, b, c = _polyfit2(t, y, e, kk)
+        rms2 = 0.0; nk = 0
+        @inbounds for j in eachindex(t)
+            kk[j] || continue
+            rms2 += (y[j] - (a + b * t[j] + c * t[j]^2))^2
+            nk += 1
+        end
+        σ = sqrt(rms2 / max(nk - 1, 1))
+        σ == 0 && break
+        any_new = false
+        @inbounds for j in eachindex(t)
+            kk[j] || continue
+            if abs(y[j] - (a + b * t[j] + c * t[j]^2)) > 3.5 * σ
+                kk[j] = false
+                any_new = true
+            end
+        end
+        (any_new && count(kk) >= 4) || break
+    end
+    return a
 end
 
 # Carry a SMOOTH baseline across each detected-dip run. The per-cadence local
@@ -274,14 +371,18 @@ function _notch_window_fit(t::Vector{Float64}, y::Vector{Float64},
                             ie_frac::Float64,
                             delta_bic_thresh::Float64,
                             niter::Int,
-                            dipw::Union{Nothing, Vector{Bool}} = nothing)
+                            dipw::Union{Nothing, Vector{Bool}} = nothing,
+                            maskw::Union{Nothing, Vector{Bool}} = nothing)
     nw = length(t)
+    # Known-transit cadences never enter any fit; `keep0` is the starting kept
+    # set (all true, bitwise the old behaviour, when no mask is given).
+    keep0 = maskw === nothing ? trues(nw) : Bool[!m for m in maskw]
     # Seed the trend from points that are NOT global pass-1 dips. Fitting the
     # initial poly2 over a transit — especially one lying OFF-CENTRE in this
     # window — bends a0 and inflates the σ-clip scale, so the dip survives
     # clipping and biases the trend (the ±0.2% detrended "shoulders"). Masking
     # dips from the seed lets the σ-clip remove them properly.
-    base = dipw === nothing ? trues(nw) : Bool[!d for d in dipw]
+    base = dipw === nothing ? copy(keep0) : Bool[keep0[j] && !dipw[j] for j in 1:nw]
     a0, b0, c0 = _polyfit2(t, y, e, base)
 
     cliplim = 3.5
@@ -289,19 +390,23 @@ function _notch_window_fit(t::Vector{Float64}, y::Vector{Float64},
     best_dur = durs[1]
     best_a, best_b, best_c = a0, b0, c0
     best_depth = 0.0
-    best_keep = trues(nw)
+    best_keep = copy(keep0)
     shape_buf = Vector{Float64}(undef, nw)
 
     for w in durs
         # Build trapezoid shape for this trial width.
         _trap_shape!(shape_buf, t, w, ie_frac)
-        n_full = count(>(0.99), shape_buf)
-        n_oot  = count(==(0.0), shape_buf)
+        n_full = 0; n_oot = 0
+        @inbounds for j in 1:nw
+            keep0[j] || continue
+            shape_buf[j] > 0.99 && (n_full += 1)
+            shape_buf[j] == 0.0 && (n_oot += 1)
+        end
         # Need full-coverage in-notch points (>=1) and OOT points (>=4)
         # to identify both the depth and the polynomial trend.
         (n_full < 1 || n_oot < 4) && continue
 
-        kk = trues(nw)
+        kk = copy(keep0)
         a, b, c = a0, b0, c0
         d = 0.0
         chi2_w = Inf
@@ -427,7 +532,8 @@ function _notch_window_fit(t::Vector{Float64}, y::Vector{Float64},
         best_depth = 0.0
     end
 
-    outlier_idx = findall(!, best_keep)
+    outlier_idx = maskw === nothing ? findall(!, best_keep) :
+                  [j for j in 1:nw if !best_keep[j] && !maskw[j]]
 
     return (; trend_at_center,
             depth = best_depth,

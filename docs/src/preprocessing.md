@@ -205,11 +205,12 @@ This is the slowest detrender (~30-90 s on multi-sector TESS) but
 produces the cleanest output on rotation-dominated targets like
 HD 18599.
 
-## `detrend_notch(t, flux, flux_err; window=1.0, durations, ie_frac=0.1, delta_bic=-1.0, niter=5, refine=true, gap_size=0.5, show_progress=false)`
+## `detrend_notch(t, flux, flux_err; window=1.0, durations, ie_frac=0.1, delta_bic=-1.0, niter=5, refine=true, gap_size=0.5, show_progress=false, transit_mask=nothing, notch_search=true)`
 
 Notch filter ([Rizzuto+ 2017](https://ui.adsabs.harvard.edu/abs/2017AJ....154..224R/abstract); Kepler/K2-style) for variable
 stars where the transit signal sits inside the rotation modulation. It
-is **mask-free** — no periods/T0s are supplied. A local polynomial
+is **mask-free by default** — no periods/T0s are needed (a `transit_mask` can
+be given, see below). A local polynomial
 baseline plus a trapezoidal notch is fit in a sliding window; the
 BIC-favoured model per cadence decides whether a transit-shaped feature
 is present, and the chosen baseline is divided out.
@@ -229,11 +230,13 @@ res = detrend_notch(t, flux, flux_err;
     niter     = 5,                     # σ-clip passes per window (3.5σ)
     refine    = true,                  # second dip-excluded trend pass (see below)
     gap_size  = 0.5,                   # segment break threshold (days)
+    transit_mask = nothing,            # Vector{Bool}: known transits left out of the fit
+    notch_search = true,               # false: skip the BIC notch search
 )
 ```
 
 Returns a NamedTuple `(; flux_detrended, trend, depth, delta_bic,
-dur_best, outlier, segments, sector_id)`, where `flux_detrended = flux ./ trend`
+dur_best, outlier, segments, transit_mask, sector_id)`, where `flux_detrended = flux ./ trend`
 (transit preserved as a residual ≈ `1 − depth`) and `delta_bic` is a
 per-cadence "is there a transit-shaped feature here?" statistic
 (positive ⇒ notch wins). Drop `window` to ~0.5 d for fast rotators
@@ -254,6 +257,20 @@ from pass 1** (where the transit is still in the trend fit, giving the
 notch-vs-null BIC full contrast). Set `refine=false` to skip pass 2 (faster,
 but the detrended shoulders return). `show_progress=true` prints a per-window
 progress bar.
+
+**Known transits (`transit_mask`).** When the transits are already known
+(from `P`, `T0` and transit durations, as for `detrend_savgol`), pass
+`transit_mask` (`true` = in transit). Masked cadences are left out of every
+local window fit (trend, σ-clip and notch search alike) but the trend is still
+evaluated at them, `flux_detrended = flux ./ trend` everywhere, and the
+returned `transit_mask` echoes the input. The BIC notch search then runs only
+on the unmasked cadences; at masked cadences it is not run, so `depth`,
+`delta_bic` and `dur_best` are 0 and `outlier` is `false` there. Set
+`notch_search=false` to skip the search altogether and get just the
+σ-clipped local poly2 baseline (with `depth`, `delta_bic`, `dur_best` all 0).
+Note that the existing `durations` keyword is the list of trial *notch search*
+widths; the transit durations used to build a mask are unrelated to it. In
+the `detrend.notch` action, `transit_mask` is a JSON array of booleans.
 
 ## `detrend_locor(t, flux, flux_err; P_rot=nothing, max_donor_cycles=nothing, niter=3, clip_sigma=3.5, gap_size=0.5, sector_id=nothing, transit_mask=nothing)`
 
