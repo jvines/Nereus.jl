@@ -51,17 +51,36 @@ end
     flux = copy(base)
     err = fill(1e-3, length(t))
     excl = falses(length(t))
-    excl[(t .>= 0.80) .& (t .<= 0.95)] .= true          # "transit"
-    excl[(t .>= 0.964) .& (t .<= 1.25)] .= true         # false-positive run
-    island = .!excl .& (t .> 0.95) .& (t .< 0.964)
+    excl[(t .>= 0.80) .& (t .<= 0.90)] .= true          # "transit"
+    excl[(t .>= 0.914) .& (t .<= 0.99)] .= true         # false-positive run
+    island = .!excl .& (t .> 0.90) .& (t .< 0.914)
     @test count(island) > 3
     trend = copy(base)
-    trend[excl .| island] .= 2.0                         # extrapolation garbage
+    trend[excl] .= 2.0                                   # extrapolation garbage
     fd = flux ./ trend
     segs = Nereus.find_segments(t)
     Nereus._bridge_trend!(trend, fd, t, flux, err, excl, segs, 0.25, 5)
-    @test maximum(abs.(trend .- base)) < 1e-9
+    @test maximum(abs.(trend .- base)) < 1e-9          # run ≤ half: exact poly2
     @test fd ≈ flux ./ trend
+
+    # The TOI-4939 shape: a 20-min island before a run that fills most of
+    # the island's window, so the island's own window trend is extrapolated
+    # (garbage here). The island is bridged with the runs by one poly2.
+    exclI = ((t .>= 0.80) .& (t .<= 0.90)) .| ((t .>= 0.914) .& (t .<= 1.13))
+    islI = .!exclI .& (t .> 0.90) .& (t .< 0.914)
+    trendI = copy(base); trendI[exclI .| islI] .= 2.0
+    fdI = flux ./ trendI
+    Nereus._bridge_trend!(trendI, fdI, t, flux, err, exclI, segs, 0.25, 5)
+    @test maximum(abs.(trendI .- base)) < 1e-9
+
+    # A chain longer than the window (2 half): flanks of half/2 each, still
+    # an interpolation, so the parabola is recovered exactly.
+    exclL = ((t .>= 0.80) .& (t .<= 0.90)) .| ((t .>= 0.914) .& (t .<= 1.35))
+    islL = .!exclL .& (t .> 0.90) .& (t .< 0.914)
+    trendL = copy(base); trendL[exclL .| islL] .= 2.0
+    fdL = flux ./ trendL
+    Nereus._bridge_trend!(trendL, fdL, t, flux, err, exclL, segs, 0.25, 5)
+    @test maximum(abs.(trendL .- base)) < 1e-9
 
     # Excluded run at a segment start: one-sided, the straight line of the
     # clean flank continued across it, never a poly2 blow-up.
