@@ -103,7 +103,7 @@ const TEST_UNITS = [
     (name = "test_loo.jl", seconds = 12, files = ["test_loo.jl"]),
     (name = "test_fit_health.jl", seconds = 7, files = ["test_fit_health.jl"]),
     (name = "test_prior_dicts.jl", seconds = 2, files = ["test_prior_dicts.jl"]),
-    (name = "test_fit_binary_sb2.jl", seconds = 60, files = ["test_fit_binary_sb2.jl"]),
+    (name = "test_fit_binary_sb2.jl", seconds = 100, files = ["test_fit_binary_sb2.jl"]),
     (name = "test_relast_channel.jl", seconds = 6, files = ["test_relast_channel.jl"]),
     (name = "test_hgca_gost_channel.jl", seconds = 8, files = ["test_hgca_gost_channel.jl"]),
     (name = "test_gaia_parallax.jl", seconds = 3, files = ["test_gaia_parallax.jl"]),

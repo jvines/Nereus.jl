@@ -7,6 +7,10 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **`fit_binary` with a `secondary` runs.** It sent planet mode `"SB2"`, which
+  `run_job` rejects, and put the secondary RVs under a key nothing read. It now
+  sends `BINARY_RV` with both components in one RV block tagged by `component`.
+
 - **The RV time series draws the trend.** With `trend_order` 1 or 2 the
   `rv_timeseries` curve was the Keplerians alone around zero, while the
   residuals took the trend out, so on a drifting star the curve missed the data.
