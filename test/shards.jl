@@ -185,6 +185,7 @@ const TEST_UNITS = [
     (name = "test_transdim_death_counters.jl", seconds = 6, files = ["test_transdim_death_counters.jl"]),
     (name = "test_locor.jl", seconds = 7, files = ["test_locor.jl"]),
     (name = "test_locor_io.jl", seconds = 4, files = ["test_locor_io.jl"]),
+    (name = "test_notch_bridge.jl", seconds = 60, files = ["test_notch_bridge.jl"]),
     (name = "test_lightcurve.jl", seconds = 3, files = ["test_lightcurve.jl"]),
     # The transit window and its cache (test/fixtures/transit_gate_target.jl).
     (name = "test_phot_n_super_cache.jl", seconds = 1, files = ["test_phot_n_super_cache.jl"]),
