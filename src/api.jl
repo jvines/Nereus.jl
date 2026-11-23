@@ -1670,10 +1670,20 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                     output_dir = nothing, extra::AbstractDict = Dict(), kwargs...)
-    mode = secondary === nothing ? "BINARY_RV" : "SB2"
+    # One mode for SB1 and SB2: BINARY_RV. SB2 is not a mode; it is carried by
+    # a `component` tag on every RV row (1 = primary, 2 = secondary), which the
+    # run_job RV parser turns into `rv_comp`. This used to send planet_mode
+    # "SB2" (rejected by the validator) and a `rv_secondary` key nothing reads.
+    mode = "BINARY_RV"
     data = _data_block(; rv)
-    secondary === nothing || (data["rv_secondary"] =
-        _data_block(; rv = secondary)["rv"])
+    if secondary !== nothing
+        v1 = data["rv"]["values"]
+        v2 = _data_block(; rv = secondary)["rv"]["values"]
+        vals = Dict{String,Any}(k => vcat(v1[k], v2[k])
+                                for k in ("bjd", "rv", "rv_err", "instrument"))
+        vals["component"] = vcat(fill(1, length(v1["bjd"])), fill(2, length(v2["bjd"])))
+        data["rv"] = Dict("values" => vals)
+    end
     cfg = Dict{String,Any}("version" => "1.0",
         "output_dir" => output_dir === nothing ? mktempdir() : String(output_dir),
         "star" => Dict{String,Any}(star), "data" => data,
