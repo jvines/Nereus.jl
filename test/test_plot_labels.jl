@@ -81,7 +81,8 @@ const _ALL_NAMES = vcat(_planet_names(), _SHARED, _instrument_names(), _IND_FLOO
     # PROPERTY: symbol + unit, i.e. the full `_sci_label` payload, also parses.
     # Units come from the registry itself, so a new unit is covered for free.
     @testset "every symbol × unit combination parses" begin
-        units = unique(vcat("", "mas", [u for (u, _) in values(Nereus._SCI_UNITS)]))
+        units = unique(vcat("", "mas", [u for (u, _) in values(Nereus._SCI_UNITS)],
+                            collect(keys(Nereus._UNIT_FORMS))))
         @test "M_sun" in units          # the unit that used to render as "M sun"
         full(nm, u) = (ul = Nereus._sci_unit_latex(u);
                        ul == "" ? Nereus._sci_sym(nm) :

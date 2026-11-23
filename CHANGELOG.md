@@ -23,6 +23,53 @@ git history (`git log --first-parent develop`).
   trends `ccf_gdot_*` / `ccf_gddot_*` are km/s/day and km/s/day^2, and
   `ccf_gamma_*`, `ccf_K_*` and `ccf_fwhm_*` km/s. The photometric baseline
   coefficients `phot_c*` stay dimensionless: they multiply a normalized time.
+- **Every parameter has a unit, the same on every output path.** An audit of
+  every name a layout can hold found more that reached the tables, summary JSON
+  and figure labels with no unit, or the wrong one:
+  - `i_star` (gravity darkening) is sampled in radians and was published as
+    raw radians with no unit; it is now converted and labelled deg.
+  - `M_pri` is M_sun; `v_sin_i_star`, `beta_p` (ARoME) m/s;
+    `tomo_sigma_line_*` and `tomo_ell_v_*` km/s.
+  - GP and activity hyperparameters, by the channel the model acts on (m/s for
+    RVs, dimensionless for flux and tomography maps): `gp_sigma`,
+    `matern_sigma`, `night_sigma`, `harm_amp` in the channel's unit; periods
+    and time scales (`gp_period`, `matern_rho`, `harm_period`,
+    `gp_act_period`, `gp_act_lambda_e`, `ind_floor_period`,
+    `ind_floor_lambda_e`, `ma_beta`, `ar_alpha`) in d; the log-parametrised
+    celerite terms as ln(m2/s2*day) (`gp_log_S0`, RV), ln(1/day)
+    (`gp_log_omega0`), ln(m2/s2) (`gp_log_amp`, RV), ln(day)
+    (`gp_log_timescale`, `gp_log_period`); `Vc`, `Vr`, `C_*`, `jit_base_*`,
+    `jit_act_*` m/s and `Cdot_*` m/s*day (indicators are normalised to unit
+    RMS by default, so indicator-side amplitudes are dimensionless).
+  - A shared photometric group (`jitter_TESS+K2`) was labelled m/s, as if
+    it were an RV jitter; instrument slots are now classified by the layout,
+    not by the name.
+  - Derived rows `lambda_deg`, `lambda_abs_deg`, `i_star_deg`, `psi_deg`
+    had no unit (deg), and the SB2 masses `M_A`, `M_B`, `M_A_sini3`,
+    `M_B_sini3` none (M_sun).
+  The .tex tables and the figure labels now render units from one table
+  (`_UNIT_FORMS`), and dimensionless parameters keep the empty unit, now as an
+  explicit rule (`sci_unit_known`) rather than a fall-through.
+
+### Added
+
+- **More derived parameters, from what every fit already samples.**
+  - The epochs the other time anchors sample: `time = :Tc` now reports `Tp`
+    and `Mo_deg`, `:Tp` reports `Tc` and `Mo_deg`, and `:Mo` reports `Tp`
+    and `Tc` (as `:phic` already did).
+  - `Tsec` (BJD), the secondary conjunction after `Tc`, for transiting
+    planets.
+  - `g_p` (m/s2), the planet's surface gravity G·M_p/R_p², and `mass_ratio`,
+    M_p/M★, where the transit geometry determines them.
+  - `p_transit`, the geometric transit probability (R★/a)(1 + e sin ω)/(1 − e²)
+    (Winn 2010), for a planet with no transit in the model and a known a/R★.
+  - Astrometric planets that sample the mass (`M_sec_driven`, `a_driven`) now
+    report `mass_jup`/`mass_earth`, and without a transit their `a_Rs` (hence
+    `Teq`, insolation) follows from the model's `a_au` rather than from the
+    minimum-mass orbit.
+  - SB2 binaries report `omega_deg`, the projected relative semi-major axis
+    `a_sini_au` = (K_A + K_B) P √(1 − e²)/2π, and `a_au` with the inclination.
+  Fitting and defaults are unchanged; these are derived per posterior draw.
 
 ## 0.9.8
 

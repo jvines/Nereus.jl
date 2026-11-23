@@ -400,12 +400,12 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         @test all(abs.(rem.(Tp .- (data.t_ref .- deg2rad.(Mo) .* P ./ 2π), P,
                             Ref(RoundNearest))) .< 1e-6)
         @test 0 <= median(Mo) < 360
-        # The Mo fit's own anchor goes untouched: nothing derived for it.
+        # The Mo fit reports the epochs it does not sample, never Mo itself.
         pM = mk(:Mo)
         chM = Nereus.with_density_columns(
             Chains(X, vcat(Symbol.(replace(nm, "phic_k1" => "Mo_k1")), :lp)), pM)
-        @test !any(k -> k in ("Tc", "Tp", "Mo_deg"),
-                   keys(compute_derived(chM, pM; t_ref = data.t_ref)[1].values))
+        dM = compute_derived(chM, pM; t_ref = data.t_ref)[1].values
+        @test !haskey(dM, "Mo_deg") && haskey(dM, "Tp") && haskey(dM, "Tc")
     end
 
     @testset "chains.nc records the anchor and its epoch" begin
