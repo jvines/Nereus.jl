@@ -7,6 +7,29 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **The notch detrender keeps transit depths.** Around every excluded run --
+  a dip found by the search (`refine`, the default) or a `transit_mask` built
+  from an ephemeris -- the trend was a per-window poly2 extrapolated from clean
+  data on one side only, and the old repair bridged each run with a chord
+  between two such extrapolated values. On TOI-4939 TESS S103 (window 0.5 d,
+  no ephemeris) a false dip just after egress left a 20-min clean stretch
+  whose extrapolated trend tilted the chord: a 6.5 ppt transit came out at
+  8.7 ppt. Each run of excluded cadences, plus the clean cadences whose window
+  is mostly excluded on one side, is now bridged by one σ-clipped poly2 fitted
+  to the raw clean flux on both flanks (and inside the run), spanning about
+  one window; a run at a segment edge continues the straight line of its
+  one flank. Injected 6 ppt transits
+  in synthetic data (rotation 0-0.8 %, 1.5 ppt noise): per-transit depth rms
+  0.52-0.54 → 0.22-0.28 ppt without an ephemeris, 0.40 → 0.26 ppt with a
+  `transit_mask` (white-noise floor 0.20 ppt). Light curves already detrended
+  with the notch should be detrended again.
+
+- **`detrend_savgol` with a `transit_mask` anchors each masked run on averaged
+  flanks.** The interpolation across a masked run started and ended at the
+  single bracketing flux points, whose noise went straight into the trend
+  across the transit (per-transit depth rms 0.68 → 0.30 ppt in the same test).
+  Each anchor is now the mean of up to 30 nearest unmasked points.
+
 - **The φ_c epoch is never in a gap between light curves.** The default
   `t_ref_c`, the 1/σ²-weighted mean of the photometric times, can land far
   from any data when light curves span years (TIC 275647095: 53 d from the
