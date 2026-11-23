@@ -281,7 +281,8 @@ rather than a single number trusted.
                                            //   π/2 − λ there. Same posterior: uniform φ_c ≡ uniform Mo.
                                            //   Omitted with priors on one anchor (e.g. Mo_k1): that anchor.
       "t_ref_c": 2459000.0,                // phic only: the epoch φ_c is measured from. Omit it to
-                                           //   use the 1/σ²-weighted mean photometric time (else data t_ref)
+                                           //   use the 1/σ²-weighted mean photometric time, moved to the nearest
+                                           //   photometric time if it is >1 d from all of them (else data t_ref)
       "ew":   "sesinw",                    // sesinw | ew
       "geom": "b_rr",                      // b_rr only. The library also has :r1r2 (Julia API), which
                                            //   run_job's validation does not accept; "b_r" passes the
