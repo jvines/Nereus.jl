@@ -7,6 +7,16 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **The φ_c epoch is never in a gap between light curves.** The default
+  `t_ref_c`, the 1/σ²-weighted mean of the photometric times, can land far
+  from any data when light curves span years (TIC 275647095: 53 d from the
+  nearest point). There P and φ_c are tied along narrow ridges, and
+  `pt_emcee` walkers started from prior draws stalled on 7×–35× aliases of the
+  17.06 d period. An epoch more than 1 d from every photometric time it was
+  computed from (`PHIC_EPOCH_GAP_TOL`) now moves to the nearest one; an epoch
+  already within the data is unchanged, so existing fits are too. The median
+  used when no point has a usable error is moved the same way.
+
 - **`fit_binary` with a `secondary` runs.** It sent planet mode `"SB2"`, which
   `run_job` rejects, and put the secondary RVs under a key nothing read. It now
   sends `BINARY_RV` with both components in one RV block tagged by `component`.

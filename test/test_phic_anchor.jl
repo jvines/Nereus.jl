@@ -115,11 +115,31 @@ include(joinpath(@__DIR__, "fixtures", "transit_gate_target.jl"))
         tw = [1000.0, 1001.0, 1002.0, 2000.0, 2001.0, 2002.0, 2003.0, 2004.0, 2005.0]
         σw = [0.001, 0.001, 0.001, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
         epoch(t, σ) = Nereus.phic_reference_epoch((; t_phot = t, flux_err = σ, t_ref = 0.0))
-        @test epoch(tw, σw) ≈ (3 * 1001.0 * 1e6 + 6 * 2002.5 * 1e4) / (3e6 + 6e4) rtol = 1e-14
+        # The weighted mean, (3·1001·1e6 + 6·2002.5·1e4)/(3e6 + 6e4) = 1020.6, is
+        # in the gap 18.6 d from 1002, the nearest point, and is moved there.
+        @test epoch(tw, σw) == 1002.0
         @test epoch(tw, σw) < 1100.0 < median(tw)
         @test epoch(vcat(tw, 5000.0, 6000.0), vcat(σw, 0.0, Inf)) ≈ epoch(tw, σw) rtol = 1e-14
         @test epoch(tw, fill(NaN, length(tw))) == median(tw)
         @test epoch(Float64[], Float64[]) == 0.0
+        # A weighted mean in a gap between light curves is moved onto the
+        # nearest weighted photometric time (TIC 275647095: 53 d from any point,
+        # and walkers stalled on long-period aliases there). Two chunks 1000 d
+        # apart, the later twice as precise: the mean, 1800.5, is in the gap.
+        tg = [1000.0, 1000.5, 1001.0, 2000.0, 2000.5, 2001.0]
+        σg = [0.002, 0.002, 0.002, 0.001, 0.001, 0.001]
+        @test epoch(tg, σg) == 2000.0
+        # Within the tolerance of a point it is the weighted mean itself: the
+        # same 1/σ² weights on cadences every 0.5 d, no gap.
+        ti = collect(1000.0:0.5:1010.0)
+        σi = [i <= 7 ? 0.001 : 0.01 for i in eachindex(ti)]
+        wi = 1 ./ σi .^ 2
+        @test epoch(ti, σi) ≈ sum(wi .* ti) / sum(wi) rtol = 1e-14
+        @test epoch(ti, σi) ∉ ti
+        # An unusable point cannot hold the epoch: it moves to a weighted one.
+        @test epoch(vcat(tg, 1800.5), vcat(σg, NaN)) == 2000.0
+        # The median fallback (no usable errors) is moved the same way.
+        @test epoch([1.0, 2.0, 101.0, 102.0], fill(NaN, 4)) == 2.0
         # Without photometry it falls back to the data reference epoch.
         rvd = Data(; t_rv = t_rv, rv = data.rv, rv_err = data.rv_err)
         prv = Params(; max_kplanet = 1, planet_modes = [RV_ONLY],

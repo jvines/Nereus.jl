@@ -477,7 +477,7 @@ The `model.parametrization` block in run_job (`_build_model` in
 |---|---|---|---|
 | `mass` | `K_driven`, `M_sec_driven`, `a_driven` | `:K_driven` / `:M_sec_driven` / `:a_driven` | `K_driven` |
 | `time` | `Tp`, `Tc`, `Mo`, `phic` | `:Tp` / `:Tc` / `:Mo` / `:phic` | `phic` |
-| `t_ref_c` | a time (`phic` only) | `t_ref_c` | 1/σ²-weighted mean photometric time |
+| `t_ref_c` | a time (`phic` only) | `t_ref_c` | 1/σ²-weighted mean photometric time; the nearest photometric time if that mean is >1 d from all of them |
 | `ew` | `sesinw`, `ew` | `:sesinw` / `:ew` | `sesinw` |
 | `geom` | `b_rr` | `:b_rr` | `b_rr` |
 | `marginalize_gamma` | `true` / `false` | bool | `false` |
