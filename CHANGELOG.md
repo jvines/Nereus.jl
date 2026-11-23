@@ -21,8 +21,14 @@ git history (`git log --first-parent develop`).
   one flank. Injected 6 ppt transits
   in synthetic data (rotation 0-0.8 %, 1.5 ppt noise): per-transit depth rms
   0.52-0.54 → 0.22-0.28 ppt without an ephemeris, 0.40 → 0.26 ppt with a
-  `transit_mask` (white-noise floor 0.20 ppt). Light curves already detrended
-  with the notch should be detrended again.
+  `transit_mask` (white-noise floor 0.20 ppt). Transits injected into real
+  TESS sectors of TOI-4939, TOI-4680 and TIC 275647095: with a `transit_mask`
+  the depth-error rms fell in 13 of 16 sectors (worst single transit 86 → 16
+  ppt, at a segment edge); without one it fell 2-3× for TOI-4939 (window
+  0.5 d) and was mixed (±50 %) for the 3 T14 windows on the two strongly
+  variable hosts, where chains of false dips remain the limit -- prefer a
+  `transit_mask` there. Light curves already detrended with the notch should
+  be detrended again.
 
 - **`detrend_savgol` with a `transit_mask` anchors each masked run on averaged
   flanks.** The interpolation across a masked run started and ended at the
