@@ -72,7 +72,7 @@ function sup_case(t, P, e, ω, k, aR, b; ld = QuadLimbDark([0.4, 0.2]))
         _phot_sparse_refresh(1, length(idx), 1, data, idx, P_, e_, ω_, Tp_, b_, aR_, k_, lds, fc)
         return _phot_chunk_loglik(1, n, data, 1, [true], fc, [Nereus.pm_offset(th, 1)],
                                   [Nereus.pm_jitter(th, 1)], [Nereus.pm_dilution(th, 1)],
-                                  data.t_ref, 0.0, _phot_trend_cache(th, 1), 2π)
+                                  [data.t_ref], [0.0], _phot_trend_cache(th, 1), 2π)
     end
     intr = [i for i in 1:n if (z = sup_zsep(t[i], P_, e_, ω_, Tp_, b_, aR_); z[1] < 1 + k_ && z[2] > 0)]
     old = sup_old(P_, k_, aR_)
@@ -203,7 +203,7 @@ end
                                                 [Nereus.pm_offset(th, ix) for ix in 1:2],
                                                 [Nereus.pm_jitter(th, ix) for ix in 1:2],
                                                 [Nereus.pm_dilution(th, ix) for ix in 1:2],
-                                                data.t_ref, 0.0, _phot_trend_cache(th, 2), 2π)
+                                                fill(data.t_ref, 2), zeros(2), _phot_trend_cache(th, 2), 2π)
                     @test val === ll(fc_all)
                     changed = val !== ll(fc_old)
                     @test changed == A

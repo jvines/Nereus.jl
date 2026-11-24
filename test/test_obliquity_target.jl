@@ -322,12 +322,13 @@ end
         @test _hash_skip(p0.config.parametrization, :sample_a_Rs)
         # ... so the hash of a default model is the one computed before they
         # existed: the same fold over every OTHER field. The fields added since
-        # (transit-time jitter, listed TTV epochs) are left out at their
+        # (transit-time jitter, listed TTV epochs, per-instrument photometric
+        # trend orders) are left out at their
         # defaults the same way.
         legacy = let x = p0.config, seen = IdDict{Any,Nothing}()
             h = hash(string(nameof(typeof(x))), zero(UInt))
             for f in fieldnames(typeof(x))
-                f in (:obliquity, :tt_jitter, :ttv_epochs) && continue
+                f in (:obliquity, :tt_jitter, :ttv_epochs, :phot_trend_orders) && continue
                 h = Nereus._content_hash(getfield(x, f), hash(f, h), seen)
             end
             h

@@ -129,7 +129,7 @@ end
                                      [Nereus.pm_offset(th, ix) for ix in 1:n_pm],
                                      [Nereus.pm_jitter(th, ix) for ix in 1:n_pm],
                                      [Nereus.pm_dilution(th, ix) for ix in 1:n_pm],
-                                     data.t_ref, 0.0, _phot_trend_cache(th, n_pm), 2π)
+                                     fill(data.t_ref, n_pm), zeros(n_pm), _phot_trend_cache(th, n_pm), 2π)
             @test val === ref
             n_cmp += 1
         end
