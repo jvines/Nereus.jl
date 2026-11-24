@@ -448,6 +448,15 @@ function Data(;
               maxlog = 1)
     end
 
+    if gost === nothing && (hgca !== nothing || g23h !== nothing)
+        @info("HGCA/G23H without a GOST scan plan: the Gaia epoch is averaged " *
+              "over a UNIFORM NOMINAL scan grid across the release's observing " *
+              "window (DR3 2014-07-25 to 2017-05-28; DR2 to 2016-05-23), every " *
+              "$(NOMINAL_GAIA_SCAN_STEP_DAYS) d. Companions with P shorter than " *
+              "about twice that step average out. GOST (`fetch_gost`) gives the " *
+              "exact scan law; supply `gost` for it.", maxlog = 1)
+    end
+
     if gost !== nothing && hgca === nothing && gaia_dr3 === nothing && g23h === nothing
         @warn("GOST provided without a Gaia-epoch measurement (HGCA / Gaia DR3 / " *
               "G23H) — GOST is INERT here (it only window-averages those). The fit " *

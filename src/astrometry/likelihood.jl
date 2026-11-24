@@ -163,16 +163,25 @@ the Hipparcos IAD scans in `HIPPARCOS_WINDOW`, the GOST transits in
 `GAIA_DR2_WINDOW` or `GAIA_DR3_WINDOW`. `(Δα*, Δδ)` in mas, `(μα*, μδ)` in
 mas/yr.
 
-`scans === nothing` means that mission's scan geometry is not available, and
-the epoch falls back to the instantaneous reflex at the same epochs: the
-offset at `t_ra` / `t_dec` and the proper motion there. `Data` warns when that
-happens for Hipparcos; for Gaia it is the absence of a GOST plan.
+`scans === nothing` means that mission's scan geometry is not available. For
+Hipparcos the epoch falls back to the instantaneous reflex at the same epochs
+(the offset at `t_ra` / `t_dec` and the proper motion there; `Data` warns). For
+a Gaia window (`GAIA_DR2_WINDOW`, `GAIA_DR3_WINDOW`) it falls back to a UNIFORM
+NOMINAL scan set over that window ([`_nominal_gaia_scans`](@ref)), so the
+reflex is still averaged over the release's observing span, which matters
+whenever the period is not much longer than that span. A supplied GOST plan
+always takes precedence.
 
 This is the one routine behind every HGCA and G23H model quantity, in the
 likelihoods and in the figures, so the same data is always modelled the same
 way.
 """
 function _catalogue_epoch(orb, M_sec, scans, window, t_ra::Float64, t_dec::Float64)
+    if scans === nothing && (window == GAIA_DR3_WINDOW || window == GAIA_DR2_WINDOW)
+        # No GOST plan: average over a uniform nominal scan set across the
+        # release's window instead of the instantaneous reflex.
+        scans = _nominal_gaia_scans(window)
+    end
     if scans === nothing
         if t_ra == t_dec
             oα, oδ = star_reflex_offset(orb, t_ra, M_sec)
@@ -187,6 +196,48 @@ function _catalogue_epoch(orb, M_sec, scans, window, t_ra::Float64, t_dec::Float
     end
     q = scan_5param_fit(orb, scans, M_sec; t_ref = (t_ra, t_dec), window = window)
     return (q[1], q[2], q[4], q[5])
+end
+
+"""
+    NOMINAL_GAIA_SCAN_STEP_DAYS
+
+Spacing, in days, of the uniform epochs of [`_nominal_gaia_scans`](@ref).
+Averaging a reflex of period `P` over a grid of step `h` is faithful for
+`P ≳ 2h`; 10 d therefore resolves companions down to about 20 d, and any
+shorter period averages out to the same near-zero reflex the real scanning
+law gives it.
+"""
+const NOMINAL_GAIA_SCAN_STEP_DAYS = 10.0
+
+"""
+    _nominal_gaia_scans(window) -> GOSTData
+
+Synthetic scan set for a Gaia release when no GOST plan was supplied: epochs
+uniform in `window` every [`NOMINAL_GAIA_SCAN_STEP_DAYS`](@ref) days, each with
+one along-RA scan (ψ = π/2) and one along-Dec scan (ψ = 0), so the
+five-parameter fit through it is a uniform-in-time average of the RA and Dec
+reflex. The parallax factors are the annual sine / cosine, which keeps the
+parallax column of the fit well conditioned. This is what the real GOST path
+does, `scan_5param_fit` through the window's transits, with synthetic
+transits. Cached per window.
+"""
+const _NOMINAL_GAIA_SCANS = Dict{Tuple{Float64,Float64}, GOSTData}()
+const _NOMINAL_GAIA_LOCK = ReentrantLock()
+function _nominal_gaia_scans(window::Tuple{Real,Real})
+    key = (Float64(window[1]), Float64(window[2]))
+    lock(_NOMINAL_GAIA_LOCK) do
+        get!(_NOMINAL_GAIA_SCANS, key) do
+            lo, hi = key
+            ts = collect(range(lo, hi; length = max(6, ceil(Int, (hi - lo) / NOMINAL_GAIA_SCAN_STEP_DAYS) + 1)))
+            t = Float64[]; psi = Float64[]; pf = Float64[]
+            for x in ts
+                ph = 2π * (x - lo) / 365.25
+                push!(t, x); push!(psi, π / 2); push!(pf, sin(ph))
+                push!(t, x); push!(psi, 0.0);   push!(pf, cos(ph))
+            end
+            GOSTData(; t, psi, parallax_factor = pf)
+        end
+    end
 end
 
 # The Hipparcos scan geometry the HGCA/G23H models fit through: `Data`'s
@@ -217,7 +268,9 @@ reduction's scan geometry, which stands in for the HGCA's 60/40 blend of the
 1997 and 2007 reductions. Without Hipparcos scans (`data.hip_scans ===
 nothing`) epoch 1 and the Hipparcos end of epoch 2 fall back to the
 instantaneous reflex at the Hipparcos epochs; without GOST, epoch 3 and the
-Gaia end of epoch 2 fall back likewise (see [`_catalogue_epoch`](@ref)).
+Gaia end of epoch 2 use a uniform nominal scan set across the release's window
+instead ([`_nominal_gaia_scans`](@ref), 10 d step), still averaged, not the
+instantaneous reflex (see [`_catalogue_epoch`](@ref)).
 
 The part of `hgca_log_likelihood` that `plot_hgca_residuals` and
 `plot_pm_anomaly` must reproduce exactly, so it lives here once.
@@ -1512,8 +1565,8 @@ it (§II–III, Table 1; Octofitter's `G23HObs` forward model):
 
 `epochs_ra` / `epochs_dec` are `g23h`'s per-coordinate central epochs. Without
 Hipparcos scans the Hipparcos epoch falls back to the instantaneous reflex at
-its epochs, without GOST the two Gaia epochs do (see
-[`_catalogue_epoch`](@ref)); the positional differences stay positional
+its epochs; without GOST the two Gaia epochs use the uniform nominal window
+average (see [`_catalogue_epoch`](@ref)); the positional differences stay positional
 differences either way.
 
 The part of `g23h_log_likelihood` that `plot_g23h_residuals` and

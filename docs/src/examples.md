@@ -359,6 +359,13 @@ blocks **auto-fetch** — `hgca` from `hip_id`, `gost` from
 `{ra_deg, dec_deg}`. The Hip–Gaia proper-motion anomaly is what pins the
 companion's absolute mass. This is the ε Eri (HIP 16537) recipe.
 
+Omit `gost` and the Gaia epoch is still window-averaged, over a UNIFORM nominal
+scan grid (every 10 d, faithful for P above about 20 d) across the release's
+observing window (DR3 2014-07-25 to 2017-05-28; DR2 to 2016-05-23), by the same
+code path; a one-line `@info` says so. It is not the real scanning law, so
+supply GOST whenever you can. Before this the Gaia epoch silently used the
+instantaneous reflex, wrong for P shorter than the Gaia baseline.
+
 ```julia
 using Nereus
 
