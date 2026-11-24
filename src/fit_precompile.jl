@@ -97,10 +97,11 @@ end
 function _fit_precompile_run(fx, dir)
     fit_rv(fx.data; engine = fx.engine, output_dir = joinpath(dir, "fit_rv"))
     fit_transit(fx.phot; time_anchor = :phic, priors = fx.priors, engine = fx.engine_tr,
+                M_s = 1.0, R_s = 1.0,
                 output_dir = joinpath(dir, "fit_transit"))
     fit_astrometry(; iad = fx.iad, hgca = fx.hgca, hip_scans = false, engine = fx.engine_tr,
                    output_dir = joinpath(dir, "fit_astrometry"))
-    fit_joint(fx.rvj, fx.phj; planets = fx.planets, time_anchor = :phic,
+    fit_joint(fx.rvj, fx.phj; planets = fx.planets, time_anchor = :phic, M_s = 1.0, R_s = 1.0,
               engine = fx.engine_tr, output_dir = joinpath(dir, "fit_joint"))
     cfg = copy(fx.cfg)
     cfg["output_dir"] = joinpath(dir, "run_job")

@@ -3224,6 +3224,7 @@ function _run_loo!(cfg, chains, params::Params, data::Data, result,
             "pareto_k_max"       => res.pareto_k_max,
             "pareto_k_warn_count" => res.pareto_k_warn_count,
             "loo_compare_log_z"  => res.loo_compare_log_z,
+            "n_nonfinite_draws"  => res.n_nonfinite_draws,
         )
     catch err
         @warn "LOO/WAIC failed (continuing)" exception = (err, catch_backtrace())

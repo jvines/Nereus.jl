@@ -5,6 +5,26 @@ git history (`git log --first-parent develop`).
 
 ## Unreleased
 
+### Fixed
+
+- **A draw with a non-finite prediction no longer takes down the posterior
+  predictive check or LOO/WAIC.** One NaN in a draw's χ² made the PPC's
+  `quantile` throw ("PPC failed"), and one NaN prediction made `compute_loo`
+  refuse the whole chain. Such draws are now left out, counted
+  (`summary["ppc"]["n_nonfinite_draws"]`, `summary["loo"]["n_nonfinite_draws"]`,
+  `LooResult.n_nonfinite_draws`) and warned about; the draws kept give the same
+  numbers as the chain without them. Only when every draw is non-finite do they
+  throw, with the reason. The RV, transit and joint paths share the code.
+
+- **A transit fit with no source of a/R★ now says so.** With neither `M_s` and
+  `R_s`, nor `use_rho_s = true`, nor a sampled a/R★, the planet's a/R★ is NaN:
+  the transit likelihood scores a constant 0 for every draw (the posterior is
+  the prior) and the predicted light curve is NaN, which is what made PPC and
+  LOO fail on the precompile workload's transit fit. `fit_transit`,
+  `fit_joint` and the other `fit_*` now warn where the target is built. (The
+  likelihood still returns 0 for such a draw, not -Inf, so an old fit of this
+  kind keeps running.)
+
 ### Changed
 
 - **The first fit in a fresh process no longer compiles for about two minutes.**
