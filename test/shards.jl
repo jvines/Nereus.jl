@@ -270,6 +270,8 @@ const TEST_UNITS = [
     (name = "test_ccf_trend_options.jl", seconds = 930, files = ["test_ccf_trend_options.jl"]),
     # A fit with no planet (trend-only, offset-only): fit_rv and run_job. 4 threads, arm64 (2026-11-23).
     (name = "test_trend_only_fit.jl", seconds = 220, files = ["test_trend_only_fit.jl"]),
+    # RV/transit channel options reach the model or throw; one short trend fit. 4 threads, arm64 (2026-11-23).
+    (name = "test_fit_channel_options.jl", seconds = 90, files = ["test_fit_channel_options.jl"]),
 ]
 
 const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")
