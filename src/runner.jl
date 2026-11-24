@@ -1696,6 +1696,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
 
     params = Params(; p_kw...)
     require_a_Rs_source(params, data)
+    require_iad_determined(params, data)
     target = NereusTarget(params, data; unconstrained = false)
     return params, target, menu
 end

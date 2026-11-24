@@ -1049,9 +1049,10 @@ method). That is what keeps `s_m` honest: without the `−½ log det A` and
 No instrument opted in (the default) and the cached-weight path runs,
 unchanged. A jitter at exactly zero reproduces it bit for bit.
 
-Requires `n ≥ n_q` transits (otherwise the correction is
+Requires `n > n_q` transits (otherwise the correction is
 underdetermined and the likelihood is undefined) — 4 for one
-instrument, 6 for two. Returns 0 if `data.iad` is `nothing` or empty.
+instrument, 6 for two; a target with fewer is refused where it is built
+(`require_iad_determined`). Returns 0 if `data.iad` is `nothing` or empty.
 
 With one instrument this reduces to the previous hand-unrolled 5×5
 marginalization bit for bit: same column order, same accumulation order,
@@ -1818,3 +1819,35 @@ end
 # function astrom_plx(theta)::T               # parallax in mas
 # function has_AS(block)::Bool                # data-source membership
 # function _planet_orbit(theta, k, M_pri, plx) -> (orbit, M_sec)
+
+"""
+    require_iad_determined(params, data)
+
+Throw an `ArgumentError` when intermediate astrometry is attached with no more
+abscissae than the model has linear nuisance parameters (`n ≤ n_q`, see
+[`_iad_n_q`](@ref)). At `n == n_q` the design is exactly determined, so χ²_min is
+identically 0 and every orbit fits perfectly; `iad_log_likelihood` then returns
+0 for every draw and the fit is the prior, silently. Called where a target is
+built (`build_target`, the `run_job` config builder). An IAD used only as the
+Hipparcos scan geometry of an HGCA row is `data.hip_scans`, not `data.iad`, and
+is not subject to this.
+"""
+function require_iad_determined(params, data)
+    iad = data.iad
+    iad === nothing && return nothing
+    n = n_iad(iad)
+    n == 0 && return nothing
+    n_inst = n_iad_inst(iad)
+    n_q = _iad_n_q(n_inst)
+    n > n_q && return nothing
+    names = params.config.instruments.iad_names
+    per = [(i <= length(names) && !isempty(names[i]) ? names[i] : "IAD$i") *
+           " ($(count(==(i), iad.inst)) abscissae)" for i in 1:n_inst]
+    throw(ArgumentError(
+        "intermediate astrometry has n = $n abscissae over $n_inst instrument(s) " *
+        "[$(join(per, ", "))], but the model has n_q = $n_q linear nuisance " *
+        "parameters (a position, a proper motion and a free offset pair per " *
+        "instrument), so it needs n > n_q: with n ≤ n_q every orbit fits " *
+        "perfectly and the likelihood is constant. Supply more abscissae, or " *
+        "drop this IAD."))
+end

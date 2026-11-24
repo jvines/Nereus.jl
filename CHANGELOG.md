@@ -16,6 +16,14 @@ git history (`git log --first-parent develop`).
   numbers as the chain without them. Only when every draw is non-finite do they
   throw, with the reason. The RV, transit and joint paths share the code.
 
+- **Intermediate astrometry with too few abscissae is refused.** With
+  `n ≤ n_q` abscissae (4 for one instrument, 6 for two) the design is exactly
+  determined, every orbit fits perfectly, and `iad_log_likelihood` returned 0
+  for every draw: a fit that was the prior. `build_target` and the `run_job`
+  builder now throw an `ArgumentError` naming the instruments, `n` and `n_q`.
+  An IAD used only as the Hipparcos scan geometry of an HGCA row is
+  `hip_scans`, not `iad`, and is not affected.
+
 - **A transit fit with no source of a/R★ is refused.** With neither `M_s` and
   `R_s`, nor `use_rho_s = true`, nor a sampled a/R★, the planet's a/R★ is NaN:
   the transit likelihood scored a constant 0 for every draw (the posterior was
