@@ -281,6 +281,8 @@ const TEST_UNITS = [
     # RV/transit channel options reach the model or throw; one short trend fit. 4 threads, arm64 (2026-11-23).
     (name = "test_fit_channel_options.jl", seconds = 90, files = ["test_fit_channel_options.jl"]),
     (name = "test_typed_api_gaps.jl", seconds = 170, files = ["test_typed_api_gaps.jl"]),
+    # Per-instrument photometric trend orders and per-group trend time. Estimated (2026-11-24).
+    (name = "test_phot_trend_per_instrument.jl", seconds = 60, files = ["test_phot_trend_per_instrument.jl"]),
 ]
 
 const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")
