@@ -94,18 +94,12 @@ function _sci_sym(name)
     return _sym_sub(s)
 end
 
-# LaTeX rendering of a unit string.
+# LaTeX rendering of a unit string: the math-mode form of `_UNIT_FORMS`
+# (src/science_tables.jl), the table the .tex writer reads too.
 function _sci_unit_latex(u)
     u == "" && return ""
-    m = Dict("m/s"=>"\\mathrm{m\\,s^{-1}}", "d"=>"\\mathrm{d}", "deg"=>"\\mathrm{deg}",
-             "BJD"=>"\\mathrm{BJD}", "AU"=>"\\mathrm{AU}", "yr"=>"\\mathrm{yr}",
-             "K"=>"\\mathrm{K}", "g/cm3"=>"\\mathrm{g\\,cm^{-3}}",
-             "rho_sun"=>"\\rho_\\odot",
-             "M_earth"=>"M_\\oplus", "M_jup"=>"M_{\\mathrm{Jup}}",
-             "M_sun"=>"M_\\odot", "mas"=>"\\mathrm{mas}",
-             "R_earth"=>"R_\\oplus", "R_jup"=>"R_{\\mathrm{Jup}}",
-             "S_earth"=>"S_\\oplus", "W/m2"=>"\\mathrm{W\\,m^{-2}}")
-    return get(m, u, "\\mathrm{$(_mtxt(u))}")
+    f = get(_UNIT_FORMS, String(u), nothing)
+    return f === nothing ? "\\mathrm{$(_mtxt(u))}" : f[2]
 end
 
 # Single-line axis label `$symbol$ (unit)` — for x-axes.

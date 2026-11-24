@@ -58,6 +58,7 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     # orbit, so it stays in radians.
     "rho_circ" => ("rho_sun", false), "eta" => ("rad", false),
     "q1" => ("", false),          "q2" => ("", false),  # Kipping LD
+    "a_Rs" => ("", false),        # a/R★ when sampled directly (`sample_a_Rs`)
     # derived
     "msini" => ("M_earth", false),"mass" => ("M_jup", false),
     "radius" => ("R_jup", false), "rho" => ("g/cm3", false),
@@ -68,6 +69,8 @@ const _SCI_UNITS = Dict{String, Tuple{String, Bool}}(
     "M_A_sini3" => ("M_sun", false),    "M_B_sini3" => ("M_sun", false),
     "M_A" => ("M_sun", false),          "M_B" => ("M_sun", false),
     "inc_deg" => ("deg", false),        "P_days" => ("d", false),
+    # RV trend: dvdt·(t − t_ref) + d2vdt2·(t − t_ref)², t in days
+    "dvdt" => ("m/s/day", false),      "d2vdt2" => ("m/s/day^2", false),
 )
 
 # True when an instrument/noise param's trailing instrument token names a
@@ -81,36 +84,147 @@ function _is_phot_param(s::AbstractString, params::Params)
     return false
 end
 
-# Unit + angle flag for any chain parameter name. Planet params carry a
-# `_k<n>` suffix; instrument/noise params are matched by prefix.
-function sci_param_unit(name::AbstractString, params::Params)
+# Dimensionless parameters carry the EMPTY unit string "": e, √e sinω, b,
+# R_p/R★, q1/q2, flux offsets and dilutions, coefficients of a normalised time,
+# shape factors of the CCF and the tomography maps. "" is a classification, not
+# a gap: every name Nereus can emit resolves through `_sci_unit_lookup` below,
+# and one that does not is a bug (test/test_science_table_labels.jl walks every
+# model family).
+
+# Fitted stellar / system-level slots without a planet suffix.
+const _SCI_SYSTEM_UNITS = Dict{String, Tuple{String, Bool}}(
+    "M_pri" => ("M_sun", false),          # primary mass, sampled in astrometry
+    # RM: v sin i★ and the two ARoME widths are in m/s (src/default_priors.jl)
+    "v_sin_i_star" => ("m/s", false),
+    "sigma_ccf" => ("m/s", false),        "beta_p" => ("m/s", false),
+    # Gravity darkening's stellar inclination: a polar angle SAMPLED IN RADIANS
+    # on [0, π] (src/circular.jl). It was published as raw radians, no unit.
+    "i_star" => ("deg", true),
+    "f_light" => ("", false),             # L_B/(L_A+L_B), astrometric band
+    "tomo_alpha" => ("", false),          # shared Doppler-shadow amplitude
+    "u1_spec" => ("", false),             "u2_spec" => ("", false),
+    "studentt_nu" => ("", false),         # Student-t degrees of freedom
+)
+
+# Ordered (prefix, unit) rules for the instrument- and map-scoped slots whose
+# names carry a tag after the prefix. First match wins.
+const _SCI_PREFIX_UNITS = (
+    # astrometric jitters, mas
+    ("sigma_as_", "mas"), ("sigma_iad_", "mas"),
+    # CCF line components (src/ccf_data.jl): centres, amplitudes and widths on
+    # the km/s velocity grid; trend γ̇·(t − t_ref) + ½γ̈·(t − t_ref)², t in days;
+    # depths, continua, per-epoch scales and jitters in units of the normalised
+    # CCF.
+    ("ccf_gdot_", "km/s/day"), ("ccf_gddot_", "km/s/day^2"),
+    ("ccf_gamma_", "km/s"), ("ccf_K_", "km/s"), ("ccf_fwhm_", "km/s"),
+    ("ccf_depth_", ""), ("ccf_cont_", ""), ("ccf_scale_", ""), ("ccf_jit_", ""),
+    # Doppler tomography, per map: local line width and velocity correlation
+    # length in km/s; shadow amplitude and white term in the map's own units
+    # (unit line depth).
+    ("tomo_sigma_line_", "km/s"), ("tomo_ell_v_", "km/s"),
+    ("tomo_alpha_", ""), ("tomo_jit_", ""),
+    ("gd_beta_", ""),                      # gravity-darkening exponent, per band
+    # photometric baseline: polynomial in a NORMALISED time, relative flux
+    ("phot_c", ""), ("dilution_", ""),
+    ("q1_", ""), ("q2_", ""), ("u1_", ""), ("u2_", ""),   # limb darkening
+)
+
+# Unit of a noise-model parameter, by the model that owns it. `y` is the unit of
+# the channel the model acts on: m/s for RVs, "" for relative flux and for the
+# tomography residual maps. Activity indicators are normalised to unit RMS per
+# instrument by default (`Data(normalize_indicators = true)`, src/data.jl), so
+# an indicator-side amplitude is dimensionless, an RV coefficient on one is in
+# m/s and one on its time derivative in m/s·d. The log-parametrised celerite
+# terms carry the log of their quantity's unit: S0 is a PSD, [y]²·d with ω0 in
+# rad/d; the FM17 amplitude is a variance.
+function _noise_param_unit(s::AbstractString, nm::NoiseModel)
+    rv = noise_channel(nm) === :rv
+    y = rv ? "m/s" : ""
+    for (p, u) in (
+            ("gp_log_S0", rv ? "ln(m2/s2*day)" : "ln(day)"),
+            ("gp_log_omega0", "ln(1/day)"), ("gp_log_Q", ""),
+            ("gp_log_amp", rv ? "ln(m2/s2)" : ""),
+            ("gp_log_timescale", "ln(day)"), ("gp_log_period", "ln(day)"),
+            ("gp_log_factor", ""),
+            ("gp_sigma", y), ("gp_period", "d"),
+            ("gp_Q0", ""), ("gp_dQ", ""), ("gp_f", ""),
+            ("matern_sigma", y), ("matern_rho", "d"),
+            ("gp_act_period", "d"), ("gp_act_lambda_e", "d"),
+            ("gp_act_lambda_p", ""), ("gp_act_jit_", ""),
+            ("Vc", "m/s"), ("Vr", "m/s"),
+            ("Bc", ""), ("Br", ""), ("Fc", ""), ("Fr", ""),
+            ("Lc", ""), ("Hc", ""), ("Hr", ""),
+            ("Cdot_", "m/s*day"), ("C_", "m/s"),
+            ("jit_base_", "m/s"), ("jit_act_", "m/s"),
+            ("ind_floor_period", "d"), ("ind_floor_lambda_e", "d"),
+            ("ind_floor_lambda_p", ""), ("ind_floor_", ""),
+            ("ma_omega_", ""), ("ma_beta_", "d"),
+            ("ar_phi_", ""), ("ar_alpha_", "d"),
+            ("errscale_", ""), ("night_sigma_", y),
+            ("harm_period", "d"), ("harm_amp_", y),
+            ("studentt_nu", ""))
+        startswith(s, p) && return (u, false)
+    end
+    return nothing
+end
+
+# `(unit, sampled_in_radians)` for a name, or `nothing` when no rule knows it.
+function _sci_unit_lookup(name::AbstractString, params::Params)
     s = String(name)
     m = match(r"^(.*)_k(\d+)$", s)
     if m !== nothing && haskey(_SCI_UNITS, m.captures[1])
         return _SCI_UNITS[m.captures[1]]
     end
     haskey(_SCI_UNITS, s) && return _SCI_UNITS[s]
+    haskey(_SCI_SYSTEM_UNITS, s) && return _SCI_SYSTEM_UNITS[s]
     occursin(_TTV_SLOT_NAME, s) && return ("d", false)  # free TTV offset (days)
-    # γ/jitter on a PHOTOMETRIC instrument live in relative flux (dimensionless),
-    # not m/s — disambiguate by which instrument the param belongs to.
-    # Astrometric jitter is in mas, and it is spelled `sigma_as_<imager>`
-    # (relative) or `sigma_iad_<instrument>` (along-scan) — so it has to be
-    # caught BEFORE the generic `sigma` prefix below, which would otherwise
-    # publish milliarcseconds as m/s in every table.
-    (startswith(s, "sigma_as_") || startswith(s, "sigma_iad_")) && return ("mas", false)
+    # The instrument slots, by the layout's own index vectors rather than by
+    # name: a shared group is labelled `HARPS+FEROS` / `TESS+K2`, and a name
+    # suffix test read `jitter_TESS+K2` as an RV jitter in m/s. RV offsets and
+    # jitters are in m/s; photometric offsets, jitters, dilutions and baseline
+    # coefficients are relative flux.
+    L = params.layout
+    idx = get(L.name_to_idx, s, 0)
+    if idx != 0
+        sy = L.systemic
+        (idx in sy.rv_gamma || idx in sy.rv_sigma) && return ("m/s", false)
+        (idx in sy.pm_offset || idx in sy.pm_jitter || idx in sy.pm_dilution ||
+         any(v -> idx in v, sy.pm_trend)) && return ("", false)
+    end
+    for (p, u) in _SCI_PREFIX_UNITS
+        startswith(s, p) && return (u, false)
+    end
+    for nm in params.config.noise_models
+        s in noise_param_names(nm, params.config.instruments) || continue
+        r = _noise_param_unit(s, nm)
+        r === nothing || return r
+    end
+    # A name outside this layout: its spelling still says RV or photometric.
     phot = _is_phot_param(s, params)
-    startswith(s, "gamma")  && return (phot ? "" : "m/s", false)   # systemic velocity
-    startswith(s, "sigma")  && return (phot ? "" : "m/s", false)   # jitter
-    startswith(s, "jitter") && return (phot ? "" : "m/s", false)
-    (startswith(s, "C_") || startswith(s, "ind_floor")) && return ("", false)
-    startswith(s, "dilution") && return ("", false)     # flux dilution factor
-    startswith(s, "phot_c")   && return ("", false)     # phot baseline-trend coeff
-    startswith(s, "q1_") && return ("", false)          # Kipping LD (per group)
-    startswith(s, "q2_") && return ("", false)
-    startswith(s, "u1_") && return ("", false)          # physical LD (per group)
-    startswith(s, "u2_") && return ("", false)
-    return ("", false)                                  # unknown → dimensionless
+    startswith(s, "gamma_")  && return (phot ? "" : "m/s", false)
+    startswith(s, "sigma_")  && return (phot ? "" : "m/s", false)
+    startswith(s, "jitter_") && return ("", false)      # photometric jitter
+    startswith(s, "offset_") && return ("", false)      # photometric offset
+    return nothing
 end
+
+"""
+    sci_param_unit(name, params) -> (unit, sampled_in_radians)
+
+Unit of a chain parameter as every output reports it (the science tables'
+`unit` column and summary JSON, the LaTeX/ECSV/`.dat` writers, the figure axis
+labels), and whether the chain holds it in radians, which those outputs
+convert to degrees. `""` is dimensionless. A name no rule knows also comes back
+`""`; `sci_unit_known` tells the two apart.
+"""
+function sci_param_unit(name::AbstractString, params::Params)
+    r = _sci_unit_lookup(name, params)
+    return r === nothing ? ("", false) : r
+end
+
+"""Whether `name` has an explicit unit rule (dimensionless counts as one)."""
+sci_unit_known(name::AbstractString, params::Params) =
+    _sci_unit_lookup(name, params) !== nothing
 
 # --- per-parameter active mask (trans-dim conditioning) ----------------
 # Draws over which `name` is DEFINED: its planet/noise component active. Returns
@@ -318,14 +432,33 @@ const _DERIVED_UNITS = Dict{String, String}(
     "T14" => "hr",          "T23" => "hr",
     "depth_ppm" => "ppm",   "rho_star_transit" => "g/cm3",
     "grazing_frac" => "",
-    # under the :phic parametrization, the epochs the other anchors sample:
-    # transit time (t_ref_c + φ_c·P/2π), periastron time, mean anomaly at t_ref
+    # the epochs the other time anchors sample: transit time, periastron time,
+    # mean anomaly at t_ref; and the secondary conjunction after Tc
     "Tc" => "BJD",          "Tp" => "BJD",        "Mo_deg" => "deg",
-    # per-instrument physical limb-darkening (keys are u1_<label>/u2_<label>;
-    # those resolve to "" via the get-default, these bare entries are for
-    # completeness/lookup robustness)
-    "u1" => "",             "u2" => "",
+    "Tsec" => "BJD",
+    # spin-orbit angles (compute_derived reports them in degrees). They had no
+    # entry, so every obliquity table published λ, |λ|, i★ and ψ without a unit.
+    "lambda_deg" => "deg",  "lambda_abs_deg" => "deg",
+    "i_star_deg" => "deg",  "psi_deg" => "deg",
+    # planet surface gravity G·M_p/R_p², companion-to-star mass ratio, and the
+    # geometric transit probability of a planet with no transit in the model
+    "g_p" => "m/s2",        "mass_ratio" => "",   "p_transit" => "",
+    # SB2 binary (from the two amplitudes, + the inclination with astrometry).
+    # The masses had no entry and were published without their M_sun.
+    "mass_ratio_q" => "",
+    "M_A_sini3" => "M_sun", "M_B_sini3" => "M_sun",
+    "M_A" => "M_sun",       "M_B" => "M_sun",
+    "a_sini_au" => "AU",
 )
+
+# Unit of a compute_derived key, or `nothing` for a key no rule knows. The
+# per-LD-group physical coefficients are keyed `u1_<label>`/`u2_<label>`.
+function _derived_unit_lookup(key::AbstractString)
+    haskey(_DERIVED_UNITS, key) && return _DERIVED_UNITS[key]
+    (startswith(key, "u1_") || startswith(key, "u2_")) && return ""
+    return nothing
+end
+derived_unit(key::AbstractString) = something(_derived_unit_lookup(key), "")
 
 _planet_active_mask(chains, k) = (col = Symbol("planet_active_$k");
     col in names(chains, :parameters) ? _draws(chains, col) .> 0.5 : nothing)
@@ -399,7 +532,7 @@ function science_derived(chains, params::Params;
             for (key, samp) in vals
                 s = mask === nothing ? copy(samp) : samp[mask]
                 (isempty(s) || any(!isfinite, extrema(s))) && continue
-                unit = get(_DERIVED_UNITS, key, "")
+                unit = derived_unit(key)
                 # Every value is finite here, and `s` is our copy: sorted in place.
                 e = (stats=ParamStats!(s), unit=unit,
                      occupancy = mask === nothing ? 1.0 : mean(mask),
@@ -530,13 +663,23 @@ function _texsym(name::AbstractString)
                    "density_gcc"=>"\\rho_p", "Teq"=>"T_{\\rm eq}",
                    "S_earth"=>"S", "S_Wm2"=>"S", "P_yr"=>"P", "P_days"=>"P",
                    "a_mas"=>"a", "alpha_star_uas"=>"\\alpha_\\star",
-                   "rho_circ"=>"\\rho_{\\rm circ}", "eta"=>"\\eta")
+                   "rho_circ"=>"\\rho_{\\rm circ}", "eta"=>"\\eta",
+                   "Tsec"=>"T_{\\rm sec}", "g_p"=>"g_p", "mass_ratio"=>"M_p/M_\\star",
+                   "p_transit"=>"p_{\\rm tr}", "a_sini_au"=>"a\\sin i",
+                   "lambda_deg"=>"\\lambda", "lambda_abs_deg"=>"|\\lambda|",
+                   "psi_deg"=>"\\psi", "i_star_deg"=>"i_\\star",
+                   "M_A"=>"M_{\\rm A}", "M_B"=>"M_{\\rm B}",
+                   "M_A_sini3"=>"M_{\\rm A}\\sin^3 i", "M_B_sini3"=>"M_{\\rm B}\\sin^3 i",
+                   "mass_ratio_q"=>"q", "Mo_deg"=>"M_0")
         # brace the base so symbols carrying their own subscript (a/R_\star, …)
         # don't make an invalid double subscript when we append _{k}.
         return haskey(sym, base) ? "\${$(sym[base])}_{$k}\$" : _texlabel(s)
     end
     s == "plx"   && return "\$\\varpi\$"
     s == "rho_s" && return "\$\\rho_\\star\$"
+    s == "i_star" && return "\$i_\\star\$"
+    s == "M_pri" && return "\$M_{\\rm pri}\$"
+    s == "v_sin_i_star" && return "\$v\\sin i_\\star\$"
     (mm = match(r"^gamma_(.+)$", s))            !== nothing && return "\$\\gamma_{$(_texsub(mm.captures[1]))}\$"
     (mm = match(r"^(?:sigma|jitter)_(.+)$", s)) !== nothing && return "\$\\sigma_{$(_texsub(mm.captures[1]))}\$"
     (mm = match(r"^C_(.+)$", s))                !== nothing && return "\$C_{$(_texsub(mm.captures[1]))}\$"
@@ -544,14 +687,42 @@ function _texsym(name::AbstractString)
 end
 _texesc(s) = replace(String(s), "_" => "\\_")
 
-# Unit string → LaTeX (proper symbols/exponents instead of escaped ASCII).
-const _TEX_UNIT = Dict(
-    "m/s"=>"m\\,s\$^{-1}\$", "M_earth"=>"\$M_\\oplus\$", "M_jup"=>"\$M_{\\rm Jup}\$",
-    "R_jup"=>"\$R_{\\rm Jup}\$", "R_earth"=>"\$R_\\oplus\$", "S_earth"=>"\$S_\\oplus\$",
-    "W/m2"=>"W\\,m\$^{-2}\$", "g/cm3"=>"g\\,cm\$^{-3}\$", "deg"=>"deg",
-    "rho_sun"=>"\$\\rho_\\odot\$", "M_sun"=>"\$M_\\odot\$",
-    "AU"=>"AU", "d"=>"d", "yr"=>"yr", "K"=>"K", "BJD"=>"BJD", "mas"=>"mas", "μas"=>"\$\\mu\$as", ""=>"")
-_texunit(u) = get(_TEX_UNIT, String(u), _texesc(u))
+# Unit string → its two renderings: (LaTeX text mode, for the .tex tables;
+# math mode without the dollars, for the figure labels). ONE table for both, so
+# a unit added for one output path cannot be missing from the other; every unit
+# the registries above emit has an entry (test/test_science_table_labels.jl).
+const _UNIT_FORMS = Dict{String, Tuple{String, String}}(
+    "" => ("", ""),
+    "m/s" => ("m\\,s\$^{-1}\$", "\\mathrm{m\\,s^{-1}}"),
+    "m/s/day" => ("m\\,s\$^{-1}\$\\,d\$^{-1}\$", "\\mathrm{m\\,s^{-1}\\,d^{-1}}"),
+    "m/s/day^2" => ("m\\,s\$^{-1}\$\\,d\$^{-2}\$", "\\mathrm{m\\,s^{-1}\\,d^{-2}}"),
+    "m/s*day" => ("m\\,s\$^{-1}\$\\,d", "\\mathrm{m\\,s^{-1}\\,d}"),
+    "m/s2" => ("m\\,s\$^{-2}\$", "\\mathrm{m\\,s^{-2}}"),
+    "km/s" => ("km\\,s\$^{-1}\$", "\\mathrm{km\\,s^{-1}}"),
+    "km/s/day" => ("km\\,s\$^{-1}\$\\,d\$^{-1}\$", "\\mathrm{km\\,s^{-1}\\,d^{-1}}"),
+    "km/s/day^2" => ("km\\,s\$^{-1}\$\\,d\$^{-2}\$", "\\mathrm{km\\,s^{-1}\\,d^{-2}}"),
+    "ln(day)" => ("ln(d)", "\\mathrm{ln(d)}"),
+    "ln(1/day)" => ("ln(d\$^{-1}\$)", "\\mathrm{ln(d^{-1})}"),
+    "ln(m2/s2)" => ("ln(m\$^{2}\$\\,s\$^{-2}\$)", "\\mathrm{ln(m^{2}\\,s^{-2})}"),
+    "ln(m2/s2*day)" => ("ln(m\$^{2}\$\\,s\$^{-2}\$\\,d)", "\\mathrm{ln(m^{2}\\,s^{-2}\\,d)}"),
+    "M_earth" => ("\$M_\\oplus\$", "M_\\oplus"),
+    "M_jup" => ("\$M_{\\rm Jup}\$", "M_{\\mathrm{Jup}}"),
+    "M_sun" => ("\$M_\\odot\$", "M_\\odot"),
+    "R_earth" => ("\$R_\\oplus\$", "R_\\oplus"),
+    "R_jup" => ("\$R_{\\rm Jup}\$", "R_{\\mathrm{Jup}}"),
+    "S_earth" => ("\$S_\\oplus\$", "S_\\oplus"),
+    "rho_sun" => ("\$\\rho_\\odot\$", "\\rho_\\odot"),
+    "W/m2" => ("W\\,m\$^{-2}\$", "\\mathrm{W\\,m^{-2}}"),
+    "g/cm3" => ("g\\,cm\$^{-3}\$", "\\mathrm{g\\,cm^{-3}}"),
+    "deg" => ("deg", "\\mathrm{deg}"), "rad" => ("rad", "\\mathrm{rad}"),
+    "mas" => ("mas", "\\mathrm{mas}"), "μas" => ("\$\\mu\$as", "\\mu\\mathrm{as}"),
+    "AU" => ("AU", "\\mathrm{AU}"), "d" => ("d", "\\mathrm{d}"),
+    "hr" => ("hr", "\\mathrm{hr}"), "yr" => ("yr", "\\mathrm{yr}"),
+    "K" => ("K", "\\mathrm{K}"), "BJD" => ("BJD", "\\mathrm{BJD}"),
+    "ppm" => ("ppm", "\\mathrm{ppm}"),
+)
+_texunit(u) = (f = get(_UNIT_FORMS, String(u), nothing);
+               f === nothing ? _texesc(u) : f[1])
 
 function _write_csv(path, entries; delim=",")
     open(path, "w") do io

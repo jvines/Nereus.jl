@@ -64,15 +64,15 @@ Notch-filter detrending (Rizzuto+ 2017). Returns a NamedTuple with:
    transit cadences (`true` = in transit), same meaning as in
    [`detrend_savgol`](@ref). Masked cadences are excluded from every local
    window fit (the poly2 trend, the σ-clip and the notch search all see only
-   unmasked points), but the trend is still evaluated at them, so
-   `flux_detrended = flux ./ trend` everywhere. The returned `transit_mask`
-   echoes the input. Build it from known `P`, `T0` and transit *durations*;
-   these are unrelated to the notch search widths in `durations` above.
-   With a mask, the BIC notch search runs only on the unmasked points, and
-   at masked cadences it is not run at all: `depth`, `delta_bic` and
-   `dur_best` are `0` and `outlier` is `false` there (the trend is a
-   σ-clipped poly2 over the window's unmasked points). `nothing` keeps the
-   default behaviour bitwise unchanged.
+   unmasked points). The trend across each masked run (and across each dip
+   the search found) is one σ-clipped poly2 fitted to the clean flux on both
+   flanks, so `flux_detrended = flux ./ trend` keeps the transit depth.
+   The returned `transit_mask` echoes the input. Build it from known `P`,
+   `T0` and transit *durations*; these are unrelated to the notch search
+   widths in `durations` above. With a mask, the BIC notch search runs only
+   on the unmasked points, and at masked cadences it is not run at all:
+   `depth`, `delta_bic` and `dur_best` are `0` and `outlier` is `false`
+   there.
 - `notch_search::Bool=true` — `false` skips the BIC notch search entirely: the
    trend in each window is a σ-clipped poly2 over the unmasked points, and
    `depth`, `delta_bic`, `dur_best` are all `0`. Use it with `transit_mask`
@@ -148,15 +148,19 @@ function detrend_notch(t::Vector{Float64}, flux::Vector{Float64},
                                     dip_mask, nothing, true,
                                     transit_mask, notch_search)
         end
-        # The per-cadence local poly2 trend still JUMPS across each detected
-        # transit: every window extrapolates the dip-excluded fit across the
-        # gap independently, so on a steep/curved baseline (a transit on a
-        # rotation extremum) the trend rings into a V/overshoot. Carry a SMOOTH
-        # baseline across each detected dip — interpolate the trend from the
-        # clean cadences bracketing it, as the masked detrenders do — so the
-        # transit survives cleanly in flux/trend with no trend artefact.
-        _interp_trend_across_dips!(trend, flux_detrended, flux, t,
-                                   dip_mask, segments)
+    end
+
+    # Excluded cadences (pass-1 dips, known transits) and the clean cadences
+    # next to them get no trustworthy per-window trend: their windows hold
+    # clean data on one side only, and the poly2 extrapolated across the gap
+    # can be off by several ppt. Bridge each such run with one poly2 fitted
+    # to the clean flux on both flanks (see `_bridge_trend!`).
+    excl = dip_mask !== nothing && any(dip_mask) ?
+           (transit_mask === nothing ? dip_mask : dip_mask .| transit_mask) :
+           (transit_mask === nothing ? nothing : BitVector(transit_mask))
+    if excl !== nothing && any(excl)
+        _bridge_trend!(trend, flux_detrended, t, flux, flux_err,
+                       excl, segments, half, niter)
     end
 
     return (; flux_detrended, trend, depth, delta_bic = dbic,
@@ -275,15 +279,14 @@ function _union_excl(dipw, maskw, nw::Int)
     return collect(ex)
 end
 
-# Poly2 trend at the window centre (t = 0) from the non-excluded points, with
-# iterative 3.5σ clipping. No notch search. Returns NaN when fewer than 4
-# points are available (the caller falls back to the raw flux).
-function _clipped_poly2_trend(t::Vector{Float64}, y::Vector{Float64},
-                              e::Vector{Float64}, excl::AbstractVector{Bool},
-                              niter::Int)
-    kk = Bool[!x for x in excl]
-    count(kk) < 4 && return NaN
-    a = NaN
+# Weighted poly2 `y ≈ a + b·t + c·t²` over the `keep`-true points with
+# iterative 3.5σ clipping. `keep` is updated in place (clipped points set
+# false). Returns `(a, b, c)`, or `nothing` when fewer than 4 points remain.
+function _clipped_poly2!(t::Vector{Float64}, y::Vector{Float64},
+                         e::Vector{Float64}, kk::Vector{Bool},
+                         niter::Int)
+    count(kk) < 4 && return nothing
+    a, b, c = NaN, NaN, NaN
     for _ in 1:max(niter, 1)
         a, b, c = _polyfit2(t, y, e, kk)
         rms2 = 0.0; nk = 0
@@ -304,54 +307,202 @@ function _clipped_poly2_trend(t::Vector{Float64}, y::Vector{Float64},
         end
         (any_new && count(kk) >= 4) || break
     end
-    return a
+    return (a, b, c)
 end
 
-# Carry a SMOOTH baseline across each detected-dip run. The per-cadence local
-# poly2 trend jumps across a transit (each window extrapolates the dip-excluded
-# fit independently), so on a steep/curved baseline it rings into a V/overshoot.
-# Within each contiguous `dip_mask` run we replace the trend with a straight
-# line between the trend values at the clean cadences bracketing the run, then
-# refresh flux_detrended = flux / trend there. Runs touching a segment edge use
-# the one available bracket (flat carry). Operates per segment so it never
-# interpolates across a data gap. The chord error vs the true curve is tiny —
-# the run is short and the trend is locally near-extremal there anyway.
-function _interp_trend_across_dips!(trend, flux_detrended, flux, t,
-                                    dip_mask, segments)
-    @inbounds for seg in segments
+# Poly2 trend at the window centre (t = 0) from the non-excluded points, with
+# iterative 3.5σ clipping. No notch search. Returns NaN when fewer than 4
+# points are available (the caller falls back to the raw flux).
+function _clipped_poly2_trend(t::Vector{Float64}, y::Vector{Float64},
+                              e::Vector{Float64}, excl::AbstractVector{Bool},
+                              niter::Int)
+    coefs = _clipped_poly2!(t, y, e, Bool[!x for x in excl], niter)
+    return coefs === nothing ? NaN : coefs[1]
+end
+
+
+# A flank needs at least this many clean cadences to anchor a bridge.
+const _BRIDGE_MIN_FLANK = 5
+# A clean cadence is "unsupported" when, on a side of its `±half` window that
+# holds data, fewer than this fraction of that side's cadences are clean.
+const _BRIDGE_MIN_SIDE_FRAC = 0.25
+
+# Clean cadences whose `±half` window is mostly excluded on one side. Their
+# per-window poly2 is fitted almost entirely to data on the other side and
+# extrapolated to the centre (a short clean stretch wedged between two
+# excluded runs, a cadence just outside a long run) and can be off by several
+# ppt. A side with nothing excluded is never held against a cadence, however
+# few cadences it holds (an ordinary window at a segment edge).
+function _unsupported_cadences(t, excl::AbstractVector{Bool}, segments,
+                               half::Float64)
+    n = length(t)
+    out = falses(n)
+    cc = zeros(Int, n + 1)                    # nclean(a:b) = cc[b+1] - cc[a]
+    @inbounds for i in 1:n
+        cc[i + 1] = cc[i] + (excl[i] ? 0 : 1)
+    end
+    for seg in segments
+        s1 = last(seg)
+        lo, hi = first(seg), first(seg)
+        @inbounds for i in seg
+            while lo < i && t[lo] < t[i] - half
+                lo += 1
+            end
+            hi = max(hi, i)
+            while hi < s1 && t[hi + 1] <= t[i] + half
+                hi += 1
+            end
+            excl[i] && continue
+            nl_all, nr_all = i - lo, hi - i
+            nl = cc[i] - cc[lo]
+            nr = cc[hi + 1] - cc[i + 1]
+            if (nl < nl_all && nl < _BRIDGE_MIN_SIDE_FRAC * nl_all) ||
+               (nr < nr_all && nr < _BRIDGE_MIN_SIDE_FRAC * nr_all)
+                out[i] = true
+            end
+        end
+    end
+    return out
+end
+
+# Collect clean cadence indices outward from `start` in direction `step`
+# (±1) within `s0:s1`, until the collected clean cadences span `A` in time or
+# the segment ends.
+function _bridge_flank(t, excl, start::Int, step::Int, s0::Int, s1::Int, A::Float64)
+    idx = Int[]
+    k = start
+    while s0 <= k <= s1
+        if !excl[k]
+            push!(idx, k)
+            abs(t[k] - t[idx[1]]) >= A && break
+        end
+        k += step
+    end
+    return idx
+end
+
+# Replace the trend wherever the per-window poly2 is an extrapolation: at
+# excluded cadences (`excl` = pass-1 dips ∪ known transits) and at the
+# unsupported clean cadences next to them.
+#
+# The previous repair drew a chord between the trend values at the two
+# cadences bracketing each excluded run, but those values come from windows
+# with clean data on one side only. On TOI-4939 S103 (window 0.5 d) a false
+# pass-1 dip right after egress left a 20-min clean island whose per-window
+# trend was extrapolated across it; the chord anchored there turned a 6.5 ppt
+# transit into 8.7 ppt.
+#
+# Per segment (never across a data gap), each run [i, j] of excluded ∪
+# unsupported cadences, of duration L, gets ONE σ-clipped weighted poly2,
+# evaluated at every cadence of the run. It is fitted to the RAW flux of
+#  - the clean cadences inside the run (short stretches between excluded
+#    runs: their flux is good data, only their own window trend is not), and
+#  - the clean cadences on each flank, collected outward (skipping excluded
+#    ones) until they span A = max(half − L/2, half/2): the whole fit then
+#    spans about one `window`, the scale over which the notch already assumes
+#    a poly2 baseline, and never less than half a window per flank.
+# A run with fewer than `_BRIDGE_MIN_FLANK` clean cadences on one flank (a
+# segment edge) gets a straight line fitted to the other flank, collected over
+# a full `half`, continued across the run. A run with neither flank usable
+# keeps its trend.
+function _bridge_trend!(trend, flux_detrended, t, flux, flux_err,
+                        excl::AbstractVector{Bool}, segments,
+                        half::Float64, niter::Int)
+    bridge = excl .| _unsupported_cadences(t, excl, segments, half)
+    for seg in segments
         s0, s1 = first(seg), last(seg)
         i = s0
         while i <= s1
-            if dip_mask[i]
-                j = i
-                while j < s1 && dip_mask[j + 1]
-                    j += 1
-                end
-                left  = i - 1 >= s0 ? i - 1 : 0      # clean bracket indices
-                right = j + 1 <= s1 ? j + 1 : 0       # 0 = none (segment edge)
-                if left != 0 && right != 0
-                    tL, tR = t[left], t[right]
-                    yL, yR = trend[left], trend[right]
-                    dt = tR - tL
-                    for k in i:j
-                        w = dt > 0 ? (t[k] - tL) / dt : 0.0
-                        trend[k] = yL + w * (yR - yL)
-                        flux_detrended[k] = flux[k] / trend[k]
-                    end
-                elseif left != 0 || right != 0
-                    yedge = trend[left != 0 ? left : right]
-                    for k in i:j
-                        trend[k] = yedge
-                        flux_detrended[k] = flux[k] / trend[k]
-                    end
-                end
-                i = j + 1
-            else
+            if !bridge[i]
                 i += 1
+                continue
+            end
+            j = i
+            while j < s1 && bridge[j + 1]
+                j += 1
+            end
+            r = i:j
+            i = j + 1
+
+            L = t[last(r)] - t[first(r)]
+            A = max(half - L / 2, half / 2)
+            left = _bridge_flank(t, excl, first(r) - 1, -1, s0, s1, A)
+            right = _bridge_flank(t, excl, last(r) + 1, 1, s0, s1, A)
+            nL, nR = length(left), length(right)
+            coefs = nothing
+            tmid = (t[first(r)] + t[last(r)]) / 2
+            inner = Int[q for q in r if !excl[q]]
+            if nL >= _BRIDGE_MIN_FLANK && nR >= _BRIDGE_MIN_FLANK
+                idx = vcat(left, inner, right)
+                tt = Float64[t[q] - tmid for q in idx]
+                yy = Float64[flux[q] for q in idx]
+                ee = Float64[flux_err[q] for q in idx]
+                coefs = _clipped_poly2!(tt, yy, ee, fill(true, length(idx)), niter)
+                coefs === nothing && continue
+            elseif max(nL, nR) >= _BRIDGE_MIN_FLANK
+                # One flank (a segment edge): a straight line through that
+                # flank, collected over a full `half`, continued across the run.
+                side = nL >= nR ? -1 : 1
+                start = side < 0 ? first(r) - 1 : last(r) + 1
+                idx = vcat(_bridge_flank(t, excl, start, side, s0, s1, half), inner)
+                tt = Float64[t[q] - tmid for q in idx]
+                yy = Float64[flux[q] for q in idx]
+                ee = Float64[flux_err[q] for q in idx]
+                a, b = _clipped_line(tt, yy, ee, niter)
+                (isfinite(a) && isfinite(b)) || continue
+                coefs = (a, b, 0.0)
+            else
+                continue
+            end
+            for q in r
+                x = t[q] - tmid
+                tr = coefs[1] + coefs[2] * x + coefs[3] * x^2
+                (isfinite(tr) && tr > 0) || continue
+                trend[q] = tr
+                flux_detrended[q] = flux[q] / tr
             end
         end
     end
     return nothing
+end
+# Weighted straight-line fit `y ≈ a + b·t` with 3.5σ clipping. Returns
+# `(a, b)`; `(NaN, NaN)` with fewer than 2 points or a degenerate design.
+function _clipped_line(t::Vector{Float64}, y::Vector{Float64},
+                       e::Vector{Float64}, niter::Int)
+    kk = fill(true, length(t))
+    a, b = NaN, NaN
+    for _ in 1:max(niter, 1)
+        count(kk) < 2 && return (NaN, NaN)
+        sw = 0.0; st = 0.0; stt = 0.0; sy = 0.0; sty = 0.0
+        @inbounds for j in eachindex(t)
+            kk[j] || continue
+            w = 1.0 / e[j]^2
+            sw += w; st += w * t[j]; stt += w * t[j]^2
+            sy += w * y[j]; sty += w * t[j] * y[j]
+        end
+        det = sw * stt - st^2
+        if !(abs(det) > 1e-300)
+            # All points at one time: the flat weighted mean.
+            return sw > 0 ? (sy / sw, 0.0) : (NaN, NaN)
+        end
+        a = (stt * sy - st * sty) / det
+        b = (sw * sty - st * sy) / det
+        rms2 = 0.0; nk = 0
+        @inbounds for j in eachindex(t)
+            kk[j] || continue
+            rms2 += (y[j] - a - b * t[j])^2; nk += 1
+        end
+        σ = sqrt(rms2 / max(nk - 1, 1))
+        σ == 0 && break
+        any_new = false
+        @inbounds for j in eachindex(t)
+            if kk[j] && abs(y[j] - a - b * t[j]) > 3.5 * σ
+                kk[j] = false; any_new = true
+            end
+        end
+        (any_new && count(kk) >= 2) || break
+    end
+    return (a, b)
 end
 
 # Per-window joint fit. Returns trend_at_center, depth, delta_bic,

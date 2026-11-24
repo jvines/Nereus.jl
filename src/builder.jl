@@ -129,6 +129,8 @@ docstring above for the full block grammar and example.
   `a/R★` from it and the period, instead of from `M_s`/`R_s`. Needs transit
   photometry; an `ArgumentError` otherwise. Put a prior on it with
   `priors = Dict("rho_s" => ...)`, or `external_priors`.
+- `marginalize_gamma` — integrate the RV offsets out analytically instead of
+  sampling them (`ParametrizationConfig`). Default `false`.
 - `M_s` — primary mass for transit `a/R*` calculations. Defaults to
   `M_pri` if numeric, else `NaN`.
 - `stability` — `:none`, `:amd`, or `:gladman`. Default `:none`.
@@ -164,6 +166,7 @@ function build_target(;
     time_anchor::Union{Nothing, Symbol} = nothing,
     density::Union{Nothing, Symbol} = nothing,
     use_rho_s::Bool = false,
+    marginalize_gamma::Bool = false,
     M_s::Real = NaN,
     R_s::Real = NaN,
     stability::Symbol = :none,
@@ -181,15 +184,19 @@ function build_target(;
     ttv_epochs::AbstractDict = Dict{Int, Vector{Int}}(),
     ttv_backend::Symbol = :ttvfaster,
 )
-    isempty(planets) &&
-        throw(ArgumentError("build_target: at least one planet required " *
-                            "(pass `planets = (b = (...),)`)"))
-
     has_rv     = !isempty(rv)
     has_phot   = !isempty(phot)
     has_astrom = (relAST !== nothing) || (hgca !== nothing) ||
                  (iad !== nothing) || (gost !== nothing) ||
                  (g23h !== nothing) || (gaia_dr3 !== nothing)
+
+    # No planet is a model: offsets, jitters and, with `trend_order`, a trend.
+    # Only an RV-only target can be that; a transit or an astrometric orbit
+    # needs a body to fit.
+    isempty(planets) && (has_phot || has_astrom || !has_rv) &&
+        throw(ArgumentError("build_target: at least one planet required " *
+                            "(pass `planets = (b = (...),)`); a fit with no planet " *
+                            "is possible only for radial velocities alone"))
 
     mode = if has_rv && has_phot && has_astrom; RVPMAS
           elseif has_rv && has_astrom;          RVAS
@@ -219,7 +226,7 @@ function build_target(;
     time_kind = if time_anchor !== nothing
         time_anchor
     else
-        first_spec = first(values(planets))
+        first_spec = isempty(planets) ? nothing : first(values(planets))
         ks = first_spec isa NamedTuple ? keys(first_spec) : ()
         if      :Tc in ks; :Tc
         elseif  :phic in ks; :phic
@@ -387,6 +394,7 @@ function build_target(;
         R_s             = R_s_val,
         parametrization = ParametrizationConfig(mass = mass_kind, time = time_kind,
                                               use_rho_s = use_rho_s,
+                                              marginalize_gamma = marginalize_gamma,
                                               density = density === nothing ?
                                                         :rho_circ : density),
         priors          = priors_dict,

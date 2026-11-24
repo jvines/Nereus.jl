@@ -758,7 +758,12 @@ The epoch the transit phase φ_c (`time = :phic`) is measured from when
 each point's quoted flux error. If a transit is equally likely at any time,
 that is the epoch where Tc is least correlated with P, so P and φ_c sample as
 near-independent coordinates. Points without a finite positive error are left
-out; if none has one, it is the median photometric time. Without photometry
+out; if none has one, it is the median photometric time. If that epoch falls
+in a gap, more than `PHIC_EPOCH_GAP_TOL` (1 d) from every photometric time it
+was taken from, it is moved to the nearest one: an epoch with no data near it
+leaves P and φ_c tied along narrow ridges where an ensemble stalls on
+long-period aliases (TIC 275647095: the mean sat 53 d from any point and walkers
+settled on 7×–35× the 17.06 d period). Without photometry
 but with measured transit times (`data.transit_times`) it is their mean
 weighted by 1/tc_err², every planet's points in the likelihood together, by the
 same reasoning: for `tc = T0 + P·n` the weighted least-squares T0 and P are
@@ -776,11 +781,31 @@ function phic_reference_epoch(data)
     isempty(t) && return _tt_reference_epoch(data)
     σ = data.flux_err
     ok = isfinite.(t) .& isfinite.(σ) .& (σ .> 0)
-    any(ok) || return Float64(median(t))
-    t0 = Float64(t[findfirst(ok)])          # average offsets: BJDs lose digits
+    any(ok) || return _epoch_onto_data(Float64(median(t)), Float64.(t))
+    tok = Float64.(t[ok])
+    t0 = tok[1]                             # average offsets: BJDs lose digits
     w = 1 ./ Float64.(σ[ok]) .^ 2
-    return t0 + sum(w .* (Float64.(t[ok]) .- t0)) / sum(w)
+    return _epoch_onto_data(t0 + sum(w .* (tok .- t0)) / sum(w), tok)
 end
+
+# `te` itself when a time in `ts` lies within PHIC_EPOCH_GAP_TOL of it, else the
+# nearest time in `ts`. In a gap between light curves the epoch is a poor one to
+# sample from: with no transit near it, P and φ_c are tied along narrow oblique
+# ridges and an ensemble started from prior draws stalls on long-period aliases.
+# The nearest data time keeps most of the decorrelation the weighted mean buys.
+function _epoch_onto_data(te::Float64, ts::AbstractVector{Float64})
+    isfinite(te) || return te
+    best = te; dbest = Inf
+    for s in ts
+        d = abs(s - te)
+        d < dbest && ((best, dbest) = (s, d))
+    end
+    return dbest <= PHIC_EPOCH_GAP_TOL ? te : best
+end
+
+# How far (days) the weighted-mean φ_c epoch may sit from the nearest
+# photometric time before `phic_reference_epoch` moves it onto the data.
+const PHIC_EPOCH_GAP_TOL = 1.0
 
 """
     resolve_time_anchor(pc, priors) -> ParametrizationConfig

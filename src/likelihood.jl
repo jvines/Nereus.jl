@@ -210,9 +210,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
     end
 
     # --- Decode trend (once) -----------------------------------------
-    trend_order = theta.params.config.trend_order
-    trend_dvdt = trend_order >= 1 ? rv_dvdt(theta) : zero(T)
-    trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
+    trend_dvdt, trend_curv = rv_trend_coeffs(theta)
 
     # --- Decode Rossiter-McLaughlin state (once) ---------------------
     n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
@@ -232,7 +230,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data) where {T}
         ins_idx = data.rv_inst[i]
 
         dt_i  = t - t_ref
-        pred  = trend_dvdt * dt_i + trend_curv * dt_i * dt_i
+        pred  = _rv_trend_term(zero(T), trend_dvdt, trend_curv, dt_i)
         marg_γ || (pred += rv_gamma(theta, ins_idx))
 
         # No noise models in this path — skip activity decorrelation
@@ -387,9 +385,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
     end
 
     # --- Decode trend (once) -----------------------------------------
-    trend_order = theta.params.config.trend_order
-    trend_dvdt = trend_order >= 1 ? rv_dvdt(theta) : zero(T)
-    trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
+    trend_dvdt, trend_curv = rv_trend_coeffs(theta)
 
     # --- Decode RM state (once) --------------------------------------
     n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
@@ -410,7 +406,7 @@ function _rv_ll_no_noise(theta::Theta{T}, data::Data, ws) where {T}
         ins_idx = data.rv_inst[i]
 
         dt_i  = t - t_ref
-        pred  = trend_dvdt * dt_i + trend_curv * dt_i * dt_i
+        pred  = _rv_trend_term(zero(T), trend_dvdt, trend_curv, dt_i)
         marg_γ || (pred += rv_gamma(theta, ins_idx))
 
         # Cache rows already carry the SB2 component gating (baked at fill).
@@ -491,9 +487,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
                               parametrization.t_ref_c)
     end
 
-    trend_order = theta.params.config.trend_order
-    trend_dvdt = trend_order >= 1 ? rv_dvdt(theta) : zero(T)
-    trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
+    trend_dvdt, trend_curv = rv_trend_coeffs(theta)
 
     # --- RM state (once) ---------------------------------------------
     n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
@@ -513,7 +507,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         t = data.t_rv[i]; obs_err = data.rv_err[i]; ins_idx = data.rv_inst[i]
         gamma = rv_gamma(theta, ins_idx)
         dt_i = t - t_ref
-        pred = gamma + trend_dvdt * dt_i + trend_curv * dt_i * dt_i
+        pred = _rv_trend_term(gamma, trend_dvdt, trend_curv, dt_i)
 
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
@@ -751,9 +745,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
                               parametrization.t_ref_c)
     end
 
-    trend_order = theta.params.config.trend_order
-    trend_dvdt = trend_order >= 1 ? rv_dvdt(theta) : zero(T)
-    trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
+    trend_dvdt, trend_curv = rv_trend_coeffs(theta)
 
     # --- RM state (once) ---------------------------------------------
     n_rm, rm_state = _decode_rm_state(theta, p_idx, Ps; t_ref = t_ref)
@@ -768,7 +760,7 @@ function _rv_ll_with_noise(theta::Theta{T}, data::Data,
         t = data.t_rv[i]; obs_err = data.rv_err[i]; ins_idx = data.rv_inst[i]
         gamma = rv_gamma(theta, ins_idx)
         dt_i = t - t_ref
-        pred = gamma + trend_dvdt * dt_i + trend_curv * dt_i * dt_i
+        pred = _rv_trend_term(gamma, trend_dvdt, trend_curv, dt_i)
 
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue
@@ -1781,9 +1773,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
     end
 
     # Decode trend
-    trend_order = theta.params.config.trend_order
-    trend_dvdt = trend_order >= 1 ? rv_dvdt(theta) : zero(T)
-    trend_curv = trend_order >= 2 ? rv_d2vdt2(theta) : zero(T)
+    trend_dvdt, trend_curv = rv_trend_coeffs(theta)
 
     # Decode Rossiter-McLaughlin state (mirrors the likelihood) so the predicted
     # RV — used by PPC, residuals, fit-health and all RV plots — includes the
@@ -1805,7 +1795,7 @@ function rv_predictions(theta::Theta{T}, data::Data) where {T}
 
         gamma = rv_gamma(theta, ins_idx)
         dt_i  = t - t_ref
-        pred  = gamma + trend_dvdt * dt_i + trend_curv * dt_i * dt_i
+        pred  = _rv_trend_term(gamma, trend_dvdt, trend_curv, dt_i)
 
         for (nm_idx, nm) in enumerate(noise_models)
             is_noise_model_active(theta, nm_idx) || continue

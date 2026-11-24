@@ -185,3 +185,98 @@ end
         @test Nereus._kw_for(f, kw) == (; robust_ylim = true)
     end
 end
+
+# An RV trend (`trend_order` 1 or 2) on two instruments with different γ. The
+# time series drew the Keplerians alone around zero while the residuals took
+# the trend out, so on a drifting star the curve missed the data; the
+# component view left the trend out of its residuals as well.
+function _trend_rv_fixture(order)
+    rng = MersenneTwister(23)
+    n = 40
+    t = 55317.0 .+ sort(5000.0 .* rand(rng, n))
+    inst = [isodd(i) ? 1 : 2 for i in 1:n]
+    data = Data(; t_rv = t, rv = zeros(n), rv_err = fill(3.0, n), rv_inst = inst)
+    params = Params(; parametrization = ParametrizationConfig(time = :Mo), max_kplanet = 1,
+                    planet_modes = [RV_ONLY], instruments = InstrumentConfig(rv = ["FEROS", "HARPS"]),
+                    data = data, M_s = 1.0, trend_order = order)
+    vals = Dict("P_k1" => 2050.0, "K_k1" => 45.0, "sesinw_k1" => 0.1, "secosw_k1" => 0.05,
+                "Mo_k1" => 1.0, "gamma_FEROS" => 12.0, "gamma_HARPS" => -30.0,
+                "sigma_FEROS" => 2.0, "sigma_HARPS" => 2.0,
+                "dvdt" => -0.018, "d2vdt2" => 4e-6)
+    filter!(kv -> first(kv) in params.layout.unfrozen_names, vals)
+    theta = Theta{Float64}(params)
+    for (k, v) in vals
+        set_param!(theta, k, v)
+    end
+    data.rv .= rv_predictions(theta, data)[1] .+ 4.0 .* randn(rng, n)
+    return params, data, _tight_chains(params, vals, rng)
+end
+
+# x and y of the curve labelled `label` in axis `ax`
+function _curve(ax, label)
+    p = only(filter(p -> p isa Nereus.CairoMakie.Makie.Lines &&
+                         get(p.attributes, :label, nothing) !== nothing &&
+                         p.label[] == label, ax.scene.plots))
+    return Float64[q[1] for q in p[1][]], Float64[q[2] for q in p[1][]]
+end
+
+@testset "RV trend: time-series curve is the likelihood model (trend_order = $order)" for order in (1, 2)
+    params, data, chains = _trend_rv_fixture(order)
+    theta = Theta{Float64}(params)
+    Nereus.set_theta_best_lp!(theta, chains, params, collect(1:size(chains, 1)))
+    preds = rv_predictions(theta, data)[1]
+    gam = [rv_gamma(theta, i) for i in data.rv_inst]
+    tmin = minimum(data.t_rv)
+
+    # the curve routine at the data times is the likelihood's mean minus γ
+    at_data = Nereus.compute_rv_model_on_grid(theta, data, data.t_rv; include_trend = true)
+    @test maximum(abs, at_data .- (preds .- gam)) < 1e-9
+    @test maximum(abs, Nereus.rv_trend(theta, data, data.t_rv) .-
+                       (at_data .- Nereus.compute_rv_model_on_grid(theta, data, data.t_rv))) < 1e-9
+
+    fig = plot_rv_timeseries(chains, params, data)
+    ax, ax_r = filter(c -> c isa Axis, fig.content)
+    x, y = _curve(ax, "Keplerian + trend")
+    @test maximum(abs, y .- Nereus.compute_rv_model_on_grid(theta, data, x .+ tmin;
+                                                            include_trend = true)) < 1e-9
+    # the curve follows the data: residuals about it are the noise, not the drift
+    @test sort(_marker_ys(ax_r)) ≈ sort(data.rv .- preds) atol = 1e-9
+
+    figc = Nereus.plot_rv_components(chains, params, data)
+    axc, axc_r = filter(c -> c isa Axis, figc.content)
+    xt, yt = _curve(axc, "trend")
+    @test maximum(abs, yt .- Nereus.rv_trend(theta, data, xt .+ tmin)) < 1e-9
+    xT, yT = _curve(axc, "total")
+    @test maximum(abs, yT .- Nereus.compute_rv_model_on_grid(theta, data, xT .+ tmin;
+                                                             include_trend = true)) < 1e-9
+    @test sort(_marker_ys(axc_r)) ≈ sort(data.rv .- preds) atol = 1e-9
+
+    # the phase-fold takes the trend OUT of the data instead of drawing it
+    figf = plot_rv_phasefold(chains, params, data; planet = 1)
+    axf = first(filter(c -> c isa Axis, figf.content))
+    folded = data.rv .- (preds .- Nereus.compute_rv_model_planet(theta, data, data.t_rv, 1))
+    @test sort(_marker_ys(axf)) ≈ sort(folded) atol = 1e-9
+
+    # every trend coefficient carries its unit in the fitted table
+    ents = Nereus.science_fitted(chains, params)
+    ents isa Tuple && (ents = first(ents))
+    units = Dict(k => v["unit"] for (k, v) in ents)
+    @test units["dvdt"] == "m/s/day"
+    order >= 2 && @test units["d2vdt2"] == "m/s/day^2"
+end
+
+@testset "trend and CCF velocity units" begin
+    params, _, _ = _trend_rv_fixture(2)
+    @test Nereus.sci_param_unit("dvdt", params) == ("m/s/day", false)
+    @test Nereus.sci_param_unit("d2vdt2", params) == ("m/s/day^2", false)
+    @test Nereus.sci_param_unit("ccf_gdot_s1_A", params) == ("km/s/day", false)
+    @test Nereus.sci_param_unit("ccf_gddot_s1_A", params) == ("km/s/day^2", false)
+    for nm in ("ccf_gamma_s1_A", "ccf_K_s1_A", "ccf_fwhm_s1_A", "ccf_fwhm_s1")
+        @test Nereus.sci_param_unit(nm, params) == ("km/s", false)
+    end
+    # rendered as units in the TeX table and the figure labels, not escaped text
+    for u in ("m/s/day", "m/s/day^2", "km/s", "km/s/day", "km/s/day^2")
+        @test !occursin("\\_", Nereus._texunit(u)) && !occursin("/", Nereus._texunit(u))
+        @test !occursin("/", Nereus._sci_unit_latex(u))
+    end
+end

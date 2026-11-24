@@ -211,7 +211,7 @@ the source-flag set from which keywords are non-empty, so this is a translation
 layer, not a second model.
 """
 function _target_from(channels::AbstractVector, planets; M_s = NaN,
-                      trend_order = 0, noise_models = nothing,
+                      trend_order = nothing, noise_models = nothing,
                       priors = nothing, stability = :none,
                       external_priors = nothing,
                       # Everything below build_target already supported and
@@ -234,12 +234,30 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     iad = hgca = gost = relast = nothing
     hip_spec = nothing
     iad_names = String[]          # per IAD instrument; "" = no jitter, _IAD_AUTO_NAME = auto-named
+    rv_opts = nothing
+    n_rv_ch = n_pm_ch = 0
     for ch in channels
         src = String(get(ch, "source", ""))
         if src == "RV"
+            # One RV channel: a second one used to replace the first without a
+            # word. Instruments go in one channel's `data`.
+            (n_rv_ch += 1) == 1 || throw(ArgumentError(
+                "two RV channels; put every RV instrument in one channel's `data`"))
             rv = _rv_namedtuple(ch)
-            trend_order = get(ch, "trend_order", trend_order)
+            rv_opts = _rv_channel_options(ch, collect(String, string.(keys(rv))))
+            # The channel's trend_order and the keyword are one setting: a
+            # disagreement is an error, not a silent precedence.
+            ct = rv_opts.trend_order
+            if ct !== nothing
+                trend_order === nothing || Int(trend_order) == ct || throw(ArgumentError(
+                    "trend_order = $trend_order and the RV channel's " *
+                    "\"trend_order\" => $ct disagree; give it once"))
+                trend_order = ct
+            end
         elseif src == "PM"
+            (n_pm_ch += 1) == 1 || throw(ArgumentError(
+                "two transit channels; put every photometric instrument in one " *
+                "channel's `data`"))
             phot = _phot_namedtuple(ch)
         elseif src == "AS"
             # ACCUMULATE across AS channels. Assigning here used to mean the
@@ -281,7 +299,12 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
             end
             # No parallax/m_pri here: both are priors and belong in `priors`.
         elseif src in ("RM", "RM_R", "RM_A", "TOMO", "TTV", "TTV_NB", "SB")
-            # handled by the technique-specific entry points below
+            # These build no part of this target. Accepting them here dropped
+            # the whole channel: `fit_joint(rv, rm)` fitted the RV alone.
+            throw(ArgumentError(
+                "a $(repr(src)) channel cannot be part of this fit; it has its own " *
+                "entry point (fit_rm, fit_tomography, fit_ttv, fit_binary) or a " *
+                "run_job config (planet_modes) for a joint model"))
         else
             throw(ArgumentError("unknown channel source $(repr(src))"))
         end
@@ -315,6 +338,41 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
         plx = _gaia_plx_prior(g)
         gaia_report === nothing || push!(gaia_report, g)
     end
+
+    trend_order = trend_order === nothing ? 0 : Int(trend_order)
+
+    # The RV channel's `jitter` is a prior on `sigma_<inst>`: the same parameter
+    # in `priors` would be a second answer to the same question.
+    for (inst, spec) in pairs(rv), key in keys(spec)
+        key === :data && continue
+        nm = "$(key)_$(inst)"
+        priors !== nothing && haskey(priors, nm) && throw(ArgumentError(
+            "`$nm` is set by the RV channel's `jitter` and again in `priors`; " *
+            "give it once"))
+    end
+
+    # The RV channel's sharing (`share`, `gamma_per_instrument = false`) and the
+    # `sharing` keyword are merged; one category given by both is an error.
+    if rv_opts !== nothing && !isempty(rv_opts.sharing)
+        merged = Dict{String,Any}()
+        if sharing !== nothing
+            for (k, v) in pairs(sharing)
+                merged[String(k)] = v
+            end
+        end
+        for (k, v) in rv_opts.sharing
+            haskey(merged, k) && throw(ArgumentError(
+                "RV sharing of `$k` is given by the RV channel " *
+                "(`share` / `gamma_per_instrument`) and by `sharing`; give it once"))
+            merged[k] = v
+        end
+        sharing = merged
+    end
+    noise_models === nothing || all(m -> m isa NoiseModel, noise_models) ||
+        throw(ArgumentError(
+            "noise models must be NoiseModel objects (e.g. `GPNoise(...)`); a " *
+            "dict spelling is not built on this route. Use a run_job config's " *
+            "`noise_models` block"))
 
     # A photometry channel's `dilution` / `jitter` are priors on
     # `dilution_<inst>` / `jitter_<inst>`; the same parameter in `priors` would
@@ -352,6 +410,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                           :as_names => as_names,
                           :iad_names => iad_names)
     use_rho_s && (kw[:use_rho_s] = true)
+    rv_opts !== nothing && rv_opts.marginalize_gamma && (kw[:marginalize_gamma] = true)
     parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
     time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
     density         === nothing || (kw[:density]         = Symbol(density))
@@ -435,6 +494,19 @@ what the jitter and offset terms are keyed on, so there is no unnamed form:
     fit_rv(Dict("HARPS" => (t = bjd, rv = rv, rv_err = err)))
     fit_rv(Dict("HARPS" => (...), "HIRES" => (...)); planets = 2)
 
+It also takes an RV CHANNEL, the dict `fit_joint` takes, whose options reach
+the model (`_rv_namedtuple`, `_rv_channel_options`):
+
+    fit_rv(Dict("source" => "RV", "data" => Dict("HARPS" => (...)),
+                "trend_order" => 1, "jitter" => Dict("type" => "uniform", ...),
+                "gamma_per_instrument" => false, "marginalize_gamma" => false,
+                "share" => Dict("sigma" => [["HARPS", "HARPS-N"]])))
+
+An unknown channel key, or `indicators`, throws. `trend_order` may be given as
+the keyword or in the channel; both, with different values, is an error. The
+channel's `share` / `gamma_per_instrument` and the `sharing` keyword merge, and
+the channel's `jitter` and `priors["sigma_<inst>"]` must not both be given.
+
 `planets` is an integer for a fixed-dimension fit or a range for
 trans-dimensional model selection over planet count.
 
@@ -458,9 +530,16 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                 stopping = nothing, stop_file = nothing, output_dir = nothing,
-                noise = nothing, trend_order = 0, kwargs...)
-    _require_instrument_map(rv, "RV", (:t, :rv, :rv_err))
+                noise = nothing, trend_order = nothing, kwargs...)
+    # An RV CHANNEL (a dict with "source", as `fit_joint` takes) carries the
+    # model options -- jitter, trend_order, gamma_per_instrument, share,
+    # marginalize_gamma -- and `_target_from` reads them; a bare instrument
+    # map has none.
     ch = _as_channel(rv, "RV")
+    src = String(get(ch, "source", ""))
+    src == "RV" || throw(ArgumentError(
+        "fit_rv takes an RV channel or an instrument map; got a $(repr(src)) channel"))
+    _require_instrument_map(get(ch, "data", Dict()), "RV", (:t, :rv, :rv_err))
     if !(planets isa NamedTuple)
         d = collect(values(get(ch, "data", Dict())))
         isempty(d) && throw(ArgumentError("fit_rv: no RV data given"))
@@ -762,16 +841,100 @@ _as_channel(x::AbstractDict, src) = haskey(x, "source") ? x :
     Dict("source" => src, "data" => x)
 _as_channel(x, src) = Dict("source" => src, "data" => x)
 
-"""Per-instrument RV -> the NamedTuple `build_target` expects."""
+"""
+    _rv_namedtuple(ch) -> NamedTuple
+
+Per-instrument RV -> the NamedTuple `build_target` expects, with the channel's
+`jitter` applied: a value (fixed), a prior (`PriorSpec` or the wire's
+`{"type": ...}` dict), or an `instrument => value` mapping, on
+`sigma_<instrument>`. `"default"` / absent leaves the default prior.
+"""
 function _rv_namedtuple(ch::AbstractDict)
     data = get(ch, "data", Dict())
     jit  = get(ch, "jitter", "default")
+    per(v, nm) = (v isa AbstractDict && !haskey(v, "type")) ?
+                 get(v, String(nm), nothing) : v
+    if jit isa AbstractDict && !haskey(jit, "type")
+        have = String.(collect(keys(data)))
+        bad = setdiff(String.(collect(keys(jit))), have)
+        isempty(bad) || throw(ArgumentError(
+            "RV channel: `jitter` names $(join(repr.(bad), ", ")), not among the " *
+            "instruments in its data ($(join(repr.(have), ", ")))"))
+    end
     names = Tuple(Symbol.(collect(keys(data))))
     vals  = Tuple(begin
         d = data[String(n)]
-        jit == "default" ? (data = d,) : (data = d, sigma = jit)
+        j = per(jit, n)
+        (j === nothing || j == "default") ? (data = d,) :
+            (data = d, sigma = j isa AbstractDict ? _as_prior(j) : j)
     end for n in names)
     return NamedTuple{names}(vals)
+end
+
+"""
+    _rv_channel_options(ch, names) -> NamedTuple
+
+The RV channel's model options other than `data` and `jitter`, checked:
+
+- `trend_order` (Int, or `nothing` when absent);
+- `gamma_per_instrument = false` -> one offset for every instrument
+  (`sharing[:gamma]`); `share` -> `Dict(category => [[inst, ...], ...])`
+  sharing groups (`"gamma"`, `"sigma"`), merged with the `sharing` keyword;
+- `marginalize_gamma = true` -> the offsets integrated out analytically
+  (`ParametrizationConfig`'s `marginalize_gamma`);
+- `indicators` is not built on this route (the activity models that read
+  indicators are run_job `noise_models`) and throws.
+
+An unknown key throws: an option nobody reads must not look accepted.
+"""
+function _rv_channel_options(ch::AbstractDict, names::Vector{String})
+    known = ("source", "data", "jitter", "trend_order", "gamma_per_instrument",
+             "share", "marginalize_gamma", "indicators")
+    bad = [String(k) for k in keys(ch) if !(String(k) in known)]
+    isempty(bad) || throw(ArgumentError(
+        "RV channel: unknown option(s) $(join(repr.(bad), ", ")); it takes " *
+        join(known[3:end], ", ")))
+    get(ch, "indicators", nothing) === nothing || throw(ArgumentError(
+        "RV channel: `indicators` are not built by the typed fit_* functions " *
+        "(they feed activity noise models, which this route does not take); use " *
+        "a run_job config: indicator columns in the RV block plus `noise_models`"))
+    to = get(ch, "trend_order", nothing)
+    to === nothing || (to isa Integer && !(to isa Bool) && to >= 0) || throw(ArgumentError(
+        "RV channel: trend_order must be a non-negative integer; got $(repr(to))"))
+    sharing = Dict{String,Vector{Vector{String}}}()
+    gpi = get(ch, "gamma_per_instrument", true)
+    gpi isa Bool || throw(ArgumentError(
+        "RV channel: gamma_per_instrument must be true or false; got $(repr(gpi))"))
+    sh = get(ch, "share", nothing)
+    if sh !== nothing
+        sh isa AbstractDict || throw(ArgumentError(
+            "RV channel: `share` maps a category (\"gamma\", \"sigma\") to " *
+            "groups of instruments, e.g. Dict(\"gamma\" => [[\"HARPS\", \"HARPS-N\"]])"))
+        for (k, groups) in pairs(sh)
+            cat = String(k)
+            cat in ("gamma", "sigma") || throw(ArgumentError(
+                "RV channel: `share` category $(repr(cat)) is not an RV parameter; " *
+                "use \"gamma\" or \"sigma\""))
+            gs = [String.(collect(g)) for g in groups]
+            for g in gs, ins in g
+                ins in names || throw(ArgumentError(
+                    "RV channel: `share` names $(repr(ins)), which is not an " *
+                    "instrument in its data ($(join(repr.(names), ", ")))"))
+            end
+            sharing[cat] = gs
+        end
+    end
+    if !gpi
+        haskey(sharing, "gamma") && throw(ArgumentError(
+            "RV channel: gamma_per_instrument = false and share[\"gamma\"] both " *
+            "group the offsets; give one"))
+        length(names) > 1 && (sharing["gamma"] = [copy(names)])
+    end
+    mg = get(ch, "marginalize_gamma", false)
+    mg isa Bool || throw(ArgumentError(
+        "RV channel: marginalize_gamma must be true or false; got $(repr(mg))"))
+    return (trend_order = to === nothing ? nothing : Int(to), sharing = sharing,
+            marginalize_gamma = mg)
 end
 
 """
@@ -794,6 +957,12 @@ channel's options applied:
   values the model has. Anything else throws; they used to be ignored.
 """
 function _phot_namedtuple(ch::AbstractDict)
+    known = ("source", "data", "limb_darkening", "gravity_darkening",
+             "supersample", "exposure_time", "dilution", "jitter")
+    bad = [String(k) for k in keys(ch) if !(String(k) in known)]
+    isempty(bad) || throw(ArgumentError(
+        "transit channel: unknown option(s) $(join(repr.(bad), ", ")); it takes " *
+        join(known[3:end], ", ")))
     ld = get(ch, "limb_darkening", "quadratic")
     Symbol(ld) in (:quadratic, :kipping) || throw(ArgumentError(
         "transit channel: limb_darkening = $(repr(ld)) is not implemented; " *
@@ -835,7 +1004,7 @@ _planet_spec(nt::NamedTuple) = nt
 _planet_spec(n::Integer; block = NamedTuple()) =
     NamedTuple{Tuple(Symbol("k$i") for i in 1:n)}(Tuple(block for _ in 1:n))
 _planet_spec(r::AbstractVector; block = NamedTuple()) =
-    _planet_spec(maximum(r); block)
+    _planet_spec(isempty(r) ? 0 : maximum(r); block)
 
 """
     default_rv_planet(t, rv) -> NamedTuple
@@ -1670,10 +1839,20 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                     output_dir = nothing, extra::AbstractDict = Dict(), kwargs...)
-    mode = secondary === nothing ? "BINARY_RV" : "SB2"
+    # One mode for SB1 and SB2: BINARY_RV. SB2 is not a mode; it is carried by
+    # a `component` tag on every RV row (1 = primary, 2 = secondary), which the
+    # run_job RV parser turns into `rv_comp`. This used to send planet_mode
+    # "SB2" (rejected by the validator) and a `rv_secondary` key nothing reads.
+    mode = "BINARY_RV"
     data = _data_block(; rv)
-    secondary === nothing || (data["rv_secondary"] =
-        _data_block(; rv = secondary)["rv"])
+    if secondary !== nothing
+        v1 = data["rv"]["values"]
+        v2 = _data_block(; rv = secondary)["rv"]["values"]
+        vals = Dict{String,Any}(k => vcat(v1[k], v2[k])
+                                for k in ("bjd", "rv", "rv_err", "instrument"))
+        vals["component"] = vcat(fill(1, length(v1["bjd"])), fill(2, length(v2["bjd"])))
+        data["rv"] = Dict("values" => vals)
+    end
     cfg = Dict{String,Any}("version" => "1.0",
         "output_dir" => output_dir === nothing ? mktempdir() : String(output_dir),
         "star" => Dict{String,Any}(star), "data" => data,

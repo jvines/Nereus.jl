@@ -594,8 +594,22 @@ radii, temperatures, transit observables) a planet reports:
   contiguous copy, every draw through its own P, e and ω), and `Mo_deg`, the
   mean anomaly at `t_ref` (the data's `data.t_ref`, the epoch the `:Mo` anchor
   uses) in degrees, median in [0, 360) like a sampled `Mo_k` on U(0, 2π).
-  `Mo_deg` needs `t_ref` and is left out without it. A fit that samples Mo, Tp
-  or Tc reports none of them here.
+  `Mo_deg` needs `t_ref` and is left out without it. The other anchors report
+  the epochs they do not sample the same way: `time = :Tc` gives `Tp` and
+  `Mo_deg`, `:Tp` gives `Tc` and `Mo_deg`, `:Mo` gives `Tp` and `Tc` (with
+  `t_ref`, the epoch Mo is measured at). The sampled anchor is not repeated.
+- `Tsec` (BJD) for a transiting planet: the secondary conjunction after `Tc`
+  (true anomaly 3π/2 − ω; the occultation's mid-time at i = 90°).
+- `g_p` (m/s²), the planet's surface gravity G·M_p/R_p², wherever its mass and
+  radius are; `mass_ratio` (M_p/M★) where the transit geometry determined it;
+  `p_transit`, the geometric transit probability (R★/a)(1 + e sin ω)/(1 − e²),
+  for a planet with no transit in the model and a known a/R★.
+- for an astrometric planet, `mass_jup`/`mass_earth` from the model's own mass
+  whether or not it has RVs, and (without a transit) `a_Rs` from its `a_au`.
+- for an SB2 binary, besides `mass_ratio_q`, `M_A_sini3`, `M_B_sini3` (and
+  `M_A`, `M_B`, `inc_deg` with astrometry): `omega_deg`, the projected relative
+  semi-major axis `a_sini_au` = (K_A + K_B) P √(1 − e²)/2π, and `a_au` with the
+  inclination.
 - `a_mas` (mas) and `alpha_star_uas` (μas) for planets whose block carries
   absolute astrometry: the relative orbit's semi-major axis as an angle,
   `a·ϖ`, and the host's reflex orbit, `a·ϖ·M_sec/(M_pri+M_sec)`, the
@@ -694,12 +708,14 @@ function compute_derived(chains, params::Params;
                         _draws(chains, Symbol(nm)) :
                         fill(get_param(Theta{Float64}(params), nm), n_samples)
             KA = draws("K_A_k$k"); KB = draws("K_B_k$k"); Pv = draws("P_k$k")
-            ev = if parametrization.ew === :sesinw
-                se = draws("sesinw_k$k"); sc = draws("secosw_k$k"); se.^2 .+ sc.^2
+            ev, wv = if parametrization.ew === :sesinw
+                se = draws("sesinw_k$k"); sc = draws("secosw_k$k")
+                se.^2 .+ sc.^2, atan.(se, sc)
             elseif parametrization.ew === :esinw
-                es = draws("esinw_k$k"); ec = draws("ecosw_k$k"); sqrt.(es.^2 .+ ec.^2)
+                es = draws("esinw_k$k"); ec = draws("ecosw_k$k")
+                sqrt.(es.^2 .+ ec.^2), atan.(es, ec)
             else
-                draws("ecc_k$k")
+                draws("ecc_k$k"), draws("w_k$k")
             end
             omE = max.(1 .- ev.^2, 0.0).^(3/2)
             Ksum = KA .+ KB
@@ -710,6 +726,13 @@ function compute_derived(chains, params::Params;
             derived["M_B_sini3"]    = MB_sini3
             derived["P_days"]       = Pv
             derived["ecc"]          = ev
+            # ω of the primary's orbit, one contiguous interval like a planet's
+            sb_active = (s = Symbol("planet_active_$k"); s in chain_syms ?
+                         _draws(chains, s) .> 0.5 : nothing)
+            derived["omega_deg"] = _contiguous_deg(wv, sb_active, _deg_lo_ref("w_k$k"))
+            # Projected relative semi-major axis, a sin i = (K_A + K_B) P √(1−e²)/2π
+            asini = Ksum .* (Pv .* _DS) .* sqrt.(max.(1 .- ev.^2, 0.0)) ./ (2π) ./ AU_M
+            derived["a_sini_au"] = asini
             if Symbol("inc_k$k") in chain_syms           # astrometric SB2 → absolute
                 inc = fold_inclination.(_draws(chains, Symbol("inc_k$k")))
                 # (folded: a cyclic inclination; src/circular.jl)
@@ -717,6 +740,7 @@ function compute_derived(chains, params::Params;
                 derived["M_A"]     = MA_sini3 ./ s3
                 derived["M_B"]     = MB_sini3 ./ s3
                 derived["inc_deg"] = rad2deg.(inc)
+                derived["a_au"]    = asini ./ max.(sin.(inc), 1e-6)
             end
             push!(results, DerivedParams("binary_$k", derived))
             continue
@@ -790,27 +814,60 @@ function compute_derived(chains, params::Params;
         # through its own P, so Tc carries its covariance with P exactly. The
         # phase is made contiguous first, so every draw lands in the same copy
         # of the orbit.
-        if parametrization.time === :phic
-            nm = "phic_k$k"
-            ph = _col(nm)
-            nm in circ && (ph = circular_contiguous(ph; period = 2π,
-                                                    lo_ref = _circ_ref(nm),
-                                                    mask = active))
-            Tc = phic_to_tc.(ph, P, parametrization.t_ref_c)
-            derived["Tc"] = Tc
-            # Tp = Tc − P·M_c/2π, M_c the mean anomaly of the conjunction
-            # (`tc_to_tp`). M_c lives on a circle: at low e, where ω is free, it
-            # covers it, and read in (−π, π] it would put Tp in two copies a
-            # period apart. Made contiguous, Tp is one copy next to Tc.
-            Mc = (Tc .- tc_to_tp.(Tc, P, e, w)) .* (2π) ./ P
-            Mc = circular_contiguous(Mc; period = 2π, lo_ref = -π, mask = active)
+        # The other anchors report the same epochs: under :Tc the periastron
+        # time and Mo, under :Tp the transit time and Mo, under :Mo (which needs
+        # the data's t_ref) both times. The sampled anchor is never repeated.
+        # M_c, the mean anomaly of the conjunction, is made contiguous for the
+        # same reason in every branch: at low e, where ω is free, it covers the
+        # circle, and read in (−π, π] it would put the derived epoch in two
+        # copies a period apart. Made contiguous, it is one copy next to the
+        # sampled one.
+        tanchor = parametrization.time
+        Tc_vec = nothing                     # conjunction time, for Tsec below
+        _mc_contig(Mc) = circular_contiguous(Mc; period = 2π, lo_ref = -π,
+                                             mask = active)
+        if tanchor === :phic || tanchor === :Tc
+            if tanchor === :phic
+                nm = "phic_k$k"
+                ph = _col(nm)
+                nm in circ && (ph = circular_contiguous(ph; period = 2π,
+                                                        lo_ref = _circ_ref(nm),
+                                                        mask = active))
+                Tc = phic_to_tc.(ph, P, parametrization.t_ref_c)
+                derived["Tc"] = Tc
+            else
+                Tc = _col("Tc_k$k")
+            end
+            # Tp = Tc − P·M_c/2π (`tc_to_tp`)
+            Mc = _mc_contig((Tc .- tc_to_tp.(Tc, P, e, w)) .* (2π) ./ P)
             Tp = Tc .- P .* Mc ./ (2π)
             derived["Tp"] = Tp
-            # Mo, the mean anomaly at the data's t_ref, as the :Mo anchor reads
-            # it: Tp = t_ref − Mo·P/2π. In the [0, 360) window of its U(0, 2π).
-            t_ref === nothing ||
-                (derived["Mo_deg"] = _contiguous_deg(tp_to_mo.(Tp, P, Float64(t_ref)),
-                                                     active, 0.0))
+            Tc_vec = Tc
+        elseif tanchor === :Tp || (tanchor === :Mo && t_ref !== nothing)
+            if tanchor === :Tp
+                Tp = _col("Tp_k$k")
+            else
+                nm = "Mo_k$k"
+                Mo = _col(nm)
+                nm in circ && (Mo = circular_contiguous(Mo; period = 2π,
+                                                        lo_ref = _circ_ref(nm),
+                                                        mask = active))
+                Tp = mo_to_tp.(Mo, P, Float64(t_ref))
+                derived["Tp"] = Tp
+            end
+            # Tc = Tp + P·M_c/2π (`tp_to_tc`)
+            Mc = _mc_contig((tp_to_tc.(Tp, P, e, w) .- Tp) .* (2π) ./ P)
+            Tc = Tp .+ P .* Mc ./ (2π)
+            derived["Tc"] = Tc
+            Tc_vec = Tc
+        else
+            Tp = nothing
+        end
+        # Mo, the mean anomaly at the data's t_ref, as the :Mo anchor reads it:
+        # Tp = t_ref − Mo·P/2π. In the [0, 360) window of its U(0, 2π).
+        if tanchor !== :Mo && t_ref !== nothing && Tp !== nothing
+            derived["Mo_deg"] = _contiguous_deg(tp_to_mo.(Tp, P, Float64(t_ref)),
+                                                active, 0.0)
         end
 
         # Semi-amplitude (RV planets). Under :a_driven / :M_sec_driven the RV
@@ -943,8 +1000,14 @@ function compute_derived(chains, params::Params;
         end
 
         # An astrometric planet's a_au is the model's own `planet_a` (total mass,
-        # per draw), so a_au * plx == a_mas exactly.
-        want_ang && (derived["a_au"] = a_model)
+        # per draw), so a_au * plx == a_mas exactly. Without a transit its a/R★
+        # follows from that a and R★, not from the minimum-mass a above, so
+        # T_eq and the insolation read the same orbit as a_au.
+        if want_ang
+            derived["a_au"] = a_model
+            !has_geom && rs !== nothing &&
+                (derived["a_Rs"] = a_model .* AU_CM ./ (rs .* _RS))
+        end
 
         # Inclination (transit planets)
         if has_geom
@@ -979,11 +1042,16 @@ function compute_derived(chains, params::Params;
         # Astrometric planets with a sampled K (:K_driven): the true mass is the
         # model's own `planet_M_sec` (mass function inverted at the sampled
         # inclination), per draw, so it is the likelihood's mass.
-        if has_rv && want_ang
+        # Astrometry without RVs samples the mass itself (M_sec_k, M_sun), and
+        # the table only ever showed it there: the same model mass in M_jup and
+        # M_earth, like every other planet.
+        if want_ang
             m_jup = msec_model .* (_MS / _MJ)
             derived["mass_jup"] = m_jup
             derived["mass_earth"] = m_jup .* (_MJ / _ME)
         end
+        # The companion-to-star mass ratio the transit geometry used (q above).
+        q_vec === nothing || (derived["mass_ratio"] = q_vec)
 
         # Planet radius (transit + stellar radius)
         if has_geom && rs !== nothing
@@ -1097,6 +1165,24 @@ function compute_derived(chains, params::Params;
             derived["T14"] = T14
             derived["T23"] = T23
 
+            # Secondary conjunction (the occultation's mid-time at i = 90°), the
+            # first one after Tc: the true anomaly goes from π/2 − ω at the
+            # transit (the convention of `tc_to_tp`) to 3π/2 − ω, and
+            # Tsec = Tc + P·(M_s − M_c)/2π with M_s − M_c taken in [0, 2π).
+            # At e = 0 it is Tc + P/2.
+            if Tc_vec !== nothing
+                Tsec = Vector{Float64}(undef, ns_k)
+                @inbounds for j in 1:ns_k
+                    ec = clamp(e[j], 0.0, 1.0 - eps())
+                    fac = sqrt((1 - ec) / (1 + ec))
+                    Ec = 2 * atan(tan((π / 2 - w[j]) / 2) * fac)
+                    Es = 2 * atan(tan((3π / 2 - w[j]) / 2) * fac)
+                    dM = mod((Es - ec * sin(Es)) - (Ec - ec * sin(Ec)), 2π)
+                    Tsec[j] = Tc_vec[j] + P[j] * dM / (2π)
+                end
+                derived["Tsec"] = Tsec
+            end
+
             # Transit-derived stellar density (photoeccentric cross-check):
             # invert rho_s_to_a_Rs.  That map is, with ρ in SOLAR units (ρ_sun
             # = RHO_SUN_CGS), G_CGS, P_sec = P·86400:
@@ -1125,6 +1211,18 @@ function compute_derived(chains, params::Params;
         if haskey(derived, "mass_jup") && haskey(derived, "radius_jup")
             rho_p = planet_density.(derived["mass_jup"], derived["radius_jup"])
             derived["density_gcc"] = rho_p
+            # Surface gravity g_p = G M_p / R_p², same mass and radius (m/s²)
+            derived["g_p"] = G_SI .* (derived["mass_jup"] .* M_JUP_KG) ./
+                             (derived["radius_jup"] .* R_JUP_M) .^ 2
+        end
+
+        # Geometric transit probability of a planet the model has no transit
+        # for (Winn 2010 eq. 9, at the conjunction f = π/2 − ω of `tc_to_tp`):
+        #   p = (R★/a) (1 + e sin ω) / (1 − e²)
+        # R★/a only; the planet's own radius is unknown without a transit.
+        if !has_geom && haskey(derived, "a_Rs")
+            derived["p_transit"] = (1 .+ e .* sin.(w)) ./
+                                   (derived["a_Rs"] .* max.(1 .- e .^ 2, eps()))
         end
 
         # Equilibrium temperature

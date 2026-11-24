@@ -3,6 +3,141 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## 0.9.9
+
+### Fixed
+
+- **`fit_rv` takes an RV channel, and every RV channel option reaches the
+  model.** `fit_rv` accepted only a bare instrument map, so astronereus passed
+  it the channel's `data` alone and `fit_rv(rv, trend_order=1)` fitted no
+  trend. It now takes the channel dict `fit_joint` takes (the instrument map
+  still works). `_target_from` (fit_rv, fit_joint, replot) read only `jitter`
+  and `trend_order` from an RV channel; `gamma_per_instrument = false` (one
+  offset), `share` (sigma/gamma groups, merged with `sharing`) and
+  `marginalize_gamma` now build the model too, and `jitter` takes a prior dict
+  or a per-instrument mapping. `indicators` and unknown keys throw, as do a
+  `trend_order` keyword that disagrees with the channel's, a sharing category
+  given in both places, and a channel `jitter` together with
+  `priors["sigma_<inst>"]`. Unknown transit-channel keys throw too.
+  `PY_API_VERSION` is 4.
+- `fit_joint` dropped an RM, tomography, TTV or SB channel without a word, and
+  a second RV or transit channel replaced the first; each throws now.
+- `build_target` takes `marginalize_gamma`.
+
+- **A fit with no planet runs.** `fit_rv(planets = 0, trend_order = 1)` (and
+  `planets = []`, which is what a JSON `[]` from astronereus is) stopped
+  before sampling: `build_target` refused an empty planet set and
+  `_planet_spec` took the maximum of an empty list. A radial-velocity-only
+  target may now have no planet: offsets, jitters and the `dvdt` / `d2vdt2`
+  trend are fitted, and the summary, tables and RV plots are written. A
+  transit or astrometric target still needs a planet.
+- **The notch detrender keeps transit depths.** Around every excluded run --
+  a dip found by the search (`refine`, the default) or a `transit_mask` built
+  from an ephemeris -- the trend was a per-window poly2 extrapolated from clean
+  data on one side only, and the old repair bridged each run with a chord
+  between two such extrapolated values. On TOI-4939 TESS S103 (window 0.5 d,
+  no ephemeris) a false dip just after egress left a 20-min clean stretch
+  whose extrapolated trend tilted the chord: a 6.5 ppt transit came out at
+  8.7 ppt. Each run of excluded cadences, plus the clean cadences whose window
+  is mostly excluded on one side, is now bridged by one σ-clipped poly2 fitted
+  to the raw clean flux on both flanks (and inside the run), spanning about
+  one window; a run at a segment edge continues the straight line of its
+  one flank. Injected 6 ppt transits
+  in synthetic data (rotation 0-0.8 %, 1.5 ppt noise): per-transit depth rms
+  0.52-0.54 → 0.22-0.28 ppt without an ephemeris, 0.40 → 0.26 ppt with a
+  `transit_mask` (white-noise floor 0.20 ppt). Transits injected into real
+  TESS sectors of TOI-4939, TOI-4680 and TIC 275647095: with a `transit_mask`
+  the depth-error rms fell in 13 of 16 sectors (worst single transit 86 → 16
+  ppt, at a segment edge); without one it fell 2-3× for TOI-4939 (window
+  0.5 d) and was mixed (±50 %) for the 3 T14 windows on the two strongly
+  variable hosts, where chains of false dips remain the limit -- prefer a
+  `transit_mask` there. Light curves already detrended with the notch should
+  be detrended again.
+
+- **`detrend_savgol` with a `transit_mask` anchors each masked run on averaged
+  flanks.** The interpolation across a masked run started and ended at the
+  single bracketing flux points, whose noise went straight into the trend
+  across the transit (per-transit depth rms 0.68 → 0.30 ppt in the same test).
+  Each anchor is now the mean of up to 30 nearest unmasked points.
+
+- **The φ_c epoch is never in a gap between light curves.** The default
+  `t_ref_c`, the 1/σ²-weighted mean of the photometric times, can land far
+  from any data when light curves span years (TIC 275647095: 53 d from the
+  nearest point). There P and φ_c are tied along narrow ridges, and
+  `pt_emcee` walkers started from prior draws stalled on 7×–35× aliases of the
+  17.06 d period. An epoch more than 1 d from every photometric time it was
+  computed from (`PHIC_EPOCH_GAP_TOL`) now moves to the nearest one; an epoch
+  already within the data is unchanged, so existing fits are too. The median
+  used when no point has a usable error is moved the same way.
+
+- **`fit_binary` with a `secondary` runs.** It sent planet mode `"SB2"`, which
+  `run_job` rejects, and put the secondary RVs under a key nothing read. It now
+  sends `BINARY_RV` with both components in one RV block tagged by `component`.
+
+- **The RV time series draws the trend.** With `trend_order` 1 or 2 the
+  `rv_timeseries` curve was the Keplerians alone around zero, while the
+  residuals took the trend out, so on a drifting star the curve missed the data.
+  The curve is now the likelihood's mean minus γ: Keplerians plus
+  `dvdt·(t − t_ref) + d2vdt2·(t − t_ref)²`, with the likelihood's `t_ref`, from
+  one shared trend routine (`rv_trend`). It is labelled "Keplerian + trend"
+  when a trend is fitted. `rv_components` draws the trend as its own curve,
+  includes it in "total", and subtracts it from the residuals, which it used to
+  leave in. The phase-folds already subtracted the trend from the data and are
+  unchanged. A whole-model posterior band (`compute_ci_bands` without `planet`)
+  includes the trend too.
+- **Trend coefficients carry units in every table and figure label.** `dvdt`
+  is m/s/day and `d2vdt2` m/s/day^2 (they had no unit); the CCF centre
+  trends `ccf_gdot_*` / `ccf_gddot_*` are km/s/day and km/s/day^2, and
+  `ccf_gamma_*`, `ccf_K_*` and `ccf_fwhm_*` km/s. The photometric baseline
+  coefficients `phot_c*` stay dimensionless: they multiply a normalized time.
+- **Every parameter has a unit, the same on every output path.** An audit of
+  every name a layout can hold found more that reached the tables, summary JSON
+  and figure labels with no unit, or the wrong one:
+  - `i_star` (gravity darkening) is sampled in radians and was published as
+    raw radians with no unit; it is now converted and labelled deg.
+  - `M_pri` is M_sun; `v_sin_i_star`, `beta_p` (ARoME) m/s;
+    `tomo_sigma_line_*` and `tomo_ell_v_*` km/s.
+  - GP and activity hyperparameters, by the channel the model acts on (m/s for
+    RVs, dimensionless for flux and tomography maps): `gp_sigma`,
+    `matern_sigma`, `night_sigma`, `harm_amp` in the channel's unit; periods
+    and time scales (`gp_period`, `matern_rho`, `harm_period`,
+    `gp_act_period`, `gp_act_lambda_e`, `ind_floor_period`,
+    `ind_floor_lambda_e`, `ma_beta`, `ar_alpha`) in d; the log-parametrised
+    celerite terms as ln(m2/s2*day) (`gp_log_S0`, RV), ln(1/day)
+    (`gp_log_omega0`), ln(m2/s2) (`gp_log_amp`, RV), ln(day)
+    (`gp_log_timescale`, `gp_log_period`); `Vc`, `Vr`, `C_*`, `jit_base_*`,
+    `jit_act_*` m/s and `Cdot_*` m/s*day (indicators are normalised to unit
+    RMS by default, so indicator-side amplitudes are dimensionless).
+  - A shared photometric group (`jitter_TESS+K2`) was labelled m/s, as if
+    it were an RV jitter; instrument slots are now classified by the layout,
+    not by the name.
+  - Derived rows `lambda_deg`, `lambda_abs_deg`, `i_star_deg`, `psi_deg`
+    had no unit (deg), and the SB2 masses `M_A`, `M_B`, `M_A_sini3`,
+    `M_B_sini3` none (M_sun).
+  The .tex tables and the figure labels now render units from one table
+  (`_UNIT_FORMS`), and dimensionless parameters keep the empty unit, now as an
+  explicit rule (`sci_unit_known`) rather than a fall-through.
+
+### Added
+
+- **More derived parameters, from what every fit already samples.**
+  - The epochs the other time anchors sample: `time = :Tc` now reports `Tp`
+    and `Mo_deg`, `:Tp` reports `Tc` and `Mo_deg`, and `:Mo` reports `Tp`
+    and `Tc` (as `:phic` already did).
+  - `Tsec` (BJD), the secondary conjunction after `Tc`, for transiting
+    planets.
+  - `g_p` (m/s2), the planet's surface gravity G·M_p/R_p², and `mass_ratio`,
+    M_p/M★, where the transit geometry determines them.
+  - `p_transit`, the geometric transit probability (R★/a)(1 + e sin ω)/(1 − e²)
+    (Winn 2010), for a planet with no transit in the model and a known a/R★.
+  - Astrometric planets that sample the mass (`M_sec_driven`, `a_driven`) now
+    report `mass_jup`/`mass_earth`, and without a transit their `a_Rs` (hence
+    `Teq`, insolation) follows from the model's `a_au` rather than from the
+    minimum-mass orbit.
+  - SB2 binaries report `omega_deg`, the projected relative semi-major axis
+    `a_sini_au` = (K_A + K_B) P √(1 − e²)/2π, and `a_au` with the inclination.
+  Fitting and defaults are unchanged; these are derived per posterior draw.
+
 ## 0.9.8
 
 ### Added

@@ -160,28 +160,54 @@ function detrend_savgol(t::Vector{Float64}, flux::Vector{Float64},
     return (; flux_detrended, trend, segments, transit_mask, sector_id = sid_out)
 end
 
-"""Linear interpolation across masked points."""
+"""
+Linear interpolation across masked runs (index space).
+
+Each run is bridged between two anchors, one per side: the mean flux, at the
+mean index, of the `min(run length, 30)` (at least 3) nearest unmasked points
+on that side. Anchoring on the single bracketing point, as before, put that
+point's full noise into every interpolated value and so into the trend
+across the transit. A run at an edge is carried flat from its one anchor.
+"""
 function _interp_masked(y::AbstractVector{<:Real}, mask::AbstractVector{Bool})
     out = Vector{Float64}(y)
     n = length(out)
     i = 1
     while i <= n
         if mask[i]
-            # Find run of masked points
             j = i
             while j <= n && mask[j]
                 j += 1
             end
-            # Interpolate from i-1 to j (boundaries)
-            left  = i > 1 ? out[i - 1] : (j <= n ? out[j] : zero(Float64))
-            right = j <= n ? out[j] : left
-            for k in i:(j - 1)
-                if i > 1 && j <= n
-                    α = (k - (i - 1)) / (j - (i - 1))
-                    out[k] = (1 - α) * left + α * right
-                else
-                    out[k] = (i > 1) ? left : right
+            # masked run is i:(j-1)
+            K = clamp(j - i, 3, 30)
+            xl = 0.0; yl = 0.0; nl = 0
+            k = i - 1
+            while k >= 1 && nl < K
+                if !mask[k]
+                    xl += k; yl += y[k]; nl += 1
                 end
+                k -= 1
+            end
+            xr = 0.0; yr = 0.0; nr = 0
+            k = j
+            while k <= n && nr < K
+                if !mask[k]
+                    xr += k; yr += y[k]; nr += 1
+                end
+                k += 1
+            end
+            if nl > 0 && nr > 0
+                xl /= nl; yl /= nl; xr /= nr; yr /= nr
+                for q in i:(j - 1)
+                    α = (q - xl) / (xr - xl)
+                    out[q] = (1 - α) * yl + α * yr
+                end
+            elseif nl > 0 || nr > 0
+                v = nl > 0 ? yl / nl : yr / nr
+                out[i:(j - 1)] .= v
+            else
+                out[i:(j - 1)] .= 0.0
             end
             i = j
         else
