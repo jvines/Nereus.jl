@@ -1098,9 +1098,30 @@ end
 
 
 """
+    _derived_with_units(stats) -> Vector{Pair{String,Dict{String,Any}}}
+
+The derived block as sent to the client: each `name => ParamStats` as its fields
+plus `unit`, the `derived_unit` of the name without its `_k<n>` planet suffix. A
+name no rule knows gets no `unit`, and the client falls back to its name map.
+"""
+function _derived_with_units(stats)
+    out = Vector{Pair{String,Dict{String,Any}}}()
+    for (name, ps) in stats
+        d = Dict{String,Any}("best" => ps.best, "unc_lo" => ps.unc_lo,
+                             "unc_hi" => ps.unc_hi, "ci1" => collect(ps.ci1),
+                             "ci2" => collect(ps.ci2), "ci3" => collect(ps.ci3))
+        u = _derived_unit_lookup(replace(name, r"_k\d+$" => ""))
+        u === nothing || (d["unit"] = u)
+        push!(out, name => d)
+    end
+    return out
+end
+
+"""
     _summarise_params(chains, params) -> Dict
 
-Per-parameter posterior summary: median plus asymmetric 1/2/3-sigma bounds.
+Per-parameter posterior summary: median plus asymmetric 1/2/3-sigma bounds, and
+`unit`, the unit of the raw chain values (`chain_param_unit`).
 The six bounds come from one sorted copy of the draws (the same values as six
 `quantile` calls, which sorted it six times).
 """
@@ -1115,11 +1136,17 @@ function _summarise_params(chains, params)
         sym in names_in || continue
         v = _draws(chains, sym)
         q = quantile(v, (0.16, 0.84, 0.025, 0.975, 0.0015, 0.9985))
-        out[name] = Dict{String,Float64}(
+        out[name] = Dict{String,Any}(
             "median" => median(v),
             "lo16"   => q[1], "hi84"   => q[2],
             "lo2sig" => q[3], "hi2sig" => q[4],
             "lo3sig" => q[5], "hi3sig" => q[6])
+        # Unit of the RAW chain values (angles in rad), from the same rules as the
+        # science tables, resolved per instrument channel so a photometric offset
+        # or jitter is not read as m/s. Absent for a name no rule knows: the client
+        # then falls back to its own name map.
+        u = chain_param_unit(name, params)
+        u === nothing || (out[name]["unit"] = u)
     end
     return out
 end
@@ -1258,7 +1285,8 @@ end
 # and go to the target. Split off before `_target_from`, which takes none of
 # them, and handed to `_finish`.
 const _STAR_DERIVED_KEYS = (:T_eff, :J_mag, :K_mag, :Ab,
-                            :sigma_M_s, :sigma_R_s, :sigma_T_eff)
+                            :sigma_M_s, :sigma_R_s, :sigma_T_eff,
+                            :distance_pc, :trend_sep_arcsec, :separation_epoch)
 function _split_star_kwargs(kwargs)
     star = Dict{Symbol,Any}(k => v for (k, v) in pairs(kwargs)
                             if k in _STAR_DERIVED_KEYS)
@@ -1395,7 +1423,11 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
             summarize_derived(chains, target.params;
                               M_s   = st.M_s, R_s = st.R_s, T_eff = st.T_eff,
                               J_mag = st.J_mag, K_mag = st.K_mag, Ab = st.Ab,
-                              t_ref = target.data.t_ref)
+                              t_ref = target.data.t_ref, data = target.data,
+                              distance_pc = st.distance_pc,
+                              trend_sep_arcsec = st.trend_sep_arcsec,
+                              separation_epoch = st.separation_epoch) |>
+            _derived_with_units
     catch err
         summary["derived_error"] = sprint(showerror, err)
     end

@@ -226,6 +226,26 @@ end
 sci_unit_known(name::AbstractString, params::Params) =
     _sci_unit_lookup(name, params) !== nothing
 
+"""
+    chain_param_unit(name, params) -> Union{String, Nothing}
+
+Unit of the RAW chain values of `name`: what a draw holds, so a sampled angle is
+`"rad"` where the tables report `"deg"`. The same rules as `sci_param_unit` (one
+source, resolved from the built target's instrument channels), and what the fit
+summary sends the client and `chains.nc` stores as the `units` attribute of every
+variable. `nothing` for a name no rule knows, or for a `params` that has no
+layout to resolve it against; callers then send no unit rather than a guess.
+"""
+function chain_param_unit(name::AbstractString, params)
+    r = try
+        _sci_unit_lookup(name, params)
+    catch
+        nothing
+    end
+    r === nothing && return nothing
+    return r[2] ? "rad" : r[1]
+end
+
 # --- per-parameter active mask (trans-dim conditioning) ----------------
 # Draws over which `name` is DEFINED: its planet/noise component active. Returns
 # `nothing` for always-defined params (γ, jitter, planet params under fixed Nₚ).
@@ -432,6 +452,12 @@ const _DERIVED_UNITS = Dict{String, String}(
     "T14" => "hr",          "T23" => "hr",
     "depth_ppm" => "ppm",   "rho_star_transit" => "g/cm3",
     "grazing_frac" => "",
+    # companion argument of periastron, sky separation and position angle
+    "omega_p_deg" => "deg", "sep_mas" => "mas", "pa_deg" => "deg",
+    # system rows (no planet suffix): RV-trend bounds, stellar M and log g
+    "trend_P_min" => "d",   "trend_K_min" => "m/s",
+    "trend_Msini_min" => "M_jup", "trend_Mc_min_torres" => "M_jup",
+    "M_s_rho" => "M_sun",   "logg_s" => "dex",
     # the epochs the other time anchors sample: transit time, periastron time,
     # mean anomaly at t_ref; and the secondary conjunction after Tc
     "Tc" => "BJD",          "Tp" => "BJD",        "Mo_deg" => "deg",
@@ -481,7 +507,9 @@ function science_derived(chains, params::Params;
                           J_mag=nothing, K_mag=nothing, Ab=0.0,
                           sigma_M_s=nothing, sigma_R_s=nothing, sigma_T_eff=nothing,
                           ms_frac=0.10, rs_frac=0.05, teff_abs=150.0,
-                          seed::Int=20260620, t_ref=nothing)
+                          seed::Int=20260620, t_ref=nothing, data=nothing,
+                          distance_pc=nothing, trend_sep_arcsec=nothing,
+                          separation_epoch=nothing)
     cfg = params.config
     M_s === nothing && !isnan(cfg.M_s) && (M_s = cfg.M_s)
     R_s === nothing && hasproperty(cfg, :R_s) && !isnan(cfg.R_s) && (R_s = cfg.R_s)
@@ -510,6 +538,7 @@ function science_derived(chains, params::Params;
     live = Set(_winning_planet_slots(chains, params))   # not 1:modal_np
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
+    rho_first = nothing        # first transiting planet's rho_star_transit
     # One planet slot at a time, in slot order: compute_derived holds some 25
     # vectors the length of the chain per slot, dropped once summarised.
     for kk in 1:cfg.max_kplanet
@@ -517,7 +546,8 @@ function science_derived(chains, params::Params;
         for dp in compute_derived(chains, params;
                                   M_s=ms_v, R_s=rs_v, T_eff=tf_v,
                                   J_mag=J_mag, K_mag=K_mag, Ab=Ab, planets = kk:kk,
-                                  t_ref = t_ref)
+                                  t_ref = t_ref, separation_epoch = separation_epoch)
+            rho_first === nothing && (rho_first = _first_rho_transit([dp]))
             k = parse(Int, split(dp.name, "_")[end])     # "planet_1" → 1
             k in live || continue
             mask = _planet_active_mask(chains, k)
@@ -540,6 +570,19 @@ function science_derived(chains, params::Params;
                 push!(entries, "$(key)_k$k" => sci_entry_dict(e))
             end
         end
+    end
+    # System and stellar rows (RV-trend bounds, M_s_rho, logg_s): one set, no
+    # planet suffix, over every draw (not conditioned on a planet being active).
+    sysv = compute_derived_system(chains, params; M_s=ms_v, R_s=rs_v, data=data,
+                                  distance_pc=distance_pc,
+                                  trend_sep_arcsec=trend_sep_arcsec,
+                                  rho_star=rho_first)
+    for (key, samp) in sort!(collect(sysv); by=first)
+        s = filter(isfinite, samp)
+        isempty(s) && continue
+        e = (stats=ParamStats!(s), unit=get(_DERIVED_UNITS, key, ""),
+             occupancy = 1.0, n_used = length(s))
+        push!(entries, key => sci_entry_dict(e))
     end
     conditioning = Dict{String, Any}("n_planets" => modal_np,
                                      "planet_slots" => sort!(collect(live)),
@@ -648,7 +691,8 @@ function _texsym(name::AbstractString)
     m = match(r"^(.*)_k(\d+)$", s)
     if m !== nothing
         base, k = m.captures[1], m.captures[2]
-        sym = Dict("P"=>"P", "K"=>"K", "ecc"=>"e", "omega_deg"=>"\\omega",
+        sym = Dict("P"=>"P", "K"=>"K", "ecc"=>"e", "omega_deg"=>"\\omega", "omega_p_deg"=>"\\omega_p",
+                   "sep_mas"=>"\\rho", "pa_deg"=>"\\mathrm{PA}",
                    "Mo"=>"M_0", "phic"=>"\\phi_c", "Tp"=>"T_p", "Tc"=>"T_c", "sesinw"=>"\\sqrt{e}\\sin\\omega",
                    "secosw"=>"\\sqrt{e}\\cos\\omega", "msini_earth"=>"M\\sin i",
                    "msini_jup"=>"M\\sin i", "mass_jup"=>"M_p", "mass_earth"=>"M_p",
@@ -677,6 +721,12 @@ function _texsym(name::AbstractString)
     end
     s == "plx"   && return "\$\\varpi\$"
     s == "rho_s" && return "\$\\rho_\\star\$"
+    s == "M_s_rho" && return "\$M_\\star(\\rho_\\star)\$"
+    s == "logg_s" && return "\$\\log g_\\star\$"
+    s == "trend_K_min" && return "\$K_{\\rm min,trend}\$"
+    s == "trend_P_min" && return "\$P_{\\rm min,trend}\$"
+    s == "trend_Msini_min" && return "\$(M\\sin i)_{\\rm min,trend}\$"
+    s == "trend_Mc_min_torres" && return "\$M_{c,\\rm min}^{\\rm Torres}\$"
     s == "i_star" && return "\$i_\\star\$"
     s == "M_pri" && return "\$M_{\\rm pri}\$"
     s == "v_sin_i_star" && return "\$v\\sin i_\\star\$"
@@ -717,7 +767,7 @@ const _UNIT_FORMS = Dict{String, Tuple{String, String}}(
     "deg" => ("deg", "\\mathrm{deg}"), "rad" => ("rad", "\\mathrm{rad}"),
     "mas" => ("mas", "\\mathrm{mas}"), "μas" => ("\$\\mu\$as", "\\mu\\mathrm{as}"),
     "AU" => ("AU", "\\mathrm{AU}"), "d" => ("d", "\\mathrm{d}"),
-    "hr" => ("hr", "\\mathrm{hr}"), "yr" => ("yr", "\\mathrm{yr}"),
+    "hr" => ("hr", "\\mathrm{hr}"), "yr" => ("yr", "\\mathrm{yr}"), "dex" => ("dex", "\\mathrm{dex}"),
     "K" => ("K", "\\mathrm{K}"), "BJD" => ("BJD", "\\mathrm{BJD}"),
     "ppm" => ("ppm", "\\mathrm{ppm}"),
 )
@@ -964,12 +1014,17 @@ function science_summary(out_dir::AbstractString, chains, params::Params, data::
                           result=nothing, formats=(:json, :csv, :ecsv, :dat, :tex),
                           M_s=nothing, R_s=nothing, T_eff=nothing,
                           J_mag=nothing, K_mag=nothing, Ab=0.0,
-                          sigma_M_s=nothing, sigma_R_s=nothing, sigma_T_eff=nothing)
+                          sigma_M_s=nothing, sigma_R_s=nothing, sigma_T_eff=nothing,
+                          distance_pc=nothing, trend_sep_arcsec=nothing,
+                          separation_epoch=nothing)
     fit_e, fit_c = science_fitted(chains, params)
     der_e, der_c = science_derived(chains, params; M_s=M_s, R_s=R_s, T_eff=T_eff,
                                     J_mag=J_mag, K_mag=K_mag, Ab=Ab,
                                     sigma_M_s=sigma_M_s, sigma_R_s=sigma_R_s,
-                                    sigma_T_eff=sigma_T_eff, t_ref=data.t_ref)
+                                    sigma_T_eff=sigma_T_eff, t_ref=data.t_ref, data=data,
+                                    distance_pc=distance_pc,
+                                    trend_sep_arcsec=trend_sep_arcsec,
+                                    separation_epoch=separation_epoch)
     modsel = science_model_selection(chains, params)
 
     tdir = joinpath(out_dir, "tables")
