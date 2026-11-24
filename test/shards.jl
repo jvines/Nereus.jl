@@ -251,7 +251,7 @@ const TEST_UNITS = [
     # Measured locally (arm64), on its own in a fresh process.
     (name = "test_plot_memory.jl", seconds = 111, files = ["test_plot_memory.jl"]),
     (name = "test_plot_precompile_workload.jl", seconds = 26, files = ["test_plot_precompile_workload.jl"]),
-    (name = "test_fit_precompile_workload.jl", seconds = 12, files = ["test_fit_precompile_workload.jl"]),
+    (name = "test_fit_precompile_workload.jl", seconds = 15, files = ["test_fit_precompile_workload.jl"]),
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 10, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 0, files = ["test_plot_patterns.jl"]),

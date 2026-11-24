@@ -8,16 +8,21 @@ git history (`git log --first-parent develop`).
 ### Changed
 
 - **The first fit in a fresh process no longer compiles for about two minutes.**
-  Nereus now precompiles the fit path (`src/fit_precompile.jl`): a tiny RV fit
-  through `fit_rv` and its post-fit stages with `pt_emcee`, and `run_job` on a
-  minimal config, in a temporary directory with fixed seeds. A first `fit_rv`
-  with the default outputs took 139 s and now takes 1.4 s; a first `run_job`
-  on the easy RV target 4.9 s, and a first `transdim_pt_emcee` one 15 s.
-  `Pkg.precompile()` of Nereus goes from about 22 s to about 156 s. The
+  Nereus now precompiles the fit path (`src/fit_precompile.jl`): tiny `fit_rv`,
+  `fit_transit`, `fit_astrometry` (inline HGCA and IAD, nothing fetched) and
+  `fit_joint` (RV + transit) fits with `pt_emcee`, post-fit included, and
+  `run_job` on a minimal config, in a temporary directory with fixed seeds.
+  First calls in a fresh process, before and after: `fit_rv` 139 s to 1.4 s,
+  `fit_transit` 93 s to 1.3 s, `fit_astrometry` 96 s to 1.2 s, `fit_joint`
+  106 s to 1.5 s; a first `run_job` on the easy RV target 4.9 s, and a first
+  `transdim_pt_emcee` one 15 s. `Pkg.precompile()` of Nereus goes from about 13 s
+  to about 150 to 165 s. The
   workload is on by default; switch it off with
   `set_preferences!(Nereus, "precompile_fit" => false)` (or `precompile_fit =
   false` under `[Nereus]` in a `LocalPreferences.toml`) and Nereus recompiles.
-  The figures stay a separate, opt-in workload (`precompile_plots`).
+  The figures stay a separate workload (`precompile_plots`, +30 s of precompile;
+  the release bundle turns it on, in nereus-py's `tools/build_bundle.sh`). With it
+  on, a first `fit_rv` with `plots = ["auto"]` takes 7.4 s instead of 21.9 s.
 
 ### Tests
 
