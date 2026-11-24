@@ -3,6 +3,35 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## 0.9.10
+
+### Added
+
+- **Every derived row sent to the client carries its `unit`** (`best`,
+  `unc_lo`, `unc_hi`, `ci1`-`ci3` plus `unit`, from the derived unit rules, the
+  `_k<n>` suffix stripped), so a client no longer guesses `trend_P_min` as m/s.
+
+- **Every entry of the fit summary's `params` block carries its `unit`**, and
+  every variable of `chains.nc` a `units` attribute: the unit of the raw chain
+  values (angles in rad, `inc_k1` -> `rad`), from `chain_param_unit`, which
+  reads the same rules as the science tables, resolved per instrument channel
+  (RV m/s, photometric relative flux, astrometric mas, CCF km/s). A name no rule
+  knows gets no `unit`, and a client without per-entry units falls back to its
+  own name map. The payload gains an optional field only; `PY_API_VERSION`
+  stays 4.
+
+- **Derived rows: ω_p, trend-implied companion bounds, sky position at an
+  epoch, stellar M★ and log g★.** Per planet: `omega_p_deg` (ω★ + 180°, median
+  in [0, 360)); `sep_mas` and `pa_deg` (east of north) at
+  `star.separation_epoch` (default `data.t_ref`), from the relative-astrometry
+  model's own orbit, for planets whose block carries astrometry. System rows
+  (no planet suffix, `compute_derived_system`) with an RV trend:
+  `trend_P_min` = the RV baseline T, `trend_K_min` = |γ̇|T/2π and
+  `trend_Msini_min`, the minimum M sin i of a companion with P ≥ T; with
+  `star.distance_pc` and `star.trend_sep_arcsec`, the Torres (1999) bound
+  `trend_Mc_min_torres`. Stellar: `M_s_rho` = (4π/3)ρ★R★³ and `logg_s` from
+  ρ★ (sampled `rho_s`, else the first transit's) and R★.
+
 ## 0.9.9
 
 ### Fixed

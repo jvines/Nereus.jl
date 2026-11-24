@@ -80,6 +80,9 @@ function save_chains(path::String, chains, params::Params;
             sym = Symbol(name)
             sym in has || continue
             v = defVar(ds, name, Float64, ("iter", "chain"))
+            # Unit of the raw values (angles in rad); absent when no rule knows it.
+            u = chain_param_unit(name, params)
+            u === nothing || (v.attrib["units"] = u)
             v[:, :] = _col(sym)
         end
 

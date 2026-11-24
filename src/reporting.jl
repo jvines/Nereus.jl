@@ -105,25 +105,33 @@ end
 """
     summarize_derived(chains, params; M_s=nothing, R_s=nothing,
                        T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0,
-                       t_ref=nothing)
+                       t_ref=nothing,
+                       data=nothing, distance_pc=nothing, trend_sep_arcsec=nothing,
+                       separation_epoch=nothing)
 
 Compute summary statistics for derived parameters (eccentricity,
 omega, msini, radius, etc.) using `compute_derived`. `t_ref` (the data's
 `data.t_ref`) lets a transit-phase fit report `Mo_deg`; see `compute_derived`.
+`data`, `distance_pc`, `trend_sep_arcsec` and `separation_epoch` feed the
+system rows (`compute_derived_system`) and the sky separation; the system and
+stellar rows are appended with no `_k<n>` suffix.
 
 Returns an ordered list of pairs: name => ParamStats.
 """
 function summarize_derived(chains, params::Params;
                             M_s=nothing, R_s=nothing,
                             T_eff=nothing, J_mag=nothing,
-                            K_mag=nothing, Ab=0.0, t_ref=nothing)
+                            K_mag=nothing, Ab=0.0, t_ref=nothing,
+                            data=nothing, distance_pc=nothing,
+                            trend_sep_arcsec=nothing, separation_epoch=nothing)
     # Fall back to config.M_s if available
     if M_s === nothing && !isnan(params.config.M_s)
         M_s = params.config.M_s
     end
     derived_vec = compute_derived(chains, params;
                                    M_s=M_s, R_s=R_s, T_eff=T_eff,
-                                   J_mag=J_mag, K_mag=K_mag, Ab=Ab, t_ref=t_ref)
+                                   J_mag=J_mag, K_mag=K_mag, Ab=Ab, t_ref=t_ref,
+                                   separation_epoch=separation_epoch)
     stats = Vector{Pair{String, ParamStats}}()
 
     for dp in derived_vec
@@ -132,6 +140,15 @@ function summarize_derived(chains, params::Params;
             label = "$(key)_k$(k_str)"
             push!(stats, label => ParamStats(samples))
         end
+    end
+    # System and stellar rows carry no planet suffix.
+    sysv = compute_derived_system(chains, params; M_s=M_s, R_s=R_s, data=data,
+                                  distance_pc=distance_pc,
+                                  trend_sep_arcsec=trend_sep_arcsec,
+                                  rho_star=_first_rho_transit(derived_vec))
+    for (key, samples) in sort!(collect(sysv); by=first)
+        s = filter(isfinite, samples)
+        isempty(s) || push!(stats, key => ParamStats(s))
     end
 
     return stats

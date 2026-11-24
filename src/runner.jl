@@ -1478,6 +1478,12 @@ function _build_star(s)
         sigma_M_s   = sig(:sigma_M_s),
         sigma_R_s   = sig(:sigma_R_s),
         sigma_T_eff = sig(:sigma_T_eff),
+        # Optional: distance [pc] and imaging separation [arcsec] for the
+        # Torres RV-trend bound, and the epoch (data time system) at which the
+        # companion sky separation is reported.
+        distance_pc      = let v = _get(s, :distance_pc; default = nothing); v === nothing ? nothing : Float64(v) end,
+        trend_sep_arcsec = let v = _get(s, :trend_sep_arcsec; default = nothing); v === nothing ? nothing : Float64(v) end,
+        separation_epoch = let v = _get(s, :separation_epoch; default = nothing); v === nothing ? nothing : Float64(v) end,
         # Which Gaia source is this star: `gaia_id` (a DR3 source_id) or `name`
         # (resolved to one). They only feed the default parallax prior of an
         # astrometric fit; see `_resolve_gaia_plx`.
@@ -1515,7 +1521,9 @@ function _star_science_kwargs(star)
     return (; M_s = f(star.M_s), R_s = f(star.R_s), T_eff = f(star.T_eff),
               J_mag = f(star.J_mag), K_mag = f(star.K_mag), Ab = star.Ab,
               sigma_M_s = star.sigma_M_s, sigma_R_s = star.sigma_R_s,
-              sigma_T_eff = star.sigma_T_eff)
+              sigma_T_eff = star.sigma_T_eff,
+              distance_pc = star.distance_pc, trend_sep_arcsec = star.trend_sep_arcsec,
+              separation_epoch = star.separation_epoch)
 end
 
 const _MASS_MODE = Dict(

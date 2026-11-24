@@ -168,6 +168,12 @@ rather than a single number trusted.
     "sigma_M_s": null,                     // M_sun
     "sigma_R_s": null,                     // R_sun
     "sigma_T_eff": null,                   // K
+    // Optional inputs to derived rows (see "derived" below). `distance_pc` (pc) and
+    // `trend_sep_arcsec` (imaging separation, arcsec) give the Torres (1999) RV-trend
+    // bound `trend_Mc_min_torres`. `separation_epoch` is the epoch (same time system as
+    // the data) at which `sep_mas_k<n>` / `pa_deg_k<n>` are evaluated; default is the
+    // data's reference epoch (`data.t_ref`, the median RV epoch).
+    "distance_pc": null, "trend_sep_arcsec": null, "separation_epoch": null,
     // Gaia DR3 parallax at runtime, for the default `plx` prior of an
     // astrometric fit. `gaia_id`: the DR3 source_id (integer, digits, or
     // "Gaia DR3 <id>"). `name`: a Simbad-resolvable name, mapped to its DR3
@@ -1067,6 +1073,18 @@ numbers live under `fitted` / `derived`
       "msini_earth_k1": { /*…*/ }, "a_au_k1": { /*…*/ }, "Teq_k1": { /*…*/ },
       // not-sampled quantities: P_days_k1 / P_yr_k1 (:a_driven), K_k1 (m/s; :a_driven and
       // :M_sec_driven), and for astrometric planets a_mas_k1 (mas) and alpha_star_uas_k1 (μas)
+      // omega_p_deg_k1 (deg): the companion's argument of periastron, omega_star + 180, in [0, 360).
+      // sep_mas_k1 (mas) / pa_deg_k1 (deg, east of north): companion sky separation and position
+      //   angle at star.separation_epoch (default data.t_ref), astrometric planets only.
+      // System and stellar rows carry no _k suffix:
+      //   RV trend (trend_order >= 1): trend_P_min (d) = T, the RV baseline; trend_K_min (m/s) =
+      //     |dv/dt| T / 2pi; trend_Msini_min (M_jup), the minimum M sin i of an unseen companion at
+      //     P = T (circular, exact mass function, stellar mass M_s). These follow from |dv/dt| <=
+      //     2 pi K / P for P >= T. With star.distance_pc and star.trend_sep_arcsec also
+      //     trend_Mc_min_torres (M_jup) = 0.0145 (d/pc)^2 (rho/arcsec)^2 |dv/dt| (m/s/yr).
+      //   M_s_rho (M_sun) = 4 pi/3 rho_star R_star^3 and logg_s (cgs dex) = log10(G M / R^2),
+      //     when rho_star (sampled rho_s, else the first transiting planet's rho_star_transit)
+      //     and R_s are known.
       "density_gcc_k1": { /*…*/ }, "TSM_k1": { /*…*/ }, "ESM_k1": { /*…*/ }
     }
   },
