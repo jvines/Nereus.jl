@@ -518,6 +518,39 @@ function _tempered_quotable(βs::AbstractVector, swap_acc::AbstractVector;
     return (true, "")
 end
 
+"""
+    SWAP_ACCEPT_WARN_BELOW
+
+Adjacent-rung swap acceptance under which a tempered ladder is considered
+broken (the threshold documented in the quickstart).
+"""
+const SWAP_ACCEPT_WARN_BELOW = 0.01
+
+"""
+    _warn_min_swap(who, βs, swap_acc)
+
+One `@warn` when the smallest adjacent swap acceptance is below
+[`SWAP_ACCEPT_WARN_BELOW`](@ref), naming the pair of rungs and suggesting more
+temperatures. Warning only: it never alters the sampling. Returns whether it
+warned.
+"""
+function _warn_min_swap(who::AbstractString, βs::AbstractVector, swap_acc::AbstractVector)
+    (isempty(swap_acc) || length(swap_acc) != length(βs) - 1) && return false
+    ok = findall(isfinite, swap_acc)      # a pair never attempted has no rate
+    isempty(ok) && return false
+    k = ok[argmin(swap_acc[ok])]
+    r = swap_acc[k]
+    r < SWAP_ACCEPT_WARN_BELOW || return false
+    @warn "$who: the minimum adjacent swap acceptance is " *
+          "$(round(100 * r, digits = 2))% (< $(100 * SWAP_ACCEPT_WARN_BELOW)%), " *
+          "between rungs $k and $(k + 1) (β = $(round(βs[k], sigdigits = 3)) and " *
+          "$(round(βs[k + 1], sigdigits = 3))). Replica exchange is effectively " *
+          "off across that gap, so the chains below it may not mix with the cold " *
+          "chain. Use more temperatures (a larger `n_temps` / `n_chains`)."
+    return true
+end
+
+
 # mode-Laplace is a Gaussian approximation at the posterior mode. It is reported
 # beside bridge sampling, never in its place, and its distance from bridge is
 # recorded (`mode_laplace_check.minus_bridge`). This warns only when that

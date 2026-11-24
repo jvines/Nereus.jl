@@ -226,6 +226,7 @@ function run_job(cfg::AbstractDict)
         for (k, v) in sci; k == "status" || (summary[k] = v); end
         summary["figures"] = figs
         isempty(pdfs) || (summary["figures_pdf"] = pdfs)
+        _add_root_figures!(summary, out_dir)
         summary["output_dir"] = out_dir     # run_job never reported it
 
         summary["elapsed_sec"] = time() - t0
@@ -3774,6 +3775,32 @@ function _run_tomography_job(cfg::AbstractDict, t0::Float64)
     summary["elapsed_sec"] = time() - t0
     open(joinpath(out_dir, "summary.json"), "w") do io
         JSON3.write(io, summary)
+    end
+    return summary
+end
+
+# `ppc.png` and `detection_limits.png` are written to the output directory
+# root, not under `plots/`, so the `plots/` manifest walk never sees them and a
+# client listing `summary["figures"]` never found them. They run after that walk
+# (the manifest is built first), so this adds them once they exist: only those
+# THIS job wrote (they are in `summary["plots"]`, pushed by the step that wrote
+# them), keyed by their basename without extension ("ppc", "detection_limits"),
+# with the .pdf beside each in `figures_pdf` when one was saved. The files stay
+# where they are, so the documented layout of JOB_CONFIG.md is unchanged.
+function _add_root_figures!(summary::AbstractDict, out_dir::AbstractString)
+    listed = get(summary, "plots", nothing)
+    listed isa AbstractVector || return summary
+    for name in ("ppc", "detection_limits")
+        png = joinpath(out_dir, name * ".png")
+        (png in listed && isfile(png)) || continue
+        figs = get!(() -> Dict{String, Any}(), summary, "figures")
+        figs isa AbstractDict || continue
+        figs[name] = png
+        pdf = joinpath(out_dir, name * ".pdf")
+        if isfile(pdf)
+            pdfs = get!(() -> Dict{String, Any}(), summary, "figures_pdf")
+            pdfs isa AbstractDict && (pdfs[name] = pdf)
+        end
     end
     return summary
 end

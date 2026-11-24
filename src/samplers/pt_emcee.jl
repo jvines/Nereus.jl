@@ -2700,6 +2700,7 @@ function sample_pt_emcee(
     # mode-Laplace within `laplace_switch_tol`. Else mode-Laplace, with a
     # warning (Jose's rule above). No number only when none of them exists.
     # Under untemper_transit + photometry there is no switch (above).
+    _warn_min_swap("sample_pt_emcee", βs, acc_swap)
     tempered_ok, tempered_why = _tempered_quotable(βs, acc_swap; swap_min)
     if tempered_ok && !isfinite(log_z)
         tempered_ok, tempered_why = false, "it is not finite"
