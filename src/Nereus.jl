@@ -27,7 +27,11 @@ module Nereus
 #                an older runtime would forward `plots=` to a fit_* that has no
 #                such keyword and die on a MethodError deep in Julia -- which is
 #                the exact failure this constant exists to turn into a sentence.
-const PY_API_VERSION = 3
+#   4  -- 0.9.9: the daemon passes fit_rv the whole RV channel (jitter,
+#                trend_order, gamma_per_instrument, share, marginalize_gamma),
+#                not just its data, which dropped every option. An older
+#                fit_rv takes only an instrument map and refuses the channel.
+const PY_API_VERSION = 4
 
 include("constants.jl")
 include("threading.jl")   # thread-slot helpers: chunk-keyed scratch, _nthread_slots()

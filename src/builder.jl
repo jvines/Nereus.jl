@@ -129,6 +129,8 @@ docstring above for the full block grammar and example.
   `a/R★` from it and the period, instead of from `M_s`/`R_s`. Needs transit
   photometry; an `ArgumentError` otherwise. Put a prior on it with
   `priors = Dict("rho_s" => ...)`, or `external_priors`.
+- `marginalize_gamma` — integrate the RV offsets out analytically instead of
+  sampling them (`ParametrizationConfig`). Default `false`.
 - `M_s` — primary mass for transit `a/R*` calculations. Defaults to
   `M_pri` if numeric, else `NaN`.
 - `stability` — `:none`, `:amd`, or `:gladman`. Default `:none`.
@@ -164,6 +166,7 @@ function build_target(;
     time_anchor::Union{Nothing, Symbol} = nothing,
     density::Union{Nothing, Symbol} = nothing,
     use_rho_s::Bool = false,
+    marginalize_gamma::Bool = false,
     M_s::Real = NaN,
     R_s::Real = NaN,
     stability::Symbol = :none,
@@ -391,6 +394,7 @@ function build_target(;
         R_s             = R_s_val,
         parametrization = ParametrizationConfig(mass = mass_kind, time = time_kind,
                                               use_rho_s = use_rho_s,
+                                              marginalize_gamma = marginalize_gamma,
                                               density = density === nothing ?
                                                         :rho_circ : density),
         priors          = priors_dict,

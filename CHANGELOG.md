@@ -7,6 +7,23 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **`fit_rv` takes an RV channel, and every RV channel option reaches the
+  model.** `fit_rv` accepted only a bare instrument map, so astronereus passed
+  it the channel's `data` alone and `fit_rv(rv, trend_order=1)` fitted no
+  trend. It now takes the channel dict `fit_joint` takes (the instrument map
+  still works). `_target_from` (fit_rv, fit_joint, replot) read only `jitter`
+  and `trend_order` from an RV channel; `gamma_per_instrument = false` (one
+  offset), `share` (sigma/gamma groups, merged with `sharing`) and
+  `marginalize_gamma` now build the model too, and `jitter` takes a prior dict
+  or a per-instrument mapping. `indicators` and unknown keys throw, as do a
+  `trend_order` keyword that disagrees with the channel's, a sharing category
+  given in both places, and a channel `jitter` together with
+  `priors["sigma_<inst>"]`. Unknown transit-channel keys throw too.
+  `PY_API_VERSION` is 4.
+- `fit_joint` dropped an RM, tomography, TTV or SB channel without a word, and
+  a second RV or transit channel replaced the first; each throws now.
+- `build_target` takes `marginalize_gamma`.
+
 - **A fit with no planet runs.** `fit_rv(planets = 0, trend_order = 1)` (and
   `planets = []`, which is what a JSON `[]` from astronereus is) stopped
   before sampling: `build_target` refused an empty planet set and
