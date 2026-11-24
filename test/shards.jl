@@ -268,6 +268,8 @@ const TEST_UNITS = [
     # CCF γ trends, shared_fwhm, pixel_correlation = :neff. Standalone, 4
     # threads, arm64 (2026-11-22), compile included.
     (name = "test_ccf_trend_options.jl", seconds = 930, files = ["test_ccf_trend_options.jl"]),
+    # A fit with no planet (trend-only, offset-only): fit_rv and run_job. 4 threads, arm64 (2026-11-23).
+    (name = "test_trend_only_fit.jl", seconds = 220, files = ["test_trend_only_fit.jl"]),
 ]
 
 const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")

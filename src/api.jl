@@ -835,7 +835,7 @@ _planet_spec(nt::NamedTuple) = nt
 _planet_spec(n::Integer; block = NamedTuple()) =
     NamedTuple{Tuple(Symbol("k$i") for i in 1:n)}(Tuple(block for _ in 1:n))
 _planet_spec(r::AbstractVector; block = NamedTuple()) =
-    _planet_spec(maximum(r); block)
+    _planet_spec(isempty(r) ? 0 : maximum(r); block)
 
 """
     default_rv_planet(t, rv) -> NamedTuple
