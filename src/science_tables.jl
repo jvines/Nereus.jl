@@ -226,6 +226,26 @@ end
 sci_unit_known(name::AbstractString, params::Params) =
     _sci_unit_lookup(name, params) !== nothing
 
+"""
+    chain_param_unit(name, params) -> Union{String, Nothing}
+
+Unit of the RAW chain values of `name`: what a draw holds, so a sampled angle is
+`"rad"` where the tables report `"deg"`. The same rules as `sci_param_unit` (one
+source, resolved from the built target's instrument channels), and what the fit
+summary sends the client and `chains.nc` stores as the `units` attribute of every
+variable. `nothing` for a name no rule knows, or for a `params` that has no
+layout to resolve it against; callers then send no unit rather than a guess.
+"""
+function chain_param_unit(name::AbstractString, params)
+    r = try
+        _sci_unit_lookup(name, params)
+    catch
+        nothing
+    end
+    r === nothing && return nothing
+    return r[2] ? "rad" : r[1]
+end
+
 # --- per-parameter active mask (trans-dim conditioning) ----------------
 # Draws over which `name` is DEFINED: its planet/noise component active. Returns
 # `nothing` for always-defined params (γ, jitter, planet params under fixed Nₚ).

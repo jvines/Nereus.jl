@@ -328,3 +328,74 @@ end
     @test e["i_star"]["value"] ≈ 60.0 rtol = 1e-4
     @test e["v_sin_i_star"]["unit"] == "m/s"
 end
+
+# --- the unit of the RAW chain, sent with every summary entry -------------
+# `chain_param_unit` is the unit of what a draw holds (angles in rad) from the
+# same rules as the tables; the fit summary and chains.nc carry it so the client
+# does not guess from the name.
+@testset "raw chain units: every layout name, channel-aware" begin
+    L = Dict(_unit_layouts())
+    cu(f, nm) = Nereus.chain_param_unit(nm, L[f])
+    for (family, p) in _unit_layouts()
+        for nm in p.layout.names
+            nm == "n_p" && continue
+            raw = Nereus.chain_param_unit(nm, p)
+            @test raw !== nothing
+            u, is_ang = Nereus.sci_param_unit(nm, p)
+            # the tables convert exactly the radian ones
+            @test raw == (is_ang ? "rad" : u)
+        end
+    end
+    # RV vs photometric: the same kind of term, a different unit by channel
+    j = "joint, r1/r2, a/R★ sampled"                 # RV "H" + photometry "TESS"
+    @test cu(j, "gamma_H") == "m/s"
+    @test cu(j, "sigma_H") == "m/s"
+    @test cu(j, "offset_TESS") == ""
+    @test cu(j, "jitter_TESS") == ""
+    # outside the layout, the spelling still says which channel it is
+    @test cu(j, "gamma_TESS") == ""
+    @test cu(j, "sigma_TESS") == ""
+    @test cu(j, "gamma_H") == "m/s"
+    # a shared photometric group is not m/s
+    sg = "transit, shared jitter/offset group, baseline, ρ★"
+    @test cu(sg, "jitter_TESS+K2") == ""
+    @test cu(sg, "offset_TESS+K2") == ""
+    # radians stay radians in the chain
+    @test cu("RV + transit + astrometry", "inc_k1") == "rad"
+    @test cu("RV + transit + astrometry", "Omega_k1") == "rad"
+    @test cu("RV + transit + astrometry", "plx") == "mas"
+    @test cu("ARoME RM + gravity darkening", "i_star") == "rad"
+    @test cu("ARoME RM + gravity darkening", "v_sin_i_star") == "m/s"
+    @test cu("RV + astrometry, imager + IAD jitter", "sigma_as_GPI") == "mas"
+    @test cu("RV + astrometry, imager + IAD jitter", "sigma_iad_HIP") == "mas"
+    @test cu("tomography", "tomo_sigma_line_HARPS") == "km/s"
+    @test cu("RV + trend + rotation GP, shared γ", "gp_period") == "d"
+    # unknown is unknown, and a params with no layout does not throw
+    @test cu(j, "definitely_not_a_parameter") === nothing
+    @test Nereus.chain_param_unit("P_k1", (layout = (unfrozen_names = String[],),)) === nothing
+end
+
+@testset "the fit summary and chains.nc carry the unit of every entry" begin
+    p = Dict(_unit_layouts())["RV + transit + astrometry"]
+    names = p.layout.unfrozen_names
+    draws = randn(MersenneTwister(1), 40, length(names), 2) .+ 5
+    ch = Chains(draws, Symbol.(names))
+    s = Nereus._summarise_params(ch, p)
+    @test sort(collect(keys(s))) == sort(names)
+    for nm in names
+        @test s[nm]["unit"] == Nereus.chain_param_unit(nm, p)
+        @test s[nm]["median"] isa Float64
+    end
+    @test s["gamma_H"]["unit"] == "m/s"
+    @test s["jitter_TESS"]["unit"] == ""
+    @test s["inc_k1"]["unit"] == "rad"
+    mktempdir() do d
+        path = joinpath(d, "chains.nc")
+        Nereus.save_chains(path, ch, p)
+        Nereus.NCDatasets.Dataset(path) do ds
+            for nm in names
+                @test ds[nm].attrib["units"] == Nereus.chain_param_unit(nm, p)
+            end
+        end
+    end
+end

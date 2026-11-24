@@ -2,6 +2,19 @@
 
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
+## Unreleased
+
+### Added
+
+- **Every entry of the fit summary's `params` block carries its `unit`**, and
+  every variable of `chains.nc` a `units` attribute: the unit of the raw chain
+  values (angles in rad, `inc_k1` -> `rad`), from `chain_param_unit`, which
+  reads the same rules as the science tables, resolved per instrument channel
+  (RV m/s, photometric relative flux, astrometric mas, CCF km/s). A name no rule
+  knows gets no `unit`, and a client without per-entry units falls back to its
+  own name map. The payload gains an optional field only; `PY_API_VERSION`
+  stays 4.
+
 
 ## 0.9.9
 
