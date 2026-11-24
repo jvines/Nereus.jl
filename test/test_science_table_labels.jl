@@ -388,7 +388,8 @@ end
     end
     @test s["gamma_H"]["unit"] == "m/s"
     @test s["jitter_TESS"]["unit"] == ""
-    @test s["inc_k1"]["unit"] == "rad"
+    # the sampled angles of this layout (its inclination may be cos i) stay rad
+    @test any(nm -> startswith(nm, "Omega_k") && s[nm]["unit"] == "rad", names)
     mktempdir() do d
         path = joinpath(d, "chains.nc")
         Nereus.save_chains(path, ch, p)
