@@ -210,6 +210,8 @@ function run_job(cfg::AbstractDict)
                            show_progress = show_pf, timings = bridge_t,
                            _postfit_rule_kw(_get(_get(cfg, :sampler; default = Dict()),
                                                  :kwargs; default = Dict()), data)...)
+        # Trapped-mode signs in the sampler, evidence and PPC blocks.
+        _fit_health_run_checks!(summary)
         _postfit_stage!(pf, "science")
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
@@ -3244,6 +3246,37 @@ function _run_loo!(cfg, chains, params::Params, data::Data, result,
         summary["loo"] = Dict("status" => "skipped",
                                 "error" => sprint(showerror, err))
     end
+end
+
+# The second half of fit health: `assess_run_summary` on the sampler, evidence
+# and PPC blocks, for a cold chain trapped in a wrong mode (src/diagnostics/
+# fit_health.jl). It runs after the evidence stage, which is after the chain
+# checks of `_run_fit_health!`, and merges into the `fit_health` block they
+# wrote: its checks only warn, so `overall` can rise to "warn" but never to
+# "fail", and `suspect_wrong_mode` (with `suspect_wrong_mode_checks`) is the flag
+# a caller reads. Nothing is added when fit_health is off or was skipped.
+function _fit_health_run_checks!(summary::AbstractDict)
+    fh = get(summary, "fit_health", nothing)
+    (fh isa AbstractDict && get(fh, "checks", nothing) isa AbstractDict) || return
+    try
+        cs = assess_run_summary(summary)
+        for c in cs
+            fh["checks"][String(c.name)] = Dict{String, Any}(
+                "status" => String(c.status), "message" => c.message)
+        end
+        flagged = [String(c.name) for c in cs if c.status !== :ok]
+        old = Symbol(get(fh, "overall", "ok"))
+        old in keys(_STATUS_RANK) || (old = :ok)
+        fh["overall"] = String(_worst(old, isempty(flagged) ? :ok : :warn))
+        fh["suspect_wrong_mode"] = !isempty(flagged)
+        fh["suspect_wrong_mode_checks"] = flagged
+        isempty(flagged) || @warn "Nereus: fit health = WARN — run-summary " *
+            "checks flag a possible wrong mode:\n" *
+            join(("  ⚠️  [$(c.name)] $(c.message)" for c in cs if c.status !== :ok), "\n")
+    catch err
+        @warn "run-summary fit-health checks failed (continuing)" exception = (err, catch_backtrace())
+    end
+    return
 end
 
 # Post-fit "silent-wrong" guard. Fail-soft: never breaks the run, only
