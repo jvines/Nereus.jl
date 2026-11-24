@@ -1813,6 +1813,8 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                 _augment_evidence!(summary, target.params, target.data, chains;
                                    show_progress = show_pf, timings = bridge_t,
                                    _postfit_rule_kw(spec_opts, target.data)...)
+                # Trapped-mode signs in the sampler, evidence and PPC blocks.
+                _fit_health_run_checks!(summary)
                 _postfit_stage!(pf, "science")
                 # Conditioned, unit-tagged fitted/derived + model_selection +
                 # run_info, and tables/ in json, csv, ecsv, dat and TEX.

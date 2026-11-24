@@ -326,6 +326,29 @@ function posterior_predictive_check(chains, params::Params, data::Data;
                  for (k, v) in rv_red_chi2)
         summary["rv_outliers_3sigma"] = count(
             i -> abs(rv_resid_med[i]) > 3 * rv_err_med[i], 1:n_rv_obs)
+        # Per-instrument noise at the median model, against the FORMAL errors:
+        # the median formal error, the median added white jitter (the model's
+        # variance minus the formal one), the residual RMS, and χ²/dof on the
+        # formal errors alone. fit_health's `rv_jitter` check reads these: a
+        # cold chain trapped in a wrong orbit hides the misfit in one
+        # instrument's jitter (HIP 63762: 109 m/s on 1.1 m/s HIRES errors,
+        # 1.4 m/s in the right mode), and every jitter-inclusive χ² stays ~1.
+        e_form = Dict{String, Float64}(); jit = Dict{String, Float64}()
+        rms = Dict{String, Float64}(); chi2f = Dict{String, Float64}()
+        for (inst, dof) in rv_dof_inst
+            lbl = _inst_label(params.config.instruments.rv_names, inst)
+            ix = findall(==(inst), data.rv_inst)
+            e = Float64.(data.rv_err[ix])
+            r = rv_resid_med[ix]
+            e_form[lbl] = median(e)
+            jit[lbl] = median(sqrt.(max.(vars_med_rv[ix] .- e .^ 2, 0.0)))
+            rms[lbl] = sqrt(sum(abs2, r) / length(r))
+            chi2f[lbl] = sum(abs2, r ./ e) / dof
+        end
+        summary["rv_err_formal_median_per_inst"] = e_form
+        summary["rv_jitter_median_per_inst"] = jit
+        summary["rv_resid_rms_per_inst"] = rms
+        summary["rv_red_chi2_formal_per_inst"] = chi2f
         summary["rv_red_chi2_per_draw_p16"] = quantile(red_per_draw, 0.16)
         summary["rv_red_chi2_per_draw_p50"] = quantile(red_per_draw, 0.50)
         summary["rv_red_chi2_per_draw_p84"] = quantile(red_per_draw, 0.84)

@@ -1131,6 +1131,11 @@ numbers live under `fitted` / `derived`
     "rv_red_chi2_per_draw_p50":   1.11,
     "rv_red_chi2_per_draw_p84":   1.42,
     "rv_outliers_3sigma":         2,
+    // per instrument at the median model, on the FORMAL errors (fit_health's rv_jitter)
+    "rv_err_formal_median_per_inst": { "HARPS": 0.9, "CORALIE": 3.1 },  // median σ_i
+    "rv_jitter_median_per_inst":     { "HARPS": 1.2, "CORALIE": 2.0 },  // median added jitter
+    "rv_resid_rms_per_inst":         { "HARPS": 1.6, "CORALIE": 3.9 },
+    "rv_red_chi2_formal_per_inst":   { "HARPS": 3.1, "CORALIE": 1.6 },  // χ²/dof without jitter
     "rv_residual_top_peak_period": 38.4,    // top GLS-of-residuals peak (missed signal);
     "rv_residual_top_peak_power":  0.18,    //   grid capped ≤20000 freqs, analytic FAP
     "rv_residual_top_peak_fap":    0.41,
@@ -1223,7 +1228,14 @@ numbers live under `fitted` / `derived`
                 // the samplers' settling test (sampler.kwargs.trim_burnin):
                 // "warn" when walkers settled during recording and were not
                 // trimmed, the run ended split, or a trim was refused
-                "burnin_settling": { "status": "ok", "message": "…" } }
+                "burnin_settling": { "status": "ok", "message": "…" },
+                // run-summary checks for a cold chain trapped in a wrong mode
+                // (warn only; thresholds RUN_HEALTH_THRESHOLDS, see
+                // docs/src/diagnostics.md): cold_acceptance, tempering_ladder,
+                // evidence_precision, rv_jitter
+                "rv_jitter": { "status": "ok", "message": "…" } },
+    "suspect_wrong_mode": false,            // any run-summary check warned
+    "suspect_wrong_mode_checks": []         // the ones that did
   },
 
   // ---- Walkers still settling into the main mode during recording ----

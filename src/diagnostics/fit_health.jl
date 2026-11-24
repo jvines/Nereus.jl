@@ -39,7 +39,7 @@ using MCMCChains
 using Statistics: median, std, mean, quantile
 using Printf: @printf
 
-export FitHealthCheck, FitHealthReport, assess_fit
+export FitHealthCheck, FitHealthReport, assess_fit, assess_run_summary, RUN_HEALTH_THRESHOLDS
 
 # =====================================================================
 # Result types
@@ -807,6 +807,272 @@ function _check_map_consistency(map_point, chains, names_to_check; nsigma::Float
         return FitHealthCheck(:map_consistency, :fail, msg,
                               sort(offenders; by = x -> -x[2]))
     end
+end
+
+# =====================================================================
+# Run-summary checks — a cold chain trapped in a wrong mode
+# =====================================================================
+#
+# The chain checks above cannot see a population that collapsed into ONE wrong
+# basin: it is converged, well mixed between walkers and off every bound.
+# HIP 63762 (nereus I, 2026-11-24; pt_emcee, RV + Hipparcos/Gaia astrometry, two
+# Keplerians): k2_ast_ms passed every chain check with overall "ok" while its
+# HIRES jitter sat at 109 m/s on 1.1 m/s errors (1.4 m/s in the right mode), the
+# inner K at half its value, and ln Z ~50-70 nats below the nested one-planet
+# fit. What gave it away was in the rest of summary.json: the sampler's
+# acceptance, the evidence error and the per-instrument noise. These checks read
+# those blocks. They only ever WARN -- each sign has innocent causes too -- and
+# a block that is missing is reported as not assessed.
+
+"""
+    RUN_HEALTH_THRESHOLDS
+
+Defaults of [`assess_run_summary`](@ref), each with the HIP 63762 numbers it was
+set against (trapped runs k2_ast_ms/v4/v5; healthy controls k1_v3, k1lin_v3,
+k1quad_v3, k2_v3, k1_ast_v5 of the same star):
+
+- `cold_acceptance_min = 0.01` — within-move acceptance of the β = 1 rung.
+  An affine-invariant / MH cold chain under 1% barely moves: its autocorrelation
+  ESS can still look large while the population stays where it started.
+  Healthy controls: 0.017-0.24.
+- `swap_min = 0.01` — the lowest adjacent-rung swap acceptance. Below it the hot
+  rungs cannot hand states down to β = 1, and the ladder no longer rescues a
+  trapped cold chain. Trapped: 6e-6 (ms), 7e-3 (v4); healthy ≥ 0.077.
+- `frozen_rung_max = 1e-3` — a rung whose within-move acceptance is below this
+  is frozen. Trapped (ms): 21 of 32 rungs at ~1e-5; healthy min 0.002.
+- `evidence_se_max = 1.0` nat — the largest error of a quotable evidence
+  estimate (bridge, nested, the tempered stack). Trapped: bridge ±4.3, ±4.7,
+  ±23; healthy ≤ ±0.7.
+- `evidence_disagree_min = 3.0` nats and `evidence_disagree_nsigma = 3.0` — two
+  independent estimators (bridge, nested, any tempered one; the four tempered
+  variants share one ⟨ln L⟩(β) and are not compared with each other) disagree
+  when they differ by more than the larger of the two.
+- `laplace_bridge_max = 20.0` nats — |mode-Laplace − bridge|. Mode-Laplace is a
+  Gaussian at the mode, so some offset is normal (healthy 3-11.5 nats);
+  trapped: 30, 72, 160.
+- `jitter_err_ratio_max = 30.0` — an instrument's median added jitter over its
+  median formal error. Trapped: HIRES 109/1.1 ≈ 100, 279/1.1 ≈ 250; right
+  mode 1.4/1.1. Above it either the residuals are many times the errors and the
+  jitter absorbs them (a misfit hidden in the noise model), or the jitter also
+  exceeds `jitter_rms_ratio_max = 2.0` × the residual RMS and that
+  instrument's data are effectively ignored. A genuinely active star can carry
+  such a jitter on precise data; the warning says to check.
+"""
+const RUN_HEALTH_THRESHOLDS = (
+    cold_acceptance_min      = 0.01,
+    swap_min                 = 0.01,
+    frozen_rung_max          = 1e-3,
+    evidence_se_max          = 1.0,
+    evidence_disagree_min    = 3.0,
+    evidence_disagree_nsigma = 3.0,
+    laplace_bridge_max       = 20.0,
+    jitter_err_ratio_max     = 30.0,
+    jitter_rms_ratio_max     = 2.0,
+)
+
+const _TRAPPED_HINT = "the signature of a cold chain trapped in a wrong mode: " *
+    "compare ln Z with a nested simpler model and rerun from another initialisation"
+
+# summary.json blocks may carry String or Symbol keys (JSON3 objects, Dicts).
+function _sget(d, k)
+    d isa AbstractDict || return nothing
+    v = get(d, k, nothing)
+    v === nothing && (v = get(d, Symbol(k), nothing))
+    return v
+end
+
+_finite_vec(v) = v isa AbstractVector ?
+    [Float64(x) for x in v if x isa Real && isfinite(x)] : Float64[]
+
+_r3(x) = round(x; sigdigits = 3)
+
+"""
+    assess_run_summary(summary; thresholds...) -> Vector{FitHealthCheck}
+
+Checks on a run's `summary.json` blocks (`sampler`, `evidence`, `ppc`) for the
+signs of a cold chain trapped in a wrong mode, which the chain checks of
+[`assess_fit`](@ref) cannot see. Returns four checks, each `:ok` or `:warn`,
+never `:fail`:
+
+- `:cold_acceptance` — within-move acceptance of the β = 1 rung below
+  `cold_acceptance_min`.
+- `:tempering_ladder` — a swap acceptance below `swap_min`, or rungs frozen at
+  within-move acceptance below `frozen_rung_max`.
+- `:evidence_precision` — a quotable evidence estimate with error above
+  `evidence_se_max`, two independent estimators disagreeing, or mode-Laplace
+  more than `laplace_bridge_max` from bridge.
+- `:rv_jitter` — an instrument whose median jitter exceeds
+  `jitter_err_ratio_max` × its median formal error (details: instrument ⇒ ratio).
+
+Keyword arguments override [`RUN_HEALTH_THRESHOLDS`](@ref), where each default
+and the runs it was set against are documented. run_job merges the result into
+`summary["fit_health"]` after the evidence stage.
+"""
+function assess_run_summary(summary::AbstractDict; kw...)
+    th = merge(RUN_HEALTH_THRESHOLDS, values(kw))
+    sampler = _sget(summary, "sampler")
+    sampler isa AbstractDict || (sampler = _sget(summary, "diagnostics"))
+    within = _finite_vec(_sget(sampler, "acceptance_within"))
+    swap = _finite_vec(_sget(sampler, "acceptance_swap"))
+    return FitHealthCheck[
+        _check_cold_acceptance(within; th.cold_acceptance_min),
+        _check_tempering_ladder(within, swap; th.swap_min, th.frozen_rung_max),
+        _check_evidence_precision(_sget(summary, "evidence"); th.evidence_se_max,
+                                  th.evidence_disagree_min, th.evidence_disagree_nsigma,
+                                  th.laplace_bridge_max),
+        _check_rv_jitter(_sget(summary, "ppc"); th.jitter_err_ratio_max,
+                         th.jitter_rms_ratio_max),
+    ]
+end
+
+function _check_cold_acceptance(within; cold_acceptance_min)
+    isempty(within) && return FitHealthCheck(:cold_acceptance, :ok,
+        "no within-move acceptance recorded — not assessed")
+    a = within[1]
+    a >= cold_acceptance_min && return FitHealthCheck(:cold_acceptance, :ok,
+        "cold-chain within-move acceptance $(_r3(a)) ≥ $(cold_acceptance_min)")
+    return FitHealthCheck(:cold_acceptance, :warn,
+        "cold-chain within-move acceptance $(_r3(a)) < $(cold_acceptance_min): " *
+        "the β = 1 population barely moves, so its ESS and R-hat describe where " *
+        "it started — $(_TRAPPED_HINT)", ["acceptance_within[β=1]" => a])
+end
+
+function _check_tempering_ladder(within, swap; swap_min, frozen_rung_max)
+    (isempty(swap) && length(within) < 2) && return FitHealthCheck(:tempering_ladder,
+        :ok, "single-temperature run — ladder not assessed")
+    problems = String[]
+    details = Pair{String, Float64}[]
+    if !isempty(swap)
+        i = argmin(swap)
+        if swap[i] < swap_min
+            push!(problems, "swap acceptance falls to $(_r3(swap[i])) between rungs " *
+                  "$i and $(i + 1) (< $(swap_min)): states from the hot rungs " *
+                  "cannot reach β = 1")
+            push!(details, "min_swap[$i↔$(i + 1)]" => swap[i])
+        end
+    end
+    if length(within) >= 2
+        frozen = findall(<(frozen_rung_max), within)
+        if !isempty(frozen)
+            push!(problems, "$(length(frozen)) of $(length(within)) rungs frozen " *
+                  "(within-move acceptance < $(frozen_rung_max), lowest " *
+                  "$(_r3(minimum(within[frozen]))))")
+            push!(details, "n_frozen_rungs" => Float64(length(frozen)))
+        end
+    end
+    isempty(problems) && return FitHealthCheck(:tempering_ladder, :ok,
+        "ladder connected: min swap " *
+        (isempty(swap) ? "n/a" : string(_r3(minimum(swap)))) *
+        ", no frozen rung")
+    return FitHealthCheck(:tempering_ladder, :warn,
+        "tempering ladder broken — " * join(problems, "; ") *
+        ". The ladder cannot rescue a trapped cold chain; $(_TRAPPED_HINT)", details)
+end
+
+# (log_z, se) of an evidence entry: a Dict with "log_z" and "se"/"sigma", or a
+# bare number (bridge before its bootstrap), whose error is unknown.
+function _ev_entry(v)
+    v isa Real && return isfinite(v) ? (Float64(v), NaN) : nothing
+    v isa AbstractDict || return nothing
+    lz = _sget(v, "log_z")
+    (lz isa Real && isfinite(lz)) || return nothing
+    se = _sget(v, "se"); se === nothing && (se = _sget(v, "sigma"))
+    return (Float64(lz), se isa Real && isfinite(se) ? Float64(se) : NaN)
+end
+
+const _TEMPERED_KEYS = ("ti", "ti_plus", "ss_plus", "hybrid")
+
+function _check_evidence_precision(ev; evidence_se_max, evidence_disagree_min,
+                                   evidence_disagree_nsigma, laplace_bridge_max)
+    ev isa AbstractDict || return FitHealthCheck(:evidence_precision, :ok,
+        "no evidence block — not assessed")
+    est = Pair{String, Tuple{Float64, Float64}}[]
+    for k in ("bridge", "nested", _TEMPERED_KEYS...)
+        e = _ev_entry(_sget(ev, k))
+        e === nothing || push!(est, k => e)
+    end
+    problems = String[]
+    details = Pair{String, Float64}[]
+    for (k, (_, se)) in est
+        if isfinite(se) && se > evidence_se_max
+            push!(problems, "$k ln Z error ±$(_r3(se)) nats (> $(evidence_se_max))")
+            push!(details, "$(k)_se" => se)
+        end
+    end
+    for a in 1:length(est), b in (a + 1):length(est)
+        ka, (za, sa) = est[a]; kb, (zb, sb) = est[b]
+        (ka in _TEMPERED_KEYS && kb in _TEMPERED_KEYS) && continue
+        s = sqrt((isfinite(sa) ? sa^2 : 0.0) + (isfinite(sb) ? sb^2 : 0.0))
+        tol = max(evidence_disagree_min, evidence_disagree_nsigma * s)
+        d = za - zb
+        if abs(d) > tol
+            push!(problems, "$ka and $kb disagree by $(_r3(abs(d))) nats " *
+                  "(tolerance $(_r3(tol)))")
+            push!(details, "$(ka)_minus_$(kb)" => d)
+        end
+    end
+    ml = _sget(ev, "mode_laplace")
+    br = _ev_entry(_sget(ev, "bridge"))
+    if ml isa Real && isfinite(ml) && br !== nothing
+        d = Float64(ml) - br[1]
+        if abs(d) > laplace_bridge_max
+            push!(problems, "mode-Laplace sits $(_r3(d)) nats from bridge " *
+                  "(|Δ| > $(laplace_bridge_max))")
+            push!(details, "laplace_minus_bridge" => d)
+        end
+    end
+    if isempty(problems)
+        isempty(est) && return FitHealthCheck(:evidence_precision, :ok,
+            "no quotable evidence estimate — not assessed")
+        return FitHealthCheck(:evidence_precision, :ok,
+            "evidence consistent: " * join(("$k $(_r3(z))" *
+                (isfinite(s) ? " ± $(_r3(s))" : "") for (k, (z, s)) in est), ", "))
+    end
+    return FitHealthCheck(:evidence_precision, :warn,
+        "evidence poorly determined — " * join(problems, "; ") *
+        ". The posterior the estimators see is not one well-sampled mode; " *
+        _TRAPPED_HINT, details)
+end
+
+function _check_rv_jitter(ppc; jitter_err_ratio_max, jitter_rms_ratio_max)
+    jit = _sget(ppc, "rv_jitter_median_per_inst")
+    err = _sget(ppc, "rv_err_formal_median_per_inst")
+    (jit isa AbstractDict && err isa AbstractDict) ||
+        return FitHealthCheck(:rv_jitter, :ok,
+            "no per-instrument RV noise in the PPC block — not assessed")
+    rms = _sget(ppc, "rv_resid_rms_per_inst")
+    chi2f = _sget(ppc, "rv_red_chi2_formal_per_inst")
+    problems = String[]
+    details = Pair{String, Float64}[]
+    worst = (0.0, "")
+    for (k, j) in jit
+        inst = String(k)
+        e = _sget(err, inst)
+        (j isa Real && e isa Real && e > 0 && isfinite(j)) || continue
+        ratio = j / e
+        ratio > worst[1] && (worst = (ratio, inst))
+        ratio > jitter_err_ratio_max || continue
+        r = _sget(rms, inst)
+        c = _sget(chi2f, inst)
+        why = if r isa Real && r > 0 && j > jitter_rms_ratio_max * r
+            "and $(_r3(j / r))× its residual RMS $(_r3(r)): its data are " *
+            "effectively ignored"
+        else
+            "absorbing residuals" * (r isa Real ? " of RMS $(_r3(r))" : "") *
+            (c isa Real ? " (χ²/dof $(_r3(c)) on the formal errors)" : "")
+        end
+        push!(problems, "$inst jitter $(_r3(j)) is $(_r3(ratio))× its median " *
+              "formal error $(_r3(e)), $why")
+        push!(details, inst => ratio)
+    end
+    isempty(problems) && return FitHealthCheck(:rv_jitter, :ok,
+        isempty(worst[2]) ? "no instrument with jitter and formal errors — not assessed" :
+        "jitter ≤ $(jitter_err_ratio_max)× the formal errors on every instrument " *
+        "(worst $(_r3(worst[1]))× on $(worst[2]))")
+    return FitHealthCheck(:rv_jitter, :warn,
+        "jitter dwarfs the formal RV errors — " * join(problems, "; ") *
+        ". A very active star can do this; otherwise it is " * _TRAPPED_HINT,
+        sort(details; by = x -> -x.second))
 end
 
 # =====================================================================
