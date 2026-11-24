@@ -61,15 +61,15 @@ end
     @testset "planet_modes" begin
         ph = Dict{String,Any}("source" => "PM", "data" => Dict{String,Any}(
             "T" => (t = d1.t, flux = ones(40), flux_err = fill(1e-3, 40))))
-        t = Nereus._target_from([ph], 1; planet_modes = ["PM_GD"])
+        t = Nereus._target_from([ph], 1; M_s = 1.0, R_s = 1.0, planet_modes = ["PM_GD"])
         @test t.params.config.planet_modes[1] == Nereus.PM_GD
         @test Nereus.has_gd(t.params.config.planet_modes[1])
-        t0 = Nereus._target_from([ph], 1)
+        t0 = Nereus._target_from([ph], 1; M_s = 1.0, R_s = 1.0)
         @test !Nereus.has_gd(t0.params.config.planet_modes[1])
         @test length(t.params.layout.unfrozen_names) > length(t0.params.layout.unfrozen_names)
-        @test_throws ArgumentError Nereus._target_from([ph], 1; planet_modes = ["NOPE"])
-        @test_throws ArgumentError Nereus._target_from([ph], 1; planet_modes = ["RVPM_GD"])
-        @test_throws ArgumentError Nereus._target_from([ph], 1; planet_modes = ["PM_GD", "PM_GD"])
+        @test_throws ArgumentError Nereus._target_from([ph], 1; M_s = 1.0, R_s = 1.0, planet_modes = ["NOPE"])
+        @test_throws ArgumentError Nereus._target_from([ph], 1; M_s = 1.0, R_s = 1.0, planet_modes = ["RVPM_GD"])
+        @test_throws ArgumentError Nereus._target_from([ph], 1; M_s = 1.0, R_s = 1.0, planet_modes = ["PM_GD", "PM_GD"])
     end
 
     @testset "config_overrides on the target route" begin
@@ -219,10 +219,10 @@ end
     rv = Dict{String,Any}("source" => "RV", "data" => Dict{String,Any}("A" => d1))
     pl = Nereus._planet_spec(1; block = Nereus.default_rv_planet(d1.t, d1.rv))
     # a JSON client names planets by string
-    t = Nereus._target_from([rv, ph], pl; planet_modes = ["RVPM_TTV"],
+    t = Nereus._target_from([rv, ph], pl; M_s = 1.0, R_s = 1.0, planet_modes = ["RVPM_TTV"],
                             ttv_epochs = Dict("1" => [0, 1, 2]))
     @test count(startswith("ttv_"), t.params.layout.unfrozen_names) == 3
-    t2 = Nereus._target_from([rv, ph], pl; planet_modes = ["RVPM_TTV"],
+    t2 = Nereus._target_from([rv, ph], pl; M_s = 1.0, R_s = 1.0, planet_modes = ["RVPM_TTV"],
                              ttv_n_transits = Dict("1" => 2))
     @test count(startswith("ttv_"), t2.params.layout.unfrozen_names) == 2
     # a channel at its default trend_order yields to the keyword

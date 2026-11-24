@@ -18,6 +18,6 @@ using Test, Nereus
     # gravity_darkening = true is the PM_GD planet mode, not a flag nothing reads
     ch = Dict{String,Any}("source" => "PM", "gravity_darkening" => true,
                           "data" => phot)
-    tg = Nereus._target_from([ch], 1)
+    tg = Nereus._target_from([ch], 1; M_s = 1.0, R_s = 1.0)   # a/R★ source
     @test Nereus.has_gd(tg.params.config.planet_modes[1])
 end

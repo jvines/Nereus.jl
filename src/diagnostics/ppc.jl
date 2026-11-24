@@ -170,6 +170,12 @@ function posterior_predictive_check(chains, params::Params, data::Data;
     phot_resid_med = n_pm_obs > 0 ? data.flux .- preds_med_phot : Float64[]
     phot_err_med   = n_pm_obs > 0 ? sqrt.(vars_med_phot) : Float64[]
 
+    if !all(isfinite, rv_resid_med) || !all(isfinite, phot_resid_med)
+        @warn "posterior_predictive_check: the median-parameter model predicts a " *
+              "non-finite value at some points; its residuals, χ² and the " *
+              "periodograms and ACFs built on them are not finite there"
+    end
+
     # ---- Per-draw accumulators ------------------------------------------
     # rv_resid_std comes from the std of `(data - preds)` across draws —
     # parameter uncertainty propagated to the data space. Useful as a
@@ -183,9 +189,18 @@ function posterior_predictive_check(chains, params::Params, data::Data;
     phot_chi2_per_draw = zeros(Float64, n_draws_eff)
 
     tdc = _td_cols(chains_flat, params)
-    for (draw_idx, idx) in enumerate(idx_pool)
+    # A draw whose prediction (or χ²) is not finite carries no information about
+    # the fit and would turn every sum and quantile below into NaN. It is left
+    # out, counted, and reported (`summary["n_nonfinite_draws"]`, and a warning).
+    n_nonfinite = 0
+    n_valid = 0
+    rv_r_buf   = zeros(Float64, n_rv_obs)
+    phot_r_buf = zeros(Float64, n_pm_obs)
+    for idx in idx_pool
         theta = _theta_from_row(chains_flat, idx, params; tdc = tdc)
 
+        ok = true
+        rv_chi2 = 0.0
         if n_rv_obs > 0
             preds, vars = rv_predictions(theta, data)
             resid = data.rv .- preds
@@ -193,25 +208,59 @@ function posterior_predictive_check(chains, params::Params, data::Data;
             chi2 = 0.0
             @inbounds for i in 1:n_rv_obs
                 r = resid[i]
-                rv_resid_sum[i] += r
-                rv_resid_sq[i]  += r * r
+                rv_r_buf[i] = r
                 chi2 += r * r / vars[i]
             end
-            rv_chi2_per_draw[draw_idx] = chi2
+            ok &= isfinite(chi2)
+            rv_chi2 = chi2
         end
 
-        if n_pm_obs > 0
+        phot_chi2 = 0.0
+        if ok && n_pm_obs > 0
             preds, vars = phot_predictions(theta, data)
             chi2 = 0.0
             @inbounds for i in 1:n_pm_obs
                 r = data.flux[i] - preds[i]
-                phot_resid_sum[i] += r
-                phot_resid_sq[i]  += r * r
+                phot_r_buf[i] = r
                 chi2 += r * r / vars[i]
             end
-            phot_chi2_per_draw[draw_idx] = chi2
+            ok &= isfinite(chi2)
+            phot_chi2 = chi2
+        end
+
+        if !ok
+            n_nonfinite += 1
+            continue
+        end
+        n_valid += 1
+        if n_rv_obs > 0
+            @inbounds for i in 1:n_rv_obs
+                rv_resid_sum[i] += rv_r_buf[i]
+                rv_resid_sq[i]  += rv_r_buf[i]^2
+            end
+            rv_chi2_per_draw[n_valid] = rv_chi2
+        end
+        if n_pm_obs > 0
+            @inbounds for i in 1:n_pm_obs
+                phot_resid_sum[i] += phot_r_buf[i]
+                phot_resid_sq[i]  += phot_r_buf[i]^2
+            end
+            phot_chi2_per_draw[n_valid] = phot_chi2
         end
     end
+    n_valid > 0 || throw(ArgumentError(
+        "posterior_predictive_check: all $(n_draws_eff) draws have a non-finite " *
+        "prediction, so there is nothing to check. The model does not evaluate on " *
+        "this chain: for a transit, a planet with no a/R★ source (give `M_s` and " *
+        "`R_s`, or `use_rho_s = true`) predicts NaN."))
+    if n_nonfinite > 0
+        @warn "posterior_predictive_check: $(n_nonfinite) of $(n_draws_eff) draws " *
+              "have a non-finite prediction; they are left out of the check " *
+              "(summary[\"n_nonfinite_draws\"])" n_nonfinite n_draws_eff
+    end
+    n_draws_eff = n_valid
+    resize!(rv_chi2_per_draw, n_valid)
+    resize!(phot_chi2_per_draw, n_valid)
 
     # ---- Std envelope (per-draw scatter of residual at each point) ------
     rv_resid_std = if n_rv_obs > 0
@@ -312,6 +361,7 @@ function posterior_predictive_check(chains, params::Params, data::Data;
     # means parameter uncertainty is the dominant contribution.
     summary = Dict{String, Any}()
     summary["n_draws"] = n_draws_eff
+    summary["n_nonfinite_draws"] = n_nonfinite
 
     if n_rv_obs > 0
         dof_total = max(1, sum(values(rv_dof_inst)))
