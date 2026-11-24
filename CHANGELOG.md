@@ -7,6 +7,20 @@ git history (`git log --first-parent develop`).
 
 ### Added
 
+- **Fit health flags a cold chain trapped in a wrong mode.** A population
+  collapsed into one wrong basin passed every chain check (HIP 63762, pt_emcee
+  RV + astrometry: `overall = "ok"` with a 109 m/s HIRES jitter on 1.1 m/s
+  errors and ln Z ~50–70 nats below the nested simpler model). After the
+  evidence stage, `fit_health` gains four warning-only checks read from the
+  run summary: `cold_acceptance` (β = 1 acceptance < 0.01), `tempering_ladder`
+  (a swap acceptance < 0.01 or rungs frozen below 1e-3), `evidence_precision`
+  (an estimate's error > 1 nat, independent estimators disagreeing, or
+  mode-Laplace > 20 nats from bridge) and `rv_jitter` (an instrument's jitter
+  > 30× its formal errors), plus `suspect_wrong_mode`. Thresholds:
+  `RUN_HEALTH_THRESHOLDS`; function: `assess_run_summary`. The PPC block gains
+  per-instrument `rv_err_formal_median_per_inst`, `rv_jitter_median_per_inst`,
+  `rv_resid_rms_per_inst` and `rv_red_chi2_formal_per_inst`.
+
 - **The typed `fit_*` route reaches what a job config does.** `fit_rv`,
   `fit_transit`, `fit_astrometry` and `fit_joint` take `planet_modes` (one name
   per planet, e.g. `["RVPM_GD"]`, `["PM_GD"]`, `["RVPM_RM_GD"]`), `noise_models`
