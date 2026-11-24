@@ -1522,6 +1522,7 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                 _postfit_stage!(pf, "detection_limits")
                 _run_detection_limits!(cfg, chains, target.params, target.data,
                                         output_dir, summary)
+                _add_root_figures!(summary, output_dir)
                 _postfit_stage!(pf, "loo")
                 _run_loo!(cfg, chains, target.params, target.data, raw, summary)
                 _postfit_stage!(pf, "fit_health")

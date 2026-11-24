@@ -22,7 +22,7 @@ Every claim below is grounded in `src/samplers/*.jl` and the
 | `transdim_pt_emcee` | `sample_transdim_pt_emcee` | trans | **required** | occupancy |
 | `pt`               | `sample_pt`               | both  | optional (`td`) | quotable TI⁺ |
 | `pt_hmc`           | `sample_pt_hmc`           | fixed | — | yes (bridge / SS⁺ / mode-Laplace) |
-| `pt_whitening`     | `sample_pt_whitening`     | fixed | — | yes |
+| `pt_whitening` (deprecated) | `sample_pt_whitening`     | fixed | — | yes |
 | `rjmcmc`           | `sample_rjmcmc`           | trans | **required** | — (NaN) |
 | `moms`             | `sample_moms`             | trans | **required** | — (NaN) |
 | `daedalus`          | `sample_daedalus`          | trans | **required** | yes (NS) |
@@ -494,6 +494,13 @@ the target with `PackedTransforms` if needed), so you can pass either.
 
 ### `sample_pt_whitening` — `name: "pt_whitening"`
 
+!!! warning "Deprecated: use `pt_emcee`"
+    Measured at matched budgets on HD 114762, HD 159062 and HD 4747, the whitened
+    swap accepts about 8x less often than the identity swap (median 0.027 vs
+    0.22) and `pt_emcee` wins on every diagnostic; with the flow off this
+    sampler is `pt_emcee`. The engine is kept for reproducibility and warns once
+    when selected.
+
 NF-coupled PT with whitening (diagonal-Gaussian) swap proposals.
 **Ensemble-per-temperature**: each temperature carries `n_walkers` walkers
 moved by the tempered Goodman-Weare stretch move (as in `sample_pt_emcee`);
@@ -508,7 +515,7 @@ res = sample_pt_whitening(target, data;
     n_walkers      = 40,                # ≥ 2·n_dim+2, even
     n_steps        = 2000,
     n_burnin       = 500,
-    betas          = nothing,           # default: (1/√5)^i geometric (same as pt_emcee)
+    betas          = nothing,           # default: (1/√5)^i geometric (NOT pt_emcee's current ladder)
     stretch_a      = 2.0,
     de_move        = 0.5,               # as in sample_pt_emcee
     proposal_scale = 0.05,              # accepted but UNUSED (ensemble stretch move)

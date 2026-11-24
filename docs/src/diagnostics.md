@@ -485,8 +485,7 @@ that all produced innocent-looking output:
   credible interval that happens to bracket the truth. The marginal CI
   looks fine but it is the *union of two disjoint basins*, not a
   posterior.
-- **`pt_whitening`** — tight CIs sitting at a wrong mode. Converged by
-  every per-chain metric, just wrong.
+- **`pt_whitening`** (deprecated; use `pt_emcee`) — walkers stranded between modes: its whitened swap accepts about 8x less often than the identity swap, so cold walkers reach the mode slowly, and the CI is the correct median at many times the true width (R-hat well above 1, low ESS). Read `acceptance_swap` and R-hat rather than trusting the interval.
 - **`map`** — a parameter railed against a prior bound with
   `converged=true`. The optimizer walked into the wall and reported
   success.

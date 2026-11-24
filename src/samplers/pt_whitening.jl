@@ -67,13 +67,15 @@
 # So the M-H ratio reduces to a (tempered-)likelihood + prior difference
 # at the transformed points.
 #
-# Performance: the per-temperature (μ, σ) are estimated from a sliding
-# window over the recent walker ensemble. Standard identity swaps are
-# used during warmup; whitened swaps kick in after `warmup_swaps`
-# iterations once the ensemble statistics are reliable. Empirically the
-# whitened swap improves swap acceptance by 2-5× over identity swaps on
-# multi-mode RV-PM joint posteriors where the β=0 chain explores the
-# prior box and β=1 sits in a tight mode.
+# The per-temperature (μ, σ) are estimated from a sliding window over the
+# recent walker ensemble. Standard identity swaps are used during warmup;
+# whitened swaps kick in after `warmup_swaps` iterations.
+#
+# CAUTION (measured, HD 114762 / HD 159062 / HD 4747): the whitened swap is NOT an
+# improvement. Its acceptance is ~8x LOWER than the identity swap it replaces
+# (median 0.027 vs 0.22 on HD 4747), it loses to `pt_emcee` on every target and
+# diagnostic, and with the flow off this sampler is `pt_emcee`. Prefer
+# `pt_emcee`; the engine is kept only for reproducibility.
 #
 # Walkers live in bounded space (prior walls auto-reject), except that a
 # full-circle angle's window is a chart, not a wall: halfway through and at
@@ -238,6 +240,11 @@ function sample_pt_whitening(
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
 )
+    @warn "sample_pt_whitening is deprecated: its whitened swap accepts about " *
+          "8x less often than the identity swap (median 0.027 vs 0.22 on a " *
+          "measured RV + astrometry target) and it is beaten by `pt_emcee` on " *
+          "every diagnostic. Use `pt_emcee` (name: \"pt_emcee\"). The engine is " *
+          "kept, not removed." maxlog = 1
     # JSON config delivers floats-as-Int and arrays-as-JSON3.Array;
     # normalize both.
     stretch_a      = Float64(stretch_a)
@@ -270,7 +277,9 @@ function sample_pt_whitening(
     n_walkers_eff = isodd(_nw_raw) ? _nw_raw + 1 : _nw_raw
 
     # Default ladder: β[1]=1 (cold) geometric down to a hot chain.
-    # Geometric (1/√5)^i matches the validated pt_emcee ladder; the old
+    # Geometric (1/√5)^i. NOTE: this is NOT pt_emcee's current ladder (that one
+    # has a `beta_min` floor and a larger default n_temps), so this sampler is
+    # not validated against it. The old
     # quadratic `1 - (i/(n-1))²` ladder packed the steps at the hot end
     # and left a large β-gap at the cold end, so the cold chain was
     # effectively decoupled (swap accept ~0 with the hottest pair).
