@@ -63,6 +63,8 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **Trans-dim noise selection no longer leaves two members of an exclusion group active.** The planet<->ActivityDecorrelation swap in `transdim_pt_emcee` activated AD after checking only that AD itself was off, not whether another member of its exclusion group was on. With `default_noise_menu` (ErrorScale, CeleriteRotation, AD and ActivityGP in one group) and planets trans-dim, walkers reached CeleriteRotation + AD, ErrorScale + AD and ActivityGP + AD, double-modelling the activity; an HD 18599 run spent a third of its cold draws in CeleriteRotation + AD. The swap now offers the planet->AD direction only when AD's group is empty, and `propose_planet_ad_swap` takes the groups as a required `exclusion_groups` keyword. Noise occupancies of any trans-dim run with planets, `noise = true` and an AD in an exclusion group are affected; rerun them.
+
 - **`ppc.png` and `detection_limits.png` are now in `summary["figures"]`** (keys `ppc`, `detection_limits`, plus `figures_pdf` when a PDF was saved). They are written to the output directory root, outside the `plots/` walk that builds the manifest, so clients never listed them. The files stay where they are.
 
 ## 0.9.10

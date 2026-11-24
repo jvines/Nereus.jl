@@ -95,6 +95,7 @@ const TEST_UNITS = [
     (name = "test_annealed_noise_birth.jl", seconds = 4, files = ["test_annealed_noise_birth.jl"]),
     (name = "test_solution_ladder.jl", seconds = 3, files = ["test_solution_ladder.jl"]),
     (name = "test_noise_swap_samplers.jl", seconds = 41, files = ["test_noise_swap_samplers.jl"]),
+    (name = "test_noise_exclusion_invariant.jl", seconds = 40, files = ["test_noise_exclusion_invariant.jl"]),
     (name = "test_ttv.jl", seconds = 10, files = ["test_ttv.jl"]),
     # Derivatives in e at e = 0 (Kepler's equation, the true anomaly, the likelihood).
     (name = "test_orbit_derivatives.jl", seconds = 26, files = ["test_orbit_derivatives.jl"]),
