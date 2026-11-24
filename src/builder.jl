@@ -171,7 +171,7 @@ function build_target(;
     R_s::Real = NaN,
     stability::Symbol = :none,
     trend_order::Int = 0,
-    phot_trend_order::Int = 0,
+    phot_trend_order::Union{Integer, AbstractDict} = 0,
     noise_models = nothing,
     priors::Union{Nothing, Dict{String, <:PriorSpec}} = nothing,
     external_priors::Vector{ExternalPrior} = ExternalPrior[],

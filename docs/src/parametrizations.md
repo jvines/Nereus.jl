@@ -655,7 +655,7 @@ Params(;
     priors::Dict{String, PriorSpec} = Dict(),    # overrides for auto-priors
     noise_models::Vector{NoiseModel} = NoiseModel[],
     trend_order::Int = 0,                        # RV γ trend: 0 = none, 1 = dvdt, 2 = +d²v/dt²
-    phot_trend_order::Int = 0,                   # per-PM-instrument baseline polynomial order
+    phot_trend_order = 0,                        # baseline polynomial order: Int, or Dict(instrument => order)
     external_priors::Vector{ExternalPrior} = ExternalPrior[],
     sharing::Dict{Symbol, Vector{Vector{String}}} = Dict(),  # see below
     stability::Symbol = :amd,                    # :none, :amd, :gladman
@@ -692,9 +692,17 @@ param_index(params, "K_k1")   # index into the theta vector
   `1` adds a `dvdt` slot (linear), `2` also adds `d2vdt2` (quadratic)
   (`src/model.jl:1850`–`1857`).
 - `phot_trend_order` adds a per-PM-instrument photometric baseline
-  polynomial `1 + offset + Σ c_p·xᵖ` in normalised time, sharing the
-  `offset` grouping; coefficients are named `phot_cP_<label>` with a
-  default `NormalPrior(0, 0.05, -0.5, 0.5)` (`src/model.jl:1794`–`1798`).
+  polynomial `1 + offset + Σ c_p·xᵖ`, sharing the `offset` grouping;
+  coefficients are named `phot_cP_<label>` with a default
+  `NormalPrior(0, 0.05, -0.5, 0.5)`. An integer sets the order for every
+  PM instrument; a dictionary `Dict("PEST" => 1)` sets it per instrument
+  (unlisted instruments get none), and the instruments of an offset group
+  must agree. x is the group's own time: x = (t − t̄) / (span / 2), with
+  t̄ and span the mean and range of that group's cadences, so x runs over
+  about [−1, 1] for a single night as for a multi-year survey
+  (`_phot_trend_norm`, `src/transit_likelihood.jl`). c_p is then the
+  flux change of the p-th term from the middle to the end of the group's
+  span.
 
 ### `stability` — multi-planet stability prior
 

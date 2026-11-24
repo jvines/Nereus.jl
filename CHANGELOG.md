@@ -7,6 +7,15 @@ git history (`git log --first-parent develop`).
 
 ### Added
 
+- **Photometric trend order per instrument.** `phot_trend_order` (the `Params`
+  keyword, and `model.phot_trend_order` of a job config) takes a map
+  `{instrument: order}` as well as an integer. Listed instruments get a baseline
+  polynomial of that order (0, 1 or 2), unlisted ones none. A single-night
+  ground-based light curve can now carry a linear baseline while the survey
+  photometry next to it keeps a flat one. Instruments sharing an `offset` share the
+  trend and must agree on its order. `phot_trend_order_of(config, name)` gives an
+  instrument's order; the NetCDF output records the map as `phot_trend_orders`.
+
 - **A job config states its own trans-dim noise menu.** `transdim.toggleable`
   and `transdim.noise_exclusion_groups` reference entries of the top-level
   `noise_models` array by 1-based index or by a new optional `label` key, and
@@ -89,6 +98,18 @@ git history (`git log --first-parent develop`).
 - **`sample_pt` and `sample_pt_emcee` warn once, after sampling, when the minimum adjacent swap acceptance is below 1%**, naming the rung pair and suggesting more temperatures. Warning only; draws are unchanged.
 
 ### Fixed
+
+- **Photometric baseline trends are measured in each instrument's own time.** The
+  trend polynomial used x = (t − t_ref) / (half the span of all the photometry),
+  with one t_ref for every instrument. Next to a multi-year survey a ground-based
+  night spanned x ≈ 2×10⁻⁴, so its trend coefficient had to be ~10⁴ times the
+  flux slope and sat far outside the default `NormalPrior(0, 0.05, -0.5, 0.5)`:
+  the trend could not be fitted. x is now centred on the mean time of the
+  instrument's offset group and scaled to that group's half span, so it runs over
+  about [−1, 1] within each group. Fits with `phot_trend_order > 0` change: the
+  coefficients `phot_c<p>_<inst>` mean something different and the fitted
+  baselines of short light curves move; rerun them, and do not resume their
+  checkpoints.
 
 - **Noise models that would silently do nothing are refused.** In a job
   config, a non-"rv" `channel` or an `instruments` list on a model with no such

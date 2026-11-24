@@ -941,11 +941,12 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
     # likelihood so a trend/diluted fit plots a consistent model.
     dil = pm_dilution(theta, ins_idx)
     trend = Float64[theta.values[s] for s in systemic.pm_trend[ins_idx]]
-    inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
+    tn_ref, tn_ih = _phot_trend_norm(theta, data)
+    tr_i, ih_i = tn_ref[ins_idx], tn_ih[ins_idx]
 
     if n_transit == 0
         for i in 1:n_grid
-            model[i] = _phot_continuum(Float64(t_grid[i]), t_ref, inv_th, offset, trend)
+            model[i] = _phot_continuum(Float64(t_grid[i]), tr_i, ih_i, offset, trend)
         end
         return model
     end
@@ -1011,7 +1012,7 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
             end
             tprod *= fsum / ns
         end
-        cont = _phot_continuum(Float64(t), t_ref, inv_th, offset, trend)
+        cont = _phot_continuum(Float64(t), tr_i, ih_i, offset, trend)
         model[i] = cont * ((1.0 - dil) * tprod + dil)
     end
     return model

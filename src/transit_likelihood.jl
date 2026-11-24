@@ -102,7 +102,7 @@ end
                                       offsets::AbstractVector{Float64},
                                       jitters::AbstractVector{Float64},
                                       dilutions::AbstractVector{Float64},
-                                      t_ref::Float64, inv_th::Float64,
+                                      t_ref::Vector{Float64}, inv_th::Vector{Float64},
                                       trends::Vector{Vector{Float64}},
                                       two_pi::Float64)
     s = 0.0
@@ -120,7 +120,7 @@ end
             tprod *= flux_cache[j, i]
         end
         # continuum (1+offset+trend) × dilution (D=0 ⇒ identity (1−D)·transit + D)
-        cont = _phot_continuum(data.t_phot[i], t_ref, inv_th,
+        cont = _phot_continuum(data.t_phot[i], t_ref[ins_idx], inv_th[ins_idx],
                                offsets[ins_idx], trends[ins_idx])
         model_flux = cont * ((1.0 - dil) * tprod + dil)
 
@@ -513,8 +513,9 @@ _sky_orbits(n_transit::Int, Ps, es, ws, Tps, bs, a_Rs) =
 @inline _apply_dilution(tprod, D) = (one(D) - D) * tprod + D
 
 # Per-instrument photometric baseline continuum: 1 + offset + Σ_p c_p·x^p, with
-# x = (t − t_ref)·inv_th the time normalized to the half-baseline span (keeps the
-# coefficients O(1) and span-independent). `trend` is the coefficient vector;
+# x = (t − t_ref)·inv_th the time normalized to the half span of the instrument's
+# own trend group (`_phot_trend_norm`; keeps the coefficients O(1) and
+# span-independent). `trend` is the coefficient vector;
 # EMPTY ⇒ identity continuum 1 + offset (the phot_trend_order==0 default, so the
 # common no-trend path is unchanged). Horner-evaluated.
 @inline function _phot_continuum(t::Float64, t_ref::Float64, inv_th::Float64,
@@ -528,12 +529,56 @@ _sky_orbits(n_transit::Int, Ps, es, ws, Tps, bs, a_Rs) =
     return one(T) + offset + c * x
 end
 
-# 1 / (half the photometric baseline span), in 1/day. 0 when no phot data. Only
-# consulted when a baseline trend is active.
+# 1 / (half the photometric baseline span), in 1/day. 0 when no phot data. Kept for
+# callers outside the likelihood; the trend continuum uses `_phot_trend_norm`.
 function _phot_inv_t_half(data::Data)
     isempty(data.t_phot) && return 0.0
     span = maximum(data.t_phot) - minimum(data.t_phot)
     span > 0 ? 2.0 / span : 0.0
+end
+
+# Per-instrument time normalisation of the baseline trend: `(t_ref, inv_th)`, two
+# vectors over the PM instruments. Instruments that share trend coefficients (the
+# offset group) share one normalisation: t_ref is the mean time of the group's
+# cadences and inv_th = 2 / (the group's time span), so x = (t − t_ref)·inv_th
+# spans about [−1, 1] within the group. A single night of ground-based photometry
+# next to a multi-year survey thus gets a trend on its own night; measuring every
+# trend in the full photometric baseline made x ≈ 0 over one night. Instruments
+# without a trend, and groups with zero span, get inv_th = 0 (no trend term).
+function _phot_trend_norm(theta::Theta, data::Data)
+    pm_trend = theta.params.layout.systemic.pm_trend
+    n_pm = length(pm_trend)
+    t_ref = zeros(Float64, n_pm)
+    inv_th = zeros(Float64, n_pm)
+    all(isempty, pm_trend) && return t_ref, inv_th
+    # group id: instruments whose trend reads the same coefficient slots
+    gid = zeros(Int, n_pm)
+    keys_ = Vector{Vector{Int}}()
+    for ix in 1:n_pm
+        isempty(pm_trend[ix]) && continue
+        k = findfirst(==(pm_trend[ix]), keys_)
+        k === nothing && (push!(keys_, pm_trend[ix]); k = length(keys_))
+        gid[ix] = k
+    end
+    ng = length(keys_)
+    s = zeros(Float64, ng); n = zeros(Int, ng)
+    lo = fill(Inf, ng); hi = fill(-Inf, ng)
+    @inbounds for i in eachindex(data.t_phot)
+        g = gid[data.phot_inst[i]]
+        g == 0 && continue
+        t = data.t_phot[i]
+        s[g] += t; n[g] += 1
+        t < lo[g] && (lo[g] = t)
+        t > hi[g] && (hi[g] = t)
+    end
+    for ix in 1:n_pm
+        g = gid[ix]
+        (g == 0 || n[g] == 0) && continue
+        t_ref[ix] = s[g] / n[g]
+        span = hi[g] - lo[g]
+        inv_th[ix] = span > 0 ? 2.0 / span : 0.0
+    end
+    return t_ref, inv_th
 end
 
 # Gather a Float64/Dual vector of trend coefficients per PM instrument (empty when
@@ -779,7 +824,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         n_super = n_super_data
         has_exp = !isempty(data.exposure_times)
         trends_c = _phot_trend_cache(theta, n_pm)
-        inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
+        tn_ref, tn_ih = _phot_trend_norm(theta, data)
         sky_c = _sky_orbits(n_transit, Ps, es, ws, Tps, bs, a_Rs)
 
         # DETERMINISTIC REDUCTION. This accumulator used to be
@@ -832,7 +877,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers, T_dur_safe,
                         r_for_j, ttv_state, n_super,
                         gd_s, gd_c, ins_idx, sky_c)
-            model_flux = _phot_continuum(t, t_ref, inv_th, offset, trends_c[ins_idx]) *
+            model_flux = _phot_continuum(t, tn_ref[ins_idx], tn_ih[ins_idx], offset, trends_c[ins_idx]) *
                          _apply_dilution(tprod, dilutions[ins_idx])
 
             var_i = obs_err * obs_err + jitter * jitter
@@ -874,7 +919,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
     n_super_s = n_super_data
     has_exp_s = !isempty(data.exposure_times)
     trends_cs = _phot_trend_cache(theta, n_pm_s)
-    inv_th_s = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
+    tn_ref_s, tn_ih_s = _phot_trend_norm(theta, data)
     sky_cs = _sky_orbits(n_transit, Ps, es, ws, Tps, bs, a_Rs)
 
     predictions = Vector{T}(undef, n_obs)
@@ -902,7 +947,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
                             Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
                             T_dur_safe, r_for_j, ttv_state, n_super_s,
                         gd_s, gd_c, ins_idx, sky_cs)
-                predictions[i] = _phot_continuum(t, t_ref, inv_th_s, offset,
+                predictions[i] = _phot_continuum(t, tn_ref_s[ins_idx], tn_ih_s[ins_idx], offset,
                                      trends_cs[ins_idx]) *
                                  _apply_dilution(tprod, dilutions_s[ins_idx])
                 variances[i]   = obs_err * obs_err + jitter * jitter
@@ -923,7 +968,7 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
                         T_dur_safe, r_for_j, ttv_state, n_super_s,
                         gd_s, gd_c, ins_idx, sky_cs)
-            predictions[i] = _phot_continuum(t, t_ref, inv_th_s, offset,
+            predictions[i] = _phot_continuum(t, tn_ref_s[ins_idx], tn_ih_s[ins_idx], offset,
                                  trends_cs[ins_idx]) *
                              _apply_dilution(tprod, dilutions_s[ins_idx])
             variances[i]   = obs_err * obs_err + jitter * jitter
@@ -1003,8 +1048,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
         jitters[ix] = pm_jitter(theta, ix)
     end
     trends_cp = _phot_trend_cache(theta, n_pm)
-    inv_th_p = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
-    t_ref_p  = data.t_ref
+    tn_ref_p, tn_ih_p = _phot_trend_norm(theta, data)
 
     predictions = Vector{T}(undef, n_obs)
     variances   = Vector{T}(undef, n_obs)
@@ -1016,7 +1060,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
     if n_transit == 0
         @inbounds for i in 1:n_obs
             ins_idx = data.phot_inst[i]
-            predictions[i] = _phot_continuum(data.t_phot[i], t_ref_p, inv_th_p,
+            predictions[i] = _phot_continuum(data.t_phot[i], tn_ref_p[ins_idx], tn_ih_p[ins_idx],
                                              offsets[ins_idx], trends_cp[ins_idx])
             σ²            = data.flux_err[i]^2 + jitters[ins_idx]^2
             variances[i]   = σ²
@@ -1151,7 +1195,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
                             Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
                             T_dur_safe, r_for_j, ttv_state, n_super_p,
                         gd_s, gd_c, ins_idx, sky_p)
-                predictions[i] = _phot_continuum(t, t_ref_p, inv_th_p, offset,
+                predictions[i] = _phot_continuum(t, tn_ref_p[ins_idx], tn_ih_p[ins_idx], offset,
                                      trends_cp[ins_idx]) *
                                  _apply_dilution(tprod, dilutions[ins_idx])
                 variances[i]   = data.flux_err[i]^2 + jitters[ins_idx]^2
@@ -1169,7 +1213,7 @@ function phot_predictions(theta::Theta{T}, data::Data) where {T}
                         Ps, es, ws, Tps, bs, a_Rs, rrs, Tc_centers,
                         T_dur_safe, r_for_j, ttv_state, n_super_p,
                         gd_s, gd_c, ins_idx, sky_p)
-            predictions[i] = _phot_continuum(t, t_ref_p, inv_th_p, offset,
+            predictions[i] = _phot_continuum(t, tn_ref_p[ins_idx], tn_ih_p[ins_idx], offset,
                                  trends_cp[ins_idx]) *
                              _apply_dilution(tprod, dilutions[ins_idx])
             variances[i]   = data.flux_err[i]^2 + jitters[ins_idx]^2
@@ -1213,14 +1257,13 @@ function _phot_ll_no_transit(theta::Theta{T}, data::Data) where {T}
     # continuum (offset + any trend) still applies out of transit.
     n_pm = length(theta.params.config.instruments.pm_names)
     trends_c = _phot_trend_cache(theta, n_pm)
-    inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
-    t_ref = data.t_ref
+    tn_ref, tn_ih = _phot_trend_norm(theta, data)
     predictions = Vector{T}(undef, n_obs)
     variances   = Vector{T}(undef, n_obs)
     @inbounds for i in 1:n_obs
         ins_idx = data.phot_inst[i]
         jitter  = pm_jitter(theta, ins_idx)
-        predictions[i] = _phot_continuum(data.t_phot[i], t_ref, inv_th,
+        predictions[i] = _phot_continuum(data.t_phot[i], tn_ref[ins_idx], tn_ih[ins_idx],
                                          pm_offset(theta, ins_idx), trends_c[ins_idx])
         variances[i]   = data.flux_err[i] * data.flux_err[i] + jitter * jitter
     end
@@ -1462,7 +1505,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
             dilutions[ix] = pm_dilution(theta, ix)
         end
         trends_c = _phot_trend_cache(theta, n_pm)
-        inv_th = theta.params.config.phot_trend_order > 0 ? _phot_inv_t_half(data) : 0.0
+        tn_ref, tn_ih = _phot_trend_norm(theta, data)
 
         # Gravity-darkening state, built as the non-workspace method builds it
         # (see there for the physics), with the same -Inf at the ends of i★ and
@@ -1620,7 +1663,7 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
         # friendly loop is faster end-to-end for this size.
         result = _phot_chunk_loglik(1, n_obs, data, n_transit, transits,
                                      flux_cache, offsets, jitters, dilutions,
-                                     t_ref, inv_th, trends_c, two_pi)
+                                     tn_ref, tn_ih, trends_c, two_pi)
         # A NaN model (an orbit the transit function cannot evaluate) rejects the
         # draw, as everywhere else in this function.
         isnan(result) && (result = convert(T, -Inf))

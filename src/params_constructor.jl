@@ -50,6 +50,10 @@ fallback bounds are used.
   name one (`Mo_k1` → `:Mo`, see `resolve_time_anchor`), else the transit phase
   `:phic` (`:Mo` under `obs_prior`), which needs `data` to fix its epoch.
 - `trend_order::Int` — 0 (none), 1 (linear), 2 (quadratic)
+- `phot_trend_order` — photometric baseline polynomial order: an integer (0, 1, 2)
+  for every PM instrument, or a dictionary `instrument => order` (unlisted
+  instruments get none). Each trend is measured in the time of its own offset
+  group: centred on the group's mean time and scaled to its half span.
 - `noise_models::Vector{NoiseModel}` — noise models to include
 - `stability::Symbol` — `:none`, `:amd`, `:gladman`; hard prior on orbital stability
 - `M_s::Float64` — stellar mass (M_sun); needed for stability and derived quantities
@@ -95,7 +99,7 @@ function Params(;
     priors::Union{Nothing, Dict{String, <:PriorSpec}} = nothing,
     data::Union{Nothing, Data} = nothing,
     trend_order::Int = 0,
-    phot_trend_order::Int = 0,
+    phot_trend_order::Union{Integer, AbstractDict} = 0,
     noise_models::Vector{<:NoiseModel} = NoiseModel[],
     stability::Symbol = :amd,
     M_s::Float64 = NaN,
@@ -117,8 +121,8 @@ function Params(;
     max_kplanet >= 0 || throw(ArgumentError("max_kplanet must be ≥ 0"))
     trend_order in (0, 1, 2) || throw(ArgumentError(
         "trend_order must be 0, 1, or 2; got $trend_order"))
-    phot_trend_order in (0, 1, 2) || throw(ArgumentError(
-        "phot_trend_order must be 0, 1, or 2; got $phot_trend_order"))
+    phot_trend_order, phot_trend_orders =
+        _phot_trend_orders(phot_trend_order, instruments.pm_names)
     stability in (:none, :amd, :gladman) || throw(ArgumentError(
         "stability must be :none, :amd, or :gladman; got :$stability"))
     if stability !== :none && isnan(M_s) && max_kplanet >= 2
@@ -218,7 +222,7 @@ function Params(;
                           instruments, Dict{String, PriorSpec}(),
                           trend_order, phot_trend_order, nm_vec, stability, M_s, R_s,
                           external_priors, sharing, ttv_n_transits,
-                          ttv_backend, obliquity, tt_jit, ttv_ep)
+                          ttv_backend, obliquity, tt_jit, ttv_ep, phot_trend_orders)
 
     # Generate defaults from data (or use generic fallbacks)
     data_for_priors = data !== nothing ? data :
@@ -252,7 +256,8 @@ function Params(;
     config = ParamsConfig(max_kplanet, parametrization, modes_vec,
                           instruments, defaults, trend_order, phot_trend_order, nm_vec,
                           stability, M_s, R_s, external_priors, sharing,
-                          ttv_n_transits, ttv_backend, obliquity, tt_jit, ttv_ep)
+                          ttv_n_transits, ttv_backend, obliquity, tt_jit, ttv_ep,
+                          phot_trend_orders)
     layout = _build_layout(config; data=data)
     return Params(config, layout)
 end
@@ -289,4 +294,31 @@ function _ttv_slot_config(ttv_n_transits::AbstractDict, ttv_epochs::AbstractDict
         isempty(ep) || (epochs[k] = ep)
     end
     return counts, epochs
+end
+
+"""
+    _phot_trend_orders(spec, pm_names) -> (order::Int, orders::Dict{String, Int})
+
+Split a `phot_trend_order` argument into the default order and the per-instrument
+overrides. An integer applies to every PM instrument. A dictionary maps PM
+instrument names to orders; instruments it does not list get none. Orders are 0,
+1 or 2, and every name must be a PM instrument.
+"""
+function _phot_trend_orders(spec::Integer, pm_names)
+    spec in (0, 1, 2) || throw(ArgumentError(
+        "phot_trend_order must be 0, 1, or 2; got $spec"))
+    return Int(spec), Dict{String, Int}()
+end
+function _phot_trend_orders(spec::AbstractDict, pm_names)
+    out = Dict{String, Int}()
+    for (k, v) in spec
+        name = String(k)
+        name in pm_names || throw(ArgumentError(
+            "phot_trend_order names `$name`, which is not a photometric instrument " *
+            "(known: $(join(pm_names, ", ")))"))
+        (v isa Integer && v in (0, 1, 2)) || throw(ArgumentError(
+            "phot_trend_order[\"$name\"] must be 0, 1, or 2; got $v"))
+        out[name] = Int(v)
+    end
+    return 0, out
 end

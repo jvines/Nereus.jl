@@ -494,8 +494,16 @@ function _validate_config(cfg::AbstractDict)
         end
         if _has(mdl, :phot_trend_order)
             t = _get(mdl, :phot_trend_order)
-            (t == 0 || t == 1 || t == 2) || push!(errs,
-                "model.phot_trend_order must be 0, 1, or 2; got $t")
+            if t isa AbstractDict
+                for (k, v) in t
+                    (v isa Integer && v in (0, 1, 2)) || push!(errs,
+                        "model.phot_trend_order[\"$k\"] must be 0, 1, or 2; got $v")
+                end
+            else
+                (t == 0 || t == 1 || t == 2) || push!(errs,
+                    "model.phot_trend_order must be 0, 1, or 2, or a map " *
+                    "{instrument: order}; got $t")
+            end
         end
         # The free TTV offsets, keyed by planet: {"1": N} and {"1": [epochs]}.
         for (key, what) in ((:ttv_n_transits, "a count"),
@@ -1661,7 +1669,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         :data            => data,
         :parametrization => parametrization,
         :trend_order     => Int(_get(mdl, :trend_order; default = 0)),
-        :phot_trend_order => Int(_get(mdl, :phot_trend_order; default = 0)),
+        :phot_trend_order => _phot_trend_order_kw(_get(mdl, :phot_trend_order; default = 0)),
         :stability       => _STAB[String(_get(mdl, :stability;
                                                 default = "none"))],
         :noise_models    => noise_models,
@@ -4045,3 +4053,8 @@ function _add_root_figures!(summary::AbstractDict, out_dir::AbstractString)
     end
     return summary
 end
+
+# `model.phot_trend_order` of a job config: an integer for every photometric
+# instrument, or a map instrument → order (JSON object), handed to `Params`.
+_phot_trend_order_kw(t::AbstractDict) = Dict{String, Int}(String(k) => Int(v) for (k, v) in t)
+_phot_trend_order_kw(t) = Int(t)
