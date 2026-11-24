@@ -5,6 +5,20 @@ git history (`git log --first-parent develop`).
 
 ## Unreleased
 
+### Changed
+
+- **The first fit in a fresh process no longer compiles for about two minutes.**
+  Nereus now precompiles the fit path (`src/fit_precompile.jl`): a tiny RV fit
+  through `fit_rv` and its post-fit stages with `pt_emcee`, and `run_job` on a
+  minimal config, in a temporary directory with fixed seeds. A first `fit_rv`
+  with the default outputs took 139 s and now takes 1.4 s; a first `run_job`
+  on the easy RV target 4.9 s, and a first `transdim_pt_emcee` one 15 s.
+  `Pkg.precompile()` of Nereus goes from about 22 s to about 156 s. The
+  workload is on by default; switch it off with
+  `set_preferences!(Nereus, "precompile_fit" => false)` (or `precompile_fit =
+  false` under `[Nereus]` in a `LocalPreferences.toml`) and Nereus recompiles.
+  The figures stay a separate, opt-in workload (`precompile_plots`).
+
 ### Tests
 
 - **`transdim_pt_emcee` is checked for thread-count invariance.** The same seed

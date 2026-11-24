@@ -443,5 +443,6 @@ export sampler_diagnostics, chain_convergence, ensemble_drift,
     FEATURE_ACTIONS, default_rv_planet, default_astrom_planet
 
 include("plotting/precompile.jl")   # the figures, for a release build (see the file)
+include("fit_precompile.jl")        # the fit path, on by default (see the file)
 
 end # module Nereus

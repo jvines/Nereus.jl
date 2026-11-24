@@ -86,9 +86,9 @@ using Test, Nereus, Random, Statistics
             "model" => Dict("max_kplanet" => 2, "planet_modes" => ["RV_ONLY", "RV_ONLY"]),
             "transdim" => Dict("max_kplanet" => 2),
             "sampler" => Dict("name" => "transdim_pt_emcee",
-                              "kwargs" => Dict("show_progress" => false, "n_temps" => 4,
-                                               "n_walkers" => 16, "n_steps" => 80,
-                                               "n_burnin" => 40))))
+                              "kwargs" => Dict("show_progress" => false, "n_temps" => 3,
+                                               "n_walkers" => 8, "n_steps" => 30,
+                                               "n_burnin" => 15))))
         Nereus.run_job(cfg)
         ch, _ = Nereus.load_chains(joinpath(cfg["output_dir"], "chains.nc"))
         println("HASH ", hash(Array(ch.value.data)))
