@@ -3,6 +3,22 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Changed
+
+- **HGCA / G23H without a GOST file now average the Gaia epoch over the release's nominal observing window.** The Gaia epoch used to fall back silently to the instantaneous reflex, wrong for a companion whose period is shorter than the Gaia baseline. With no `gost`, the model now takes the five-parameter fit through a UNIFORM synthetic scan set across the window of the catalogue's release (DR3: 2014-07-25 to 2017-05-28; DR2: to 2016-05-23), epochs every 10 d (`NOMINAL_GAIA_SCAN_STEP_DAYS`; faithful for P above about 20 d), by the same code path as the GOST window average. `Data` logs one `@info` saying so; supply `gost` (`fetch_gost`) for the exact scan law, which is used unchanged. Hipparcos without scans still uses the instantaneous reflex (and still warns). Fits to HGCA / G23H without GOST move by the window averaging, most for short periods.
+
+- **`pt_whitening` is deprecated** (kept, not removed): it warns once when selected. Its whitened swap accepts about 8x less often than the identity swap (median 0.027 vs 0.22) and `pt_emcee` beats it on every measured target. The comment claiming its ladder matches the validated `pt_emcee` one, and the docs rating it "Solid", were wrong and are corrected. `docs/src/sampler_validation.md` is rewritten to describe the tests that exist (the harness it described is not in the repository).
+
+### Added
+
+- **`sample_pt` and `sample_pt_emcee` warn once, after sampling, when the minimum adjacent swap acceptance is below 1%**, naming the rung pair and suggesting more temperatures. Warning only; draws are unchanged.
+
+### Fixed
+
+- **`ppc.png` and `detection_limits.png` are now in `summary["figures"]`** (keys `ppc`, `detection_limits`, plus `figures_pdf` when a PDF was saved). They are written to the output directory root, outside the `plots/` walk that builds the manifest, so clients never listed them. The files stay where they are.
+
 ## 0.9.10
 
 ### Added
