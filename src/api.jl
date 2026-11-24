@@ -1265,7 +1265,8 @@ end
 # and go to the target. Split off before `_target_from`, which takes none of
 # them, and handed to `_finish`.
 const _STAR_DERIVED_KEYS = (:T_eff, :J_mag, :K_mag, :Ab,
-                            :sigma_M_s, :sigma_R_s, :sigma_T_eff)
+                            :sigma_M_s, :sigma_R_s, :sigma_T_eff,
+                            :distance_pc, :trend_sep_arcsec, :separation_epoch)
 function _split_star_kwargs(kwargs)
     star = Dict{Symbol,Any}(k => v for (k, v) in pairs(kwargs)
                             if k in _STAR_DERIVED_KEYS)
@@ -1402,7 +1403,10 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
             summarize_derived(chains, target.params;
                               M_s   = st.M_s, R_s = st.R_s, T_eff = st.T_eff,
                               J_mag = st.J_mag, K_mag = st.K_mag, Ab = st.Ab,
-                              t_ref = target.data.t_ref)
+                              t_ref = target.data.t_ref, data = target.data,
+                              distance_pc = st.distance_pc,
+                              trend_sep_arcsec = st.trend_sep_arcsec,
+                              separation_epoch = st.separation_epoch)
     catch err
         summary["derived_error"] = sprint(showerror, err)
     end

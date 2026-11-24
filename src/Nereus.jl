@@ -284,7 +284,7 @@ export
     stellar_mass_from_density,
     equilibrium_temperature, incident_flux, incident_flux_earth,
     tsm, esm, is_amd_stable, is_gladman_stable, check_stability,
-    DerivedParams, compute_derived, conditional_gamma,
+    DerivedParams, compute_derived, compute_derived_system, conditional_gamma,
     # Reporting
     ParamStats,
     summarize_fitted, summarize_derived,
