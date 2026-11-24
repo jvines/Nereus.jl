@@ -334,5 +334,88 @@ function validate_noise_models(models::Vector{<:NoiseModel}; transdim::Bool=fals
                 "allow both as toggleable components, or scope the GP to " *
                 "specific instruments via `instruments=[\"…\"]`)."))
         end
+        # Every model is on at once here: the trans-dim pairs below are refused
+        # for the whole fit.
+        validate_noise_coactivity(models, Int[], Vector{Int}[])
     end
+end
+
+"""
+    _check_noise_instruments(models, instruments::InstrumentConfig)
+
+Every instrument a noise model names must be one of its channel's instruments
+(RV for `:rv`, photometric for `:phot`). A name from the other channel, or a
+typo, made the model cover nothing: ErrorScale(instruments = ["TESS"]) on a
+light curve allocated `errscale_TESS` and rescaled no point at all.
+"""
+function _check_noise_instruments(models, instruments::InstrumentConfig)
+    for (i, m) in enumerate(models)
+        insts = noise_instruments(m)
+        isempty(insts) && continue
+        ch = noise_channel(m)
+        known = ch === :rv ? instruments.rv_names :
+                ch === :phot ? instruments.pm_names : continue
+        bad = setdiff(insts, known)
+        isempty(bad) || throw(ArgumentError(
+            "noise_models[$i] ($(nameof(typeof(m)))) on channel :$ch names " *
+            "instrument(s) $bad, which are not $(ch === :rv ? "RV" : "photometric") " *
+            "instruments of this fit ($(isempty(known) ? "it has none" :
+                                        join(known, ", ")))" *
+            (m isa ErrorScale ? "; ErrorScale rescales RV errors only" : "")))
+    end
+    return nothing
+end
+
+_coactive_gp(m) = m isa CovarianceNoise && !(m isa ActivityGP)
+
+"""
+    validate_noise_coactivity(models, toggle_idx, groups)
+
+Refuse noise models that a run can have active at the same time but that the
+channel likelihood (`_eval_channel_likelihood`) cannot score together. Every
+model not in `toggle_idx` is always on; `groups` are the exclusion groups as
+index vectors into `models`. A pair is allowed when both are toggleable and
+share a group. Refused, per channel:
+
+- two covariance GPs whose instruments overlap (an empty list covers every
+  instrument of the channel): two global GPs score one of them and drop the
+  other, two restricted GPs on one instrument score its points twice;
+- an `AdditiveCovariance` (NightlyOffset, HarmonicBlock) beside a GP restricted
+  to some instruments, a composition the likelihood has no route for (it
+  composes on a white base or one global GP only).
+
+`ActivityGP` is scored on its own route and is not a member of either pair.
+A per-light-curve photometric menu -- {white | MaternGP | CeleriteSHO} on each
+light curve, `instruments = [lc]`, one exclusion group per light curve -- passes.
+"""
+function validate_noise_coactivity(models::AbstractVector, toggle_idx, groups)
+    tog = Set{Int}(toggle_idx)
+    exclusive(i, j) = (i in tog) && (j in tog) && any(g -> (i in g) && (j in g), groups)
+    name(i) = "noise_models[$i] ($(nameof(typeof(models[i]))))"
+    for i in eachindex(models), j in (i + 1):lastindex(models)
+        a, b = models[i], models[j]
+        ch = noise_channel(a)
+        noise_channel(b) === ch || continue
+        why = nothing
+        if _coactive_gp(a) && _coactive_gp(b)
+            ia, ib = noise_instruments(a), noise_instruments(b)
+            if isempty(ia) && isempty(ib)
+                why = "both are global GPs, and only one would be scored"
+            elseif isempty(ia) || isempty(ib)
+                why = "a global GP and an instrument-restricted one cover the same points"
+            elseif !isempty(intersect(ia, ib))
+                why = "both are GPs on $(intersect(ia, ib)), whose points would be scored twice"
+            end
+        elseif (a isa AdditiveCovariance && _coactive_gp(b) && !isempty(noise_instruments(b))) ||
+               (b isa AdditiveCovariance && _coactive_gp(a) && !isempty(noise_instruments(a)))
+            why = "an additive covariance does not compose with a GP restricted to " *
+                  "some instruments"
+        end
+        (why === nothing || exclusive(i, j)) && continue
+        throw(ArgumentError(
+            "$(name(i)) and $(name(j)) can be active together on channel :$ch, " *
+            "but $why. Make both toggleable and put them in one " *
+            "noise_exclusion_groups entry, or drop one."))
+    end
+    return nothing
 end

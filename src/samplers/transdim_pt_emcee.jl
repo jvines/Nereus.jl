@@ -1074,6 +1074,11 @@ function sample_transdim_pt_emcee(
             length(idxs) >= 2 && push!(noise_excl_idx, idxs)
         end
     end
+    # No reachable state may hold models the likelihood cannot score together
+    # (two GPs on one light curve, ...): refused here, before the first step,
+    # rather than mid-run or, worse, scored wrong.
+    validate_noise_coactivity(params.config.noise_models,
+                              do_noise ? noise_toggle_idx : Int[], noise_excl_idx)
 
     td_states = Matrix{TransDimState}(undef, n_temps, n_walkers_eff)
     for t in 1:n_temps, w in 1:n_walkers_eff

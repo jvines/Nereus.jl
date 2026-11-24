@@ -504,6 +504,10 @@ is the alternative, not an addition. Put it in a `noise_exclusion_groups`
 entry with any other white treatment so the trans-dim menu carries at most
 one. Composes with a base GP: `f²σ_i²` feeds the GP's diagonal too.
 
+RV only: it has no `channel`, and a job config that sets `channel: "phot"`
+or names a photometric instrument is refused rather than left to do nothing.
+On a light curve the white alternative is the per-instrument `jitter_<lc>`.
+
 Stage 1 — applied at the variance-build step (like `ActivityJitter`).
 """
 struct ErrorScale <: MeanModifier
@@ -632,9 +636,15 @@ const _ACTIVITY_GP_COEFFS = Dict(
     :halpha => (:Hc, :Hr),
 )
 
-"""Channel of a noise model — `:rv` or `:phot`. Defaults to `:rv` for
-all subtypes; only `CovarianceNoise` currently honors per-channel
-routing in the likelihood (see `transit_log_likelihood`)."""
+"""Channel of a noise model — `:rv`, `:phot` (or `:tomo`). A model with no
+`channel` field acts on the RV data (`:rv`): ErrorScale, ActivityDecorrelation,
+ActivityJitter, IndicatorFloor, ActivityGP. On the photometry the transit
+likelihood (`transit_log_likelihood`) routes every model whose channel is
+`:phot` through `_eval_channel_likelihood`: the GPs (global or per light curve
+via `instruments`), NightlyOffset and HarmonicBlock (per instrument), AR/MA and
+StudentT. A job config that puts a channel-less model on `:phot` is refused
+(`_build_noise_models`), as is a model naming instruments its channel does not
+have (`_check_noise_instruments`)."""
 noise_channel(nm::NoiseModel) = hasfield(typeof(nm), :channel) ? getfield(nm, :channel) : :rv
 
 """Instrument-name list a `CovarianceNoise` GP is restricted to.
