@@ -1116,6 +1116,8 @@ numbers live under `fitted` / `derived`
     "models/rv_timeseries": "/work/out/plots/models/rv_timeseries.png",
     "transdim/occupancy":   "/work/out/plots/transdim/occupancy.png"
   },
+  // `ppc` and `detection_limits` (written to the output root, not plots/) are
+  // added to `figures` by name when this run wrote them.
   // legacy flat list of generated plot paths (PPC/detection-limits pushed here too)
   "plots": [ "ppc.png", "detection_limits.png" ],
 
