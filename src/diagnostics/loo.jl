@@ -65,6 +65,9 @@ Fields:
   prefers the model more than PT log Z does.
 - `n_nonfinite_draws::Int` — draws left out because their prediction or
   log-likelihood was not finite (`n_draws` counts the draws used).
+- `status::String` — `"ok"`, `"warn"` (some k̂ > 0.7: PSIS-LOO is uncertain) or
+  `"unreliable"` (`elpd_loo` is NaN, or k̂ > 1: use `elpd_waic` or more draws),
+  and `message::String` says which and why.
 """
 struct LooResult
     n_draws::Int
@@ -80,12 +83,15 @@ struct LooResult
     pareto_k_warn_count::Int
     loo_compare_log_z::Union{Nothing, Float64}
     n_nonfinite_draws::Int
+    status::String
+    message::String
 end
 
 LooResult(n_draws, n_obs, elpd_loo, se_elpd_loo, p_loo, elpd_waic, se_elpd_waic,
           p_waic, pareto_k, pareto_k_max, pareto_k_warn_count, loo_compare_log_z) =
     LooResult(n_draws, n_obs, elpd_loo, se_elpd_loo, p_loo, elpd_waic, se_elpd_waic,
-              p_waic, pareto_k, pareto_k_max, pareto_k_warn_count, loo_compare_log_z, 0)
+              p_waic, pareto_k, pareto_k_max, pareto_k_warn_count, loo_compare_log_z,
+              0, "ok", "")
 
 
 # =====================================================================
@@ -215,12 +221,16 @@ function compute_loo(chains, params::Params, data::Data;
     loo_minus_logz = log_z === nothing ? nothing :
                       elpd_loo - Float64(log_z)
 
+    status, message = _loo_status(elpd_loo, pareto_k_max, pareto_k_warn)
+    status == "unreliable" &&
+        @warn "compute_loo: $message" elpd_loo elpd_waic pareto_k_max
+
     return LooResult(
         n_draws_eff, n_obs_total,
         elpd_loo, se_elpd_loo, p_loo,
         elpd_waic, se_elpd_waic, p_waic,
         pareto_k, pareto_k_max, pareto_k_warn,
-        loo_minus_logz, n_nonfinite,
+        loo_minus_logz, n_nonfinite, status, message,
     )
 end
 
@@ -714,4 +724,20 @@ function _waic(log_L::AbstractMatrix{<:Real})
     p   = sum(p_waic_per_i)
     se  = sqrt(n_obs * var(elpd_per_i; corrected = true))
     return (elpd, se, p)
+end
+
+# Whether the PSIS estimate can be read. ParetoSmooth returns NaN for `elpd_loo`
+# when a point's k̂ is so large (above 2, as on a short or poorly mixed chain)
+# that the tail fit degenerates; a bare NaN says nothing about why.
+function _loo_status(elpd_loo::Float64, kmax::Float64, n_warn::Int)
+    fmt(x) = isnan(x) ? "NaN" : string(round(x; digits = 2))
+    if !isfinite(elpd_loo) || !isfinite(kmax) || kmax > 1
+        return "unreliable", "Pareto k̂ = $(fmt(kmax)), LOO unreliable" *
+               (isfinite(elpd_loo) ? "" : " (elpd_loo is NaN)") *
+               "; use WAIC (elpd_waic) or more draws"
+    elseif kmax > 0.7
+        return "warn", "Pareto k̂ = $(fmt(kmax)) > 0.7 at $n_warn point(s): PSIS-LOO is " *
+               "uncertain; compare with WAIC or use more draws"
+    end
+    return "ok", ""
 end

@@ -101,14 +101,71 @@ using Test, Nereus, Logging, MCMCChains, Random
         end
     end
 
-    @testset "a transit with no a/R★ source says so" begin
-        @test_logs (:warn, r"nothing sets its a/R★") match_mode = :any begin
+    @testset "a transit with no a/R★ source is refused" begin
+        # No M_s/R_s, no use_rho_s, no sampled a/R★: a/R★ would be NaN for every
+        # draw. It used to fit a likelihood of constant 0 and warn nowhere.
+        err = try
             Nereus._target_from([fx.phj], 1; time_anchor = :phic, priors = fx.priors)
+        catch e; e end
+        @test err isa ArgumentError
+        msg = sprint(showerror, err)
+        @test occursin("M_s", msg) && occursin("use_rho_s", msg) && occursin("a/R★", msg)
+        # fit_* and the joint path say the same, before any sampling.
+        @test_throws ArgumentError fit_transit(fx.phot; priors = fx.priors, time_anchor = :phic)
+        @test_throws ArgumentError fit_joint(fx.rvj, fx.phj; planets = fx.planets,
+                                             time_anchor = :phic)
+        # Each of the three sources is enough.
+        @test Nereus._target_from([fx.phj], 1; time_anchor = :phic, priors = fx.priors,
+                                  M_s = 1.0, R_s = 1.0) isa Nereus.NereusTarget
+        @test Nereus._target_from([fx.phj], 1; time_anchor = :phic, use_rho_s = true,
+                                  priors = fx.priors) isa Nereus.NereusTarget
+        # M_s without R_s is not enough.
+        @test_throws ArgumentError Nereus._target_from([fx.phj], 1; time_anchor = :phic,
+                                                       priors = fx.priors, M_s = 1.0)
+        # An RV-only fit has no transit and needs none.
+        @test Nereus._target_from([rvch], Nereus._planet_spec(1; block =
+                  Nereus.default_rv_planet(fx.data["HARPS"].t, fx.data["HARPS"].rv));
+                  time_anchor = :phic) isa Nereus.NereusTarget
+    end
+
+    @testset "a draw with no a/R★ is rejected, not scored 0" begin
+        tgt = Nereus._target_from([fx.phj], 1; time_anchor = :phic, use_rho_s = true,
+                                  priors = merge(fx.priors, Dict{String, PriorSpec}(
+                                      "rho_s" => UniformPrior(0.5, 3.0))))
+        params, data = tgt.params, tgt.data
+        th = Nereus.Theta{Float64}(params)
+        for (i, s) in enumerate(params.layout.unfrozen_idx)
+            lo, hi = Nereus.bounds(params.layout.unfrozen_priors[i])
+            th.values[s] = clamp((lo + hi) / 2, lo, hi)
         end
-        @test_logs min_level = Logging.Warn begin
-            Nereus._target_from([fx.phj], 1; time_anchor = :phic, priors = fx.priors,
-                                M_s = 1.0, R_s = 1.0)
+        th.values[params.layout.name_to_idx["P_k1"]] = 3.0
+        rho_names = [n for n in params.layout.unfrozen_names if startswith(n, "rho")]
+        @test !isempty(rho_names)
+        for n in rho_names; th.values[params.layout.name_to_idx[n]] = 1.4; end
+        @test isfinite(Nereus.transit_log_likelihood(th, data))
+        for n in rho_names; th.values[params.layout.name_to_idx[n]] = NaN; end   # a/R★ = NaN
+        @test Nereus.transit_log_likelihood(th, data) == -Inf
+        ws = Nereus.PTWorkspace(params, 1, 0; n_obs = 0, n_phot = length(data.t_phot))
+        @test Nereus.transit_log_likelihood(th, data, ws) == -Inf
+    end
+
+    @testset "LOO says why elpd_loo is NaN" begin
+        st, msg = Nereus._loo_status(NaN, 3.2, 5)
+        @test st == "unreliable" && occursin("Pareto k̂ = 3.2", msg) &&
+              occursin("WAIC", msg) && occursin("more draws", msg)
+        @test Nereus._loo_status(-10.0, 1.4, 3)[1] == "unreliable"
+        @test Nereus._loo_status(-10.0, 0.8, 2)[1] == "warn"
+        @test Nereus._loo_status(-10.0, 0.3, 0) == ("ok", "")
+        # The transit chain of this test has k̂ above 2 for some seeds (a short,
+        # poorly mixed chain): then the result carries the status beside the NaN.
+        r = quiet() do
+            fit_transit(fx.phot; time_anchor = :phic, priors = fx.priors, M_s = 1.0, R_s = 1.0,
+                        engine = eng(100), output_dir = mktempdir())
         end
+        loo = r.summary["loo"]
+        @test haskey(loo, "status") && haskey(loo, "message") && isfinite(loo["elpd_waic"])
+        loo["status"] == "ok" || @test occursin("k̂", loo["message"])
+        isfinite(loo["elpd_loo"]) || @test loo["status"] == "unreliable"
     end
 
     @testset "the workload's fits leave no PPC or LOO failure" begin
@@ -119,8 +176,8 @@ using Test, Nereus, Logging, MCMCChains, Random
             end
             for sub in ("fit_rv", "fit_transit", "fit_joint", "run_job")
                 s = Nereus.JSON3.read(read(joinpath(dir, sub, "summary.json"), String))
-                @test !haskey(s.ppc, :status)
-                @test !haskey(s.loo, :status)
+                @test get(s.ppc, :status, "") != "failed"
+                @test get(s.loo, :status, "ok") != "skipped"
                 @test s.ppc.n_nonfinite_draws == 0
             end
         finally

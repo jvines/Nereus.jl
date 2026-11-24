@@ -23,7 +23,10 @@ using Statistics: median, mean
     @testset "the density is a sampled parameter only on request" begin
         on  = Nereus._target_from([rvch, phch], planets; use_rho_s = true,
                                   time_anchor = :phic)
-        off = Nereus._target_from([rvch, phch], planets; time_anchor = :phic)
+        # Without use_rho_s, a/R★ comes from (M_s, R_s); with neither the target
+        # is refused (test_nonfinite_draws.jl).
+        off = Nereus._target_from([rvch, phch], planets; time_anchor = :phic,
+                                  M_s = 1.0, R_s = 1.0)
         @test on.params.config.parametrization.use_rho_s
         @test "rho_s" in layout_names(on)
         @test !off.params.config.parametrization.use_rho_s
@@ -71,7 +74,9 @@ end
                     engine = eng, science = false)
     ρ = r.summary["params"]["rho_s"]
     @test 0.5 <= ρ["lo3sig"] && ρ["hi3sig"] <= 5.0
-    r0 = fit_transit(phot; time_anchor = :phic,
+    # The test is about `rho_s` being absent without `use_rho_s`. a/R★ then needs
+    # (M_s, R_s): with neither, the old fit ran on a likelihood of constant 0.
+    r0 = fit_transit(phot; time_anchor = :phic, M_s = 1.0, R_s = 1.0,
                      priors = Dict{String,PriorSpec}("P_k1" => UniformPrior(2.9, 3.1)),
                      engine = eng, science = false)
     @test !haskey(r0.summary["params"], "rho_s")

@@ -638,7 +638,10 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         # sampled slot, rho_s, or (M_s, R_s): see `planet_geometry`.
         a_Rs[j] = planet_a_Rs(theta, k, Ps[j])
         if isnan(a_Rs[j])
-            return zero(T)
+            # No a/R★ for this draw: the model cannot be evaluated, so the draw is
+            # rejected. (It used to score 0, which beats every real draw whose
+            # log L is negative.)
+            return convert(T, -Inf)
         end
 
         # Geometry gate: planet transits if b < 1 + rr
@@ -948,8 +951,9 @@ function _transit_ll_direct(theta::Theta{T}, data::Data, n_super_data::Int) wher
         end
     end
 
-    return _eval_channel_likelihood(theta, residuals, variances, data.t_phot,
-                                     data.phot_inst, :phot, two_pi)
+    ll = _eval_channel_likelihood(theta, residuals, variances, data.t_phot,
+                                  data.phot_inst, :phot, two_pi)
+    return isnan(ll) ? convert(T, -Inf) : ll
 end
 
 """
@@ -1405,7 +1409,10 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
         # sampled slot, rho_s, or (M_s, R_s): see `planet_geometry`.
         a_Rs[j] = planet_a_Rs(theta, k, Ps[j])
         if isnan(a_Rs[j])
-            return zero(T)
+            # No a/R★ for this draw: the model cannot be evaluated, so the draw is
+            # rejected. (It used to score 0, which beats every real draw whose
+            # log L is negative.)
+            return convert(T, -Inf)
         end
 
         transits[j] = bs[j] < 1 + rrs[j]
@@ -1614,6 +1621,9 @@ function transit_log_likelihood(theta::Theta{T}, data::Data, ws) where {T}
         result = _phot_chunk_loglik(1, n_obs, data, n_transit, transits,
                                      flux_cache, offsets, jitters, dilutions,
                                      t_ref, inv_th, trends_c, two_pi)
+        # A NaN model (an orbit the transit function cannot evaluate) rejects the
+        # draw, as everywhere else in this function.
+        isnan(result) && (result = convert(T, -Inf))
         ws.phot_ll_total_cache = result
         ws.phot_ll_total_hash = total_h
         return result

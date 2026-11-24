@@ -16,14 +16,26 @@ git history (`git log --first-parent develop`).
   numbers as the chain without them. Only when every draw is non-finite do they
   throw, with the reason. The RV, transit and joint paths share the code.
 
-- **A transit fit with no source of a/R★ now says so.** With neither `M_s` and
+- **A transit fit with no source of a/R★ is refused.** With neither `M_s` and
   `R_s`, nor `use_rho_s = true`, nor a sampled a/R★, the planet's a/R★ is NaN:
-  the transit likelihood scores a constant 0 for every draw (the posterior is
-  the prior) and the predicted light curve is NaN, which is what made PPC and
-  LOO fail on the precompile workload's transit fit. `fit_transit`,
-  `fit_joint` and the other `fit_*` now warn where the target is built. (The
-  likelihood still returns 0 for such a draw, not -Inf, so an old fit of this
-  kind keeps running.)
+  the transit likelihood scored a constant 0 for every draw (the posterior was
+  the prior, silently) and the predicted light curve was NaN. `build_target`
+  (so every `fit_*`) and the `run_job` config builder now throw an
+  `ArgumentError` naming the three ways to give one. Transit-times-only fits
+  read no a/R★ and are unaffected.
+
+- **A draw whose a/R★ is NaN, or whose transit model is NaN, is rejected with
+  -Inf** (the transit likelihood, with and without the workspace), not scored
+  0, which outscored every real draw whose log L is negative. The RV, RM,
+  tomography and astrometry likelihoods already rejected such draws; the
+  astrometry `zero` returns left are for absent data, not invalid draws.
+
+- **`elpd_loo` NaN now says why.** When a point's Pareto k̂ is so large (above
+  2 on a short or poorly mixed chain) that PSIS gives NaN, the `loo` block of
+  `summary.json` carries `status` (`ok`, `warn`, `unreliable`) and a `message`
+  ("Pareto k̂ = 3.2, LOO unreliable; use WAIC (elpd_waic) or more draws"), and
+  a warning is logged; `elpd_waic` is always alongside. `LooResult` has
+  `status` and `message` fields.
 
 ### Changed
 

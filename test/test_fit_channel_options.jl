@@ -58,12 +58,14 @@ using Test, Nereus, Random, Statistics
         ph = Dict("T" => (t = t1, flux = ones(30), flux_err = fill(1e-3, 30)))
         pch(; kw...) = Dict{String,Any}("source" => "PM", "data" => ph,
                                         (String(k) => v for (k, v) in kw)...)
+        # (M_s, R_s) give a/R★ -- a transit planet with no source for it is refused
         tp = Nereus._target_from([pch(exposure_time = 1800.0,
-                                      dilution = Dict("T" => 0.1))], 1)
+                                      dilution = Dict("T" => 0.1))], 1;
+                                 M_s = 1.0, R_s = 1.0)
         @test all(tp.data.exposure_times .≈ 1800.0 / 86400.0)
         @test tp.params.config.priors["dilution_T"].lo == 0.1
-        @test_throws ArgumentError Nereus._target_from([pch(rho_star = 1.0)], 1)
-        @test_throws ArgumentError Nereus._target_from([pch(supersample = 5)], 1)
+        @test_throws ArgumentError Nereus._target_from([pch(rho_star = 1.0)], 1; M_s = 1.0, R_s = 1.0)
+        @test_throws ArgumentError Nereus._target_from([pch(supersample = 5)], 1; M_s = 1.0, R_s = 1.0)
     end
 
     @testset "fit_rv takes the channel" begin

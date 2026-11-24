@@ -425,30 +425,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     ttv_backend === nothing || (kw[:ttv_backend] = Symbol(ttv_backend))
     M_pri === nothing || (kw[:M_pri] = M_pri)
     isnan(M_s) || (kw[:M_s] = M_s)
-    tgt = build_target(; kw...)
-    _warn_no_a_Rs(tgt.params)
-    return tgt
-end
-
-# A transiting planet needs a/R★ from somewhere: a sampled `a_Rs`, the stellar
-# density (`use_rho_s`) or `(M_s, R_s)`. With none, a/R★ is NaN, the transit
-# likelihood scores a constant 0 for every draw (the posterior is the prior) and
-# the predicted light curve is NaN. That is a model that cannot be evaluated,
-# not a result, so say so where the target is built.
-function _warn_no_a_Rs(params::Params)
-    cfg = params.config
-    cfg.parametrization.use_rho_s && return nothing
-    (isnan(cfg.M_s) || isnan(cfg.R_s)) || return nothing
-    th = Theta{Float64}(params)
-    for k in 1:length(params.layout.planet_blocks)
-        has_geometry(params.layout.planet_blocks[k]) || continue
-        a_Rs_slot(th, k) == 0 || continue
-        @warn "planet $k transits but nothing sets its a/R★: give `M_s` and `R_s`, " *
-              "or `use_rho_s = true`, or sample a/R★. As it stands the transit " *
-              "likelihood is a constant and the predicted light curve is NaN."
-        return nothing
-    end
-    return nothing
+    return build_target(; kw...)
 end
 
 # ---------------------------------------------------------------------------
