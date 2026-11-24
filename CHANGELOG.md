@@ -3,6 +3,26 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Tests
+
+- **`transdim_pt_emcee` is checked for thread-count invariance.** The same seed
+  gives a bit-identical chain at `-t 1` and `-t 2` (it was only checked for
+  `pt_emcee`). Measured on the easy 12.3 d target at the shipped defaults
+  (16 temps, 100 walkers, 3000/2000): seeds 2, 5, 9, 12 and 42 all pass the
+  sampler's own convergence gate (worst R-hat 1.004 to 1.007, least ESS 12,700
+  to 17,200), and seed 42 gives the same chain at 2 and 6 threads. The failures
+  recorded in 2026-09 (3 of 14 seeds) predate the stranded-walker pruning, the
+  node flip and the log-scale moves; no change to the transdim defaults is
+  needed and none was made.
+
+- **Short `pt_emcee` runs are not slower per step.** With the bridge solved by
+  Newton and its bootstrap skipped for an estimate that did not converge, a
+  100-step run takes 0.3 s and 1500 steps 3.7 s (16 temps, 150 walkers). What
+  makes a first short run look slow is about 100 s of compilation in a fresh
+  process, whatever the run's length.
+
 ## 0.9.10
 
 ### Added

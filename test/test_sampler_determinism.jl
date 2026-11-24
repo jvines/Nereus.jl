@@ -71,4 +71,34 @@ using Test, Nereus, Random, Statistics
         @test all(isfinite, bridge)
         @test out[1] == out[2]
     end
+
+    # transdim_pt_emcee through run_job: same seed, same chain at -t 1 and -t 2.
+    # Its streams are keyed by task (walker, replica, attempt) and the
+    # reversible-jump and noise moves run in their own threaded loops, so a
+    # thread-keyed draw anywhere would show here as a different chain hash.
+    @testset "transdim_pt_emcee invariant to thread count" begin
+        fx = joinpath(@__DIR__, "fixtures", "easy_rv_target.jl")
+        script = """
+        using Nereus, Random, Statistics, MCMCChains
+        include($(repr(fx)))
+        cfg = merge(_easy_rv_cfg(), Dict{String,Any}(
+            "output_dir" => mktempdir(),
+            "model" => Dict("max_kplanet" => 2, "planet_modes" => ["RV_ONLY", "RV_ONLY"]),
+            "transdim" => Dict("max_kplanet" => 2),
+            "sampler" => Dict("name" => "transdim_pt_emcee",
+                              "kwargs" => Dict("show_progress" => false, "n_temps" => 4,
+                                               "n_walkers" => 16, "n_steps" => 80,
+                                               "n_burnin" => 40))))
+        Nereus.run_job(cfg)
+        ch, _ = Nereus.load_chains(joinpath(cfg["output_dir"], "chains.nc"))
+        println("HASH ", hash(Array(ch.value.data)))
+        """
+        sf = joinpath(mktempdir(), "det_td.jl"); write(sf, script)
+        proj = dirname(@__DIR__)
+        out = map((1, 2)) do nt
+            s = read(`$(Base.julia_cmd()) --project=$proj -t $nt $sf`, String)
+            only(filter(startswith("HASH "), split(s, '\n')))
+        end
+        @test out[1] == out[2]
+    end
 end
