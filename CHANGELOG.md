@@ -39,6 +39,15 @@ git history (`git log --first-parent develop`).
 
 ### Changed
 
+- **A trans-dimensional engine or a planet range is trans-dim mode by itself.**
+  `engine = transdim_pt_emcee` (and `rjmcmc`, `moms`, `daedalus` in a job config)
+  no longer needs `transdim`: the `TransDimConfig` is built from the model's
+  `max_kplanet`. `planets` as a range of two or more counts sets `transdim`.
+  `transdim = false` with either is an error that says so. A job config's
+  `"transdim": false` is read the same way.
+- `fit_rm`, `fit_ttv` and `fit_binary` write the config they ran to
+  `<output_dir>/job_config.json`; `evidence`, `diagnostics.loo`/`ppc`/`fit_health`
+  and `detection_limits` rebuild the target from it the way `run_job` does.
 - `RV` channel `indicators` no longer throws; it takes `{instrument: {name:
   values}}`. Anything else is still an `ArgumentError`.
 - `fit_transit(gravity_darkening = true)` fits the PM_GD mode instead of throwing.

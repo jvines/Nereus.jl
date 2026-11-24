@@ -231,3 +231,59 @@ end
     rv2 = merge(rv, Dict("trend_order" => 2))
     @test_throws ArgumentError Nereus._target_from([rv2], pl; trend_order = 1)
 end
+
+@testset "a trans-dim engine or a planet range is trans-dim mode" begin
+    @test Nereus._planets_transdim(1, nothing, "f") === nothing
+    @test Nereus._planets_transdim([], nothing, "f") === nothing
+    @test Nereus._planets_transdim([1], nothing, "f") === nothing
+    @test Nereus._planets_transdim([1, 2], nothing, "f") === true
+    @test Nereus._planets_transdim(0:2, nothing, "f") === true
+    @test Nereus._planets_transdim([1, 2], 3, "f") == 3
+    @test_throws ArgumentError Nereus._planets_transdim([1, 2], false, "f")
+    @test Nereus._planets_transdim(2, false, "f") === false
+
+    d1 = _rvdat(40)
+    ch = Dict{String,Any}("source" => "RV", "data" => Dict{String,Any}("A" => d1))
+    tiny(name) = Dict("engine" => name, "options" => Dict("n_temps" => 3, "n_walkers" => 24,
+        "n_steps" => 50, "n_burnin" => 30, "seed" => 2, "show_progress" => false))
+    # the engine alone
+    r = Nereus.fit_rv(ch; planets = 2, engine = tiny("transdim_pt_emcee"), science = false)
+    @test r.summary["status"] == "ok"
+    # a planet range alone
+    r = Nereus.fit_rv(ch; planets = [1, 2], science = false,
+                      engine = Dict("options" => Dict("n_temps" => 3, "n_walkers" => 24,
+                                    "n_steps" => 50, "n_burnin" => 30, "show_progress" => false)))
+    @test r.summary["status"] == "ok"
+    # contradicted
+    @test_throws ArgumentError Nereus.fit_rv(ch; planets = [1, 2], transdim = false, science = false)
+    @test_throws ArgumentError Nereus.fit_rv(ch; planets = 2, transdim = false, science = false,
+                                             engine = tiny("transdim_pt_emcee"))
+
+    # a job config
+    cfg(; kw...) = Dict{String,Any}("version" => "1.0", "output_dir" => mktempdir(),
+        "data" => Nereus._data_block(; rv = Dict("A" => d1)),
+        "model" => Dict{String,Any}("max_kplanet" => 2, "planet_modes" => ["RV_ONLY", "RV_ONLY"]),
+        "priors" => Dict{String,Any}(),
+        "sampler" => Dict{String,Any}("name" => "transdim_pt_emcee", "kwargs" => Dict(
+            "n_temps" => 3, "n_walkers" => 24, "n_steps" => 50, "n_burnin" => 30,
+            "show_progress" => false)), (String(k) => v for (k, v) in kw)...)
+    s = Nereus.run_job(cfg())
+    @test s["status"] == "ok"
+    @test_throws Exception Nereus.run_job(cfg(transdim = false))
+end
+
+@testset "operations on a fit that ran as a job config" begin
+    d1 = _rvdat(40)
+    out = mktempdir()
+    r = Nereus.fit_binary(; rv = Dict("A" => d1), output_dir = out, science = false,
+        engine = Dict("engine" => "pt_emcee", "options" => Dict("n_temps" => 3,
+            "n_walkers" => 24, "n_steps" => 60, "n_burnin" => 40, "seed" => 2,
+            "show_progress" => false)))
+    @test isfile(joinpath(out, "job_config.json"))
+    A = Nereus.FEATURE_ACTIONS
+    payload = Dict{String,Any}("output_dir" => out)
+    @test haskey(A["diagnostics.loo"](payload), "elpd_waic")
+    @test haskey(A["diagnostics.fit_health"](payload), "overall")
+    @test haskey(A["evidence"](payload), "evidence")
+    @test A["diagnostics.ppc"](payload) isa AbstractDict
+end

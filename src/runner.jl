@@ -567,7 +567,7 @@ function _validate_config(cfg::AbstractDict)
             inds isa AbstractVector || push!(errs,
                 "noise_menu.indicators must be an array of channel names")
         end
-        if _has(cfg, :transdim)
+        if _has(cfg, :transdim) && _get(cfg, :transdim) !== false
             td = _get(cfg, :transdim)
             (isempty(_get(td, :toggleable; default = [])) &&
              isempty(_get(td, :noise_exclusion_groups; default = []))) || push!(errs,
@@ -592,13 +592,16 @@ function _validate_config(cfg::AbstractDict)
             name in _KNOWN_SAMPLERS || push!(errs,
                 "unknown sampler.name=`$name` (known: $(join(_KNOWN_SAMPLERS, ", ")))")
         end
-        if name in _SAMPLERS_REQUIRE_TD && !_has(cfg, :transdim)
-            push!(errs, "sampler `$name` requires a top-level `transdim` block")
+        # A trans-dim sampler is trans-dim mode on its own (`transdim` is then
+        # built from model.max_kplanet); only `"transdim": false` contradicts it.
+        if name in _SAMPLERS_REQUIRE_TD && _has(cfg, :transdim) &&
+           _get(cfg, :transdim) === false
+            push!(errs, "sampler `$name` is trans-dimensional but `transdim` is false")
         end
     end
 
     # ---- transdim ----
-    if _has(cfg, :transdim)
+    if _has(cfg, :transdim) && _get(cfg, :transdim) !== false
         td = _get(cfg, :transdim)
         _has(td, :max_kplanet) || push!(errs, "missing `transdim.max_kplanet`")
         if _has(td, :birth_strategies)
@@ -1944,7 +1947,7 @@ function _job_sampler_name(cfg)
     smp = _get(cfg, :sampler; default = Dict())
     smp isa AbstractString && return String(smp)
     smp === nothing && (smp = Dict())
-    td = _get(cfg, :transdim; default = nothing) !== nothing
+    td = !(_get(cfg, :transdim; default = nothing) in (nothing, false))
     return String(_get(smp, :name; default = td ? "transdim_pt_emcee" : "pt_emcee"))
 end
 
@@ -2016,7 +2019,17 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     end
 
     td_block = _get(cfg, :transdim; default = nothing)
-    td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
+    td_off = td_block === false
+    td = (td_block === nothing || td_off) ? nothing : _build_transdim(td_block; menu = menu)
+    # Naming the trans-dim sampler is trans-dim mode: max_kplanet is the model's,
+    # unless `"transdim": false` contradicts it.
+    if name in _SAMPLERS_REQUIRE_TD && td === nothing
+        td_off && error("sampler $name is trans-dimensional, but " *
+                        "`transdim` is false; drop it or choose pt_emcee")
+        td = _build_transdim(Dict{Symbol,Any}(:max_kplanet => Int(_get(
+                 _get(cfg, :model; default = Dict()), :max_kplanet; default = 1)));
+             menu = menu)
+    end
 
     if name == "pt_emcee"
         # The post-fit stage chooses the evidence again on an unconstrained

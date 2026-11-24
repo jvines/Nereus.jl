@@ -575,6 +575,7 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
                 noise = nothing, trend_order = nothing,
                 config_overrides = nothing, kwargs...)
     kwargs = _apply_target_overrides(config_overrides, kwargs, "fit_rv")
+    transdim = _planets_transdim(planets, transdim, "fit_rv")
     # `noise` and `noise_models` are one setting.
     if haskey(kwargs, :noise_models)
         noise === nothing || throw(ArgumentError(
@@ -639,6 +640,7 @@ function fit_transit(phot; planets = 1, use_rho_s::Bool = false,
                      stop_file = nothing, output_dir = nothing,
                      config_overrides = nothing, kwargs...)
     kwargs = _apply_target_overrides(config_overrides, kwargs, "fit_transit")
+    transdim = _planets_transdim(planets, transdim, "fit_transit")
     # A transit CHANNEL (a dict with "source", as `fit_joint` takes) carries the
     # photometry options; a bare instrument map has none.
     phot_ch = phot isa AbstractDict && haskey(phot, "source") ? phot :
@@ -836,6 +838,7 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
                         output_dir = nothing, config_overrides = nothing,
                         kwargs...)
     kwargs = _apply_target_overrides(config_overrides, kwargs, "fit_astrometry")
+    transdim = _planets_transdim(planets, transdim, "fit_astrometry")
     # NOT resolved here: `_target_from` resolves the spec, and has to see it
     # unresolved to read the per-instrument `jitter` / `clip_outliers` keys.
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
@@ -881,6 +884,7 @@ function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
                    stopping = nothing, stop_file = nothing,
                    output_dir = nothing, config_overrides = nothing, kwargs...)
     kwargs = _apply_target_overrides(config_overrides, kwargs, "fit_joint")
+    transdim = _planets_transdim(planets, transdim, "fit_joint")
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
@@ -1551,6 +1555,24 @@ function _apply_target_overrides(co, kwargs, f::AbstractString)
     return (; d...)
 end
 
+"""
+    _planets_transdim(planets, transdim, f)
+
+`planets` given as a range (two or more candidate counts) is trans-dimensional
+model selection: it sets `transdim` to `true` when the caller gave none, and
+contradicts `transdim = false`, which is an error. A fixed count, an empty list
+(no planet) or one entry is not a range.
+"""
+function _planets_transdim(planets, transdim, f)
+    (planets isa AbstractVector && !(planets isa NamedTuple) && length(planets) >= 2) ||
+        return transdim
+    transdim === false && throw(ArgumentError(
+        "$f: planets = $(collect(planets)) is a range, which is trans-dimensional " *
+        "model selection, but transdim = false; give a single planet count, or " *
+        "drop transdim"))
+    return transdim === nothing ? true : transdim
+end
+
 """Run the engine, then assemble the standard result."""
 function _finish(target, engine, stopping, output_dir; op::String, stop_file = nothing,
                 science::Bool = true, output = nothing,
@@ -1567,6 +1589,17 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
     _rs = hasproperty(_cfg, :R_s) && !isnan(_cfg.R_s) ? Float64(_cfg.R_s) : nothing
     st = _build_star(merge(Dict{Symbol,Any}(:M_s => _M_s_of(target), :R_s => _rs),
                            Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(star))))
+    # A trans-dim engine is trans-dim mode: it needs a TransDimConfig, so naming it
+    # sets one up (max_kplanet from the target) unless `transdim = false` says
+    # otherwise, which contradicts it.
+    _en = engine === nothing ? nothing :
+          (engine isa AbstractDict ? get(engine, "engine", get(engine, :engine, nothing)) : engine)
+    _trans_engine = _en !== nothing && String(_en) == "transdim_pt_emcee"
+    _trans_engine && transdim === false && throw(ArgumentError(
+        "$op: engine transdim_pt_emcee is a trans-dimensional sampler, but " *
+        "transdim = false; drop transdim, or choose a fixed-dimension engine " *
+        "(pt_emcee)"))
+    (_trans_engine && transdim === nothing) && (transdim = true)
     td = menu === nothing ? _as_td(transdim, target.params.config.max_kplanet) :
          _as_td_menu(transdim, target.params.config.max_kplanet, menu)
     # Engine defaults by SHAPE, so the trans-dim and fixed-dim paths are
@@ -1578,6 +1611,8 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
         (engine isa AbstractDict ?
             Dict{String,Any}(String(k) => v for (k, v) in pairs(engine)) :
             Dict{String,Any}("engine" => String(engine)))
+    # options without a name: the engine is chosen by shape, as with no engine
+    haskey(spec, "engine") || (spec["engine"] = td === nothing ? "pt_emcee" : "transdim_pt_emcee")
     if td !== nothing
         o = Dict{Symbol,Any}(Symbol(k) => v
                              for (k, v) in pairs(get(spec, "options", Dict())))
@@ -1922,6 +1957,24 @@ end
 """Run a JOB_CONFIG and return the same shape the other entry points do."""
 function _run_config(cfg::AbstractDict; op::String)
     t0 = time()
+    # The config this fit runs, kept beside its chains: post-fit operations
+    # (`evidence`, `diagnostics.loo`, ...) rebuild the target from it.
+    try
+        od = String(cfg["output_dir"]); mkpath(od)
+        rec = Dict{String,Any}(String(k) => v for (k, v) in pairs(cfg))
+        # PriorSpec objects (what these fits put in `priors`) are not JSON: they are
+        # written as `prior_to_dict` and marked, for `_replay_config` to rebuild.
+        if rec["priors"] isa AbstractDict
+            rec["priors"] = Dict{String,Any}(String(k) => (v isa PriorSpec ?
+                merge(prior_to_dict(v), Dict{String,Any}("_nereus_spec" => true)) : v)
+                for (k, v) in pairs(rec["priors"]))
+        end
+        open(joinpath(od, "job_config.json"), "w") do io
+            JSON3.write(io, rec; allow_inf = true)
+        end
+    catch err
+        @warn "could not record the job config" exception = err
+    end
     summary = run_job(cfg)
     s = Dict{String,Any}(String(k) => v for (k, v) in pairs(summary))
     s["op"] = op

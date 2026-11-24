@@ -412,6 +412,9 @@ function _replay(p)
               joinpath(outdir, "chains.nc"))
     isfile(chpath) || error("no chains at $chpath; run the fit first")
     outdir === nothing && (outdir = dirname(abspath(chpath)))
+    if !haskey2(:channels) && isfile(joinpath(outdir, "job_config.json"))
+        return _replay_config(outdir, chains_path = chpath)
+    end
     haskey2(:channels) || error("this operation re-evaluates the model: give the " *
         "fit's `channels` (and its `planets`, `priors` and model keywords), as " *
         "`replot` takes them; `result=` does it from a fit this client ran")
@@ -479,6 +482,34 @@ function _replay(p)
         "seed" => haskey2(:seed) ? Int(_pget(p, :seed)) : 1,
         "sampler" => Dict{String,Any}("name" => ename, "kwargs" => eopts))
     return (; chains, target, cfg, outdir, meta)
+end
+
+# The fits that run as a job config (fit_rm, fit_ttv, fit_binary) write the config
+# they ran to `<output_dir>/job_config.json`; the target is rebuilt from it the way
+# run_job builds it.
+function _replay_config(outdir::AbstractString; chains_path::AbstractString)
+    cfg = _plain(JSON3.read(read(joinpath(outdir, "job_config.json"), String);
+                            allow_inf = true))
+    if get(cfg, "priors", nothing) isa AbstractDict
+        cfg["priors"] = Dict{String,Any}(String(k) => (v isa AbstractDict &&
+            get(v, "_nereus_spec", false) === true ?
+            prior_from_dict(Dict{String,Any}(a => b for (a, b) in v if a != "_nereus_spec")) : v)
+            for (k, v) in cfg["priors"])
+    end
+    chains, meta = load_chains(chains_path)
+    data, irv, ipm, ias, iiad, _ = _build_data(_get(cfg, :data; default = Dict());
+                                               obliquity = _obliquity_cfg(cfg),
+                                               pm_planets = _cfg_pm_planets(cfg))
+    star = _build_star(_get(cfg, :star; default = Dict()))
+    gaia = _resolve_gaia_plx(cfg, star)
+    params, target, _menu = _build_model(cfg, data, star, irv, ipm, ias, iiad;
+                                         gaia_plx = gaia)
+    if density_active(params) && _job_sampler_name(cfg) in _DENSITY_FREE_ENGINES
+        params = without_density_reparam(params, data)
+        target = NereusTarget(params, data; unconstrained = false)
+    end
+    get!(cfg, "output", Dict{String,Any}())
+    return (; chains, target, cfg, outdir = String(outdir), meta)
 end
 
 function act_diag_loo(p)
