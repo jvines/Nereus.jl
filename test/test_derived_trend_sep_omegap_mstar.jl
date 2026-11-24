@@ -153,3 +153,15 @@ end
     # no t_ref (and no epoch) -> skipped silently
     @test !haskey(only(compute_derived(chains, params; M_s = 1.0)).values, "sep_mas")
 end
+
+@testset "derived block sent to the client carries units" begin
+    ps = Nereus.ParamStats(collect(1.0:10.0))
+    out = Dict(Nereus._derived_with_units(["trend_P_min" => ps, "sep_mas_k2" => ps,
+                                           "logg_s" => ps, "not_a_row_k1" => ps]))
+    @test out["trend_P_min"]["unit"] == "d"
+    @test out["sep_mas_k2"]["unit"] == "mas"
+    @test out["logg_s"]["unit"] == "dex"
+    @test !haskey(out["not_a_row_k1"], "unit")
+    @test out["trend_P_min"]["best"] == ps.best
+    @test out["trend_P_min"]["ci1"] == collect(ps.ci1)
+end

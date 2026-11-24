@@ -1098,6 +1098,26 @@ end
 
 
 """
+    _derived_with_units(stats) -> Vector{Pair{String,Dict{String,Any}}}
+
+The derived block as sent to the client: each `name => ParamStats` as its fields
+plus `unit`, the `derived_unit` of the name without its `_k<n>` planet suffix. A
+name no rule knows gets no `unit`, and the client falls back to its name map.
+"""
+function _derived_with_units(stats)
+    out = Vector{Pair{String,Dict{String,Any}}}()
+    for (name, ps) in stats
+        d = Dict{String,Any}("best" => ps.best, "unc_lo" => ps.unc_lo,
+                             "unc_hi" => ps.unc_hi, "ci1" => collect(ps.ci1),
+                             "ci2" => collect(ps.ci2), "ci3" => collect(ps.ci3))
+        u = _derived_unit_lookup(replace(name, r"_k\d+$" => ""))
+        u === nothing || (d["unit"] = u)
+        push!(out, name => d)
+    end
+    return out
+end
+
+"""
     _summarise_params(chains, params) -> Dict
 
 Per-parameter posterior summary: median plus asymmetric 1/2/3-sigma bounds, and
@@ -1406,7 +1426,8 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                               t_ref = target.data.t_ref, data = target.data,
                               distance_pc = st.distance_pc,
                               trend_sep_arcsec = st.trend_sep_arcsec,
-                              separation_epoch = st.separation_epoch)
+                              separation_epoch = st.separation_epoch) |>
+            _derived_with_units
     catch err
         summary["derived_error"] = sprint(showerror, err)
     end
