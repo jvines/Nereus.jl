@@ -7,6 +7,10 @@ git history (`git log --first-parent develop`).
 
 ### Added
 
+- **Every derived row sent to the client carries its `unit`** (`best`,
+  `unc_lo`, `unc_hi`, `ci1`-`ci3` plus `unit`, from the derived unit rules, the
+  `_k<n>` suffix stripped), so a client no longer guesses `trend_P_min` as m/s.
+
 - **Every entry of the fit summary's `params` block carries its `unit`**, and
   every variable of `chains.nc` a `units` attribute: the unit of the raw chain
   values (angles in rad, `inc_k1` -> `rad`), from `chain_param_unit`, which
