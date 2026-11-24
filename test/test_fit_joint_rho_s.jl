@@ -130,7 +130,8 @@ end
     @testset "what the model lacks throws" begin
         @test_throws ArgumentError mk(chan(limb_darkening = "linear"))
         @test_throws ArgumentError mk(chan(limb_darkening = "nonlinear"))
-        @test_throws ArgumentError mk(chan(gravity_darkening = true))
+        @test Nereus.has_gd(mk(chan(gravity_darkening = true)).params.config.planet_modes[1])
+        @test_throws ArgumentError mk(chan(gravity_darkening = "yes"))
         @test_throws ArgumentError mk(chan(supersample = 5))
         @test mk(chan(limb_darkening = "kipping")) isa NereusTarget      # same model as "quadratic"
     end

@@ -3,6 +3,46 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Added
+
+- **The typed `fit_*` route reaches what a job config does.** `fit_rv`,
+  `fit_transit`, `fit_astrometry` and `fit_joint` take `planet_modes` (one name
+  per planet, e.g. `["RVPM_GD"]`, `["PM_GD"]`, `["RVPM_RM_GD"]`), `noise_models`
+  (the dicts of a job config's `noise_models` block, built by run_job's own
+  builder; `NoiseModel` objects still work) and `noise_menu` (a job config's
+  block; with `transdim=` the menu's toggleable models and exclusion groups are
+  wired in, as run_job does). `fit_transit(gravity_darkening = true)`, and a
+  transit channel with it, now fits the gravity-darkened transit (`PM_GD`, or
+  `RVPM_GD` with RV) where it used to throw. `build_target` gains `planet_modes`,
+  `indicator_cols`, `noise_menu` and `menu_out`.
+- **Activity indicators on the RV channel.** `indicator_cols` names columns of
+  each instrument's data (`<name>_err` is the 1-sigma), and `indicators`
+  (`{instrument: {name: values}}`) supplies them; both feed the activity noise
+  models. `fit_rm`, `fit_ttv` and `fit_binary` take `indicator_cols` the same way.
+- **`config_overrides` on every `fit_*`.** A dictionary in a job config's shape,
+  applied last. On `fit_rm`, `fit_ttv` and `fit_binary` (which build a config) it
+  is deep-merged into it, so any key of a config is reachable; they also take
+  `noise_models`, `noise_menu` and `planet_modes`. On the four that build a
+  target it is read block by block (`star`, `model`, `priors`, `noise_models`,
+  `noise_menu`, `planet_modes`) and a block with no place there is an error.
+- **Post-fit operations, no longer stubs.** `evidence`, `detection_limits`,
+  `diagnostics.loo`, `diagnostics.ppc`, `diagnostics.fit_health` re-evaluate a
+  finished fit from its `chains.nc` and the fit's own request (channels, planets,
+  priors, model keywords), through the helpers the post-fit stage of the fit
+  runs; `diagnostics.label_switching`, `select_planets` (P(N_p = k) and Bayes
+  factors of a trans-dim fit's chains) and `select_noise` (noise-model occupancy)
+  need only the chains. `detect.lc_periodogram` is a GLS periodogram of a light
+  curve; `pre_white` is iterative GLS prewhitening. `FEATURE_NOT_IMPLEMENTED` is
+  empty.
+
+### Changed
+
+- `RV` channel `indicators` no longer throws; it takes `{instrument: {name:
+  values}}`. Anything else is still an `ArgumentError`.
+- `fit_transit(gravity_darkening = true)` fits the PM_GD mode instead of throwing.
+
 ## 0.9.10
 
 ### Added

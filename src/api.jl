@@ -223,6 +223,11 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                       sharing = nothing, transdim_noise = false,
                       ttv_n_transits = nothing, ttv_epochs = nothing,
                       ttv_backend = nothing,
+                      # Per-planet data-source modes (a job config's
+                      # `model.planet_modes`), the noise menu block and the
+                      # collector for the menu it builds (see `build_target`).
+                      planet_modes = nothing, noise_menu = nothing,
+                      menu_out = nothing,
                       # Collects `clip_transit_outliers` reports, when given.
                       iad_reports = nothing,
                       # The star's Gaia identity, for the default `plx` prior of
@@ -235,6 +240,8 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
     hip_spec = nothing
     iad_names = String[]          # per IAD instrument; "" = no jitter, _IAD_AUTO_NAME = auto-named
     rv_opts = nothing
+    indicator_cols = nothing
+    gd_channel = false
     n_rv_ch = n_pm_ch = 0
     for ch in channels
         src = String(get(ch, "source", ""))
@@ -245,20 +252,24 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                 "two RV channels; put every RV instrument in one channel's `data`"))
             rv = _rv_namedtuple(ch)
             rv_opts = _rv_channel_options(ch, collect(String, string.(keys(rv))))
+            indicator_cols = rv_opts.indicator_cols
             # The channel's trend_order and the keyword are one setting: a
             # disagreement is an error, not a silent precedence.
             ct = rv_opts.trend_order
             if ct !== nothing
-                trend_order === nothing || Int(trend_order) == ct || throw(ArgumentError(
+                # A channel at its default (0) yields to the keyword, which is what
+                # config_overrides sets; two different non-default values disagree.
+                trend_order === nothing || Int(trend_order) == ct || ct == 0 || throw(ArgumentError(
                     "trend_order = $trend_order and the RV channel's " *
                     "\"trend_order\" => $ct disagree; give it once"))
-                trend_order = ct
+                (trend_order === nothing || ct != 0) && (trend_order = ct)
             end
         elseif src == "PM"
             (n_pm_ch += 1) == 1 || throw(ArgumentError(
                 "two transit channels; put every photometric instrument in one " *
                 "channel's `data`"))
             phot = _phot_namedtuple(ch)
+            gd_channel = get(ch, "gravity_darkening", false) === true
         elseif src == "AS"
             # ACCUMULATE across AS channels. Assigning here used to mean the
             # last channel silently won, so `fit_joint` with a Hipparcos
@@ -368,11 +379,19 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
         end
         sharing = merged
     end
-    noise_models === nothing || all(m -> m isa NoiseModel, noise_models) ||
-        throw(ArgumentError(
-            "noise models must be NoiseModel objects (e.g. `GPNoise(...)`); a " *
-            "dict spelling is not built on this route. Use a run_job config's " *
-            "`noise_models` block"))
+    # Noise models are NoiseModel objects, or the dicts of a job config's
+    # `noise_models` block ({"kind": "CeleriteRotation", "channel": "rv",
+    # "instruments": [...], "kwargs": {...}}), built the way run_job builds them.
+    if noise_models !== nothing
+        nm_in = collect(noise_models)
+        all(m -> m isa NoiseModel || m isa AbstractDict, nm_in) ||
+            throw(ArgumentError(
+                "noise models must be NoiseModel objects or the dicts of a job " *
+                "config's `noise_models` block; got " *
+                join(unique(string.(typeof.(nm_in))), ", ")))
+        any(m -> m isa AbstractDict, nm_in) && (noise_models =
+            _noise_models_from(nm_in))
+    end
 
     # A photometry channel's `dilution` / `jitter` are priors on
     # `dilution_<inst>` / `jitter_<inst>`; the same parameter in `priors` would
@@ -410,6 +429,17 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                           :as_names => as_names,
                           :iad_names => iad_names)
     use_rho_s && (kw[:use_rho_s] = true)
+    if gd_channel && planet_modes === nothing
+        (iad === nothing && hgca === nothing && gost === nothing && relast === nothing) ||
+            throw(ArgumentError(
+                "gravity_darkening = true with astrometry: name the planet modes " *
+                "(planet_modes = [\"RVPMAS_GD\" ...]); none is implied"))
+        planet_modes = fill(isempty(rv) ? "PM_GD" : "RVPM_GD", length(planet_spec))
+    end
+    planet_modes === nothing || (kw[:planet_modes] = planet_modes)
+    noise_menu === nothing || (kw[:noise_menu] = noise_menu)
+    menu_out === nothing || (kw[:menu_out] = menu_out)
+    indicator_cols === nothing || (kw[:indicator_cols] = indicator_cols)
     rv_opts !== nothing && rv_opts.marginalize_gamma && (kw[:marginalize_gamma] = true)
     parametrization === nothing || (kw[:parametrization] = Symbol(parametrization))
     time_anchor     === nothing || (kw[:time_anchor]     = Symbol(time_anchor))
@@ -419,13 +449,25 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
         Symbol(k) => [String.(g) for g in v] for (k, v) in pairs(sharing)))
     transdim_noise && (kw[:transdim_noise] = true)
     ttv_n_transits === nothing || (kw[:ttv_n_transits] =
-        Dict{Int,Int}(Int(k) => Int(v) for (k, v) in pairs(ttv_n_transits)))
+        Dict{Int,Int}(_ttv_planet_key(k) => Int(v) for (k, v) in pairs(ttv_n_transits)))
     ttv_epochs === nothing || (kw[:ttv_epochs] =
-        Dict{Int,Vector{Int}}(Int(k) => Int.(collect(v)) for (k, v) in pairs(ttv_epochs)))
+        Dict{Int,Vector{Int}}(_ttv_planet_key(k) => Int.(collect(v)) for (k, v) in pairs(ttv_epochs)))
     ttv_backend === nothing || (kw[:ttv_backend] = Symbol(ttv_backend))
     M_pri === nothing || (kw[:M_pri] = M_pri)
     isnan(M_s) || (kw[:M_s] = M_s)
     return build_target(; kw...)
+end
+
+# The dict entries of a `noise_models` list built into NoiseModel objects by
+# run_job's own builder (`_build_noise_models`); objects pass through in place.
+function _noise_models_from(nm_in)
+    out = NoiseModel[]
+    for m in nm_in
+        m isa NoiseModel ? push!(out, m) :
+            append!(out, _build_noise_models([m], nothing))
+    end
+    validate_noise_models(out)
+    return out
 end
 
 # ---------------------------------------------------------------------------
@@ -530,7 +572,16 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                 stopping = nothing, stop_file = nothing, output_dir = nothing,
-                noise = nothing, trend_order = nothing, kwargs...)
+                noise = nothing, trend_order = nothing,
+                config_overrides = nothing, kwargs...)
+    kwargs = _apply_target_overrides(config_overrides, kwargs, "fit_rv")
+    # `noise` and `noise_models` are one setting.
+    if haskey(kwargs, :noise_models)
+        noise === nothing || throw(ArgumentError(
+            "fit_rv: `noise` and `noise_models` are the same setting; give one"))
+        noise = kwargs.noise_models
+        kwargs = Base.structdiff(kwargs, NamedTuple{(:noise_models,)})
+    end
     # An RV CHANNEL (a dict with "source", as `fit_joint` takes) carries the
     # model options -- jitter, trend_order, gamma_per_instrument, share,
     # marginalize_gamma -- and `_target_from` reads them; a bare instrument
@@ -548,10 +599,11 @@ function fit_rv(rv; planets = 1, engine = nothing, transdim = nothing,
         planets = _planet_spec(planets; block = default_rv_planet(allt, allrv))
     end
     star, kwargs = _split_star_kwargs(kwargs)
+    menu = Any[]
     tgt = _target_from([ch], planets;
-                       trend_order, noise_models = noise, kwargs...)
+                       trend_order, noise_models = noise, menu_out = menu, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_rv", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star)
+                   star, menu = isempty(menu) ? nothing : menu[1])
 end
 
 """
@@ -572,19 +624,21 @@ a `run_job` config; the prior on it is `priors["rho_s"]` (default log-uniform on
 [0.001, 100]) or an `external_priors` entry on `rho_s`. The same keyword and
 semantics as [`fit_joint`](@ref).
 
-The gravity-darkened transit (planet mode `PM_GD`, GD_SOURCE, which constrains
-i* separately from λ) is a `run_job` option; this entry point does not build
-it. `limb_darkening`, `rho_star` and `gravity_darkening` are accepted at their
-defaults only and throw otherwise: they were never read, so
-`gravity_darkening = true` fitted a symmetric transit and said nothing.
-`rho_star` is replaced by `use_rho_s` plus `priors["rho_s"]`.
+`gravity_darkening = true` fits the gravity-darkened transit (planet mode
+`PM_GD`, GD_SOURCE, which constrains i* separately from λ); the same as
+`planet_modes = ["PM_GD"]`, which also takes the other modes of a job config.
+`noise_models`, `noise_menu` and `config_overrides` are as for [`fit_rv`](@ref).
+`limb_darkening` is `:quadratic` or `:kipping` (one model); `rho_star` was never
+read and throws: use `use_rho_s` plus `priors["rho_s"]`.
 """
 function fit_transit(phot; planets = 1, use_rho_s::Bool = false,
                      limb_darkening = :quadratic, rho_star = nothing, gravity_darkening = false,
                      engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, stopping = nothing,
-                     stop_file = nothing, output_dir = nothing, kwargs...)
+                     stop_file = nothing, output_dir = nothing,
+                     config_overrides = nothing, kwargs...)
+    kwargs = _apply_target_overrides(config_overrides, kwargs, "fit_transit")
     # A transit CHANNEL (a dict with "source", as `fit_joint` takes) carries the
     # photometry options; a bare instrument map has none.
     phot_ch = phot isa AbstractDict && haskey(phot, "source") ? phot :
@@ -597,14 +651,19 @@ function fit_transit(phot; planets = 1, use_rho_s::Bool = false,
         "fit_transit: `rho_star` was never read. Sample the stellar density with " *
         "`use_rho_s = true` and put its prior (solar units) in " *
         "`priors = Dict(\"rho_s\" => ...)`"))
-    gravity_darkening == false || throw(ArgumentError(
-        "fit_transit: `gravity_darkening` was never read, and this entry point " *
-        "does not build a gravity-darkened transit; use run_job with " *
-        "planet_modes = [\"PM_GD\"]"))
+    gravity_darkening isa Bool || throw(ArgumentError(
+        "fit_transit: gravity_darkening must be true or false"))
+    # `gravity_darkening = true` is the PM_GD planet mode (planet_modes = ["PM_GD"]).
+    if gravity_darkening
+        get(phot_ch, "gravity_darkening", false) === true || (phot_ch =
+            merge(Dict{String,Any}(String(k) => v for (k, v) in pairs(phot_ch)),
+                  Dict{String,Any}("gravity_darkening" => true)))
+    end
     star, kwargs = _split_star_kwargs(kwargs)
-    tgt = _target_from([phot_ch], planets; use_rho_s, kwargs...)
+    menu = Any[]
+    tgt = _target_from([phot_ch], planets; use_rho_s, menu_out = menu, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_transit", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star)
+                   star, menu = isempty(menu) ? nothing : menu[1])
 end
 
 """
@@ -774,7 +833,9 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                         stopping = nothing, stop_file = nothing,
-                        output_dir = nothing, kwargs...)
+                        output_dir = nothing, config_overrides = nothing,
+                        kwargs...)
+    kwargs = _apply_target_overrides(config_overrides, kwargs, "fit_astrometry")
     # NOT resolved here: `_target_from` resolves the spec, and has to see it
     # unresolved to read the per-instrument `jitter` / `clip_outliers` keys.
     ch = Dict("source" => "AS", "iad" => iad, "hgca" => hgca, "gost" => gost,
@@ -784,9 +845,12 @@ function fit_astrometry(; iad = nothing, hgca = nothing, gost = nothing,
     star, kwargs = _split_star_kwargs(kwargs)
     reps = Any[]
     greps = Any[]
-    tgt = _target_from([ch], planets; iad_reports = reps, gaia_report = greps, kwargs...)
+    menu = Any[]
+    tgt = _target_from([ch], planets; iad_reports = reps, gaia_report = greps,
+                       menu_out = menu, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_astrometry", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star, iad_outliers = reps, gaia = greps)
+                   star, iad_outliers = reps, gaia = greps,
+                   menu = isempty(menu) ? nothing : menu[1])
 end
 
 
@@ -815,7 +879,8 @@ function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
                    stopping = nothing, stop_file = nothing,
-                   output_dir = nothing, kwargs...)
+                   output_dir = nothing, config_overrides = nothing, kwargs...)
+    kwargs = _apply_target_overrides(config_overrides, kwargs, "fit_joint")
     length(channels) >= 2 || throw(ArgumentError(
         "fit_joint needs at least two channels; for one technique use its " *
         "dedicated entry point, which has a clearer signature"))
@@ -827,10 +892,12 @@ function fit_joint(channels...; planets = 1, use_rho_s::Bool = false,
     star, kwargs = _split_star_kwargs(kwargs)
     reps = Any[]
     greps = Any[]
+    menu = Any[]
     tgt = _target_from(collect(channels), planets; iad_reports = reps,
-                       gaia_report = greps, use_rho_s, kwargs...)
+                       gaia_report = greps, use_rho_s, menu_out = menu, kwargs...)
     return _finish(tgt, engine, stopping, output_dir; op = "fit_joint", stop_file, transdim, plots, plot_kwargs, save_pdf, science, output,
-                   star, iad_outliers = reps, gaia = greps)
+                   star, iad_outliers = reps, gaia = greps,
+                   menu = isempty(menu) ? nothing : menu[1])
 end
 
 # ---------------------------------------------------------------------------
@@ -851,6 +918,19 @@ Per-instrument RV -> the NamedTuple `build_target` expects, with the channel's
 """
 function _rv_namedtuple(ch::AbstractDict)
     data = get(ch, "data", Dict())
+    # `indicators` ({instrument: {name: values}}) are folded into each
+    # instrument's data table, where `indicator_cols` reads them.
+    ind = get(ch, "indicators", nothing)
+    if ind !== nothing
+        bad_i = setdiff(String.(collect(keys(ind))), String.(collect(keys(data))))
+        isempty(bad_i) || throw(ArgumentError(
+            "RV channel: `indicators` names $(join(repr.(bad_i), ", ")), not among " *
+            "the instruments in its data"))
+        data = Dict{String,Any}(String(k) => (haskey(ind, String(k)) ?
+            merge(NamedTuple(v), NamedTuple(Symbol(a) => (b isa AbstractVector ?
+                  Float64.(collect(b)) : b) for (a, b) in pairs(ind[String(k)]))) : v)
+            for (k, v) in pairs(data))
+    end
     jit  = get(ch, "jitter", "default")
     per(v, nm) = (v isa AbstractDict && !haskey(v, "type")) ?
                  get(v, String(nm), nothing) : v
@@ -889,15 +969,24 @@ An unknown key throws: an option nobody reads must not look accepted.
 """
 function _rv_channel_options(ch::AbstractDict, names::Vector{String})
     known = ("source", "data", "jitter", "trend_order", "gamma_per_instrument",
-             "share", "marginalize_gamma", "indicators")
+             "share", "marginalize_gamma", "indicators", "indicator_cols")
     bad = [String(k) for k in keys(ch) if !(String(k) in known)]
     isempty(bad) || throw(ArgumentError(
         "RV channel: unknown option(s) $(join(repr.(bad), ", ")); it takes " *
         join(known[3:end], ", ")))
-    get(ch, "indicators", nothing) === nothing || throw(ArgumentError(
-        "RV channel: `indicators` are not built by the typed fit_* functions " *
-        "(they feed activity noise models, which this route does not take); use " *
-        "a run_job config: indicator columns in the RV block plus `noise_models`"))
+    # Activity indicators: `indicator_cols` names columns of each instrument's
+    # data (the `indicator_cols` of a job config's RV block); `indicators`
+    # ({instrument: {name: values, name_err: values}}) supplies them and, with no
+    # `indicator_cols`, names them. They feed the activity noise models.
+    ic = get(ch, "indicator_cols", nothing)
+    ind = get(ch, "indicators", nothing)
+    ind === nothing || ind isa AbstractDict || throw(ArgumentError(
+        "RV channel: `indicators` maps an instrument to {name => values}"))
+    if ic === nothing && ind !== nothing
+        ic = unique(String(k) for blk in values(ind) for k in keys(blk)
+                    if !endswith(String(k), "_err"))
+    end
+    ic === nothing || (ic = String.(collect(ic)))
     to = get(ch, "trend_order", nothing)
     to === nothing || (to isa Integer && !(to isa Bool) && to >= 0) || throw(ArgumentError(
         "RV channel: trend_order must be a non-negative integer; got $(repr(to))"))
@@ -934,7 +1023,7 @@ function _rv_channel_options(ch::AbstractDict, names::Vector{String})
     mg isa Bool || throw(ArgumentError(
         "RV channel: marginalize_gamma must be true or false; got $(repr(mg))"))
     return (trend_order = to === nothing ? nothing : Int(to), sharing = sharing,
-            marginalize_gamma = mg)
+            marginalize_gamma = mg, indicator_cols = ic)
 end
 
 """
@@ -967,10 +1056,12 @@ function _phot_namedtuple(ch::AbstractDict)
     Symbol(ld) in (:quadratic, :kipping) || throw(ArgumentError(
         "transit channel: limb_darkening = $(repr(ld)) is not implemented; " *
         "the transit model is quadratic, sampled in Kipping's (q1, q2)"))
-    get(ch, "gravity_darkening", false) == false || throw(ArgumentError(
-        "transit channel: gravity_darkening was never read, and this entry point " *
-        "does not build a gravity-darkened transit; use run_job with " *
-        "planet_modes = [\"PM_GD\"]"))
+    # `gravity_darkening = true` selects the gravity-darkened transit (planet mode
+    # PM_GD, or RVPM_GD with RV data) in `_target_from`; any other mode, such as
+    # RVPM_RM_GD, is `planet_modes`.
+    get(ch, "gravity_darkening", false) isa Bool || throw(ArgumentError(
+        "transit channel: gravity_darkening must be true or false; got " *
+        "$(repr(get(ch, "gravity_darkening", false)))"))
     get(ch, "supersample", nothing) === nothing || throw(ArgumentError(
         "transit channel: there is no explicit supersampling count. Set " *
         "`exposure_time` (seconds) and the sub-sample count follows from it " *
@@ -1177,6 +1268,31 @@ const _CFG_STAR_KW  = (:M_s, :R_s, :T_eff, :J_mag, :K_mag, :Ab,
                        :sigma_M_s, :sigma_R_s, :sigma_T_eff)
 const _CFG_MODEL_KW = (:stability, :phot_trend_order, :sharing, :ttv_backend)
 
+# The noise, planet-mode and indicator options of a job config, given as
+# keywords. `noise_models` is the config's `noise_models` list (dicts), which is
+# what run_job builds the models from; objects are not JSON-able here.
+function _cfg_route_blocks!(cfg::AbstractDict, f::AbstractString;
+                            noise_models = nothing, noise_menu = nothing,
+                            planet_modes = nothing)
+    if noise_models !== nothing
+        all(m -> m isa AbstractDict, noise_models) || throw(ArgumentError(
+            "$f: noise_models are the dicts of a job config's `noise_models` " *
+            "block ({\"kind\": ..., \"channel\": ..., \"instruments\": [...], " *
+            "\"kwargs\": {...}}); it runs as a job config"))
+        cfg["noise_models"] = collect(noise_models)
+    end
+    noise_menu === nothing || (cfg["noise_menu"] = noise_menu)
+    if planet_modes !== nothing
+        n = length(cfg["model"]["planet_modes"])
+        pm = planet_modes isa AbstractString ? fill(String(planet_modes), n) :
+             String.(collect(planet_modes))
+        length(pm) == n || throw(ArgumentError(
+            "$f: planet_modes has $(length(pm)) entries for $n planet(s)"))
+        cfg["model"]["planet_modes"] = pm
+    end
+    return cfg
+end
+
 function _cfg_route_kw!(cfg::AbstractDict, f::AbstractString, kw)
     for (k, v) in pairs(kw)
         s = String(k)
@@ -1318,12 +1434,129 @@ _as_td(td, max_k) = throw(ArgumentError(
     "transdim must be true, an Int, a config block, or a TransDimConfig; " *
     "got $(typeof(td))"))
 
+# `_as_td` for a fit with a `noise_menu`: the menu defines the toggleable noise
+# models and exclusion groups, as in a job config (`_build_transdim`). A fixed-
+# dimension fit (`transdim` absent or false) takes the menu's models only.
+function _as_td_menu(td, max_k, menu)
+    (td === nothing || td === false) && return nothing
+    td isa TransDimConfig && return td
+    d = td === true ? Dict{Symbol,Any}() :
+        td isa Integer ? Dict{Symbol,Any}(:max_kplanet => Int(td)) :
+        Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(td))
+    haskey(d, :max_kplanet) || (d[:max_kplanet] = max_k)
+    return _build_transdim(d; menu)
+end
+
+"""
+    _deep_merge!(dst, src) -> dst
+
+Recursive merge of `src` into `dst`: a dictionary meets a dictionary key by key,
+anything else in `src` replaces what `dst` has. Keys are strings.
+"""
+function _deep_merge!(dst::AbstractDict, src)
+    for (k, v) in pairs(src)
+        ks = String(k)
+        if v isa AbstractDict && get(dst, ks, nothing) isa AbstractDict
+            _deep_merge!(dst[ks], v)
+        else
+            dst[ks] = v isa AbstractDict ?
+                Dict{String,Any}(String(a) => b for (a, b) in pairs(v)) : v
+        end
+    end
+    return dst
+end
+
+# `config_overrides` on the fits that build a job config (fit_rm, fit_ttv,
+# fit_binary): the dictionary is deep-merged into the config they built, last.
+# Whatever a job config holds can be set or replaced, including keys the typed
+# keywords have no name for.
+function _apply_config_overrides!(cfg::AbstractDict, co, f::AbstractString)
+    co === nothing && return cfg
+    co isa AbstractDict || throw(ArgumentError(
+        "$f: config_overrides must be a dictionary shaped like a job config " *
+        "(`\"model\"`, `\"sampler\"`, `\"priors\"`, ...); got $(typeof(co))"))
+    return _deep_merge!(cfg, co)
+end
+
+# `config_overrides` on the fits that build a target directly (fit_rv,
+# fit_transit, fit_astrometry, fit_joint). There is no job config, so the
+# dictionary is read in a job config's own shape and translated: the `star`
+# block (`M_s`, `R_s`, T_eff, ...), the `model` block (`stability`,
+# `trend_order`, `phot_trend_order`, `sharing`, `ttv_*`, `planet_modes`,
+# `parametrization` as a mass mode or a `{mass, time, density, use_rho_s}`
+# block), `priors`, `noise_models` and `noise_menu`. An entry overrides the
+# keyword of the same meaning; a block this route has no place for is an error.
+const _OVR_MODEL_KEYS = (:stability, :trend_order, :phot_trend_order, :sharing,
+                         :ttv_backend, :ttv_n_transits, :ttv_epochs,
+                         :planet_modes, :transdim_noise, :external_priors)
+function _apply_target_overrides(co, kwargs, f::AbstractString)
+    co === nothing && return (; pairs(kwargs)...)
+    co isa AbstractDict || throw(ArgumentError(
+        "$f: config_overrides must be a dictionary shaped like a job config " *
+        "(`\"star\"`, `\"model\"`, `\"priors\"`, ...); got $(typeof(co))"))
+    d = Dict{Symbol,Any}(pairs(kwargs))
+    for (blk, v) in pairs(co)
+        b = String(blk)
+        if b == "star"
+            for (a, x) in pairs(v)
+                d[Symbol(a)] = x
+            end
+        elseif b == "model"
+            for (a, x) in pairs(v)
+                sa = Symbol(a)
+                if sa === :parametrization
+                    if x isa AbstractDict
+                        for (pa, px) in pairs(x)
+                            pa = String(pa)
+                            pa == "mass" ? (d[:parametrization] = Symbol(px)) :
+                            pa == "time" ? (d[:time_anchor] = Symbol(px)) :
+                            pa == "density" ? (d[:density] = Symbol(px)) :
+                            pa == "use_rho_s" ? (d[:use_rho_s] = Bool(px)) :
+                            throw(ArgumentError(
+                                "$f: config_overrides model.parametrization.$pa " *
+                                "has no place on this route (mass, time, density, " *
+                                "use_rho_s do)"))
+                        end
+                    else
+                        d[:parametrization] = Symbol(x)
+                    end
+                elseif sa in (:M_s, :R_s, :time_anchor, :density)
+                    d[sa] = sa in (:time_anchor, :density) ? Symbol(x) : x
+                elseif sa in _OVR_MODEL_KEYS
+                    d[sa] = sa === :stability ? Symbol(x) : x
+                else
+                    throw(ArgumentError(
+                        "$f: config_overrides model.$(a) has no place on this route; " *
+                        "it takes $(join(_OVR_MODEL_KEYS, ", ")), M_s, R_s, " *
+                        "time_anchor, density and parametrization"))
+                end
+            end
+        elseif b == "priors"
+            pr = (haskey(d, :priors) && d[:priors] !== nothing) ?
+                 Dict{String,Any}(String(k) => x for (k, x) in pairs(d[:priors])) :
+                 Dict{String,Any}()
+            for (k, x) in pairs(v)
+                pr[String(k)] = x
+            end
+            d[:priors] = Dict{String,PriorSpec}(k => _as_prior(x) for (k, x) in pr)
+        elseif b in ("noise_models", "noise_menu", "planet_modes")
+            d[Symbol(b)] = v
+        else
+            throw(ArgumentError(
+                "$f: config_overrides block \"$b\" has no place on this route, " *
+                "which builds a target and not a job config. Blocks it takes: " *
+                "star, model, priors, noise_models, noise_menu, planet_modes."))
+        end
+    end
+    return (; d...)
+end
+
 """Run the engine, then assemble the standard result."""
 function _finish(target, engine, stopping, output_dir; op::String, stop_file = nothing,
                 science::Bool = true, output = nothing,
                  transdim = nothing, plots = nothing, plot_kwargs = nothing,
                  save_pdf::Bool = false, star = Dict{Symbol,Any}(),
-                 iad_outliers = nothing, gaia = nothing)
+                 iad_outliers = nothing, gaia = nothing, menu = nothing)
     t0 = time()
     # `Stopping` and `stop_file` are folded into the engine's own options below,
     # once the engine is known; a field the engine cannot honour throws.
@@ -1334,7 +1567,8 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
     _rs = hasproperty(_cfg, :R_s) && !isnan(_cfg.R_s) ? Float64(_cfg.R_s) : nothing
     st = _build_star(merge(Dict{Symbol,Any}(:M_s => _M_s_of(target), :R_s => _rs),
                            Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(star))))
-    td = _as_td(transdim, target.params.config.max_kplanet)
+    td = menu === nothing ? _as_td(transdim, target.params.config.max_kplanet) :
+         _as_td_menu(transdim, target.params.config.max_kplanet, menu)
     # Engine defaults by SHAPE, so the trans-dim and fixed-dim paths are
     # symmetric: you ask for trans-dim by saying `transdim=`, not by also
     # having to know which sampler can do it.
@@ -1639,17 +1873,36 @@ end
 const _RM_MODE = Dict(:rm => "RVPM_RM", :reloaded => "RVPM_RM_R", :arome => "RVPM_RM_A")
 
 """Assemble the JOB_CONFIG `data` block from RV + transit photometry."""
-function _data_block(; rv = nothing, phot = nothing)
+function _data_block(; rv = nothing, phot = nothing, indicator_cols = nothing)
     d = Dict{String,Any}()
     if rv !== nothing
         bjd = Float64[]; v = Float64[]; e = Float64[]; inst = String[]
+        cols = indicator_cols === nothing ? String[] : String.(collect(indicator_cols))
+        ind = Dict{String,Vector{Float64}}()
+        for c in cols
+            ind[c] = Float64[]
+            ind["$(c)_err"] = Float64[]
+        end
         for (name, blob) in pairs(rv)
             b = blob isa NamedTuple ? blob : NamedTuple(Symbol(k) => x for (k,x) in blob)
             append!(bjd, Float64.(b.t)); append!(v, Float64.(b.rv))
             append!(e, Float64.(b.rv_err)); append!(inst, fill(String(name), length(b.t)))
+            for c in cols
+                hasproperty(b, Symbol(c)) || throw(ArgumentError(
+                    "indicator_cols names \"$c\", which RV instrument $name does " *
+                    "not carry; every instrument's data needs the column"))
+                append!(ind[c], Float64.(getproperty(b, Symbol(c))))
+                hasproperty(b, Symbol(c, "_err")) &&
+                    append!(ind["$(c)_err"], Float64.(getproperty(b, Symbol(c, "_err"))))
+            end
         end
-        d["rv"] = Dict("values" => Dict("bjd" => bjd, "rv" => v,
-                                        "rv_err" => e, "instrument" => inst))
+        vals = Dict{String,Any}("bjd" => bjd, "rv" => v, "rv_err" => e,
+                                "instrument" => inst)
+        for c in cols
+            vals[c] = ind[c]
+            isempty(ind["$(c)_err"]) || (vals["$(c)_err"] = ind["$(c)_err"])
+        end
+        d["rv"] = Dict("values" => vals)
     end
     if phot !== nothing
         blocks = Any[]
@@ -1701,13 +1954,15 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, output_dir = nothing,
                 parametrization = _RM_PARAMETRIZATION,
+                noise_models = nothing, noise_menu = nothing, planet_modes = nothing,
+                indicator_cols = nothing, config_overrides = nothing,
                 extra::AbstractDict = Dict(), kwargs...)
     haskey(_RM_MODE, flavour) || throw(ArgumentError(
         "flavour must be one of :rm, :reloaded, :arome; got $(repr(flavour))"))
     cfg = Dict{String,Any}("version" => "1.0",
         "output_dir" => output_dir === nothing ? mktempdir() : String(output_dir),
         "star" => Dict{String,Any}(star),
-        "data" => _data_block(; rv, phot),
+        "data" => _data_block(; rv, phot, indicator_cols),
         "model" => Dict{String,Any}("max_kplanet" => planets,
                                     "planet_modes" => [_RM_MODE[flavour]],
                                     "parametrization" => _rm_parametrization(parametrization),
@@ -1733,7 +1988,9 @@ function fit_rm(; rv, phot, star::AbstractDict = Dict(), flavour::Symbol = :arom
             "transdim_fraction" => td.transdim_fraction)
     end
     _cfg_route_kw!(cfg, "fit_rm", kwargs)
+    _cfg_route_blocks!(cfg, "fit_rm"; noise_models, noise_menu, planet_modes)
     merge!(cfg, Dict{String,Any}(extra))
+    _apply_config_overrides!(cfg, config_overrides, "fit_rm")
     return _run_config(cfg; op = "fit_rm")
 end
 
@@ -1767,6 +2024,8 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
                  engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing, output_dir = nothing,
+                 noise_models = nothing, noise_menu = nothing, planet_modes = nothing,
+                 indicator_cols = nothing, config_overrides = nothing,
                  extra::AbstractDict = Dict(), kwargs...)
     (phot === nothing && transit_times === nothing) && throw(ArgumentError(
         "fit_ttv needs photometry or measured transit_times"))
@@ -1785,7 +2044,7 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
     cfg = Dict{String,Any}("version" => "1.0",
         "output_dir" => output_dir === nothing ? mktempdir() : String(output_dir),
         "star" => Dict{String,Any}(star),
-        "data" => _data_block(; rv, phot),
+        "data" => _data_block(; rv, phot, indicator_cols),
         # One mode per planet. It was `[mode]`, one entry for `planets` (2 by
         # default) planets, which Params refuses.
         "model" => Dict{String,Any}("max_kplanet" => planets,
@@ -1815,7 +2074,9 @@ function fit_ttv(; phot = nothing, transit_times = nothing, rv = nothing,
             "transdim_fraction" => td.transdim_fraction)
     end
     _cfg_route_kw!(cfg, "fit_ttv", kwargs)
+    _cfg_route_blocks!(cfg, "fit_ttv"; noise_models, noise_menu, planet_modes)
     merge!(cfg, Dict{String,Any}(extra))
+    _apply_config_overrides!(cfg, config_overrides, "fit_ttv")
     return _run_config(cfg; op = "fit_ttv")
 end
 
@@ -1870,13 +2131,16 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
                     priors = nothing, engine = nothing, transdim = nothing,
                 plots = nothing, plot_kwargs = nothing, save_pdf = false,
                 science::Bool = true, output = nothing,
-                    output_dir = nothing, extra::AbstractDict = Dict(), kwargs...)
+                    output_dir = nothing,
+                    noise_models = nothing, noise_menu = nothing, planet_modes = nothing,
+                    indicator_cols = nothing, config_overrides = nothing,
+                    extra::AbstractDict = Dict(), kwargs...)
     # One mode for SB1 and SB2: BINARY_RV. SB2 is not a mode; it is carried by
     # a `component` tag on every RV row (1 = primary, 2 = secondary), which the
     # run_job RV parser turns into `rv_comp`. This used to send planet_mode
     # "SB2" (rejected by the validator) and a `rv_secondary` key nothing reads.
     mode = "BINARY_RV"
-    data = _data_block(; rv)
+    data = _data_block(; rv, indicator_cols)
     if secondary !== nothing
         v1 = data["rv"]["values"]
         v2 = _data_block(; rv = secondary)["rv"]["values"]
@@ -1912,7 +2176,9 @@ function fit_binary(; rv, secondary = nothing, star::AbstractDict = Dict(),
             "transdim_fraction" => td.transdim_fraction)
     end
     _cfg_route_kw!(cfg, "fit_binary", kwargs)
+    _cfg_route_blocks!(cfg, "fit_binary"; noise_models, noise_menu, planet_modes)
     merge!(cfg, Dict{String,Any}(extra))
+    _apply_config_overrides!(cfg, config_overrides, "fit_binary")
     return _run_config(cfg; op = "fit_binary")
 end
 
