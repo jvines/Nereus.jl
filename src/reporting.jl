@@ -614,6 +614,16 @@ function _noise_model_label(m::NoiseModel)
     return String(nameof(typeof(m)))
 end
 
+# The label with its instrument scope, for a model restricted to some
+# instruments: a per-light-curve menu has a MaternGP on each light curve, and
+# "GP-Matern[TESS]" / "GP-Matern[LCO]" say which is which where the bare label
+# could not ("GP-Matern", "GP-Matern#3").
+function _noise_model_label_scoped(m::NoiseModel)
+    insts = noise_instruments(m)
+    lbl = _noise_model_label(m)
+    return isempty(insts) ? lbl : "$(lbl)[$(join(insts, "+"))]"
+end
+
 """
     _print_joint_table(io, np, chains, noise_cols, max_kp, n_total)
 

@@ -183,6 +183,7 @@ function Params(;
     nm_vec = Vector{NoiseModel}(noise_models)
     if !isempty(nm_vec)
         validate_noise_models(nm_vec; transdim=transdim_noise)
+        _check_noise_instruments(nm_vec, instruments)
     end
 
     # The γ-marginalized RV likelihood integrates the per-instrument

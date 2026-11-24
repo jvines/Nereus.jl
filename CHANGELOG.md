@@ -16,6 +16,19 @@ git history (`git log --first-parent develop`).
   trend and must agree on its order. `phot_trend_order_of(config, name)` gives an
   instrument's order; the NetCDF output records the map as `phot_trend_orders`.
 
+- **A job config states its own trans-dim noise menu.** `transdim.toggleable`
+  and `transdim.noise_exclusion_groups` reference entries of the top-level
+  `noise_models` array by 1-based index or by a new optional `label` key, and
+  resolve to the run's own model objects. run_job used to refuse any non-empty
+  `toggleable`, so the only JSON menu was the RV-oriented `noise_menu` block and
+  a per-light-curve photometric menu (white | `MaternGP` | `CeleriteSHO` on each
+  light curve, `channel: "phot"`, `instruments: [lc]`, one group per light
+  curve) could not be run through `transdim_pt_emcee`. The schema validator
+  names an index out of range, an unknown or duplicate label, a group member
+  that is not toggleable and a group of one. `transdim.noise` defaults to true
+  when `toggleable` is non-empty, and such a job builds its noise models in
+  trans-dim mode. Example in docs/JOB_CONFIG.md.
+
 - **Fit health flags a cold chain trapped in a wrong mode.** A population
   collapsed into one wrong basin passed every chain check (HIP 63762, pt_emcee
   RV + astrometry: `overall = "ok"` with a 109 m/s HIRES jitter on 1.1 m/s
@@ -97,6 +110,26 @@ git history (`git log --first-parent develop`).
   coefficients `phot_c<p>_<inst>` mean something different and the fitted
   baselines of short light curves move; rerun them, and do not resume their
   checkpoints.
+
+- **Noise models that would silently do nothing are refused.** In a job
+  config, a non-"rv" `channel` or an `instruments` list on a model with no such
+  field is an error (ErrorScale with `channel: "phot"` rescaled the RV errors
+  and left the light curve alone), as is a model naming an instrument its
+  channel does not have (ErrorScale on a light curve's name allocated
+  `errscale_<lc>` and rescaled nothing).
+
+- **Co-active noise models the likelihood cannot score are refused before the
+  run.** Under trans-dim, two GPs on the same instrument (its points scored
+  twice), two global GPs on one channel (one silently dropped) or an additive
+  covariance (NightlyOffset, HarmonicBlock) beside an instrument-restricted GP
+  (an error mid-run) that can be active together without sharing an exclusion
+  group now fail at setup (`validate_noise_coactivity`, run by
+  `transdim_pt_emcee` and run_job). The last pair is refused in a
+  fixed-dimension fit too.
+
+- **Model-selection labels carry the instrument scope.** Per-instrument models
+  are reported as e.g. `GP-Matern[TESS]` in `model_selection` and in the fitted
+  table's conditioning, instead of `GP-Matern` and `GP-Matern#3`.
 
 - **Trans-dim noise selection no longer leaves two members of an exclusion group active.** The planet<->ActivityDecorrelation swap in `transdim_pt_emcee` activated AD after checking only that AD itself was off, not whether another member of its exclusion group was on. With `default_noise_menu` (ErrorScale, CeleriteRotation, AD and ActivityGP in one group) and planets trans-dim, walkers reached CeleriteRotation + AD, ErrorScale + AD and ActivityGP + AD, double-modelling the activity; an HD 18599 run spent a third of its cold draws in CeleriteRotation + AD. The swap now offers the planet->AD direction only when AD's group is empty, and `propose_planet_ad_swap` takes the groups as a required `exclusion_groups` keyword. Noise occupancies of any trans-dim run with planets, `noise = true` and an AD in an exclusion group are affected; rerun them.
 
