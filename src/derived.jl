@@ -571,6 +571,16 @@ function _k_and_angular(want_K::Bool, want_ang::Bool, k::Int)
     end
 end
 
+# (sky separation [mas], position angle [rad, east of north]) of planet k's
+# companion relative to its host at `t_sep`, for one draw.
+function _sep_pa(k::Int, t_ref::Float64, t_sep::Float64)
+    return function (theta)
+        orb, _ = _planet_orbit(theta, k, astrom_M_pri(theta), astrom_plx(theta), t_ref)
+        dra, ddec = relastrom_offset(orb, t_sep)
+        return (Float64(hypot(dra, ddec)), Float64(atan(dra, ddec)))
+    end
+end
+
 """
     compute_derived(chains, params; M_s=nothing, R_s=nothing,
                      T_eff=nothing, J_mag=nothing, K_mag=nothing, Ab=0.0,
@@ -610,6 +620,12 @@ radii, temperatures, transit observables) a planet reports:
   `M_A`, `M_B`, `inc_deg` with astrometry): `omega_deg`, the projected relative
   semi-major axis `a_sini_au` = (K_A + K_B) P √(1 − e²)/2π, and `a_au` with the
   inclination.
+- `omega_p_deg`: the companion's argument of periastron, ω★ + 180°, with its
+  median in [0, 360).
+- `sep_mas` (mas) and `pa_deg` (deg, east of north): the companion's sky
+  separation and position angle at `separation_epoch` (same time system as the
+  data; default `t_ref`, the data's reference epoch), for planets whose block
+  carries astrometry. Evaluated with the relative-astrometry model's own orbit.
 - `a_mas` (mas) and `alpha_star_uas` (μas) for planets whose block carries
   absolute astrometry: the relative orbit's semi-major axis as an angle,
   `a·ϖ`, and the host's reflex orbit, `a·ϖ·M_sec/(M_pri+M_sec)`, the
@@ -635,7 +651,7 @@ function compute_derived(chains, params::Params;
                           T_eff = nothing, J_mag = nothing,
                           K_mag = nothing, Ab = 0.0,
                           planets = 1:params.config.max_kplanet,
-                          t_ref = nothing)
+                          t_ref = nothing, separation_epoch = nothing)
     config = params.config
     parametrization = config.parametrization
     # `chains` may be 2-D (n_iter, n_param) for legacy samplers or 3-D
@@ -808,6 +824,9 @@ function compute_derived(chains, params::Params;
         # summary and reporting all read the same contiguous draws. `w` itself
         # stays in radians for the transit durations below (sin ω is periodic).
         derived["omega_deg"] = _contiguous_deg(w, active, _deg_lo_ref("w_k$k"))
+        # The companion's own argument of periastron, ω_p = ω★ + 180°, one
+        # contiguous interval with its median in [0, 360).
+        derived["omega_p_deg"] = _contiguous_deg(w .+ π, active, 0.0)
 
         # Under :phic the sampled anchor is the transit phase at t_ref_c, and the
         # epochs the other anchors sample are reported instead. Each draw maps
@@ -893,6 +912,23 @@ function compute_derived(chains, params::Params;
             if want_ang
                 derived["a_mas"] = a_mas
                 derived["alpha_star_uas"] = alpha_uas
+            end
+        end
+
+        # Companion separation and position angle on the sky at the separation
+        # epoch (default: the data's reference epoch `t_ref`), from the SAME
+        # orbit and projection the relative-astrometry likelihood uses
+        # (`_planet_orbit`, `relastrom_offset`). Needs a block with astrometry
+        # (inclination, Ω, parallax); skipped silently otherwise.
+        t_sep = separation_epoch === nothing ? t_ref : separation_epoch
+        if want_ang && t_sep !== nothing && t_ref !== nothing
+            sep_mas, pa_rad = _per_draw(_sep_pa(k, Float64(t_ref), Float64(t_sep)),
+                                        chains, params, k, Val(2))
+            if any(isfinite, sep_mas)
+                derived["sep_mas"] = sep_mas
+                derived["pa_deg"] = all(isfinite, pa_rad) ?
+                    _contiguous_deg(pa_rad, active, 0.0) :
+                    mod.(rad2deg.(pa_rad), 360.0)
             end
         end
 
@@ -1262,6 +1298,98 @@ function compute_derived(chains, params::Params;
     end
 
     return results
+end
+
+# =====================================================================
+# System-level derived rows (RV trend bounds, stellar mass and log g)
+# =====================================================================
+
+# ρ★ [g/cm³] of the first transiting planet in `derived_vec` that has one.
+function _first_rho_transit(derived_vec)
+    for dp in derived_vec
+        haskey(dp.values, "rho_star_transit") && return dp.values["rho_star_transit"]
+    end
+    return nothing
+end
+
+"""
+    compute_derived_system(chains, params; M_s, R_s, data, distance_pc,
+                           trend_sep_arcsec, rho_star) -> Dict{String, Vector{Float64}}
+
+Derived rows that belong to the system or the star, not to one planet; keys
+carry no `_k<n>` suffix. A row is left out when its inputs are missing.
+
+RV trend (the fit has `trend_order >= 1`, `data` gives the RV epochs). For an
+unseen companion with `P >= T`, `T = max(t_rv) - min(t_rv)`, the trend obeys
+`|dv/dt| <= 2πK/P`, so:
+
+- `trend_P_min` (d): `T`.
+- `trend_K_min` (m/s): `|dv/dt| T / 2π`.
+- `trend_Msini_min` (M_Jup): minimum `M sin i` at `P = T`, circular, from the
+  exact mass function with the stellar mass (`M_s`, else the sampled `M_pri`,
+  else the config's).
+- `trend_Mc_min_torres` (M_Jup): Torres (1999), needs `distance_pc` and
+  `trend_sep_arcsec`: `M_c >= 0.0145 M_J (d/pc)^2 (rho/arcsec)^2 |dv/dt|`, with
+  `dv/dt` in m/s/yr.
+
+Star (needs R★ in `R_s`, or in the config, and ρ★: the sampled `rho_s`, else
+`rho_star`, the first transiting planet's `rho_star_transit` in g/cm³):
+
+- `M_s_rho` (M_sun) = (4π/3) ρ★ R★³.
+- `logg_s` (cgs dex) = log10(G M★ / R★²).
+"""
+function compute_derived_system(chains, params::Params;
+                                M_s = nothing, R_s = nothing, data = nothing,
+                                distance_pc = nothing, trend_sep_arcsec = nothing,
+                                rho_star = nothing)
+    config = params.config
+    out = Dict{String, Vector{Float64}}()
+    n = size(chains, 1) * size(chains, 3)
+    syms = Set(names(chains, :parameters))
+    tovec(x::Nothing) = nothing
+    tovec(x::Real) = fill(Float64(x), n)
+    tovec(x::AbstractVector) = Float64.(x)
+    col(nm) = Symbol(nm) in syms ? _draws(chains, Symbol(nm)) :
+              fill(Float64(get_param(Theta{Float64}(params), nm)), n)
+
+    # --- RV trend ---------------------------------------------------
+    if config.trend_order >= 1 && haskey(params.layout.name_to_idx, "dvdt") &&
+       data !== nothing && length(data.t_rv) >= 2
+        T = Float64(maximum(data.t_rv) - minimum(data.t_rv))
+        if T > 0
+            adv = abs.(col("dvdt"))                  # m/s/day
+            Kmin = adv .* T ./ (2π)
+            out["trend_P_min"] = fill(T, n)
+            out["trend_K_min"] = Kmin
+            ms = tovec(M_s)
+            ms === nothing && :M_pri in syms && (ms = _draws(chains, :M_pri))
+            ms === nothing && !isnan(config.M_s) && (ms = fill(Float64(config.M_s), n))
+            ms === nothing || (out["trend_Msini_min"] =
+                [msini(ms[i], Kmin[i], T, 0.0) for i in 1:n])
+            d = tovec(distance_pc); rho = tovec(trend_sep_arcsec)
+            if d !== nothing && rho !== nothing
+                # Torres (1999): γ̇ in m/s/yr
+                out["trend_Mc_min_torres"] =
+                    0.0145 .* d .^ 2 .* rho .^ 2 .* adv .* 365.25
+            end
+        end
+    end
+
+    # --- stellar mass and surface gravity from ρ★ and R★ -------------
+    rs = tovec(R_s)
+    rs === nothing && hasproperty(config, :R_s) && !isnan(config.R_s) &&
+        (rs = fill(Float64(config.R_s), n))
+    rho = if haskey(params.layout.name_to_idx, "rho_s")
+        col("rho_s") .* RHO_SUN_CGS
+    else
+        rho_star === nothing ? nothing : Float64.(rho_star)
+    end
+    if rs !== nothing && rho !== nothing && length(rho) == length(rs)
+        m = stellar_mass_from_density.(rho, rs)
+        out["M_s_rho"] = m
+        out["logg_s"] = log10.(G_CGS .* m .* M_SUN_G ./ (rs .* R_SUN_CM) .^ 2)
+    end
+    return out
 end
 
 # =====================================================================
