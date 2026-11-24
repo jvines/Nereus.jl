@@ -103,6 +103,7 @@ const TEST_UNITS = [
     (name = "test_detection_limits.jl", seconds = 86, files = ["test_detection_limits.jl"]),
     (name = "test_loo.jl", seconds = 12, files = ["test_loo.jl"]),
     (name = "test_fit_health.jl", seconds = 7, files = ["test_fit_health.jl"]),
+    (name = "test_fit_health_run.jl", seconds = 5, files = ["test_fit_health_run.jl"]),
     (name = "test_prior_dicts.jl", seconds = 2, files = ["test_prior_dicts.jl"]),
     (name = "test_fit_binary_sb2.jl", seconds = 100, files = ["test_fit_binary_sb2.jl"]),
     (name = "test_relast_channel.jl", seconds = 6, files = ["test_relast_channel.jl"]),
