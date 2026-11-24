@@ -64,7 +64,7 @@ end
     @test s["trend_Msini_min"] ≈ [msini(1.0, K, T, 0.0) for K in s["trend_K_min"]] rtol = 1e-12
     # small-companion closed form: M sin i = K sqrt(1-e^2) (P/2πG)^(1/3) M_s^(2/3)
     G = Nereus.G_CGS
-    msini_cf = 1.16183 * (T * 86400 / (2π * G))^(1/3) * (Nereus.M_SUN_G)^(2/3) / Nereus.M_JUP_G * 1e2^(-1)
+    msini_cf = 1.16183 * (T * 86400 / (2π * G))^(1/3) * (Nereus.M_SUN_G)^(2/3) / Nereus.M_JUP_G * 1e2   # K in cm/s
     @test s["trend_Msini_min"][1] ≈ msini_cf rtol = 2e-3
     @test !haskey(s, "trend_Mc_min_torres")
 

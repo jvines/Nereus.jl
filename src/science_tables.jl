@@ -331,7 +331,6 @@ function science_fitted(chains, params::Params)
     end
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
-    rho_first = nothing        # first transiting planet's rho_star_transit
     circ = circular_names(params)
     cinc = cyclic_inclination_names(params)
     jit = jitter_names(params)
@@ -519,6 +518,7 @@ function science_derived(chains, params::Params;
     live = Set(_winning_planet_slots(chains, params))   # not 1:modal_np
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
+    rho_first = nothing        # first transiting planet's rho_star_transit
     # One planet slot at a time, in slot order: compute_derived holds some 25
     # vectors the length of the chain per slot, dropped once summarised.
     for kk in 1:cfg.max_kplanet
@@ -747,7 +747,7 @@ const _UNIT_FORMS = Dict{String, Tuple{String, String}}(
     "deg" => ("deg", "\\mathrm{deg}"), "rad" => ("rad", "\\mathrm{rad}"),
     "mas" => ("mas", "\\mathrm{mas}"), "μas" => ("\$\\mu\$as", "\\mu\\mathrm{as}"),
     "AU" => ("AU", "\\mathrm{AU}"), "d" => ("d", "\\mathrm{d}"),
-    "hr" => ("hr", "\\mathrm{hr}"), "yr" => ("yr", "\\mathrm{yr}"),
+    "hr" => ("hr", "\\mathrm{hr}"), "yr" => ("yr", "\\mathrm{yr}"), "dex" => ("dex", "\\mathrm{dex}"),
     "K" => ("K", "\\mathrm{K}"), "BJD" => ("BJD", "\\mathrm{BJD}"),
     "ppm" => ("ppm", "\\mathrm{ppm}"),
 )
