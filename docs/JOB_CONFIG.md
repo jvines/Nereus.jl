@@ -317,8 +317,10 @@ rather than a single number trusted.
     },
 
     "trend_order": 0,                      // RV systemic γ trend: 0 | 1 | 2 (src/runner.jl:433-437,1167)
-    "phot_trend_order": 0,                 // per-instrument photometric baseline: 0 | 1 | 2
-                                           //   → params phot_c<p>_<inst> (src/runner.jl:438-442,1168)
+    "phot_trend_order": 0,                 // photometric baseline order: 0 | 1 | 2 for every
+                                           //   instrument, or {"PEST": 1, "TESS": 0} per instrument
+                                           //   (unlisted: none) → params phot_c<p>_<inst>; x is
+                                           //   each offset group's own time, scaled to [-1, 1]
     "stability": "none",                   // none | amd | gladman (src/runner.jl:293,1169)
 
     // ttv_backend: consulted only for *_TTV_NB modes (src/runner.jl:1195-1198)
