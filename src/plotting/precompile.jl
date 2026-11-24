@@ -6,9 +6,11 @@
 # process the first plot set otherwise compiles for about two minutes and
 # holds the compiler's memory on top of the figures'.
 #
-# It adds about a minute to every precompilation, so it is off unless the
-# `precompile_plots` preference is set -- by the release bundle, in the
-# environment it precompiles:
+# It adds about 30 s to every precompilation, so it is off unless the
+# `precompile_plots` preference is set. The release bundle sets it: nereus-py's
+# tools/build_bundle.sh writes `[Nereus] precompile_plots = true` into the staged
+# project (a `LocalPreferences.toml` the runtime loads from the same directory,
+# so the image's preferences match and nothing recompiles). By hand:
 #
 #     using Preferences, Nereus
 #     set_preferences!(Nereus, "precompile_plots" => true)

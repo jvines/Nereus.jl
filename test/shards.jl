@@ -224,7 +224,7 @@ const TEST_UNITS = [
     (name = "test_reference_path_evidence.jl", seconds = 4, files = ["test_reference_path_evidence.jl"]),
     (name = "test_phot_determinism.jl", seconds = 0, files = ["test_phot_determinism.jl"]),
     (name = "test_phot_supersampling.jl", seconds = 0, files = ["test_phot_supersampling.jl"]),
-    (name = "test_sampler_determinism.jl", seconds = 163, files = ["test_sampler_determinism.jl"]),
+    (name = "test_sampler_determinism.jl", seconds = 92, files = ["test_sampler_determinism.jl"]),
     (name = "test_bls_informed_phot.jl", seconds = 4, files = ["test_bls_informed_phot.jl"]),
     (name = "test_evidence_curved.jl", seconds = 4, files = ["test_evidence_curved.jl"]),
     (name = "test_evidence_gaussian.jl", seconds = 0, files = ["test_evidence_gaussian.jl"]),
@@ -256,6 +256,9 @@ const TEST_UNITS = [
     # Measured locally (arm64), on its own in a fresh process.
     (name = "test_plot_memory.jl", seconds = 111, files = ["test_plot_memory.jl"]),
     (name = "test_plot_precompile_workload.jl", seconds = 26, files = ["test_plot_precompile_workload.jl"]),
+    (name = "test_fit_precompile_workload.jl", seconds = 15, files = ["test_fit_precompile_workload.jl"]),
+    (name = "test_nonfinite_draws.jl", seconds = 25, files = ["test_nonfinite_draws.jl"]),
+    (name = "test_iad_determined.jl", seconds = 5, files = ["test_iad_determined.jl"]),
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 10, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 0, files = ["test_plot_patterns.jl"]),

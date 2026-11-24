@@ -66,6 +66,82 @@ git history (`git log --first-parent develop`).
 - **Trans-dim noise selection no longer leaves two members of an exclusion group active.** The planet<->ActivityDecorrelation swap in `transdim_pt_emcee` activated AD after checking only that AD itself was off, not whether another member of its exclusion group was on. With `default_noise_menu` (ErrorScale, CeleriteRotation, AD and ActivityGP in one group) and planets trans-dim, walkers reached CeleriteRotation + AD, ErrorScale + AD and ActivityGP + AD, double-modelling the activity; an HD 18599 run spent a third of its cold draws in CeleriteRotation + AD. The swap now offers the planet->AD direction only when AD's group is empty, and `propose_planet_ad_swap` takes the groups as a required `exclusion_groups` keyword. Noise occupancies of any trans-dim run with planets, `noise = true` and an AD in an exclusion group are affected; rerun them.
 
 - **`ppc.png` and `detection_limits.png` are now in `summary["figures"]`** (keys `ppc`, `detection_limits`, plus `figures_pdf` when a PDF was saved). They are written to the output directory root, outside the `plots/` walk that builds the manifest, so clients never listed them. The files stay where they are.
+### Fixed
+
+- **A draw with a non-finite prediction no longer takes down the posterior
+  predictive check or LOO/WAIC.** One NaN in a draw's χ² made the PPC's
+  `quantile` throw ("PPC failed"), and one NaN prediction made `compute_loo`
+  refuse the whole chain. Such draws are now left out, counted
+  (`summary["ppc"]["n_nonfinite_draws"]`, `summary["loo"]["n_nonfinite_draws"]`,
+  `LooResult.n_nonfinite_draws`) and warned about; the draws kept give the same
+  numbers as the chain without them. Only when every draw is non-finite do they
+  throw, with the reason. The RV, transit and joint paths share the code.
+
+- **Intermediate astrometry with too few abscissae is refused.** With
+  `n ≤ n_q` abscissae (4 for one instrument, 6 for two) the design is exactly
+  determined, every orbit fits perfectly, and `iad_log_likelihood` returned 0
+  for every draw: a fit that was the prior. `build_target` and the `run_job`
+  builder now throw an `ArgumentError` naming the instruments, `n` and `n_q`.
+  An IAD used only as the Hipparcos scan geometry of an HGCA row is
+  `hip_scans`, not `iad`, and is not affected.
+
+- **A transit fit with no source of a/R★ is refused.** With neither `M_s` and
+  `R_s`, nor `use_rho_s = true`, nor a sampled a/R★, the planet's a/R★ is NaN:
+  the transit likelihood scored a constant 0 for every draw (the posterior was
+  the prior, silently) and the predicted light curve was NaN. `build_target`
+  (so every `fit_*`) and the `run_job` config builder now throw an
+  `ArgumentError` naming the three ways to give one. Transit-times-only fits
+  read no a/R★ and are unaffected.
+
+- **A draw whose a/R★ is NaN, or whose transit model is NaN, is rejected with
+  -Inf** (the transit likelihood, with and without the workspace), not scored
+  0, which outscored every real draw whose log L is negative. The RV, RM,
+  tomography and astrometry likelihoods already rejected such draws; the
+  astrometry `zero` returns left are for absent data, not invalid draws.
+
+- **`elpd_loo` NaN now says why.** When a point's Pareto k̂ is so large (above
+  2 on a short or poorly mixed chain) that PSIS gives NaN, the `loo` block of
+  `summary.json` carries `status` (`ok`, `warn`, `unreliable`) and a `message`
+  ("Pareto k̂ = 3.2, LOO unreliable; use WAIC (elpd_waic) or more draws"), and
+  a warning is logged; `elpd_waic` is always alongside. `LooResult` has
+  `status` and `message` fields.
+
+### Changed
+
+- **The first fit in a fresh process no longer compiles for about two minutes.**
+  Nereus now precompiles the fit path (`src/fit_precompile.jl`): tiny `fit_rv`,
+  `fit_transit`, `fit_astrometry` (inline HGCA and IAD, nothing fetched) and
+  `fit_joint` (RV + transit) fits with `pt_emcee`, post-fit included, and
+  `run_job` on a minimal config, in a temporary directory with fixed seeds.
+  First calls in a fresh process, before and after: `fit_rv` 139 s to 1.4 s,
+  `fit_transit` 93 s to 1.3 s, `fit_astrometry` 96 s to 1.2 s, `fit_joint`
+  106 s to 1.5 s; a first `run_job` on the easy RV target 4.9 s, and a first
+  `transdim_pt_emcee` one 15 s. `Pkg.precompile()` of Nereus goes from about 13 s
+  to about 150 to 165 s. The
+  workload is on by default; switch it off with
+  `set_preferences!(Nereus, "precompile_fit" => false)` (or `precompile_fit =
+  false` under `[Nereus]` in a `LocalPreferences.toml`) and Nereus recompiles.
+  The figures stay a separate workload (`precompile_plots`, +30 s of precompile;
+  the release bundle turns it on, in nereus-py's `tools/build_bundle.sh`). With it
+  on, a first `fit_rv` with `plots = ["auto"]` takes 7.4 s instead of 21.9 s.
+
+### Tests
+
+- **`transdim_pt_emcee` is checked for thread-count invariance.** The same seed
+  gives a bit-identical chain at `-t 1` and `-t 2` (it was only checked for
+  `pt_emcee`). Measured on the easy 12.3 d target at the shipped defaults
+  (16 temps, 100 walkers, 3000/2000): seeds 2, 5, 9, 12 and 42 all pass the
+  sampler's own convergence gate (worst R-hat 1.004 to 1.007, least ESS 12,700
+  to 17,200), and seed 42 gives the same chain at 2 and 6 threads. The failures
+  recorded in 2026-09 (3 of 14 seeds) predate the stranded-walker pruning, the
+  node flip and the log-scale moves; no change to the transdim defaults is
+  needed and none was made.
+
+- **Short `pt_emcee` runs are not slower per step.** With the bridge solved by
+  Newton and its bootstrap skipped for an estimate that did not converge, a
+  100-step run takes 0.3 s and 1500 steps 3.7 s (16 temps, 150 walkers). What
+  makes a first short run look slow is about 100 s of compilation in a fresh
+  process, whatever the run's length.
 
 ## 0.9.10
 

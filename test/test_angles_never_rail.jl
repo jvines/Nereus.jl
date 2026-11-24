@@ -261,8 +261,8 @@ _anr_cdist(a, b) = abs(rem2pi(a - b, RoundNearest))
         end
         raw = Nereus._pt_convergence(M, size(M, 1), nw, [ii, il])
         can = Nereus._pt_convergence(M, size(M, 1), nw, [ii, il]; canon = AngleCanon(p))
-        @test raw[2] > 1.5
-        @test can[2] < 1.05
+        @test raw.max_rhat > 1.5
+        @test can.max_rhat < 1.05
         # a full-circle angle split by its seam (half the walkers a period up)
         tg = _anr_ew()
         q = tg.params
@@ -271,8 +271,8 @@ _anr_cdist(a, b) = abs(rem2pi(a - b, RoundNearest))
         X[:, iw] .= π .+ 0.05 .* randn(rng, ns * nw)
         X[1:2:end, iw] .-= 2π
         cols = [iw]
-        @test Nereus._pt_convergence(X, size(X, 1), nw, cols)[2] > 1.5
-        @test Nereus._pt_convergence(X, size(X, 1), nw, cols; canon = AngleCanon(q))[2] < 1.05
+        @test Nereus._pt_convergence(X, size(X, 1), nw, cols).max_rhat > 1.5
+        @test Nereus._pt_convergence(X, size(X, 1), nw, cols; canon = AngleCanon(q)).max_rhat < 1.05
     end
 
     @testset "a rail against a sub-range angle prior says it is the prior's" begin

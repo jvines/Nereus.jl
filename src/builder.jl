@@ -436,6 +436,8 @@ function build_target(;
         ttv_epochs      = ttv_epochs,
         ttv_backend     = ttv_backend,
     )
+    require_a_Rs_source(params, data)
+    require_iad_determined(params, data)
     return NereusTarget(params, data)
 end
 

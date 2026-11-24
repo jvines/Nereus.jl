@@ -63,6 +63,11 @@ Fields:
 - `loo_compare_log_z::Union{Nothing, Float64}` — `elpd_loo` minus the
   PT log-evidence, when `log_z` is passed in. Positive means LOO
   prefers the model more than PT log Z does.
+- `n_nonfinite_draws::Int` — draws left out because their prediction or
+  log-likelihood was not finite (`n_draws` counts the draws used).
+- `status::String` — `"ok"`, `"warn"` (some k̂ > 0.7: PSIS-LOO is uncertain) or
+  `"unreliable"` (`elpd_loo` is NaN, or k̂ > 1: use `elpd_waic` or more draws),
+  and `message::String` says which and why.
 """
 struct LooResult
     n_draws::Int
@@ -77,7 +82,16 @@ struct LooResult
     pareto_k_max::Float64
     pareto_k_warn_count::Int
     loo_compare_log_z::Union{Nothing, Float64}
+    n_nonfinite_draws::Int
+    status::String
+    message::String
 end
+
+LooResult(n_draws, n_obs, elpd_loo, se_elpd_loo, p_loo, elpd_waic, se_elpd_waic,
+          p_waic, pareto_k, pareto_k_max, pareto_k_warn_count, loo_compare_log_z) =
+    LooResult(n_draws, n_obs, elpd_loo, se_elpd_loo, p_loo, elpd_waic, se_elpd_waic,
+              p_waic, pareto_k, pareto_k_max, pareto_k_warn_count, loo_compare_log_z,
+              0, "ok", "")
 
 
 # =====================================================================
@@ -122,8 +136,10 @@ for hours -- raise it if that cost is acceptable.
 (`marginalize_indicators = false`), an instrument-restricted or more
 than one active `ActivityGP`, `StudentT` combined with `MAModel`, a
 γ-marginalized instrument group with a single point (its leave-one-out
-predictive is improper), and a draw whose likelihood is not finite
-throw an `ArgumentError`.
+predictive is improper) throw an
+`ArgumentError`. A draw whose prediction or likelihood is not finite has no
+leave-one-out predictive: it is left out, counted in `n_nonfinite_draws` and
+warned about; only when every draw is non-finite does it throw.
 """
 function compute_loo(chains, params::Params, data::Data;
                       n_draws::Int = 500,
@@ -141,27 +157,46 @@ function compute_loo(chains, params::Params, data::Data;
     n_draws_eff > 0 || throw(ArgumentError("chain is empty"))
     idx_pool = randperm(rng, n_total)[1:n_draws_eff]
 
-    # Per-point log-likelihood matrix (n_obs × n_draws).
+    # Per-point log-likelihood matrix (n_obs × n_draws). A draw whose prediction
+    # or log-likelihood is not finite has no leave-one-out predictive: it is left
+    # out and counted (`n_nonfinite_draws`, and a warning), not allowed to end the
+    # run. If no draw is finite, the error is the first draw's own.
     log_L = Matrix{Float64}(undef, n_obs_total, n_draws_eff)
+    n_kept = 0
+    n_nonfinite = 0
+    first_err = nothing
 
     tdc = _td_cols(chains_flat, params)      # each draw with its own live slots
-    for (d, idx) in enumerate(idx_pool)
+    for idx in idx_pool
         theta = _theta_from_row(chains_flat, idx, params; tdc = tdc)
-        offset = 0
-        if n_rv_obs > 0
-            rv_ll = _pointwise_loo_rv(theta, data, max_dense_obs)
-            @inbounds for i in 1:n_rv_obs
-                log_L[i, d] = rv_ll[i]
+        col = Vector{Float64}(undef, n_obs_total)
+        try
+            offset = 0
+            if n_rv_obs > 0
+                _finite_predictions(rv_predictions(theta, data), :rv)
+                col[1:n_rv_obs] .= _pointwise_loo_rv(theta, data, max_dense_obs)
+                offset = n_rv_obs
             end
-            offset = n_rv_obs
-        end
-        if n_pm_obs > 0
-            pm_ll = _pointwise_loo_phot(theta, data, max_dense_obs)
-            @inbounds for i in 1:n_pm_obs
-                log_L[offset + i, d] = pm_ll[i]
+            if n_pm_obs > 0
+                _finite_predictions(phot_predictions(theta, data), :phot)
+                col[offset+1:offset+n_pm_obs] .= _pointwise_loo_phot(theta, data, max_dense_obs)
             end
+        catch err
+            (err isa ArgumentError && startswith(err.msg, _NONFINITE_PREFIX)) || rethrow()
+            n_nonfinite += 1
+            first_err === nothing && (first_err = err)
+            continue
         end
+        n_kept += 1
+        log_L[:, n_kept] = col
     end
+    n_kept > 0 || throw(first_err)
+    if n_nonfinite > 0
+        @warn "compute_loo: $(n_nonfinite) of $(n_draws_eff) draws have a non-finite " *
+              "prediction or log-likelihood; they are left out" n_nonfinite n_draws_eff
+    end
+    log_L = log_L[:, 1:n_kept]
+    n_draws_eff = n_kept
 
     # PSIS-LOO via ParetoSmooth. The 3D form takes (n_obs, n_samples,
     # n_chains); we treat the flattened chain as 1 chain.
@@ -186,12 +221,16 @@ function compute_loo(chains, params::Params, data::Data;
     loo_minus_logz = log_z === nothing ? nothing :
                       elpd_loo - Float64(log_z)
 
+    status, message = _loo_status(elpd_loo, pareto_k_max, pareto_k_warn)
+    status == "unreliable" &&
+        @warn "compute_loo: $message" elpd_loo elpd_waic pareto_k_max
+
     return LooResult(
         n_draws_eff, n_obs_total,
         elpd_loo, se_elpd_loo, p_loo,
         elpd_waic, se_elpd_waic, p_waic,
         pareto_k, pareto_k_max, pareto_k_warn,
-        loo_minus_logz,
+        loo_minus_logz, n_nonfinite, status, message,
     )
 end
 
@@ -454,10 +493,22 @@ end
 
 # A posterior draw the likelihood gives zero probability has no leave-one-out
 # predictive; the chain is not a posterior of this model and data.
+const _NONFINITE_PREFIX = "compute_loo: a draw has a non-finite"
+
 _finite_draw(ref::Float64, channel::Symbol) =
     isfinite(ref) || throw(ArgumentError(
-        "compute_loo: a draw has a non-finite :$channel log-likelihood ($ref); " *
+        "$_NONFINITE_PREFIX :$channel log-likelihood ($ref); " *
         "the chain is not a posterior sample of this model and data."))
+
+# The model's prediction at a draw must be finite for the draw to have a
+# leave-one-out predictive at all.
+function _finite_predictions(pv, channel::Symbol)
+    (all(isfinite, pv[1]) && all(isfinite, pv[2])) ||
+        throw(ArgumentError("$_NONFINITE_PREFIX :$channel prediction; the model " *
+            "does not evaluate at this draw (a transit with no a/R★ source " *
+            "predicts NaN: give `M_s` and `R_s`, or `use_rho_s = true`)."))
+    return nothing
+end
 
 _check_dense_size(n::Int, max_dense::Int, channel::Symbol) =
     n <= max_dense || throw(ArgumentError(
@@ -673,4 +724,20 @@ function _waic(log_L::AbstractMatrix{<:Real})
     p   = sum(p_waic_per_i)
     se  = sqrt(n_obs * var(elpd_per_i; corrected = true))
     return (elpd, se, p)
+end
+
+# Whether the PSIS estimate can be read. ParetoSmooth returns NaN for `elpd_loo`
+# when a point's k̂ is so large (above 2, as on a short or poorly mixed chain)
+# that the tail fit degenerates; a bare NaN says nothing about why.
+function _loo_status(elpd_loo::Float64, kmax::Float64, n_warn::Int)
+    fmt(x) = isnan(x) ? "NaN" : string(round(x; digits = 2))
+    if !isfinite(elpd_loo) || !isfinite(kmax) || kmax > 1
+        return "unreliable", "Pareto k̂ = $(fmt(kmax)), LOO unreliable" *
+               (isfinite(elpd_loo) ? "" : " (elpd_loo is NaN)") *
+               "; use WAIC (elpd_waic) or more draws"
+    elseif kmax > 0.7
+        return "warn", "Pareto k̂ = $(fmt(kmax)) > 0.7 at $n_warn point(s): PSIS-LOO is " *
+               "uncertain; compare with WAIC or use more draws"
+    end
+    return "ok", ""
 end

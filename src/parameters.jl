@@ -1201,3 +1201,33 @@ function _log_prior_transdim(theta::Theta{T}) where {T}
     end
     return total
 end
+
+"""
+    require_a_Rs_source(params, data)
+
+Throw an `ArgumentError` when a planet with transit geometry has nothing to set
+its a/R★: no sampled `a_Rs` slot, no stellar density (`use_rho_s`), and no
+`(M★, R★)` (`M_s` or a sampled `M_pri`, with `R_s`). Its a/R★ would be NaN for
+every draw, the transit model cannot be evaluated, and the fit would not be one.
+Called where a target is built (`build_target`, the `run_job` config builder).
+"""
+function require_a_Rs_source(params::Params, data::Data)
+    isempty(data.t_phot) && return nothing     # a/R★ is read by photometry only
+    cfg = params.config
+    cfg.parametrization.use_rho_s && return nothing
+    sys = params.layout.systemic
+    has_M = sys.m_pri != 0 || !isnan(cfg.M_s)
+    has_R = !isnan(cfg.R_s) && cfg.R_s > 0
+    for (k, block) in enumerate(params.layout.planet_blocks)
+        has_geometry(block) || continue
+        (!isempty(sys.a_Rs) && k <= length(sys.a_Rs) && sys.a_Rs[k] > 0) && continue
+        (has_M && has_R) && continue
+        throw(ArgumentError(
+            "planet $k transits but nothing sets its a/R★, so the transit model " *
+            "cannot be evaluated (a/R★ would be NaN for every draw). Supply one: " *
+            "stellar mass and radius (`M_s` and `R_s`, a `star` block in a run_job " *
+            "config), or the stellar density (`use_rho_s = true`, with a `rho_s` " *
+            "prior), or sample a/R★ directly (`sample_a_Rs`)."))
+    end
+    return nothing
+end

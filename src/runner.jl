@@ -1699,6 +1699,8 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     menu === nothing || (p_kw[:transdim_noise] = true)
 
     params = Params(; p_kw...)
+    require_a_Rs_source(params, data)
+    require_iad_determined(params, data)
     target = NereusTarget(params, data; unconstrained = false)
     return params, target, menu
 end
@@ -3238,6 +3240,9 @@ function _run_loo!(cfg, chains, params::Params, data::Data, result,
             "pareto_k_max"       => res.pareto_k_max,
             "pareto_k_warn_count" => res.pareto_k_warn_count,
             "loo_compare_log_z"  => res.loo_compare_log_z,
+            "n_nonfinite_draws"  => res.n_nonfinite_draws,
+            "status"             => res.status,
+            "message"            => res.message,
         )
     catch err
         @warn "LOO/WAIC failed (continuing)" exception = (err, catch_backtrace())
