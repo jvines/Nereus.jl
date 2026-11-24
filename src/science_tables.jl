@@ -347,7 +347,7 @@ function science_fitted(chains, params::Params)
         col = Symbol("noise_active_$i")
         col in allnames || continue
         mean(_draws(chains, col) .> 0.5) > 0.5 &&
-            push!(active_noise, _noise_model_label(nm))
+            push!(active_noise, _noise_model_label_scoped(nm))
     end
 
     entries = Vector{Pair{String, Dict{String, Any}}}()
@@ -618,7 +618,7 @@ function science_model_selection(chains, params::Params)
         # Disambiguate rather than overwrite: two models of the same type (e.g.
         # a per-instrument GP on two instruments) share a label, and keying the
         # occupancy Dict on it would drop all but the last.
-        lbl = _noise_model_label(nm)
+        lbl = _noise_model_label_scoped(nm)
         haskey(noise, lbl) && (lbl = "$(lbl)#$(i)")
         noise[lbl] = mean(_draws(chains, col) .> 0.5)
     end

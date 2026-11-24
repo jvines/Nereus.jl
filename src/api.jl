@@ -390,7 +390,7 @@ function _target_from(channels::AbstractVector, planets; M_s = NaN,
                 "config's `noise_models` block; got " *
                 join(unique(string.(typeof.(nm_in))), ", ")))
         any(m -> m isa AbstractDict, nm_in) && (noise_models =
-            _noise_models_from(nm_in))
+            _noise_models_from(nm_in; transdim = transdim_noise))
     end
 
     # A photometry channel's `dilution` / `jitter` are priors on
@@ -460,13 +460,13 @@ end
 
 # The dict entries of a `noise_models` list built into NoiseModel objects by
 # run_job's own builder (`_build_noise_models`); objects pass through in place.
-function _noise_models_from(nm_in)
+function _noise_models_from(nm_in; transdim::Bool = false)
     out = NoiseModel[]
     for m in nm_in
         m isa NoiseModel ? push!(out, m) :
             append!(out, _build_noise_models([m], nothing))
     end
-    validate_noise_models(out)
+    validate_noise_models(out; transdim)
     return out
 end
 

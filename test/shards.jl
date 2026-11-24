@@ -170,6 +170,7 @@ const TEST_UNITS = [
     (name = "test_celerite_order.jl", seconds = 2, files = ["test_celerite_order.jl"]),
     (name = "test_arma_time_order.jl", seconds = 1, files = ["test_arma_time_order.jl"]),
     (name = "test_phot_noise_routing.jl", seconds = 2, files = ["test_phot_noise_routing.jl"]),
+    (name = "test_runjob_json_noise_menu.jl", seconds = 60, files = ["test_runjob_json_noise_menu.jl"]),
     (name = "test_ci_run_tests.jl", seconds = 0, files = ["test_ci_run_tests.jl"]),
     (name = "test_rv_modifier_slots.jl", seconds = 1, files = ["test_rv_modifier_slots.jl"]),
     (name = "test_multiseries_gp.jl", seconds = 8, files = ["test_multiseries_gp.jl"]),

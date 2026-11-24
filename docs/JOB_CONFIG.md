@@ -390,7 +390,15 @@ rather than a single number trusted.
   //     channels and a mean model does not, so without a floor the two log Z values are
   //     computed on different data and are not comparable.
   //   ErrorScale, NightlyOffset, HarmonicBlock, StudentT, MaternGP
-  // `channel`/`instruments` are injected ONLY into constructors that accept them.
+  // `channel`/`instruments` are injected ONLY into constructors that accept them;
+  // a non-"rv" `channel` or an `instruments` list on a model that has no such
+  // field (ErrorScale, ActivityDecorrelation, ActivityJitter, ...) is a hard
+  // error, as is an instrument the model's channel does not have. On "phot" the
+  // GPs (CeleriteSHO, CeleriteRotation[FM17], MaternGP; global, or per light
+  // curve via `instruments`), NightlyOffset, HarmonicBlock, ARModel/MAModel and
+  // StudentT act; ErrorScale is RV only.
+  // `label` (optional, unique string): a name `transdim.toggleable` and
+  // `transdim.noise_exclusion_groups` can use instead of the 1-based index.
   "noise_models": [
     { "kind": "CeleriteRotation", "channel": "rv", "instruments": [], "kwargs": {} },
     { "kind": "ActivityDecorrelation", "channel": "rv",
@@ -407,9 +415,8 @@ rather than a single number trusted.
   // + always-on IndicatorFloor) AND the single exclusion group (white XOR
   // correlated XOR decorrelation — one winner), and wires
   // `transdim.toggleable` / `transdim.noise_exclusion_groups` automatically.
-  // JSON cannot express those two fields itself (they hold NoiseModel
-  // objects), so this block is the ONLY way to run menu-based noise
-  // selection through run_job.
+  // For any other menu (e.g. a per-light-curve photometric one) list the
+  // models in `noise_models` and reference them from `transdim` (below).
   //
   // `indicators` — WHICH activity channels the menu's indicator-driven
   //   members (AD / ActivityGP / IndicatorFloor) use. Default: every
@@ -474,10 +481,29 @@ rather than a single number trusted.
     "transdim_fraction": 0.3,              // fraction of steps that jump dimension (default 0.3)
     "planets": true,                       // toggle planet-count dimension (default true)
     "noise":   false,                      // toggle noise-model dimension (default false)
-    "toggleable": [],                      // MUST be empty via run_job (JSON can't encode
-                                           //   NoiseModel objects; src/runner.jl:1616-1630)
-    "noise_exclusion_groups": []           // likewise empty via run_job
+    "toggleable": [],                      // noise_models entries that switch on/off, by
+                                           //   1-based index or `label`; the rest are always on
+    "noise_exclusion_groups": []           // arrays of toggleable entries (index or label);
+                                           //   at most one of each group is active at a time
   },
+  // `noise` defaults to true when `toggleable` is non-empty. An index out of
+  // range, an unknown label, a group member that is not toggleable or a group
+  // of fewer than 2 is a validation error. Two models the likelihood cannot
+  // score together (two GPs on the same instrument, an additive covariance
+  // beside an instrument-restricted GP) must both be toggleable and share a group.
+  //
+  // Example: a per-light-curve photometric menu, white | Matern | SHO on each
+  // of two light curves (white = both GPs off; jitter_<lc> is always on):
+  //   "noise_models": [
+  //     {"kind": "MaternGP",    "channel": "phot", "instruments": ["TESS"], "label": "tess_mat"},
+  //     {"kind": "CeleriteSHO", "channel": "phot", "instruments": ["TESS"], "label": "tess_sho"},
+  //     {"kind": "MaternGP",    "channel": "phot", "instruments": ["LCO"],  "label": "lco_mat"},
+  //     {"kind": "CeleriteSHO", "channel": "phot", "instruments": ["LCO"],  "label": "lco_sho"}],
+  //   "transdim": {"max_kplanet": 1, "planets": false,
+  //     "toggleable": ["tess_mat", "tess_sho", "lco_mat", "lco_sho"],
+  //     "noise_exclusion_groups": [["tess_mat", "tess_sho"], ["lco_mat", "lco_sho"]]}
+  // summary.json's model_selection.noise_models then holds the occupancy of
+  // "GP-Matern[TESS]", "GP-SHO[TESS]", "GP-Matern[LCO]" and "GP-SHO[LCO]".
 
   // ---- Output (src/runner.jl:1793-2208,2214-2483) -------------------
   "output": {
