@@ -34,6 +34,7 @@ Outputs land in `output_dir/`:
 output_dir/
 ├── chains.nc                  # MCMCChains NetCDF (always)
 ├── summary.json               # machine-readable contract (always)
+├── progress.jsonl             # pt_emcee: one JSON line per convergence check, during the run
 ├── ppc.png / ppc.json         # posterior predictive check (default on)
 ├── detection_limits.png       # K_lim(P) curve (PT samplers, when P explored its prior)
 ├── detection_limits.nc        # per-bin arrays sidecar
@@ -949,6 +950,21 @@ prior when that degeneracy is present.
   is not changed: a finished run resumed
   at the same `n_steps` with the option on trims on resume. Runs after an
   extended burn-in, on what was recorded. See `src/samplers/burnin_trim.jl`.
+- **`progress.jsonl`** (`pt_emcee`): `run_job` passes
+  `progress_log = output_dir/progress.jsonl` (`src/runner.jl:1987-1990`), as
+  it passes the checkpoint `<name>_state.jls`. One JSON object per line at
+  every convergence check, burn-in included (every `diag_every` steps, default
+  `max(200, n_steps ÷ 40)`), and one at the end (`"final": true`), so a long
+  run can be followed while it runs: `step`, `phase` (`"burn"`/`"sample"`),
+  `elapsed_s`, `eta_s`, `steps_per_s`, `acc`, `beta1_acc`, `swap_acc` per
+  adjacent pair with `swap_mean`/`swap_min`/`swap_worst_pair`, the cold rung's
+  `lp_median`/`lp_max`, and per science parameter `rhat`, `bulk_ess` and
+  `tail_ess` with `rhat_max`/`rhat_worst` and `tail_ess_min`/`tail_ess_worst`.
+  During burn-in the diagnostics come from a rolling window of recent
+  cold-rung steps, afterwards from every kept draw (`diag_window` says which
+  steps). A resumed job appends to the file. `"progress_log": null` in
+  `sampler.kwargs` turns it off and a path puts it elsewhere; the full list of
+  keys is in the `sample_pt_emcee` docstring.
 - Unknown kwargs are rejected with an actionable error listing the valid set
   (`src/runner.jl:1425-1439,1466-1475`); every JSON-string kwarg value is coerced to a Julia
   `Symbol` so `"multi"`, `"rslice"`, `"stretch"`, etc. work as expected.
