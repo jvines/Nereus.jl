@@ -7,6 +7,13 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **A fit with no planet runs.** `fit_rv(planets = 0, trend_order = 1)` (and
+  `planets = []`, which is what a JSON `[]` from astronereus is) stopped
+  before sampling: `build_target` refused an empty planet set and
+  `_planet_spec` took the maximum of an empty list. A radial-velocity-only
+  target may now have no planet: offsets, jitters and the `dvdt` / `d2vdt2`
+  trend are fitted, and the summary, tables and RV plots are written. A
+  transit or astrometric target still needs a planet.
 - **The notch detrender keeps transit depths.** Around every excluded run --
   a dip found by the search (`refine`, the default) or a `transit_mask` built
   from an ephemeris -- the trend was a per-window poly2 extrapolated from clean

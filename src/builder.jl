@@ -181,15 +181,19 @@ function build_target(;
     ttv_epochs::AbstractDict = Dict{Int, Vector{Int}}(),
     ttv_backend::Symbol = :ttvfaster,
 )
-    isempty(planets) &&
-        throw(ArgumentError("build_target: at least one planet required " *
-                            "(pass `planets = (b = (...),)`)"))
-
     has_rv     = !isempty(rv)
     has_phot   = !isempty(phot)
     has_astrom = (relAST !== nothing) || (hgca !== nothing) ||
                  (iad !== nothing) || (gost !== nothing) ||
                  (g23h !== nothing) || (gaia_dr3 !== nothing)
+
+    # No planet is a model: offsets, jitters and, with `trend_order`, a trend.
+    # Only an RV-only target can be that; a transit or an astrometric orbit
+    # needs a body to fit.
+    isempty(planets) && (has_phot || has_astrom || !has_rv) &&
+        throw(ArgumentError("build_target: at least one planet required " *
+                            "(pass `planets = (b = (...),)`); a fit with no planet " *
+                            "is possible only for radial velocities alone"))
 
     mode = if has_rv && has_phot && has_astrom; RVPMAS
           elseif has_rv && has_astrom;          RVAS
@@ -219,7 +223,7 @@ function build_target(;
     time_kind = if time_anchor !== nothing
         time_anchor
     else
-        first_spec = first(values(planets))
+        first_spec = isempty(planets) ? nothing : first(values(planets))
         ks = first_spec isa NamedTuple ? keys(first_spec) : ()
         if      :Tc in ks; :Tc
         elseif  :phic in ks; :phic
