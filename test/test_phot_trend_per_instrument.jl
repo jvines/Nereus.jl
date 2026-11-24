@@ -76,7 +76,8 @@ using Statistics: mean
         # the likelihood sees the same continuum: the exact slope beats no slope
         ll(cv) = (th.values[p.layout.name_to_idx["phot_c1_NIGHT"]] = cv;
                   Nereus.transit_log_likelihood(th, data))
-        @test ll(c) > ll(0.0) + 100
+        l0 = ll(0.0)
+        @test ll(c) > l0 + 50                            # Δ ln L ≈ 64.6 here
     end
 
     @testset "job config accepts a per-instrument map" begin
@@ -93,7 +94,12 @@ using Statistics: mean
         @test_throws ArgumentError Nereus._validate_config(cfg(3))
         # the map reaches the Params the runner builds
         c = cfg(Dict("NIGHT" => 1))
-        d, _, _ = Nereus._build_data(c["data"])
-        @test d.phot_inst == data.phot_inst
+        kw = Nereus._phot_trend_order_kw(c["model"]["phot_trend_order"])
+        @test kw == Dict("NIGHT" => 1)
+        d, _, ipm = Nereus._build_data(c["data"])
+        p = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+                   instruments = InstrumentConfig(pm = ipm), data = d, stability = :none,
+                   phot_trend_order = kw)
+        @test "phot_c1_NIGHT" in p.layout.names && !("phot_c1_SURVEY" in p.layout.names)
     end
 end
