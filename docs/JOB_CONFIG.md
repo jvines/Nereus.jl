@@ -34,6 +34,7 @@ Outputs land in `output_dir/`:
 output_dir/
 ├── chains.nc                  # MCMCChains NetCDF (always)
 ├── summary.json               # machine-readable contract (always)
+├── progress.jsonl             # pt_emcee: one JSON line per convergence check, during the run
 ├── ppc.png / ppc.json         # posterior predictive check (default on)
 ├── detection_limits.png       # K_lim(P) curve (PT samplers, when P explored its prior)
 ├── detection_limits.nc        # per-bin arrays sidecar
@@ -316,8 +317,10 @@ rather than a single number trusted.
     },
 
     "trend_order": 0,                      // RV systemic γ trend: 0 | 1 | 2 (src/runner.jl:433-437,1167)
-    "phot_trend_order": 0,                 // per-instrument photometric baseline: 0 | 1 | 2
-                                           //   → params phot_c<p>_<inst> (src/runner.jl:438-442,1168)
+    "phot_trend_order": 0,                 // photometric baseline order: 0 | 1 | 2 for every
+                                           //   instrument, or {"PEST": 1, "TESS": 0} per instrument
+                                           //   (unlisted: none) → params phot_c<p>_<inst>; x is
+                                           //   each offset group's own time, scaled to [-1, 1]
     "stability": "none",                   // none | amd | gladman (src/runner.jl:293,1169)
 
     // ttv_backend: consulted only for *_TTV_NB modes (src/runner.jl:1195-1198)
@@ -389,7 +392,15 @@ rather than a single number trusted.
   //     channels and a mean model does not, so without a floor the two log Z values are
   //     computed on different data and are not comparable.
   //   ErrorScale, NightlyOffset, HarmonicBlock, StudentT, MaternGP
-  // `channel`/`instruments` are injected ONLY into constructors that accept them.
+  // `channel`/`instruments` are injected ONLY into constructors that accept them;
+  // a non-"rv" `channel` or an `instruments` list on a model that has no such
+  // field (ErrorScale, ActivityDecorrelation, ActivityJitter, ...) is a hard
+  // error, as is an instrument the model's channel does not have. On "phot" the
+  // GPs (CeleriteSHO, CeleriteRotation[FM17], MaternGP; global, or per light
+  // curve via `instruments`), NightlyOffset, HarmonicBlock, ARModel/MAModel and
+  // StudentT act; ErrorScale is RV only.
+  // `label` (optional, unique string): a name `transdim.toggleable` and
+  // `transdim.noise_exclusion_groups` can use instead of the 1-based index.
   "noise_models": [
     { "kind": "CeleriteRotation", "channel": "rv", "instruments": [], "kwargs": {} },
     { "kind": "ActivityDecorrelation", "channel": "rv",
@@ -406,9 +417,8 @@ rather than a single number trusted.
   // + always-on IndicatorFloor) AND the single exclusion group (white XOR
   // correlated XOR decorrelation — one winner), and wires
   // `transdim.toggleable` / `transdim.noise_exclusion_groups` automatically.
-  // JSON cannot express those two fields itself (they hold NoiseModel
-  // objects), so this block is the ONLY way to run menu-based noise
-  // selection through run_job.
+  // For any other menu (e.g. a per-light-curve photometric one) list the
+  // models in `noise_models` and reference them from `transdim` (below).
   //
   // `indicators` — WHICH activity channels the menu's indicator-driven
   //   members (AD / ActivityGP / IndicatorFloor) use. Default: every
@@ -473,10 +483,29 @@ rather than a single number trusted.
     "transdim_fraction": 0.3,              // fraction of steps that jump dimension (default 0.3)
     "planets": true,                       // toggle planet-count dimension (default true)
     "noise":   false,                      // toggle noise-model dimension (default false)
-    "toggleable": [],                      // MUST be empty via run_job (JSON can't encode
-                                           //   NoiseModel objects; src/runner.jl:1616-1630)
-    "noise_exclusion_groups": []           // likewise empty via run_job
+    "toggleable": [],                      // noise_models entries that switch on/off, by
+                                           //   1-based index or `label`; the rest are always on
+    "noise_exclusion_groups": []           // arrays of toggleable entries (index or label);
+                                           //   at most one of each group is active at a time
   },
+  // `noise` defaults to true when `toggleable` is non-empty. An index out of
+  // range, an unknown label, a group member that is not toggleable or a group
+  // of fewer than 2 is a validation error. Two models the likelihood cannot
+  // score together (two GPs on the same instrument, an additive covariance
+  // beside an instrument-restricted GP) must both be toggleable and share a group.
+  //
+  // Example: a per-light-curve photometric menu, white | Matern | SHO on each
+  // of two light curves (white = both GPs off; jitter_<lc> is always on):
+  //   "noise_models": [
+  //     {"kind": "MaternGP",    "channel": "phot", "instruments": ["TESS"], "label": "tess_mat"},
+  //     {"kind": "CeleriteSHO", "channel": "phot", "instruments": ["TESS"], "label": "tess_sho"},
+  //     {"kind": "MaternGP",    "channel": "phot", "instruments": ["LCO"],  "label": "lco_mat"},
+  //     {"kind": "CeleriteSHO", "channel": "phot", "instruments": ["LCO"],  "label": "lco_sho"}],
+  //   "transdim": {"max_kplanet": 1, "planets": false,
+  //     "toggleable": ["tess_mat", "tess_sho", "lco_mat", "lco_sho"],
+  //     "noise_exclusion_groups": [["tess_mat", "tess_sho"], ["lco_mat", "lco_sho"]]}
+  // summary.json's model_selection.noise_models then holds the occupancy of
+  // "GP-Matern[TESS]", "GP-SHO[TESS]", "GP-Matern[LCO]" and "GP-SHO[LCO]".
 
   // ---- Output (src/runner.jl:1793-2208,2214-2483) -------------------
   "output": {
@@ -955,6 +984,21 @@ prior when that degeneracy is present.
   is not changed: a finished run resumed
   at the same `n_steps` with the option on trims on resume. Runs after an
   extended burn-in, on what was recorded. See `src/samplers/burnin_trim.jl`.
+- **`progress.jsonl`** (`pt_emcee`): `run_job` passes
+  `progress_log = output_dir/progress.jsonl` (`src/runner.jl:1987-1990`), as
+  it passes the checkpoint `<name>_state.jls`. One JSON object per line at
+  every convergence check, burn-in included (every `diag_every` steps, default
+  `max(200, n_steps ÷ 40)`), and one at the end (`"final": true`), so a long
+  run can be followed while it runs: `step`, `phase` (`"burn"`/`"sample"`),
+  `elapsed_s`, `eta_s`, `steps_per_s`, `acc`, `beta1_acc`, `swap_acc` per
+  adjacent pair with `swap_mean`/`swap_min`/`swap_worst_pair`, the cold rung's
+  `lp_median`/`lp_max`, and per science parameter `rhat`, `bulk_ess` and
+  `tail_ess` with `rhat_max`/`rhat_worst` and `tail_ess_min`/`tail_ess_worst`.
+  During burn-in the diagnostics come from a rolling window of recent
+  cold-rung steps, afterwards from every kept draw (`diag_window` says which
+  steps). A resumed job appends to the file. `"progress_log": null` in
+  `sampler.kwargs` turns it off and a path puts it elsewhere; the full list of
+  keys is in the `sample_pt_emcee` docstring.
 - Unknown kwargs are rejected with an actionable error listing the valid set
   (`src/runner.jl:1425-1439,1466-1475`); every JSON-string kwarg value is coerced to a Julia
   `Symbol` so `"multi"`, `"rslice"`, `"stretch"`, etc. work as expected.
@@ -1100,6 +1144,8 @@ numbers live under `fitted` / `derived`
     "models/rv_timeseries": "/work/out/plots/models/rv_timeseries.png",
     "transdim/occupancy":   "/work/out/plots/transdim/occupancy.png"
   },
+  // `ppc` and `detection_limits` (written to the output root, not plots/) are
+  // added to `figures` by name when this run wrote them.
   // legacy flat list of generated plot paths (PPC/detection-limits pushed here too)
   "plots": [ "ppc.png", "detection_limits.png" ],
 
@@ -1113,6 +1159,11 @@ numbers live under `fitted` / `derived`
     "rv_red_chi2_per_draw_p50":   1.11,
     "rv_red_chi2_per_draw_p84":   1.42,
     "rv_outliers_3sigma":         2,
+    // per instrument at the median model, on the FORMAL errors (fit_health's rv_jitter)
+    "rv_err_formal_median_per_inst": { "HARPS": 0.9, "CORALIE": 3.1 },  // median σ_i
+    "rv_jitter_median_per_inst":     { "HARPS": 1.2, "CORALIE": 2.0 },  // median added jitter
+    "rv_resid_rms_per_inst":         { "HARPS": 1.6, "CORALIE": 3.9 },
+    "rv_red_chi2_formal_per_inst":   { "HARPS": 3.1, "CORALIE": 1.6 },  // χ²/dof without jitter
     "rv_residual_top_peak_period": 38.4,    // top GLS-of-residuals peak (missed signal);
     "rv_residual_top_peak_power":  0.18,    //   grid capped ≤20000 freqs, analytic FAP
     "rv_residual_top_peak_fap":    0.41,
@@ -1205,7 +1256,14 @@ numbers live under `fitted` / `derived`
                 // the samplers' settling test (sampler.kwargs.trim_burnin):
                 // "warn" when walkers settled during recording and were not
                 // trimmed, the run ended split, or a trim was refused
-                "burnin_settling": { "status": "ok", "message": "…" } }
+                "burnin_settling": { "status": "ok", "message": "…" },
+                // run-summary checks for a cold chain trapped in a wrong mode
+                // (warn only; thresholds RUN_HEALTH_THRESHOLDS, see
+                // docs/src/diagnostics.md): cold_acceptance, tempering_ladder,
+                // evidence_precision, rv_jitter
+                "rv_jitter": { "status": "ok", "message": "…" } },
+    "suspect_wrong_mode": false,            // any run-summary check warned
+    "suspect_wrong_mode_checks": []         // the ones that did
   },
 
   // ---- Walkers still settling into the main mode during recording ----

@@ -151,8 +151,16 @@ end
 # These need a fitted posterior, so they take a chains file rather than arrays.
 
 function _load(p)
-    _need(p, :chains_path)
-    chains, meta = load_chains(String(_pget(p, :chains_path)))
+    # `chains_path`, or the `output_dir` of a fit (its chains.nc).
+    path = if _haskey2(p, :chains_path) && _pget(p, :chains_path) !== nothing
+        String(_pget(p, :chains_path))
+    elseif _haskey2(p, :output_dir) && _pget(p, :output_dir) !== nothing
+        joinpath(String(_pget(p, :output_dir)), "chains.nc")
+    else
+        _need(p, :chains_path)
+    end
+    isfile(path) || error("no chains at $path; run the fit first")
+    chains, meta = load_chains(path)
     return chains, meta
 end
 
@@ -345,6 +353,358 @@ function act_tomo_injection_test(p)
 end
 
 
+# --- operations on a finished fit ----------------------------------------------
+# `diagnostics.loo`, `diagnostics.ppc`, `diagnostics.fit_health`, `evidence`,
+# `detection_limits` and `diagnostics.label_switching` read a posterior. A chains
+# file holds the draws and not the model (layout, priors, noise models, data), so
+# the ones that re-evaluate the likelihood take the fit's own request again, as
+# `replot` does: the channels, `planets`, `priors` and the model keywords the fit
+# was called with, and `output_dir` (whose `chains.nc` is read) or `chains_path`.
+# The target is rebuilt with `_target_from`, the route fit_rv / fit_transit /
+# fit_astrometry / fit_joint build theirs by, and each block comes from the same
+# helper the post-fit stage of those fits runs, so it is the block the fit wrote.
+
+"JSON3 objects/arrays -> plain Dict/Vector, recursively; anything else as is."
+_plain(x::AbstractDict) = Dict{String,Any}(String(k) => _plain(v) for (k, v) in pairs(x))
+_plain(x::AbstractVector) = Any[_plain(v) for v in x]
+_plain(x) = x
+
+# Per-instrument tables of a channel -> the NamedTuples of Float64 columns the
+# fit_* functions take (the daemon does the same on the way in).
+function _replay_channels(p)
+    out = Any[]
+    for c in _pget(p, :channels)
+        d = _plain(c)
+        if haskey(d, "data") && d["data"] isa AbstractDict
+            d["data"] = Dict{String,Any}(String(inst) => NamedTuple(
+                Symbol(k) => (v isa AbstractVector && !isempty(v) && all(x -> x isa Real, v) ?
+                              Float64.(v) : v) for (k, v) in blob)
+                for (inst, blob) in d["data"])
+        end
+        push!(out, d)
+    end
+    return out
+end
+
+# What a replay does not hand to `_target_from`: transport, sampling and output.
+const _REPLAY_DROP = ("op", "channels", "planets", "priors", "engine", "stopping",
+                      "output_dir", "chains_path", "stop_file", "plots",
+                      "plot_kwargs", "save_pdf", "science", "output", "transdim",
+                      "config_overrides", "gaia_id", "name", "result_summary",
+                      "n_draws", "seed", "planet", "confidence", "n_bins",
+                      "show_progress", "n_proposal")
+const _REPLAY_SYMBOLS = (:parametrization, :time_anchor, :stability, :ttv_backend,
+                         :density)
+
+"""
+    _replay(p) -> (; chains, target, cfg, outdir, meta, planets)
+
+Chains and rebuilt target of a finished fit; see the block comment above.
+"""
+function _replay(p)
+    haskey2(k) = _haskey2(p, k)
+    outdir = haskey2(:output_dir) && _pget(p, :output_dir) !== nothing ?
+             String(_pget(p, :output_dir)) : nothing
+    chpath = haskey2(:chains_path) && _pget(p, :chains_path) !== nothing ?
+             String(_pget(p, :chains_path)) :
+             (outdir === nothing ? error("give `output_dir` (a fit's, holding " *
+                                         "chains.nc) or `chains_path`") :
+              joinpath(outdir, "chains.nc"))
+    isfile(chpath) || error("no chains at $chpath; run the fit first")
+    outdir === nothing && (outdir = dirname(abspath(chpath)))
+    if !haskey2(:channels) && isfile(joinpath(outdir, "job_config.json"))
+        return _replay_config(outdir, chains_path = chpath)
+    end
+    haskey2(:channels) || error("this operation re-evaluates the model: give the " *
+        "fit's `channels` (and its `planets`, `priors` and model keywords), as " *
+        "`replot` takes them; `result=` does it from a fit this client ran")
+    chains, meta = load_chains(chpath)
+    channels = _replay_channels(p)
+    planets = haskey2(:planets) ? _pget(p, :planets) : 1
+    planets isa JSON3.Array && (planets = collect(planets))
+    priors = if haskey2(:priors) && _pget(p, :priors) !== nothing
+        raw = _plain(_pget(p, :priors))
+        isempty(raw) ? nothing :
+            Dict{String, PriorSpec}(String(k) => _as_prior(v) for (k, v) in pairs(raw))
+    else
+        nothing
+    end
+    if !(planets isa NamedTuple)
+        rvi = findfirst(c -> String(get(c, "source", "")) == "RV", channels)
+        has_as = any(c -> String(get(c, "source", "")) == "AS", channels)
+        if rvi !== nothing && !has_as
+            dv = collect(values(get(channels[rvi], "data", Dict())))
+            if !isempty(dv)
+                allt  = reduce(vcat, [collect(x.t)  for x in dv])
+                allrv = reduce(vcat, [collect(x.rv) for x in dv])
+                blk = default_rv_planet(allt, allrv)
+                planets = length(channels) == 1 ?
+                    _planet_spec(planets; block = blk) :
+                    _planet_spec(planets; block = (P = blk.P, K = blk.K))
+            end
+        end
+    end
+    kw = Dict{Symbol,Any}()
+    # Only what builds the target: `_target_from`'s keywords and the star's. The
+    # rest of a recorded request (sampling, output, this operation's own
+    # arguments) is not the model and is left out.
+    model_kw = Set(String.(Base.kwarg_decl(first(methods(_target_from)))))
+    union!(model_kw, String.(_STAR_DERIVED_KEYS))
+    for (k, v) in pairs(p)
+        String(k) in _REPLAY_DROP && continue
+        String(k) in model_kw || continue
+        v === nothing && continue
+        sk = Symbol(k)
+        jv = _plain(v)
+        kw[sk] = (sk in _REPLAY_SYMBOLS && jv isa AbstractString) ? Symbol(jv) : jv
+    end
+    if haskey2(:config_overrides) && _pget(p, :config_overrides) !== nothing
+        kw = Dict{Symbol,Any}(pairs(_apply_target_overrides(
+            _plain(_pget(p, :config_overrides)), (; kw...), "replay")))
+    end
+    _, kw2 = _split_star_kwargs((; kw...))
+    for k in (:gaia_id, :name)
+        haskey2(k) && _pget(p, k) !== nothing && (kw2 = merge(kw2, NamedTuple{(k,)}((_pget(p, k),))))
+    end
+    menu = Any[]
+    target = _target_from(channels, planets; priors, menu_out = menu, kw2...)
+    eng = haskey2(:engine) && _pget(p, :engine) !== nothing ? _plain(_pget(p, :engine)) : nothing
+    ename = eng isa AbstractDict ? String(get(eng, "engine", "pt_emcee")) :
+            eng === nothing ? "pt_emcee" : String(eng)
+    eopts = eng isa AbstractDict ? get(eng, "options", Dict{String,Any}()) : Dict{String,Any}()
+    outc = Dict{String,Any}()
+    for k in ("ppc_n_draws", "loo_n_draws", "loo_max_dense_obs", "detection_limits_n_bins",
+              "detection_limits_confidence", "detection_limits_planet", "save_pdf")
+        haskey2(Symbol(k)) && (outc[k] = _pget(p, Symbol(k)))
+    end
+    cfg = Dict{String,Any}(
+        "output" => outc,
+        "seed" => haskey2(:seed) ? Int(_pget(p, :seed)) : 1,
+        "sampler" => Dict{String,Any}("name" => ename, "kwargs" => eopts))
+    return (; chains, target, cfg, outdir, meta)
+end
+
+# The fits that run as a job config (fit_rm, fit_ttv, fit_binary) write the config
+# they ran to `<output_dir>/job_config.json`; the target is rebuilt from it the way
+# run_job builds it.
+function _replay_config(outdir::AbstractString; chains_path::AbstractString)
+    cfg = _plain(JSON3.read(read(joinpath(outdir, "job_config.json"), String);
+                            allow_inf = true))
+    if get(cfg, "priors", nothing) isa AbstractDict
+        cfg["priors"] = Dict{String,Any}(String(k) => (v isa AbstractDict &&
+            get(v, "_nereus_spec", false) === true ?
+            prior_from_dict(Dict{String,Any}(a => b for (a, b) in v if a != "_nereus_spec")) : v)
+            for (k, v) in cfg["priors"])
+    end
+    chains, meta = load_chains(chains_path)
+    data, irv, ipm, ias, iiad, _ = _build_data(_get(cfg, :data; default = Dict());
+                                               obliquity = _obliquity_cfg(cfg),
+                                               pm_planets = _cfg_pm_planets(cfg))
+    star = _build_star(_get(cfg, :star; default = Dict()))
+    gaia = _resolve_gaia_plx(cfg, star)
+    params, target, _menu = _build_model(cfg, data, star, irv, ipm, ias, iiad;
+                                         gaia_plx = gaia)
+    if density_active(params) && _job_sampler_name(cfg) in _DENSITY_FREE_ENGINES
+        params = without_density_reparam(params, data)
+        target = NereusTarget(params, data; unconstrained = false)
+    end
+    get!(cfg, "output", Dict{String,Any}())
+    return (; chains, target, cfg, outdir = String(outdir), meta)
+end
+
+function act_diag_loo(p)
+    r = _replay(p)
+    r.cfg["output"]["loo"] = true
+    summary = Dict{String,Any}()
+    lz = get(r.meta, "log_evidence", NaN)
+    res = lz isa Real && lz > -1e299 ? (; log_evidence = Float64(lz)) : (;)
+    _run_loo!(r.cfg, r.chains, r.target.params, r.target.data, res, summary)
+    return get(summary, "loo", Dict{String,Any}(
+        "status" => "skipped", "reason" => "the fit has no RV or photometry"))
+end
+
+function act_diag_ppc(p)
+    r = _replay(p)
+    r.cfg["output"]["ppc"] = true
+    summary = Dict{String,Any}()
+    mkpath(r.outdir)
+    _run_ppc!(r.cfg, r.chains, r.target.params, r.target.data, r.outdir, summary)
+    return get(summary, "ppc", Dict{String,Any}(
+        "status" => "skipped", "reason" => "the fit has no RV or photometry"))
+end
+
+function act_diag_fit_health(p)
+    r = _replay(p)
+    r.cfg["output"]["fit_health"] = true
+    summary = Dict{String,Any}()
+    _run_fit_health!(r.cfg, r.chains, r.target.params, summary)
+    return get(summary, "fit_health", Dict{String,Any}("status" => "skipped"))
+end
+
+function act_detection_limits(p)
+    r = _replay(p)
+    r.cfg["output"]["detection_limits"] = true
+    summary = Dict{String,Any}()
+    mkpath(r.outdir)
+    _run_detection_limits!(r.cfg, r.chains, r.target.params, r.target.data,
+                           r.outdir, summary)
+    return get(summary, "detection_limits", Dict{String,Any}(
+        "status" => "skipped", "reason" => "the fit has no RV planet column"))
+end
+
+"""
+`evidence`: the post-fit evidence of a fit, recomputed from its chains: mode-
+Laplace and bridge sampling, with the same selection rule as the fit's own
+post-fit stage. Returns `{"log_z", "evidence": {...}}`.
+"""
+function act_evidence(p)
+    r = _replay(p)
+    lz = get(r.meta, "log_evidence", NaN)
+    summary = Dict{String,Any}(
+        "log_z" => lz isa Real && lz > -1e299 ? Float64(lz) : NaN,
+        "evidence" => Dict{String,Any}("reported" => "none"))
+    _augment_evidence!(summary, r.target.params, r.target.data, r.chains;
+                       show_progress = false)
+    return Dict{String,Any}("log_z" => summary["log_z"], "evidence" => summary["evidence"])
+end
+
+# A struct (or a vector of them) as plain JSON values.
+_jsonable(x::Symbol) = String(x)
+_jsonable(x::Pair) = [_jsonable(x.first), _jsonable(x.second)]
+_jsonable(x::AbstractVector) = Any[_jsonable(v) for v in x]
+_jsonable(x::AbstractDict) = Dict{String,Any}(string(k) => _jsonable(v) for (k, v) in x)
+_jsonable(x::Union{Real,AbstractString,Nothing,Bool}) = x
+function _jsonable(x)
+    isstructtype(typeof(x)) || return string(x)
+    return Dict{String,Any}(String(f) => _jsonable(getfield(x, f))
+                            for f in fieldnames(typeof(x)))
+end
+
+"""
+`diagnostics.label_switching`: slot-permutation entropy of a trans-dim or
+multi-planet chain (`label_switching`); needs only the chains. Optional
+`reference_periods`, `labels`, `tol`, `min_occupancy`, `period_prefix`.
+"""
+function act_diag_label_switching(p)
+    chains, _ = _load(p)
+    kw = Dict{Symbol,Any}()
+    for k in (:reference_periods, :labels, :tol, :min_occupancy, :period_prefix)
+        (_haskey2(p, k) && _pget(p, k) !== nothing) || continue
+        v = _pget(p, k)
+        kw[k] = k === :reference_periods ? _vec(v) :
+                k === :labels ? String.(collect(v)) :
+                k === :period_prefix ? String(v) : Float64(v)
+    end
+    return _jsonable(label_switching(chains; kw...))
+end
+
+"""
+`select_planets` of a TRANS-DIM fit's chains: P(N_p = k | data) and the Bayes
+factor of each k against the best-supported one (`model_probabilities`,
+`bayes_factors`). Fitting each fixed count and comparing log Z is the client's
+loop (`Session.select_planets`).
+"""
+function act_select_planets(p)
+    chains, _ = _load(p)
+    "n_planets" in String.(names(chains, :parameters)) || error(
+        "select_planets reads a trans-dim fit's chains (an `n_planets` column); " *
+        "fit with planets=range(...) or run the candidates one by one")
+    probs = model_probabilities(chains)
+    ks = sort(collect(keys(probs)))
+    best = ks[argmax([probs[k] for k in ks])]
+    bf = probs[best] > 0 ? bayes_factors(chains; reference = best) : Dict{Int,Float64}()
+    rows = [Dict{String,Any}("n_planets" => k, "probability" => probs[k],
+                             "bayes_factor_vs_best" => k == best ? 1.0 :
+                                 (haskey(bf, k) ? bf[k] : NaN)) for k in ks]
+    return Dict{String,Any}("table" => rows, "best" => best)
+end
+
+"""
+`select_noise` of a trans-dim-noise fit's chains: the fraction of draws each
+noise model is active (`noise_active_<model>` columns), most occupied first.
+"""
+function act_select_noise(p)
+    chains, _ = _load(p)
+    cols = [String(s) for s in names(chains, :parameters)
+            if startswith(String(s), "noise_active_")]
+    isempty(cols) && error("select_noise reads a fit with trans-dim noise " *
+        "(`noise_active_*` columns); fit with a noise_menu and transdim=...")
+    rows = [Dict{String,Any}("model" => c[length("noise_active_")+1:end],
+                             "occupancy" => mean(Array(chains[Symbol(c)])))
+            for c in cols]
+    sort!(rows; by = r -> -r["occupancy"])
+    return Dict{String,Any}("table" => rows, "best" => rows[1]["model"])
+end
+
+# --- light curves and prewhitening ---------------------------------------------
+
+"""
+`detect.lc_periodogram`: a Lomb-Scargle (GLS) periodogram of a light curve
+(`gls_periodogram`). Takes `t`, `flux`, `flux_err` and its keywords
+(`period_min`, `period_max`, `samples_per_peak`, `max_peaks`, `fap_levels`,
+`fap_method`, `n_bootstrap`). The false-alarm probability is analytic unless
+asked otherwise: bootstrapping a TESS sector is minutes.
+"""
+function act_detect_lc_periodogram(p)
+    _need(p, :t, :flux, :flux_err)
+    kw = _kw(p, ["t", "flux", "flux_err"])
+    haskey(kw, :fap_method) || (kw[:fap_method] = :analytic)
+    for k in (:fap_method,)
+        kw[k] isa AbstractString && (kw[k] = Symbol(kw[k]))
+    end
+    haskey(kw, :fap_levels) && (kw[:fap_levels] = _vec(kw[:fap_levels]))
+    r = gls_periodogram(_vec(_pget(p, :t)), _vec(_pget(p, :flux)),
+                        _vec(_pget(p, :flux_err)); kw...)
+    return _jsonable(r)
+end
+
+"""
+`pre_white`: iterative prewhitening of a time series. Each pass takes the
+highest GLS peak, fits a sinusoid at that period by weighted least squares
+(with a constant) and subtracts it; it stops at `max_signals` or when the best
+peak's false-alarm probability exceeds `fap` (default 0.01). Takes `t`, `y`,
+`y_err` (or `rv`, `rv_err`), `max_signals` (5), `fap`, `period_min`,
+`period_max`. Returns the signals found (period, amplitude, phase, FAP) and the
+residual series.
+"""
+function act_pre_white(p)
+    t = _vec(_pget(p, _haskey2(p, :t) ? :t : error("missing required argument t")))
+    ykey = _haskey2(p, :y) ? :y : (_haskey2(p, :rv) ? :rv : (_haskey2(p, :flux) ? :flux :
+           error("pre_white needs `y` (or `rv`, or `flux`)")))
+    ekey = _haskey2(p, :y_err) ? :y_err : (_haskey2(p, :rv_err) ? :rv_err :
+           (_haskey2(p, :flux_err) ? :flux_err : error("pre_white needs `y_err`")))
+    y = copy(_vec(_pget(p, ykey))); e = _vec(_pget(p, ekey))
+    length(t) == length(y) == length(e) || error("t, y and y_err differ in length")
+    max_signals = _haskey2(p, :max_signals) ? Int(_pget(p, :max_signals)) : 5
+    fap_max = _haskey2(p, :fap) ? Float64(_pget(p, :fap)) : 0.01
+    gkw = Dict{Symbol,Any}(:fap_method => :analytic, :fap_levels => [fap_max],
+                           :max_peaks => 1)
+    for k in (:period_min, :period_max, :samples_per_peak)
+        _haskey2(p, k) && _pget(p, k) !== nothing && (gkw[k] = _pget(p, k))
+    end
+    w = 1 ./ e .^ 2
+    signals = Dict{String,Any}[]
+    for it in 1:max_signals
+        pg = gls_periodogram(t, y, e; gkw...)
+        isempty(pg.peaks) && break
+        pk = pg.peaks[1]
+        fap = Float64(pk.fap)
+        isfinite(fap) && fap > fap_max && break
+        P = Float64(pk.period)
+        X = hcat(ones(length(t)), sin.(2π .* t ./ P), cos.(2π .* t ./ P))
+        sw = sqrt.(w)
+        β = (X .* sw) \ (y .* sw)
+        y .-= X * β
+        push!(signals, Dict{String,Any}("iteration" => it, "period" => P,
+              "amplitude" => hypot(β[2], β[3]), "phase" => atan(β[3], β[2]),
+              "fap" => fap))
+    end
+    return Dict{String,Any}("signals" => signals, "n_signals" => length(signals),
+                            "residuals" => y,
+                            "rms" => sqrt(sum(w .* y .^ 2) / sum(w)))
+end
+
+
 # --- registration -------------------------------------------------------------
 # Only operations with a working implementation are registered. An action that
 # is declared but not implemented is worse than an absent one: the client
@@ -371,6 +731,16 @@ const FEATURE_ACTIONS = Dict{String, Function}(
     "detrend.locor"         => act_detrend_locor,
     "detrend.gp"            => act_detrend_gp,
     "diagnostics.ess_rhat"  => act_diag_ess_rhat,
+    "diagnostics.loo"       => act_diag_loo,
+    "diagnostics.ppc"       => act_diag_ppc,
+    "diagnostics.fit_health" => act_diag_fit_health,
+    "diagnostics.label_switching" => act_diag_label_switching,
+    "detect.lc_periodogram" => act_detect_lc_periodogram,
+    "pre_white"             => act_pre_white,
+    "select_planets"        => act_select_planets,
+    "select_noise"          => act_select_noise,
+    "evidence"              => act_evidence,
+    "detection_limits"      => act_detection_limits,
     "tomogram.ccf_profile"       => act_tomo_ccf_profile,
     "tomogram.residuals"         => act_tomo_residuals,
     "tomogram.shadow_track"      => act_tomo_shadow_track,
@@ -379,17 +749,5 @@ const FEATURE_ACTIONS = Dict{String, Function}(
     "tomogram.injection_test"    => act_tomo_injection_test,
 )
 
-"Declared in the client but not implemented here — fail with WHY, not 'unknown'."
-const FEATURE_NOT_IMPLEMENTED = Dict{String,String}(
-    "detrend.gp"                 => "needs a CovarianceNoise model; use the noise menu",
-    "detect.lc_periodogram"      => "not yet wired",
-    "diagnostics.loo"            => "needs the Params/Data of the originating fit",
-    "diagnostics.ppc"            => "needs the originating fit",
-    "diagnostics.label_switching"=> "not yet wired",
-    "diagnostics.fit_health"     => "needs the originating fit",
-    "pre_white"                  => "not yet wired",
-    "select_planets"             => "use a trans-dim engine (moms, rjmcmc, transdim_pt_emcee)",
-    "select_noise"               => "use the noise menu with a trans-dim engine",
-    "evidence"                   => "returned as log_z by every fit_* call",
-    "detection_limits"           => "needs the originating fit's Params",
-)
+"Declared in the client but not implemented here: fail with WHY, not 'unknown'."
+const FEATURE_NOT_IMPLEMENTED = Dict{String,String}()

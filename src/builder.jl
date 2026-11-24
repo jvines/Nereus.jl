@@ -171,7 +171,7 @@ function build_target(;
     R_s::Real = NaN,
     stability::Symbol = :none,
     trend_order::Int = 0,
-    phot_trend_order::Int = 0,
+    phot_trend_order::Union{Integer, AbstractDict} = 0,
     noise_models = nothing,
     priors::Union{Nothing, Dict{String, <:PriorSpec}} = nothing,
     external_priors::Vector{ExternalPrior} = ExternalPrior[],
@@ -183,6 +183,20 @@ function build_target(;
     ttv_n_transits::Dict{Int, Int} = Dict{Int, Int}(),
     ttv_epochs::AbstractDict = Dict{Int, Vector{Int}}(),
     ttv_backend::Symbol = :ttvfaster,
+    # Per-planet data-source modes ("RVPM_GD", "PM_RM_GD", ...: the `planet_modes`
+    # of a job config), for a model the shape of the data alone does not pick:
+    # gravity-darkened transits, RM, TTV. `nothing` infers one mode for every
+    # planet from the data present, as before.
+    planet_modes = nothing,
+    # Names of the activity-indicator columns to read from each RV instrument's
+    # `data` (the `indicator_cols` of a job config's RV block), with `<name>_err`
+    # as that indicator's 1σ when present. `nothing` reads none.
+    indicator_cols = nothing,
+    # A noise-menu block (`default_noise_menu` keywords: `indicators` and the
+    # `include_*` flags) replacing `noise_models`; the built menu is pushed to
+    # `menu_out` when given, so a trans-dim fit can take its toggleable set.
+    noise_menu = nothing,
+    menu_out = nothing,
 )
     has_rv     = !isempty(rv)
     has_phot   = !isempty(phot)
@@ -257,6 +271,7 @@ function build_target(;
         append!(rv_err,  src.rv_err)
         append!(rv_inst, fill(i, n_i))
     end
+    indicators_d, indicator_errs_d = _collect_indicators(rv, indicator_cols)
 
     # Assemble photometry vectors.
     t_phot    = Float64[]
@@ -301,6 +316,8 @@ function build_target(;
         rv        = rv_arr,
         rv_err    = rv_err,
         rv_inst   = isempty(t_rv) ? nothing : rv_inst,
+        indicators = indicators_d,
+        indicator_errs = indicator_errs_d,
         t_phot    = t_phot,
         flux      = flux_arr,
         flux_err  = flux_err,
@@ -375,6 +392,17 @@ function build_target(;
     R_s_val = isnan(R_s) ? NaN : Float64(R_s)
     nm_vec = noise_models === nothing ? NoiseModel[] :
              collect(NoiseModel, noise_models)
+    if noise_menu !== nothing
+        isempty(nm_vec) || throw(ArgumentError(
+            "`noise_menu` and `noise_models` are mutually exclusive: the menu " *
+            "BUILDS the model list. Give one."))
+        menu = _build_noise_menu(noise_menu, data)
+        nm_vec = collect(NoiseModel, menu.noise_models)
+        transdim_noise = true
+        menu_out === nothing || push!(menu_out, menu)
+    end
+    modes_v = _resolve_planet_modes(planet_modes, length(planets), mode,
+                                    has_rv, has_phot, has_astrom)
 
     # Merge user-supplied priors into the auto-generated dict; user
     # entries (e.g., narrow GP rotation period) override defaults.
@@ -386,7 +414,7 @@ function build_target(;
 
     params = Params(
         max_kplanet     = length(planets),
-        planet_modes    = [mode for _ in 1:length(planets)],
+        planet_modes    = modes_v,
         instruments     = instruments,
         data            = data,
         stability       = stability,
@@ -408,6 +436,8 @@ function build_target(;
         ttv_epochs      = ttv_epochs,
         ttv_backend     = ttv_backend,
     )
+    require_a_Rs_source(params, data)
+    require_iad_determined(params, data)
     return NereusTarget(params, data)
 end
 
@@ -464,4 +494,86 @@ function _detect_mass_parametrization(planets::NamedTuple;
             "planet must declare a mass parameter: " *
             "one of `a + M_sec`, `P + M_sec`, or `P + K`"))
     end
+end
+
+
+# `indicator_cols`: the named per-instrument columns of the RV data, joined in
+# instrument order into the row-aligned vectors `Data` takes. A name an
+# instrument lacks is an error (the columns are one table). `<name>_err` is that
+# indicator's 1σ, taken when every instrument has it.
+function _collect_indicators(rv::NamedTuple, cols)
+    cols === nothing && return (nothing, nothing)
+    names = String.(collect(cols))
+    isempty(names) && return (nothing, nothing)
+    ind  = Dict{String,Vector{Float64}}()
+    errs = Dict{String,Vector{Float64}}()
+    for nm in names
+        vals = Float64[]; ev = Float64[]; have_err = true
+        for (inst, spec) in pairs(rv)
+            d = spec.data
+            sym = Symbol(nm)
+            hasproperty(d, sym) || throw(ArgumentError(
+                "indicator_cols names \"$nm\", which RV instrument $(inst) does not " *
+                "carry; every instrument's data needs the column"))
+            v = Float64.(collect(getproperty(d, sym)))
+            length(v) == length(d.t) || throw(ArgumentError(
+                "indicator \"$nm\" of $(inst) has $(length(v)) values for " *
+                "$(length(d.t)) RV rows"))
+            append!(vals, v)
+            esym = Symbol(nm, "_err")
+            if hasproperty(d, esym)
+                append!(ev, Float64.(collect(getproperty(d, esym))))
+            else
+                have_err = false
+            end
+        end
+        ind[nm] = vals
+        have_err && (errs[nm] = ev)
+    end
+    return (ind, isempty(errs) ? nothing : errs)
+end
+
+# The `noise_menu` block -> `default_noise_menu(data; ...)`, as run_job reads it.
+function _build_noise_menu(cfg, data::Data)
+    provided = sort!(collect(keys(data.indicators)))
+    g(k, d) = cfg isa AbstractDict ?
+              get(cfg, String(k), get(cfg, Symbol(k), d)) : d
+    sel = String.(collect(g(:indicators, provided)))
+    bad = setdiff(sel, provided)
+    isempty(bad) || throw(ArgumentError(
+        "noise_menu.indicators $(bad) not present in the RV data " *
+        "(provided channels: $(provided)); give them as RV(indicator_cols=...)"))
+    mkw = Dict{Symbol,Any}()
+    for k in (:include_matern, :include_studentt, :include_harmonic,
+              :include_ad_ffprime, :include_nightly, :include_activity_gp)
+        v = g(k, nothing)
+        v === nothing || (mkw[k] = Bool(v))
+    end
+    return default_noise_menu(data; indicators = sel, mkw...)
+end
+
+# `planet_modes` -> one `PlanetDataSources` per planet. Names are those of a job
+# config's `model.planet_modes`. A mode that needs a data kind the target does
+# not have is an error here, not a model that silently ignores its flag.
+function _resolve_planet_modes(spec, n::Int, inferred, has_rv, has_phot, has_astrom)
+    spec === nothing && return [inferred for _ in 1:n]
+    names = spec isa AbstractString ? fill(String(spec), n) : String.(collect(spec))
+    length(names) == n || throw(ArgumentError(
+        "planet_modes has $(length(names)) entries for $n planet(s); give one " *
+        "per planet (or a single name for all)"))
+    out = PlanetDataSources[]
+    for m in names
+        haskey(_PLANET_MODES, m) || throw(ArgumentError(
+            "unknown planet mode $(repr(m)). Known: " *
+            join(sort!(collect(keys(_PLANET_MODES))), ", ")))
+        pm = _PLANET_MODES[m]
+        (RV_SOURCE in pm && !has_rv) && throw(ArgumentError(
+            "planet mode $m needs RV data, which this fit has none of"))
+        (PM_SOURCE in pm && !has_phot) && throw(ArgumentError(
+            "planet mode $m needs transit photometry, which this fit has none of"))
+        (AS_SOURCE in pm && !has_astrom) && throw(ArgumentError(
+            "planet mode $m needs astrometry, which this fit has none of"))
+        push!(out, pm)
+    end
+    return out
 end

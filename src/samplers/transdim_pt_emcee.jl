@@ -1074,6 +1074,11 @@ function sample_transdim_pt_emcee(
             length(idxs) >= 2 && push!(noise_excl_idx, idxs)
         end
     end
+    # No reachable state may hold models the likelihood cannot score together
+    # (two GPs on one light curve, ...): refused here, before the first step,
+    # rather than mid-run or, worse, scored wrong.
+    validate_noise_coactivity(params.config.noise_models,
+                              do_noise ? noise_toggle_idx : Int[], noise_excl_idx)
 
     td_states = Matrix{TransDimState}(undef, n_temps, n_walkers_eff)
     for t in 1:n_temps, w in 1:n_walkers_eff
@@ -1811,7 +1816,8 @@ function sample_transdim_pt_emcee(
                 # over a long run a low rate still fires plenty to escape it).
                 if td.planets && do_noise && βs[t] > 0.3 && rand(trng) < 0.05
                     β = βs[t]
-                    cand_s, lq_s = propose_planet_ad_swap(theta, trng, td.toggleable; data=data)
+                    cand_s, lq_s = propose_planet_ad_swap(theta, trng, td.toggleable; data=data,
+                                                         exclusion_groups=td.noise_exclusion_groups)
                     if isfinite(lq_s)
                         is_pn = cand_s.td.n_planets_active < td_states[t, w].n_planets_active
                         Threads.atomic_add!(pswap_prop, 1)

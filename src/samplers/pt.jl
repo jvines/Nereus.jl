@@ -817,6 +817,7 @@ function _sample_pt_transdim(
     # never swapped with β = 0 on an RV + Hipparcos-IAD companion (TI+ at -624
     # where log Z is 164).
     swap_rate = swap_a ./ max.(swap_n, 1)
+    _warn_min_swap("sample_pt", betas, swap_a ./ swap_n)
     tq_ok, tq_why = _tempered_quotable(betas, swap_rate; swap_min)
     if tq_ok && !isfinite(log_ev)
         tq_ok, tq_why = false, "TI+ is not finite"

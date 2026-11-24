@@ -95,6 +95,7 @@ const TEST_UNITS = [
     (name = "test_annealed_noise_birth.jl", seconds = 4, files = ["test_annealed_noise_birth.jl"]),
     (name = "test_solution_ladder.jl", seconds = 3, files = ["test_solution_ladder.jl"]),
     (name = "test_noise_swap_samplers.jl", seconds = 41, files = ["test_noise_swap_samplers.jl"]),
+    (name = "test_noise_exclusion_invariant.jl", seconds = 40, files = ["test_noise_exclusion_invariant.jl"]),
     (name = "test_ttv.jl", seconds = 10, files = ["test_ttv.jl"]),
     # Derivatives in e at e = 0 (Kepler's equation, the true anomaly, the likelihood).
     (name = "test_orbit_derivatives.jl", seconds = 26, files = ["test_orbit_derivatives.jl"]),
@@ -102,6 +103,7 @@ const TEST_UNITS = [
     (name = "test_detection_limits.jl", seconds = 86, files = ["test_detection_limits.jl"]),
     (name = "test_loo.jl", seconds = 12, files = ["test_loo.jl"]),
     (name = "test_fit_health.jl", seconds = 7, files = ["test_fit_health.jl"]),
+    (name = "test_fit_health_run.jl", seconds = 5, files = ["test_fit_health_run.jl"]),
     (name = "test_prior_dicts.jl", seconds = 2, files = ["test_prior_dicts.jl"]),
     (name = "test_fit_binary_sb2.jl", seconds = 100, files = ["test_fit_binary_sb2.jl"]),
     (name = "test_relast_channel.jl", seconds = 6, files = ["test_relast_channel.jl"]),
@@ -120,6 +122,7 @@ const TEST_UNITS = [
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.
     (name = "test_pt_emcee_stranded.jl", seconds = 186, files = ["test_pt_emcee_stranded.jl"]),
     (name = "test_pt_emcee_resume.jl", seconds = 39, files = ["test_pt_emcee_resume.jl"]),
+    (name = "test_pt_emcee_progress.jl", seconds = 30, files = ["test_pt_emcee_progress.jl"]),
     (name = "test_burnin_hold.jl", seconds = 88, files = ["test_burnin_hold.jl"]),
     # The opt-in extended burn-in in the three samplers and through run_job.
     # Measured locally (arm64, 4 threads), not yet on the CI runner.
@@ -167,6 +170,7 @@ const TEST_UNITS = [
     (name = "test_celerite_order.jl", seconds = 2, files = ["test_celerite_order.jl"]),
     (name = "test_arma_time_order.jl", seconds = 1, files = ["test_arma_time_order.jl"]),
     (name = "test_phot_noise_routing.jl", seconds = 2, files = ["test_phot_noise_routing.jl"]),
+    (name = "test_runjob_json_noise_menu.jl", seconds = 60, files = ["test_runjob_json_noise_menu.jl"]),
     (name = "test_ci_run_tests.jl", seconds = 0, files = ["test_ci_run_tests.jl"]),
     (name = "test_rv_modifier_slots.jl", seconds = 1, files = ["test_rv_modifier_slots.jl"]),
     (name = "test_multiseries_gp.jl", seconds = 8, files = ["test_multiseries_gp.jl"]),
@@ -222,7 +226,7 @@ const TEST_UNITS = [
     (name = "test_reference_path_evidence.jl", seconds = 4, files = ["test_reference_path_evidence.jl"]),
     (name = "test_phot_determinism.jl", seconds = 0, files = ["test_phot_determinism.jl"]),
     (name = "test_phot_supersampling.jl", seconds = 0, files = ["test_phot_supersampling.jl"]),
-    (name = "test_sampler_determinism.jl", seconds = 163, files = ["test_sampler_determinism.jl"]),
+    (name = "test_sampler_determinism.jl", seconds = 92, files = ["test_sampler_determinism.jl"]),
     (name = "test_bls_informed_phot.jl", seconds = 4, files = ["test_bls_informed_phot.jl"]),
     (name = "test_evidence_curved.jl", seconds = 4, files = ["test_evidence_curved.jl"]),
     (name = "test_evidence_gaussian.jl", seconds = 0, files = ["test_evidence_gaussian.jl"]),
@@ -240,6 +244,10 @@ const TEST_UNITS = [
     (name = "test_ns_proposals.jl", seconds = 22, files = ["test_ns_proposals.jl"]),
     (name = "test_nested_vendored.jl", seconds = 40, files = ["test_nested_vendored.jl"]),
     (name = "test_ppc_residual_acf.jl", seconds = 0, files = ["test_ppc_residual_acf.jl"]),
+    (name = "test_hgca_nominal_gaia_window.jl", seconds = 5, files = ["test_hgca_nominal_gaia_window.jl"]),
+    (name = "test_min_swap_warning.jl", seconds = 60, files = ["test_min_swap_warning.jl"]),
+    (name = "test_pt_whitening_deprecation.jl", seconds = 30, files = ["test_pt_whitening_deprecation.jl"]),
+    (name = "test_root_figures_manifest.jl", seconds = 40, files = ["test_root_figures_manifest.jl"]),
     (name = "test_candidate_gate.jl", seconds = 1, files = ["test_candidate_gate.jl"]),
     (name = "test_spectral_window.jl", seconds = 49, files = ["test_spectral_window.jl"]),
     (name = "test_pm_fold_rv_only_slot.jl", seconds = 13, files = ["test_pm_fold_rv_only_slot.jl"]),
@@ -250,6 +258,9 @@ const TEST_UNITS = [
     # Measured locally (arm64), on its own in a fresh process.
     (name = "test_plot_memory.jl", seconds = 111, files = ["test_plot_memory.jl"]),
     (name = "test_plot_precompile_workload.jl", seconds = 26, files = ["test_plot_precompile_workload.jl"]),
+    (name = "test_fit_precompile_workload.jl", seconds = 15, files = ["test_fit_precompile_workload.jl"]),
+    (name = "test_nonfinite_draws.jl", seconds = 25, files = ["test_nonfinite_draws.jl"]),
+    (name = "test_iad_determined.jl", seconds = 5, files = ["test_iad_determined.jl"]),
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
     (name = "test_science_table_labels.jl", seconds = 10, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 0, files = ["test_plot_patterns.jl"]),
@@ -273,6 +284,9 @@ const TEST_UNITS = [
     (name = "test_trend_only_fit.jl", seconds = 220, files = ["test_trend_only_fit.jl"]),
     # RV/transit channel options reach the model or throw; one short trend fit. 4 threads, arm64 (2026-11-23).
     (name = "test_fit_channel_options.jl", seconds = 90, files = ["test_fit_channel_options.jl"]),
+    (name = "test_typed_api_gaps.jl", seconds = 170, files = ["test_typed_api_gaps.jl"]),
+    # Per-instrument photometric trend orders and per-group trend time. Estimated (2026-11-24).
+    (name = "test_phot_trend_per_instrument.jl", seconds = 60, files = ["test_phot_trend_per_instrument.jl"]),
 ]
 
 const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")

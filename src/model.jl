@@ -1485,6 +1485,11 @@ this) and treated as immutable afterward.
 - `R_s::Float64` — stellar radius (R_sun); required for transit a/R* when not using rho_s; `NaN` = unknown
 - `external_priors::Vector{ExternalPrior}` — priors on derived quantities (ecc, rho_s, etc.)
 - `sharing::Dict{Symbol, Vector{Vector{String}}}` — instrument parameter sharing groups
+- `phot_trend_order::Int`, `phot_trend_orders::Dict{String, Int}` — order of the
+  photometric baseline polynomial: `phot_trend_orders[name]` for a PM instrument
+  listed there, `phot_trend_order` for the rest. Each trend is evaluated in the time
+  of its own offset group, centred on the group's mean time and scaled to its half
+  span (`_phot_trend_norm`).
 
 The `priors` dict is the friendly user API. The hot-path sampler code
 does not read from it — see `ParamsLayout.unfrozen_priors`.
@@ -1538,7 +1543,41 @@ struct ParamsConfig
     # planet not in it, with `ttv_n_transits[k] = N`, has transits 0..N−1.
     # Empty by default.
     ttv_epochs::Dict{Int, Vector{Int}}
+    # Per-instrument photometric trend orders (PM instrument name → 0, 1 or 2),
+    # overriding `phot_trend_order` for the instruments listed. Empty by default:
+    # every instrument then takes `phot_trend_order`.
+    phot_trend_orders::Dict{String, Int}
 end
+
+# The positional form from before `phot_trend_orders`: one order for every
+# photometric instrument.
+ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
+             trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
+             external_priors, sharing, ttv_n_transits, ttv_backend,
+             obliquity::ObliquityConfig, tt_jitter::AbstractVector{<:Integer},
+             ttv_epochs::AbstractDict) =
+    ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
+                 trend_order, phot_trend_order, noise_models, stability, M_s, R_s,
+                 external_priors, sharing, ttv_n_transits, ttv_backend, obliquity,
+                 Vector{Int}(tt_jitter), Dict{Int, Vector{Int}}(ttv_epochs),
+                 Dict{String, Int}())
+
+"""
+    phot_trend_order_of(config, name) -> Int
+
+The photometric baseline trend order of PM instrument `name`:
+`config.phot_trend_orders[name]` when listed, else `config.phot_trend_order`.
+"""
+phot_trend_order_of(config::ParamsConfig, name::AbstractString) =
+    get(config.phot_trend_orders, String(name), config.phot_trend_order)
+
+"""
+    phot_trend_active(config) -> Bool
+
+Whether any photometric instrument carries a baseline trend.
+"""
+phot_trend_active(config::ParamsConfig) =
+    config.phot_trend_order > 0 || any(>(0), values(config.phot_trend_orders))
 
 # The positional form from before `tt_jitter`: no transit-time jitter.
 ParamsConfig(max_kplanet, parametrization, planet_modes, instruments, priors,
@@ -2174,14 +2213,23 @@ function _build_layout(config::ParamsConfig; data::Union{Data, Nothing}=nothing)
     end
 
     # Per-instrument photometric baseline trend: a polynomial continuum
-    # 1 + offset + Σ_{p=1}^order c_p·x^p (x = normalized time, see transit
-    # likelihood). Coefficients share the OFFSET grouping (one continuum per
-    # instrument group). order==0 ⇒ pm_trend stays empty ⇒ identity continuum.
+    # 1 + offset + Σ_{p=1}^order c_p·x^p (x = the group's own normalized time,
+    # `_phot_trend_norm`). Coefficients share the OFFSET grouping (one continuum
+    # per instrument group), so the instruments of a group must agree on the
+    # order (`phot_trend_order_of`). order==0 ⇒ pm_trend stays empty ⇒ identity
+    # continuum.
     pm_trend = [Int[] for _ in 1:n_pm]
-    if config.phot_trend_order >= 1
+    if phot_trend_active(config)
         for (label, idxs) in offset_groups
+            ords = unique(phot_trend_order_of(config, pm_names[i]) for i in idxs)
+            length(ords) == 1 || throw(ArgumentError(
+                "the instruments of offset group `$label` " *
+                "($(join(pm_names[idxs], ", "))) share one baseline trend, so they " *
+                "need the same phot_trend_order; got $(join(ords, ", "))"))
+            order = only(ords)
+            order >= 1 || continue
             slots = Int[]
-            for p in 1:config.phot_trend_order
+            for p in 1:order
                 push!(names, "phot_c$(p)_$label")
                 push!(slots, length(names))
                 if !haskey(config.priors, "phot_c$(p)_$label")

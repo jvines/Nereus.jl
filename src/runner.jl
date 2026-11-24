@@ -210,6 +210,8 @@ function run_job(cfg::AbstractDict)
                            show_progress = show_pf, timings = bridge_t,
                            _postfit_rule_kw(_get(_get(cfg, :sampler; default = Dict()),
                                                  :kwargs; default = Dict()), data)...)
+        # Trapped-mode signs in the sampler, evidence and PPC blocks.
+        _fit_health_run_checks!(summary)
         _postfit_stage!(pf, "science")
         _obliquity_cfg(cfg) === nothing ||
             (summary["obliquity"] = _obliquity_summary(cfg, data, params))
@@ -226,6 +228,7 @@ function run_job(cfg::AbstractDict)
         for (k, v) in sci; k == "status" || (summary[k] = v); end
         summary["figures"] = figs
         isempty(pdfs) || (summary["figures_pdf"] = pdfs)
+        _add_root_figures!(summary, out_dir)
         summary["output_dir"] = out_dir     # run_job never reported it
 
         summary["elapsed_sec"] = time() - t0
@@ -491,8 +494,16 @@ function _validate_config(cfg::AbstractDict)
         end
         if _has(mdl, :phot_trend_order)
             t = _get(mdl, :phot_trend_order)
-            (t == 0 || t == 1 || t == 2) || push!(errs,
-                "model.phot_trend_order must be 0, 1, or 2; got $t")
+            if t isa AbstractDict
+                for (k, v) in t
+                    (v isa Integer && v in (0, 1, 2)) || push!(errs,
+                        "model.phot_trend_order[\"$k\"] must be 0, 1, or 2; got $v")
+                end
+            else
+                (t == 0 || t == 1 || t == 2) || push!(errs,
+                    "model.phot_trend_order must be 0, 1, or 2, or a map " *
+                    "{instrument: order}; got $t")
+            end
         end
         # The free TTV offsets, keyed by planet: {"1": N} and {"1": [epochs]}.
         for (key, what) in ((:ttv_n_transits, "a count"),
@@ -555,6 +566,7 @@ function _validate_config(cfg::AbstractDict)
                 "noise_models[$i].kind=`$k` unknown " *
                 "(known: $(join(_known_noise_kinds(), ", ")))")
         end
+        _noise_labels!(errs, _get(cfg, :noise_models))
     end
 
     # ---- noise_menu ----
@@ -567,7 +579,7 @@ function _validate_config(cfg::AbstractDict)
             inds isa AbstractVector || push!(errs,
                 "noise_menu.indicators must be an array of channel names")
         end
-        if _has(cfg, :transdim)
+        if _has(cfg, :transdim) && _get(cfg, :transdim) !== false
             td = _get(cfg, :transdim)
             (isempty(_get(td, :toggleable; default = [])) &&
              isempty(_get(td, :noise_exclusion_groups; default = []))) || push!(errs,
@@ -592,13 +604,16 @@ function _validate_config(cfg::AbstractDict)
             name in _KNOWN_SAMPLERS || push!(errs,
                 "unknown sampler.name=`$name` (known: $(join(_KNOWN_SAMPLERS, ", ")))")
         end
-        if name in _SAMPLERS_REQUIRE_TD && !_has(cfg, :transdim)
-            push!(errs, "sampler `$name` requires a top-level `transdim` block")
+        # A trans-dim sampler is trans-dim mode on its own (`transdim` is then
+        # built from model.max_kplanet); only `"transdim": false` contradicts it.
+        if name in _SAMPLERS_REQUIRE_TD && _has(cfg, :transdim) &&
+           _get(cfg, :transdim) === false
+            push!(errs, "sampler `$name` is trans-dimensional but `transdim` is false")
         end
     end
 
     # ---- transdim ----
-    if _has(cfg, :transdim)
+    if _has(cfg, :transdim) && _get(cfg, :transdim) !== false
         td = _get(cfg, :transdim)
         _has(td, :max_kplanet) || push!(errs, "missing `transdim.max_kplanet`")
         if _has(td, :birth_strategies)
@@ -614,6 +629,8 @@ function _validate_config(cfg::AbstractDict)
             ns == nw || push!(errs,
                 "transdim.birth_strategies length $ns ≠ birth_weights length $nw")
         end
+        _has(cfg, :noise_menu) ||
+            _validate_noise_refs!(errs, td, _get(cfg, :noise_models; default = nothing))
     end
 
     # ---- output ----
@@ -1599,8 +1616,12 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
                           as = inst_names_as, iad = inst_names_iad)
 
     priors        = _build_priors(_get(cfg, :priors; default = Dict()))
+    # A transdim block that switches noise models builds them in trans-dim mode
+    # (two competing GPs on one light curve are a menu, not a conflict; its
+    # exclusion groups keep them apart, see `validate_noise_coactivity`).
+    td_noise      = _job_transdim_noise(cfg)
     noise_models  = _build_noise_models(_get(cfg, :noise_models; default = []),
-                                          ic)
+                                          ic; transdim = td_noise)
 
     # ---- noise_menu: server-built default menu with USER-SELECTED indicators.
     # The exoautomata-facing alternative to hand-listing `noise_models`: the
@@ -1648,7 +1669,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         :data            => data,
         :parametrization => parametrization,
         :trend_order     => Int(_get(mdl, :trend_order; default = 0)),
-        :phot_trend_order => Int(_get(mdl, :phot_trend_order; default = 0)),
+        :phot_trend_order => _phot_trend_order_kw(_get(mdl, :phot_trend_order; default = 0)),
         :stability       => _STAB[String(_get(mdl, :stability;
                                                 default = "none"))],
         :noise_models    => noise_models,
@@ -1692,9 +1713,11 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         p_kw[:external_priors] = [_build_external_prior(e) for e in ext_cfg]
     end
 
-    menu === nothing || (p_kw[:transdim_noise] = true)
+    (menu !== nothing || td_noise) && (p_kw[:transdim_noise] = true)
 
     params = Params(; p_kw...)
+    require_a_Rs_source(params, data)
+    require_iad_determined(params, data)
     target = NereusTarget(params, data; unconstrained = false)
     return params, target, menu
 end
@@ -1781,9 +1804,9 @@ function _ctor_accepts(@nospecialize(T), kw::Symbol)
     return false
 end
 
-function _build_noise_models(nm_cfg, ic)
+function _build_noise_models(nm_cfg, ic; transdim::Bool = false)
     out = NoiseModel[]
-    for nm in nm_cfg
+    for (i, nm) in enumerate(nm_cfg)
         kind = String(_get(nm, :kind; required = true))
         T = get(_NOISE_TYPES, kind, nothing)
         T === nothing && error("Unknown noise_model kind: $kind. " *
@@ -1791,6 +1814,16 @@ function _build_noise_models(nm_cfg, ic)
         channel = Symbol(_get(nm, :channel; default = "rv"))
         instruments = Vector{String}(String.(_get(nm, :instruments;
                                                     default = String[])))
+        # A `channel` or `instruments` the model has no field for would be
+        # dropped below, and the model would act somewhere other than where the
+        # config put it -- ErrorScale with channel "phot" rescaled the RV errors
+        # and left the light curve alone. Refused instead.
+        channel === :rv || _ctor_accepts(T, :channel) || throw(ArgumentError(
+            "noise_models[$i]: $kind has no `channel`; it acts on the RV data " *
+            "only, so `channel: \"$channel\"` cannot be honoured. Remove the " *
+            "channel, or use a model that takes one."))
+        isempty(instruments) || _ctor_accepts(T, :instruments) || throw(ArgumentError(
+            "noise_models[$i]: $kind takes no `instruments` list; got $instruments."))
         kwargs = _get(nm, :kwargs; default = Dict())
         # Symbolize keys AND narrow JSON array values: JSON3 parses a JSON
         # array as a `JSON3.Array`, which does not satisfy concretely-typed
@@ -1830,8 +1863,9 @@ function _build_noise_models(nm_cfg, ic)
     # Cross-model consistency check (per-instrument exclusivity, channel
     # validity, AR/MA conflict, etc.). Errors here surface as `failed`
     # in summary.json with the explicit complaint instead of a deeper
-    # crash inside the likelihood.
-    validate_noise_models(out)
+    # crash inside the likelihood. A trans-dim menu may hold competing GPs for
+    # one instrument; `validate_noise_coactivity` checks its exclusion groups.
+    validate_noise_models(out; transdim)
     return out
 end
 
@@ -1944,7 +1978,7 @@ function _job_sampler_name(cfg)
     smp = _get(cfg, :sampler; default = Dict())
     smp isa AbstractString && return String(smp)
     smp === nothing && (smp = Dict())
-    td = _get(cfg, :transdim; default = nothing) !== nothing
+    td = !(_get(cfg, :transdim; default = nothing) in (nothing, false))
     return String(_get(smp, :name; default = td ? "transdim_pt_emcee" : "pt_emcee"))
 end
 
@@ -1989,6 +2023,14 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
         kw[:checkpoint] = joinpath(String(_get(cfg, :output_dir; required = true)),
                                    "$(name)_state.jls")
     end
+    # Likewise a sampler that keeps a progress log (one JSON line per
+    # convergence check, readable while it runs) keeps it in the output
+    # directory, unless the job names another file or turns it off with null.
+    if haskey(_SAMPLER_FNS, name) && !haskey(kw, :progress_log) &&
+       any(m -> :progress_log in Base.kwarg_decl(m), methods(_SAMPLER_FNS[name]))
+        kw[:progress_log] = joinpath(String(_get(cfg, :output_dir; required = true)),
+                                     "progress.jsonl")
+    end
 
     # The out-of-band stop (src/graceful_stop.jl): a file whose appearance ends
     # the run at the last recorded step. `<output_dir>/STOP` unless the job's
@@ -2008,7 +2050,23 @@ function _dispatch_sampler(cfg, target, data, seed::Int; menu = nothing)
     end
 
     td_block = _get(cfg, :transdim; default = nothing)
-    td = td_block === nothing ? nothing : _build_transdim(td_block; menu = menu)
+    td_off = td_block === false
+    # Toggleable models named by reference resolve against the target's own
+    # noise models: the objects the sampler matches by identity.
+    nm_run = target.params.config.noise_models
+    nm_cfg = _get(cfg, :noise_models; default = nothing)
+    td = (td_block === nothing || td_off) ? nothing :
+         _build_transdim(td_block; menu = menu, noise_models = nm_run,
+                         noise_models_cfg = nm_cfg)
+    # Naming the trans-dim sampler is trans-dim mode: max_kplanet is the model's,
+    # unless `"transdim": false` contradicts it.
+    if name in _SAMPLERS_REQUIRE_TD && td === nothing
+        td_off && error("sampler $name is trans-dimensional, but " *
+                        "`transdim` is false; drop it or choose pt_emcee")
+        td = _build_transdim(Dict{Symbol,Any}(:max_kplanet => Int(_get(
+                 _get(cfg, :model; default = Dict()), :max_kplanet; default = 1)));
+             menu = menu, noise_models = nm_run)
+    end
 
     if name == "pt_emcee"
         # The post-fit stage chooses the evidence again on an unconstrained
@@ -2138,19 +2196,18 @@ const _BIRTH_TYPES = Dict(
     "MoMSBirth"           => MoMSBirth,
 )
 
-# Normalize a JSON-supplied toggleable list to Vector{NoiseModel}.
-# TransDimConfig's constructor declares `toggleable::Vector{<:NoiseModel}`,
-# which neither the `Any[]`/`NoiseModel[]` default NOR a JSON empty array
-# (parsed as `JSON3.Array{Union{}}` / `Vector{Any}`) satisfies until it's
-# concretely typed. Empty → typed empty (the planets-only common case);
-# non-empty must already hold NoiseModels (JSON can't encode them, so a
-# non-empty value here is a config error worth naming).
+# Normalize a toggleable list of NoiseModel OBJECTS (the Julia route: fit_*,
+# `_as_td`) to Vector{NoiseModel}. TransDimConfig's constructor declares
+# `toggleable::Vector{<:NoiseModel}`, which neither the `Any[]`/`NoiseModel[]`
+# default NOR a JSON empty array (parsed as `JSON3.Array{Union{}}` /
+# `Vector{Any}`) satisfies until it's concretely typed. A JSON config names
+# models by reference instead (`_resolve_noise_refs`).
 function _coerce_noise_models(v)
     isempty(v) && return NoiseModel[]
     all(x -> x isa NoiseModel, v) ||
-        throw(ArgumentError("transdim.toggleable must be empty or hold " *
-            "NoiseModel objects; JSON-specified toggleable models aren't " *
-            "supported via run_job."))
+        throw(ArgumentError("transdim.toggleable must hold NoiseModel objects " *
+            "or references (1-based index or `label`) into `noise_models`; " *
+            "got $(join(unique(string.(typeof.(collect(v)))), ", "))."))
     return Vector{NoiseModel}(collect(v))
 end
 
@@ -2159,37 +2216,217 @@ function _coerce_exclusion_groups(v)
     return [_coerce_noise_models(g) for g in v]
 end
 
-function _build_transdim(td_cfg; menu = nothing)
+# ---- JSON references into `noise_models` ------------------------------
+# `transdim.toggleable` and `transdim.noise_exclusion_groups` name entries of
+# the top-level `noise_models` array by 1-based index or by the entry's
+# optional `label`:
+#
+#   "noise_models": [{"kind": "MaternGP", "channel": "phot",
+#                     "instruments": ["TESS"], "label": "tess_matern"}, ...],
+#   "transdim": {"toggleable": ["tess_matern", 2],
+#                "noise_exclusion_groups": [["tess_matern", 2]]}
+#
+# The same resolver serves the schema validator (errors collected) and
+# `_build_transdim` (errors thrown), so the two cannot disagree.
+
+# label => index over the entries that carry a `label`; problems go to `errs`.
+function _noise_labels!(errs, nm_cfg)
+    labels = Dict{String, Int}()
+    for (i, nm) in enumerate(nm_cfg)
+        (nm isa AbstractDict && _has(nm, :label)) || continue
+        l = _get(nm, :label)
+        if !(l isa AbstractString)
+            push!(errs, "noise_models[$i].label must be a string; got $(repr(l))")
+        elseif haskey(labels, String(l))
+            push!(errs, "noise_models label \"$l\" is used by noise_models" *
+                        "[$(labels[String(l)])] and [$i]; labels must be unique")
+        else
+            labels[String(l)] = i
+        end
+    end
+    return labels
+end
+
+# One reference -> its index, or the error message as a String.
+function _resolve_noise_ref(ref, n::Int, labels, at::String)
+    if ref isa AbstractString
+        j = get(labels, String(ref), nothing)
+        j === nothing || return j
+        known = isempty(labels) ? "no entry has a `label`" :
+                "labels: " * join(sort!(collect(keys(labels))), ", ")
+        return "$at = \"$ref\": no noise_models entry has that label ($known)"
+    elseif ref isa Real && !(ref isa Bool) && isinteger(ref)
+        j = Int(ref)
+        1 <= j <= n || return "$at = $j is out of range: noise_models has $n " *
+                              "entr$(n == 1 ? "y" : "ies"), so valid indices are 1..$n"
+        return j
+    end
+    return "$at must be a 1-based integer index into noise_models or a " *
+           "noise_models `label`; got $(repr(ref))"
+end
+
+# (toggleable indices, exclusion groups as index vectors, errors), or `nothing`
+# when the block holds NoiseModel objects (the Julia route) or nothing at all.
+function _resolve_noise_refs(td, nm_cfg)
+    errs = String[]
+    tog_raw = _get(td, :toggleable; default = Any[])
+    grp_raw = _get(td, :noise_exclusion_groups; default = Any[])
+    if !(tog_raw isa AbstractVector)
+        push!(errs, "transdim.toggleable must be an array; got $(repr(tog_raw))")
+        return (Int[], Vector{Int}[], errs)
+    end
+    if !(grp_raw isa AbstractVector && all(g -> g isa AbstractVector, grp_raw))
+        push!(errs, "transdim.noise_exclusion_groups must be an array of arrays; " *
+                    "got $(repr(grp_raw))")
+        return (Int[], Vector{Int}[], errs)
+    end
+    tog = collect(Any, tog_raw)
+    grps = [collect(Any, g) for g in grp_raw]
+    refs = vcat(tog, grps...)
+    isempty(refs) && return nothing
+    nobj = count(r -> r isa NoiseModel, refs)
+    nobj == length(refs) && return nothing
+    if nobj > 0
+        push!(errs, "transdim.toggleable/noise_exclusion_groups mix NoiseModel " *
+                    "objects with references into noise_models; use one or the other")
+        return (Int[], Vector{Int}[], errs)
+    end
+    if nm_cfg === nothing || isempty(nm_cfg)
+        push!(errs, "transdim.toggleable/noise_exclusion_groups reference " *
+                    "noise_models entries, but there is no `noise_models` array")
+        return (Int[], Vector{Int}[], errs)
+    end
+    n = length(nm_cfg)
+    labels = _noise_labels!(String[], nm_cfg)   # its own errors: the noise_models check
+    tog_idx = Int[]
+    for (k, r) in enumerate(tog)
+        j = _resolve_noise_ref(r, n, labels, "transdim.toggleable[$k]")
+        j isa String && (push!(errs, j); continue)
+        j in tog_idx ? push!(errs, "transdim.toggleable[$k]: noise_models[$j] listed twice") :
+                       push!(tog_idx, j)
+    end
+    grp_idx = Vector{Int}[]
+    for (gi, g) in enumerate(grps)
+        idx = Int[]
+        for (k, r) in enumerate(g)
+            j = _resolve_noise_ref(r, n, labels, "transdim.noise_exclusion_groups[$gi][$k]")
+            j isa String && (push!(errs, j); continue)
+            j in tog_idx || push!(errs, "transdim.noise_exclusion_groups[$gi] references " *
+                "noise_models[$j], which is not in transdim.toggleable (a group holds " *
+                "toggleable models; an always-on model cannot be switched off)")
+            j in idx ? push!(errs, "transdim.noise_exclusion_groups[$gi]: noise_models[$j] " *
+                                   "listed twice") : push!(idx, j)
+        end
+        length(g) >= 2 || push!(errs, "transdim.noise_exclusion_groups[$gi] has " *
+            "$(length(g)) member(s); a group needs at least 2")
+        push!(grp_idx, idx)
+    end
+    return (tog_idx, grp_idx, errs)
+end
+
+function _validate_noise_refs!(errs, td, nm_cfg)
+    r = _resolve_noise_refs(td, nm_cfg)
+    r === nothing || append!(errs, r[3])
+    return nothing
+end
+
+# Whether a job's `transdim` block switches noise models (toggleable given, or
+# `noise: true`). Such a job builds its noise models in trans-dim mode: two
+# competing GPs on one light curve are the point of the menu, and its exclusion
+# groups (checked by `validate_noise_coactivity`) keep them apart.
+function _job_transdim_noise(cfg)
+    td = _get(cfg, :transdim; default = nothing)
+    (td === nothing || td === false || !(td isa AbstractDict)) && return false
+    Bool(_get(td, :noise; default = false)) && return true
+    tog = _get(td, :toggleable; default = Any[])
+    return tog isa AbstractVector && !isempty(tog)
+end
+
+"""
+    _build_transdim(td_cfg; menu = nothing, noise_models = nothing,
+                    noise_models_cfg = nothing) -> TransDimConfig
+
+The trans-dim block of a job config. Its noise menu comes from one of:
+
+- a `noise_menu` block (`menu`): the server-built menu defines the toggleable
+  set and the exclusion groups, and the block must not set either;
+- references into the job's `noise_models` array: `toggleable` and
+  `noise_exclusion_groups` hold 1-based indices or `label`s of its entries,
+  resolved against `noise_models` -- the run's `params.config.noise_models`,
+  so the TransDimConfig holds the very objects the sampler matches by identity
+  (`noise_models_cfg` is the raw JSON array, for the labels);
+- NoiseModel objects (the Julia route), used as given.
+
+`noise` defaults to true when the block lists toggleable models or a menu is
+given: switchable models with switching off is never what a config means.
+With `noise_models` given, co-activity the likelihood cannot score is refused
+(`validate_noise_coactivity`).
+"""
+function _build_transdim(td_cfg; menu = nothing, noise_models = nothing,
+                         noise_models_cfg = nothing)
     bstr = String.(_get(td_cfg, :birth_strategies; default = ["PriorBirth"]))
     strategies = [_BIRTH_TYPES[s]() for s in bstr]
     weights    = Float64.(_get(td_cfg, :birth_weights; default = ones(length(strategies))))
     # With a `noise_menu` block, the toggleable set + exclusion groups come from
     # the SERVER-BUILT menu (same NoiseModel objects as params.config.noise_models
-    # — identity matters downstream). JSON cannot express NoiseModel objects, so
-    # a config that sets both is contradictory: hard error, not silent override.
+    # — identity matters downstream). A config that sets both is contradictory:
+    # hard error, not silent override.
     if menu !== nothing
         (isempty(_get(td_cfg, :toggleable; default = [])) &&
          isempty(_get(td_cfg, :noise_exclusion_groups; default = []))) || error(
             "`transdim.toggleable`/`transdim.noise_exclusion_groups` cannot be " *
             "set together with a `noise_menu` block — the menu defines both.")
+        toggleable, groups = menu.toggleable, menu.exclusion_groups
+    else
+        refs = _resolve_noise_refs(td_cfg,
+                   noise_models_cfg !== nothing ? noise_models_cfg : noise_models)
+        if refs === nothing
+            # Coerce the value (not just the default): a config that passes
+            # `toggleable: []` delivers an empty JSON3.Array, which still
+            # isn't a Vector{<:NoiseModel}.
+            toggleable = _coerce_noise_models(_get(td_cfg, :toggleable; default = NoiseModel[]))
+            groups = _coerce_exclusion_groups(
+                _get(td_cfg, :noise_exclusion_groups; default = Vector{NoiseModel}[]))
+        else
+            tog_idx, grp_idx, errs = refs
+            isempty(errs) || throw(ArgumentError(join(errs, "; ")))
+            noise_models === nothing && throw(ArgumentError(
+                "transdim.toggleable/noise_exclusion_groups reference noise_models " *
+                "entries, which are resolved against the run's noise models; " *
+                "pass NoiseModel objects here instead"))
+            (noise_models_cfg === nothing ||
+             length(noise_models_cfg) == length(noise_models)) || error(
+                "noise_models: $(length(noise_models_cfg)) entries in the config " *
+                "but $(length(noise_models)) built models")
+            toggleable = NoiseModel[noise_models[j] for j in tog_idx]
+            groups = Vector{NoiseModel}[NoiseModel[noise_models[j] for j in g]
+                                        for g in grp_idx]
+        end
     end
-    return TransDimConfig(
+    td = TransDimConfig(
         max_kplanet       = Int(_get(td_cfg, :max_kplanet; required = true)),
         birth_strategies  = strategies,
         birth_weights     = weights,
         transdim_fraction = Float64(_get(td_cfg, :transdim_fraction; default = 0.3)),
         planets           = Bool(_get(td_cfg, :planets; default = true)),
-        # menu ⇒ noise selection is the point; default flips to true.
-        noise             = Bool(_get(td_cfg, :noise;   default = menu !== nothing)),
-        # Coerce the value (not just the default): a config that passes
-        # `toggleable: []` delivers an empty JSON3.Array, which still
-        # isn't a Vector{<:NoiseModel}.
-        toggleable = menu !== nothing ? menu.toggleable : _coerce_noise_models(
-            _get(td_cfg, :toggleable; default = NoiseModel[])),
-        noise_exclusion_groups = menu !== nothing ? menu.exclusion_groups :
-            _coerce_exclusion_groups(
-                _get(td_cfg, :noise_exclusion_groups; default = Vector{NoiseModel}[])),
+        noise             = Bool(_get(td_cfg, :noise;
+                                      default = menu !== nothing || !isempty(toggleable))),
+        toggleable        = toggleable,
+        noise_exclusion_groups = groups,
     )
+    noise_models === nothing || _check_td_coactivity(td, noise_models)
+    return td
+end
+
+# `validate_noise_coactivity` for a TransDimConfig over `noise_models`. With
+# noise switching off, every model is always on.
+function _check_td_coactivity(td::TransDimConfig, noise_models)
+    pos(nm) = findfirst(m -> m === nm, noise_models)
+    tog = td.noise ? Int[j for j in (pos(m) for m in td.toggleable) if j !== nothing] : Int[]
+    grps = td.noise ? [Int[j for j in (pos(m) for m in g) if j !== nothing]
+                       for g in td.noise_exclusion_groups] : Vector{Int}[]
+    validate_noise_coactivity(noise_models, tog, grps)
+    return nothing
 end
 
 # =====================================================================
@@ -3216,12 +3453,46 @@ function _run_loo!(cfg, chains, params::Params, data::Data, result,
             "pareto_k_max"       => res.pareto_k_max,
             "pareto_k_warn_count" => res.pareto_k_warn_count,
             "loo_compare_log_z"  => res.loo_compare_log_z,
+            "n_nonfinite_draws"  => res.n_nonfinite_draws,
+            "status"             => res.status,
+            "message"            => res.message,
         )
     catch err
         @warn "LOO/WAIC failed (continuing)" exception = (err, catch_backtrace())
         summary["loo"] = Dict("status" => "skipped",
                                 "error" => sprint(showerror, err))
     end
+end
+
+# The second half of fit health: `assess_run_summary` on the sampler, evidence
+# and PPC blocks, for a cold chain trapped in a wrong mode (src/diagnostics/
+# fit_health.jl). It runs after the evidence stage, which is after the chain
+# checks of `_run_fit_health!`, and merges into the `fit_health` block they
+# wrote: its checks only warn, so `overall` can rise to "warn" but never to
+# "fail", and `suspect_wrong_mode` (with `suspect_wrong_mode_checks`) is the flag
+# a caller reads. Nothing is added when fit_health is off or was skipped.
+function _fit_health_run_checks!(summary::AbstractDict)
+    fh = get(summary, "fit_health", nothing)
+    (fh isa AbstractDict && get(fh, "checks", nothing) isa AbstractDict) || return
+    try
+        cs = assess_run_summary(summary)
+        for c in cs
+            fh["checks"][String(c.name)] = Dict{String, Any}(
+                "status" => String(c.status), "message" => c.message)
+        end
+        flagged = [String(c.name) for c in cs if c.status !== :ok]
+        old = Symbol(get(fh, "overall", "ok"))
+        old in keys(_STATUS_RANK) || (old = :ok)
+        fh["overall"] = String(_worst(old, isempty(flagged) ? :ok : :warn))
+        fh["suspect_wrong_mode"] = !isempty(flagged)
+        fh["suspect_wrong_mode_checks"] = flagged
+        isempty(flagged) || @warn "Nereus: fit health = WARN — run-summary " *
+            "checks flag a possible wrong mode:\n" *
+            join(("  ⚠️  [$(c.name)] $(c.message)" for c in cs if c.status !== :ok), "\n")
+    catch err
+        @warn "run-summary fit-health checks failed (continuing)" exception = (err, catch_backtrace())
+    end
+    return
 end
 
 # Post-fit "silent-wrong" guard. Fail-soft: never breaks the run, only
@@ -3756,3 +4027,34 @@ function _run_tomography_job(cfg::AbstractDict, t0::Float64)
     end
     return summary
 end
+
+# `ppc.png` and `detection_limits.png` are written to the output directory
+# root, not under `plots/`, so the `plots/` manifest walk never sees them and a
+# client listing `summary["figures"]` never found them. They run after that walk
+# (the manifest is built first), so this adds them once they exist: only those
+# THIS job wrote (they are in `summary["plots"]`, pushed by the step that wrote
+# them), keyed by their basename without extension ("ppc", "detection_limits"),
+# with the .pdf beside each in `figures_pdf` when one was saved. The files stay
+# where they are, so the documented layout of JOB_CONFIG.md is unchanged.
+function _add_root_figures!(summary::AbstractDict, out_dir::AbstractString)
+    listed = get(summary, "plots", nothing)
+    listed isa AbstractVector || return summary
+    for name in ("ppc", "detection_limits")
+        png = joinpath(out_dir, name * ".png")
+        (png in listed && isfile(png)) || continue
+        figs = get!(() -> Dict{String, Any}(), summary, "figures")
+        figs isa AbstractDict || continue
+        figs[name] = png
+        pdf = joinpath(out_dir, name * ".pdf")
+        if isfile(pdf)
+            pdfs = get!(() -> Dict{String, Any}(), summary, "figures_pdf")
+            pdfs isa AbstractDict && (pdfs[name] = pdf)
+        end
+    end
+    return summary
+end
+
+# `model.phot_trend_order` of a job config: an integer for every photometric
+# instrument, or a map instrument → order (JSON object), handed to `Params`.
+_phot_trend_order_kw(t::AbstractDict) = Dict{String, Int}(String(k) => Int(v) for (k, v) in t)
+_phot_trend_order_kw(t) = Int(t)

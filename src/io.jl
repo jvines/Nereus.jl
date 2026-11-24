@@ -58,6 +58,9 @@ function save_chains(path::String, chains, params::Params;
         ds.attrib["stability"] = String(params.config.stability)
         ds.attrib["trend_order"] = params.config.trend_order
         ds.attrib["phot_trend_order"] = params.config.phot_trend_order
+        # per-instrument overrides as "NAME=order,..." (empty when none)
+        ds.attrib["phot_trend_orders"] = join(("$k=$v" for (k, v) in
+                                               sort!(collect(params.config.phot_trend_orders))), ",")
         ds.attrib["log_evidence"] = isnan(log_evidence) ? -1e300 : log_evidence
         ds.attrib["instrument_rv"] = join(params.config.instruments.rv_names, ",")
         ds.attrib["instrument_pm"] = join(params.config.instruments.pm_names, ",")

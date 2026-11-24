@@ -127,7 +127,7 @@ occ_fold(t, Tc, P) = (Δ = t - Tc; Δ - P * round(Δ / P))
                                         [Nereus.pm_offset(th, ix) for ix in 1:2],
                                         [Nereus.pm_jitter(th, ix) for ix in 1:2],
                                         [Nereus.pm_dilution(th, ix) for ix in 1:2],
-                                        data.t_ref, 0.0, _phot_trend_cache(th, 2), 2π)
+                                        fill(data.t_ref, 2), zeros(2), _phot_trend_cache(th, 2), 2π)
             @test val === ll(f_fix)
             @test (val !== ll(f_old)) == B
             n_B += B; n_cmp += 1

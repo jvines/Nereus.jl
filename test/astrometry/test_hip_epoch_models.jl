@@ -324,7 +324,7 @@ end
         @test_logs (:warn, r"INERT") match_mode = :any _he_setup(hip_scans = HE_HIP)
     end
 
-    @testset "missing scan geometry warns and falls back to instantaneous" begin
+    @testset "missing scan geometry: Hipparcos instantaneous (warns), Gaia on the nominal window" begin
         hg = _he_hgca(); g = _he_g23h()
         d, θ = @test_logs (:warn, r"INSTANTANEOUS") match_mode = :any _he_setup(
             hgca = hg, g23h = g, gost = HE_GOST)
@@ -338,14 +338,21 @@ end
                          ((HE_HGRA[3] - HE_HGRA[1]) / HE_YR)
         @test pmdec[2] == (G[2] - Nereus.star_reflex_offset(orb, HE_HGDEC[1], Ms)[2]) /
                           ((HE_HGDEC[3] - HE_HGDEC[1]) / HE_YR)
-        # G23H without GOST either: every epoch instantaneous, but the two
-        # differences stay positional differences.
+        # G23H without GOST either: the Hipparcos epoch is instantaneous (no
+        # scans), the two Gaia epochs are fitted through the jittered nominal
+        # scan set of their release, and the two differences stay positional
+        # differences.
         d, θ = _he_quiet(() -> _he_setup(g23h = g))
         pr, pd = Nereus._g23h_model_pm(θ, g, d, M_pri, plx, d.t_ref)
         off(t, i) = Nereus.star_reflex_offset(orb, t, Ms)[i]
-        @test pr[4] == (off(HE_GRA[5], 1) - off(HE_GRA[3], 1)) / ((HE_GRA[5] - HE_GRA[3]) / HE_YR)
-        @test pd[2] == (off(HE_GDEC[5], 2) - off(HE_GDEC[1], 2)) / ((HE_GDEC[5] - HE_GDEC[1]) / HE_YR)
-        @test pr[3] == Nereus.star_reflex_pm(orb, HE_GRA[3], Ms)[1]
+        nom(win, k) = scan_5param_fit(orb, Nereus._nominal_gaia_scans(win), Ms;
+                                      t_ref = (HE_GRA[k], HE_GDEC[k]), window = win)
+        D2 = nom(Nereus.GAIA_DR2_WINDOW, 3); D3 = nom(Nereus.GAIA_DR3_WINDOW, 5)
+        @test pr[4] ≈ (D3[1] - D2[1]) / ((HE_GRA[5] - HE_GRA[3]) / HE_YR) rtol = 1e-12
+        @test pd[2] ≈ (D3[2] - off(HE_GDEC[1], 2)) / ((HE_GDEC[5] - HE_GDEC[1]) / HE_YR) rtol = 1e-12
+        @test pr[3] ≈ D2[4] rtol = 1e-12
+        # and the Gaia epochs are no longer the instantaneous reflex
+        @test !(pr[3] ≈ Nereus.star_reflex_pm(orb, HE_GRA[3], Ms)[1])
     end
 
     @testset "run_job / fit_* obtain the scans by hip_id" begin

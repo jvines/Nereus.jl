@@ -485,8 +485,7 @@ that all produced innocent-looking output:
   credible interval that happens to bracket the truth. The marginal CI
   looks fine but it is the *union of two disjoint basins*, not a
   posterior.
-- **`pt_whitening`** — tight CIs sitting at a wrong mode. Converged by
-  every per-chain metric, just wrong.
+- **`pt_whitening`** (deprecated; use `pt_emcee`) — walkers stranded between modes: its whitened swap accepts about 8x less often than the identity swap, so cold walkers reach the mode slowly, and the CI is the correct median at many times the true width (R-hat well above 1, low ESS). Read `acceptance_swap` and R-hat rather than trusting the interval.
 - **`map`** — a parameter railed against a prior bound with
   `converged=true`. The optimizer walked into the wall and reported
   success.
@@ -611,6 +610,33 @@ When `overall == "fail"`, `run_job` emits a prominent `@warn` with the
 full report; the pipeline consumer should treat a `fail` as a hard stop
 on trusting the posterior. Disable the stage with `output.fit_health =
 false` (default `true`).
+
+#### Trapped-mode checks on the run summary
+
+A cold chain trapped in ONE wrong mode passes every chain check: the
+population is converged, well mixed and off every bound. HIP 63762
+(pt_emcee, RV + Hipparcos/Gaia astrometry, two Keplerians) did exactly that:
+`overall = "ok"` with HIRES jitter at 109 m/s on 1.1 m/s errors (1.4 m/s in
+the right mode) and ln Z ~50–70 nats below the nested one-planet fit. After the
+evidence stage, `run_job` (and the `fit_*` route) therefore also runs
+`assess_run_summary(summary)` on the `sampler`, `evidence` and `ppc` blocks and
+merges four more checks into `fit_health`. They only ever **warn**:
+
+| check | warns when | default |
+|---|---|---|
+| `cold_acceptance` | β = 1 within-move acceptance below | `0.01` |
+| `tempering_ladder` | min adjacent swap acceptance below / any rung's within-move acceptance below | `0.01` / `1e-3` |
+| `evidence_precision` | a quotable estimate's error above / two independent estimators (bridge, nested, a tempered one) differing by more than max(3, 3σ) nats / \|mode-Laplace − bridge\| above | `1.0` nat / — / `20` nats |
+| `rv_jitter` | an instrument's median jitter above this many times its median formal error | `30` |
+
+The thresholds are `RUN_HEALTH_THRESHOLDS` (each documented with the HIP 63762
+trapped and healthy values it was set against) and are keyword arguments of
+`assess_run_summary`. `fit_health.suspect_wrong_mode` is `true` when any of the
+four warns, with `suspect_wrong_mode_checks` naming them; `overall` rises to
+`"warn"` but a `"fail"` from the chain checks stays. The jitter check reads the
+PPC's per-instrument noise block (`rv_err_formal_median_per_inst`,
+`rv_jitter_median_per_inst`, `rv_resid_rms_per_inst`,
+`rv_red_chi2_formal_per_inst`).
 
 ## Rossiter-McLaughlin
 

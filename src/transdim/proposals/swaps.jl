@@ -144,34 +144,59 @@ function _swap_ad_q(theta::Theta{T}, ad::ActivityDecorrelation, data::Data, rng,
     return convert(T, _ad_mvn_logq(Ccur, C_ols, F, _SWAP_AD_INFLATE))
 end
 
+# Is activating noise model `nm` blocked because another member of an exclusion
+# group it belongs to is already active? Same rule as propose_noise_birth.
+function _exclusion_blocks(td, nm::NoiseModel, noise_models::Vector{NoiseModel},
+                           exclusion_groups)
+    for group in exclusion_groups
+        nm in group || continue
+        for other in group
+            other === nm && continue
+            j = findfirst(==(other), noise_models)
+            j === nothing && continue
+            is_noise_active(td, j) && return true
+        end
+    end
+    return false
+end
+
 # Available swap directions from a state: :pn (kill planet, activate AD) needs
-# ≥1 planet AND AD inactive; :np (deactivate AD, birth planet) needs AD active
-# AND a free planet slot.
-function _swap_dirs(td, adi::Int, modes, max_k::Int)
+# ≥1 planet, AD inactive AND no other member of AD's exclusion group active
+# (otherwise the move would land in a forbidden state, e.g. AD + GP-Rot);
+# :np (deactivate AD, birth planet) needs AD active AND a free planet slot.
+# The same function counts the reverse move's directions, so the Hastings
+# direction-select term stays consistent.
+function _swap_dirs(td, ad::NoiseModel, adi::Int, noise_models::Vector{NoiseModel},
+                    exclusion_groups, modes, max_k::Int)
     dirs = Symbol[]
-    (td.n_planets_active ≥ 1 && !is_noise_active(td, adi)) && push!(dirs, :pn)
+    (td.n_planets_active ≥ 1 && !is_noise_active(td, adi) &&
+     !_exclusion_blocks(td, ad, noise_models, exclusion_groups)) && push!(dirs, :pn)
     (is_noise_active(td, adi) && td.n_planets_active < max_k) && push!(dirs, :np)
     dirs
 end
 
 """
-    propose_planet_ad_swap(theta, rng, toggleable; data) -> (new_theta, log_q_ratio)
+    propose_planet_ad_swap(theta, rng, toggleable; data, exclusion_groups)
+        -> (new_theta, log_q_ratio)
 
 DB-correct planet↔ActivityDecorrelation swap (see header above ad_ols_fit).
 Returns `(theta, -Inf)` if no AD model is toggleable or no swap direction is
-available. The caller combines `log_q_ratio` with ΔlogL+Δlogπ in the standard
+available. `exclusion_groups` (the run's `noise_exclusion_groups`) is required:
+the planet→AD direction is only offered when no other member of AD's group is
+active. The caller combines `log_q_ratio` with ΔlogL+Δlogπ in the standard
 RJMCMC acceptance; valid POST-burn-in.
 """
 function propose_planet_ad_swap(theta::Theta{T}, rng::AbstractRNG,
                                  toggleable::Vector{NoiseModel};
-                                 data::Union{Data,Nothing}=nothing) where {T}
+                                 data::Union{Data,Nothing}=nothing,
+                                 exclusion_groups) where {T}
     data === nothing && return (theta, convert(T,-Inf))
     nm_models = theta.params.config.noise_models
     ad, adi = _swap_ad_index(toggleable, nm_models)
     ad === nothing && return (theta, convert(T,-Inf))
     modes = theta.params.config.planet_modes
     max_k = length(theta.td.planet_active)
-    dirs = _swap_dirs(theta.td, adi, modes, max_k)
+    dirs = _swap_dirs(theta.td, ad, adi, nm_models, exclusion_groups, modes, max_k)
     isempty(dirs) && return (theta, convert(T,-Inf))
     d_x = length(dirs)
     dir = dirs[rand(rng, 1:d_x)]
@@ -191,7 +216,7 @@ function propose_planet_ad_swap(theta::Theta{T}, rng::AbstractRNG,
         # density at the killed params (residual is state-independent → use nt).
         r = _swap_planet_q(nt, k, data, rng, nt.values; mode = :eval)
         q_pl_rev = r[1]; isfinite(q_pl_rev) || return (theta, convert(T,-Inf))
-        d_xp = length(_swap_dirs(nt.td, adi, modes, max_k))
+        d_xp = length(_swap_dirs(nt.td, ad, adi, nm_models, exclusion_groups, modes, max_k))
         Gp = length(group_first_inactive(nt.td, modes))      # reverse picks the slot among these
         log_q = (log(d_x) - log(d_xp)) + (log(n_p) - log(max(Gp,1))) + (q_pl_rev - q_ad_fwd)
         _sort_group_periods!(nt)
@@ -211,7 +236,7 @@ function propose_planet_ad_swap(theta::Theta{T}, rng::AbstractRNG,
         tmp = Theta{T}(theta.params, nt.values; td = tmp_td)
         q_ad_rev = _swap_ad_q(tmp, ad, data, rng, nt.values; mode = :eval)
         isfinite(q_ad_rev) || return (theta, convert(T,-Inf))
-        d_xp = length(_swap_dirs(nt.td, adi, modes, max_k))
+        d_xp = length(_swap_dirs(nt.td, ad, adi, nm_models, exclusion_groups, modes, max_k))
         n_p_after = n_p + 1                                   # reverse kills one of these
         log_q = (log(d_x) - log(d_xp)) + (log(G) - log(n_p_after)) + (q_ad_rev - q_pl_fwd)
         _sort_group_periods!(nt)

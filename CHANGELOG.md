@@ -3,6 +3,214 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## 0.9.11
+
+### Added
+
+- **Photometric trend order per instrument.** `phot_trend_order` (the `Params`
+  keyword, and `model.phot_trend_order` of a job config) takes a map
+  `{instrument: order}` as well as an integer. Listed instruments get a baseline
+  polynomial of that order (0, 1 or 2), unlisted ones none. A single-night
+  ground-based light curve can now carry a linear baseline while the survey
+  photometry next to it keeps a flat one. Instruments sharing an `offset` share the
+  trend and must agree on its order. `phot_trend_order_of(config, name)` gives an
+  instrument's order; the NetCDF output records the map as `phot_trend_orders`.
+
+- **A job config states its own trans-dim noise menu.** `transdim.toggleable`
+  and `transdim.noise_exclusion_groups` reference entries of the top-level
+  `noise_models` array by 1-based index or by a new optional `label` key, and
+  resolve to the run's own model objects. run_job used to refuse any non-empty
+  `toggleable`, so the only JSON menu was the RV-oriented `noise_menu` block and
+  a per-light-curve photometric menu (white | `MaternGP` | `CeleriteSHO` on each
+  light curve, `channel: "phot"`, `instruments: [lc]`, one group per light
+  curve) could not be run through `transdim_pt_emcee`. The schema validator
+  names an index out of range, an unknown or duplicate label, a group member
+  that is not toggleable and a group of one. `transdim.noise` defaults to true
+  when `toggleable` is non-empty, and such a job builds its noise models in
+  trans-dim mode. Example in docs/JOB_CONFIG.md.
+
+- **Fit health flags a cold chain trapped in a wrong mode.** A population
+  collapsed into one wrong basin passed every chain check (HIP 63762, pt_emcee
+  RV + astrometry: `overall = "ok"` with a 109 m/s HIRES jitter on 1.1 m/s
+  errors and ln Z ~50–70 nats below the nested simpler model). After the
+  evidence stage, `fit_health` gains four warning-only checks read from the
+  run summary: `cold_acceptance` (β = 1 acceptance < 0.01), `tempering_ladder`
+  (a swap acceptance < 0.01 or rungs frozen below 1e-3), `evidence_precision`
+  (an estimate's error > 1 nat, independent estimators disagreeing, or
+  mode-Laplace > 20 nats from bridge) and `rv_jitter` (an instrument's jitter
+  > 30× its formal errors), plus `suspect_wrong_mode`. Thresholds:
+  `RUN_HEALTH_THRESHOLDS`; function: `assess_run_summary`. The PPC block gains
+  per-instrument `rv_err_formal_median_per_inst`, `rv_jitter_median_per_inst`,
+  `rv_resid_rms_per_inst` and `rv_red_chi2_formal_per_inst`.
+
+- **The typed `fit_*` route reaches what a job config does.** `fit_rv`,
+  `fit_transit`, `fit_astrometry` and `fit_joint` take `planet_modes` (one name
+  per planet, e.g. `["RVPM_GD"]`, `["PM_GD"]`, `["RVPM_RM_GD"]`), `noise_models`
+  (the dicts of a job config's `noise_models` block, built by run_job's own
+  builder; `NoiseModel` objects still work) and `noise_menu` (a job config's
+  block; with `transdim=` the menu's toggleable models and exclusion groups are
+  wired in, as run_job does). `fit_transit(gravity_darkening = true)`, and a
+  transit channel with it, now fits the gravity-darkened transit (`PM_GD`, or
+  `RVPM_GD` with RV) where it used to throw. `build_target` gains `planet_modes`,
+  `indicator_cols`, `noise_menu` and `menu_out`.
+- **Activity indicators on the RV channel.** `indicator_cols` names columns of
+  each instrument's data (`<name>_err` is the 1-sigma), and `indicators`
+  (`{instrument: {name: values}}`) supplies them; both feed the activity noise
+  models. `fit_rm`, `fit_ttv` and `fit_binary` take `indicator_cols` the same way.
+- **`config_overrides` on every `fit_*`.** A dictionary in a job config's shape,
+  applied last. On `fit_rm`, `fit_ttv` and `fit_binary` (which build a config) it
+  is deep-merged into it, so any key of a config is reachable; they also take
+  `noise_models`, `noise_menu` and `planet_modes`. On the four that build a
+  target it is read block by block (`star`, `model`, `priors`, `noise_models`,
+  `noise_menu`, `planet_modes`) and a block with no place there is an error.
+- **Post-fit operations, no longer stubs.** `evidence`, `detection_limits`,
+  `diagnostics.loo`, `diagnostics.ppc`, `diagnostics.fit_health` re-evaluate a
+  finished fit from its `chains.nc` and the fit's own request (channels, planets,
+  priors, model keywords), through the helpers the post-fit stage of the fit
+  runs; `diagnostics.label_switching`, `select_planets` (P(N_p = k) and Bayes
+  factors of a trans-dim fit's chains) and `select_noise` (noise-model occupancy)
+  need only the chains. `detect.lc_periodogram` is a GLS periodogram of a light
+  curve; `pre_white` is iterative GLS prewhitening. `FEATURE_NOT_IMPLEMENTED` is
+  empty.
+
+### Changed
+
+- **A trans-dimensional engine or a planet range is trans-dim mode by itself.**
+  `engine = transdim_pt_emcee` (and `rjmcmc`, `moms`, `daedalus` in a job config)
+  no longer needs `transdim`: the `TransDimConfig` is built from the model's
+  `max_kplanet`. `planets` as a range of two or more counts sets `transdim`.
+  `transdim = false` with either is an error that says so. A job config's
+  `"transdim": false` is read the same way.
+- `fit_rm`, `fit_ttv` and `fit_binary` write the config they ran to
+  `<output_dir>/job_config.json`; `evidence`, `diagnostics.loo`/`ppc`/`fit_health`
+  and `detection_limits` rebuild the target from it the way `run_job` does.
+- `RV` channel `indicators` no longer throws; it takes `{instrument: {name:
+  values}}`. Anything else is still an `ArgumentError`.
+- `fit_transit(gravity_darkening = true)` fits the PM_GD mode instead of throwing.
+### Changed
+
+- **HGCA / G23H without a GOST file now average the Gaia epoch over the release's nominal observing window.** The Gaia epoch used to fall back silently to the instantaneous reflex, wrong for a companion whose period is shorter than the Gaia baseline. With no `gost`, the model now takes the five-parameter fit through a synthetic stratified-jittered scan set across the window of the catalogue's release (DR3: 2014-07-25 to 2017-05-28; DR2: to 2016-05-23), one epoch drawn from a fixed hash inside each 5 d bin (`NOMINAL_GAIA_SCAN_STEP_DAYS`; deterministic, faithful for P above about 10 d; a strictly uniform grid would alias periods near 5/n d into a spurious proper motion), by the same code path as the GOST window average. `Data` logs one `@info` saying so; supply `gost` (`fetch_gost`) for the exact scan law, which is used unchanged. Hipparcos without scans still uses the instantaneous reflex (and still warns). Fits to HGCA / G23H without GOST move by the window averaging, most for short periods.
+
+- **`pt_whitening` is deprecated** (kept, not removed): it warns once when selected. Its whitened swap accepts about 8x less often than the identity swap (median 0.027 vs 0.22) and `pt_emcee` beats it on every measured target. The comment claiming its ladder matches the validated `pt_emcee` one, and the docs rating it "Solid", were wrong and are corrected. `docs/src/sampler_validation.md` is rewritten to describe the tests that exist (the harness it described is not in the repository).
+
+### Added
+
+- **`sample_pt` and `sample_pt_emcee` warn once, after sampling, when the minimum adjacent swap acceptance is below 1%**, naming the rung pair and suggesting more temperatures. Warning only; draws are unchanged.
+
+### Fixed
+
+- **Photometric baseline trends are measured in each instrument's own time.** The
+  trend polynomial used x = (t − t_ref) / (half the span of all the photometry),
+  with one t_ref for every instrument. Next to a multi-year survey a ground-based
+  night spanned x ≈ 2×10⁻⁴, so its trend coefficient had to be ~10⁴ times the
+  flux slope and sat far outside the default `NormalPrior(0, 0.05, -0.5, 0.5)`:
+  the trend could not be fitted. x is now centred on the mean time of the
+  instrument's offset group and scaled to that group's half span, so it runs over
+  about [−1, 1] within each group. Fits with `phot_trend_order > 0` change: the
+  coefficients `phot_c<p>_<inst>` mean something different and the fitted
+  baselines of short light curves move; rerun them, and do not resume their
+  checkpoints.
+
+- **Noise models that would silently do nothing are refused.** In a job
+  config, a non-"rv" `channel` or an `instruments` list on a model with no such
+  field is an error (ErrorScale with `channel: "phot"` rescaled the RV errors
+  and left the light curve alone), as is a model naming an instrument its
+  channel does not have (ErrorScale on a light curve's name allocated
+  `errscale_<lc>` and rescaled nothing).
+
+- **Co-active noise models the likelihood cannot score are refused before the
+  run.** Under trans-dim, two GPs on the same instrument (its points scored
+  twice), two global GPs on one channel (one silently dropped) or an additive
+  covariance (NightlyOffset, HarmonicBlock) beside an instrument-restricted GP
+  (an error mid-run) that can be active together without sharing an exclusion
+  group now fail at setup (`validate_noise_coactivity`, run by
+  `transdim_pt_emcee` and run_job). The last pair is refused in a
+  fixed-dimension fit too.
+
+- **Model-selection labels carry the instrument scope.** Per-instrument models
+  are reported as e.g. `GP-Matern[TESS]` in `model_selection` and in the fitted
+  table's conditioning, instead of `GP-Matern` and `GP-Matern#3`.
+
+- **Trans-dim noise selection no longer leaves two members of an exclusion group active.** The planet<->ActivityDecorrelation swap in `transdim_pt_emcee` activated AD after checking only that AD itself was off, not whether another member of its exclusion group was on. With `default_noise_menu` (ErrorScale, CeleriteRotation, AD and ActivityGP in one group) and planets trans-dim, walkers reached CeleriteRotation + AD, ErrorScale + AD and ActivityGP + AD, double-modelling the activity; an HD 18599 run spent a third of its cold draws in CeleriteRotation + AD. The swap now offers the planet->AD direction only when AD's group is empty, and `propose_planet_ad_swap` takes the groups as a required `exclusion_groups` keyword. Noise occupancies of any trans-dim run with planets, `noise = true` and an AD in an exclusion group are affected; rerun them.
+
+- **`ppc.png` and `detection_limits.png` are now in `summary["figures"]`** (keys `ppc`, `detection_limits`, plus `figures_pdf` when a PDF was saved). They are written to the output directory root, outside the `plots/` walk that builds the manifest, so clients never listed them. The files stay where they are.
+### Fixed
+
+- **A draw with a non-finite prediction no longer takes down the posterior
+  predictive check or LOO/WAIC.** One NaN in a draw's χ² made the PPC's
+  `quantile` throw ("PPC failed"), and one NaN prediction made `compute_loo`
+  refuse the whole chain. Such draws are now left out, counted
+  (`summary["ppc"]["n_nonfinite_draws"]`, `summary["loo"]["n_nonfinite_draws"]`,
+  `LooResult.n_nonfinite_draws`) and warned about; the draws kept give the same
+  numbers as the chain without them. Only when every draw is non-finite do they
+  throw, with the reason. The RV, transit and joint paths share the code.
+
+- **Intermediate astrometry with too few abscissae is refused.** With
+  `n ≤ n_q` abscissae (4 for one instrument, 6 for two) the design is exactly
+  determined, every orbit fits perfectly, and `iad_log_likelihood` returned 0
+  for every draw: a fit that was the prior. `build_target` and the `run_job`
+  builder now throw an `ArgumentError` naming the instruments, `n` and `n_q`.
+  An IAD used only as the Hipparcos scan geometry of an HGCA row is
+  `hip_scans`, not `iad`, and is not affected.
+
+- **A transit fit with no source of a/R★ is refused.** With neither `M_s` and
+  `R_s`, nor `use_rho_s = true`, nor a sampled a/R★, the planet's a/R★ is NaN:
+  the transit likelihood scored a constant 0 for every draw (the posterior was
+  the prior, silently) and the predicted light curve was NaN. `build_target`
+  (so every `fit_*`) and the `run_job` config builder now throw an
+  `ArgumentError` naming the three ways to give one. Transit-times-only fits
+  read no a/R★ and are unaffected.
+
+- **A draw whose a/R★ is NaN, or whose transit model is NaN, is rejected with
+  -Inf** (the transit likelihood, with and without the workspace), not scored
+  0, which outscored every real draw whose log L is negative. The RV, RM,
+  tomography and astrometry likelihoods already rejected such draws; the
+  astrometry `zero` returns left are for absent data, not invalid draws.
+
+- **`elpd_loo` NaN now says why.** When a point's Pareto k̂ is so large (above
+  2 on a short or poorly mixed chain) that PSIS gives NaN, the `loo` block of
+  `summary.json` carries `status` (`ok`, `warn`, `unreliable`) and a `message`
+  ("Pareto k̂ = 3.2, LOO unreliable; use WAIC (elpd_waic) or more draws"), and
+  a warning is logged; `elpd_waic` is always alongside. `LooResult` has
+  `status` and `message` fields.
+
+### Changed
+
+- **The first fit in a fresh process no longer compiles for about two minutes.**
+  Nereus now precompiles the fit path (`src/fit_precompile.jl`): tiny `fit_rv`,
+  `fit_transit`, `fit_astrometry` (inline HGCA and IAD, nothing fetched) and
+  `fit_joint` (RV + transit) fits with `pt_emcee`, post-fit included, and
+  `run_job` on a minimal config, in a temporary directory with fixed seeds.
+  First calls in a fresh process, before and after: `fit_rv` 139 s to 1.4 s,
+  `fit_transit` 93 s to 1.3 s, `fit_astrometry` 96 s to 1.2 s, `fit_joint`
+  106 s to 1.5 s; a first `run_job` on the easy RV target 4.9 s, and a first
+  `transdim_pt_emcee` one 15 s. `Pkg.precompile()` of Nereus goes from about 13 s
+  to about 150 to 165 s. The
+  workload is on by default; switch it off with
+  `set_preferences!(Nereus, "precompile_fit" => false)` (or `precompile_fit =
+  false` under `[Nereus]` in a `LocalPreferences.toml`) and Nereus recompiles.
+  The figures stay a separate workload (`precompile_plots`, +30 s of precompile;
+  the release bundle turns it on, in nereus-py's `tools/build_bundle.sh`). With it
+  on, a first `fit_rv` with `plots = ["auto"]` takes 7.4 s instead of 21.9 s.
+
+### Tests
+
+- **`transdim_pt_emcee` is checked for thread-count invariance.** The same seed
+  gives a bit-identical chain at `-t 1` and `-t 2` (it was only checked for
+  `pt_emcee`). Measured on the easy 12.3 d target at the shipped defaults
+  (16 temps, 100 walkers, 3000/2000): seeds 2, 5, 9, 12 and 42 all pass the
+  sampler's own convergence gate (worst R-hat 1.004 to 1.007, least ESS 12,700
+  to 17,200), and seed 42 gives the same chain at 2 and 6 threads. The failures
+  recorded in 2026-09 (3 of 14 seeds) predate the stranded-walker pruning, the
+  node flip and the log-scale moves; no change to the transdim defaults is
+  needed and none was made.
+
+- **Short `pt_emcee` runs are not slower per step.** With the bridge solved by
+  Newton and its bootstrap skipped for an estimate that did not converge, a
+  100-step run takes 0.3 s and 1500 steps 3.7 s (16 temps, 150 walkers). What
+  makes a first short run look slow is about 100 s of compilation in a fresh
+  process, whatever the run's length.
+
 ## 0.9.10
 
 ### Added
