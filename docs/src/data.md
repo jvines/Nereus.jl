@@ -57,7 +57,7 @@ length consistency.
 | `relastrom` | `Union{Nothing, RelAstromData}` | Relative astrometry (RA/Dec offsets per epoch) — direct-imaging companions. |
 | `hgca` | `Union{Nothing, HGCAData}` | Hipparcos–Gaia Catalogue of Accelerations row (Brandt 2018, 2021). Auto-stage with `fetch_hgca(hip_id)`. The **validated** Hipparcos–Gaia path (recovers the orvara orbit on HD 159062). |
 | `iad` | `Union{Nothing, IADData}` | Along-scan Intermediate Astrometric Data. Auto-stage Hipparcos with `fetch_hip_iad(hip_id)`; **Gaia DR4 epoch astrometry** loads into the *same* channel via `read_gaia_epoch_votable` / `fetch_gaia_dr4_prerelease` (see below). Constrains the epoch abscissae; the Hip+Gaia IAD joint additionally needs `gaia_dr3` (implemented, not yet validated). |
-| `gost` | `Union{Nothing, GOSTData}` | Gaia scanning law from the GOST tool (predicted scan epochs + angles). **Without it**, an `hgca`/`g23h` Gaia epoch is averaged over a uniform nominal scan grid (every 10 d) across the release's observing window (DR3 2014-07-25 to 2017-05-28; DR2 to 2016-05-23) rather than the instantaneous reflex, and `Data` logs an `@info`; GOST gives the exact scan law. Auto-stage with `fetch_gost(ra, dec)`. **Auxiliary, not a standalone measurement** — GOST only window-averages (Mode B) the Gaia epoch(s) of a paired `hgca`/`gaia_dr3`/`g23h` (a five-parameter fit through the transits inside the release window); supplied alone (or only with `iad`) it is inert and the constructor warns. |
+| `gost` | `Union{Nothing, GOSTData}` | Gaia scanning law from the GOST tool (predicted scan epochs + angles). **Without it**, an `hgca`/`g23h` Gaia epoch is averaged over a stratified-jittered nominal scan grid (one deterministic epoch per 5 d bin; a strictly uniform grid aliases periods near 5/n d into a spurious proper motion) across the release's observing window (DR3 2014-07-25 to 2017-05-28; DR2 to 2016-05-23) rather than the instantaneous reflex, and `Data` logs an `@info`; GOST gives the exact scan law. Auto-stage with `fetch_gost(ra, dec)`. **Auxiliary, not a standalone measurement** — GOST only window-averages (Mode B) the Gaia epoch(s) of a paired `hgca`/`gaia_dr3`/`g23h` (a five-parameter fit through the transits inside the release window); supplied alone (or only with `iad`) it is inert and the constructor warns. |
 | `g23h` | `Union{Nothing, G23HData}` | G23H five-PM Gaia DR2/DR3 + Hipparcos joint product (Thompson+ 2026, arXiv:2602.00235). |
 | `gaia_dr3` | `Union{Nothing, GaiaDR3Data}` | Gaia DR3 5-parameter astrometric solution. |
 | `transit_times` | `Vector{TransitTimeSet}` | Measured mid-transit times, one `TransitTimeSet` per planet (`planet`, integer `epoch` labels, `tc` in BJD_TDB, `tc_err` 1σ days, `source`, a `use` mask, `exclude_sources`, an optional reference ephemeris kept for provenance, and `jitter`). An independent Gaussian term per planet against the model's own transit times (`transit_times_log_likelihood`); the planet's mode must contain `PM`. See the `transit_times` subsection of [The `data` config block](#The-data-config-block) below. |
@@ -317,7 +317,7 @@ to `epochs`.
     Without scan geometry (`data.hip_scans === nothing`, with a warning) the
     Hipparcos epoch falls back to the instantaneous reflex at the Hipparcos
     epochs. Without GOST the Gaia epoch is instead averaged over a uniform
-    nominal scan grid across the release's window (10 d step; see `gost`). For
+    nominal scan grid across the release's window (5 d bins; see `gost`). For
     a period of a few years the instantaneous fallback is wrong by far more than the
     catalogue errors.
 
@@ -521,8 +521,7 @@ and Octofitter's G23H implementation:
 Every position is the fit's at that coordinate's central epoch, and every
 divisor the difference of those epochs (0.5 yr between the nominal J2016.0 and
 J2015.5). Without `hip_scans` (warned) the Hipparcos fit falls back to the instantaneous
-reflex at its epochs; without `gost` the Gaia fits use the uniform nominal
-window average. #2 and #4 stay positional differences.
+reflex at its epochs; without `gost` the Gaia fits use the nominal window average. #2 and #4 stay positional differences.
 
 The caller assembles the 10×10 covariance (typically in the Python
 sidecar reading the published catalog). UEVA, Hipparcos-IAD-jitter, and

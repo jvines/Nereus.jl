@@ -166,7 +166,7 @@ mas/yr.
 `scans === nothing` means that mission's scan geometry is not available. For
 Hipparcos the epoch falls back to the instantaneous reflex at the same epochs
 (the offset at `t_ra` / `t_dec` and the proper motion there; `Data` warns). For
-a Gaia window (`GAIA_DR2_WINDOW`, `GAIA_DR3_WINDOW`) it falls back to a UNIFORM
+a Gaia window (`GAIA_DR2_WINDOW`, `GAIA_DR3_WINDOW`) it falls back to a STRATIFIED-JITTERED
 NOMINAL scan set over that window ([`_nominal_gaia_scans`](@ref)), so the
 reflex is still averaged over the release's observing span, which matters
 whenever the period is not much longer than that span. A supplied GOST plan
@@ -178,7 +178,7 @@ way.
 """
 function _catalogue_epoch(orb, M_sec, scans, window, t_ra::Float64, t_dec::Float64)
     if scans === nothing && (window == GAIA_DR3_WINDOW || window == GAIA_DR2_WINDOW)
-        # No GOST plan: average over a uniform nominal scan set across the
+        # No GOST plan: average over a stratified-jittered nominal scan set across the
         # release's window instead of the instantaneous reflex.
         scans = _nominal_gaia_scans(window)
     end
@@ -201,25 +201,38 @@ end
 """
     NOMINAL_GAIA_SCAN_STEP_DAYS
 
-Spacing, in days, of the uniform epochs of [`_nominal_gaia_scans`](@ref).
-Averaging a reflex of period `P` over a grid of step `h` is faithful for
-`P ≳ 2h`; 10 d therefore resolves companions down to about 20 d, and any
-shorter period averages out to the same near-zero reflex the real scanning
-law gives it.
+Bin width, in days, of the stratified-jittered grid of
+[`_nominal_gaia_scans`](@ref): one epoch is drawn inside each bin. A strictly
+uniform grid aliases (a period near `h/n` is sampled at nearly the same phase
+every epoch and beats into a spurious drift that the 5-parameter fit reads as
+proper motion); the jitter turns that into noise that averages out. Periods
+shorter than about `2h` average to the near-zero reflex the real scanning law
+gives them.
 """
-const NOMINAL_GAIA_SCAN_STEP_DAYS = 10.0
+const NOMINAL_GAIA_SCAN_STEP_DAYS = 5.0
+
+# Deterministic uniform [0, 1) from an integer (splitmix64), independent of
+# Julia's RNG streams, which may change between versions.
+function _splitmix_unit(k::UInt64)
+    z = k * 0x9e3779b97f4a7c15 + 0x2545f4914f6cdd1d
+    z = (z ⊻ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = (z ⊻ (z >> 27)) * 0x94d049bb133111eb
+    z ⊻= z >> 31
+    return Float64(z >> 11) * 0x1p-53
+end
 
 """
     _nominal_gaia_scans(window) -> GOSTData
 
-Synthetic scan set for a Gaia release when no GOST plan was supplied: epochs
-uniform in `window` every [`NOMINAL_GAIA_SCAN_STEP_DAYS`](@ref) days, each with
-one along-RA scan (ψ = π/2) and one along-Dec scan (ψ = 0), so the
-five-parameter fit through it is a uniform-in-time average of the RA and Dec
-reflex. The parallax factors are the annual sine / cosine, which keeps the
-parallax column of the fit well conditioned. This is what the real GOST path
-does, `scan_5param_fit` through the window's transits, with synthetic
-transits. Cached per window.
+Synthetic scan set for a Gaia release when no GOST plan was supplied: one epoch
+drawn uniformly inside each [`NOMINAL_GAIA_SCAN_STEP_DAYS`](@ref)-day bin of
+`window` (deterministic: a fixed splitmix64 hash, so the likelihood is
+identical across runs, machines and Julia versions), each epoch with one
+along-RA scan (ψ = π/2) and one along-Dec scan (ψ = 0), so the five-parameter
+fit through it is a time average of the RA and Dec reflex. The parallax
+factors are the annual sine / cosine, which keeps the parallax column of the
+fit well conditioned. This is what the real GOST path does, `scan_5param_fit`
+through the window's transits, with synthetic transits. Cached per window.
 """
 const _NOMINAL_GAIA_SCANS = Dict{Tuple{Float64,Float64}, GOSTData}()
 const _NOMINAL_GAIA_LOCK = ReentrantLock()
@@ -228,9 +241,13 @@ function _nominal_gaia_scans(window::Tuple{Real,Real})
     lock(_NOMINAL_GAIA_LOCK) do
         get!(_NOMINAL_GAIA_SCANS, key) do
             lo, hi = key
-            ts = collect(range(lo, hi; length = max(6, ceil(Int, (hi - lo) / NOMINAL_GAIA_SCAN_STEP_DAYS) + 1)))
+            h = NOMINAL_GAIA_SCAN_STEP_DAYS
+            nb = max(2, ceil(Int, (hi - lo) / h))
             t = Float64[]; psi = Float64[]; pf = Float64[]
-            for x in ts
+            for k in 0:(nb - 1)
+                b = lo + k * h
+                w = min(h, hi - b)
+                x = b + _splitmix_unit(UInt64(k)) * w
                 ph = 2π * (x - lo) / 365.25
                 push!(t, x); push!(psi, π / 2); push!(pf, sin(ph))
                 push!(t, x); push!(psi, 0.0);   push!(pf, cos(ph))
@@ -268,8 +285,8 @@ reduction's scan geometry, which stands in for the HGCA's 60/40 blend of the
 1997 and 2007 reductions. Without Hipparcos scans (`data.hip_scans ===
 nothing`) epoch 1 and the Hipparcos end of epoch 2 fall back to the
 instantaneous reflex at the Hipparcos epochs; without GOST, epoch 3 and the
-Gaia end of epoch 2 use a uniform nominal scan set across the release's window
-instead ([`_nominal_gaia_scans`](@ref), 10 d step), still averaged, not the
+Gaia end of epoch 2 use a stratified-jittered nominal scan set across the release's window
+instead ([`_nominal_gaia_scans`](@ref), 5 d bins), still averaged, not the
 instantaneous reflex (see [`_catalogue_epoch`](@ref)).
 
 The part of `hgca_log_likelihood` that `plot_hgca_residuals` and
@@ -1565,7 +1582,7 @@ it (§II–III, Table 1; Octofitter's `G23HObs` forward model):
 
 `epochs_ra` / `epochs_dec` are `g23h`'s per-coordinate central epochs. Without
 Hipparcos scans the Hipparcos epoch falls back to the instantaneous reflex at
-its epochs; without GOST the two Gaia epochs use the uniform nominal window
+its epochs; without GOST the two Gaia epochs use the jittered nominal window
 average (see [`_catalogue_epoch`](@ref)); the positional differences stay positional
 differences either way.
 
