@@ -1601,7 +1601,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     max_k = Int(_get(mdl, :max_kplanet; default = 1))
     modes_str = String.(_get(mdl, :planet_modes;
                               default = fill("RV_ONLY", max_k)))
-    pm = [_PLANET_MODES[m] for m in modes_str]
+    pm = PlanetDataSources[_PLANET_MODES[m] for m in modes_str]
 
     par = _get(mdl, :parametrization; default = Dict())
     # `time`, when absent, is ParametrizationConfig's default `:auto`, as in
