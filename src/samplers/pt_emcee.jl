@@ -1771,6 +1771,7 @@ function sample_pt_emcee(
     # walkers and rng_master (whose draw of `init_seeds` above is undone by the
     # restore) are put back before the main loop.
     init_chunks = _chunk_ranges(ck === nothing ? n_temps * n_walkers_eff : 0, n_slots)
+    _sigint_deferred() do   # an interrupt lands after the threads, not inside @threads' wait
     Threads.@threads :static for slot in 1:length(init_chunks)
         for task_idx in init_chunks[slot]
             t = (task_idx - 1) ÷ n_walkers_eff + 1
@@ -1826,6 +1827,7 @@ function sample_pt_emcee(
             end
         end
     end
+    end   # _sigint_deferred
 
     # --- Sample storage (β=1, post-burnin, thinned; bounded space) ---
     n_keep_per_walker = max(0, cld(n_steps - n_burnin, thin))
@@ -1931,6 +1933,7 @@ function sample_pt_emcee(
         n_move = n_dim - length(held_x)
         held_dims = isempty(held_x) ? no_held_dim : is_held_dim
         p_de > 0 && _de_spread!(de_scale, state, partner_lo, partner_hi)
+        _sigint_deferred() do   # an interrupt lands after the threads, not inside @threads' wait
         Threads.@threads :static for slot in 1:length(chunks)
             fills_threads && _serial_inner_loops!()
             # Each slot takes the next walker as it frees up, not a fixed block:
@@ -1994,6 +1997,7 @@ function sample_pt_emcee(
                 end
             end
         end
+        end   # _sigint_deferred
         Threads.atomic_add!(n_evals_atomic, length(tasks))
     end
 
@@ -2008,6 +2012,7 @@ function sample_pt_emcee(
         n_tot = n_temps * n_walkers_eff
         rel_seeds = rand(rng_master, UInt64, n_tot)
         rel_chunks = _chunk_ranges(n_tot, n_slots)
+        _sigint_deferred() do   # an interrupt lands after the threads, not inside @threads' wait
         Threads.@threads :static for slot in 1:length(rel_chunks)
             buf = thread_proposal[slot]
             for task_idx in rel_chunks[slot]
@@ -2032,6 +2037,7 @@ function sample_pt_emcee(
                 end
             end
         end
+        end   # _sigint_deferred
         _prune_forget!(prune_mem)
         return nothing
     end

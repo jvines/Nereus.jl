@@ -7,6 +7,14 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **Ctrl-C during a `pt_emcee` run is an interrupt, not a crash.** A SIGINT that
+  arrived while the main task waited for a `Threads.@threads` half-step could be
+  thrown inside Base's lock-held `_wait` and surface as `ErrorException("unlock
+  count must match lock count")`. After burn-in the run then crashed and lost its
+  draws instead of stopping as "interrupted" (1 in 20 burn-in interrupts under
+  load). The threaded regions now run with SIGINT deferred to their end
+  (`_sigint_deferred`), so the interrupt lands in the step loop.
+
 - **Phase folds of a light curve with a baseline trend show the transit.** The
   fold evaluates its model and bands at the reference epoch, where it also
   evaluated the instrument's trend; with each trend in its own time the
