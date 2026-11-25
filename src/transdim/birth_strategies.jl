@@ -655,16 +655,21 @@ function _informed_slot_kernel(theta::Theta, block, slot::Int, S::_InformedSetup
     return (_QK_PRIOR, 0.0, 0.0, 0.0)
 end
 
+# A draw outside the slot's prior is returned as NaN and the birth rejected,
+# rather than clamped: a clamp piles the kernel's tail onto the bound, a point
+# mass `_qk_logpdf` does not carry.
+_qk_inside(v, lo, hi) = (lo <= v <= hi) ? v : NaN
+
 function _qk_draw(kind::Int, μ, σ, period, prior, lo, hi, rng)
     if kind == _QK_LOGNORMAL
-        return clamp(exp(log(μ) + σ * randn(rng)), lo, hi)
+        return _qk_inside(exp(log(μ) + σ * randn(rng)), lo, hi)
     elseif kind == _QK_NORMAL
-        return clamp(μ + σ * randn(rng), lo, hi)
+        return _qk_inside(μ + σ * randn(rng), lo, hi)
     elseif kind == _QK_WRAPPED
         raw = μ + σ * randn(rng)
-        return lo + (raw - lo) - period * floor((raw - lo) / period)
+        return _qk_inside(lo + (raw - lo) - period * floor((raw - lo) / period), lo, hi)
     elseif kind == _QK_HALFNORMAL
-        return clamp(abs(σ * randn(rng)), lo, hi)
+        return _qk_inside(abs(σ * randn(rng)), lo, hi)
     else
         return clamp(rand(rng, prior.dist), lo, hi)
     end
@@ -691,7 +696,8 @@ end
     _informed_draw!(new_values, theta, block, S, data, rng, M_sec_drawn)
 
 Draw the newborn's slot values from the informed mixture `S` into
-`new_values`: component, then period, then the component's kernels.
+`new_values`: component, then period, then the component's kernels. Returns
+`nothing` when a draw falls outside the prior (the birth is then rejected).
 """
 function _informed_draw!(new_values::AbstractVector{T}, theta::Theta, block,
                           S::_InformedSetup, data::Data, rng::AbstractRNG,
@@ -711,7 +717,8 @@ function _informed_draw!(new_values::AbstractVector{T}, theta::Theta, block,
     else
         log_x = S.log_x_min + (S.log_x_max - S.log_x_min) * rand(rng)
     end
-    x = exp(clamp(log_x, S.log_x_min, S.log_x_max))
+    (S.log_x_min <= log_x <= S.log_x_max) || return nothing
+    x = exp(log_x)
     new_values[block.P] = convert(T, x)
     P_now = _slot_to_period(S.m, x)
     for slot in planet_slot_indices(block)
@@ -722,7 +729,9 @@ function _informed_draw!(new_values::AbstractVector{T}, theta::Theta, block,
         prior = layout.unfrozen_priors[uf_pos]
         lo, hi = bounds(prior)
         kind, μ, σ, period = _informed_slot_kernel(theta, block, slot, S, c, P_now, data)
-        new_values[slot] = convert(T, _qk_draw(kind, μ, σ, period, prior, lo, hi, rng))
+        v = _qk_draw(kind, μ, σ, period, prior, lo, hi, rng)
+        isnan(v) && return nothing
+        new_values[slot] = convert(T, v)
     end
     return new_values
 end
@@ -741,7 +750,7 @@ function _informed_slot_log_q(theta::Theta, block, vals::AbstractVector,
     x = Float64(vals[block.P])
     x > 0 || return -Inf
     log_x = log(x)
-    # The draw clamps into [log_x_min, log_x_max]: nothing outside is reachable.
+    # The draw rejects outside [log_x_min, log_x_max]: nothing there is reachable.
     tol = 1e-9 * max(1.0, abs(S.log_x_max))
     (S.log_x_min - tol <= log_x <= S.log_x_max + tol) || return -Inf
     P_now = _slot_to_period(S.m, x)
@@ -776,15 +785,16 @@ function _informed_slot_log_q(theta::Theta, block, vals::AbstractVector,
     return mx + log(sum(t -> exp(t - mx), terms)) - log_x
 end
 
-# LS-only setup (InformedBirth). `bump`: count this call towards the cache's
-# refresh interval (births do; a death's reverse-density evaluation only reads
-# the cache, refreshing it when empty).
+# LS-only setup (InformedBirth). `bump`: a birth -- count this call towards the
+# cache's refresh interval and store what it computes. Without it (a death's
+# reverse-density evaluation) the cache is only read (`_read_peak_cache`).
 function _ls_informed_setup(theta::Theta, m::_PeriodSlotMap, log_x_min, log_x_max,
                              P_lo, P_hi, data::Data, rng::AbstractRNG; bump::Bool)
     # Cached periodogram, keyed by (rng, active-set signature): the peaks are
     # refined against the active-subtracted residuals, so the cache must be
     # state-consistent.
-    cache = _get_cache(_active_set_signature(theta, objectid(rng)))
+    sig = _active_set_signature(theta, objectid(rng))
+    cache = bump ? _get_cache(sig) : _read_peak_cache(sig)
     bump && (cache.calls_since_update += 1)
     if (bump && cache.calls_since_update >= INFORMED_CACHE_INTERVAL) ||
             isempty(cache.periods)
@@ -950,7 +960,8 @@ function _informed_birth(theta::Theta{T}, rng::AbstractRNG, data::Data, scratch,
                            data, rng; bump = true)
     S === nothing && return propose_planet_birth(theta, rng, PriorBirth(); scratch=scratch)
 
-    _informed_draw!(new_values, theta, block, S, data, rng, M_sec_drawn)
+    _informed_draw!(new_values, theta, block, S, data, rng, M_sec_drawn) === nothing &&
+        return (theta, convert(T, -Inf))
     log_q_fwd = lq_M + _informed_slot_log_q(theta, block, new_values, S, data, M_sec_drawn)
 
     activate_planet!(new_td, k)
@@ -1048,6 +1059,22 @@ function _get_bls_cache(chain_id::UInt64)
         length(_BLS_CACHES) > 512 && empty!(_BLS_CACHES)
         get!(() -> BLSCache(), _BLS_CACHES, chain_id)
     end
+end
+
+# The cache a death's reverse-density evaluation reads: the stored entry if it
+# holds peaks, otherwise a fresh one that is NOT stored, which the caller fills
+# from the post-death state -- the same peaks the reverse birth would find
+# there. A death must never add, refresh or reset an entry: births record the
+# keys they use so a checkpoint carries those entries, and an entry a death
+# created (or the oversize reset it triggered) would make a resumed run diverge
+# from a straight one.
+function _read_peak_cache(sig::UInt64)
+    c = lock(() -> get(_PEAK_CACHES, sig, nothing), _PEAK_CACHE_LOCK)
+    return (c === nothing || isempty(c.periods)) ? PeakCache() : c
+end
+function _read_bls_cache(sig::UInt64)
+    c = lock(() -> get(_BLS_CACHES, sig, nothing), _BLS_CACHE_LOCK)
+    return (c === nothing || isempty(c.periods)) ? BLSCache() : c
 end
 
 # Active-set signature for proposal caches. The cached BLS/LS peaks are
@@ -1331,7 +1358,7 @@ function _joint_informed_setup(theta::Theta, m::_PeriodSlotMap, log_x_min, log_x
                                 P_lo, P_hi, data::Data, rng::AbstractRNG; bump::Bool)
     # ---- LS peaks (same caching pathway as InformedBirth) ----
     state_sig = _active_set_signature(theta, objectid(rng))
-    ls_cache = _get_cache(state_sig)
+    ls_cache = bump ? _get_cache(state_sig) : _read_peak_cache(state_sig)
     bump && (ls_cache.calls_since_update += 1)
     if (bump && ls_cache.calls_since_update >= INFORMED_CACHE_INTERVAL) ||
                 isempty(ls_cache.periods)
@@ -1366,7 +1393,7 @@ function _joint_informed_setup(theta::Theta, m::_PeriodSlotMap, log_x_min, log_x
     end
 
     # ---- BLS peaks (cached, harmonic-deduped) ----
-    bls_cache = _get_bls_cache(state_sig)
+    bls_cache = bump ? _get_bls_cache(state_sig) : _read_bls_cache(state_sig)
     bump && (bls_cache.calls_since_update += 1)
     if (bump && bls_cache.calls_since_update >= INFORMED_CACHE_INTERVAL) ||
                 isempty(bls_cache.periods)

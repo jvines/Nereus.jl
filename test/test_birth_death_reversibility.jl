@@ -187,3 +187,23 @@ end
                                  population = Theta{Float64}[])
     @test lb + ld ≈ 0.0 atol = 1e-9
 end
+
+@testset "an informed death only reads the periodogram cache" begin
+    # Births record the active-set keys whose cache entries a checkpoint must
+    # carry. A death that stored an entry of its own (or triggered the
+    # oversize reset) made a resumed rjmcmc run diverge from a straight one.
+    params, data = rv_params(2)
+    Nereus.reset_transdim_caches!()
+    rng = MersenneTwister(4)
+    th = Theta{Float64}(params; td = TransDimState(max_planets = 2))
+    born, lb = propose_planet_birth(th, rng, InformedBirth(); data = data)
+    @test isfinite(lb)
+    before = Dict(k => (copy(v.periods), v.calls_since_update)
+                  for (k, v) in Nereus._PEAK_CACHES)
+    for _ in 1:20
+        propose_planet_death(born, rng, InformedBirth(); data = data)
+    end
+    after = Dict(k => (copy(v.periods), v.calls_since_update)
+                 for (k, v) in Nereus._PEAK_CACHES)
+    @test after == before
+end
