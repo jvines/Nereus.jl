@@ -193,7 +193,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     max_k = length(td.planet_active)
     n_active = td.n_planets_active
 
-    cand_slots = group_first_inactive(td, theta.params.config.planet_modes)
+    cand_slots = group_first_inactive(td, birth_group_keys(theta.params))
     isempty(cand_slots) && return (theta, convert(T, -Inf))
     k = cand_slots[rand(rng, 1:length(cand_slots))]
     G = length(cand_slots)
@@ -272,6 +272,7 @@ The reverse move is the random-walk add, whose density is included in
 """
 function propose_planet_death(theta::Theta{T}, rng::AbstractRNG,
                                strategy::MoMSBirth;
+                               data::Union{Data, Nothing}=nothing,
                                scratch::Union{Theta{T}, Nothing}=nothing) where {T}
     td = theta.td
     max_k = length(td.planet_active)
@@ -320,7 +321,7 @@ function propose_planet_death(theta::Theta{T}, rng::AbstractRNG,
     _, p_death     = _birth_death_probs(n_active, max_k)
     # −log(G_after): mirror of the births' uniform mode-group slot choice.
     G_after = length(group_first_inactive(new_td,
-                                           theta.params.config.planet_modes))
+                                           birth_group_keys(theta.params)))
     log_q_ratio = log(p_birth_new) + log(n_active) - log(p_death) +
                   log_q_reverse - log(max(G_after, 1))
 

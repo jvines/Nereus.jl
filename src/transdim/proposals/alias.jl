@@ -95,7 +95,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     max_k = length(td.planet_active)
     n_active = td.n_planets_active
 
-    cand_slots = group_first_inactive(td, theta.params.config.planet_modes)
+    cand_slots = group_first_inactive(td, birth_group_keys(theta.params))
     isempty(cand_slots) && return (theta, convert(T, -Inf))
     k = cand_slots[rand(rng, 1:length(cand_slots))]
     G = length(cand_slots)

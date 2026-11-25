@@ -727,16 +727,11 @@ function _moms_planet_move!(callback, theta::Theta, data::Data,
 
     new_theta, log_q = if do_birth
         propose_planet_birth(theta, rng, chosen_strategy; data=data)
-    elseif chosen_strategy isa MoMSBirth
-        # MoMS death is deterministic (reset to `off_values`); its
-        # M-H ratio uses the matching MoMSBirth-specific proposal
-        # density.
-        propose_planet_death(theta, rng, chosen_strategy)
     else
-        # InformedBirth/PriorBirth deaths are uniform over active
-        # planets; the Hastings ratio in `propose_planet_birth(::Informed)`
-        # was computed against this strategy-agnostic death.
-        propose_planet_death(theta, rng)
+        # Each birth strategy's own death (MoMS: deterministic reset to
+        # `off_values`; informed: the informed-birth density at the killed
+        # values), so every pair is reversible.
+        propose_planet_death(theta, rng, chosen_strategy; data=data)
     end
 
     !isfinite(log_q) && return (false, 0)

@@ -974,7 +974,7 @@ function _pt_transdim_move!(rep::TransDimPTState, data::Data,
         propose_planet_birth(theta, rng, strategy;
                               data=data, population=population,
                               scratch=scratch) :
-        propose_planet_death(theta, rng, strategy; scratch=scratch)
+        propose_planet_death(theta, rng, strategy; data=data, scratch=scratch)
 
     !isfinite(log_q) && return
 

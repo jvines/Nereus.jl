@@ -194,7 +194,7 @@ function propose_planet_ad_swap(theta::Theta{T}, rng::AbstractRNG,
     nm_models = theta.params.config.noise_models
     ad, adi = _swap_ad_index(toggleable, nm_models)
     ad === nothing && return (theta, convert(T,-Inf))
-    modes = theta.params.config.planet_modes
+    modes = birth_group_keys(theta.params)
     max_k = length(theta.td.planet_active)
     dirs = _swap_dirs(theta.td, ad, adi, nm_models, exclusion_groups, modes, max_k)
     isempty(dirs) && return (theta, convert(T,-Inf))

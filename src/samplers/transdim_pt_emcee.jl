@@ -2304,12 +2304,12 @@ function sample_transdim_pt_emcee(
                     continue
                 end
 
+                # Each birth strategy pairs with its own death, which carries
+                # that birth's density at the killed values.
                 new_theta, log_q = if do_birth
                     propose_planet_birth(theta, trng, chosen_strategy; data=data)
-                elseif chosen_strategy isa MoMSBirth
-                    propose_planet_death(theta, trng, strategy)
                 else
-                    propose_planet_death(theta, trng)
+                    propose_planet_death(theta, trng, chosen_strategy; data=data)
                 end
                 isfinite(log_q) || continue
 

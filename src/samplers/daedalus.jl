@@ -633,13 +633,10 @@ function _daedalus_evolve(start::DaedalusPoint, target::NereusTarget,
                     strategy
                 if rand(rng) < p_birth
                     propose_planet_birth(theta, rng, chosen_strategy; data = data)
-                elseif chosen_strategy isa MoMSBirth
-                    propose_planet_death(theta, rng, chosen_strategy)
                 else
-                    # InformedBirth's matching reverse is the strategy-
-                    # agnostic uniform-pick death; its Hastings ratio
-                    # was computed against this in `propose_planet_birth`.
-                    propose_planet_death(theta, rng)
+                    # Each birth strategy's own death: it carries that
+                    # birth's density at the killed values.
+                    propose_planet_death(theta, rng, chosen_strategy; data = data)
                 end
             end
             isfinite(log_q) || continue
