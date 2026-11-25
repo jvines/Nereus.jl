@@ -7,6 +7,23 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **Ctrl-C during a `pt_emcee` run is an interrupt, not a crash.** A SIGINT that
+  arrived while the main task waited for a `Threads.@threads` half-step could be
+  thrown inside Base's lock-held `_wait` and surface as `ErrorException("unlock
+  count must match lock count")`. After burn-in the run then crashed and lost its
+  draws instead of stopping as "interrupted" (1 in 20 burn-in interrupts under
+  load). The threaded regions now run with SIGINT deferred to their end
+  (`_sigint_deferred`), so the interrupt lands in the step loop.
+
+- **Phase folds of a light curve with a baseline trend show the transit.** The
+  fold evaluates its model and bands at the reference epoch, where it also
+  evaluated the instrument's trend; with each trend in its own time the
+  extrapolated trend put the folded model of a single night far off the data
+  (NGTS-33 PEST g': flux ≈ −7). The fold now leaves the trend out of its curve
+  and bands and takes it out of the folded cadences; residuals are unchanged.
+  `compute_transit_model_on_grid` and `compute_transit_ci_bands` take
+  `trend = false`.
+
 - **Missing activity-indicator values no longer break RV fits.** An indicator
   entry that is NaN (a night the pipeline did not report H-alpha, a blank CSV
   cell) made `IndicatorFloor` (`:qp` and `:white`, generic and workspace

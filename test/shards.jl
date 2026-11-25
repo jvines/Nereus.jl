@@ -288,6 +288,8 @@ const TEST_UNITS = [
     (name = "test_typed_api_gaps.jl", seconds = 170, files = ["test_typed_api_gaps.jl"]),
     # Per-instrument photometric trend orders and per-group trend time. Estimated (2026-11-24).
     (name = "test_phot_trend_per_instrument.jl", seconds = 60, files = ["test_phot_trend_per_instrument.jl"]),
+    # A phase fold of a trended light curve: model and bands without the trend. Estimated (2026-11-25).
+    (name = "test_phot_trend_fold_plot.jl", seconds = 60, files = ["test_phot_trend_fold_plot.jl"]),
 ]
 
 const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")

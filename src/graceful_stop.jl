@@ -132,3 +132,16 @@ end
 const _STEP_HOOK = Ref{Union{Nothing,Function}}(nothing)
 _step_hook!(step::Int, sc::StopControl) =
     (h = _STEP_HOOK[]; h === nothing || h(step, sc); nothing)
+
+"""
+    _sigint_deferred(f)
+
+Run `f` (a `Threads.@threads` region) with SIGINT deferred until it returns, so
+an interrupt is thrown in the task that resumes after the threads, not inside
+the wait for them. Delivered inside that wait, while Base's `_wait(::Task)` holds
+the task's lock, an interrupt surfaced as `ErrorException("unlock count must
+match lock count")`: Ctrl-C after burn-in then crashed the run instead of
+keeping its draws (test_graceful_stop failed this way under load). A half-step
+is milliseconds to seconds, which is how long the interrupt waits.
+"""
+_sigint_deferred(f) = Base.disable_sigint(f)
