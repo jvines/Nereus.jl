@@ -96,10 +96,12 @@ end
         at = _GS_BURNIN + 40
         r = _gs_with_hook(() -> _gs_run(target), _gs_interrupt(at))
         @test r.stop.stopped == "interrupted"
-        # The signal is delivered asynchronously: on a loaded machine it can land
-        # a step or two after the hook sends it. What must hold whatever the
-        # step is that the step in flight is dropped (the draw counts below).
-        @test at - 1 <= r.stop.step <= at + 5
+        # The signal is delivered asynchronously, and pt_emcee holds it until the
+        # threaded region in flight returns (`_sigint_deferred`): on a loaded
+        # machine it lands some steps after the hook sends it (up to 6 in 30
+        # loaded runs, 8 once in the suite). What must hold whatever the step is
+        # that the step in flight is dropped (the draw counts below).
+        @test at - 1 <= r.stop.step <= at + 20
         @test r.stop.n_draws == 20 * (r.stop.step - _GS_BURNIN)
         _gs_consistent(r, 20)
         @test size(r.chains.value.data, 1) == r.stop.step - _GS_BURNIN
