@@ -48,7 +48,13 @@ function _rj_setup(rv; td_kw = (;), params_kw = (;), data_kw = (;))
     return NereusTarget(params, data; unconstrained = false), data, td
 end
 
-const _RJ_KW = (n_warmup = 400, seed = 5, within_model = :rwm, show_progress = false)
+# The seed is picked so that the straight run exercises everything the splits
+# must carry: the planet at 4.23 d (some seeds trap the only planet on its
+# 8.5 d alias, where adding the true one is Hill-unstable), AD toggling rather
+# than on throughout, and a re-cut of the circular windows. With the
+# birth/death ratios corrected (informed planet deaths, noise selection term),
+# seed 5 trapped on the alias; seed 59 does all three.
+const _RJ_KW = (n_warmup = 400, seed = 59, within_model = :rwm, show_progress = false)
 
 # The informed-birth caches are process-global: every run starts them cold, as
 # a fresh process does.
@@ -56,7 +62,7 @@ function _rj_run(n_samples; rv = _RJ_RV, td_kw = (;), params_kw = (;), data_kw =
                  kw...)
     tg, data, td = _rj_setup(rv; td_kw, params_kw, data_kw)
     Nereus.reset_transdim_caches!()
-    chains, n_evals = sample_rjmcmc(tg, data; td, _RJ_KW..., n_samples, kw...)
+    chains, n_evals = sample_rjmcmc(tg, data; td, merge(_RJ_KW, (; n_samples, kw...))...)
     return (; chains, n_evals, windows = Nereus.circular_windows(tg.params))
 end
 
@@ -152,13 +158,24 @@ end
     @test ext.n_evals == full.n_evals
 
     # A chain the checkpoint holds nothing for (killed before its first
-    # checkpoint) starts from its seed, which is where it was.
-    raw = open(deserialize, path)
-    Nereus.write_checkpoint(path, "rjmcmc", raw.fingerprint,
+    # checkpoint) starts from its seed, which is where it was -- provided the
+    # straight run did not re-cut the circular windows. The windows live on the
+    # one Params every chain shares, so a resume takes the re-cut ones before
+    # any chain starts, and a chain restarted from nothing then warms up in the
+    # re-cut chart instead of the original one: the same target, not the same
+    # draws. Seed 59 re-cuts here (the resume above covers that); seed 5 does
+    # not, and is where "restarted from its seed" is exact.
+    kw5 = (; kw..., seed = 5)
+    full5 = _rj_run(400; kw5...)
+    @test full5.windows == Nereus.circular_windows(_rj_setup(_RJ_RV)[1].params)
+    path5 = joinpath(mktempdir(), "rjmcmc_state.jls")
+    _rj_run(200; kw5..., checkpoint = path5)
+    raw = open(deserialize, path5)
+    Nereus.write_checkpoint(path5, "rjmcmc", raw.fingerprint,
                             (; chains = Any[raw.state.chains[1], nothing]))
-    redo = _rj_run(400; kw..., checkpoint = path, resume = true)
-    @test _cube(redo) == _cube(full)
-    @test redo.n_evals == full.n_evals
+    redo = _rj_run(400; kw5..., checkpoint = path5, resume = true)
+    @test _cube(redo) == _cube(full5)
+    @test redo.n_evals == full5.n_evals
 end
 
 @testset "rjmcmc fingerprint reads the whole model" begin
