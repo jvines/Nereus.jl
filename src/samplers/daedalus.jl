@@ -608,7 +608,8 @@ function _daedalus_evolve(start::DaedalusPoint, target::NereusTarget,
                     propose_noise_birth(theta, rng, td.toggleable; data=data,
                                          exclusion_groups=td.noise_exclusion_groups)
                 else
-                    propose_noise_death(theta, rng, td.toggleable; data=data)
+                    propose_noise_death(theta, rng, td.toggleable; data=data,
+                                         exclusion_groups=td.noise_exclusion_groups)
                 end
             else
                 # Planet birth/death. With probability

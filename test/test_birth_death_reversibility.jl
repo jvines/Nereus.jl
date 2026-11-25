@@ -187,3 +187,42 @@ end
                                  population = Theta{Float64}[])
     @test lb + ld ≈ 0.0 atol = 1e-9
 end
+
+@testset "an informed death reads the periodogram cache and only fills a missing entry" begin
+    # Births record the active-set keys whose cache entries a checkpoint must
+    # carry. A death that refreshed or bumped an entry made a resumed rjmcmc
+    # run diverge from a straight one; a death that never stored anything
+    # recomputed the periodogram on every death into an unvisited state.
+    params, data = rv_params(2)
+    Nereus.reset_transdim_caches!()
+    rng = MersenneTwister(4)
+    th = Theta{Float64}(params; td = TransDimState(max_planets = 2))
+    born, lb = propose_planet_birth(th, rng, InformedBirth(); data = data)
+    @test isfinite(lb)
+    born2, lb2 = propose_planet_birth(born, rng, InformedBirth(); data = data)
+    @test isfinite(lb2)
+    before = Dict(k => (copy(v.periods), v.calls_since_update)
+                  for (k, v) in Nereus._PEAK_CACHES)
+    for _ in 1:20
+        propose_planet_death(born2, rng, InformedBirth(); data = data)
+    end
+    after = Dict(k => (copy(v.periods), v.calls_since_update)
+                 for (k, v) in Nereus._PEAK_CACHES)
+    # entries that existed are untouched
+    @test all(k -> after[k] == before[k], keys(before))
+    # what was added is exactly the post-death states' entries, filled once
+    id = objectid(rng)
+    death_sigs = Set(Nereus._active_set_signature(key, id)
+                     for key in Nereus._death_active_set_keys(born2))
+    added = setdiff(keys(after), keys(before))
+    @test !isempty(added)
+    @test all(in(death_sigs), added)
+    @test all(k -> after[k][2] == 0 && !isempty(after[k][1]), added)
+    # and the next deaths reuse them without recomputing
+    for _ in 1:20
+        propose_planet_death(born2, rng, InformedBirth(); data = data)
+    end
+    again = Dict(k => (copy(v.periods), v.calls_since_update)
+                 for (k, v) in Nereus._PEAK_CACHES)
+    @test again == after
+end

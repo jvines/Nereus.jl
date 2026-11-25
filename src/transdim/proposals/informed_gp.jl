@@ -201,8 +201,12 @@ function _gp_informed_draw(rng::AbstractRNG, h)
     else
         h.tmin + rand(rng) * (h.tmax - h.tmin)
     end
-    t = clamp(t, h.tmin, h.tmax)
-    return clamp(_gp_val_of(t, Val(h.kind)), h.lo, h.hi)
+    # Outside the range: NaN, so the caller's density check rejects the
+    # birth. A clamp would pile the tail onto the bound, a point mass that
+    # `_gp_informed_logq` does not carry.
+    (h.tmin <= t <= h.tmax) || return NaN
+    v = _gp_val_of(t, Val(h.kind))
+    return (h.lo <= v <= h.hi) ? v : NaN
 end
 
 "Density of `_gp_informed_draw` at `v`, in the parameter's own coordinate."

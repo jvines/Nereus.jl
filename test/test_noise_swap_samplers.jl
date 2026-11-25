@@ -110,16 +110,13 @@ using Random, Statistics, MCMCChains
         check(r, "rjmcmc")
     end
 
-    # Regression: a swap needs an active member to swap FROM. With no
-    # fallthrough, rate = 1 meant EVERY noise move was a swap, none could fire
-    # from the "none" state, and the chain froze there for the whole run with
-    # both members permanently inactive.
-    @testset "swap rate 1.0 does not starve birth/death" begin
-        r = Nereus.sample_rjmcmc(tgt, data; td = td, n_samples = 4000,
-                                 n_warmup = 2000, seed = 3,
+    # The swap is chosen with the same probability in every state (a null move
+    # when no member is active), so its selection never biases birth/death. At
+    # rate 1 that leaves no birth/death at all, so the rate is refused.
+    @testset "swap rate 1.0 is refused with exclusion groups" begin
+        @test_throws ArgumentError Nereus.sample_rjmcmc(tgt, data; td = td,
+                                 n_samples = 10, n_warmup = 10, seed = 3,
                                  noise_swap_rate = 1.0, show_progress = false)
-        a1, a2 = activity(r)
-        @test any(a1) || any(a2)
     end
 
     @testset "transdim_pt_emcee unchanged by the port" begin

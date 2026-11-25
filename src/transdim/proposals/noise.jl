@@ -86,7 +86,9 @@ function propose_noise_birth(theta::Theta{T}, rng::AbstractRNG,
                 uf_pos = findfirst(==(slot), layout.unfrozen_idx)
                 uf_pos === nothing && continue
                 lo, hi = bounds(layout.unfrozen_priors[uf_pos])
-                Cdraw[k] = clamp(Cdraw[k], lo, hi)
+                # Reject, not clamp: a clamp piles the tail onto the bound, a
+                # point mass the Gaussian density below does not carry.
+                (lo <= Cdraw[k] <= hi) || return (theta, convert(T, -Inf))
                 new_values[slot] = convert(T, Cdraw[k])
             end
             log_q_fwd = _ad_mvn_logq(Cdraw, C_ols, F, inflate)
