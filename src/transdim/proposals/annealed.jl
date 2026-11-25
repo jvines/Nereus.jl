@@ -88,6 +88,10 @@ already consumed the prior and likelihood terms. `log_accept = -Inf` means the
 move could not be constructed and the caller should do nothing.
 
 `n_bridge = 1` reproduces the ordinary RJ birth exactly (see the note above).
+Its reverse is [`propose_noise_death_annealed`](@ref) with the same `n_bridge`,
+`n_relax` and `relax_scale`: the annealed birth paired with the instantaneous
+death is NOT reversible (the birth enjoys the bridge, the death does not, and
+the chain over-occupies whatever the bridge makes easy to enter).
 """
 function propose_noise_birth_annealed(theta::Theta{T}, rng::AbstractRNG,
         toggleable::Vector{NoiseModel}, loglik, logprior;
@@ -107,11 +111,7 @@ function propose_noise_birth_annealed(theta::Theta{T}, rng::AbstractRNG,
     p = parts[]
     slots = _noise_model_slots(cand, p.nm_idx)
     isempty(slots) && return (theta, convert(T,-Inf), NaN)
-    # q != prior for the OLS-informed AD birth, so the relaxation target below
-    # is not its rho_t. Fall back to a single stage (== ordinary RJ).
-    if theta.params.config.noise_models[p.nm_idx] isa ActivityDecorrelation
-        n_bridge = 1
-    end
+    n_bridge = _annealed_stages(theta, p.nm_idx, n_bridge)
 
     ll_A = ll_current === nothing ? loglik(theta)  : Float64(ll_current)
     lp_A = lp_current === nothing ? logprior(theta) : Float64(lp_current)
@@ -121,64 +121,147 @@ function propose_noise_birth_annealed(theta::Theta{T}, rng::AbstractRNG,
     lp_x = logprior(cand)
     (isfinite(ll_x) && isfinite(lp_x)) || return (theta, convert(T,-Inf), NaN)
 
-    # D(x) = log rho_T(x) - log rho_0(x), with
-    #   rho_0 = pi_A(theta) * q(u)        rho_T = pi_B(theta, u)
-    # Everything shared between the models cancels inside the prior difference.
-    Dof(lp, ll) = (lp + beta*ll) - (lp_A + beta*ll_A + p.log_q_fwd)
+    # The birth proposal q(u) as a density (theta has the model inactive): the
+    # relaxation targets rho_t, which carries q(u)^(1-b_t).
+    qset = _noise_birth_q_setup(theta, p.nm_idx, data)
+    lq_x = Float64(p.log_q_fwd)
 
     logW = 0.0
-    βprev = 0.0
     for t in 1:n_bridge
-        βt = t / n_bridge
-        logW += (βt - βprev) * Dof(lp_x, ll_x)
-        βprev = βt
+        logW += (lp_x + beta * ll_x - lq_x - lp_A - beta * ll_A) / n_bridge
         t == n_bridge && break                  # nothing to relax after the last
-
-        # Relaxation must leave rho_t invariant. In general
-        #   rho_t(u) ∝ q(u)^(1-b_t) * [prior(u) * L^beta]^(b_t)
-        # which needs q evaluable at arbitrary u. When the birth DRAWS FROM THE
-        # PRIOR (the default path) q = prior and this collapses to
-        #   rho_t(u) ∝ prior(u) * L(theta,u)^(beta*b_t)
-        # i.e. plain tempered-likelihood M-H on the newborn — which is what
-        # `climb_newborn!` already approximates, only now its work is counted
-        # instead of discarded. ActivityDecorrelation births are OLS-informed
-        # (q != prior), so they are left to the standard path; their occupancy
-        # gate already passes.
-        for _ in 1:n_relax
-            for slot in slots
-                uf = findfirst(==(slot), cand.params.layout.unfrozen_idx)
-                uf === nothing && continue
-                lo, hi = bounds(cand.params.layout.unfrozen_priors[uf])
-                old = cand.values[slot]
-                span = (isfinite(hi) && isfinite(lo)) ? (hi - lo) : abs(old) + 1
-                nv = old + relax_scale * span * randn(rng)
-                (lo <= nv <= hi) || continue
-                cur = lp_x + βt * beta * ll_x
-                cand.values[slot] = convert(T, nv)
-                ll_try = loglik(cand); lp_try = logprior(cand)
-                if isfinite(ll_try) && isfinite(lp_try) &&
-                   log(rand(rng)) < (lp_try + βt*beta*ll_try) - cur
-                    ll_x = ll_try; lp_x = lp_try
-                else
-                    cand.values[slot] = old
-                end
-            end
-        end
+        ll_x, lp_x, lq_x = _annealed_relax!(cand, slots, t / n_bridge, beta,
+                                             ll_x, lp_x, lq_x, loglik, logprior,
+                                             qset, p.nm_idx, n_relax, relax_scale, rng)
     end
 
     log_accept = logW + p.log_comb
     return (cand, convert(T, log_accept), ll_x)
 end
 
-"""
-    propose_noise_death(theta, rng, toggleable) -> (new_theta, log_q_ratio)
+# ActivityDecorrelation births are OLS-informed and already land near the
+# mode; they keep the single-stage (ordinary RJ) move in both directions.
+_annealed_stages(theta::Theta, nm_idx::Int, n_bridge::Int) =
+    theta.params.config.noise_models[nm_idx] isa ActivityDecorrelation ? 1 : n_bridge
 
-Deactivate a random active noise component.
+# One relaxation sweep block at bridge stage b of the geometric path
+#   log rho_b(u) = (1 - b)·log q(u) + b·[log prior(θ,u) + beta·log L(θ,u)] + const,
+# by coordinate random-walk Metropolis on the model's own slots. For a prior
+# draw (q = the prior) this is prior(u)·L^(beta·b), the tempered posterior of
+# the newborn; for an informed draw (GP hints) the q term is what keeps the
+# kernel rho_b-invariant — without it the AIS weights do not match the path.
+function _annealed_relax!(cand::Theta{T}, slots, b::Float64, beta, ll_x, lp_x, lq_x,
+                           loglik, logprior, qset, nm_idx::Int, n_relax::Int,
+                           relax_scale, rng) where {T}
+    layout = cand.params.layout
+    tgt(lp, ll, lq) = (1 - b) * lq + b * (lp + beta * ll)
+    for _ in 1:n_relax
+        for slot in slots
+            uf = findfirst(==(slot), layout.unfrozen_idx)
+            uf === nothing && continue
+            lo, hi = bounds(layout.unfrozen_priors[uf])
+            old = cand.values[slot]
+            span = (isfinite(hi) && isfinite(lo)) ? (hi - lo) : abs(old) + 1
+            nv = old + relax_scale * span * randn(rng)
+            (lo <= nv <= hi) || continue
+            cand.values[slot] = convert(T, nv)
+            ll_try = loglik(cand); lp_try = logprior(cand)
+            lq_try = (isfinite(ll_try) && isfinite(lp_try)) ?
+                     _noise_birth_q_eval(qset, cand, nm_idx, cand.values) : -Inf
+            if isfinite(lq_try) &&
+               log(rand(rng)) < tgt(lp_try, ll_try, lq_try) - tgt(lp_x, ll_x, lq_x)
+                ll_x = ll_try; lp_x = lp_try; lq_x = lq_try
+            else
+                cand.values[slot] = old
+            end
+        end
+    end
+    return (ll_x, lp_x, lq_x)
+end
+
+"""
+    propose_noise_death_annealed(theta, rng, toggleable, loglik, logprior; ...)
+        -> (cand, log_accept, ll_new)
+
+The reverse of [`propose_noise_birth_annealed`](@ref): pick an active toggleable
+model, run the SAME bridge backwards from the current state (stages
+T−1, …, 1, each relaxing the model's parameters under the stage's
+rho_t-invariant kernel) accumulating
+
+    log W_rev = −Σ_t (b_t − b_{t−1}) · [log rho_T(x_t) − log rho_0(x_t)],
+
+then switch the model off. On the path space this is the time reversal of the
+birth (Karagiannis & Andrieu 2013), so the pair is reversible; with
+`n_bridge = 1` it is exactly the ordinary death `propose_noise_death`.
+Returns the FULL log acceptance exponent and the post-death log-likelihood.
+"""
+function propose_noise_death_annealed(theta::Theta{T}, rng::AbstractRNG,
+        toggleable::Vector{NoiseModel}, loglik, logprior;
+        data::Union{Data,Nothing}=nothing,
+        exclusion_groups::Vector{Vector{NoiseModel}}=Vector{NoiseModel}[],
+        beta::Real=1.0, n_bridge::Int=8, n_relax::Int=2,
+        relax_scale::Real=0.3,
+        ll_current::Union{Nothing,Real}=nothing,
+        lp_current::Union{Nothing,Real}=nothing) where {T}
+
+    n_bridge >= 1 || throw(ArgumentError("n_bridge must be ≥ 1"))
+    td = theta.td
+    noise_models = theta.params.config.noise_models
+    active_toggle = Int[]
+    for nm in toggleable
+        j = findfirst(==(nm), noise_models)
+        j === nothing && continue
+        is_noise_active(td, j) && push!(active_toggle, j)
+    end
+    isempty(active_toggle) && return (theta, convert(T, -Inf), NaN)
+    nm_idx = active_toggle[rand(rng, 1:length(active_toggle))]
+    n_bridge = _annealed_stages(theta, nm_idx, n_bridge)
+
+    off_td = copy(td); deactivate_noise!(off_td, nm_idx)
+    off = Theta{T}(theta.params, copy(theta.values); td = off_td)
+    ll_A = loglik(off); lp_A = logprior(off)
+    (isfinite(ll_A) && isfinite(lp_A)) || return (theta, convert(T, -Inf), NaN)
+
+    cand = Theta{T}(theta.params, copy(theta.values); td = copy(td))
+    slots = _noise_model_slots(cand, nm_idx)
+    ll_x = ll_current === nothing ? loglik(cand)  : Float64(ll_current)
+    lp_x = lp_current === nothing ? logprior(cand) : Float64(lp_current)
+    (isfinite(ll_x) && isfinite(lp_x)) || return (theta, convert(T, -Inf), NaN)
+    qset = _noise_birth_q_setup(off, nm_idx, data)
+    lq_x = _noise_birth_q_eval(qset, cand, nm_idx, cand.values)
+    isfinite(lq_x) || return (theta, convert(T, -Inf), NaN)
+
+    logW = -(lp_x + beta * ll_x - lq_x - lp_A - beta * ll_A) / n_bridge
+    for t in (n_bridge - 1):-1:1
+        ll_x, lp_x, lq_x = _annealed_relax!(cand, slots, t / n_bridge, beta,
+                                             ll_x, lp_x, lq_x, loglik, logprior,
+                                             qset, nm_idx, n_relax, relax_scale, rng)
+        logW -= (lp_x + beta * ll_x - lq_x - lp_A - beta * ll_A) / n_bridge
+    end
+
+    # Reverse-birth selection among the models activatable after the death,
+    # against this death's choice among the active ones.
+    n_act_after = length(_noise_activatable(off_td, toggleable, noise_models,
+                                            exclusion_groups))
+    log_comb = log(max(n_act_after, 1)) - log(length(active_toggle))
+    return (off, convert(T, logW + log_comb), ll_A)
+end
+
+"""
+    propose_noise_death(theta, rng, toggleable; data, exclusion_groups) -> (new_theta, log_q_ratio)
+
+Deactivate a random active noise component. The Hastings ratio carries the
+reverse birth's density at the killed parameters (`_noise_birth_q_eval`, from
+the post-death state) and its selection probability among the models
+activatable after the death (`_noise_activatable`, which needs the run's
+`exclusion_groups`).
 """
 function propose_noise_death(theta::Theta{T}, rng::AbstractRNG,
                               toggleable::Vector{NoiseModel};
                               scratch::Union{Theta{T}, Nothing}=nothing,
-                              data::Union{Data, Nothing}=nothing) where {T}
+                              data::Union{Data, Nothing}=nothing,
+                              exclusion_groups::Vector{Vector{NoiseModel}}=
+                                  Vector{NoiseModel}[]) where {T}
     td = theta.td
     noise_models = theta.params.config.noise_models
 
@@ -211,57 +294,21 @@ function propose_noise_death(theta::Theta{T}, rng::AbstractRNG,
     end
 
     n_active = length(active_toggle)
-    # Count how many would be inactive after (for reverse proposal)
-    n_inactive_after = count(.!new_td.noise_active[
-        [findfirst(==(nm), noise_models) for nm in toggleable
-         if findfirst(==(nm), noise_models) !== nothing]])
-    n_inactive_after = max(n_inactive_after, 1)
+    # The reverse birth picks uniformly among the models activatable in the
+    # post-death state — the same set `propose_noise_birth` builds.
+    n_inactive_after = max(length(_noise_activatable(new_td, toggleable,
+                                                     noise_models,
+                                                     exclusion_groups)), 1)
 
-    # Reverse-birth density of the killed params (prior pdf at their current
-    # values) — mirrors the −log_q_fwd in `propose_noise_birth`: it cancels
-    # the −Σ logpdf that Δlog_pi gains on deactivation, so the toggle samples
-    # P(M|D) instead of a prior-tilted pseudo-posterior.
-    layout = theta.params.layout
-    instruments = theta.params.config.instruments
-    killed = noise_models[nm_idx]
-    # Reverse-birth density of the killed AD coefficients must MATCH the
-    # OLS-informed forward birth: evaluate N(C_current; C_ols, inflate²
-    # (XᵀWX)⁻¹) where the OLS is on the POST-death (AD-inactive) residual,
-    # i.e. `new_theta` here (AD already deactivated above).
-    log_q_rev = zero(T)
-    ad_informed = false
-    if AD_INFORMED_BIRTH[] && killed isa ActivityDecorrelation && data !== nothing
-        cnames, C_ols, F = ad_ols_fit(new_theta, data, killed)
-        if F !== nothing && length(C_ols) == length(cnames) && !isempty(cnames)
-            Ccur = Float64[theta.values[layout.name_to_idx[nm]] for nm in cnames]
-            log_q_rev = _ad_mvn_logq(Ccur, C_ols, F, 2.0)
-            ad_informed = true
-        end
-    end
-    # Mirror of the informed forward birth: the hint must be built on the
-    # POST-death residual (`new_theta`, model already deactivated) so it is the
-    # same hint the birth would have used.
-    gp_hints = ad_informed ? NamedTuple[] :
-               _gp_hints(new_theta, data, killed, layout, instruments)
-    hint_of(sl) = (for h in gp_hints; h.slot == sl && return h; end; nothing)
-    if !ad_informed
-        for name in noise_param_names(killed, instruments)
-            haskey(layout.name_to_idx, name) || continue
-            slot = layout.name_to_idx[name]
-            uf_pos = findfirst(==(slot), layout.unfrozen_idx)
-            hh = hint_of(slot)
-            if hh !== nothing
-                lq = _gp_informed_logq(theta.values[slot], hh)
-                isfinite(lq) || return (theta, convert(T, -Inf))
-                log_q_rev += lq
-            elseif uf_pos !== nothing
-                log_q_rev += eval_packed_logpdf(theta.values[slot], layout.packed_priors, uf_pos)
-            end
-        end
-    end
+    # Reverse-birth density of the killed params — mirrors the −log_q_fwd in
+    # `propose_noise_birth` (OLS-informed AD, GP hints, else the prior), built
+    # on the POST-death state (`new_theta`, model already off), the state the
+    # reverse birth would start from.
+    qset = _noise_birth_q_setup(new_theta, nm_idx, data)
+    log_q_rev = _noise_birth_q_eval(qset, theta, nm_idx, theta.values)
+    isfinite(log_q_rev) || return (theta, convert(T, -Inf))
 
     log_q_ratio = log(n_inactive_after) - log(n_active) + log_q_rev
 
     return (new_theta, convert(T, log_q_ratio))
 end
-

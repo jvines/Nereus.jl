@@ -20,6 +20,7 @@ using Nereus: Params, Data, InstrumentConfig, NereusTarget, Theta,
               TransDimState, NoiseModel, PlanetDataSources,
               ActivityDecorrelation, CeleriteRotation, MaternGP,
               propose_noise_birth, propose_noise_birth_annealed,
+              propose_noise_death, propose_noise_death_annealed, ErrorScale,
               rv_log_likelihood, log_prior, _noise_model_slots,
               _noise_block_logprior
 using Random, Statistics
@@ -138,6 +139,118 @@ using Random, Statistics
         end
         @test total > 0
         @test better > total ÷ 2
+    end
+
+    @testset "one bridge stage death == ordinary RJ death" begin
+        for nm in (CeleriteRotation(channel = :rv), MaternGP(),
+                   ActivityDecorrelation(indicators = ["bis"]))
+            params, th = build(nm)
+            tog = NoiseModel[nm]
+            th.td.noise_active[1] = true
+            checked = 0
+            for trial in 1:10
+                a_cand, a_acc, a_ll = propose_noise_death_annealed(
+                    th, MersenneTwister(700 + trial), tog, loglik, logpri;
+                    data = data, n_bridge = 1)
+                b_cand, b_lqr = propose_noise_death(
+                    th, MersenneTwister(700 + trial), tog; data = data)
+                (isfinite(a_acc) && isfinite(b_lqr)) || continue
+                rj = (logpri(b_cand) + loglik(b_cand)) - (logpri(th) + loglik(th)) + b_lqr
+                @test a_acc ≈ rj atol = 1e-8
+                @test a_ll ≈ loglik(b_cand) atol = 1e-10
+                checked += 1
+            end
+            @test checked > 0
+        end
+    end
+
+    @testset "annealed birth + annealed death sample P(M | D)" begin
+        # One toggleable model with ONE parameter (ErrorScale), everything else
+        # frozen, so the exact posterior odds are a 1-D quadrature. The chain
+        # uses the sampler's move mix: half birth, half death (each annealed
+        # over 6 stages), plus a within-model step on the parameter. The
+        # annealed birth paired with the INSTANTANEOUS death is not reversible
+        # and over-occupies the model; the time-reversed annealed death is.
+        Nn = 40
+        r0 = MersenneTwister(31)
+        tt = sort(rand(r0, Nn)) .* 50.0
+        ee = fill(1.0, Nn)
+        yy = 1.2 .* randn(r0, Nn)              # errors underestimated by ~20%
+        dd = Data(t_rv = tt, rv = yy, rv_err = ee, rv_inst = ones(Int, Nn))
+        es = ErrorScale()
+        pp = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+            instruments = InstrumentConfig(rv = ["I1"]), data = dd,
+            priors = Dict{String,PriorSpec}(
+                "gamma_I1" => FixedPrior(0.0), "sigma_I1" => FixedPrior(0.0),
+                "errscale_I1" => LogUniformPrior(0.3, 3.0)),
+            noise_models = NoiseModel[es], transdim_noise = true, stability = :none)
+        th = Theta{Float64}(pp)
+        th.td = TransDimState(max_planets = 0, n_noise = 1)
+        si = pp.layout.name_to_idx["errscale_I1"]
+        th.values[si] = 1.0
+        ll(x) = rv_log_likelihood(x, dd)
+        lp(x) = log_prior(x)
+        # exact: Z_off = L(off); Z_on = ∫ p(s) L(s) ds (log-uniform prior)
+        L_off = ll(th)
+        on = Theta{Float64}(pp); on.td = TransDimState(max_planets = 0, n_noise = 1)
+        on.td.noise_active[1] = true; on.values .= th.values
+        grid = range(log(0.3), log(3.0), length = 4001)
+        vals = map(grid) do u
+            on.values[si] = exp(u); ll(on)
+        end
+        mx = maximum(vals)
+        Z_on = log(sum(exp.(vals .- mx)) * step(grid) / (log(3.0) - log(0.3))) + mx
+        p_exact = 1 / (1 + exp(L_off - Z_on))
+        @test 0.2 < p_exact < 0.8                    # the toy must be sensitive
+
+        function run_chain(paired::Bool; n_iter = 30_000, seed = 5)
+            rng = MersenneTwister(seed)
+            x = Theta{Float64}(pp); x.td = TransDimState(max_planets = 0, n_noise = 1)
+            x.values .= th.values
+            cur_ll = ll(x); cur_lp = lp(x)
+            n_on = 0
+            for it in 1:n_iter
+                if rand(rng) < 0.5
+                    if rand(rng) < 0.5
+                        c, a, l = propose_noise_birth_annealed(x, rng, NoiseModel[es], ll, lp;
+                                      data = dd, n_bridge = 6, n_relax = 2,
+                                      ll_current = cur_ll, lp_current = cur_lp)
+                    elseif paired
+                        c, a, l = propose_noise_death_annealed(x, rng, NoiseModel[es], ll, lp;
+                                      data = dd, n_bridge = 6, n_relax = 2,
+                                      ll_current = cur_ll, lp_current = cur_lp)
+                    else
+                        c, lq = propose_noise_death(x, rng, NoiseModel[es]; data = dd)
+                        l = isfinite(lq) ? ll(c) : NaN
+                        a = isfinite(lq) ? (l + lp(c)) - (cur_ll + cur_lp) + lq : -Inf
+                    end
+                    if isfinite(a) && log(rand(rng)) < a
+                        x = c; cur_ll = l; cur_lp = lp(x)
+                    end
+                elseif x.td.noise_active[1]
+                    old = x.values[si]
+                    nv = old * exp(0.3 * randn(rng))
+                    if 0.3 <= nv <= 3.0
+                        x.values[si] = nv
+                        l2 = ll(x); p2 = lp(x)
+                        # log-scale step: Hastings log(nv/old)
+                        if log(rand(rng)) < (l2 + p2) - (cur_ll + cur_lp) + log(nv / old)
+                            cur_ll = l2; cur_lp = p2
+                        else
+                            x.values[si] = old
+                        end
+                    end
+                end
+                n_on += x.td.noise_active[1]
+            end
+            return n_on / n_iter
+        end
+        p_paired = run_chain(true)
+        @test abs(p_paired - p_exact) < 0.03
+        # The old pairing is measurably off on the same toy (guards the test's
+        # sensitivity, so a future change cannot pass it by accident).
+        p_old = run_chain(false)
+        @test p_old - p_exact > 0.05
     end
 
     @testset "n_bridge must be at least 1" begin

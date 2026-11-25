@@ -1938,7 +1938,8 @@ function sample_transdim_pt_emcee(
                     if in_burnin && β > 0.3 && n_birth_tries > 1 &&
                        rand(trng) < 0.5
                         dead, lq_death = propose_noise_death(theta, trng,
-                                                              td.toggleable; data=data)
+                                                              td.toggleable; data=data,
+                                                              exclusion_groups = td.noise_exclusion_groups)
                         if isfinite(lq_death)
                             best_α = -Inf
                             best_nt = nothing
@@ -2158,10 +2159,43 @@ function sample_transdim_pt_emcee(
                         continue
                     end
 
+                    # The reverse of the annealed birth is the annealed death
+                    # (the same bridge run backwards). Pairing it with the
+                    # instantaneous death below made the pair irreversible: the
+                    # birth enjoyed the bridge and the death did not, so the
+                    # bridged models were over-occupied.
+                    if !do_nbirth && n_noise_bridge > 1
+                        _lld(x) = last(split_ref(spike_slab_log_prior(x, strategy,
+                                                     inclusion_prior), x, slot))
+                        _lpd(x) = spike_slab_log_prior(x, strategy, inclusion_prior)
+                        cand_d, acc_d, ll_d = propose_noise_death_annealed(
+                            theta, trng, td.toggleable, _lld, _lpd; data=data,
+                            exclusion_groups = td.noise_exclusion_groups,
+                            beta = β, n_bridge = n_noise_bridge,
+                            n_relax = n_noise_relax,
+                            ll_current = logL_arr[t, w],
+                            lp_current = logπ_arr[t, w])
+                        isfinite(acc_d) || continue
+                        Threads.atomic_add!(propose_ntd[t], 1)
+                        Threads.atomic_add!(n_evals_atomic, 1)
+                        if log(rand(trng)) < acc_d
+                            lp_d = _lpd(cand_d)
+                            @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                                state[t, w, j] = cand_d.values[idx]
+                            end
+                            copyto!(td_states[t, w].noise_active,
+                                     cand_d.td.noise_active)
+                            logπ_arr[t, w] = lp_d; logL_arr[t, w] = ll_d
+                            Threads.atomic_add!(accept_ntd[t], 1)
+                        end
+                        continue
+                    end
+
                     new_theta, log_q = do_nbirth ?
                         propose_noise_birth(theta, trng, td.toggleable; data=data,
                                               exclusion_groups = td.noise_exclusion_groups) :
-                        propose_noise_death(theta, trng, td.toggleable; data=data)
+                        propose_noise_death(theta, trng, td.toggleable; data=data,
+                                              exclusion_groups = td.noise_exclusion_groups)
                     isfinite(log_q) || continue
                     Threads.atomic_add!(propose_ntd[t], 1)
                     # MUST be the same prior function the rest of the sampler
