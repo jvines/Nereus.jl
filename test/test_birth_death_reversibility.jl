@@ -145,3 +145,45 @@ end
     end
 end
 
+
+@testset "DonorBirth carries the donor mixture density both ways" begin
+    # DonorBirth clones a donor's planet with jitter. It used to call that
+    # proposal symmetric (combinatorial ratio only) and to share the
+    # strategy-blind death, so neither side carried the mixture density.
+    params, data = rv_params(2)
+    rng = MersenneTwister(5)
+    function donor(P, K)
+        d = Theta{Float64}(params; td = TransDimState(max_planets = 2))
+        for (i, slot) in enumerate(params.layout.unfrozen_idx)
+            lo, hi = bounds(params.layout.unfrozen_priors[i])
+            d.values[slot] = clamp(rand(rng, params.layout.unfrozen_priors[i].dist), lo, hi)
+        end
+        Nereus.set_param!(d, "P_k1", P)
+        haskey(params.layout.name_to_idx, "K_k1") && Nereus.set_param!(d, "K_k1", K)
+        activate_planet!(d.td, 1)
+        return d
+    end
+    pop = [donor(5.1, 20.0), donor(5.12, 19.0), donor(12.0, 3.0)]
+    for seed in 1:5
+        th = Theta{Float64}(params; td = TransDimState(max_planets = 2))
+        r = MersenneTwister(seed)
+        born, lb = propose_planet_birth(th, r, Nereus.DonorBirth(); data = data,
+                                        population = pop)
+        isfinite(lb) || continue
+        _, ld = propose_planet_death(born, r, Nereus.DonorBirth(); data = data,
+                                     population = pop)
+        @test lb + ld ≈ 0.0 atol = 1e-9
+        # the blind death misses the density: its round trip is left with
+        # exactly −log q_donor, which is not zero
+        _, lblind = propose_planet_death(born, r)
+        @test abs(lb + lblind) > 1e-3
+    end
+    # no donors: both directions are the PriorBirth pair
+    th = Theta{Float64}(params; td = TransDimState(max_planets = 2))
+    r = MersenneTwister(9)
+    born, lb = propose_planet_birth(th, r, Nereus.DonorBirth(); data = data,
+                                    population = Theta{Float64}[])
+    _, ld = propose_planet_death(born, r, Nereus.DonorBirth(); data = data,
+                                 population = Theta{Float64}[])
+    @test lb + ld ≈ 0.0 atol = 1e-9
+end

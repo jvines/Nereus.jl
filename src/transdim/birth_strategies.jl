@@ -976,6 +976,7 @@ without RVs) the reverse birth is a prior draw, so this is the PriorBirth death.
 """
 function propose_planet_death(theta::Theta{T}, rng::AbstractRNG, ::InformedBirth;
                                data::Union{Data, Nothing}=nothing,
+                               population=nothing,
                                scratch::Union{Theta{T}, Nothing}=nothing) where {T}
     (data === nothing || isempty(data.t_rv)) &&
         return propose_planet_death(theta, rng, PriorBirth(); scratch=scratch)
@@ -1532,6 +1533,7 @@ photometry it is the InformedBirth death, as the birth is the InformedBirth one.
 """
 function propose_planet_death(theta::Theta{T}, rng::AbstractRNG, ::JointInformedBirth;
                                data::Union{Data, Nothing}=nothing,
+                               population=nothing,
                                scratch::Union{Theta{T}, Nothing}=nothing) where {T}
     (data === nothing || isempty(data.t_phot)) &&
         return propose_planet_death(theta, rng, InformedBirth(); data=data, scratch=scratch)

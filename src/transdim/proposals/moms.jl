@@ -273,6 +273,7 @@ The reverse move is the random-walk add, whose density is included in
 function propose_planet_death(theta::Theta{T}, rng::AbstractRNG,
                                strategy::MoMSBirth;
                                data::Union{Data, Nothing}=nothing,
+                               population=nothing,
                                scratch::Union{Theta{T}, Nothing}=nothing) where {T}
     td = theta.td
     max_k = length(td.planet_active)

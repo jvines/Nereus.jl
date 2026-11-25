@@ -225,10 +225,11 @@ end
 Fallback for birth strategies with no dedicated death: the strategy-agnostic
 uniform-pick death, which carries no reverse proposal density. Every strategy
 the samplers use has its own death (PriorBirth, MoMSBirth, InformedBirth,
-JointInformedBirth); only DonorBirth, a population move, still lands here.
+JointInformedBirth, DonorBirth), so nothing the samplers run lands here.
 """
 propose_planet_death(theta::Theta{T}, rng::AbstractRNG, ::BirthStrategy;
                       data::Union{Data, Nothing}=nothing,
+                      population=nothing,
                       scratch::Union{Theta{T}, Nothing}=nothing) where {T} =
     propose_planet_death(theta, rng; scratch=scratch)
 
@@ -252,6 +253,7 @@ informed births have the same need and their own deaths
 function propose_planet_death(theta::Theta{T}, rng::AbstractRNG,
                                ::PriorBirth;
                                data::Union{Data, Nothing}=nothing,
+                               population=nothing,
                                scratch::Union{Theta{T}, Nothing}=nothing) where {T}
     td = theta.td
     max_k = length(td.planet_active)
