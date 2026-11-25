@@ -415,7 +415,7 @@ Notes on the couplings:
 `ActivityGP` requires both the indicator **values** and their **1σ
 errors** for every non-`:rv` channel. Errors are mandatory (the
 `activity_gp_predict`/likelihood paths throw / return `nothing` without
-`data.indicator_errs`, `src/noise/activity_gp.jl:637,842`).
+`data.indicator_errs`, `src/noise/activity_gp.jl:637,848`).
 
 - **Julia API:** `Data(; indicators = Dict("bis" => …, "fwhm" => …),
   indicator_errs = Dict("bis" => …, "fwhm" => …), …)` with string keys
@@ -442,6 +442,15 @@ errors** for every non-`:rv` channel. Errors are mandatory (the
   "rv": { "csv": "rvs.csv", "indicator_cols": ["bis", "fwhm"] }
   ```
   with columns `bis`, `bis_err`, `fwhm`, `fwhm_err` present.
+
+**Missing values.** An epoch whose indicator was not measured holds NaN
+(a blank, `NaN`, `NA` or `null` CSV cell; `null` in an inline `values`
+indicator or `_err` array, since JSON has no NaN). Its error may be anything,
+NaN included; a finite value still needs a strictly positive error.
+`ActivityGP` and `IndicatorFloor` drop that entry of the channel (the
+likelihood equals the same one with the entry removed), keeping the RV entry
+of the epoch; `ActivityDecorrelation` adds no term there and `ActivityJitter`
+only its base jitter. `bjd`, `rv` and `rv_err` may not be missing.
 
 #### run_job form
 
@@ -497,7 +506,7 @@ falls through the standard white/celerite machinery untouched. In
   hyperparameters fall inside their prior bounds (guards against
   hot-chain pollution).
 - [`activity_gp_decompose_rv(chains, params, data)`](@ref)
-  (`src/noise/activity_gp.jl:772`) multiplies that posterior by the
+  (`src/noise/activity_gp.jl:778`) multiplies that posterior by the
   per-draw `Vc`/`Vr` and returns the inferred RV activity contribution
   at each observation plus the activity-corrected residual
   `rv − ⟨activity⟩` with its inflated error.
@@ -534,7 +543,7 @@ The HD 18599 K-gap scenario is the canonical use case.
 
 With every indicator at the RV epochs (`N` epochs, `C` channels including
 RV, `n_total = C·N`), the joint likelihood goes through
-`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1163`): it
+`activity_gp_joint_logpdf_lowrank` (`src/noise/activity_gp.jl:1171`): it
 whitens each epoch's 2×2 information block and factors one `(2N)²` matrix
 instead of the dense `(C·N)²`, and is exact up to rounding. Gradients
 (ForwardDiff, or ReverseDiff under `sample_nuts(ad_backend = :ReverseDiff)`)

@@ -3,6 +3,31 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Fixed
+
+- **Missing activity-indicator values no longer break RV fits.** An indicator
+  entry that is NaN (a night the pipeline did not report H-alpha, a blank CSV
+  cell) made `IndicatorFloor` (`:qp` and `:white`, generic and workspace
+  paths) and `ActivityGP` (joint, conditional, indicators-only, semiseparable
+  and instrument-scoped) return NaN. The floor is always on in
+  `default_noise_menu` whenever an AGP-capable channel is present, so one
+  missing value broke every RV fit with a noise menu. These likelihoods now
+  drop the missing entries of each channel (the Gaussian marginal of the
+  entries that exist) while the RV entry of that epoch stays; the result
+  equals the same likelihood with those entries removed. The workspace floor
+  still allocates nothing. `ActivityJitter` applies only its base jitter where
+  the indicator is missing (it gave NaN), and the AGP prediction, RV
+  decomposition and LOO conditional drop the missing entries too.
+- `Data` accepts a non-finite indicator error exactly where the indicator value
+  is non-finite; elsewhere errors must still be strictly positive.
+- An inline JSON `rv.values` block accepts `null` in an indicator column or its
+  `_err` column as a missing value (JSON has no NaN). A `null` in `bjd`, `rv`
+  or `rv_err` is refused with an error naming the column and entry.
+- The data-scaled default priors of `IndicatorFloor` and `ActivityGP` (channel
+  MAD) read the finite indicator entries only; one NaN made them NaN.
+
 ## 0.9.11
 
 ### Added

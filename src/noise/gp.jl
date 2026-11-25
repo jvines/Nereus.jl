@@ -872,8 +872,8 @@ function _activity_gp_rv_mean_at_theta(theta::Theta{T}, data::Data,
         n_ch = length(vals)
         @inbounds for i in 1:n_ch
             t_obs[offset + i]  = data.t_rv[i]
-            y_obs[offset + i]  = Float64(vals[i])
-            σ²_obs[offset + i] = Float64(errs[i]^2) + jit²
+            y_obs[offset + i]  = _agp_obs(vals[i], Float64)   # missing: dropped below
+            σ²_obs[offset + i] = _agp_var(vals[i], errs[i], jit², Float64)
             a_obs[offset + i]  = a_coef
             b_obs[offset + i]  = b_coef
         end
@@ -882,6 +882,12 @@ function _activity_gp_rv_mean_at_theta(theta::Theta{T}, data::Data,
     channel_obs = vcat(fill(:rv, n_rv_obs),
                         vcat(fill.(getindex.(ind_meta, 1),
                                      length.(getindex.(ind_meta, 2)))...))
+    if any(isinf, σ²_obs)   # missing indicator entries out
+        keep = findall(!isinf, σ²_obs)
+        t_obs = t_obs[keep]; y_obs = y_obs[keep]; σ²_obs = σ²_obs[keep]
+        a_obs = a_obs[keep]; b_obs = b_obs[keep]; channel_obs = channel_obs[keep]
+        n_obs_total = length(keep)
+    end
 
     Σ_oo = activity_gp_covariance(t_obs, channel_obs, a_obs, b_obs,
                                     amp, P, λe, λp)

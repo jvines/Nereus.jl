@@ -671,8 +671,8 @@ function _default_noise_priors!(dic, m::IndicatorFloor,
         name = String(ch)
         if data !== nothing && haskey(data.indicators, name) &&
            !isempty(data.indicators[name])
-            v = data.indicators[name]
-            max(1.4826 * median(abs.(v .- median(v))), 1e-3)
+            v = filter(isfinite, data.indicators[name])   # missing entries out
+            isempty(v) ? 1.0 : max(1.4826 * median(abs.(v .- median(v))), 1e-3)
         else
             1.0
         end
@@ -973,8 +973,8 @@ function _default_noise_priors!(dic, m::ActivityGP,
         name = String(ch)
         mad = if data !== nothing && haskey(data.indicators, name) &&
                  !isempty(data.indicators[name])
-            vals = data.indicators[name]
-            max(1.4826 * median(abs.(vals .- median(vals))), 1e-3)
+            vals = filter(isfinite, data.indicators[name])   # missing entries out
+            isempty(vals) ? 10.0 / 3 : max(1.4826 * median(abs.(vals .- median(vals))), 1e-3)
         else
             10.0 / 3
         end
