@@ -121,10 +121,25 @@ build_local_mac() {
       JULIA_VER="$CFG_JULIA" WORK="$CFG_STAGE/work-macos" tools/build_bundle.sh ) \
     >"$OUT/build-macos-arm64.log" 2>&1
 }
-build_local_docker_arm() {
+build_local_docker_arm_once() {
   ( cd "$PY_ROOT" && OUT_DIR="$OUT" NEREUS_JL="$JL_ROOT" NEREUS_PY="$PY_ROOT" \
       JULIA_VER="$CFG_JULIA" tools/build_bundle_docker.sh linux/arm64 ) \
     >"$OUT/build-linux-aarch64.log" 2>&1
+}
+# The linux/arm64 build runs in this machine's Docker VM, which it shares with
+# whatever else is running there. Precompiling Nereus (with its fit workload)
+# needs several GB at its peak; on 2026-11-25 the kernel's OOM killer took it
+# (`ProcessSignaled(9)`) while other containers held the VM's memory, and the
+# same tree then built cleanly on its own. A build killed that way is retried
+# once, after the macOS build has finished so the two do not overlap; any other
+# failure is not retried.
+build_local_docker_arm() {
+  build_local_docker_arm_once && return 0
+  grep -q -E 'ProcessSignaled\(9\)|exit code 137|Killed' "$OUT/build-linux-aarch64.log" || return 1
+  mv "$OUT/build-linux-aarch64.log" "$OUT/build-linux-aarch64.oom.log"
+  echo "linux-aarch64 build was OOM-killed; retrying once after the macOS build" >&2
+  while kill -0 "$mac_pid" 2>/dev/null; do sleep 15; done
+  build_local_docker_arm_once
 }
 
 build_local_mac &            mac_pid=$!
