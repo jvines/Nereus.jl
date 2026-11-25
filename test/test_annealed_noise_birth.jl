@@ -253,6 +253,84 @@ using Random, Statistics
         @test p_old - p_exact > 0.05
     end
 
+    @testset "birth/death sample the uniform discrete prior at β = 0" begin
+        # Three toggleable models in one exclusion group: the allowed states
+        # are none, W, R, A, and noise toggles carry no prior, so at β = 0 the
+        # occupancy must be 1/4 each. The selection term of the noise
+        # birth/death once had the wrong sign; the round trip still summed to
+        # zero, but "none" came out (3/1)² = 9× too likely: 0.75 against 0.08.
+        es = ErrorScale(); rot = CeleriteRotation(channel = :rv)
+        ad = ActivityDecorrelation(indicators = ["bis"], derivative = false,
+                                   label = "lin")
+        nms = NoiseModel[es, rot, ad]
+        groups = [NoiseModel[es, rot, ad]]
+        params = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+            instruments = InstrumentConfig(rv = ["I1"]), data = data,
+            priors = Dict{String,PriorSpec}(
+                "gamma_I1" => UniformPrior(-3rvmax, 3rvmax),
+                "sigma_I1" => LogUniformPrior(0.2, 12.0)),
+            noise_models = nms, transdim_noise = true, stability = :none)
+        for annealed in (false, true)
+            rng = MersenneTwister(annealed ? 11 : 7)
+            th = Theta{Float64}(params)
+            th.td = TransDimState(max_planets = 0, n_noise = 3)
+            for (i, slot) in enumerate(params.layout.unfrozen_idx)
+                lo, hi = bounds(params.layout.unfrozen_priors[i])
+                th.values[slot] = clamp(rand(rng, params.layout.unfrozen_priors[i].dist), lo, hi)
+            end
+            counts = zeros(Int, 4)
+            n_iter = 40_000
+            for _ in 1:n_iter
+                if rand(rng) < 0.5
+                    if annealed
+                        c, a, _ = propose_noise_birth_annealed(th, rng, nms,
+                            loglik, logpri; data = data, exclusion_groups = groups,
+                            beta = 0.0, n_bridge = 3)
+                    else
+                        c, q = propose_noise_birth(th, rng, nms; data = data,
+                                                   exclusion_groups = groups)
+                        a = isfinite(q) ? logpri(c) - logpri(th) + q : -Inf
+                    end
+                else
+                    if annealed
+                        c, a, _ = propose_noise_death_annealed(th, rng, nms,
+                            loglik, logpri; data = data, exclusion_groups = groups,
+                            beta = 0.0, n_bridge = 3)
+                    else
+                        c, q = propose_noise_death(th, rng, nms; data = data,
+                                                   exclusion_groups = groups)
+                        a = isfinite(q) ? logpri(c) - logpri(th) + q : -Inf
+                    end
+                end
+                if isfinite(a) && log(rand(rng)) < a
+                    th = Theta{Float64}(params, copy(c.values); td = copy(c.td))
+                end
+                on = findfirst(i -> th.td.noise_active[i], 1:3)
+                # Within-model moves, as the sampler's stretch provides: a
+                # prior-invariant (β = 0) random walk on the active model's
+                # parameters. Without them a parameter only ever takes values
+                # the informed birth drew, and the chain cannot reach the
+                # prior's tails in any finite run (AD's OLS draw is narrow).
+                if on !== nothing
+                    for slot in _noise_model_slots(th, on)
+                        uf = findfirst(==(slot), params.layout.unfrozen_idx)
+                        lo, hi = bounds(params.layout.unfrozen_priors[uf])
+                        old = th.values[slot]
+                        w = (isfinite(lo) && isfinite(hi)) ? hi - lo : abs(old) + 1
+                        lp0 = logpri(th)
+                        th.values[slot] = old + 0.3 * w * randn(rng)
+                        lp1 = logpri(th)
+                        (isfinite(lp1) && log(rand(rng)) < lp1 - lp0) ||
+                            (th.values[slot] = old)
+                    end
+                end
+                counts[on === nothing ? 1 : on + 1] += 1
+            end
+            occ = counts ./ n_iter
+            @test all(abs.(occ .- 0.25) .< 0.03)
+        end
+    end
+
     @testset "n_bridge must be at least 1" begin
         nm = CeleriteRotation(channel = :rv)
         params, th = build(nm)

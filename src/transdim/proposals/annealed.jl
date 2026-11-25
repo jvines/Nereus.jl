@@ -243,7 +243,7 @@ function propose_noise_death_annealed(theta::Theta{T}, rng::AbstractRNG,
     # against this death's choice among the active ones.
     n_act_after = length(_noise_activatable(off_td, toggleable, noise_models,
                                             exclusion_groups))
-    log_comb = log(max(n_act_after, 1)) - log(length(active_toggle))
+    log_comb = log(length(active_toggle)) - log(max(n_act_after, 1))
     return (off, convert(T, logW + log_comb), ll_A)
 end
 
@@ -308,7 +308,7 @@ function propose_noise_death(theta::Theta{T}, rng::AbstractRNG,
     log_q_rev = _noise_birth_q_eval(qset, theta, nm_idx, theta.values)
     isfinite(log_q_rev) || return (theta, convert(T, -Inf))
 
-    log_q_ratio = log(n_inactive_after) - log(n_active) + log_q_rev
+    log_q_ratio = log(n_active) - log(n_inactive_after) + log_q_rev
 
     return (new_theta, convert(T, log_q_ratio))
 end

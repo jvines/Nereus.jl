@@ -142,13 +142,18 @@ function propose_noise_birth(theta::Theta{T}, rng::AbstractRNG,
         j = findfirst(==(nm), noise_models)
         j !== nothing && is_noise_active(new_td, j)
     end
-    log_q_ratio = log(n_active_after) - log(n_inactive) - log_q_fwd
+    # Selection: the forward birth picks this model among `n_inactive`, the
+    # reverse death picks it among `n_active_after`, so the Hastings ratio
+    # carries (1/n_active_after)/(1/n_inactive). (The opposite sign made every
+    # one-model state 9× less likely than "none" at β → 0 with three
+    # activatable models, i.e. (n_inactive/n_active_after)² too small.)
+    log_q_ratio = log(n_inactive) - log(n_active_after) - log_q_fwd
 
     # The annealed move needs the pieces separately: which slot was born, the
     # forward proposal density on its parameters, and the combinatorial term.
     if parts !== nothing
         parts[] = (nm_idx = nm_idx, log_q_fwd = log_q_fwd,
-                   log_comb = log(n_active_after) - log(n_inactive))
+                   log_comb = log(n_inactive) - log(n_active_after))
     end
     return (new_theta, convert(T, log_q_ratio))
 end
