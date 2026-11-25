@@ -1120,8 +1120,19 @@ function indicator_floor_log_likelihood(theta::Theta{T}, data::Data) where {T}
             amp = theta.values[ai]; jit = theta.values[ji]
             (amp > 0 && jit > 0) || return convert(T, -Inf)
             errs = get(data.indicator_errs, name, nothing)
-            yv = T[convert(T, v) for v in data.indicators[name]]
-            ll = _qp_floor_channel_loglike(t, yv, errs, amp, jit, P, λ_e, λ_p)
+            vals = data.indicators[name]
+            if all(isfinite, vals)
+                yv = T[convert(T, v) for v in vals]
+                ll = _qp_floor_channel_loglike(t, yv, errs, amp, jit, P, λ_e, λ_p)
+            else
+                # Missing entries (non-finite) are dropped from the channel:
+                # the GP marginal of the entries that exist.
+                keep = findall(isfinite, vals)
+                yv = T[convert(T, vals[k]) for k in keep]
+                ll = _qp_floor_channel_loglike(t[keep], yv,
+                                               errs === nothing ? nothing : errs[keep],
+                                               amp, jit, P, λ_e, λ_p)
+            end
             isfinite(ll) || return convert(T, -Inf)
             total += ll
         end
@@ -1140,6 +1151,7 @@ function indicator_floor_log_likelihood(theta::Theta{T}, data::Data) where {T}
         σf > 0 || return convert(T, -Inf)
         σf2 = σf * σf
         @inbounds for k in eachindex(vals)
+            isfinite(vals[k]) || continue   # missing entry: not scored
             e2 = errs === nothing ? zero(T) : convert(T, errs[k])^2
             v2 = σf2 + e2
             total += -0.5 * (convert(T, vals[k])^2 / v2 + log(2π * v2))
@@ -1176,6 +1188,8 @@ mutable struct RVNoiseScratch
     floor_α::Vector{Float64}        # Σ⁻¹ y
     floor_s::Vector{Float64}        # sin(π(t_i − t_mid)/P), n_rv
     floor_c::Vector{Float64}        # cos(π(t_i − t_mid)/P), n_rv
+    floor_y::Vector{Float64}        # a channel with missing entries: its
+    floor_keep::Vector{Int}         # finite values and their epochs (first m)
     # ActivityDecorrelation / ActivityJitter / ErrorScale slots (noise/activity.jl)
     mods::RVModifierSlots
     # CeleriteRotation coefficients, solver arrays and slots (noise/gp.jl)
@@ -1186,6 +1200,7 @@ RVNoiseScratch() = RVNoiseScratch(nothing, nothing, String[], Int[], Int[], 0, 0
                                   Matrix{Float64}(undef, 0, 0),
                                   Matrix{Float64}(undef, 0, 0), Float64[],
                                   Float64[], Float64[],
+                                  Float64[], Int[],
                                   RVModifierSlots(), CeleriteWork())
 
 # Resolve the floor's layout slots once; later calls only compare two keys.
@@ -1281,6 +1296,8 @@ function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloo
         sc.floor_α  = Vector{Float64}(undef, n)
         sc.floor_s  = Vector{Float64}(undef, n)
         sc.floor_c  = Vector{Float64}(undef, n)
+        sc.floor_y  = Vector{Float64}(undef, n)
+        sc.floor_keep = Vector{Int}(undef, n)
     end
     K0 = sc.floor_K0
     Σ  = sc.floor_Σ
@@ -1328,12 +1345,27 @@ function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloo
             end
             shape_done = true
         end
-        # Upper triangle only: potrf!('U') / potrs!('U') read nothing else.
         amp2 = amp * amp
+        jit2 = jit * jit
+        m = 0
+        @inbounds for i in 1:n
+            isfinite(y[i]) && (m += 1)
+        end
+        if m < n
+            # Missing entries (non-finite values) are dropped from the
+            # channel: the leading m×m block of the buffers holds the
+            # covariance of the entries that exist, built from the same
+            # kernel shape, so nothing is allocated.
+            ll = m == 0 ? zero(T) :
+                 _qp_floor_masked_ll!(sc, K0, y, errs, amp2, jit2, n, m)
+            isfinite(ll) || return convert(T, -Inf)
+            total += ll
+            continue
+        end
+        # Upper triangle only: potrf!('U') / potrs!('U') read nothing else.
         @inbounds for j in 1:n, i in 1:j
             Σ[i, j] = amp2 * K0[i, j]
         end
-        jit2 = jit * jit
         @inbounds for i in 1:n
             e2 = errs === nothing ? zero(T) : convert(T, errs[i])^2
             Σ[i, i] += e2 + jit2
@@ -1348,6 +1380,43 @@ function _qp_floor_ll_ws(theta::Theta{Float64}, data::Data, floor::IndicatorFloo
         total += ll
     end
     return total
+end
+
+# One floor channel with missing entries on the workspace path: the m finite
+# values y[keep] and their covariance amp²·K0[keep, keep] + diag(err² + jit²)
+# in the leading m×m block of the scratch buffers (strided views, factored in
+# place as the full channel is). `K0` holds the upper triangle, and keep is
+# increasing, so K0[keep[i], keep[j]] for i ≤ j reads only that triangle.
+function _qp_floor_masked_ll!(sc::RVNoiseScratch, K0::Matrix{Float64},
+                              y::AbstractVector, errs, amp2::Float64, jit2::Float64,
+                              n::Int, m::Int)
+    keep = sc.floor_keep
+    yk = sc.floor_y
+    c = 0
+    @inbounds for i in 1:n
+        if isfinite(y[i])
+            c += 1
+            keep[c] = i
+            yk[c] = y[i]
+        end
+    end
+    Σ = view(sc.floor_Σ, 1:m, 1:m)
+    @inbounds for j in 1:m
+        kj = keep[j]
+        for i in 1:j
+            Σ[i, j] = amp2 * K0[keep[i], kj]
+        end
+        e2 = errs === nothing ? 0.0 : Float64(errs[kj])^2
+        Σ[j, j] += e2 + jit2
+    end
+    _, info = LinearAlgebra.LAPACK.potrf!('U', Σ)
+    F = Cholesky(Σ, 'U', info)
+    issuccess(F) || return -Inf
+    yv = view(yk, 1:m)
+    α = view(sc.floor_α, 1:m)
+    copyto!(α, yv)
+    ldiv!(F, α)
+    return -0.5 * (dot(yv, α) + logdet(F) + m * log(2π))
 end
 
 # Per-instrument-scoped ActivityGP path. Each AGP covers an instrument
@@ -1494,8 +1563,9 @@ function _activity_gp_joint_ll_scoped(theta::Theta{T}, data::Data,
     offset = n_rv_obs
     for (ch, vals, errs, a_coef, b_coef, jit²) in ind_meta
         @inbounds for k in 1:n_rv_obs
-            y_flat[offset + k]  = convert(T, vals[k])
-            σ²_flat[offset + k] = convert(T, errs[k]^2) + jit²
+            # Missing entry (non-finite): y = 0, variance Inf, dropped below.
+            y_flat[offset + k]  = _agp_obs(vals[k], T)
+            σ²_flat[offset + k] = _agp_var(vals[k], errs[k], jit², T)
         end
         offset += n_rv_obs
     end
@@ -1512,9 +1582,10 @@ function _activity_gp_joint_ll_scoped(theta::Theta{T}, data::Data,
     @inbounds for i in 1:n_obs_total
         Σ[i, i] += σ²_flat[i]
     end
+    Σ, y_flat = _agp_drop_missing(Σ, y_flat)   # missing indicator entries out
     # Solved through the triangular factors (`_agp_conditional_logpdf`,
     # `_agp_chol_logpdf`): `F \ y` lost the Hessian at couplings that are 0.
-    if agp.marginalize_indicators && n_obs_total > n_rv_obs
+    if agp.marginalize_indicators && length(y_flat) > n_rv_obs
         return convert(T, _agp_conditional_logpdf(Σ, y_flat, n_rv_obs))
     end
     F = cholesky(Symmetric(Σ); check = false)
@@ -1591,8 +1662,8 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         for k in 1:n_ind
             vals = ix.vals[k]; errs = ix.errs[k]; jit² = jit2[k + 1]
             @inbounds for i in 1:length(vals)
-                y_I[off + i]  = convert(T, vals[i])
-                σ²_I[off + i] = convert(T, errs[i]^2) + jit²
+                y_I[off + i]  = _agp_obs(vals[i], T)   # missing: dropped below
+                σ²_I[off + i] = _agp_var(vals[i], errs[i], jit², T)
             end
             off += length(vals)
         end
@@ -1604,6 +1675,8 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         @inbounds for i in 1:n_ind_total
             Σ_I[i, i] += σ²_I[i]
         end
+        Σ_I, y_I = _agp_drop_missing(Σ_I, y_I)
+        isempty(y_I) && return zero(T)
         F_I = cholesky(Symmetric(Σ_I); check = false)
         issuccess(F_I) || return convert(T, -Inf)
         # Not `F_I \ y_I`, which lost the Hessian where every coupling is 0
@@ -1623,8 +1696,10 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         vals = ix.vals[k]; errs = ix.errs[k]; jit² = jit2[k + 1]
         n_ch = length(vals)
         @inbounds for i in 1:n_ch
-            y_flat[offset + i]  = convert(T, vals[i])
-            σ²_flat[offset + i] = convert(T, errs[i]^2) + jit²
+            # Missing entry (non-finite): y = 0 with variance Inf, which the
+            # low-rank solve skips and the other routes drop.
+            y_flat[offset + i]  = _agp_obs(vals[i], T)
+            σ²_flat[offset + i] = _agp_var(vals[i], errs[i], jit², T)
         end
         offset += n_ch
     end
@@ -1656,6 +1731,11 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
         α_ss = chan_a[1:C]
         β_ss = chan_b[1:C]
         # σ²_flat already carries the per-channel measurement variance + jitter.
+        if any(isinf, σ²_flat)   # missing indicator entries out
+            keep = findall(!isinf, σ²_flat)
+            t_flat = t_flat[keep]; series_id = series_id[keep]
+            y_flat = y_flat[keep]; σ²_flat = σ²_flat[keep]
+        end
         return multiseries_loglike(t_flat, y_flat, σ²_flat, series_id,
                                     α_ss, β_ss, kern)
     end
@@ -1694,8 +1774,9 @@ function _activity_gp_joint_ll(theta::Theta{T}, data::Data,
     @inbounds for i in 1:n_total
         Σ[i, i] += σ²_flat[i]
     end
+    Σ, y_flat = _agp_drop_missing(Σ, y_flat)   # missing indicator entries out
 
-    if agp.marginalize_indicators && n_total > n_rv_obs
+    if agp.marginalize_indicators && length(y_flat) > n_rv_obs
         # Conditional Gaussian: log p(RV | indicators) — marginalises
         # the indicator block out of the joint Rajpaul Gaussian.
         #

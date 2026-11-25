@@ -670,8 +670,8 @@ function activity_gp_predict(chains, params::Params, data::Data;
             n_ch = length(vals)
             @inbounds for i in 1:n_ch
                 t_obs[offset + i]  = data.t_rv[i]
-                y_obs[offset + i]  = vals[i]
-                σ²_obs[offset + i] = errs[i]^2 + jit²
+                y_obs[offset + i]  = _agp_obs(vals[i], Float64)   # missing: dropped below
+                σ²_obs[offset + i] = _agp_var(vals[i], errs[i], jit², Float64)
                 a_obs[offset + i]  = a_coef
                 b_obs[offset + i]  = b_coef
             end
@@ -682,6 +682,12 @@ function activity_gp_predict(chains, params::Params, data::Data;
         ch_obs = vcat(fill(:rv, n_rv_obs),
                        vcat(fill.(getindex.(ind_meta, 1),
                                     length.(getindex.(ind_meta, 2)))...))
+        if any(isinf, σ²_obs)   # missing indicator entries out
+            keep = findall(!isinf, σ²_obs)
+            t_obs = t_obs[keep]; y_obs = y_obs[keep]; σ²_obs = σ²_obs[keep]
+            a_obs = a_obs[keep]; b_obs = b_obs[keep]; ch_obs = ch_obs[keep]
+            n_obs_total = length(keep)
+        end
         Σ_oo = activity_gp_covariance(t_obs, ch_obs, a_obs, b_obs,
                                        amp, P, λe, λp)
         @inbounds for i in 1:n_obs_total
@@ -1156,7 +1162,9 @@ Gradients are not affected in any practical sense; a MAP Hessian at such a
 point can be.
 
 `y_flat`, `σ²_flat` are the channel-stacked residuals and per-point
-variances (RV block first, then each indicator), length C·N. A NaN among
+variances (RV block first, then each indicator), length C·N. An entry with
+variance `Inf` is a missing indicator value: it is left out exactly, and the
+density is that of the entries that remain. A NaN among
 the couplings, variances or residuals gives `NaN`. `-Inf` is returned if the
 Cholesky of A fails, which A ⪰ I rules out for finite inputs.
 """
@@ -1351,6 +1359,31 @@ function _agp_conditional_logpdf(Σ::AbstractMatrix, y::AbstractVector, n_R::Int
     return _agp_chol_logpdf(F_R, y[iR] .- transpose(W) * zI)
 end
 
+# Missing indicator entries. Indicators are stored parallel to the RVs, one
+# value per epoch, and an epoch whose indicator was not measured holds a
+# non-finite value (NaN; `Data` allows any error there). Every ActivityGP
+# likelihood drops such an entry from its channel -- the Gaussian marginal of
+# the entries that exist -- while the RV entry of that epoch stays. In the
+# channel-stacked arrays a missing entry is y = 0 with variance Inf (no
+# information): the low-rank solve skips it exactly (a row of M with
+# D⁻¹ = 0 contributes nothing to B, v, yᵀD⁻¹y or log det D, and is not counted
+# in the dimension), and the dense routes remove its row and column
+# (`_agp_drop_missing`) before the factorization.
+@inline _agp_obs(v, ::Type{T}) where {T} = isfinite(v) ? convert(T, v) : zero(T)
+@inline _agp_var(v, e, jit², ::Type{T}) where {T} =
+    isfinite(v) ? convert(T, e^2) + jit² : convert(T, Inf)
+
+# Σ (measurement variances already on its diagonal) and y with the missing
+# entries (infinite variance) removed; the same objects when there are none.
+# The order is kept, so an RV block that leads stays first.
+function _agp_drop_missing(Σ::AbstractMatrix, y::AbstractVector)
+    n = length(y)
+    nkeep = count(i -> !isinf(Σ[i, i]), 1:n)
+    nkeep == n && return Σ, y
+    keep = findall(i -> !isinf(Σ[i, i]), 1:n)
+    return Σ[keep, keep], y[keep]
+end
+
 # The dense (C·N)² Gaussian log-density of the same Σ = M·K_g·Mᵀ + D,
 # generic in the element type: the fallback for numbers that carry
 # derivatives at near-singular blocks with two or three channels.
@@ -1359,6 +1392,7 @@ function _agp_dense_logpdf(epochs, chan_a, chan_b, amp, P, λe, λp, y_flat, σ�
     TS = promote_type(eltype(Σ0), eltype(y_flat), eltype(σ²_flat))
     Σ  = eltype(Σ0) === TS ? Σ0 : convert(Matrix{TS}, Σ0)
     @inbounds for i in eachindex(σ²_flat); Σ[i, i] += σ²_flat[i]; end
+    Σ, y_flat = _agp_drop_missing(Σ, y_flat)
     F = cholesky!(Symmetric(Σ, :U); check = false)
     issuccess(F) || return convert(TS, -Inf)
     return _agp_chol_logpdf(F, y_flat)
@@ -1384,7 +1418,7 @@ end
 # cancel; see the docstring), which is why it is not used everywhere.
 function _agp_sequential_logpdf!(K::AbstractMatrix, m::AbstractVector,
         epochs::AbstractVector{<:Real}, bGG::AbstractVector, bGd::AbstractVector,
-        bdd::AbstractVector, v::AbstractVector, yDy, logdetD, C::Int, kc)
+        bdd::AbstractVector, v::AbstractVector, yDy, logdetD, nobs::Int, kc)
     N = length(epochs)
     TA = eltype(K)
     @inbounds for j in 1:N
@@ -1439,7 +1473,7 @@ function _agp_sequential_logpdf!(K::AbstractMatrix, m::AbstractVector,
             end
         end
     end
-    return -(yDy + logdetD + (C * N) * log(2π)) / 2 + Z
+    return -(yDy + logdetD + nobs * log(2π)) / 2 + Z
 end
 
 # The whitened low-rank solve on caller-supplied buffers: `A` is 2N×2N,
@@ -1463,10 +1497,15 @@ function _agp_whitened_core!(A::AbstractMatrix,
     fill!(bGG, zero(T)); fill!(bGd, zero(T)); fill!(bdd, zero(T))
     fill!(v, zero(T))
     yDy = zero(T); logdetD = zero(T)
+    # A missing indicator entry has variance Inf (see `_agp_obs`): it adds
+    # nothing to B, v, yᵀD⁻¹y or log det D and is not counted in the dimension.
+    nobs = C * N
     @inbounds for c in 1:C
         ac = chan_a[c]; bc = chan_b[c]; off = (c - 1) * N
         for j in 1:N
-            d = σ²_flat[off + j]; inv_d = inv(d)
+            d = σ²_flat[off + j]
+            isinf(d) && (nobs -= 1; continue)
+            inv_d = inv(d)
             yj = y_flat[off + j]; wj = yj * inv_d
             yDy += yj * wj; logdetD += log(d)
             v[j] += ac * wj; v[N+j] += bc * wj
@@ -1496,7 +1535,7 @@ function _agp_whitened_core!(A::AbstractMatrix,
             # Inputs for which the low-rank route gives NaN give NaN here too.
             _agp_nan_seen(yDy, logdetD, bGG, bGd, bdd, v) && return convert(TA, NaN)
             C >= 4 && return _agp_sequential_logpdf!(A, t, epochs, bGG, bGd, bdd, v,
-                                                     yDy, logdetD, C, kc)
+                                                     yDy, logdetD, nobs, kc)
             return convert(TA, _agp_dense_logpdf(epochs, chan_a, chan_b,
                                                  amp, P, λe, λp, y_flat, σ²_flat))
         end
@@ -1558,5 +1597,5 @@ function _agp_whitened_core!(A::AbstractMatrix,
     copyto!(t, w)
     ldiv!(transpose(UpperTriangular(A)), t)       # t = U⁻ᵀ w, so wᵀA⁻¹w = tᵀt
     quad = yDy - ww + dot(t, t)
-    return -(quad + logdetD + logdetA + (C * N) * log(2π)) / 2
+    return -(quad + logdetD + logdetA + nobs * log(2π)) / 2
 end
