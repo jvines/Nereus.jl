@@ -104,8 +104,12 @@ try
         @test exp(amp.mu[1]) ≈ 1.4826*median(abs.(rv .- median(rv))) rtol = 1e-8
         rng = MersenneTwister(5)
         draws = [_gp_informed_draw(rng, amp) for _ in 1:400]
-        @test all(isfinite, _gp_informed_logq.(draws, Ref(amp)))
-        @test median(draws) > 0
+        # a draw outside the prior comes back NaN (the birth is rejected, not
+        # clamped onto the bound); the rest carry a finite density
+        kept = filter(isfinite, draws)
+        @test length(kept) > 0.9 * length(draws)
+        @test all(isfinite, _gp_informed_logq.(kept, Ref(amp)))
+        @test median(kept) > 0
     end
 
     @testset "hint locates the rotation peak" begin
@@ -123,8 +127,11 @@ try
         draws = [_gp_informed_draw(rng, h) for _ in 1:400]
         near = count(d -> min(abs(d - P_ROT), abs(d - P_ROT / 2)) < 1.5, draws)
         @test near > 400 * 0.3      # α = 0.7 informed, rest uniform
-        # every draw must have finite density under the same mixture
-        @test all(isfinite, _gp_informed_logq.(draws, Ref(h)))
+        # every draw inside the prior has finite density under the same
+        # mixture; one outside comes back NaN and the birth is rejected
+        kept = filter(isfinite, draws)
+        @test length(kept) > 0.9 * length(draws)
+        @test all(isfinite, _gp_informed_logq.(kept, Ref(h)))
     end
 
     # ---- a model with no data hint must fall back, not crash -------------
