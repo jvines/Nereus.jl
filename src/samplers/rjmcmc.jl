@@ -91,7 +91,11 @@ Run a standalone RJMCMC sampler for trans-dimensional inference.
   if the checkpoint came from different data (any field, any element),
   priors, parameters, model settings (stability, stellar mass, noise models,
   parametrization, ...), warmup, seed, chain count, within-model kernel or
-  trans-dim settings.
+  trans-dim settings. One exception with `n_chains > 1`: a chain the
+  checkpoint holds nothing for (killed before its first write) restarts from
+  its seed, but if the other chains had already re-cut the shared circular
+  windows it warms up in the re-cut chart rather than the original one, so it
+  samples the same target without reproducing the uninterrupted run's draws.
 
 Circular angles (`src/circular.jl`): with planet births on, same-mode planet
 slots share one window per angle, set before the first state is drawn. A single
@@ -133,6 +137,13 @@ function sample_rjmcmc(
     noise_swap_rate = Float64(noise_swap_rate)
     0.0 <= noise_swap_rate <= 1.0 ||
         throw(ArgumentError("noise_swap_rate must be in [0, 1]"))
+    # The swap is chosen in every state (a null move when no member is active),
+    # so at rate 1 birth/death would never run and the chain would never leave
+    # its starting noise state.
+    (noise_swap_rate < 1.0 || isempty(td.noise_exclusion_groups)) ||
+        throw(ArgumentError("noise_swap_rate must be < 1 when the menu has " *
+                            "exclusion groups: at 1 no noise birth or death " *
+                            "ever runs"))
     checkpoint_interval = Float64(checkpoint_interval)
     ck_path = checkpoint === nothing ? nothing : String(checkpoint)
     resume && ck_path === nothing && throw(ArgumentError(
@@ -1055,11 +1066,6 @@ function _noise_move!(callback, theta::Theta, data::Data, td::TransDimConfig,
                        noise_swap_rate::Float64 = 0.5)
     # Within-group swap, BEFORE the birth/death branch.
     #
-        # A swap moves BETWEEN two members, so it needs one already active.
-        # Attempting it from the "none" state wastes the move — and at a high
-        # swap rate it starves birth/death entirely, freezing the chain in
-        # "none" forever. Fall through to birth/death instead of returning.
-    #
     # rjmcmc runs at beta = 1 with no ladder, so unlike the tempered samplers it
     # has NO way to cross the "none" valley that sits between two members of an
     # exclusion group: going A -> none -> B requires accepting an intermediate
@@ -1067,8 +1073,16 @@ function _noise_move!(callback, theta::Theta, data::Data, td::TransDimConfig,
     # hot chains (which is why its swap is gated to beta > 0.3, cold side only);
     # here there are no hot chains, so without this move a walker that lands in
     # one member never leaves and the occupancy is NOT P(M|D).
-    if !isempty(td.noise_exclusion_groups) && rand(rng) < noise_swap_rate &&
-       _any_group_member_active(theta, td.noise_exclusion_groups)
+    #
+    # The swap is CHOSEN with the same probability in every state, and is a
+    # null move when no group member is active. Choosing it only when a member
+    # is active (falling through to birth/death otherwise) makes the
+    # birth/death selection probability state dependent, 1 in "none" and
+    # 1 - noise_swap_rate next to it, which the Hastings ratio does not carry:
+    # at rate 0.5 every group member came out twice as likely as "none" under
+    # a flat likelihood. Hence noise_swap_rate < 1 whenever there are groups.
+    if !isempty(td.noise_exclusion_groups) && rand(rng) < noise_swap_rate
+        _any_group_member_active(theta, td.noise_exclusion_groups) || return
         grp = _pick_active_group(theta, td.noise_exclusion_groups, rng)
         cand, lq = propose_noise_swap(theta, rng, grp, td.toggleable; data=data)
         isfinite(lq) || return
@@ -1093,7 +1107,8 @@ function _noise_move!(callback, theta::Theta, data::Data, td::TransDimConfig,
                                                 exclusion_groups=td.noise_exclusion_groups,
                                                 data=data)
     else
-        new_theta, log_q = propose_noise_death(theta, rng, td.toggleable; data=data)
+        new_theta, log_q = propose_noise_death(theta, rng, td.toggleable; data=data,
+                                                exclusion_groups=td.noise_exclusion_groups)
     end
 
     !isfinite(log_q) && return

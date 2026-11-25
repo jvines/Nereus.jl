@@ -137,7 +137,10 @@ function _swap_ad_q(theta::Theta{T}, ad::ActivityDecorrelation, data::Data, rng,
             slot = layout.name_to_idx[nm]
             uf = findfirst(==(slot), layout.unfrozen_idx); uf === nothing && continue
             lo, hi = bounds(layout.unfrozen_priors[uf])
-            Cd[i] = clamp(Cd[i], lo, hi); vals[slot] = convert(T, Cd[i])
+            # Reject rather than clamp (a clamp is a point mass at the bound
+            # that _ad_mvn_logq does not carry).
+            (lo <= Cd[i] <= hi) || return convert(T, -Inf)
+            vals[slot] = convert(T, Cd[i])
         end
         Ccur = Cd
     end

@@ -18,7 +18,7 @@ using Test
 using Nereus
 using Nereus: Params, Data, InstrumentConfig, NereusTarget, Theta,
               TransDimState, NoiseModel, PlanetDataSources,
-              ActivityDecorrelation, CeleriteRotation, MaternGP,
+              ActivityDecorrelation, ActivityJitter, CeleriteRotation, MaternGP,
               propose_noise_birth, propose_noise_birth_annealed,
               propose_noise_death, propose_noise_death_annealed, ErrorScale,
               propose_noise_swap,
@@ -378,6 +378,47 @@ using Random, Statistics
         end
         occ = counts ./ n_iter
         @test all(abs.(occ .- 1/3) .< 0.03)
+    end
+
+    @testset "rjmcmc noise toggles sample the discrete prior across groups" begin
+        # The rotation GP (R) and a Matérn GP (M) in one exclusion group, an
+        # activity jitter (J) outside it: the allowed states are {}, M, R, J,
+        # M+J, R+J, uniform when the likelihood is flat (errors of 1e4 against
+        # amplitudes of order the data). Not ErrorScale, whose likelihood scales
+        # as s^-n whatever the errors, and not ActivityDecorrelation, whose OLS
+        # birth is likelihood shaped and far wider than its prior on flat data,
+        # so it toggles a few dozen times in 30k steps and the occupancy is
+        # noise. Two defects this catches: a death that counted the reverse
+        # birth's choices without the groups (rjmcmc, pt and daedalus called it
+        # so) gets R+J -> R wrong, since M is not activatable there; and a swap
+        # chosen only when a member is active (birth/death otherwise) made each
+        # member twice as likely as "none" at the default swap rate of 0.5.
+        es = MaternGP(); rot = CeleriteRotation(channel = :rv)
+        ad = ActivityJitter(indicator = "rhk")
+        flat = Data(t_rv = t, rv = rv, rv_err = fill(1e4, N), rv_inst = ones(Int, N),
+                    indicators = Dict("rhk" => abs.(bis) .+ 1.0),
+                    indicator_errs = Dict("rhk" => fill(1e4, N)))
+        params = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+            instruments = InstrumentConfig(rv = ["I1"]), data = flat,
+            priors = Dict{String,PriorSpec}(
+                "gamma_I1" => UniformPrior(-3rvmax, 3rvmax),
+                "sigma_I1" => LogUniformPrior(0.2, 12.0)),
+            noise_models = NoiseModel[es, rot, ad], transdim_noise = true,
+            stability = :none)
+        tg = NereusTarget(params, flat; unconstrained = false)
+        tdc = Nereus.TransDimConfig(; max_kplanet = 0, planets = false, noise = true,
+            toggleable = NoiseModel[es, rot, ad],
+            noise_exclusion_groups = [NoiseModel[es, rot]], transdim_fraction = 0.5)
+        chains, _ = Nereus.sample_rjmcmc(tg, flat; td = tdc, n_samples = 30_000,
+                                         n_warmup = 2_000, seed = 3,
+                                         within_model = :rwm, show_progress = false)
+        a = [vec(Array(chains[Symbol("noise_active_$k")])) .> 0.5 for k in 1:3]
+        lab = [(a[1][i], a[2][i], a[3][i]) for i in eachindex(a[1])]
+        states = [(false, false, false), (true, false, false), (false, true, false),
+                  (false, false, true), (true, false, true), (false, true, true)]
+        @test all(s -> s in states, lab)
+        occ = [count(==(s), lab) / length(lab) for s in states]
+        @test all(abs.(occ .- 1/6) .< 0.04)
     end
 
     @testset "n_bridge must be at least 1" begin
