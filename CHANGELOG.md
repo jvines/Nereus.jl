@@ -3,6 +3,48 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## 0.9.12
+
+### Fixed
+
+- **Ctrl-C during a `pt_emcee` run is an interrupt, not a crash.** A SIGINT that
+  arrived while the main task waited for a `Threads.@threads` half-step could be
+  thrown inside Base's lock-held `_wait` and surface as `ErrorException("unlock
+  count must match lock count")`. After burn-in the run then crashed and lost its
+  draws instead of stopping as "interrupted" (1 in 20 burn-in interrupts under
+  load). The threaded regions now run with SIGINT deferred to their end
+  (`_sigint_deferred`), so the interrupt lands in the step loop.
+
+- **Phase folds of a light curve with a baseline trend show the transit.** The
+  fold evaluates its model and bands at the reference epoch, where it also
+  evaluated the instrument's trend; with each trend in its own time the
+  extrapolated trend put the folded model of a single night far off the data
+  (NGTS-33 PEST g': flux ≈ −7). The fold now leaves the trend out of its curve
+  and bands and takes it out of the folded cadences; residuals are unchanged.
+  `compute_transit_model_on_grid` and `compute_transit_ci_bands` take
+  `trend = false`.
+
+- **Missing activity-indicator values no longer break RV fits.** An indicator
+  entry that is NaN (a night the pipeline did not report H-alpha, a blank CSV
+  cell) made `IndicatorFloor` (`:qp` and `:white`, generic and workspace
+  paths) and `ActivityGP` (joint, conditional, indicators-only, semiseparable
+  and instrument-scoped) return NaN. The floor is always on in
+  `default_noise_menu` whenever an AGP-capable channel is present, so one
+  missing value broke every RV fit with a noise menu. These likelihoods now
+  drop the missing entries of each channel (the Gaussian marginal of the
+  entries that exist) while the RV entry of that epoch stays; the result
+  equals the same likelihood with those entries removed. The workspace floor
+  still allocates nothing. `ActivityJitter` applies only its base jitter where
+  the indicator is missing (it gave NaN), and the AGP prediction, RV
+  decomposition and LOO conditional drop the missing entries too.
+- `Data` accepts a non-finite indicator error exactly where the indicator value
+  is non-finite; elsewhere errors must still be strictly positive.
+- An inline JSON `rv.values` block accepts `null` in an indicator column or its
+  `_err` column as a missing value (JSON has no NaN). A `null` in `bjd`, `rv`
+  or `rv_err` is refused with an error naming the column and entry.
+- The data-scaled default priors of `IndicatorFloor` and `ActivityGP` (channel
+  MAD) read the finite indicator entries only; one NaN made them NaN.
+
 ## 0.9.11
 
 ### Added

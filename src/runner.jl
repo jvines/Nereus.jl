@@ -947,10 +947,34 @@ function _rv_component_code(x)
                         "(use 1/A/primary or 2/B/secondary)"))
 end
 
+# One numeric column of an inline `values` block. JSON cannot carry NaN, so a
+# missing activity-indicator entry (a night the pipeline did not report it)
+# arrives as `null`: with `strict = false` (indicator and indicator-error
+# columns) that is NaN, which the likelihoods mask per channel. Time, RV and
+# RV error columns are strict and name the bad entry.
+function _rv_values_col(vals, k; strict::Bool)
+    col = _get(vals, k; required = strict)
+    col === nothing && return Float64[]
+    out = Vector{Float64}(undef, length(col))
+    for (i, x) in enumerate(col)
+        if x === nothing || x === missing
+            strict && error("rv `values` column `$k` entry $i is null. Only activity " *
+                            "indicator columns (and their `_err` columns) may hold " *
+                            "null, read as a missing value; bjd, rv and rv_err may not.")
+            out[i] = NaN
+        elseif x isa Real
+            out[i] = Float64(x)
+        else
+            error("rv `values` column `$k` entry $i is not a number: `$x`.")
+        end
+    end
+    return out
+end
+
 function _parse_rv_values(vals)
-    t   = Float64.(_get(vals, :bjd; required = true))
-    v   = Float64.(_get(vals, :rv; required = true))
-    σ   = Float64.(_get(vals, :rv_err; required = true))
+    t   = _rv_values_col(vals, :bjd; strict = true)
+    v   = _rv_values_col(vals, :rv; strict = true)
+    σ   = _rv_values_col(vals, :rv_err; strict = true)
     inst_str = String.(_get(vals, :instrument; required = true))
     inst_names = sort!(unique(inst_str))
     inst_map   = Dict(name => i for (i, name) in enumerate(inst_names))
@@ -969,7 +993,7 @@ function _parse_rv_values(vals)
             comp = Int[_rv_component_code(x) for x in _get(vals, k)]
             continue
         end
-        extra[ks] = Float64.(_get(vals, k))
+        extra[ks] = _rv_values_col(vals, k; strict = false)
     end
     indicators, indicator_errs = _split_indicator_errs(extra)
     return t, v, σ, inst_idx, inst_names, indicators, indicator_errs, comp
@@ -1577,7 +1601,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
     max_k = Int(_get(mdl, :max_kplanet; default = 1))
     modes_str = String.(_get(mdl, :planet_modes;
                               default = fill("RV_ONLY", max_k)))
-    pm = [_PLANET_MODES[m] for m in modes_str]
+    pm = PlanetDataSources[_PLANET_MODES[m] for m in modes_str]
 
     par = _get(mdl, :parametrization; default = Dict())
     # `time`, when absent, is ParametrizationConfig's default `:auto`, as in

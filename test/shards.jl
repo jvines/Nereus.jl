@@ -166,6 +166,8 @@ const TEST_UNITS = [
     (name = "test_activity_gp.jl", seconds = 43, files = ["test_activity_gp.jl"]),
     (name = "test_activity_gp_lowrank.jl", seconds = 442, files = ["test_activity_gp_lowrank.jl"]),
     (name = "test_indicator_floor_ws.jl", seconds = 4, files = ["test_indicator_floor_ws.jl"]),
+    (name = "test_indicator_nan_mask.jl", seconds = 60, files = ["test_indicator_nan_mask.jl"]),
+    (name = "test_zero_planet_job.jl", seconds = 30, files = ["test_zero_planet_job.jl"]),
     (name = "test_celerite_ws.jl", seconds = 3, files = ["test_celerite_ws.jl"]),
     (name = "test_celerite_order.jl", seconds = 2, files = ["test_celerite_order.jl"]),
     (name = "test_arma_time_order.jl", seconds = 1, files = ["test_arma_time_order.jl"]),
@@ -287,6 +289,8 @@ const TEST_UNITS = [
     (name = "test_typed_api_gaps.jl", seconds = 170, files = ["test_typed_api_gaps.jl"]),
     # Per-instrument photometric trend orders and per-group trend time. Estimated (2026-11-24).
     (name = "test_phot_trend_per_instrument.jl", seconds = 60, files = ["test_phot_trend_per_instrument.jl"]),
+    # A phase fold of a trended light curve: model and bands without the trend. Estimated (2026-11-25).
+    (name = "test_phot_trend_fold_plot.jl", seconds = 60, files = ["test_phot_trend_fold_plot.jl"]),
 ]
 
 const _SHARD = let s = get(ENV, "NEREUS_TEST_SHARD", "")

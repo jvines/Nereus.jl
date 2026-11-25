@@ -39,8 +39,9 @@ end
 """
     _sort_group_periods!(theta) -> theta
 
-Canonical labeling for trans-dim states: within each planet-mode group,
-keep the ACTIVE slots period-sorted by swapping parameter blocks
+Canonical labeling for trans-dim states: within each birth group
+(`birth_group_keys`: same planet mode AND identical slot priors), keep the
+ACTIVE slots period-sorted by swapping parameter blocks
 (insertion sort; activation bits untouched). Called at the end of every
 birth proposal — a freshly-born planet is inserted into period order
 instead of being left wherever the free slot was. Deaths cannot disorder
@@ -48,14 +49,15 @@ a sorted state, and the per-group ordering gate in `rv_log_likelihood`
 rejects within-model moves that would disorder, so the chain stays on the
 single canonical labeling and the k! permutation degeneracy is broken
 exactly as in fixed-dim (no evidence inflation). Detailed balance is
-unaffected: slot priors within a group are identical, so the proposal
+unaffected: slot priors within a birth group are identical by construction
+(slots with their own priors are groups of one and never move), so the proposal
 density is labeling-invariant, and the death move picks planets
 slot-agnostically. No-op for fixed-dim states.
 """
 function _sort_group_periods!(theta::Theta)
     td = theta.td
     td === nothing && return theta
-    modes = theta.params.config.planet_modes
+    modes = birth_group_keys(theta.params)
     K = length(td.planet_active)
     @inbounds for i in 2:K
         td.planet_active[i] || continue
@@ -107,7 +109,7 @@ function propose_planet_birth(theta::Theta{T}, rng::AbstractRNG,
     # Pick the target slot uniformly among each mode-group's first inactive
     # slot (see `group_first_inactive`); the 1/G choice factor enters the
     # combinatorial term below.
-    cand_slots = group_first_inactive(td, theta.params.config.planet_modes)
+    cand_slots = group_first_inactive(td, birth_group_keys(theta.params))
     isempty(cand_slots) && return (theta, convert(T, -Inf))  # all slots full
     k = cand_slots[rand(rng, 1:length(cand_slots))]
     G = length(cand_slots)
@@ -177,6 +179,7 @@ Death move: deactivate a randomly chosen active planet. Returns the
 new theta (with planet deactivated) and the log proposal ratio.
 """
 function propose_planet_death(theta::Theta{T}, rng::AbstractRNG;
+                               data::Union{Data, Nothing}=nothing,
                                scratch::Union{Theta{T}, Nothing}=nothing) where {T}
     td = theta.td
     max_k = length(td.planet_active)
@@ -209,7 +212,7 @@ function propose_planet_death(theta::Theta{T}, rng::AbstractRNG;
     # −log(G_after): the reverse birth picks the slot uniformly among the
     # post-death mode-group slots (mirrors the +log(G) in the births).
     G_after = length(group_first_inactive(new_theta.td,
-                                           theta.params.config.planet_modes))
+                                           birth_group_keys(theta.params)))
     log_q_ratio = log(p_birth_new) + log(n_active) - log(p_death) -
                   log(max(G_after, 1))
 
@@ -217,14 +220,16 @@ function propose_planet_death(theta::Theta{T}, rng::AbstractRNG;
 end
 
 """
-    propose_planet_death(theta, rng, strategy::BirthStrategy; scratch)
+    propose_planet_death(theta, rng, strategy::BirthStrategy; data, scratch)
 
-Fallback for birth strategies with no dedicated death: use the
-strategy-agnostic uniform-pick death. `InformedBirth`/`JointInformedBirth`
-are documented as pairing with this one. Keeps the strategy-dispatched call
-total so callers can pass whatever strategy they selected.
+Fallback for birth strategies with no dedicated death: the strategy-agnostic
+uniform-pick death, which carries no reverse proposal density. Every strategy
+the samplers use has its own death (PriorBirth, MoMSBirth, InformedBirth,
+JointInformedBirth, DonorBirth), so nothing the samplers run lands here.
 """
 propose_planet_death(theta::Theta{T}, rng::AbstractRNG, ::BirthStrategy;
+                      data::Union{Data, Nothing}=nothing,
+                      population=nothing,
                       scratch::Union{Theta{T}, Nothing}=nothing) where {T} =
     propose_planet_death(theta, rng; scratch=scratch)
 
@@ -242,11 +247,13 @@ so a death already loses `Σ logpdf(slab_prior, β_killed)` from the prior term,
 and with a purely combinatorial ratio the round trip
 `log_q_birth + log_q_death` comes out at `−Σ logpdf(...)` — order +10 in ln Z,
 i.e. deaths over-accepted by e^10, biasing occupancy toward low Np. The
-strategy-agnostic 2-argument method is left as-is: it is the documented
-reverse for the informed births, whose own log_q is computed against it.
+informed births have the same need and their own deaths
+(`propose_planet_death(theta, rng, ::InformedBirth; data)`).
 """
 function propose_planet_death(theta::Theta{T}, rng::AbstractRNG,
                                ::PriorBirth;
+                               data::Union{Data, Nothing}=nothing,
+                               population=nothing,
                                scratch::Union{Theta{T}, Nothing}=nothing) where {T}
     td = theta.td
     max_k = length(td.planet_active)
@@ -285,7 +292,7 @@ function propose_planet_death(theta::Theta{T}, rng::AbstractRNG,
     _, p_death = _birth_death_probs(n_active, max_k)
     p_birth_new, _ = _birth_death_probs(n_active - 1, max_k)
     G_after = length(group_first_inactive(new_theta.td,
-                                           theta.params.config.planet_modes))
+                                           birth_group_keys(theta.params)))
     log_q_ratio = log(p_birth_new) + log(n_active) - log(p_death) +
                   log_q_reverse - log(max(G_after, 1))
 

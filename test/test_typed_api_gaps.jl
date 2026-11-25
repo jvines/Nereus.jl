@@ -202,13 +202,13 @@ end
 
 @testset "typed API gaps: the priors the Python client can express" begin
     mj = Nereus._as_prior(Dict("type" => "modjeffreys", "knee" => 1.0, "upper" => 100.0))
-    @test mj isa PriorSpec && bounds(mj) == (0.0, 100.0)
+    @test mj isa PriorSpec && Nereus.bounds(mj) == (0.0, 100.0)
     be = Nereus._as_prior(Dict("type" => "beta", "a" => 2.0, "b" => 5.0, "lo" => 0.0, "hi" => 5.0))
-    @test be isa PriorSpec && bounds(be) == (0.0, 5.0)
+    @test be isa PriorSpec && Nereus.bounds(be) == (0.0, 5.0)
     bn = Nereus._as_prior(Dict("type" => "normal", "mu" => 0.0, "sigma" => 5.0,
                                "lo" => -20.0, "hi" => 20.0))
-    @test bn isa PriorSpec && bounds(bn) == (-20.0, 20.0)
-    @test bounds(Nereus._as_prior(Dict("type" => "normal", "mu" => 0.0, "sigma" => 1.0,
+    @test bn isa PriorSpec && Nereus.bounds(bn) == (-20.0, 20.0)
+    @test Nereus.bounds(Nereus._as_prior(Dict("type" => "normal", "mu" => 0.0, "sigma" => 1.0,
                                        "hi" => 2.0)))[2] == 2.0
 end
 

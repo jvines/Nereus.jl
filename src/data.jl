@@ -283,8 +283,15 @@ function Data(;
                 "indicator_errs entry \"$name\" has no matching indicator values"))
             length(errs) == n_rv || throw(ArgumentError(
                 "indicator_errs \"$name\" length ($(length(errs))) must match t_rv length ($n_rv)"))
-            all(e -> e > 0, errs) || throw(ArgumentError(
-                "indicator_errs \"$name\" entries must be strictly positive"))
+            # A missing indicator value (non-finite: a night the pipeline did
+            # not report it) has no uncertainty either, so any error -- NaN
+            # included -- is accepted there and nowhere else. Every likelihood
+            # that scores the indicators drops that entry of the channel.
+            vals = ind_dict[name]
+            all(k -> !isfinite(vals[k]) || errs[k] > 0, eachindex(errs)) ||
+                throw(ArgumentError(
+                    "indicator_errs \"$name\" entries must be strictly positive " *
+                    "wherever the indicator value is finite"))
             ind_err_dict[name] = Vector{Float64}(errs)
         end
     end

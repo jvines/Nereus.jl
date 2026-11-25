@@ -124,6 +124,69 @@ function group_first_inactive(tds::TransDimState, modes)
     return out
 end
 
+"""
+    birth_group_keys(params) -> Vector
+
+The planet-slot groups of the trans-dim moves: one key per slot, equal for
+two slots exactly when they are interchangeable, i.e. share the planet mode
+AND have identical priors (identical frozen values) slot by slot. Pass it as
+the `modes` argument of [`group_first_inactive`](@ref).
+
+Only interchangeable slots may be collapsed onto one "first inactive" birth
+target and kept period-sorted (`_sort_group_periods!`): then which slot holds
+a planet carries no information and the chain is exact on the period-sorted
+labelling. Slots with their own priors (the usual named-planet menu, one
+period window per known planet) are distinct models. Grouping them by mode
+alone made a birth from {b} only ever target the lowest free slot, so the
+death {b, d} -> {b} had no reverse birth: probability leaked out of every
+state holding a high slot without all the lower ones, and the sort could swap
+parameter blocks between slots with different priors. Each such slot is now
+its own group: every free slot is a birth target, and nothing is sorted.
+"""
+function birth_group_keys(params)
+    modes  = params.config.planet_modes
+    layout = params.layout
+    blocks = layout.planet_blocks
+    K = length(blocks)
+    keys = Vector{Tuple{Any, Int}}(undef, K)
+    reps = Int[]
+    @inbounds for k in 1:K
+        gid = 0
+        for r in reps
+            if modes[r] == modes[k] && _slots_interchangeable(layout, blocks[r], blocks[k])
+                gid = r
+                break
+            end
+        end
+        gid == 0 && (push!(reps, k); gid = k)
+        keys[k] = (modes[k], gid)
+    end
+    return keys
+end
+
+function _slots_interchangeable(layout, ba, bb)
+    typeof(ba) === typeof(bb) || return false
+    sa = planet_slot_indices(ba)
+    sb = planet_slot_indices(bb)
+    length(sa) == length(sb) || return false
+    @inbounds for i in eachindex(sa)
+        ua = findfirst(==(sa[i]), layout.unfrozen_idx)
+        ub = findfirst(==(sb[i]), layout.unfrozen_idx)
+        if ua === nothing && ub === nothing
+            fa = findfirst(==(sa[i]), layout.frozen_idx)
+            fb = findfirst(==(sb[i]), layout.frozen_idx)
+            (fa === nothing) == (fb === nothing) || return false
+            fa === nothing && continue
+            isequal(layout.frozen_values[fa], layout.frozen_values[fb]) || return false
+        elseif ua === nothing || ub === nothing
+            return false
+        else
+            isequal(layout.unfrozen_priors[ua], layout.unfrozen_priors[ub]) || return false
+        end
+    end
+    return true
+end
+
 # --- Noise mask operations --------------------------------------------
 
 """

@@ -888,7 +888,7 @@ end
 
 """
     compute_transit_model_on_grid(theta, data, t_grid, ins_idx; planet=nothing,
-                                  exposure=0.0) -> model
+                                  exposure=0.0, trend=true) -> model
 
 Evaluate the transit photometric model `f(t)` on `t_grid` for instrument
 `ins_idx`. Returns the multi-planet product of (offset + Π transit_flux).
@@ -904,12 +904,17 @@ over the exposure as the likelihood does: the same sub-samples, from
 fine-grid curve drawn over binned long-cadence data. At the default 0 the
 model is instantaneous.
 
+`trend=false` leaves out the instrument's baseline trend (`phot_trend_order`),
+keeping 1 + offset: a phase fold evaluates the model at the reference epoch,
+where a trend fitted to the instrument's own cadences does not apply.
+
 Returns `1.0 + offset + (transit dips)` per cadence — exactly what the
 photometric likelihood compares against `data.flux`.
 """
 function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
                                           planet::Union{Nothing, Int}=nothing,
-                                          exposure::Union{Real, AbstractVector{<:Real}}=0.0)
+                                          exposure::Union{Real, AbstractVector{<:Real}}=0.0,
+                                          trend::Bool=true)
     parametrization = theta.params.config.parametrization
     t_ref = data.t_ref
     two_pi = 2π
@@ -940,7 +945,7 @@ function compute_transit_model_on_grid(theta, data, t_grid, ins_idx::Int;
     # Baseline continuum (offset + any trend) and third-light dilution — match the
     # likelihood so a trend/diluted fit plots a consistent model.
     dil = pm_dilution(theta, ins_idx)
-    trend = Float64[theta.values[s] for s in systemic.pm_trend[ins_idx]]
+    trend = trend ? Float64[theta.values[s] for s in systemic.pm_trend[ins_idx]] : Float64[]
     tn_ref, tn_ih = _phot_trend_norm(theta, data)
     tr_i, ih_i = tn_ref[ins_idx], tn_ih[ins_idx]
 
@@ -1420,7 +1425,8 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
                                      n_draws::Int=1000,
                                      bf_cutoff::Real=10.0,
                                      fold_phase::Union{Nothing, AbstractVector}=nothing,
-                                     pool::Union{Nothing, AbstractVector{<:Integer}}=nothing)
+                                     pool::Union{Nothing, AbstractVector{<:Integer}}=nothing,
+                                     trend::Bool=true)
     pool = pool === nothing ? _band_pool(chains, params, planet, bf_cutoff) :
                               _given_band_pool(chains, params, planet, pool)
     n_grid = fold_phase === nothing ? length(t_grid) : length(fold_phase)
@@ -1456,7 +1462,7 @@ function compute_transit_ci_bands(chains, params, data, t_grid,
             t_grid
         end
         m = compute_transit_model_on_grid(theta, data, t_eval, ins_idx;
-                                            planet=planet, exposure=exposure)
+                                            planet=planet, exposure=exposure, trend=trend)
         all(isfinite, m) || continue
         n_ok += 1
         models[n_ok, :] = m

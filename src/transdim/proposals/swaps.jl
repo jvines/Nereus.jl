@@ -194,7 +194,7 @@ function propose_planet_ad_swap(theta::Theta{T}, rng::AbstractRNG,
     nm_models = theta.params.config.noise_models
     ad, adi = _swap_ad_index(toggleable, nm_models)
     ad === nothing && return (theta, convert(T,-Inf))
-    modes = theta.params.config.planet_modes
+    modes = birth_group_keys(theta.params)
     max_k = length(theta.td.planet_active)
     dirs = _swap_dirs(theta.td, ad, adi, nm_models, exclusion_groups, modes, max_k)
     isempty(dirs) && return (theta, convert(T,-Inf))
@@ -249,9 +249,9 @@ end
 #     inflate²Σ). The informed escape is what lets a walker entrenched in a
 #     flexible model jump to AD at β≈1 (a prior-drawn AD never fits, so a blind
 #     swap would never be accepted in that direction).
-#   * everything else → prior draw/eval, density = Σ logpdf(prior). This matches
-#     propose_noise_birth's non-informed branch, so the −log_q_fwd cancels the
-#     +Σ logpdf the activation adds to Δlogπ (occupancy stays P(M|D)).
+#   * everything else → the noise birth's density: period/amplitude from the
+#     data-only `_gp_hints`, other parameters prior draw/eval — the density
+#     propose_noise_birth draws from, carried in the Hastings ratio.
 # `theta` MUST have the target model INACTIVE so an AD OLS fit sees the
 # model-free residual. mode=:draw fills `vals` at the model's slots and returns
 # the forward density; mode=:eval reads them from `vals`.
@@ -264,11 +264,27 @@ function _noise_birth_q(theta::Theta{T}, nm::NoiseModel,
     layout = theta.params.layout
     instruments = theta.params.config.instruments
     nm_names = noise_param_names(nm, instruments)
+    # Period and amplitude from the same data-only hints the noise birth uses
+    # (`_gp_hints`); the rest from the prior. A prior-drawn GP almost never
+    # fits at β ≈ 1, so a swap INTO a GP was close to never accepted and the
+    # A ↔ GP exchange relied on the hot rungs alone.
+    hints = _gp_hints(theta, data, nm, layout, instruments)
     log_q = zero(T)
     for name in nm_names
         haskey(layout.name_to_idx, name) || continue
         slot = layout.name_to_idx[name]
         uf = findfirst(==(slot), layout.unfrozen_idx); uf === nothing && continue
+        hh = nothing
+        for h in hints
+            h.slot == slot && (hh = h; break)
+        end
+        if hh !== nothing
+            mode === :draw && (vals[slot] = convert(T, _gp_informed_draw(rng, hh)))
+            l = _gp_informed_logq(vals[slot], hh)
+            isfinite(l) || return convert(T, -Inf)
+            log_q += l
+            continue
+        end
         prior = layout.unfrozen_priors[uf]
         lo, hi = bounds(prior)
         if mode === :draw

@@ -33,55 +33,8 @@ function propose_noise_birth(theta::Theta{T}, rng::AbstractRNG,
     td = theta.td
     noise_models = theta.params.config.noise_models
 
-    # Find inactive toggleable components
-    inactive = Int[]
-    for (i, nm) in enumerate(toggleable)
-        nm_idx = findfirst(==(nm), noise_models)
-        nm_idx === nothing && continue
-        if !is_noise_active(td, nm_idx)
-            # Mutual exclusion rules:
-            # - Stage 2 (Sequential) blocked if any Stage 3 (Covariance) active
-            # - Stage 3 (Covariance) blocked if any Stage 2 or Stage 3 active
-            # - Stage 2 components can coexist (AR + MA = ARMA)
-            # - Stage 1 (MeanModifier) always allowed at the typing level
-            can_activate = true
-            if nm isa SequentialNoise
-                for (j, other) in enumerate(noise_models)
-                    if other isa CovarianceNoise && is_noise_active(td, j)
-                        can_activate = false
-                        break
-                    end
-                end
-            elseif nm isa CovarianceNoise
-                for (j, other) in enumerate(noise_models)
-                    if (other isa SequentialNoise || other isa CovarianceNoise) &&
-                       is_noise_active(td, j)
-                        can_activate = false
-                        break
-                    end
-                end
-            end
-            # User-declared exclusion groups (e.g. {BIS-activity, GP-rotation}):
-            # block this activation if ANY *other* member of any group the
-            # candidate belongs to is currently active.
-            if can_activate && !isempty(exclusion_groups)
-                for group in exclusion_groups
-                    nm in group || continue
-                    for other in group
-                        other === nm && continue
-                        other_idx = findfirst(==(other), noise_models)
-                        other_idx === nothing && continue
-                        if is_noise_active(td, other_idx)
-                            can_activate = false
-                            break
-                        end
-                    end
-                    can_activate || break
-                end
-            end
-            can_activate && push!(inactive, nm_idx)
-        end
-    end
+    # Inactive toggleable components that may be switched on here.
+    inactive = _noise_activatable(td, toggleable, noise_models, exclusion_groups)
 
     isempty(inactive) && return (theta, convert(T, -Inf))
 
@@ -189,15 +142,129 @@ function propose_noise_birth(theta::Theta{T}, rng::AbstractRNG,
         j = findfirst(==(nm), noise_models)
         j !== nothing && is_noise_active(new_td, j)
     end
-    log_q_ratio = log(n_active_after) - log(n_inactive) - log_q_fwd
+    # Selection: the forward birth picks this model among `n_inactive`, the
+    # reverse death picks it among `n_active_after`, so the Hastings ratio
+    # carries (1/n_active_after)/(1/n_inactive). (The opposite sign made every
+    # one-model state 9× less likely than "none" at β → 0 with three
+    # activatable models, i.e. (n_inactive/n_active_after)² too small.)
+    log_q_ratio = log(n_inactive) - log(n_active_after) - log_q_fwd
 
     # The annealed move needs the pieces separately: which slot was born, the
     # forward proposal density on its parameters, and the combinatorial term.
     if parts !== nothing
         parts[] = (nm_idx = nm_idx, log_q_fwd = log_q_fwd,
-                   log_comb = log(n_active_after) - log(n_inactive))
+                   log_comb = log(n_inactive) - log(n_active_after))
     end
     return (new_theta, convert(T, log_q_ratio))
 end
 
 
+
+"""
+    _noise_activatable(td, toggleable, noise_models, exclusion_groups) -> Vector{Int}
+
+Global indices of the inactive toggleable noise models that a birth may
+switch on in `td`, under the two exclusion layers of `propose_noise_birth`:
+
+1. typing: SequentialNoise (AR/MA) is blocked by an active CovarianceNoise;
+   CovarianceNoise by any active Sequential or Covariance model;
+2. user-declared exclusion groups: at most one member of each group.
+
+A noise death counts the same set in its post-death state, so the reverse
+birth's selection probability is the one the birth really uses.
+"""
+function _noise_activatable(td, toggleable::Vector{NoiseModel},
+                            noise_models::Vector{NoiseModel},
+                            exclusion_groups)
+    inactive = Int[]
+    for nm in toggleable
+        nm_idx = findfirst(==(nm), noise_models)
+        nm_idx === nothing && continue
+        is_noise_active(td, nm_idx) && continue
+        can_activate = true
+        if nm isa SequentialNoise
+            for (j, other) in enumerate(noise_models)
+                if other isa CovarianceNoise && is_noise_active(td, j)
+                    can_activate = false
+                    break
+                end
+            end
+        elseif nm isa CovarianceNoise
+            for (j, other) in enumerate(noise_models)
+                if (other isa SequentialNoise || other isa CovarianceNoise) &&
+                   is_noise_active(td, j)
+                    can_activate = false
+                    break
+                end
+            end
+        end
+        if can_activate && !isempty(exclusion_groups)
+            for group in exclusion_groups
+                nm in group || continue
+                for other in group
+                    other === nm && continue
+                    other_idx = findfirst(==(other), noise_models)
+                    other_idx === nothing && continue
+                    if is_noise_active(td, other_idx)
+                        can_activate = false
+                        break
+                    end
+                end
+                can_activate || break
+            end
+        end
+        can_activate && push!(inactive, nm_idx)
+    end
+    return inactive
+end
+
+"""
+    _noise_birth_q_setup(theta_off, nm_idx, data)
+
+What the birth proposal of noise model `nm_idx` depends on, from the state
+`theta_off` (the model inactive): the OLS fit of an informed
+ActivityDecorrelation birth, or the data-only GP hints. Evaluate with
+`_noise_birth_q_eval`. It is the density `propose_noise_birth` draws from.
+"""
+function _noise_birth_q_setup(theta_off::Theta, nm_idx::Int, data)
+    nm = theta_off.params.config.noise_models[nm_idx]
+    layout = theta_off.params.layout
+    instruments = theta_off.params.config.instruments
+    if AD_INFORMED_BIRTH[] && nm isa ActivityDecorrelation && data !== nothing
+        cnames, C_ols, F = ad_ols_fit(theta_off, data, nm)
+        if F !== nothing && length(C_ols) == length(cnames) && !isempty(cnames)
+            return (ad = true, cnames = cnames, C_ols = C_ols, F = F,
+                    hints = NamedTuple[])
+        end
+    end
+    return (ad = false, cnames = String[], C_ols = Float64[], F = nothing,
+            hints = _gp_hints(theta_off, data, nm, layout, instruments))
+end
+
+"Log-density of noise model `nm_idx`'s birth proposal at its values in `values`."
+function _noise_birth_q_eval(setup, theta::Theta, nm_idx::Int, values::AbstractVector)
+    layout = theta.params.layout
+    if setup.ad
+        Ccur = Float64[values[layout.name_to_idx[nm]] for nm in setup.cnames]
+        return Float64(_ad_mvn_logq(Ccur, setup.C_ols, setup.F, 2.0))
+    end
+    nm = theta.params.config.noise_models[nm_idx]
+    lq = 0.0
+    for name in noise_param_names(nm, theta.params.config.instruments)
+        haskey(layout.name_to_idx, name) || continue
+        slot = layout.name_to_idx[name]
+        uf_pos = findfirst(==(slot), layout.unfrozen_idx)
+        hh = nothing
+        for h in setup.hints
+            h.slot == slot && (hh = h; break)
+        end
+        if hh !== nothing
+            l = _gp_informed_logq(values[slot], hh)
+            isfinite(l) || return -Inf
+            lq += l
+        elseif uf_pos !== nothing
+            lq += Float64(eval_packed_logpdf(values[slot], layout.packed_priors, uf_pos))
+        end
+    end
+    return lq
+end

@@ -1004,7 +1004,7 @@ function _planet_move!(callback, theta::Theta, data::Data, td::TransDimConfig,
     strategy = _select_strategy(td, rng)
     new_theta, log_q = do_birth ?
         propose_planet_birth(theta, rng, strategy; data=data) :
-        propose_planet_death(theta, rng, strategy)
+        propose_planet_death(theta, rng, strategy; data=data)
 
     !isfinite(log_q) && return
 

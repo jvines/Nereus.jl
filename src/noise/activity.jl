@@ -35,7 +35,8 @@ layout slots resolved once (`RVModifierSlots`).
     jit_base = theta.values[layout.name_to_idx[_aj_base_name(model, ins_name)]]
     jit_act  = theta.values[layout.name_to_idx[_aj_act_name(model, ins_name)]]
     ind_val  = T(data.indicators[model.indicator][obs_idx])
-    sigma_j  = jit_base + jit_act * ind_val
+    # A missing indicator (non-finite) adds no activity jitter: base only.
+    sigma_j  = isfinite(ind_val) ? jit_base + jit_act * ind_val : jit_base
     return obs_err_sq + sigma_j * sigma_j
 end
 
@@ -237,7 +238,7 @@ end
     vals = sl.aj_vals[m]
     vals === _NO_INDICATOR && _missing_slot(model.indicator)
     ind_val = T(vals[obs_idx])
-    sigma_j = jit_base + jit_act * ind_val
+    sigma_j = isfinite(ind_val) ? jit_base + jit_act * ind_val : jit_base
     return obs_err_sq + sigma_j * sigma_j
 end
 

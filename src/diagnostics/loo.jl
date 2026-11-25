@@ -660,7 +660,9 @@ function _agp_conditional_gaussian(theta::Theta{Float64}, data::Data,
         jit² = ix.jit[k] == 0 ? 0.0 : v[ix.jit[k]]^2
         vals = ix.vals[k]; errs = ix.errs[k]
         @inbounds for i in eachindex(vals)
-            y[off + i] = vals[i]; σ²[off + i] = errs[i]^2 + jit²
+            # A missing entry (non-finite) is dropped below.
+            y[off + i] = _agp_obs(vals[i], Float64)
+            σ²[off + i] = _agp_var(vals[i], errs[i], jit², Float64)
         end
         off += length(vals)
     end
@@ -669,6 +671,8 @@ function _agp_conditional_gaussian(theta::Theta{Float64}, data::Data,
     @inbounds for i in 1:n_total
         Σ[i, i] += σ²[i]
     end
+    Σ, y = _agp_drop_missing(Σ, y)
+    n_total = length(y)
     R = 1:n_rv
     n_total == n_rv && return (y, Matrix(Σ))
     Iind = (n_rv + 1):n_total

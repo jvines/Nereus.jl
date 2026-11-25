@@ -1250,8 +1250,10 @@ function sample_transdim_pt_emcee(
     # in ln Z). Coordinate M-H over the newborn model's params climbs the
     # drawn config toward its mode; positive-support params step
     # multiplicatively (Hastings-corrected), the rest additively at a
-    # tenth of the prior's central width. Standard within-model M-H ⇒
-    # detailed balance is safe wherever it runs.
+    # tenth of the prior's central width. Burn-in only: each step is
+    # within-model M-H, but applied to freshly accepted births alone the climb
+    # is not a reversible kernel, and in the sampling phase it biases the
+    # occupancy toward the richer state.
     function refine_noise_birth!(t::Int, w::Int, nm_idx::Int, β::Float64,
                                   slot::Int, trng)
         entries = noise_refine_slots[nm_idx]
@@ -1291,8 +1293,8 @@ function sample_transdim_pt_emcee(
     # coordinate-wise moves accept independently and track the (P, Tc)
     # ridge. A lone fresh planet CANNOT be refined by the stretch move (its
     # only valid partners would need the same planet active), so this is
-    # its only mobility until the ensemble populates. Standard within-model
-    # M-H ⇒ detailed balance is safe.
+    # its only mobility until the ensemble populates. Burn-in only, for the
+    # reason given at `refine_noise_birth!`.
     function refine_birth!(t::Int, w::Int, kb::Int, β::Float64,
                             bufslot::Int, trng)
         blk = params.layout.planet_blocks[kb]
@@ -1936,7 +1938,8 @@ function sample_transdim_pt_emcee(
                     if in_burnin && β > 0.3 && n_birth_tries > 1 &&
                        rand(trng) < 0.5
                         dead, lq_death = propose_noise_death(theta, trng,
-                                                              td.toggleable; data=data)
+                                                              td.toggleable; data=data,
+                                                              exclusion_groups = td.noise_exclusion_groups)
                         if isfinite(lq_death)
                             best_α = -Inf
                             best_nt = nothing
@@ -2156,10 +2159,43 @@ function sample_transdim_pt_emcee(
                         continue
                     end
 
+                    # The reverse of the annealed birth is the annealed death
+                    # (the same bridge run backwards). Pairing it with the
+                    # instantaneous death below made the pair irreversible: the
+                    # birth enjoyed the bridge and the death did not, so the
+                    # bridged models were over-occupied.
+                    if !do_nbirth && n_noise_bridge > 1
+                        _lld(x) = last(split_ref(spike_slab_log_prior(x, strategy,
+                                                     inclusion_prior), x, slot))
+                        _lpd(x) = spike_slab_log_prior(x, strategy, inclusion_prior)
+                        cand_d, acc_d, ll_d = propose_noise_death_annealed(
+                            theta, trng, td.toggleable, _lld, _lpd; data=data,
+                            exclusion_groups = td.noise_exclusion_groups,
+                            beta = β, n_bridge = n_noise_bridge,
+                            n_relax = n_noise_relax,
+                            ll_current = logL_arr[t, w],
+                            lp_current = logπ_arr[t, w])
+                        isfinite(acc_d) || continue
+                        Threads.atomic_add!(propose_ntd[t], 1)
+                        Threads.atomic_add!(n_evals_atomic, 1)
+                        if log(rand(trng)) < acc_d
+                            lp_d = _lpd(cand_d)
+                            @inbounds for (j, idx) in enumerate(unfrozen_idx)
+                                state[t, w, j] = cand_d.values[idx]
+                            end
+                            copyto!(td_states[t, w].noise_active,
+                                     cand_d.td.noise_active)
+                            logπ_arr[t, w] = lp_d; logL_arr[t, w] = ll_d
+                            Threads.atomic_add!(accept_ntd[t], 1)
+                        end
+                        continue
+                    end
+
                     new_theta, log_q = do_nbirth ?
                         propose_noise_birth(theta, trng, td.toggleable; data=data,
                                               exclusion_groups = td.noise_exclusion_groups) :
-                        propose_noise_death(theta, trng, td.toggleable; data=data)
+                        propose_noise_death(theta, trng, td.toggleable; data=data,
+                                              exclusion_groups = td.noise_exclusion_groups)
                     isfinite(log_q) || continue
                     Threads.atomic_add!(propose_ntd[t], 1)
                     # MUST be the same prior function the rest of the sampler
@@ -2191,9 +2227,12 @@ function sample_transdim_pt_emcee(
                         logπ_arr[t, w] = new_log_pi
                         logL_arr[t, w] = new_log_L
                         Threads.atomic_add!(accept_ntd[t], 1)
-                        # Refinement is standard within-model M-H — DB-safe
-                        # post-burn-in too (same argument as planet births).
-                        do_nbirth && n_birth_refine > 0 && β > 0.3 &&
+                        # Post-birth refinement, burn-in only: a climb applied to accepted births alone
+                        # is not part of any reversible kernel (it moves the
+                        # newborns, never the planets a death is judged on), so
+                        # in the sampling phase it biases the occupancy toward
+                        # the richer state.
+                        in_burnin && do_nbirth && n_birth_refine > 0 && β > 0.3 &&
                             nb !== nothing &&
                             refine_noise_birth!(t, w, nb, β, slot, trng)
                     end
@@ -2304,12 +2343,12 @@ function sample_transdim_pt_emcee(
                     continue
                 end
 
+                # Each birth strategy pairs with its own death, which carries
+                # that birth's density at the killed values.
                 new_theta, log_q = if do_birth
                     propose_planet_birth(theta, trng, chosen_strategy; data=data)
-                elseif chosen_strategy isa MoMSBirth
-                    propose_planet_death(theta, trng, strategy)
                 else
-                    propose_planet_death(theta, trng)
+                    propose_planet_death(theta, trng, chosen_strategy; data=data)
                 end
                 isfinite(log_q) || continue
 
@@ -2366,12 +2405,15 @@ function sample_transdim_pt_emcee(
                     # active, and at birth there are none. So climb it to its mode
                     # here with a few within-model RWM sweeps on JUST the new
                     # planet's params. Once at the mode it is self-protecting: a
-                    # later stretch/death that degrades it fails its own M-H. These
-                    # are standard within-model moves → detailed balance is safe.
+                    # later stretch/death that degrades it fails its own M-H.
                     # Refinement gated to the cold side (β > 0.3): hot junk births
                     # don't merit the per-slot eval cost, and hot chains explore
                     # via the standard moves anyway.
-                    do_birth && n_birth_refine > 0 && β > 0.3 &&
+                    # Burn-in only (see `refine_noise_birth!`): each step is
+                    # within-model M-H, but a climb applied to accepted births
+                    # alone is not a reversible kernel and in the sampling phase
+                    # it pushes the occupancy toward the richer state.
+                    in_burnin && do_birth && n_birth_refine > 0 && β > 0.3 &&
                         refine_birth!(t, w, k_touched, β, slot, trng)
                 end
             end
