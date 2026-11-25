@@ -905,6 +905,16 @@ function _canonical_slot_columns(chains, allp, model_params, nflat::Int)
     return out
 end
 
+# Trans-dim components active in fewer draws than this are not assessed by the
+# convergence gates (convergence_report, fit_health). Such a component is a
+# rare excursion: a near-absent planet at the floor of its amplitude prior, its
+# period anywhere in the prior. Its R-hat and ESS count the excursions, and its
+# amplitude sits on the lower bound by construction, so the gates would flag
+# them however well the sampler mixes. It was 1%, and an exact sampler crossed
+# it: on the easy 12.3 d target with two slots, a second planet in 1.2% of the
+# draws failed R-hat at 1.68 and its K "railed" in 19% of them.
+const TRANSDIM_ASSESS_MIN_OCCUPANCY = 0.05
+
 """
     convergence_report(chains, n_walkers; io=stdout, params=nothing,
                        rhat_max=1.1, ess_min=400) -> NamedTuple
@@ -1074,7 +1084,7 @@ function _convergence_stats(chains, n_walkers::Int; params=nothing, model_params
                   (() -> _cond_matrix(getv(), nothing, nsteps, 1:n_walkers))
         else
             f = count(mask)/length(mask)
-            if f < 0.01                                      # component ~never on
+            if f < TRANSDIM_ASSESS_MIN_OCCUPANCY             # component rarely on
                 pre[i] = (:inactive,)
                 continue
             end

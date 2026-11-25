@@ -2266,8 +2266,15 @@ function sample_transdim_pt_emcee(
                 use_informed = informed_birth_fraction > 0.0 && βs[t] > 0.3 &&
                                 rand(trng) < informed_birth_fraction
                 chosen_strategy = use_informed ? JointInformedBirth() : strategy
-                track_informed && use_informed && do_birth &&
-                    push!(informed_keys[task_idx], _active_set_key(theta))
+                # A death's reverse density can fill the entry of the state it
+                # leads to, so those keys are recorded as well.
+                if track_informed && use_informed
+                    if do_birth
+                        push!(informed_keys[task_idx], _active_set_key(theta))
+                    else
+                        union!(informed_keys[task_idx], _death_active_set_keys(theta))
+                    end
+                end
                 β = βs[t]
 
                 # (1)+(2) Generous multi-try exploration, BURN-IN ONLY (discarded, so

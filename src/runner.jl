@@ -3561,8 +3561,8 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
         # Trans-dim: a planet's or noise model's parameters are posterior draws
         # only where that component is active; elsewhere the column holds a
         # parked value. Every check is run on the active draws only (`active`),
-        # and a component active in under 1% of draws -- the science tables'
-        # threshold for "not meaningfully constrained" -- is not assessed.
+        # and a component active in under TRANSDIM_ASSESS_MIN_OCCUPANCY (5%) of
+        # draws is not assessed (src/reporting.jl says why).
         # Measured: on the HD 18599 artifact every railed parameter belonged
         # to a never-active noise model (one with a median of -5.09 against a
         # lower bound of 0.1); on an easy 12.3 d RV target with max 2 planets,
@@ -3590,7 +3590,7 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
             mask = haskey(canon, Symbol(nm)) ? canon[Symbol(nm)][2] :
                    sci_active_mask(chains, params, nm)
             mask === nothing && continue
-            if count(mask) < 0.01 * length(mask)
+            if count(mask) < TRANSDIM_ASSESS_MIN_OCCUPANCY * length(mask)
                 push!(skip, Symbol(nm))
             elseif !all(mask)
                 active[Symbol(nm)] = BitVector(mask)
@@ -3599,7 +3599,8 @@ function _run_fit_health!(cfg, chains, params::Params, summary::Dict;
         pnames = isempty(skip) ? nothing :
                  [s for s in layout.unfrozen_names if Symbol(s) ∉ skip]
         isempty(skip) || @info "fit_health: not assessing $(length(skip)) " *
-              "parameter(s) of components active in under 1% of draws " *
+              "parameter(s) of components active in under " *
+              "$(round(Int, 100TRANSDIM_ASSESS_MIN_OCCUPANCY))% of draws " *
               "(their columns are parked values, not posterior draws)"
 
         # Full-circle angles are relabelled into that window before the rail

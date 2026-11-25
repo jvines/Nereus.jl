@@ -1630,8 +1630,16 @@ end
 const _InformedSeen = Dict{UInt64, Tuple{Vector{Float64}, TransDimState}}
 
 function _note_informed!(seen::_InformedSeen, theta::Theta, rng::AbstractRNG)
-    sig = _active_set_signature(theta, objectid(rng))
+    id = objectid(rng)
+    sig = _active_set_signature(theta, id)
     haskey(seen, sig) || (seen[sig] = (copy(theta.values), copy(theta.td)))
+    # A death's reverse density can fill the entry of the state it leads to.
+    for k in active_planets(theta.td)
+        td_k = copy(theta.td)
+        deactivate_planet!(td_k, k)
+        sig_k = _active_set_signature(Theta{Float64}(theta.params, theta.values; td = td_k), id)
+        haskey(seen, sig_k) || (seen[sig_k] = (copy(theta.values), td_k))
+    end
     return nothing
 end
 

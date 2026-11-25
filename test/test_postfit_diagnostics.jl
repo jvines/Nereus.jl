@@ -312,6 +312,26 @@ end
     end
 end
 
+@testset "convergence_report: a rarely active component is not assessed" begin
+    # A component on in ~3% of draws (below TRANSDIM_ASSESS_MIN_OCCUPANCY) is a
+    # rare excursion; its R-hat would count the excursions, so it is skipped.
+    rng = MersenneTwister(22)
+    nw, ns = 12, 400
+    X = Array{Float64,3}(undef, ns, 2, nw)
+    X[:, 1, :] = 100 .* randn(rng, ns, nw)              # junk, walker-dependent
+    X[:, 1, :] .+= reshape(1000 .* (1:nw), 1, nw)
+    X[:, 2, :] = Float64.(rand(rng, ns, nw) .< 0.03)
+    ch = Chains(X, [:K_k1, :planet_active_1])
+    rep = convergence_report(ch, nw; io = devnull, params = [:K_k1])
+    @test Nereus.TRANSDIM_ASSESS_MIN_OCCUPANCY > 0.03
+    @test rep.pass
+    # the same column, on in 70% of draws, is assessed and fails
+    X[:, 2, :] = Float64.(rand(rng, ns, nw) .< 0.7)
+    rep2 = convergence_report(Chains(X, [:K_k1, :planet_active_1]), nw;
+                              io = devnull, params = [:K_k1])
+    @test !rep2.pass
+end
+
 @testset "_draws: one copy, the same vector" begin
     for n_chain in (1, 5)
         ch = _diag_chain(; n_iter = 400, n_chain)

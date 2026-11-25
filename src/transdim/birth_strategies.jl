@@ -125,6 +125,14 @@ end
 WindowCache() = WindowCache(Float64[], Float64[], false)
 
 const _PEAK_CACHES = Dict{UInt64, PeakCache}()
+# Size at which _PEAK_CACHES / _BLS_CACHES are wiped. An entry is a handful of
+# peaks, and one costs a periodogram (or a BLS) to rebuild, so the cap only
+# guards against unbounded junk-state churn. It was 512 while only births
+# stored entries; with informed deaths filling the post-death states too, a
+# default transdim_pt_emcee run (26 walkers per temperature, each its own
+# RNG and so its own keys) crossed 512 every couple of minutes and spent most
+# of its time rebuilding what the wipe threw away.
+const INFORMED_CACHE_MAX_ENTRIES = 8192
 const _WINDOW_CACHES = Dict{UInt64, WindowCache}()
 const _PEAK_CACHE_LOCK = ReentrantLock()
 
@@ -132,7 +140,7 @@ function _get_cache(chain_id::UInt64)
     lock(_PEAK_CACHE_LOCK) do
         # Signature-keyed since the state-consistency fix; junk-state churn can
         # mint many keys, so reset when oversized (entries rebuild on demand).
-        length(_PEAK_CACHES) > 512 && empty!(_PEAK_CACHES)
+        length(_PEAK_CACHES) > INFORMED_CACHE_MAX_ENTRIES && empty!(_PEAK_CACHES)
         get!(() -> PeakCache(), _PEAK_CACHES, chain_id)
     end
 end
@@ -1027,7 +1035,7 @@ single Julia process.** These caches are keyed on `objectid(...)` of the RNG
 and of the data arrays. `objectid` is address-derived and the GC may reuse an
 address once an object is collected, so a cache entry populated by one run can
 in principle be served to a later run in the same process. On top of that the
-`length > 512 && empty!` guard wipes *everything* at once, so which entries
+size guards (`length > cap && empty!`) wipe *everything* at once, so which entries
 survive depends on how many distinct keys earlier runs happened to create.
 Between them, a fixed seed does not pin the result: the same script can recover
 a different period depending on what ran before it in the process.
@@ -1056,25 +1064,41 @@ function _get_bls_cache(chain_id::UInt64)
     lock(_BLS_CACHE_LOCK) do
         # Junk-state churn (hot chains) can mint many signatures; rebuilds are
         # cheap relative to unbounded growth, so just reset when oversized.
-        length(_BLS_CACHES) > 512 && empty!(_BLS_CACHES)
+        length(_BLS_CACHES) > INFORMED_CACHE_MAX_ENTRIES && empty!(_BLS_CACHES)
         get!(() -> BLSCache(), _BLS_CACHES, chain_id)
     end
 end
 
-# The cache a death's reverse-density evaluation reads: the stored entry if it
-# holds peaks, otherwise a fresh one that is NOT stored, which the caller fills
-# from the post-death state -- the same peaks the reverse birth would find
-# there. A death must never add, refresh or reset an entry: births record the
-# keys they use so a checkpoint carries those entries, and an entry a death
-# created (or the oversize reset it triggered) would make a resumed run diverge
-# from a straight one.
+# The cache a death's reverse-density evaluation reads. An entry with peaks is
+# only read: a death never bumps, refreshes or resets it. A missing entry is
+# created and the caller fills it from the post-death state, as the reverse
+# birth there would; without that, every death into a state no birth had
+# visited recomputed the periodogram (a Lomb-Scargle, or a BLS on the
+# photometry) and the default trans-dim fit ran for hours. Samplers that
+# checkpoint these caches record the post-death keys too
+# (`_death_active_set_keys`), so a resumed run finds the same entries. An entry
+# that exists without peaks comes back as a fresh, unstored cache.
 function _read_peak_cache(sig::UInt64)
     c = lock(() -> get(_PEAK_CACHES, sig, nothing), _PEAK_CACHE_LOCK)
-    return (c === nothing || isempty(c.periods)) ? PeakCache() : c
+    c === nothing && return _get_cache(sig)
+    return isempty(c.periods) ? PeakCache() : c
 end
 function _read_bls_cache(sig::UInt64)
     c = lock(() -> get(_BLS_CACHES, sig, nothing), _BLS_CACHE_LOCK)
-    return (c === nothing || isempty(c.periods)) ? BLSCache() : c
+    c === nothing && return _get_bls_cache(sig)
+    return isempty(c.periods) ? BLSCache() : c
+end
+
+"""
+    _death_active_set_keys(theta) -> Vector{Vector{Float64}}
+
+The `_active_set_key` of each state a planet death can lead to from `theta`
+(one active planet removed): the keys a death's reverse-density evaluation can
+add to the informed caches.
+"""
+function _death_active_set_keys(theta::Theta)
+    key = _active_set_key(theta)
+    return [deleteat!(copy(key), i) for i in eachindex(key)]
 end
 
 # Active-set signature for proposal caches. The cached BLS/LS peaks are
