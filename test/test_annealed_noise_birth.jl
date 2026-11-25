@@ -21,6 +21,7 @@ using Nereus: Params, Data, InstrumentConfig, NereusTarget, Theta,
               ActivityDecorrelation, CeleriteRotation, MaternGP,
               propose_noise_birth, propose_noise_birth_annealed,
               propose_noise_death, propose_noise_death_annealed, ErrorScale,
+              propose_noise_swap,
               rv_log_likelihood, log_prior, _noise_model_slots,
               _noise_block_logprior
 using Random, Statistics
@@ -329,6 +330,54 @@ using Random, Statistics
             occ = counts ./ n_iter
             @test all(abs.(occ .- 0.25) .< 0.03)
         end
+    end
+
+    @testset "within-group swap samples the uniform prior at β = 0" begin
+        # Swap-only chain over the members of one exclusion group (exactly one
+        # active), plus prior-invariant within-model moves: 1/3 each. Guards
+        # the swap's informed (GP-hint / AD-OLS) densities in both directions.
+        es = ErrorScale(); rot = CeleriteRotation(channel = :rv)
+        ad = ActivityDecorrelation(indicators = ["bis"], derivative = false,
+                                   label = "lin")
+        nms = NoiseModel[es, rot, ad]
+        params = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+            instruments = InstrumentConfig(rv = ["I1"]), data = data,
+            priors = Dict{String,PriorSpec}(
+                "gamma_I1" => UniformPrior(-3rvmax, 3rvmax),
+                "sigma_I1" => LogUniformPrior(0.2, 12.0)),
+            noise_models = nms, transdim_noise = true, stability = :none)
+        rng = MersenneTwister(23)
+        th = Theta{Float64}(params)
+        th.td = TransDimState(max_planets = 0, n_noise = 3)
+        for (i, slot) in enumerate(params.layout.unfrozen_idx)
+            lo, hi = bounds(params.layout.unfrozen_priors[i])
+            th.values[slot] = clamp(rand(rng, params.layout.unfrozen_priors[i].dist), lo, hi)
+        end
+        th.td.noise_active[1] = true
+        counts = zeros(Int, 3)
+        n_iter = 30_000
+        for _ in 1:n_iter
+            c, q = propose_noise_swap(th, rng, nms, nms; data = data)
+            a = isfinite(q) ? logpri(c) - logpri(th) + q : -Inf
+            if isfinite(a) && log(rand(rng)) < a
+                th = Theta{Float64}(params, copy(c.values); td = copy(c.td))
+            end
+            on = findfirst(i -> th.td.noise_active[i], 1:3)
+            for slot in _noise_model_slots(th, on)
+                uf = findfirst(==(slot), params.layout.unfrozen_idx)
+                lo, hi = bounds(params.layout.unfrozen_priors[uf])
+                old = th.values[slot]
+                w = (isfinite(lo) && isfinite(hi)) ? hi - lo : abs(old) + 1
+                lp0 = logpri(th)
+                th.values[slot] = old + 0.3 * w * randn(rng)
+                lp1 = logpri(th)
+                (isfinite(lp1) && log(rand(rng)) < lp1 - lp0) ||
+                    (th.values[slot] = old)
+            end
+            counts[on] += 1
+        end
+        occ = counts ./ n_iter
+        @test all(abs.(occ .- 1/3) .< 0.03)
     end
 
     @testset "n_bridge must be at least 1" begin
