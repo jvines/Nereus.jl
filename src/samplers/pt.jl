@@ -1015,11 +1015,12 @@ function _pt_noise_move!(rep::TransDimPTState, data::Data,
     # At beta ~ 1 that valley is deep and birth/death cannot cross it, so an
     # entrenched replica never leaves and the occupancy stops being P(M|D).
     # Same rationale and same gate as transdim_pt_emcee.
-    if beta > 0.3 && !isempty(td.noise_exclusion_groups) && rand(rng) < 0.5 &&
-       _any_group_member_active(theta, td.noise_exclusion_groups)
-        # Needs an active member to swap FROM; otherwise fall through to
-        # birth/death rather than burning the move (see rjmcmc for the full
-        # note — a high swap rate with no fallthrough freezes the chain).
+    # Chosen with the same probability in every state and a null move when no
+    # member is active: gating it on an active member makes the birth/death
+    # selection probability state dependent, which the Hastings ratio does not
+    # carry (see rjmcmc's _noise_move!).
+    if beta > 0.3 && !isempty(td.noise_exclusion_groups) && rand(rng) < 0.5
+        _any_group_member_active(theta, td.noise_exclusion_groups) || return
         grp = _pick_active_group(theta, td.noise_exclusion_groups, rng)
         cand, lq = propose_noise_swap(theta, rng, grp, td.toggleable; data=data)
         isfinite(lq) || return
@@ -1045,7 +1046,8 @@ function _pt_noise_move!(rep::TransDimPTState, data::Data,
                                                 exclusion_groups=td.noise_exclusion_groups)
     else
         new_theta, log_q = propose_noise_death(theta, rng, td.toggleable;
-                                                scratch=scratch, data=data)
+                                                scratch=scratch, data=data,
+                                                exclusion_groups=td.noise_exclusion_groups)
     end
 
     !isfinite(log_q) && return
