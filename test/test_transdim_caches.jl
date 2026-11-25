@@ -83,9 +83,10 @@ end
 
     @testset "sibling _PEAK_CACHES guard still present (regression anchor)" begin
         empty!(_PEAK_CACHES)
-        for i in 1:1300
+        cap = Nereus.INFORMED_CACHE_MAX_ENTRIES
+        for i in 1:(2cap + 300)
             _get_cache(UInt64(i))
         end
-        @test length(_PEAK_CACHES) <= 512 + 1
+        @test length(_PEAK_CACHES) <= cap + 1
     end
 end
