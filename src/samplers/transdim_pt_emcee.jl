@@ -1250,8 +1250,10 @@ function sample_transdim_pt_emcee(
     # in ln Z). Coordinate M-H over the newborn model's params climbs the
     # drawn config toward its mode; positive-support params step
     # multiplicatively (Hastings-corrected), the rest additively at a
-    # tenth of the prior's central width. Standard within-model M-H ⇒
-    # detailed balance is safe wherever it runs.
+    # tenth of the prior's central width. Burn-in only: each step is
+    # within-model M-H, but applied to freshly accepted births alone the climb
+    # is not a reversible kernel, and in the sampling phase it biases the
+    # occupancy toward the richer state.
     function refine_noise_birth!(t::Int, w::Int, nm_idx::Int, β::Float64,
                                   slot::Int, trng)
         entries = noise_refine_slots[nm_idx]
@@ -1291,8 +1293,8 @@ function sample_transdim_pt_emcee(
     # coordinate-wise moves accept independently and track the (P, Tc)
     # ridge. A lone fresh planet CANNOT be refined by the stretch move (its
     # only valid partners would need the same planet active), so this is
-    # its only mobility until the ensemble populates. Standard within-model
-    # M-H ⇒ detailed balance is safe.
+    # its only mobility until the ensemble populates. Burn-in only, for the
+    # reason given at `refine_noise_birth!`.
     function refine_birth!(t::Int, w::Int, kb::Int, β::Float64,
                             bufslot::Int, trng)
         blk = params.layout.planet_blocks[kb]
@@ -2191,9 +2193,12 @@ function sample_transdim_pt_emcee(
                         logπ_arr[t, w] = new_log_pi
                         logL_arr[t, w] = new_log_L
                         Threads.atomic_add!(accept_ntd[t], 1)
-                        # Refinement is standard within-model M-H — DB-safe
-                        # post-burn-in too (same argument as planet births).
-                        do_nbirth && n_birth_refine > 0 && β > 0.3 &&
+                        # Post-birth refinement, burn-in only: a climb applied to accepted births alone
+                        # is not part of any reversible kernel (it moves the
+                        # newborns, never the planets a death is judged on), so
+                        # in the sampling phase it biases the occupancy toward
+                        # the richer state.
+                        in_burnin && do_nbirth && n_birth_refine > 0 && β > 0.3 &&
                             nb !== nothing &&
                             refine_noise_birth!(t, w, nb, β, slot, trng)
                     end
@@ -2366,12 +2371,15 @@ function sample_transdim_pt_emcee(
                     # active, and at birth there are none. So climb it to its mode
                     # here with a few within-model RWM sweeps on JUST the new
                     # planet's params. Once at the mode it is self-protecting: a
-                    # later stretch/death that degrades it fails its own M-H. These
-                    # are standard within-model moves → detailed balance is safe.
+                    # later stretch/death that degrades it fails its own M-H.
                     # Refinement gated to the cold side (β > 0.3): hot junk births
                     # don't merit the per-slot eval cost, and hot chains explore
                     # via the standard moves anyway.
-                    do_birth && n_birth_refine > 0 && β > 0.3 &&
+                    # Burn-in only (see `refine_noise_birth!`): each step is
+                    # within-model M-H, but a climb applied to accepted births
+                    # alone is not a reversible kernel and in the sampling phase
+                    # it pushes the occupancy toward the richer state.
+                    in_burnin && do_birth && n_birth_refine > 0 && β > 0.3 &&
                         refine_birth!(t, w, k_touched, β, slot, trng)
                 end
             end
