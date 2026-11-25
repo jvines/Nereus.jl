@@ -7,6 +7,15 @@ git history (`git log --first-parent develop`).
 
 ### Fixed
 
+- **Phase folds of a light curve with a baseline trend show the transit.** The
+  fold evaluates its model and bands at the reference epoch, where it also
+  evaluated the instrument's trend; with each trend in its own time the
+  extrapolated trend put the folded model of a single night far off the data
+  (NGTS-33 PEST g': flux ≈ −7). The fold now leaves the trend out of its curve
+  and bands and takes it out of the folded cadences; residuals are unchanged.
+  `compute_transit_model_on_grid` and `compute_transit_ci_bands` take
+  `trend = false`.
+
 - **Missing activity-indicator values no longer break RV fits.** An indicator
   entry that is NaN (a night the pipeline did not report H-alpha, a blank CSV
   cell) made `IndicatorFloor` (`:qp` and `:white`, generic and workspace
