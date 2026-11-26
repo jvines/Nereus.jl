@@ -173,7 +173,7 @@ function plot_rv_activity_corr(chains, params, data;
             span_t = tmax > tmin ? tmax - tmin : 1.0
             n_total = length(tt)
             data_alpha = n_total > 1000 ? 0.4 : n_total > 500 ? 0.6 : 0.9
-            fsize = figsize === nothing ? (380 * ncol + 220, 700) : figsize
+            fsize = figsize === nothing ? (380 * ncol + 220, 700) : Tuple(Int.(round.(collect(figsize))))   # also takes the JSON array of plot_kwargs
 
             fig = Figure(; size = fsize)
             ga = fig[1, 1] = GridLayout()

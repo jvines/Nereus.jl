@@ -154,3 +154,10 @@ end
     @test isempty(Nereus._band_extra(vals, errs, signal, ci_wild))
     @test Nereus.FIG_RV_FOLD[1] / Nereus.FIG_RV_FOLD[2] ≈ 1.5
 end
+
+@testset "figsize from plot_kwargs (a JSON array) sets the canvas" begin
+    params, data, chains = _corr_fixture()
+    figs = plot_rv_activity_corr(chains, params, data; figsize = [900, 520])
+    @test Tuple(size(first(figs).scene)) == (900, 520)
+    @test Nereus._kw_for(plot_rv_activity_corr, Dict{Symbol, Any}(:figsize => [900, 520], :nope => 1)) == (; figsize = [900, 520])
+end
