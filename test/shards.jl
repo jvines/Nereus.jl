@@ -265,6 +265,7 @@ const TEST_UNITS = [
     (name = "test_nonfinite_draws.jl", seconds = 25, files = ["test_nonfinite_draws.jl"]),
     (name = "test_iad_determined.jl", seconds = 5, files = ["test_iad_determined.jl"]),
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
+    (name = "test_inst_colors.jl", seconds = 1, files = ["test_inst_colors.jl"]),
     (name = "test_science_table_labels.jl", seconds = 10, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 0, files = ["test_plot_patterns.jl"]),
     (name = "test_ladder_history.jl", seconds = 53, files = ["test_ladder_history.jl"]),

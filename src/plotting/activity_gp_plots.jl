@@ -113,17 +113,18 @@ function plot_activity_gp_decomposition(chains, params::Params, data::Data;
     linkxaxes!(ax_top, ax_bot)
 
     insts = sort!(unique(decomp.rv_inst))
+    n_inst = maximum(insts)
     for ii in insts
         mask = decomp.rv_inst .== ii
         scatter!(ax_top, decomp.t_rv[mask], decomp.rv_data[mask];
-                   color = inst_color(ii), marker = inst_marker(ii),
+                   color = inst_color(ii, n_inst), marker = inst_marker(ii),
                    markersize = 7, strokewidth = 0.4, strokecolor = :black)
         scatter!(ax_bot, decomp.t_rv[mask], decomp.rv_corrected[mask];
-                   color = inst_color(ii), marker = inst_marker(ii),
+                   color = inst_color(ii, n_inst), marker = inst_marker(ii),
                    markersize = 7, strokewidth = 0.4, strokecolor = :black)
         errorbars!(ax_bot, decomp.t_rv[mask], decomp.rv_corrected[mask],
                      decomp.rv_corrected_err[mask];
-                     color = inst_color(ii), whiskerwidth = 0)
+                     color = inst_color(ii, n_inst), whiskerwidth = 0)
     end
 
     # Activity band on top panel (re-sample on a smooth dense grid). Propagate

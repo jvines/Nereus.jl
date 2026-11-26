@@ -3,6 +3,14 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Changed
+
+- **Instrument colors come from the cool colormap.** Plots now color instruments with
+  pastelised samples of `cool`, spread over the number of instruments in the plot
+  (`inst_color(i, n)`), instead of a fixed Tableau cycle. Markers are unchanged.
+
 ## 0.9.12
 
 ### Added

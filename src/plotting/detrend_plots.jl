@@ -532,10 +532,10 @@ function plot_transit_phasefold(t::AbstractVector{<:Real}, result;
                     m = inwin .& (sector_id .== s)
                     any(m) || continue
                     ferr === nothing || errorbars!(ax, ph[m], flux[m], ferr[m];
-                        color = (inst_color(si), 0.30), whiskerwidth = 0,
+                        color = (inst_color(si, length(sectors)), 0.30), whiskerwidth = 0,
                         linewidth = 0.7, rasterize = 2)
                     scatter!(ax, ph[m], flux[m];
-                             color = (inst_color(si), 0.6), markersize = 5,
+                             color = (inst_color(si, length(sectors)), 0.6), markersize = 5,
                              strokewidth = 0, rasterize = 2)
                 end
             else
@@ -596,7 +596,7 @@ function plot_transit_phasefold(t::AbstractVector{<:Real}, result;
         ncand > 1 && linkxaxes!(axs...)
         if multi
             # explicit opaque swatches (the data scatter is near-transparent)
-            elems  = [MarkerElement(color = inst_color(si), marker = :circle,
+            elems  = [MarkerElement(color = inst_color(si, length(sectors)), marker = :circle,
                                     markersize = 10) for si in eachindex(sectors)]
             labels = [sec_label(si) for si in eachindex(sectors)]
             axislegend(axs[1], elems, labels; position = :rt,

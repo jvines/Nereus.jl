@@ -153,7 +153,7 @@ function plot_rm(chains, params, data;
             mask = (data.rv_inst .== i) .& (abs.(hr_of.(data.t_rv)) .<= half * 24.0)
             any(mask) || continue
             hx = hr_of.(data.t_rv[mask]); err = data.rv_err[mask]
-            mc = inst_color(i); mk = inst_marker(i)
+            mc = inst_color(i, length(params.config.instruments.rv_names)); mk = inst_marker(i)
             errorbars!(ax, hx, rm_resid[mask], err; color = mc, linewidth = ERRBAR_LW)
             scatter!(ax, hx, rm_resid[mask]; color = mc, marker = mk, markersize = 11,
                      strokewidth = 1.5, strokecolor = :black, label = params.config.instruments.rv_names[i])
