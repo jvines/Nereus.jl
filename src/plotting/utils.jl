@@ -332,6 +332,30 @@ function _fold_inliers(res::AbstractVector{<:Real}; k::Real = 5)
 end
 
 """
+    _band_extra(vals, errs, signal, ci; factor=1.6) -> Vector{Float64}
+
+Edges of the widest credible band of a fold (`ci.lo3/hi3`, then `lo2/hi2`,
+`lo1/hi1`) that the y-frame can contain without growing past `factor` times
+the span of what it must show anyway (the points with their bars, plus
+`signal`: the median and binned points). A band that fits is framed, so the
+drawn 3σ band is not cut at the panel edge; one that spikes to ±100s at a
+poorly constrained phase is left out, as before (empty result).
+"""
+function _band_extra(vals::AbstractVector{<:Real}, errs::AbstractVector{<:Real},
+                     signal::AbstractVector{<:Real}, ci; factor::Float64 = 1.6)
+    e = [isfinite(x) ? abs(Float64(x)) : 0.0 for x in errs]
+    base = filter(isfinite, vcat(vals .- e, vals .+ e, signal))
+    isempty(base) && return Float64[]
+    bl, bh = extrema(base)
+    for (lo, hi) in ((ci.lo3, ci.hi3), (ci.lo2, ci.hi2), (ci.lo1, ci.hi1))
+        l = filter(isfinite, lo); h = filter(isfinite, hi)
+        (isempty(l) || isempty(h)) && continue
+        max(maximum(h), bh) - min(minimum(l), bl) <= factor * (bh - bl) && return vcat(l, h)
+    end
+    return Float64[]
+end
+
+"""
     _frame_all_ylims!(ax, ax_r, vals, residuals, errs;
                         extra=Float64[], pad_frac=0.10, resid_pad=1.15)
 

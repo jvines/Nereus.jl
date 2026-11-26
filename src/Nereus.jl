@@ -148,6 +148,7 @@ include("plotting/theme.jl")
 include("plotting/utils.jl")
 include("plotting/rv_plots.jl")
 include("plotting/pm_plots.jl")
+include("plotting/activity_corr_plots.jl")   # RV and RV residuals against the activity indicators
 include("plotting/diagnostics.jl")
 include("plotting/detrend_plots.jl")
 include("plotting/astrom_plots.jl")
@@ -374,7 +375,7 @@ export
     plot_sbgls_heatmap,
     # Plotting
     nereus_theme,
-    plot_rv_timeseries, plot_rv_phasefold,
+    plot_rv_timeseries, plot_rv_phasefold, plot_rv_activity_corr,
     plot_pm_timeseries, plot_pm_phasefold,
     plot_trace, plot_posteriors, plot_histograms, plot_corner, plot_corners,
     plot_ladder_rates, plot_beta_ladder,

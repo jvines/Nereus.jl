@@ -520,6 +520,7 @@ rather than a single number trusted.
       "rv_timeseries",        // full RV model over time
       "rv_components",        // RV model DECOMPOSITION (Keplerian/GP/trend pieces)
       "rv_phasefold",         // per-planet phase fold
+      "rv_activity_corr",     // RV and residuals vs each activity indicator (only with indicators)
       // Photometry
       "pm_timeseries",
       "pm_phasefold",
@@ -1006,7 +1007,7 @@ prior when that degeneracy is present.
 ### `output` plots
 - `auto` expands to the applicable set from the data + model present
   (`src/runner.jl:1760-1791`): always the posterior/trace/corner family; RV →
-  `rv_timeseries`+`rv_phasefold` (+`rv_components` when ≥2 planets or a GP/AGP);
+  `rv_timeseries`+`rv_phasefold` (+`rv_activity_corr` when indicators are present; +`rv_components` when ≥2 planets or a GP/AGP);
   photometry → `pm_*`+`ttv_oc`+`transit_overlay`; transit times → `ttv_oc`;
   astrometry → the astrometry
   plots; any `*_RM` mode → `rm_anomaly`; an ActivityGP → `activity_gp_latent`

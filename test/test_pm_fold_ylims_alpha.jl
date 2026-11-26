@@ -21,7 +21,9 @@ const N = Nereus
     # Raw scatter does not set the limits when bins exist.
     noisy = 1.0 .+ 0.025 .* randn(MersenneTwister(2), 8000)
     lo2, hi2 = N._fold_flux_ylims(model, yb, eb, noisy)
-    @test (lo2, hi2) == (lo, hi)
+    @test (lo2, hi2) == N._fold_flux_ylims(model, yb, eb, Float64[])
+    # Raw cadences that cost little are framed too (a sparse fold shows every point).
+    @test hi >= quantile(raw, 0.99) && lo <= quantile(raw, 0.01)
     @test hi2 - lo2 < 0.02
     # No bins: raw quantiles, still widened to the model's floor.
     lo3, hi3 = N._fold_flux_ylims(model, Float64[], Float64[], raw)
