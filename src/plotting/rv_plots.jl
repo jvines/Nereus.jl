@@ -167,7 +167,7 @@ function plot_rv_timeseries(chains, params, data;
                 has_trend && (kep_at_i .+= rv_trend(theta_med, data, data.t_rv[mask]))
                 res_i = raw_i .- kep_at_i .- act_at_data[mask]
                 append!(frame_y, raw_i); append!(frame_e, err_i); append!(frame_r, res_i)
-                mc = inst_color(i); mk = inst_marker(i)
+                mc = inst_color(i, length(inst_names)); mk = inst_marker(i)
                 errorbars!(ax, t_i, raw_i, err_i; color=mc, linewidth=ERRBAR_LW)
                 scatter!(ax, t_i, raw_i; color=mc, marker=mk, markersize=12,
                          strokewidth=2.0, strokecolor=:black, label=ins)
@@ -211,7 +211,7 @@ function plot_rv_timeseries(chains, params, data;
                 err_i = data.rv_err[mask]
                 res_i = residuals[mask]
                 append!(frame_y, dec_i); append!(frame_e, err_i); append!(frame_r, res_i)
-                mc = inst_color(i); mk = inst_marker(i)
+                mc = inst_color(i, length(inst_names)); mk = inst_marker(i)
 
                 if has_activity
                     append!(frame_raw, rv_i)
@@ -491,7 +491,7 @@ end
                        n_draws=10000)
 
 RV data phase-folded on one planet's period, other planets subtracted.
-Points colored by observation time (cool colormap) with colorbar.
+Points colored by instrument (`inst_color`).
 Matches EMPEROR's paint_fold_rv: 10K model points, 10K CI draws.
 
 For an SB2 fit: folding the binary block delegates to the double-lined
@@ -688,9 +688,7 @@ function plot_rv_phasefold(chains, params, data;
                         data.rv_err[mask];
                         color=(:gray, 0.15), linewidth=1.0)
             scatter!(ax, phases_data[mask], rv_folded[mask];
-                      color=data.t_rv[mask] .- tmin,
-                      colormap=NEREUS_CMAP,
-                      colorrange=(0, tmax - tmin),
+                      color=inst_color(i, length(inst_names)),
                       marker=inst_marker(i), markersize=13,
                       strokewidth=1.5, strokecolor=:black,
                       alpha=data_alpha, label=ins)
@@ -699,9 +697,7 @@ function plot_rv_phasefold(chains, params, data;
                         data.rv_err[mask];
                         color=(:gray, 0.15), linewidth=1.0)
             scatter!(ax_r, phases_data[mask], residuals[mask];
-                      color=data.t_rv[mask] .- tmin,
-                      colormap=NEREUS_CMAP,
-                      colorrange=(0, tmax - tmin),
+                      color=inst_color(i, length(inst_names)),
                       marker=inst_marker(i), markersize=13,
                       strokewidth=1.5, strokecolor=:black,
                       alpha=data_alpha)
@@ -739,12 +735,6 @@ function plot_rv_phasefold(chains, params, data;
         # phase-shifted off the band centre, which read as a "weird" band.
         lines!(ax, ph_fine, ci.median;
                 color=:black, linewidth=3)
-
-        # Colorbar
-        Colorbar(ga[1:2, 2]; colormap=NEREUS_CMAP,
-                  limits=(0, tmax - tmin),
-                  label="BJD - $(round(Int, tmin))",
-                  labelsize=20, ticklabelsize=16)
 
         hlines!(ax_r, 0; color=NEREUS_COLORS.zero_line,
                  linestyle=:dash, linewidth=MODEL_LW)
