@@ -5,7 +5,19 @@ git history (`git log --first-parent develop`).
 
 ## 0.9.13
 
+### Added
+
+- **`rv_activity_corr` plot.** RV and RV residuals against each activity indicator,
+  one figure per RV instrument, with a weighted line, its exact Gaussian (a, b)
+  posterior band and Pearson r. Drawn by default whenever indicators exist; a NaN
+  indicator value drops only its own point. Accepts `figsize` from `plot_kwargs`.
+
 ### Changed
+
+- **Phase folds are 3:2 and frame what they draw.** Transit and RV folds default to
+  1200x800. The transit panel frames the 3σ band, the nearby raw cadences and a label
+  strip; the RV fold frames the widest credible band that stays within 1.6× the
+  signal span.
 
 - **Instrument colors come from the cool colormap.** Plots now color instruments with
   pastelised samples of `cool`, spread over the number of instruments in the plot
