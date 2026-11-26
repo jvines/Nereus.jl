@@ -508,7 +508,7 @@ function plot_rv_phasefold(chains, params, data;
                             output::Union{Nothing, String}=nothing,
                             fmt::Symbol=:png,
                             save_pdf::Bool=false,
-                            figsize=FIG_RV,
+                            figsize=FIG_RV_FOLD,
                             n_draws::Int=60000,
                             bf_cutoff::Real=10.0,
                             credmass::Real=0.85,
@@ -799,7 +799,9 @@ function plot_rv_phasefold(chains, params, data;
         else
             _frame_all_ylims!(ax, ax_r, rv_folded[keep], residuals[keep],
                               data.rv_err[keep];
-                              extra = vcat(ci.median, yb .- eb, yb .+ eb))
+                              extra = vcat(ci.median, yb .- eb, yb .+ eb,
+                                           _band_extra(rv_folded[keep], data.rv_err[keep],
+                                                       vcat(ci.median, yb .- eb, yb .+ eb), ci)))
         end
 
         ph_lo, ph_hi = extrema(phases_data)

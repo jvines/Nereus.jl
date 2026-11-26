@@ -133,7 +133,7 @@ function plot_pm_phasefold(chains, params, data;
                             output::Union{Nothing, String}=nothing,
                             fmt::Symbol=:png,
                             save_pdf::Bool=false,
-                            figsize=FIG_PM,
+                            figsize=FIG_PM_FOLD,
                             n_bins::Union{Nothing, Int}=nothing,
                             credmass::Real=0.85,
                             phase_window::Tuple{<:Real, <:Real}=(-0.025, 0.025))
@@ -269,7 +269,11 @@ function plot_pm_phasefold(chains, params, data;
             # from how the points crowd this exact axis box. Framed on the
             # model and the bins, not on the raw cadences (`_fold_flux_ylims`).
             in_window = ph_lo .<= ph_i .<= ph_hi
-            flims = _fold_flux_ylims(ci.median, yb, eb, flux_i[in_window])
+            # The 3σ band is drawn, so it is framed: its transit floor lies
+            # below the median's, and framed on the median it was cut off at
+            # the bottom edge. `top_extra` leaves a strip free for the label.
+            flims = _fold_flux_ylims(vcat(ci.lo3, ci.hi3, ci.median), yb, eb,
+                                     flux_i[in_window]; top_extra = 0.12)
             flims === nothing || ylims!(ax, flims...)
             rlims = _fold_resid_ylims(rb, erb, res_ppm[in_window])
             rlims === nothing || ylims!(ax_r, rlims...)
@@ -341,11 +345,12 @@ function _pm_fold_data(theta, data, mask, ins_idx::Int, planet::Int)
 end
 
 """
-    _fold_flux_ylims(model, yb, eb, raw; pad_frac=0.10) -> (lo, hi) or nothing
+    _fold_flux_ylims(model, yb, eb, raw; pad_frac=0.10, top_extra=0.0) -> (lo, hi) or nothing
 
 Flux limits for a transit panel, framed on what carries the signal: the
-model curve (its transit floor and its baseline) and the binned points
-(`yb ± eb`). The raw cadences set the limits only when there are no bins,
+model curve (its transit floor and its baseline; `plot_pm_phasefold` passes
+the 3σ band's edges as well, so no drawn band is cut) and the binned points
+(`yb ± eb`). `top_extra` adds that fraction of the span on top, for a label. The raw cadences' 1-99% range is framed as well when that stays within `raw_factor` times the signal span. The raw cadences set the limits only when there are no bins,
 and then the model's range is still included. Raw points may overflow the
 axis; they do not set it.
 
@@ -357,7 +362,8 @@ bottom of the panel, and NGTS's 10 s cadences (±2.5% scatter) made the axis
 function _fold_flux_ylims(model::AbstractVector{<:Real}, yb::AbstractVector{<:Real},
                           eb::AbstractVector{<:Real}, raw::AbstractVector{<:Real};
                           pad_frac::Float64 = 0.10, q_lo::Float64 = 0.02,
-                          q_hi::Float64 = 0.98)
+                          q_hi::Float64 = 0.98, top_extra::Float64 = 0.0,
+                          raw_factor::Float64 = 2.0)
     fm = filter(isfinite, model)
     lo, hi = Inf, -Inf
     if !isempty(yb)
@@ -369,9 +375,20 @@ function _fold_flux_ylims(model::AbstractVector{<:Real}, yb::AbstractVector{<:Re
     if !isempty(fm)
         lo = min(lo, minimum(fm)); hi = max(hi, maximum(fm))
     end
+    # Raw cadences (1-99% range, bars excluded) are framed too when that costs
+    # less than `raw_factor` times the signal span: a sparse fold keeps every
+    # point in view, while 10 s cadences with ±2.5% scatter on a 1% transit
+    # (far past the factor) are left to overflow, as before.
+    if !isempty(yb) && isfinite(lo) && isfinite(hi) && hi > lo
+        fr = filter(isfinite, raw)
+        if !isempty(fr)
+            rl, rh = quantile(fr, 0.01), quantile(fr, 0.99)
+            max(hi, rh) - min(lo, rl) <= raw_factor * (hi - lo) && ((lo, hi) = (min(lo, rl), max(hi, rh)))
+        end
+    end
     (isfinite(lo) && isfinite(hi) && hi > lo) || return nothing
     span = hi - lo
-    return (lo - pad_frac * span, hi + pad_frac * span)
+    return (lo - pad_frac * span, hi + (pad_frac + top_extra) * span)
 end
 
 """

@@ -22,7 +22,7 @@ produced.
 ```jsonc
 "output": {
   "plots": [
-    "rv_timeseries", "rv_components", "rv_phasefold",
+    "rv_timeseries", "rv_components", "rv_phasefold", "rv_activity_corr",
     "pm_timeseries", "pm_phasefold", "transit_overlay",
     "rm_anomaly", "ttv_oc",
     "orbit_skyplane", "relastrom_timeseries", "relastrom_residuals",
@@ -123,6 +123,11 @@ The selection logic (`_dispatch_plot(..., "auto", ...)`):
   `ladder_rates`, `beta_ladder`.
 - `:n_planets` column present → `transdim_occupancy`.
 - RV data present → `rv_timeseries`, `rv_phasefold`.
+- An RV instrument carries activity indicators (BIS, FWHM, S-index, …) →
+  `rv_activity_corr`: the RV and the RV residuals against each indicator, one
+  figure per instrument (`models/RV_activity_corr_<instrument>.png`), each
+  panel with its weighted linear fit, 68/95/99.7% bands and Pearson r
+  (`plot_rv_activity_corr`).
 - RV data **and** (≥ 2 planets **or** a smooth-activity noise model —
   `ActivityGP` / `CovarianceNoise` GP) → `rv_components`.
 - Photometry present → `pm_timeseries`, `pm_phasefold`, `ttv_oc`,

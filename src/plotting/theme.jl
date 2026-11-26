@@ -62,6 +62,11 @@ const FIG_RV   = (1000, 1000)   # 10×10 inches
 # wastes space and reads oversized. Wider than tall, and smaller overall.
 const FIG_RM   = (820, 620)     # 8.2×6.2
 const FIG_PM   = (1000, 1000)   # 10×10
+# Transit phase fold: a flux panel over a residual strip sharing the x axis.
+# Wider than tall (3:2); the 10x10 square made the dip tower over a long,
+# empty column and clipped the credible bands at the bottom edge.
+const FIG_PM_FOLD = (1200, 800)  # 12×8
+const FIG_RV_FOLD = (1200, 800)  # 12×8, the RV phase fold: same shape as the transit fold
 const FIG_TRACE = (1200, 700)   # 12×7
 const FIG_POST  = (1000, 800)   # 10×8
 const FIG_HIST  = (1200, 800)   # 12×8

@@ -254,6 +254,7 @@ const TEST_UNITS = [
     (name = "test_spectral_window.jl", seconds = 49, files = ["test_spectral_window.jl"]),
     (name = "test_pm_fold_rv_only_slot.jl", seconds = 13, files = ["test_pm_fold_rv_only_slot.jl"]),
     (name = "test_pm_fold_ylims_alpha.jl", seconds = 20, files = ["test_pm_fold_ylims_alpha.jl"]),
+    (name = "test_activity_corr_plot.jl", seconds = 25, files = ["test_activity_corr_plot.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 2, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_posteriors_thinning.jl", seconds = 3, files = ["test_plot_posteriors_thinning.jl"]),
     # The plotting stage's memory: two `auto` plot sets of 100k and 300k draws.
