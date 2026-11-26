@@ -254,6 +254,7 @@ const TEST_UNITS = [
     (name = "test_spectral_window.jl", seconds = 49, files = ["test_spectral_window.jl"]),
     (name = "test_pm_fold_rv_only_slot.jl", seconds = 13, files = ["test_pm_fold_rv_only_slot.jl"]),
     (name = "test_pm_fold_ylims_alpha.jl", seconds = 20, files = ["test_pm_fold_ylims_alpha.jl"]),
+    (name = "test_activity_corr_plot.jl", seconds = 25, files = ["test_activity_corr_plot.jl"]),
     (name = "test_plot_trace_thinning.jl", seconds = 2, files = ["test_plot_trace_thinning.jl"]),
     (name = "test_plot_posteriors_thinning.jl", seconds = 3, files = ["test_plot_posteriors_thinning.jl"]),
     # The plotting stage's memory: two `auto` plot sets of 100k and 300k draws.
@@ -264,6 +265,7 @@ const TEST_UNITS = [
     (name = "test_nonfinite_draws.jl", seconds = 25, files = ["test_nonfinite_draws.jl"]),
     (name = "test_iad_determined.jl", seconds = 5, files = ["test_iad_determined.jl"]),
     (name = "test_plot_labels.jl", seconds = 1, files = ["test_plot_labels.jl"]),
+    (name = "test_inst_colors.jl", seconds = 1, files = ["test_inst_colors.jl"]),
     (name = "test_science_table_labels.jl", seconds = 10, files = ["test_science_table_labels.jl"]),
     (name = "test_plot_patterns.jl", seconds = 0, files = ["test_plot_patterns.jl"]),
     (name = "test_ladder_history.jl", seconds = 53, files = ["test_ladder_history.jl"]),

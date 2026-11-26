@@ -98,10 +98,11 @@ function _ppc_residual_axis!(fig, row::Int,
              linestyle = :dash, linewidth = 1.0)
 
     insts = sort!(unique(inst))
+    n_inst = maximum(insts)
     for ii in insts
         mask = inst .== ii
         any(mask) || continue
-        col = inst_color(ii)
+        col = inst_color(ii, n_inst)
         errorbars!(ax, t[mask], resid[mask], sigma[mask];
                     color = col, whiskerwidth = 0)
         scatter!(ax, t[mask], resid[mask];

@@ -34,14 +34,6 @@ const INST_MARKERS = [
     :hexagon, :cross, :dtriangle, :rtriangle, :ltriangle, :octagon,
 ]
 
-# Per-instrument colors (Tableau 10 cycle)
-const INST_COLORS = [
-    colorant"#1f77b4", colorant"#ff7f0e", colorant"#2ca02c",
-    colorant"#d62728", colorant"#9467bd", colorant"#8c564b",
-    colorant"#e377c2", colorant"#7f7f7f", colorant"#bcbd22",
-    colorant"#17becf",
-]
-
 const CI_ALPHA = 0.25
 
 # Nested 1σ/2σ/3σ credible-band opacities, darkest→lightest. These are FINAL
@@ -62,6 +54,11 @@ const FIG_RV   = (1000, 1000)   # 10×10 inches
 # wastes space and reads oversized. Wider than tall, and smaller overall.
 const FIG_RM   = (820, 620)     # 8.2×6.2
 const FIG_PM   = (1000, 1000)   # 10×10
+# Transit phase fold: a flux panel over a residual strip sharing the x axis.
+# Wider than tall (3:2); the 10x10 square made the dip tower over a long,
+# empty column and clipped the credible bands at the bottom edge.
+const FIG_PM_FOLD = (1200, 800)  # 12×8
+const FIG_RV_FOLD = (1200, 800)  # 12×8, the RV phase fold: same shape as the transit fold
 const FIG_TRACE = (1200, 700)   # 12×7
 const FIG_POST  = (1000, 800)   # 10×8
 const FIG_HIST  = (1200, 800)   # 12×8
@@ -199,5 +196,10 @@ const SKY_INST_MARKERS = filter(m -> !(m in (:star5, :diamond)), INST_MARKERS)
 """Marker for instrument index on a sky-plane figure (no star glyph, no diamond)."""
 sky_inst_marker(i::Int) = SKY_INST_MARKERS[mod1(i, length(SKY_INST_MARKERS))]
 
-"""Color for instrument index (cycles through INST_COLORS)."""
-inst_color(i::Int) = INST_COLORS[mod1(i, length(INST_COLORS))]
+"""
+    inst_color(i, n) -> RGBAf
+
+Color of instrument `i` out of `n` in a plot: the `i`-th of `cool_pastel(max(n, 2))`,
+so instruments are spread over the cool colormap whatever their number.
+"""
+inst_color(i::Integer, n::Integer) = cool_pastel(max(n, 2))[i]

@@ -3,6 +3,32 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## 0.9.13
+
+### Added
+
+- **`rv_activity_corr`, a default plot whenever an RV instrument carries activity
+  indicators.** `plot_rv_activity_corr` draws, per RV instrument, the RV and the
+  RV residuals after the adopted model (GP mean included) against every indicator
+  in `Data` (BIS, FWHM, S-index, ...): time-coloured `cool` markers, a weighted
+  linear fit with nested 68/95/99.7% bands (the `(a, b)` posterior is exactly
+  Gaussian, so it is sampled directly), Pearson r in each panel, shared y per row.
+  A missing (NaN) indicator value drops that point from its panel only.
+  File: `models/RV_activity_corr_<instrument>.png`.
+
+### Changed
+
+- **Phase folds are 3:2 and no longer clip.** The transit fold (`plot_pm_phasefold`)
+  and the RV fold (`plot_rv_phasefold`) default to 1200x800 instead of 1000x1000.
+  The transit panel now frames the 3σ band it draws (it was cut off at the bottom
+  edge), the raw cadences when that costs under twice the signal span, and leaves
+  a strip at the top for the instrument label. The RV fold frames the widest
+  credible band that does not blow up the axis (`_band_extra`).
+
+- **Instrument colors come from the cool colormap.** Plots now color instruments with
+  pastelised samples of `cool`, spread over the number of instruments in the plot
+  (`inst_color(i, n)`), instead of a fixed Tableau cycle. Markers are unchanged.
+
 ## 0.9.12
 
 ### Fixed

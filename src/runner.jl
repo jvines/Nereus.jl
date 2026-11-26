@@ -362,6 +362,7 @@ const _KNOWN_BIRTH_STRATEGIES = ("PriorBirth", "InformedBirth",
                                   "JointInformedBirth", "DonorBirth",
                                   "MoMSBirth")
 const _KNOWN_PLOTS          = ("rv_timeseries", "rv_components", "rv_phasefold",
+                                "rv_activity_corr",
                                 "pm_timeseries", "pm_phasefold",
                                 "rv_astrom_phasefold", "orbit_skyplane",
                                 "iad_residuals", "epoch_astrometry_orbit",
@@ -2549,6 +2550,8 @@ function _auto_plot_kinds(chains, params, data; result = nothing)
     _ladder_of(result) !== nothing && append!(kinds, ["ladder_rates", "beta_ladder"])
     :n_planets in Set(names(chains, :parameters)) && push!(kinds, "transdim_occupancy")
     n_rv(data) > 0           && append!(kinds, ["rv_timeseries", "rv_phasefold"])
+    # RV against the activity indicators, whenever an RV instrument carries any
+    (n_rv(data) > 0 && !isempty(data.indicators)) && push!(kinds, "rv_activity_corr")
     # component decomposition adds over the timeseries only with multiple
     # model pieces — ≥2 planets or a smooth (GP/AGP) activity curve.
     (n_rv(data) > 0 && (params.config.max_kplanet ≥ 2 ||
@@ -2779,6 +2782,12 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
             plot_rv_phasefold(chains, params, data; planet = k, output = out_dir,
                 _kw_for(plot_rv_phasefold, kw; except = (:output, :filename, :planet))...)
         end
+    elseif name == "rv_activity_corr"
+        (n_rv(data) > 0 && !isempty(data.indicators)) || return nothing
+        figs = plot_rv_activity_corr(chains, params, data; output = out_dir,
+                                     _kw_for(plot_rv_activity_corr, kw)...)
+        isempty(figs) && return nothing
+        return "models/RV_activity_corr_*.png"
     elseif name == "pm_timeseries"
         n_phot(data) > 0 || return nothing
         plot_pm_timeseries(chains, params, data; output = out_dir, _kw_for(plot_pm_timeseries, kw)...)

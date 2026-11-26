@@ -72,7 +72,11 @@ end
     # the fold renders, and its panel is framed on the transit, not on −7
     out = mktempdir()
     @test plot_pm_phasefold(chains, params, data; planet = 1, output = out) === nothing
-    @test isfile(joinpath(out, "models", "Transit_phasefold_K1_NIGHT.png"))
+    png = joinpath(out, "models", "Transit_phasefold_K1_NIGHT.png")
+    @test isfile(png)
+    # 3:2, wider than tall (PNG header: width, height as big-endian UInt32 at bytes 17-24)
+    w, h = open(png) do io; skip(io, 16); (ntoh(read(io, UInt32)), ntoh(read(io, UInt32))); end
+    @test w / h ≈ 1.5
     # the folded cadences are detrended: they sit on the transit model, not on the slope
     flux, model = Nereus._pm_fold_data(theta, data, data.phot_inst .== 2, 2, 1)
     @test model ≈ m_flat rtol = 1e-12
