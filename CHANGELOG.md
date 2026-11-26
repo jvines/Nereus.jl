@@ -3,7 +3,7 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
-## Unreleased
+## 0.9.13
 
 ### Changed
 
