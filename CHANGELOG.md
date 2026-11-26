@@ -7,26 +7,6 @@ git history (`git log --first-parent develop`).
 
 ### Added
 
-- **`rv_activity_corr` plot.** RV and RV residuals against each activity indicator,
-  one figure per RV instrument, with a weighted line, its exact Gaussian (a, b)
-  posterior band and Pearson r. Drawn by default whenever indicators exist; a NaN
-  indicator value drops only its own point. Accepts `figsize` from `plot_kwargs`.
-
-### Changed
-
-- **Phase folds are 3:2 and frame what they draw.** Transit and RV folds default to
-  1200x800. The transit panel frames the 3σ band, the nearby raw cadences and a label
-  strip; the RV fold frames the widest credible band that stays within 1.6× the
-  signal span.
-
-- **Instrument colors come from the cool colormap.** Plots now color instruments with
-  pastelised samples of `cool`, spread over the number of instruments in the plot
-  (`inst_color(i, n)`), instead of a fixed Tableau cycle. Markers are unchanged.
-
-## 0.9.12
-
-### Added
-
 - **`rv_activity_corr`, a default plot whenever an RV instrument carries activity
   indicators.** `plot_rv_activity_corr` draws, per RV instrument, the RV and the
   RV residuals after the adopted model (GP mean included) against every indicator
@@ -44,6 +24,12 @@ git history (`git log --first-parent develop`).
   edge), the raw cadences when that costs under twice the signal span, and leaves
   a strip at the top for the instrument label. The RV fold frames the widest
   credible band that does not blow up the axis (`_band_extra`).
+
+- **Instrument colors come from the cool colormap.** Plots now color instruments with
+  pastelised samples of `cool`, spread over the number of instruments in the plot
+  (`inst_color(i, n)`), instead of a fixed Tableau cycle. Markers are unchanged.
+
+## 0.9.12
 
 ### Fixed
 
