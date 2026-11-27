@@ -1853,11 +1853,14 @@ function _build_noise_models(nm_cfg, ic; transdim::Bool = false)
         # Symbolize keys AND narrow JSON array values: JSON3 parses a JSON
         # array as a `JSON3.Array`, which does not satisfy concretely-typed
         # noise-model fields like `indicators::Vector{String}` (TypeError on
-        # construction). `collect` narrows it to a plain `Vector` (eltype
-        # preserved) so the constructor's field convert takes over. Covers any
+        # construction). `map(identity, v)` makes a plain `Vector` with the
+        # narrowest element type, so a `Vector{Any}` of strings (what
+        # `_replay_config` passes after `_plain`) also becomes `Vector{String}`
+        # and the constructor's field convert takes over. Covers any
         # vector-valued noise-model kwarg, not just `indicators`.
         kw_sym = Dict{Symbol, Any}(
-            Symbol(k) => (v isa AbstractVector ? collect(v) : v)
+            Symbol(k) => (v isa AbstractVector && !isempty(v) ? map(identity, v) :
+                          v isa AbstractVector ? collect(v) : v)
             for (k, v) in kwargs)
         # JSON has no Symbol, so any Symbol-typed field arrives as a String and
         # the typed constructor raises a TypeError. Coerce from the FIELD TYPE
