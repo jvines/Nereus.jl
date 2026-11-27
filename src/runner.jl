@@ -1668,19 +1668,7 @@ function _build_model(cfg, data, star, inst_names_rv, inst_names_pm,
         isempty(noise_models) || error(
             "`noise_menu` and `noise_models` are mutually exclusive: the menu " *
             "BUILDS the model list. Remove one of the two blocks.")
-        provided = sort!(collect(keys(data.indicators)))
-        sel = String.(collect(_get(menu_cfg, :indicators; default = provided)))
-        bad = setdiff(sel, provided)
-        isempty(bad) || error(
-            "noise_menu.indicators $(bad) not present in the RV data " *
-            "(provided channels: $(provided))")
-        mkw = Dict{Symbol, Any}()
-        for k in (:include_matern, :include_studentt, :include_harmonic,
-                  :include_ad_ffprime, :include_nightly, :include_activity_gp)
-            v = _get(menu_cfg, k; default = nothing)
-            v === nothing || (mkw[k] = Bool(v))
-        end
-        menu = default_noise_menu(data; indicators = sel, mkw...)
+        menu = _noise_menu_from_cfg(menu_cfg, data)
         noise_models = menu.noise_models
     end
 
@@ -2583,6 +2571,54 @@ function _auto_plot_kinds(chains, params, data; result = nothing)
     return unique(kinds)
 end
 
+# The `noise_menu` block -> `default_noise_menu(data; indicators, include_*)`.
+# Shared by the model build and by the occupancy plot's labels, so both see the
+# same menu members in the same order.
+function _noise_menu_from_cfg(menu_cfg, data)
+    provided = sort!(collect(keys(data.indicators)))
+    sel = String.(collect(_get(menu_cfg, :indicators; default = provided)))
+    bad = setdiff(sel, provided)
+    isempty(bad) || error(
+        "noise_menu.indicators $(bad) not present in the RV data " *
+        "(provided channels: $(provided))")
+    mkw = Dict{Symbol, Any}()
+    for k in (:include_matern, :include_studentt, :include_harmonic,
+              :include_ad_ffprime, :include_nightly, :include_activity_gp)
+        v = _get(menu_cfg, k; default = nothing)
+        v === nothing || (mkw[k] = Bool(v))
+    end
+    return default_noise_menu(data; indicators = sel, mkw...)
+end
+
+# Labels of the toggleable noise models in `noise_active_<i>` order, for the
+# occupancy plot: the `label` of each referenced `noise_models` entry (else its
+# type label with instrument scope), or the members of a `noise_menu`. `nothing`
+# when the job has no toggleable noise models, or when they are given as Julia
+# objects, which the plot then numbers.
+function _occupancy_noise_labels(cfg, params, data)
+    td = _get(cfg, :transdim; default = nothing)
+    (td === nothing || td === false) && return nothing
+    menu_cfg = _get(cfg, :noise_menu; default = nothing)
+    if menu_cfg !== nothing
+        return String[_noise_model_label_scoped(m)
+                      for m in _noise_menu_from_cfg(menu_cfg, data).toggleable]
+    end
+    nm_cfg = _get(cfg, :noise_models; default = nothing)
+    (nm_cfg === nothing || isempty(nm_cfg)) && return nothing
+    refs = _resolve_noise_refs(td, nm_cfg)
+    refs === nothing && return nothing
+    tog_idx, _, errs = refs
+    isempty(errs) || return nothing
+    built = params === nothing ? nothing : params.config.noise_models
+    function lab_of(j)
+        lab = _get(nm_cfg[j], :label; default = nothing)
+        lab === nothing || return String(lab)
+        (built !== nothing && j <= length(built)) && return _noise_model_label_scoped(built[j])
+        return String(_get(nm_cfg[j], :kind; required = true))
+    end
+    return String[lab_of(j) for j in tog_idx]
+end
+
 function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
     out_cfg = _get(cfg, :output; default = Dict())
     plot_list = _get(out_cfg, :plots; default = String[])
@@ -2596,6 +2632,19 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
     # `plot_kwargs.save_pdf` still wins (per-plot override).
     save_pdf_global = Bool(_get(out_cfg, :save_pdf; default = false))
     haskey(plot_kwargs, :save_pdf) || (plot_kwargs[:save_pdf] = save_pdf_global)
+    # The occupancy plot names the noise models by their labels (else "model i").
+    nl_auto = !haskey(plot_kwargs, :noise_labels)
+    if !nl_auto
+        plot_kwargs[:noise_labels] = String.(collect(plot_kwargs[:noise_labels]))
+    else
+        nl = try
+            _occupancy_noise_labels(cfg, params, data)
+        catch err
+            @warn "occupancy plot: noise-model labels not resolved; numbering them" err
+            nothing
+        end
+        nl === nothing || (plot_kwargs[:noise_labels] = nl)
+    end
 
     # All figures live under `out_dir/plots/` (models, transdim, posteriors,
     # traces). The figures manifest is built by scanning this tree afterwards.
@@ -2669,7 +2718,8 @@ function _make_plots(cfg, chains, params, data, out_dir; result = nothing)
     # Each figure now takes only the `plot_kwargs` it knows (`_kw_for`), so a
     # misspelt key no longer throws -- say so instead of dropping it silently.
     unused = sort!([String(k) for k in keys(plot_kwargs)
-                    if k !== :save_pdf && !(k in seen_kw)])
+                    if k !== :save_pdf && !(k === :noise_labels && nl_auto) &&
+                       !(k in seen_kw)])
     isempty(unused) || @warn "plot_kwargs ignored: no figure rendered in this " *
         "run accepts them (misspelt, or meant for a plot not drawn)" keys = unused
     return generated
@@ -2953,8 +3003,11 @@ function _dispatch_plot(name, chains, params, data, out_dir, kw; n_walkers=nothi
         return "posteriors/*.png"
     elseif name == "transdim_occupancy"
         :n_planets in Set(names(chains, :parameters)) || return nothing
+        haskey(kw, :noise_labels) && _PLOT_KW_SEEN[] !== nothing &&
+            push!(_PLOT_KW_SEEN[], :noise_labels)
         plot_transdim_occupancy(chains, params;
             output = joinpath(out_dir, "transdim", "occupancy.png"),
+            noise_labels = get(kw, :noise_labels, nothing),
             save_pdf = get(kw, :save_pdf, false))
         return "transdim/occupancy.png"
     elseif name == "posteriors_raw"
