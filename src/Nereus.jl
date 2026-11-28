@@ -114,6 +114,7 @@ include("samplers/ess.jl")
 include("samplers/ofti.jl")
 include("samplers/pathfinder.jl")
 include("samplers/node_flip.jl") # astrometric (Ω, ω) → (Ω+π, ω+π) move for the PT ensembles
+include("samplers/period_jump.jl") # informed starts + periodogram period jumps for the fixed-k PT samplers
 include("samplers/lambda_slide.jl") # (Mo, ω) → (Mo+δ, ω−δ) slide along the mean-longitude ridge
 include("samplers/ladder_history.jl") # per-step T / swap rate / swap mean distance of a PT ensemble run
 include("samplers/burnin_hold.jl") # parameters the PT ensembles hold at a value early in burn-in
