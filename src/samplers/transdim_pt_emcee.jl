@@ -739,7 +739,8 @@ selection on planet count.
   shared jitters/offsets of its instruments) from a normal fitted to that
   member's β = 1 draws (needs `noise_state_min_draws` of them; otherwise seeded
   from a fixed-member ensemble run at β = 1, continued for `noise_state_seed_steps`
-  steps at each refit and started at the stale move's informed draws), refitted at 1/2, 3/4 and the end of
+  steps at each refit and started about the top of the member's conditional
+  posterior, climbed to from the stale move's informed draws), refitted at 1/2, 3/4 and the end of
   burn-in and fixed after it; `noise_state_tries` such Metropolis-Hastings steps
   per attempt. The rest use `propose_noise_swap`, which redraws only the
   incoming member's own parameters. Per-move counts: `result.noise_swaps`.
@@ -1293,22 +1294,39 @@ function sample_transdim_pt_emcee(
                 length(starts) >= 6 && break
             end
             tdj === nothing && return nothing
-            # one target for the whole ensemble: every walker shares the best
+            # one target for the whole ensemble: every walker shares one
             # start's other parameters (planets' periods and phases, other
-            # noise) and differs only in the member's state, scattered about
-            # the starts
-            base = starts[argmax(lstarts)]
+            # noise) and differs only in the member's state. That state is
+            # first climbed to the top of its conditional posterior from the
+            # best three starts (`climb_noise_state`) and the walkers are
+            # scattered about the highest top at its widths. Without the climb
+            # the ensemble stays tens of nats under the member's mode, and so
+            # does every proposal fitted to it (HD 18599: the decorrelation's
+            # seeded proposals 40-50 nats under its own cold walkers; seeds
+            # 103 and 203 then drained into different members, neither into
+            # the decorrelation).
             nw = max(2 * length(sl) + 2, 32); nw += isodd(nw)
-            X = Vector{Vector{Float64}}(undef, nw)
-            for i in 1:nw
-                v = copy(base); s0 = starts[mod1(i, length(starts))]
-                for (k, sidx) in enumerate(sl)
-                    x = s0[sidx]
-                    x = lo[k] > 0 ? x * exp(0.05 * randn(srng)) :
-                                    x + 0.01 * max(abs(x), 0.1) * randn(srng)
-                    v[sidx] = clamp(x, nextfloat(lo[k]), prevfloat(hi[k]))
+            ctop = (starts[argmax(lstarts)], -Inf, nothing)
+            for i in sortperm(lstarts; rev = true)[1:min(3, length(starts))]
+                c = climb_noise_state(v -> lpost(v, tdj, 1), starts[i], sl, lo, hi)
+                c[2] > ctop[2] && c[3] !== nothing && (ctop = c)
+            end
+            if ctop[3] !== nothing
+                X = scatter_noise_state(srng, ctop[1], sl, lo, hi, ctop[3], nw)
+            else
+                # no width settled anywhere: scatter about the starts
+                base = starts[argmax(lstarts)]
+                X = Vector{Vector{Float64}}(undef, nw)
+                for i in 1:nw
+                    v = copy(base); s0 = starts[mod1(i, length(starts))]
+                    for (k, sidx) in enumerate(sl)
+                        x = s0[sidx]
+                        x = lo[k] > 0 ? x * exp(0.05 * randn(srng)) :
+                                        x + 0.01 * max(abs(x), 0.1) * randn(srng)
+                        v[sidx] = clamp(x, nextfloat(lo[k]), prevfloat(hi[k]))
+                    end
+                    X[i] = v
                 end
-                X[i] = v
             end
             sp_ens[(j, key)] = NoiseStateEnsemble(X, copy(tdj), 0)
         end
