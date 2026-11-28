@@ -226,6 +226,10 @@ function run_job(cfg::AbstractDict)
                               n_walkers = _ensemble_n_walkers(cfg, params),
                               result = result, _star_science_kwargs(star)...)
         for (k, v) in sci; k == "status" || (summary[k] = v); end
+        # The planet-count block, one convergence verdict, evidence reliability.
+        _finalize_run_reporting!(summary, chains, params, result; cfg,
+                                 engine = _job_sampler_name(cfg),
+                                 n_walkers = _ensemble_n_walkers(cfg, params))
         summary["figures"] = figs
         isempty(pdfs) || (summary["figures_pdf"] = pdfs)
         _add_root_figures!(summary, out_dir)

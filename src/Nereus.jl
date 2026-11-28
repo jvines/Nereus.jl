@@ -173,6 +173,8 @@ include("ttv.jl")                  # Per-transit free time offsets (TTV-A)
 include("ttv_nbody.jl")            # N-body-predicted TTVs via TTVFaster (TTV-C)
 include("ttv_nbody_full.jl")       # full ODE backend via NbodyGradient.jl
 include("sampler_diagnostics.jl") # per-engine run health, persisted into every summary
+include("transdim/k_report.jl")   # planet-count reporting: prior on k, ln B, mixture evidence, occupancy health
+include("run_reporting.jl")       # one convergence verdict, evidence reliability, trans-dim block (shared by run_job and fit_*)
 include("engines_registry.jl")   # the ONE sampler registry; api.jl and runner.jl derive from it
 include("provenance.jl")           # summary.json provenance: engine, version, priors
 include("runner.jl")               # JSON/dict-driven batch entry point
@@ -438,6 +440,7 @@ end
 
 
 # Public API surface (api.jl / features.jl)
+export transdim_k_prior, transdim_k_report, transdim_occupancy_health, transdim_move_counts
 export sampler_diagnostics, chain_convergence, ensemble_drift,
        fit_rv, fit_transit, fit_astrometry, fit_rm, fit_tomography,
     fit_ttv, fit_binary, fit_joint, run_engine, Stopping, ENGINES,
