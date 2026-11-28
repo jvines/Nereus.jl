@@ -24,21 +24,30 @@ function _ind_sorted(names)
 end
 
 """
-    _wls_line(x, y, σ) -> (a, b, cov, xm)
+    _wls_line(x, y, σ; scale_to_scatter=false) -> (a, b, cov, xm)
 
 Weighted least-squares line `y = a + b (x - xm)` (`xm` the weighted mean of `x`,
 which only conditions the solve). With flat priors on `(a, b)` and Gaussian
 errors σ the posterior of `(a, b)` is exactly Gaussian with this mean and
 covariance `(AᵀWA)⁻¹`, so it needs no sampler.
+
+`scale_to_scatter = true` multiplies the covariance by the reduced χ² of the
+line when it exceeds 1 (errors σ scaled by a common factor fitted to the
+scatter about the line). The activity-correlation panels use it: their top row
+still holds the planets' signal, which no error bar accounts for.
 """
 function _wls_line(x::AbstractVector{<:Real}, y::AbstractVector{<:Real},
-                   σ::AbstractVector{<:Real})
+                   σ::AbstractVector{<:Real}; scale_to_scatter::Bool = false)
     w = 1 ./ Float64.(σ) .^ 2
     xm = sum(w .* x) / sum(w)
     A = hcat(ones(length(x)), Float64.(x) .- xm)
     M = A' * (w .* A)
     cov = inv(Symmetric(M))
     β = cov * (A' * (w .* y))
+    if scale_to_scatter && length(x) > 2
+        χ2r = sum(w .* (y .- A * β) .^ 2) / (length(x) - 2)
+        cov = cov .* max(χ2r, 1.0)
+    end
     return β[1], β[2], Matrix(Symmetric(cov)), xm
 end
 
@@ -50,8 +59,9 @@ the exact Gaussian posterior ([`_wls_line`](@ref)), and the 0.15, 2.5, 16, 50,
 84, 97.5, 99.85 percentiles of the drawn lines (rows of `q`, one column per
 `xs`): the nested 68/95/99.7% bands and the median.
 """
-function _line_bands(x, y, σ, xs; n::Int = 4000, rng = MersenneTwister(7))
-    a, b, cov, xm = _wls_line(x, y, σ)
+function _line_bands(x, y, σ, xs; n::Int = 4000, rng = MersenneTwister(7),
+                     scale_to_scatter::Bool = false)
+    a, b, cov, xm = _wls_line(x, y, σ; scale_to_scatter)
     L = cholesky(Symmetric(cov + 1e-300I)).L
     draws = [[a, b] .+ L * randn(rng, 2) for _ in 1:n]
     lines = [d[1] .+ d[2] .* (xs .- xm) for d in draws]
@@ -82,9 +92,13 @@ data times when a GP is active (`subtract_gp`).
 Points carry the time colour of the phase fold (`cool`, black edge, a
 `BJD - t₀` colourbar) and light-grey RV error bars. In each panel the black
 line and the nested 68/95/99.7% bands are the weighted linear fit
-`y = a + b·x` with the RV errors as weights; the `(a, b)` posterior (flat
-priors, Gaussian errors) is exactly Gaussian, so it is sampled directly. The
-Pearson `r` of the panel is printed top-left, in the headroom above the data.
+`y = a + b·x` weighted by the RV errors with the instrument's fitted jitter
+added in quadrature; the `(a, b)` posterior (flat priors, Gaussian errors) is
+exactly Gaussian, so it is sampled directly, and its covariance is scaled by
+the reduced χ² of the line when that exceeds 1 (the top row carries the
+planets' signal). The Pearson `r` of the panel and the slope in units of its
+posterior standard deviation, `b/σ_b`, are printed top-left, in the headroom
+above the data.
 
 Indicators enter as `Data` holds them (per instrument median-subtracted and
 RMS-scaled when `normalize_indicators`, the default), so the x axes are in
@@ -155,6 +169,13 @@ function plot_rv_activity_corr(chains, params, data;
             rv = data.rv[inst_mask] .- gamma
             res = residuals[inst_mask]
             err = data.rv_err[inst_mask]
+            # line weights: RV errors with the instrument's fitted jitter in quadrature
+            jit = try
+                Float64(get_param(theta_med, "sigma_$ins"))
+            catch
+                0.0
+            end
+            werr = sqrt.(err .^ 2 .+ jit^2)
             tt = data.t_rv[inst_mask]
 
             # one column per indicator with something to correlate
@@ -200,11 +221,12 @@ function plot_rv_activity_corr(chains, params, data;
                 for (r, y) in enumerate((rv, res))
                     ax = axs[r, c]
                     ok = isfinite.(x) .& isfinite.(y) .& isfinite.(err)
-                    xo = x[ok]; yo = y[ok]; eo = err[ok]
+                    xo = x[ok]; yo = y[ok]; eo = err[ok]; wo = werr[ok]
                     xlo, xhi = extrema(xo)
                     xpad = 0.06 * (xhi - xlo)
                     xs = collect(range(xlo - xpad, xhi + xpad; length = 200))
-                    q, _, _, _, _ = _line_bands(xo, yo, eo, xs; n = n_samples, rng = rng)
+                    q, _, bsl, sdb, _ = _line_bands(xo, yo, wo, xs; n = n_samples, rng = rng,
+                                                    scale_to_scatter = true)
                     band!(ax, xs, q[1, :], q[7, :]; color = (NEREUS_COLORS.ci, CI_ALPHA_3SIGMA))
                     band!(ax, xs, q[2, :], q[6, :]; color = (NEREUS_COLORS.ci, CI_ALPHA_2SIGMA))
                     band!(ax, xs, q[3, :], q[5, :]; color = (NEREUS_COLORS.ci, CI_ALPHA_1SIGMA))
@@ -217,6 +239,8 @@ function plot_rv_activity_corr(chains, params, data;
                              strokewidth = 1.5, strokecolor = :black, alpha = data_alpha)
                     rho = length(xo) >= 3 ? cor(xo, yo) : NaN
                     rtxt = isfinite(rho) ? replace("r = " * @sprintf("%.2f", rho), "-" => "−") : "r = n/a"
+                    isfinite(bsl / sdb) &&
+                        (rtxt *= replace(@sprintf(", b/σ = %.1f", bsl / sdb), "-" => "−"))
                     text!(ax, 0.05, 0.95; text = rtxt, space = :relative,
                           align = (:left, :top), fontsize = 20)
                     xlims!(ax, xs[1], xs[end])

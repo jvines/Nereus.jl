@@ -722,6 +722,56 @@ end
     rm(tmp; force = true)
 end
 
+@testset "activity_gp_predict / plots — indicators_only (no Vc, Vr in the layout)" begin
+    # An indicators_only ActivityGP has no RV couplings: G is conditioned on
+    # the indicators alone and the RV activity contribution is zero. Both
+    # activity plots used to throw KeyError "Vc" on such a chain.
+    rng = MersenneTwister(7)
+    n_obs = 30
+    t_rv = sort!(40.0 .* rand(rng, n_obs))
+    P_t, λe_t, λp_t, Bc_t, Br_t, σ_bis = 12.0, 50.0, 0.5, 0.05, 0.005, 0.005
+    Σ = activity_gp_covariance(t_rv, fill(:bis, n_obs), fill(Bc_t, n_obs),
+                                 fill(Br_t, n_obs), 1.0, P_t, λe_t, λp_t)
+    bis_obs = cholesky(Symmetric(Σ + σ_bis^2 * I)).L * randn(rng, n_obs)
+    rv_obs = 0.5 .* randn(rng, n_obs)
+    data = Data(; normalize_indicators = false, t_rv = t_rv, rv = rv_obs,
+                  rv_err = fill(0.5, n_obs), rv_inst = ones(Int, n_obs),
+                  indicators = Dict("bis" => bis_obs),
+                  indicator_errs = Dict("bis" => fill(σ_bis, n_obs)))
+    params = Params(; max_kplanet = 0, planet_modes = PlanetDataSources[],
+                     instruments = InstrumentConfig(rv = ["SIM"]), data = data, M_s = 1.0,
+                     noise_models = NoiseModel[ActivityGP(channels = [:bis],
+                                                          indicators_only = true)])
+    names = Symbol.(params.layout.unfrozen_names)
+    @test :Vc ∉ names && :Vr ∉ names
+    truth = Dict(:gamma_SIM => 0.0, :sigma_SIM => 0.5, :gp_act_period => P_t,
+                 :gp_act_lambda_e => λe_t, :gp_act_lambda_p => λp_t,
+                 :Bc => Bc_t, :Br => Br_t)
+    n_draws = 40
+    arr = zeros(Float64, n_draws, length(names), 1)
+    for (j, nm) in enumerate(names)
+        arr[:, j, 1] .= get(truth, nm, 0.0) .+ 1e-4 .* randn(rng, n_draws)
+    end
+    chains = Chains(arr, names)
+
+    pred = activity_gp_predict(chains, params, data; n_draws = n_draws,
+                                 rng = MersenneTwister(0))
+    @test all(isfinite, pred.G_mean)
+    @test all(==(0.0), pred.Vc_samples) && all(==(0.0), pred.Vr_samples)
+    @test minimum(pred.G_mean) < 0 < maximum(pred.G_mean)
+    decomp = activity_gp_decompose_rv(chains, params, data; n_draws = n_draws,
+                                        rng = MersenneTwister(0))
+    @test all(==(0.0), decomp.rv_activity_mean)
+    @test decomp.rv_corrected == data.rv
+
+    for f in (plot_activity_gp_latent, plot_activity_gp_decomposition)
+        tmp = tempname() * ".png"
+        f(chains, params, data; filename = tmp, n_draws = n_draws)
+        @test isfile(tmp) && filesize(tmp) > 1000
+        rm(tmp; force = true)
+    end
+end
+
 @testset "activity_gp_predict — refuses non-ActivityGP fits" begin
     data = Data(; normalize_indicators = false, t_rv = collect(0.0:5.0:50.0), rv = randn(11),
                   rv_err = ones(11), rv_inst = ones(Int, 11))
