@@ -1837,6 +1837,9 @@ function _finish(target, engine, stopping, output_dir; op::String, stop_file = n
                     (k == "status" || k == "figures") && continue
                     summary[k] = v
                 end
+                _finalize_run_reporting!(summary, chains, target.params, raw; cfg,
+                                         engine = String(spec_name),
+                                         n_walkers = _ensemble_n_walkers(cfg, target.params))
             catch err
                 summary["science_error"] = sprint(showerror, err)
             end

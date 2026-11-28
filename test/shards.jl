@@ -212,6 +212,10 @@ const TEST_UNITS = [
     (name = "test_bridge_bootstrap.jl", seconds = 19, files = ["test_bridge_bootstrap.jl"]),
     # ESS, R-hat and quantiles on long chains, per parameter on threads.
     (name = "test_postfit_diagnostics.jl", seconds = 5, files = ["test_postfit_diagnostics.jl"]),
+    # Prior-only occupancy follows the documented prior on k (1/k!, slab fraction).
+    (name = "test_transdim_prior_only.jl", seconds = 60, files = ["test_transdim_prior_only.jl"]),
+    # Planet-count report, one convergence verdict, evidence reliability flag.
+    (name = "test_transdim_k_report.jl", seconds = 120, files = ["test_transdim_k_report.jl"]),
     # run_job's and fit_*'s post-fit stage lines and timings.
     (name = "test_postfit_progress.jl", seconds = 103, files = ["test_postfit_progress.jl"]),
     # summary.json provenance block: engine, version, priors.

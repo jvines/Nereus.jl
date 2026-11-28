@@ -6,9 +6,10 @@ Nereus supports trans-dimensional inference over **planet count**
 
 The deliverable of a trans-dim run is an **occupancy** posterior:
 P(N\_p = k | D) over planet counts and P(model active | D) over each
-toggleable noise model. Under a uniform model prior the occupancy *is*
-the posterior model probability P(M | D) — see the
-**Occupancy = P(M | D)** section below. This is model
+toggleable noise model. The occupancy *is* the posterior model
+probability P(M | D) under the run's prior on the models (the prior on k is
+written out below, and recorded in `run_info`) — see the
+**Occupancy = P(M | D)** section. This is model
 **selection**, never model averaging.
 
 ## When to use it
@@ -314,11 +315,176 @@ P(\mathrm{N_p} = k \mid D) \;=\; \frac{1}{N}\sum_{s} \mathbb{1}[\,n_{\mathrm{pla
 ```
 
 and likewise P(model\_i active | D) is the fraction of samples with
-`noise_active_i == 1`. Under a uniform model prior this *is* P(M | D);
-for a non-uniform prior reweight with `bayes_factors(...;
-model_prior = k -> p(k))`. The same identity is what the validation
+`noise_active_i == 1`. The occupancy of the planet count is P(k | D) under the
+prior on k of the next section, which is not uniform on k (it is uniform over
+the period-ordered evidences at the default `inclusion_prior = 0.5`); noise models
+have the Bernoulli prior alone. To read a Bayes factor between planet counts off
+the occupancy, divide the prior out: `bayes_factors(...; model_prior = k -> prior[k + 1])`
+with `prior = transdim_k_prior(max_kplanet; inclusion_prior)`, or take
+`run_info["transdim"]["ln_bayes_factor_adjacent"]`, which does. The same identity is what the validation
 suite checks: occupancy must agree with an independently computed log Z
 to ≲ 0.2 in ln Z once the ladder is dense and recovery aids are on.
+
+## The prior on the planet count k
+
+The prior a trans-dim run puts on the number of planets is **not** uniform on
+k, and not binomial. Every planet slot carries an independent
+Bernoulli(`inclusion_prior`) activation bit (`sample_transdim_pt_emcee`,
+`sample_moms`, `sample_daedalus`; `rjmcmc` has none, which is the same as
+`inclusion_prior = 0.5`), the planets of one planet mode are kept in period
+order (next section), and which slot holds a planet carries no information. The
+prior mass of the k-planet model, against its evidence ``Z_k`` under the
+normalised slab prior, is
+
+```math
+P(k) \;\propto\; \Big(\frac{p}{1-p}\Big)^{k} \frac{1}{k!},
+\qquad k = 0, \dots, k_\mathrm{max},\quad p = \texttt{inclusion\_prior},
+```
+
+where `c` is the share of one planet's slab prior that the model allows (below)
+truncated at `k_max` (`max_kplanet`) and normalised, with one `1/k_g!` per planet
+mode when the slot menu mixes modes (`transdim_k_prior`). The `1/k!` is the mass
+of the period-ordered region of the k-planet parameter space, which is where the
+chain lives and which the sampler does not renormalise. Then
+
+```math
+P(k \mid D) \;\propto\; P(k)\, Z_k ,
+```
+
+and the same statement in the fixed-k convention: at the default `p = 0.5`,
+P(k | D) is *uniform-prior* over ``Z_k/k!``, the evidences of the period-ordered
+model that a fixed-k fit with the ordering gate integrates. For `max_kplanet = 3`
+at `p = 0.5` the prior is ``(0.375, 0.375, 0.1875, 0.0625)``. (with `c = 1`; see below). A likelihood that
+carries no information (all errors 10⁶ m/s) returns the occupancy ratios
+k+1 : k in the proportions c : c/2 : c/3 at `p = 0.5` and multiplied by
+`p/(1-p)` at `p = 0.3`, which is this formula.
+
+**The slab fraction `c`.** The default (√e sin ω, √e cos ω) parametrisation draws
+both uniformly on [-1, 1] and the likelihood rejects e ≥ 1, so a new planet's
+prior keeps π/4 ≈ 0.785 of its box: `c = π/4`. This is a hard constraint of the
+prior, not a bug: the prior-only run's factor of about 0.75 per planet was this
+(0.76, 0.75 and 0.69 of the 1 : 1/2 : 1/3 ratios; π/4 = 0.785). The evidence of the
+k-planet model under the slab prior normalised over its allowed region is the
+box-prior evidence divided by `c^k`, so `P(k)` carries `c^k`, and the ln B between
+adjacent k is the evidence ratio under that normalised prior. `c` is computed by
+Monte Carlo over the first slot's priors (`transdim_slab_fraction`) and reported
+as `prior.slab_fraction`; other hard constraints (dynamical stability, `M_s`-dependent)
+involve several planets at once, are not a per-planet factor, and are not in `c`.
+
+The prior is recorded in `run_info["transdim"]["prior"]` (`p_k`,
+`inclusion_prior`, `group_sizes`, the form and its meaning) and in
+`model_selection["n_planets_prior"]`.
+
+## Period ordering convention
+
+Planets are labelled by period. Within each planet mode, the **active** slots
+are kept in increasing period in slot order, `P_k1 < P_k2 < …` among the active
+slots of that mode:
+
+- a hard gate in the likelihood (`rv_log_likelihood`) rejects any within-model
+  move that would put two active same-mode planets out of order;
+- a birth draws the new planet, then inserts it into period order by swapping
+  parameter blocks between active slots (`_sort_group_periods!`), with the
+  activation bits untouched; a death cannot disorder a sorted state;
+- a slot of another mode (an RV-only slot among RV+astrometry slots) is ordered
+  only against slots of its own mode, and the SB2 companion is not a planet and
+  is not ordered at all.
+
+So slot `k1` is the shortest-period *active* planet of its mode, `k2` the next,
+and so on, per draw: **a slot index is a rank by period, not an identity**.
+Slots that are inactive in a draw hold parked values, and an inactive slot can sit
+between two active ones, so `planet_active_<k>` is not "has at least k planets".
+A planet that is the shortest-period one in one draw and not in another changes
+slot between draws; across draws the columns `P_k<j>`, `K_k<j>`, … of one slot are a
+mixture over planets, and a quantity of one *planet* (the 12.3 d one) is read by
+selecting draws where some active slot lies near that period, or through the
+relabelled columns that `convergence_report`, the fit-health check and
+`label_switching` build (active planets in the lowest slots, period-sorted,
+per draw). Conditioning on a slot being active, as the summary tables do, is
+conditioning on the slot's rank being occupied. The ordering is what removes the
+`k!` label-permutation degeneracy of the posterior; it is also the `1/k!` of the
+prior on k above.
+
+## Reporting the planet count
+
+Every trans-dim run (any engine that has `n_planets` in its chain) writes, under
+`run_info["transdim"]`:
+
+| key | content |
+|---|---|
+| `prior` | the prior on k above: `p_k`, `inclusion_prior`, `group_sizes`, form |
+| `occupancy`, `per_k` | P(k \| D); per k the draws, effective draws (`n_eff`), walkers that visited it, separate visits |
+| `ln_bayes_factor_adjacent` | per pair `k_hi = k+1`, `k_lo = k`: `ln_bayes_factor`, `se`, `ln_prior_ratio`, `estimable`, `reason` |
+| `mixture_evidence` | `available`, `log_z`, `method`, `how`, `evidence_reliable`, `ln_z_k` |
+| `k_max_truncation` | `p_k_max`, `warn`, `advice` |
+| `occupancy_health` | `ok`, `problems`, `rule` |
+| `k_transitions` | accepted k transitions per move type (below) |
+
+(also `diagnostics["k_transitions"]`, and the prior, the adjacent ln B and the
+mixture evidence in `model_selection`.)
+
+**ln B between adjacent k.**
+`ln B(k+1 vs k) = ln[P(k+1 | D) / P(k | D)] − ln[P(k+1) / P(k)]`, the posterior
+occupancy ratio less the prior ratio of the previous section. This is the Bayes
+factor of the evidences ``Z_{k+1}/Z_k`` under the normalised slab prior. `se` is
+the delta-method standard error from the effective size of the two occupancy
+indicators (autocorrelation-corrected across the walkers' traces, with the
+multinomial covariance). `per_k[k].n_eff` is the effective number of draws in k
+(its occupancy times that size). A pair is `estimable = false`, with a `reason` and
+a warning, when either k has fewer than 25 effective draws; when a count was
+never drawn, `ln_bayes_factor` is `NaN` (null in JSON), not infinity.
+
+**Mixture evidence.** `mixture_evidence.log_z` is ``\ln Z = \ln \sum_k P(k)\,Z_k``,
+the evidence of the whole trans-dim model marginalised over k with the prior
+above. It is the engine's own log evidence: a tempered or nested estimator
+integrates the likelihood against the normalised prior of the trans-dim model
+(`method` names the estimator `log_z` came from: `ti_plus`, `hybrid`, `nested`,
+…). It is available only when the engine reports one (the tempered stack needs a
+ladder that reaches β = 0 and swaps ≥ 5%; `rjmcmc` and `moms` have no estimator);
+otherwise `available = false` and `reason` says so, and the adjacent ln B still
+hold. `ln_z_k` then gives each visited k's evidence,
+``\ln Z_k = \ln Z + \ln P(k \mid D) − \ln P(k)``.
+
+**Truncation by `k_max`.** When `P(k = k_max | D) > 0.5` the run warns that the
+prior's upper bound on k is likely truncating the posterior, and says to raise
+`k_max`: `max_kplanet` in the `transdim` block (or `TransDimConfig`) **and** in
+the model, then refit. Not raised for a run that fixes the count
+(`planets = false`).
+
+**Occupancy health.** Every k with P(k | D) ≥ 0.01 must have been visited by at
+least `min(3, n_walkers)` walkers and, unless it holds ≥ 90% of the posterior, by
+at least 10 separate visits (entries into k, summed over walkers); otherwise its
+mass rests on one or two excursions and is not an estimate. `occupancy_health.ok =
+false` fails the run's convergence verdict (next section).
+
+**Accepted k transitions.** `k_transitions` counts, per move type, the proposed and
+accepted moves summed over the ladder, and at the β = 1 rung (`cold_*`): `birth`,
+`death`, `noise_toggle_swap` (noise-model birth, death and within-group swap, which
+the engine counts together) and, for `transdim_pt_emcee`, `planet_noise_swap` (the
+planet ↔ activity-model swap, with both directions). Engines with no move counters (`rjmcmc`, `moms`, `daedalus`) report `up` and `down`, the k changes seen between consecutive recorded draws of a walker (also `transitions_observed` for every engine; a lower bound on the accepted births and deaths). A run whose cold rung accepts
+no birth or death did not move in k, whatever its occupancy says.
+
+## One convergence verdict, and the evidence of an unconverged fit
+
+A summary used to carry two convergence answers: `run_info["convergence"]["pass"]`
+(split R̂ ≤ 1.1, ESS ≥ 400 gated on well-occupied components) and
+`fit_health["checks"]["convergence"]` (R̂ ≤ 1.05, ESS ≥ 200), and they could
+disagree. Both are now written from one rule (`converged` at the top of the summary,
+with `convergence_verdict` saying which checks looked and which failed): a run has
+converged when **none** of these failed: the R̂/ESS gate, the fit-health convergence
+check, the trans-dim occupancy health, a MAP fit's optimiser, and the run ending on
+its own (not `interrupted`, `requested`, `max_seconds`, `max_evals`).
+`run_info.convergence.pass`/`converged`, `fit_health.converged` and the status of
+`fit_health.checks.convergence` all follow it; what the gate and the check each said
+on their own is kept as `rhat_ess_pass` and `own_status`.
+
+The evidence of a run that has not converged is **reported, not withheld**, and
+flagged: `evidence_reliable = false` sits beside it (`summary`, `summary["evidence"]`,
+`run_info`, the trans-dim mixture evidence), `evidence_unreliable_reasons` lists the
+checks that failed and, if `log_z` is the mode-Laplace fallback, says so, and a
+warning prints the same. It applies to every engine and every evidence path (TI,
+TI⁺, SS⁺, H⁺, bridge, nested, mode-Laplace, a MAP fit's Laplace). When nothing assessed the run
+`evidence_reliable` is `null`.
 
 ## Reading trans-dim output
 
