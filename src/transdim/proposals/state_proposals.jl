@@ -270,9 +270,9 @@ Affine-invariant stretch moves (Goodman & Weare 2010) on the member's state slot
 for every walker of `ens`, on the scale of `fit_noise_state_proposal` (log for
 positive support, Jacobian included), for `n_steps` steps. `logp(values, k)` is
 the β = 1 log posterior with the member on; `k` is a workspace index (walkers of
-one half-ensemble are evaluated in parallel, `k = Threads.threadid()`-free chunk
-numbers 1..nchunks). Returns the draws of the last half of the steps, rows on the
-original scale.
+one half-ensemble are evaluated in parallel, dealt round-robin to chunks, and `k`
+is the chunk number 1..nchunks, never a thread id). Returns the draws of the last
+half of the steps, rows on the original scale.
 """
 function run_noise_state_ensemble!(ens::NoiseStateEnsemble, logp, slots::Vector{Int},
                                    lo::Vector{Float64}, hi::Vector{Float64},
