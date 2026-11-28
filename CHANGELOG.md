@@ -3,6 +3,50 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Added
+
+- **Trans-dim runs report their prior on k and what the occupancy says about it.**
+  `run_info["transdim"]` carries the prior on the planet count
+  (`P(k) ∝ (p/(1-p))^k / k!`, per planet mode: it is not uniform on k, because the
+  chain lives on the period-ordered region, which holds 1/k! of the slab prior;
+  uniform over the period-ordered evidences at `inclusion_prior = 0.5`), the
+  occupancy per k, `ln B` between adjacent k with a standard error and an
+  `estimable` flag (a k with fewer than 25 effective draws gives a reason and a
+  warning, never a number), and the mixture evidence (the engine's own `log_z`,
+  marginalised over k with that prior, with `ln Z_k` per k; unavailable when the
+  engine reports none, with the reason). The same appears in `model_selection`.
+  `transdim_k_prior`, `transdim_k_report`, `transdim_occupancy_health` and
+  `transdim_move_counts` are exported. The docs say what the prior is and how the
+  planets are ordered by period (`docs/src/transdim.md`).
+- **Occupancy health check and accepted k transitions.** Every k with P ≥ 1% must
+  have been visited by at least three walkers and, below 99% mass, by ten separate
+  visits. `run_info["transdim"]["k_transitions"]` and `diagnostics["k_transitions"]`
+  count proposed and accepted births, deaths, noise toggles/swaps and (for
+  `transdim_pt_emcee`) planet-activity swaps, in total and at the β = 1 rung.
+- **A warning when P(k = k_max) > 0.5**, saying the upper bound on k is likely
+  truncating the posterior and to raise `k_max` (`max_kplanet`, in the `transdim`
+  block and the model).
+- **`evidence_reliable` beside every evidence.** The evidence of a fit that has not
+  converged is still reported, and now flagged `evidence_reliable = false` (in the
+  summary, its `evidence` block and `run_info`) with `evidence_unreliable_reasons`
+  (which convergence check failed, and that `log_z` is the mode-Laplace fallback
+  when it is) and a warning. All engines and estimators; `null` when nothing assessed
+  the run.
+
+### Changed
+
+- **One convergence verdict.** `run_info.convergence.pass` and the fit-health
+  `convergence` check could disagree; both, `fit_health.converged` and a new
+  top-level `converged` are now written from one rule (no assessed check failed:
+  R̂/ESS gate, fit-health convergence, trans-dim occupancy health, MAP optimiser,
+  run ended on its own), with `convergence_verdict` naming the failed checks. What
+  the gate and the check each said alone is kept as `rhat_ess_pass` / `own_status`.
+  Chains are unchanged.
+- `TransDimPTemceeResult` gains `planet_noise_swap`, the planet-activity swap
+  counters the sampler already kept.
+
 ## 0.9.13
 
 ### Added
