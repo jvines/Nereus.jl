@@ -332,3 +332,82 @@ function run_noise_state_ensemble!(ens::NoiseStateEnsemble, logp, slots::Vector{
     ens.n_done += n_steps
     return reduce(hcat, keep)'
 end
+
+"""
+    climb_noise_state(logp, x0, slots, lo, hi; rounds = 3, max_evals = 300 * length(slots))
+        -> (x, ℓ, σ)
+
+The top of the member's conditional posterior, from `x0` (a full theta value
+vector): `logp(values)` is the β = 1 log posterior with the member on, and only
+`slots` move. Worked on the scale of `fit_noise_state_proposal` (log for positive
+support, Jacobian included, so the top is the mode of the density the proposal is
+fitted to): axis widths at the current point (`_pt_axis_widths`), BFGS in units
+of them (`_pt_climb`; in units of the starting steps where a width does not
+settle), repeated up to `rounds` times while a round gains more than
+0.1 in ln p. Returns the top `x`, its density `ℓ` on that scale, and the
+conditional widths `σ` there (one per slot, on that scale; `nothing` if a width
+never settled). A seeding ensemble started where the cold walkers of another
+member sit is tens of nats below the member's mode in a 35-parameter state
+(HD 18599, decorrelation: seeded ensembles at -1330 to -1340, the decorrelation's
+own cold walkers at -1290) and its stretch moves do not close the gap in a few
+thousand steps; the climb does, since most of such a state (coefficients,
+offsets, trend) enters the model linearly.
+"""
+function climb_noise_state(logp, x0::AbstractVector{Float64}, slots::Vector{Int},
+                           lo::Vector{Float64}, hi::Vector{Float64};
+                           rounds::Int = 3, max_evals::Int = 300 * length(slots))
+    d = length(slots); logt = BitVector(lo .> 0)
+    v = collect(Float64, x0)
+    function at(y)
+        jac = 0.0
+        @inbounds for k in 1:d
+            x = logt[k] ? exp(y[k]) : y[k]
+            (lo[k] <= x <= hi[k]) || return -Inf
+            v[slots[k]] = x; logt[k] && (jac += y[k])
+        end
+        l = logp(v)
+        return isfinite(l) ? l + jac : -Inf
+    end
+    y = Float64[logt[k] ? log(clamp(x0[slots[k]], nextfloat(lo[k]), hi[k])) :
+                clamp(x0[slots[k]], lo[k], hi[k]) for k in 1:d]
+    h0 = Float64[logt[k] ? 0.1 : 0.1 * max(abs(y[k]), 1e-3) for k in 1:d]
+    ℓ = at(y)
+    σ = nothing
+    isfinite(ℓ) || return (collect(Float64, x0), -Inf, nothing)
+    for _ in 1:rounds
+        # far from the mode, or against a bound, a width may not settle; the
+        # climb then works in units of the starting steps
+        σ = something(_pt_axis_widths(at, y, ℓ, h0), h0)
+        yc, ℓc = _pt_climb(at, y, ℓ, σ; max_evals)
+        gain = ℓc - ℓ
+        y, ℓ = yc, ℓc
+        gain > 0.1 || break
+    end
+    σ = _pt_axis_widths(at, y, ℓ, h0; half = false)
+    at(y)
+    return (copy(v), ℓ, σ)
+end
+
+"""
+    scatter_noise_state(rng, x, slots, lo, hi, σ, n) -> Vector{Vector{Float64}}
+
+`n` copies of `x` with the slots drawn about it, independently per slot on the
+scale of `fit_noise_state_proposal` with the widths `σ` (redrawn into the prior
+bounds; a slot that will not go in stays at `x`).
+"""
+function scatter_noise_state(rng::AbstractRNG, x::AbstractVector{Float64},
+                             slots::Vector{Int}, lo::Vector{Float64},
+                             hi::Vector{Float64}, σ::AbstractVector{<:Real}, n::Int)
+    out = Vector{Vector{Float64}}(undef, n)
+    for i in 1:n
+        u = collect(Float64, x)
+        for (k, s) in enumerate(slots)
+            for _ in 1:20
+                c = lo[k] > 0 ? x[s] * exp(σ[k] * randn(rng)) : x[s] + σ[k] * randn(rng)
+                lo[k] < c < hi[k] && (u[s] = c; break)
+            end
+        end
+        out[i] = u
+    end
+    return out
+end

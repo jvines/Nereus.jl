@@ -59,6 +59,42 @@ using Test, Nereus, Random, LinearAlgebra, Statistics, Serialization
         @test ens.n_done == 3010
     end
 
+    @testset "seed: the climb recovers a member's mode from a start far below it" begin
+        # 30 slots (every third positive), a correlated normal on the
+        # proposal's scale with its mode 15-40 widths from the start: the
+        # seeding ensemble's situation in HD 18599, a decorrelation state tens
+        # of nats below its mode
+        d = 30; slots = collect(2:2:2d); r = MersenneTwister(11)
+        lo = [k % 3 == 0 ? 1e-9 : -1e3 for k in 1:d]; hi = [k % 3 == 0 ? 1e9 : 1e3 for k in 1:d]
+        logt = lo .> 0
+        mu = [logt[k] ? log(2.0 + k / 10) : 5.0 * randn(r) for k in 1:d]
+        sd = 0.05 .+ 0.3 .* rand(r, d)
+        A = randn(r, d, d) ./ sqrt(d) .* 0.3; C = Symmetric(Diagonal(sd .^ 2) .+ (A * A') .* (sd * sd'))
+        P = inv(Matrix(C))
+        y(v) = [logt[k] ? log(v[slots[k]]) : v[slots[k]] for k in 1:d]
+        # density on the original scale: the normal on y times the Jacobian
+        logp(v) = (z = y(v) .- mu; -0.5 * dot(z, P * z) - sum(y(v)[logt]))
+        x0 = zeros(2d + 1); x0[1] = 7.0; x0[end] = -3.0
+        for k in 1:d
+            off = (15 + 25 * rand(r)) * sd[k] * (isodd(k) ? 1 : -1)
+            x0[slots[k]] = logt[k] ? exp(mu[k] + off) : mu[k] + off
+        end
+        ℓ0 = logp(x0)
+        @test all(lo .< x0[slots] .< hi)
+        x, ℓ, σ = Nereus.climb_noise_state(logp, x0, slots, lo, hi)
+        @test ℓ0 < -1000
+        @test σ !== nothing
+        @test maximum(abs.((y(x) .- mu) ./ sd)) < 0.05      # at the mode
+        @test ℓ ≈ 0.0 atol = 1e-2                          # its density there
+        @test σ ≈ 1 ./ sqrt.(diag(P)) rtol = 0.1           # conditional widths
+        @test x[1] == 7.0 && x[end] == -3.0                # nothing else moved
+        # walkers scattered there start the ensemble in the mode
+        X = Nereus.scatter_noise_state(MersenneTwister(2), x, slots, lo, hi, σ, 64)
+        @test all(v -> logp(v) > -3d, X)
+        @test all(v -> v[1] == 7.0 && v[end] == -3.0, X)
+        @test all(v -> all(lo .< v[slots] .< hi), X)
+    end
+
     # data: an RV signal tracked by two indicators, so decorrelation and the
     # rotation GP are competing explanations of the same scatter
     P_ROT, N, SIG = 9.0, 70, 1.0
@@ -175,6 +211,34 @@ using Test, Nereus, Random, LinearAlgebra, Statistics, Serialization
         res = Nereus.sample_transdim_pt_emcee(tgt, data; kw..., n_steps = 1200,
                                               checkpoint = joinpath(d2, "ck.jls"), resume = true)
         @test Array(res.chains) == Array(full.chains)
+    end
+
+    @testset "sampler: seeded proposals in every populated planet configuration" begin
+        # No member is fitted from draws (min_draws beyond any count), and the
+        # cold walkers split between planet on and off. Every member must get a
+        # proposal for each configuration holding at least 5% of them: seeded
+        # in one configuration only, the walkers in the others would use the
+        # pooled proposals, which fit neither (HD 18599, seed 203, stayed in
+        # GP-Rot that way at 18 nats below the decorrelation).
+        tgt = NereusTarget(params, data)
+        td = TransDimConfig(; max_kplanet = 1, planets = true, noise = true,
+                              toggleable = nms, noise_exclusion_groups = [nms])
+        ck = joinpath(mktempdir(), "ck.jls")
+        Nereus.sample_transdim_pt_emcee(tgt, data; td = td, n_temps = 4, n_walkers = 16,
+            n_steps = 900, n_burnin = 600, seed = 11, noise_state_min_draws = 10^9,
+            checkpoint = ck, show_progress = false)
+        st = open(deserialize, ck).state
+        ns = st.noise_state
+        @test ns.ens isa Dict{Tuple{Int,UInt64}, Nereus.NoiseStateEnsemble}
+        # the configurations seeded are those of the cold walkers at the last
+        # refit; every member has a proposal in each of them
+        seeded = unique(k for (_, k) in keys(ns.ens))
+        @test !isempty(seeded)
+        for k in seeded, j in (1, 2)
+            @test haskey(ns.kprops, (j, k))
+            @test haskey(ns.ens, (j, k))
+        end
+        @test all(j -> ns.props[j] isa Nereus.NoiseStateProposal, 1:2)
     end
 
     @testset "sampler: seeds agree where the stale swap leaves them apart" begin
