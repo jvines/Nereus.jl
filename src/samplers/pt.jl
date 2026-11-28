@@ -156,8 +156,19 @@ function sample_pt(
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
     checkpoint_interval::Real = 900.0,
     resume::Bool = false,
+    informed_init::Bool = false,
+    period_jump_prob::Real = 0.0,
 )
     early_stop_thresh = Float64(early_stop_thresh)   # JSON may deliver an Int
+    # Informed starts and the period jump (src/samplers/period_jump.jl) are
+    # fixed-k tools: trans-dim births are informed already and have their own
+    # alias jump (`alias_jump_fraction`).
+    (informed_init || period_jump_prob != 0) && td !== nothing && td.planets &&
+        throw(ArgumentError("informed_init / period_jump_prob are for a fixed-k " *
+            "run; with planet births on use the births' own informed proposals"))
+    informed_init && (init !== nothing || init_strategy !== :prior) &&
+        throw(ArgumentError("informed_init places the replicas itself; it needs " *
+            "init = nothing and init_strategy = :prior"))
     # PT parallelises chain updates via Threads.@threads. With nthreads()
     # == 1 the @threads loop runs serially, so n_chains chains take
     # n_chains× longer than they should — easily a >10× hit on real-data
@@ -224,7 +235,8 @@ function sample_pt(
         early_stop_min_rounds=early_stop_min_rounds,
         init=init_mat,
         within_model=within_model,
-        n_warmup_rounds, swap_min, checkpoint, checkpoint_interval, resume, init_key)
+        n_warmup_rounds, swap_min, checkpoint, checkpoint_interval, resume, init_key,
+        informed_init, period_jump_prob)
     # Preserve historical return shapes: 2-tuple for fixed-dim
     # (matches the old Pigeons-backed path); 3-tuple for trans-dim
     # (matches the old in-house path). Test scripts depend on this.
@@ -289,6 +301,8 @@ function _sample_pt_transdim(
     resume::Bool = false,
     init_key = nothing,
     halt_after::Int = 0,
+    informed_init::Bool = false,
+    period_jump_prob::Real = 0.0,
 )
     within_model in (:slice, :rwm) || throw(ArgumentError(
         "within_model must be :slice or :rwm; got :$within_model"))
@@ -316,6 +330,16 @@ function _sample_pt_transdim(
               "caches that a checkpoint cannot hold, so this run cannot be resumed."
     end
     ck_path = checkpoint === nothing || informed_births ? nothing : String(checkpoint)
+    # The period jump and informed starts (src/samplers/period_jump.jl), fixed-k
+    # only (`sample_pt` refuses them with planet births).
+    p_pj = _period_jump_check(period_jump_prob)
+    pj_plan = p_pj > 0 && !td.planets ? period_jump_plan(target.params, target.data) : nothing
+    if pj_plan !== nothing && isempty(pj_plan.planets)
+        @warn "sample_pt: period_jump_prob = $p_pj but no planet can take the jump " *
+              "(it needs a sampled period, an RV amplitude and RV data, and not the " *
+              ":a_driven parametrization); it is off."
+        pj_plan = nothing
+    end
     ck_every = Float64(checkpoint_interval)
     rng = MersenneTwister(seed)
     params = target.params
@@ -351,7 +375,8 @@ function _sample_pt_transdim(
         init = init_key !== nothing ? init_key :
                init === nothing ? :prior : hash(Matrix{Float64}(init)),
         # The warm-up history is saved per group, and polar angles are groups.
-        polar_chart_key(params)...)
+        polar_chart_key(params)...,
+        _period_jump_fp(pj_plan === nothing ? 0.0 : p_pj)...)
     ck = resume ? read_checkpoint(ck_path, "pt", ck_fp) : nothing
     iter0 = ck === nothing ? 0 : ck.iter::Int
     iter0 <= total_samples || throw(ArgumentError(
@@ -381,6 +406,13 @@ function _sample_pt_transdim(
     # Initialize replicas with per-chain RNGs for thread safety
     replicas = Vector{TransDimPTState}(undef, n_chains)
     chain_rngs = [MersenneTwister(seed + c) for c in 1:n_chains]
+    init_plan = informed_init && !resume && init === nothing && !td.planets ?
+                informed_init_plan(params, data) : nothing
+    if init_plan !== nothing && all(S -> S === nothing, init_plan.setups)
+        @warn "sample_pt: informed_init found no residual-periodogram peak for any " *
+              "planet; replicas start from the prior."
+        init_plan = nothing
+    end
     for c in 1:n_chains
         # Activate all planet slots up to max_kplanet when either:
         #  (a) trans-dim is OFF for planets (`td.planets == false`) —
@@ -425,6 +457,14 @@ function _sample_pt_transdim(
                                          params)
             for (j, uf_idx) in enumerate(layout.unfrozen_idx)
                 theta.values[uf_idx] = x0[j]
+            end
+        elseif init_plan !== nothing
+            # Informed starts: the planets from their residual periodograms,
+            # redrawn (with everything else) until the density is finite.
+            for _ in 1:200
+                _init_systemics_from_prior!(theta, chain_rngs[c])
+                _informed_init_draw!(theta, init_plan, data, chain_rngs[c])
+                isfinite(log_prior(theta)) && isfinite(_eval_ll(theta, data)) && break
             end
         else
             _init_systemics_from_prior!(theta, chain_rngs[c])
@@ -495,6 +535,11 @@ function _sample_pt_transdim(
     # is (after the warmup rounds): `_tempered_quotable` reads their rates.
     swap_n = zeros(Int, n_chains - 1)
     swap_a = zeros(Int, n_chains - 1)
+    # Period jump: a scratch replica per chain, its tallies per chain.
+    pj_thetas = pj_plan === nothing ? Theta{Float64}[] :
+        [Theta{Float64}(params; td = copy(replicas[c].theta.td)) for c in 1:n_chains]
+    pj_proposed = zeros(Int, n_chains)
+    pj_accepted = zeros(Int, n_chains)
 
     # Circular angles (src/circular.jl): the cold replica's ACTIVE values over
     # the second half of the warmup iterations, pooled per window group,
@@ -545,6 +590,10 @@ function _sample_pt_transdim(
             swap_n .= ck.swap_n
             swap_a .= ck.swap_a
         end
+        if pj_plan !== nothing
+            pj_plan.setups .= ck.pj_setups
+            pj_proposed .= ck.pj_proposed; pj_accepted .= ck.pj_accepted
+        end
         prev_np_post = ck.prev_np_post::Vector{Float64}
         # Windows the saved replicas live in (moved by the warmup re-cut).
         _restore_windows!(params, ck.windows, (target.transform,))
@@ -582,6 +631,12 @@ function _sample_pt_transdim(
 
         for it in (round == r_done + 1 ? k0 + 1 : 1):n_iter_this_round
             iter += 1
+
+            # The period jump's setups, from the cold replica: refreshed
+            # through the warmup, then fixed (src/samplers/period_jump.jl).
+            if pj_plan !== nothing && _period_jump_refresh_due(iter, warmup_iters)
+                _period_jump_refresh!(pj_plan, replicas[end].theta, data)
+            end
 
             # --- Multiple MCMC steps per chain (parallel) ----------------
             Threads.@threads for c in 1:n_chains
@@ -645,6 +700,9 @@ function _sample_pt_transdim(
                             _pt_within_move!(rep, data, beta, 1.0, widths, crng, ws; ctr=cctr)
                         end
                     end
+                    pj_plan === nothing ||
+                        _pt_period_jump!(rep, pj_thetas[c], pj_plan, p_pj, data, beta,
+                                         crng, cctr, ws, pj_proposed, pj_accepted, c)
                 end
             end
 
@@ -710,7 +768,8 @@ function _sample_pt_transdim(
                 _pt_write_checkpoint(ck_path, ck_fp, iter, replicas, rng,
                     chain_rngs, chain_ctrs, chain_ws, cold_samples,
                     cold_n_planets, cold_noise, cold_planet_active,
-                    evidence_acc, prev_np_post, circ, params; swap_n, swap_a)
+                    evidence_acc, prev_np_post, circ, params; swap_n, swap_a,
+                extra = _pt_period_jump_ck(pj_plan, pj_proposed, pj_accepted))
                 last_ck = time()
                 iter == halt_after && throw(InterruptException())
             end
@@ -767,13 +826,16 @@ function _sample_pt_transdim(
             _pt_write_checkpoint(ck_path, ck_fp, iter, replicas, rng,
                 chain_rngs, chain_ctrs, chain_ws, cold_samples,
                 cold_n_planets, cold_noise, cold_planet_active,
-                evidence_acc, prev_np_post, circ, params; swap_n, swap_a)
+                evidence_acc, prev_np_post, circ, params; swap_n, swap_a,
+                extra = _pt_period_jump_ck(pj_plan, pj_proposed, pj_accepted))
             last_ck = time()
             iter == halt_after && throw(InterruptException())
         end
         stop_early && break
     end
     finish!(pb)
+    show_report && pj_plan !== nothing &&
+        _period_jump_info("pt", pj_plan, params, reverse(pj_proposed), reverse(pj_accepted))
 
     # Build Chains
     n_post = length(cold_samples)
@@ -909,8 +971,9 @@ end
 function _pt_write_checkpoint(path, fp, iter, replicas, rng, chain_rngs,
                               chain_ctrs, chain_ws, cold_samples, cold_n_planets,
                               cold_noise, cold_planet_active, evidence_acc,
-                              prev_np_post, circ, params; swap_n, swap_a)
-    write_checkpoint(path, "pt", fp, (; iter,
+                              prev_np_post, circ, params; swap_n, swap_a,
+                              extra = (;))
+    write_checkpoint(path, "pt", fp, (; iter, extra...,
         values = [r.theta.values for r in replicas],
         td_states = [r.theta.td for r in replicas],
         log_pi = Float64[r.log_pi for r in replicas],

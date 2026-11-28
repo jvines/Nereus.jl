@@ -183,6 +183,12 @@ the distinguishing feature of this sampler.
 - `node_flip::Real=0.1` — as in `sample_pt_emcee`: the tempered
   (Ω, ω) → (Ω + π, ω + π) move for astrometry-only planets
   (src/samplers/node_flip.jl). `0` disables it.
+- `informed_init::Bool=false`, `period_jump_prob::Real=0.0` — opt-in, as in
+  `sample_pt_emcee`: walkers start with each planet drawn from its residual
+  periodogram's peaks and their aliases, and a period jump (an independence
+  draw from that mixture, or a harmonic ratio) is offered per walker, step and
+  planet with the tempered Metropolis-Hastings ratio
+  (src/samplers/period_jump.jl). Off, the run draws exactly what it did.
 - `burnin_hold = nothing`, `burnin_hold_frac::Real = 0.5` — as in
   `sample_pt_emcee`: every IAD jitter `sigma_iad_<instrument>` held at 0 for
   at least the first half of burn-in, until the β = 1 rung stops climbing, then
@@ -233,6 +239,8 @@ function sample_pt_whitening(
     thin::Int = 1,
     show_progress::Bool = true,
     node_flip::Real = 0.1,
+    informed_init::Bool = false,
+    period_jump_prob::Real = 0.0,
     burnin_hold = nothing,
     burnin_hold_frac::Real = 0.5,
     trim_burnin::Bool = false,
@@ -252,6 +260,8 @@ function sample_pt_whitening(
     node_flip      = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
+    # Informed starts and the period jump (src/samplers/period_jump.jl).
+    p_pj = _period_jump_check(period_jump_prob)
     # Accepted for symmetry with pt_emcee, but every walker is drawn from the
     # prior: `:pathfinder` used to be taken and silently ignored.
     init_strategy === :prior || throw(ArgumentError(
@@ -294,12 +304,21 @@ function sample_pt_whitening(
     # Node flip for astrometry-only planets (src/samplers/node_flip.jl). Walkers
     # here are plain bounded space, so no log-scale dimension to exclude.
     flips = node_flip > 0 ? node_flips(params, data) : NodeFlip[]
+    # The period jump's planets (src/samplers/period_jump.jl); `nothing` when off.
+    pj_plan = p_pj > 0 ? period_jump_plan(params, data) : nothing
+    if pj_plan !== nothing && isempty(pj_plan.planets)
+        @warn "pt_whitening: period_jump_prob = $p_pj but no planet can take the " *
+              "jump (it needs a sampled period, an RV amplitude and RV data, and not " *
+              "the :a_driven parametrization); it is off."
+        pj_plan = nothing
+    end
     # Coordinates held early in burn-in (src/samplers/burnin_hold.jl). Walkers
     # live in x, so the held value is stored exactly and the stretch leaves it
     # (every walker shares it); `is_held` is cleared at the release.
     hold = _burnin_hold(params, burnin_hold, burnin_hold_frac, n_burnin;
-                        forbid = reduce(vcat, (vcat(f.shift, f.negate) for f in flips);
-                                        init = Int[]),
+                        forbid = vcat(reduce(vcat, (vcat(f.shift, f.negate) for f in flips);
+                                             init = Int[]),
+                                      pj_plan === nothing ? Int[] : _period_jump_dims(pj_plan)),
                         sampler = "pt_whitening")
     is_held = falses(n_dim)
     is_held[hold.dims] .= true
@@ -315,7 +334,7 @@ function sample_pt_whitening(
         n_burnin, thin, seed, stretch_a, betas = copy(βs), warmup_swaps,
         whiten_window = max(whiten_window, 1), whiten_refresh,
         node_flip = isempty(flips) ? 0.0 : node_flip, _burnin_hold_fp(hold, params)...,
-        _de_fp(p_de)...)
+        _de_fp(p_de)..., _period_jump_fp(pj_plan === nothing ? 0.0 : p_pj)...)
     ck = resume ? read_checkpoint(ck_path, "pt_whitening", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -369,6 +388,13 @@ function sample_pt_whitening(
     # near the high-likelihood region, and stretch + swap-down carry that
     # to the cold chain.
     init_seeds  = rand(rng_master, UInt64, n_temps * n_walkers_eff)
+    # Informed starts (`informed_init`, src/samplers/period_jump.jl).
+    init_plan = informed_init && ck === nothing ? informed_init_plan(params, data) : nothing
+    if init_plan !== nothing && all(S -> S === nothing, init_plan.setups)
+        @warn "pt_whitening: informed_init found no residual-periodogram peak for " *
+              "any planet; walkers start from the prior."
+        init_plan = nothing
+    end
     # One chunk of tasks per slot, so `slot` is a plain loop counter and the
     # buffers cannot be shared between tasks however the scheduler moves
     # them. `:static` is kept for the 1:1 chunk-to-thread mapping, but the
@@ -384,6 +410,16 @@ function sample_pt_whitening(
             rng = MersenneTwister(init_seeds[task_idx])
             for _ in 1:200
                 xb = _draw_from_prior(target, rng)
+                if init_plan !== nothing
+                    th = thread_theta[slot]
+                    @inbounds for (d, idx) in enumerate(unfrozen_idx)
+                        th.values[idx] = xb[d]
+                    end
+                    _informed_init_draw!(th, init_plan, data, rng)
+                    @inbounds for (d, idx) in enumerate(unfrozen_idx)
+                        xb[d] = th.values[idx]
+                    end
+                end
                 @inbounds for d in 1:n_dim
                     state[t, w, d] = xb[d]
                 end
@@ -554,6 +590,17 @@ function sample_pt_whitening(
     flip_proposed  = zeros(Int, n_temps)
     flip_accepted  = zeros(Int, n_temps)
     flip_eval(buf, t, w, slot) = eval_bounded!(buf, slot)
+    # Period jump (`period_jump_prob`), as in sample_pt_emcee; walkers here move
+    # on the raw parameters (no flat scale).
+    rngs_pj = pj_plan === nothing ? MersenneTwister[] :
+        [MersenneTwister(_walker_seed(seed, 6, i)) for i in 1:(n_temps * n_walkers_eff)]
+    pj_thetas = pj_plan === nothing ? Theta{Float64}[] :
+        [Theta{Float64}(params) for _ in 1:n_slots]
+    pj_ref = Theta{Float64}(params)
+    pj_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    pj_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    pj_proposed  = zeros(Int, n_temps)
+    pj_accepted  = zeros(Int, n_temps)
 
     function do_half_step!(tasks::Vector{Tuple{Int,Int}}, active_half::Symbol)
         partner_lo = active_half === :h1 ? half + 1 : 1
@@ -677,6 +724,11 @@ function sample_pt_whitening(
         copy!(rng_master, ck.rng_master)
         foreach(copy!, rngs_h1, ck.rngs_h1); foreach(copy!, rngs_h2, ck.rngs_h2)
         foreach(copy!, rngs_flip, ck.rngs_flip)
+        if pj_plan !== nothing
+            foreach(copy!, rngs_pj, ck.rngs_pj)
+            pj_plan.setups .= ck.pj_setups
+            pj_proposed .= ck.pj_proposed; pj_accepted .= ck.pj_accepted
+        end
         ring[:, 1:size(ck.ring, 2), :, :] .= ck.ring
         ring_count .= ck.ring_count; ring_head .= ck.ring_head
         μ_w .= ck.μ_w; σ_w .= ck.σ_w
@@ -727,6 +779,11 @@ function sample_pt_whitening(
                      start = step0)
 
     for step in (step0 + 1):n_steps
+        # The period jump's setups: refreshed through burn-in, then fixed.
+        if pj_plan !== nothing && _period_jump_refresh_due(step, n_burnin)
+            _period_jump_refresh!(pj_plan, _pj_best_cold!(pj_ref, state, logπ_arr,
+                                  logL_arr, unfrozen_idx, nothing), data)
+        end
         # ---- Within-temp ensemble stretch (two half-steps) ----------
         do_half_step!(tasks_h1, :h1)
         do_half_step!(tasks_h2, :h2)
@@ -747,6 +804,18 @@ function sample_pt_whitening(
             @inbounds for t in 1:n_temps
                 flip_proposed[t] += Threads.atomic_xchg!(flip_prop_temp[t], 0)
                 flip_accepted[t] += Threads.atomic_xchg!(flip_acc_temp[t],  0)
+            end
+        end
+
+        # ---- Period jump (threaded; src/samplers/period_jump.jl) -------
+        if pj_plan !== nothing
+            Threads.atomic_add!(n_evals_atomic,
+                _period_jump_sweep!(flip_eval, state, logπ_arr, logL_arr, βs, pj_plan,
+                                    data, p_pj, rngs_pj, thread_proposal, pj_thetas,
+                                    unfrozen_idx, nothing, pj_prop_temp, pj_acc_temp))
+            @inbounds for t in 1:n_temps
+                pj_proposed[t] += Threads.atomic_xchg!(pj_prop_temp[t], 0)
+                pj_accepted[t] += Threads.atomic_xchg!(pj_acc_temp[t],  0)
             end
         end
 
@@ -922,7 +991,8 @@ function sample_pt_whitening(
                 windows = circular_windows(params),
                 spin_axis = copy(params.layout.spin_axis), recut_moved,
                 hold_on = any(is_held), hold_med = hold_med[],
-                evidence_blocks = ev_blocks))
+                evidence_blocks = ev_blocks,
+                _period_jump_ck(pj_plan, rngs_pj, pj_proposed, pj_accepted)...))
             last_ck = time()
         end
     end
@@ -930,6 +1000,8 @@ function sample_pt_whitening(
     show_progress && _pt_recut_info("pt_whitening", recut_moved)
     show_progress && _node_flip_info("pt_whitening", flips, params, flip_proposed,
                                      flip_accepted)
+    show_progress && pj_plan !== nothing &&
+        _period_jump_info("pt_whitening", pj_plan, params, pj_proposed, pj_accepted)
 
     samples    = samples[1:keep_idx, :]
     lp_samples = lp_samples[1:keep_idx]

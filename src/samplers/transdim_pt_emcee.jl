@@ -90,6 +90,11 @@ struct TransDimPTemceeResult
     # `state_*` the state proposals (src/transdim/proposals/state_proposals.jl).
     # Counted since the start or the last resume.
     noise_swaps::NamedTuple
+    # The planet<->activity-noise swap (a k-changing move of its own): proposed and
+    # accepted over the run, and the two directions (planet -> noise model,
+    # noise model -> planet). Counted in the sampling loop since the move existed;
+    # reported here so a run's k transitions are all in the result.
+    planet_noise_swap::Dict{String, Int}
 end
 
 # ------------------------------------------------------------------
@@ -3292,5 +3297,8 @@ function sample_transdim_pt_emcee(
         _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc),
         _de_acceptance(de_accepted, de_proposed), drift, n_burnin_used,
         n_trimmed, burnin_trim, noise_swaps,
+        Dict{String, Int}("proposed" => pswap_prop[], "accepted" => pswap_acc[],
+                          "planet_to_noise_proposed" => pn_prop[], "planet_to_noise_accepted" => pn_acc[],
+                          "noise_to_planet_proposed" => np_prop[], "noise_to_planet_accepted" => np_acc[]),
     )
 end

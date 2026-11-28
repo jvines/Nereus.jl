@@ -122,6 +122,7 @@ const TEST_UNITS = [
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.
     (name = "test_pt_emcee_stranded.jl", seconds = 186, files = ["test_pt_emcee_stranded.jl"]),
     (name = "test_pt_emcee_resume.jl", seconds = 39, files = ["test_pt_emcee_resume.jl"]),
+    (name = "test_period_jump.jl", seconds = 90, files = ["test_period_jump.jl"]),
     (name = "test_pt_emcee_progress.jl", seconds = 30, files = ["test_pt_emcee_progress.jl"]),
     (name = "test_burnin_hold.jl", seconds = 88, files = ["test_burnin_hold.jl"]),
     # The opt-in extended burn-in in the three samplers and through run_job.
@@ -213,6 +214,10 @@ const TEST_UNITS = [
     (name = "test_bridge_bootstrap.jl", seconds = 19, files = ["test_bridge_bootstrap.jl"]),
     # ESS, R-hat and quantiles on long chains, per parameter on threads.
     (name = "test_postfit_diagnostics.jl", seconds = 5, files = ["test_postfit_diagnostics.jl"]),
+    # Prior-only occupancy follows the documented prior on k (1/k!, slab fraction).
+    (name = "test_transdim_prior_only.jl", seconds = 60, files = ["test_transdim_prior_only.jl"]),
+    # Planet-count report, one convergence verdict, evidence reliability flag.
+    (name = "test_transdim_k_report.jl", seconds = 120, files = ["test_transdim_k_report.jl"]),
     # run_job's and fit_*'s post-fit stage lines and timings.
     (name = "test_postfit_progress.jl", seconds = 103, files = ["test_postfit_progress.jl"]),
     # summary.json provenance block: engine, version, priors.

@@ -3,6 +3,75 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Added
+
+- **Trans-dim runs report their prior on k and what the occupancy says about it.**
+  `run_info["transdim"]` carries the prior on the planet count
+  (`P(k) ∝ (c·p/(1-p))^k / k!`, `c = π/4` the share of a planet's (√e sin ω, √e cos ω) box with e < 1, per planet mode: it is not uniform on k, because the
+  chain lives on the period-ordered region, which holds 1/k! of the slab prior;
+  uniform over the period-ordered evidences at `inclusion_prior = 0.5`), the
+  occupancy per k, `ln B` between adjacent k with a standard error and an
+  `estimable` flag (a k with fewer than 25 effective draws gives a reason and a
+  warning, never a number), and the mixture evidence (the engine's own `log_z`,
+  marginalised over k with that prior, with `ln Z_k` per k; unavailable when the
+  engine reports none, with the reason). The same appears in `model_selection`.
+  `transdim_k_prior`, `transdim_k_report`, `transdim_occupancy_health` and
+  `transdim_move_counts` are exported. The docs say what the prior is and how the
+  planets are ordered by period (`docs/src/transdim.md`).
+- **Occupancy health check and accepted k transitions.** Every k with P ≥ 1% must
+  have been visited by at least three walkers and, below 90% mass, by ten separate
+  visits. `run_info["transdim"]["k_transitions"]` and `diagnostics["k_transitions"]`
+  count proposed and accepted births, deaths, noise toggles/swaps and (for
+  `transdim_pt_emcee`) planet-activity swaps, in total and at the β = 1 rung.
+- **A warning when P(k = k_max) > 0.5**, saying the upper bound on k is likely
+  truncating the posterior and to raise `k_max` (`max_kplanet`, in the `transdim`
+  block and the model).
+- **`evidence_reliable` beside every evidence.** The evidence of a fit that has not
+  converged is still reported, and now flagged `evidence_reliable = false` (in the
+  summary, its `evidence` block and `run_info`) with `evidence_unreliable_reasons`
+  (which convergence check failed, and that `log_z` is the mode-Laplace fallback
+  when it is) and a warning. All engines and estimators; `null` when nothing assessed
+  the run.
+
+- **Informed starts and period jumps for the fixed-k PT samplers** (`pt_emcee`,
+  `pt_whitening`, and `pt` without planet births), both opt-in.
+  `informed_init = true` places every walker's planets from the residual
+  periodogram, as a trans-dim informed birth proposes one: the residual after
+  the other planets' signals, its peaks and the yearly / daily aliases of the
+  strongest, K and the time anchor from the peak's least-squares sinusoid,
+  spread over the peaks rather than piled on the strongest.
+  `period_jump_prob = p` adds a move that redraws a planet's (P, K, time anchor)
+  from that mixture (an independence proposal, ratio ln q(old) − ln q(new)) or
+  multiplies its period by a harmonic ratio (ratio ln r), accepted with the
+  tempered Metropolis-Hastings ratio at every rung. Its proposal is refreshed
+  through burn-in and fixed for the recorded steps, and is checkpointed. Off by
+  default, which draws exactly what it did. Job config: `sampler.kwargs`.
+
+### Changed
+
+- **One convergence verdict.** `run_info.convergence.pass` and the fit-health
+  `convergence` check could disagree; both, `fit_health.converged` and a new
+  top-level `converged` are now written from one rule (no assessed check failed:
+  R̂/ESS gate, fit-health convergence, trans-dim occupancy health, MAP optimiser,
+  run ended on its own), with `convergence_verdict` naming the failed checks. What
+  the gate and the check each said alone is kept as `rhat_ess_pass` / `own_status`.
+  Chains are unchanged.
+- `TransDimPTemceeResult` gains `planet_noise_swap`, the planet-activity swap
+  counters the sampler already kept.
+
+### Fixed
+
+- **Informed planet births placed the time anchor out of phase under the `:Mo`
+  and `:Tp` parametrizations.** The periodogram's least-squares sinusoid fixes
+  the phase of M + ω, but the birth put Mo (or Tp) there as if ω were 0, while
+  drawing the newborn's eccentricity vector near zero, so its ω, and with it the
+  phase, was effectively random. The anchor is now drawn after the
+  eccentricity pair, at Mo_LS − ω (Tp likewise); the death's reverse density
+  uses the same kernel. `:phic` (the default) and `:Tc` are ω-free and draw
+  exactly what they did.
+
 ## 0.9.13
 
 ### Added

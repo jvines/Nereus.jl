@@ -221,8 +221,12 @@ that consumes these residuals must be chain-state-independent, otherwise
 γ noise at chain init dominates the residuals and Mo_est gets pinned to
 spurious peaks. Per-instrument median is the data-conditional best
 zero-point estimate that doesn't depend on chain state.
+
+`exclude` lists planets left in the residual: the fixed-k period jump and
+informed init (src/samplers/period_jump.jl) take the residual after the OTHER
+planets. Empty by default, which subtracts every active planet as before.
 """
-function _compute_rv_residuals(theta::Theta, data::Data)
+function _compute_rv_residuals(theta::Theta, data::Data; exclude = ())
     n_obs = length(data.t_rv)
     pred = zeros(Float64, n_obs)
     parametrization = theta.params.config.parametrization
@@ -234,6 +238,7 @@ function _compute_rv_residuals(theta::Theta, data::Data)
     end
 
     for k in planet_indices(theta)
+        k in exclude && continue
         block = theta.params.layout.planet_blocks[k]
         has_K(block) || continue
         P = Float64(planet_P(theta, k))
@@ -609,10 +614,24 @@ function _informed_K_est(theta::Theta, S::_InformedSetup, c::Int, P_now::Float64
     return S.K_ls[c]
 end
 
+# ω of the planet in `block` at the values `vals` (its eccentricity pair, as
+# the parametrization stores it).
+function _informed_omega(theta::Theta, block, vals::AbstractVector)
+    x1 = Float64(vals[block.e1]); x2 = Float64(vals[block.e2])
+    return theta.params.config.parametrization.ew === :ew ? x2 : atan(x1, x2)
+end
+
+# Whether the time-anchor kernel reads ω: the LS sinusoid fixes the phase of
+# M + ω (v ∝ cos(ν + ω) ≈ cos(M + ω) near e = 0), so a mean anomaly or a
+# periastron time placed from it must take ω off; a conjunction (Tc, φ_c) is
+# ω-free. The anchor is then drawn after the eccentricity pair.
+_informed_t_reads_omega(theta::Theta) = theta.params.config.parametrization.time in (:Mo, :Tp)
+
 # The kernel slot `slot` of `block` is drawn from under component c:
-# (kind, μ, σ, period). Period P_now is the newborn's period in days.
+# (kind, μ, σ, period). Period P_now is the newborn's period in days; ω the
+# newborn's argument of periastron (read only by the :Mo / :Tp anchor).
 function _informed_slot_kernel(theta::Theta, block, slot::Int, S::_InformedSetup,
-                                c::Int, P_now::Float64, data::Data)
+                                c::Int, P_now::Float64, data::Data; ω::Float64 = 0.0)
     cfg = theta.params.config
     if has_K(block) && slot == block.K && cfg.parametrization.mass === :K_driven
         K_est = _informed_K_est(theta, S, c, P_now)
@@ -638,12 +657,15 @@ function _informed_slot_kernel(theta::Theta, block, slot::Int, S::_InformedSetup
             # width is tied to the BLS duration (the Tc basin is ~a duration).
             return (_QK_WRAPPED, S.t0[c], clamp(0.3 * S.dur[c], 0.005, 0.1), P_now)
         elseif time_param === :Mo
-            return (_QK_WRAPPED, S.Mo_ls[c], INFORMED_SIGMA_MO, 2π)
+            # The LS phase is that of M + ω (see `_informed_t_reads_omega`).
+            return (_QK_WRAPPED, S.Mo_ls[c] - ω, INFORMED_SIGMA_MO, 2π)
         elseif time_param === :phic
             Tc_est = data.t_ref - S.Mo_ls[c] * P_now / (2π) + P_now / 4
             return (_QK_WRAPPED, tc_to_phic(Tc_est, P_now, t_ref_c), INFORMED_SIGMA_MO, 2π)
         else
-            Tp_est = data.t_ref - S.Mo_ls[c] * P_now / (2π)
+            # Tp from the phase of M + ω. Tc = Tp + (π/2 − ω)P/2π (circular), in
+            # which ω cancels, so :Tc is placed at ω = 0 (passed as such).
+            Tp_est = data.t_ref - (S.Mo_ls[c] - ω) * P_now / (2π)
             center = time_param === :Tp ? Tp_est : Tp_est + P_now / 4
             return (_QK_WRAPPED, center, INFORMED_SIGMA_MO * P_now / (2π), P_now)
         end
@@ -709,7 +731,7 @@ Draw the newborn's slot values from the informed mixture `S` into
 """
 function _informed_draw!(new_values::AbstractVector{T}, theta::Theta, block,
                           S::_InformedSetup, data::Data, rng::AbstractRNG,
-                          M_sec_drawn::Bool) where {T}
+                          M_sec_drawn::Bool; slots = nothing) where {T}
     layout = theta.params.layout
     c = 0
     if !isempty(S.w) && rand(rng) < INFORMED_ALPHA
@@ -729,17 +751,28 @@ function _informed_draw!(new_values::AbstractVector{T}, theta::Theta, block,
     x = exp(log_x)
     new_values[block.P] = convert(T, x)
     P_now = _slot_to_period(S.m, x)
-    for slot in planet_slot_indices(block)
-        slot == block.P && continue
-        M_sec_drawn && slot == block.K && continue
+    slot_list = slots === nothing ? planet_slot_indices(block) : slots
+    t_last = _informed_t_reads_omega(theta)
+    function draw_slot(slot, ω)
         uf_pos = findfirst(==(slot), layout.unfrozen_idx)
-        uf_pos === nothing && continue
+        uf_pos === nothing && return true
         prior = layout.unfrozen_priors[uf_pos]
         lo, hi = bounds(prior)
-        kind, μ, σ, period = _informed_slot_kernel(theta, block, slot, S, c, P_now, data)
+        kind, μ, σ, period = _informed_slot_kernel(theta, block, slot, S, c, P_now, data; ω)
         v = _qk_draw(kind, μ, σ, period, prior, lo, hi, rng)
-        isnan(v) && return nothing
+        isnan(v) && return false
         new_values[slot] = convert(T, v)
+        return true
+    end
+    for slot in slot_list
+        slot == block.P && continue
+        M_sec_drawn && slot == block.K && continue
+        t_last && slot == block.t && continue
+        draw_slot(slot, 0.0) || return nothing
+    end
+    # A :Mo / :Tp anchor after the eccentricity pair, from the drawn ω.
+    if t_last && block.t in slot_list
+        draw_slot(block.t, _informed_omega(theta, block, new_values)) || return nothing
     end
     return new_values
 end
@@ -751,9 +784,17 @@ Log-density of the informed mixture `S` at the slot values in `vals`
 (excluding a pre-drawn M_sec): log Σ_c π_c q(x | c) Π_slots q(v | c), with the
 period density on the slot variable x (the Jacobian from log x is included,
 matching the prior's convention in Δlog π).
+
+`slots` restricts the density to those slots (with the period), for a draw
+made with the same `slots`; `nothing` is every slot of the block. With
+`strict_wrap`, a wrapped kernel scores a value the draw cannot produce (outside
+`[lo, lo + period)`, possible when a window in days is longer than one period)
+as unreachable rather than by its nearest image: an MCMC move needs the exact
+support (src/samplers/period_jump.jl).
 """
 function _informed_slot_log_q(theta::Theta, block, vals::AbstractVector,
-                               S::_InformedSetup, data::Data, M_sec_drawn::Bool)
+                               S::_InformedSetup, data::Data, M_sec_drawn::Bool;
+                               slots = nothing, strict_wrap::Bool = false)
     layout = theta.params.layout
     x = Float64(vals[block.P])
     x > 0 || return -Inf
@@ -762,6 +803,7 @@ function _informed_slot_log_q(theta::Theta, block, vals::AbstractVector,
     tol = 1e-9 * max(1.0, abs(S.log_x_max))
     (S.log_x_min - tol <= log_x <= S.log_x_max + tol) || return -Inf
     P_now = _slot_to_period(S.m, x)
+    ω = _informed_t_reads_omega(theta) ? _informed_omega(theta, block, vals) : 0.0
     α = INFORMED_ALPHA
     n_c = length(S.w)
     terms = Vector{Float64}(undef, n_c + 1)
@@ -778,13 +820,19 @@ function _informed_slot_log_q(theta::Theta, block, vals::AbstractVector,
                  0.5 * ((log_x - S.log_x[c]) / σc)^2
         end
         lr = 0.0
-        for slot in planet_slot_indices(block)
+        for slot in (slots === nothing ? planet_slot_indices(block) : slots)
             slot == block.P && continue
             M_sec_drawn && slot == block.K && continue
             uf_pos = findfirst(==(slot), layout.unfrozen_idx)
             uf_pos === nothing && continue
-            kind, μ, σ, period = _informed_slot_kernel(theta, block, slot, S, c, P_now, data)
-            lr += _qk_logpdf(kind, μ, σ, period, Float64(vals[slot]), layout, uf_pos)
+            kind, μ, σ, period = _informed_slot_kernel(theta, block, slot, S, c, P_now,
+                                                       data; ω)
+            v = Float64(vals[slot])
+            if strict_wrap && kind == _QK_WRAPPED
+                lo, _ = bounds(layout.unfrozen_priors[uf_pos])
+                (lo <= v < lo + period) || (lr = -Inf; break)
+            end
+            lr += _qk_logpdf(kind, μ, σ, period, v, layout, uf_pos)
         end
         terms[c + 1] = lw + lr
     end
@@ -814,11 +862,21 @@ function _ls_informed_setup(theta::Theta, m::_PeriodSlotMap, log_x_min, log_x_ma
         cache.calls_since_update = 0
     end
     isempty(cache.periods) && return nothing
-    n = length(cache.periods)
+    return _ls_setup_from_peaks(m, log_x_min, log_x_max, cache.log_periods,
+                                cache.weights, cache.K_est, cache.Mo_est)
+end
+
+# An LS-only `_InformedSetup` from periodogram peaks (log periods, normalised
+# weights, LS amplitude and phase). Shared by InformedBirth and the fixed-k
+# period jump (src/samplers/period_jump.jl).
+function _ls_setup_from_peaks(m::_PeriodSlotMap, log_x_min, log_x_max,
+                              log_periods::AbstractVector, weights::AbstractVector,
+                              K_est::AbstractVector, Mo_est::AbstractVector)
+    n = length(log_periods)
     return _InformedSetup(m, Float64(log_x_min), Float64(log_x_max),
-                          _slot_log.(Ref(m), cache.log_periods),
-                          fill(m.slope * INFORMED_SIGMA_P, n), copy(cache.weights),
-                          copy(cache.K_est), copy(cache.Mo_est), fill(:ls, n),
+                          _slot_log.(Ref(m), log_periods),
+                          fill(m.slope * INFORMED_SIGMA_P, n), copy(weights),
+                          copy(K_est), copy(Mo_est), fill(:ls, n),
                           zeros(n), zeros(n), zeros(n))
 end
 
