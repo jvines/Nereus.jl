@@ -439,7 +439,7 @@ the model, then refit. Not raised for a run that fixes the count
 (`planets = false`).
 
 **Occupancy health.** Every k with P(k | D) ≥ 0.01 must have been visited by at
-least `min(3, n_walkers)` walkers and, unless it holds ≥ 99% of the posterior, by
+least `min(3, n_walkers)` walkers and, unless it holds ≥ 90% of the posterior, by
 at least 10 separate visits (entries into k, summed over walkers); otherwise its
 mass rests on one or two excursions and is not an estimate. `occupancy_health.ok =
 false` fails the run's convergence verdict (next section).
@@ -448,7 +448,7 @@ false` fails the run's convergence verdict (next section).
 accepted moves summed over the ladder, and at the β = 1 rung (`cold_*`): `birth`,
 `death`, `noise_toggle_swap` (noise-model birth, death and within-group swap, which
 the engine counts together) and, for `transdim_pt_emcee`, `planet_noise_swap` (the
-planet ↔ activity-model swap, with both directions). A run whose cold rung accepts
+planet ↔ activity-model swap, with both directions). Engines with no move counters (`rjmcmc`, `moms`, `daedalus`) report `up` and `down`, the k changes seen between consecutive recorded draws of a walker (also `transitions_observed` for every engine; a lower bound on the accepted births and deaths). A run whose cold rung accepts
 no birth or death did not move in k, whatever its occupancy says.
 
 ## One convergence verdict, and the evidence of an unconverged fit

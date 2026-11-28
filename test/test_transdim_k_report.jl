@@ -160,6 +160,10 @@ _flat(M) = vec(permutedims(M))
         @test mv["planet_noise_swap"]["accepted"] == 3
         @test transdim_move_counts(nothing) === nothing
         @test transdim_move_counts((; chains = nothing)) === nothing
+        # an engine with no counters: the k changes seen in the chain
+        Mt = [1 1; 2 1; 2 2; 1 2]                       # iteration × walker
+        ob = transdim_k_report(_flat(Mt), 2; n_walkers = 2)["transitions_observed"]
+        @test ob["up"] == 2 && ob["down"] == 1
     end
 
     @testset "the convergence fields cannot disagree" begin
@@ -283,5 +287,27 @@ _flat(M) = vec(permutedims(M))
         @test (chk["status"] == "ok") == (s["converged"] && chk["own_status"] == "ok")
         # the evidence flag sits beside the evidence whenever there is one
         isfinite(s["log_z"]) && @test s["run_info"]["evidence_reliable"] == s["converged"]
+    end
+
+    @testset "end to end: rjmcmc (no evidence, no move counters) carries the block" begin
+        cfg = _easy_rv_cfg()
+        rcfg = merge(cfg, Dict{String, Any}(
+            "output_dir" => mktempdir(),
+            "model" => Dict("max_kplanet" => 2, "planet_modes" => ["RV_ONLY", "RV_ONLY"]),
+            "transdim" => Dict("max_kplanet" => 2),
+            "sampler" => Dict("name" => "rjmcmc",
+                              "kwargs" => Dict("show_progress" => false, "n_samples" => 600,
+                                               "n_warmup" => 300))))
+        s = Nereus.run_job(rcfg)
+        td = s["run_info"]["transdim"]
+        @test td["prior"]["inclusion_prior"] == 0.5          # rjmcmc: no activation prior
+        @test !td["mixture_evidence"]["available"]            # no estimator: says why
+        @test haskey(td["k_transitions"], "up") && haskey(td["k_transitions"], "down")
+        @test s["diagnostics"]["k_transitions"] == td["k_transitions"]
+        @test !haskey(s, "evidence_reliable") || s["evidence_reliable"] === nothing ||
+              s["evidence_reliable"] == s["converged"]
+        if s["converged"] isa Bool
+            @test s["run_info"]["convergence"]["pass"] == s["converged"]
+        end
     end
 end

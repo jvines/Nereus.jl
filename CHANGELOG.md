@@ -21,7 +21,7 @@ git history (`git log --first-parent develop`).
   `transdim_move_counts` are exported. The docs say what the prior is and how the
   planets are ordered by period (`docs/src/transdim.md`).
 - **Occupancy health check and accepted k transitions.** Every k with P ≥ 1% must
-  have been visited by at least three walkers and, below 99% mass, by ten separate
+  have been visited by at least three walkers and, below 90% mass, by ten separate
   visits. `run_info["transdim"]["k_transitions"]` and `diagnostics["k_transitions"]`
   count proposed and accepted births, deaths, noise toggles/swaps and (for
   `transdim_pt_emcee`) planet-activity swaps, in total and at the β = 1 rung.
