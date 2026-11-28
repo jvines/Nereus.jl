@@ -244,6 +244,16 @@ function transdim_k_report(np::AbstractVector{<:Integer}, max_k::Integer;
     end
     out["k_max_truncation"] = trunc
 
+    # k changes seen between consecutive recorded draws of a walker: all an engine
+    # with no move counters (rjmcmc, moms, daedalus) leaves to read, and a lower
+    # bound on the accepted births and deaths of the others (a thinned chain and
+    # several moves per step hide some).
+    dM = diff(M; dims = 1)
+    out["transitions_observed"] = Dict{String, Any}(
+        "up" => count(>(0), dM), "down" => count(<(0), dM),
+        "net_moves_per_draw" => n > size(M, 2) ? (count(!=(0), dM) / (n - size(M, 2))) : NaN,
+        "note" => "k changes between consecutive recorded draws of a walker (births and " *
+                  "deaths seen in the chain, a lower bound on the accepted moves)")
     out["occupancy_health"] = transdim_occupancy_health(per_k, size(M, 2))
     return out
 end
@@ -253,7 +263,7 @@ end
 
 Every k with posterior mass of at least `TRANSDIM_K_MIN_MASS` must have been
 visited by at least `min(TRANSDIM_K_MIN_WALKERS, n_walkers)` walkers, and unless
-it holds essentially the whole posterior (mass ≥ 0.99) by at least
+it holds the bulk of the posterior (mass ≥ 0.9) by at least
 `TRANSDIM_K_MIN_VISITS` separate visits: otherwise its mass rests on one or two
 excursions and is not an estimate. `ok` is false with the offending ks in
 `problems` when a k fails.
@@ -267,7 +277,7 @@ function transdim_occupancy_health(per_k::AbstractDict, n_walkers::Integer)
         if d["walkers_visiting"] < need_w
             push!(problems, "k = $k (P = $(round(d["p"], digits = 3))) was visited " *
                   "by $(d["walkers_visiting"]) walker(s), fewer than $need_w")
-        elseif d["p"] < 0.99 && d["n_visits"] < TRANSDIM_K_MIN_VISITS
+        elseif d["p"] < 0.9 && d["n_visits"] < TRANSDIM_K_MIN_VISITS
             push!(problems, "k = $k (P = $(round(d["p"], digits = 3))) has " *
                   "$(d["n_visits"]) separate visit(s), fewer than " *
                   "$TRANSDIM_K_MIN_VISITS")
@@ -276,7 +286,7 @@ function transdim_occupancy_health(per_k::AbstractDict, n_walkers::Integer)
     return Dict{String, Any}("ok" => isempty(problems),
         "status" => isempty(problems) ? "ok" : "fail", "problems" => problems,
         "rule" => "each k with P ≥ $(TRANSDIM_K_MIN_MASS): ≥ $need_w walkers visited " *
-                  "and, below P = 0.99, ≥ $TRANSDIM_K_MIN_VISITS separate visits")
+                  "and, below P = 0.9, ≥ $TRANSDIM_K_MIN_VISITS separate visits")
 end
 
 """

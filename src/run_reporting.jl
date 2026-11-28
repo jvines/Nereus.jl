@@ -55,13 +55,13 @@ function _transdim_k_summary!(summary::AbstractDict, chains, params, result;
                             log_evidence = lz isa Real ? Float64(lz) : NaN,
                             evidence_method = method)
     mv = transdim_move_counts(result)
-    mv === nothing || (rep["k_transitions"] = mv)
+    # an engine with no move counters: the k changes seen in the chain
+    mv === nothing && (mv = rep["transitions_observed"])
+    rep["k_transitions"] = mv
     ri = get!(() -> Dict{String, Any}(), summary, "run_info")
     ri["transdim"] = rep
-    if mv !== nothing
-        dg = get!(() -> Dict{String, Any}(), summary, "diagnostics")
-        dg isa AbstractDict && (dg["k_transitions"] = mv)
-    end
+    dg = get!(() -> Dict{String, Any}(), summary, "diagnostics")
+    dg isa AbstractDict && (dg["k_transitions"] = mv)
     ms = get!(() -> Dict{String, Any}(), summary, "model_selection")
     if ms isa AbstractDict
         ms["n_planets_prior"] = rep["prior"]
