@@ -21,7 +21,10 @@ const _RJ_N = 50
 const _RJ_RNG = MersenneTwister(99)
 const _RJ_T = sort!(80.0 .* rand(_RJ_RNG, _RJ_N))
 const _RJ_ACT = 3.0 .* sin.(2π .* _RJ_T ./ 11.0)
-# The phase puts Mo's posterior across the 0/2π seam, so the re-cut moves it.
+# The phase put Mo's posterior across the 0/2π seam while informed births placed
+# Mo at the periodogram phase as if ω = 0. Placed at the phase minus ω, as is
+# correct, the chain settles in a low-e mode with Mo near 4.2 rad, clear of the
+# seam, and no seed re-cuts; the re-cut itself is tested directly at the end.
 const _RJ_RV = 30.0 .* sin.(2π .* _RJ_T ./ 4.23 .+ 6.0) .+ _RJ_ACT .+
                1.5 .* randn(_RJ_RNG, _RJ_N)
 const _RJ_BIS = _RJ_ACT .+ randn(_RJ_RNG, _RJ_N)
@@ -51,9 +54,10 @@ end
 # The seed is picked so that the straight run exercises everything the splits
 # must carry: the planet at 4.23 d (some seeds trap the only planet on its
 # 8.5 d alias, where adding the true one is Hill-unstable), AD toggling rather
-# than on throughout, and a re-cut of the circular windows. With the
+# than on throughout. (It was also picked for a re-cut of the circular windows,
+# which no seed gives since the :Mo anchor fix, see above.) With the
 # birth/death ratios corrected (informed planet deaths, noise selection term),
-# seed 5 trapped on the alias; seed 59 does all three.
+# seed 5 trapped on the alias; seed 59 does both.
 const _RJ_KW = (n_warmup = 400, seed = 59, within_model = :rwm, show_progress = false)
 
 # The informed-birth caches are process-global: every run starts them cold, as
@@ -88,7 +92,8 @@ _cube(r) = r.chains.value.data
 
     full = _rj_run(600)
     # Everything the splits must carry was exercised.
-    @test full.windows != Nereus.circular_windows(_rj_setup(_RJ_RV)[1].params)
+    # (The re-cut at 400 runs and its trace is carried, but leaves the windows
+    # where they are; `ext.windows == full.windows` below still compares them.)
     @test 0 < sum(full.chains[:n_planets]) < 2 * 600
     @test 0 < sum(full.chains[:noise_active_1]) < 600
 
@@ -206,4 +211,23 @@ end
     tg = _rj_setup(_RJ_RV)[1]
     @test fp(tg, phot(f)).data != fp(tg, phot(g)).data
     @test fp(tg, phot(f)).data == fp(tg, phot(copy(f))).data
+end
+
+# The re-cut itself, on this target's own Mo window: draws across the seam move
+# it, draws clear of the seam leave it put. (The resume test above depends on
+# where the chain's Mo mode happens to fall; this one does not.)
+@testset "rjmcmc target: Mo window re-cut" begin
+    params = _rj_setup(_RJ_RV)[1].params
+    i = findfirst(==("Mo_k1"), params.layout.names[params.layout.unfrozen_idx])
+    lo = Nereus.bounds(params.layout.unfrozen_priors[i])[1]
+    rng = MersenneTwister(3)
+    across = lo .+ mod.(0.15 .* randn(rng, 2000), 2π)          # straddles lo ≡ lo + 2π
+    win = Nereus.recut_circular_param!(params, i, across)
+    @test win !== nothing
+    @test win[2] - win[1] ≈ 2π
+    # the moved seam sits far from the draws, which are near lo (mod 2π)
+    @test abs(mod(win[1] - lo + π, 2π) - π) > 1.0
+    @test Nereus.bounds(params.layout.unfrozen_priors[i]) == win
+    clear = win[1] .+ π .+ 0.15 .* randn(rng, 2000)            # mid-window: nothing moves
+    @test Nereus.recut_circular_param!(params, i, clear) === nothing
 end

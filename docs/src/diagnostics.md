@@ -36,6 +36,11 @@ R̂ / ESS gate is run automatically (and ensemble-aware) as part of the
 fit-health guard — see [Fit health — the silent-wrong guard](#fit-health-the-silent-wrong-guard)
 for the `convergence` check and how it lands in `summary.json`.
 
+The two convergence answers a summary carries (`run_info.convergence.pass` and the
+fit-health `convergence` check) are written from one verdict, `converged`, which
+also folds in the trans-dim occupancy health and a run stopped early; see
+[Trans-dimensional sampling](transdim.md).
+
 ### `print_ess_rhat(chains, params)`
 
 Effective sample size + Gelman-Rubin R̂ per parameter, computed via

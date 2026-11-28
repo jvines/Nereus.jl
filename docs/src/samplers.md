@@ -157,6 +157,8 @@ res = sample_pt_emcee(target, data;
     prune_stranded = true,             # burn-in only; see the docstring
     trim_burnin    = false,            # drop recorded steps of walkers still settling (below)
     node_flip      = 0.1,              # per-step probability of the (Ω, ω) -> (Ω+π, ω+π) mirror of astrometry-only planets
+    informed_init  = false,            # start planets from their residual periodograms (below)
+    period_jump_prob = 0.0,            # per walker/step/planet probability of a period jump (below)
     swap_min       = 0.05,             # least adjacent swap rate at which a tempered log Z is quoted
     betas          = nothing,          # default: geometric from β = 1 down to beta_min
     beta_min       = 1e-4,             # hottest β; β_i = beta_min^(i/(n_temps-1)), i = 0..n_temps-1
@@ -245,6 +247,47 @@ itself: a walker settles until its first entry into any model's band, and a
 birth after that into another model's tail sets no cut. `result.burnin_trim`
 (`chains.info.burnin_trim` for `sample_ensemble`) records the test; see
 `src/samplers/burnin_trim.jl`.
+
+**Informed starts and period jumps** (opt-in; `sample_pt_emcee`,
+`sample_pt_whitening`, and the fixed-k `sample_pt`). The same residual
+periodogram the trans-dim `InformedBirth` proposes planets from
+(`src/samplers/period_jump.jl`). For planet k it is the GLS of the RV residual
+after every *other* planet (per-instrument medians for the zero points), over
+k's period prior, with the yearly and sidereal-daily aliases (f ± 1/365.25 d,
+f ± 1/0.99727 d) of the three strongest peaks added as components. The
+proposal is a mixture: Gaussians in log P on the peaks (weights ∝ power,
+aliases at half their parent's; σ = P / 2T over the RV baseline T, the
+periodogram's resolution, at most the births' 5 %) plus a uniform-in-log P
+floor (30 %), with K log-normal about the peak's least-squares amplitude and the
+time anchor wrapped normal about its phase. Informed starts also put each RV
+zero point at its instruments' median RV, scattered by its standard error.
+
+- `informed_init = true` draws every walker's planets from that mixture (all of
+  the block's slots, as a birth does: the eccentricity vector near zero, the
+  rest from the prior). The residual is first searched greedily for one signal
+  per planet; planet k's mixture is built after the other planets' signals, and
+  its weights are flattened halfway to uniform so walkers spread over the peaks
+  and aliases. Needs `init = nothing`, `init_strategy = :prior`.
+  Walkers spread over several peaks start the ensemble multimodal, where the
+  stretch and DE moves (which need a partner in the same mode) stall, so pair
+  it with `period_jump_prob`: on a two-planet test, informed starts with the
+  jump found the weak planet in 87 % of the cold draws, the jump alone in 44 %,
+  informed starts alone and prior starts in under 5 %.
+- `period_jump_prob = p` offers, per walker, step and eligible planet, with
+  probability p, a jump accepted with the tempered Metropolis-Hastings ratio:
+  with probability 3/4 an independence draw of (P, K, time anchor) from the
+  mixture, log α = β Δln L + Δln p + ln q(old) − ln q(new); otherwise
+  P → rP with r uniform over {2, 1/2, 3, 1/3, 3/2, 2/3}, log α = β Δln L +
+  Δln p + ln r. On the ensembles' flat scale (log x for LogUniform priors) the
+  cached log π carries Σ log x, which the ratio removes over the moved
+  coordinates. The mixture is rebuilt from the cold rung's best walker every 50
+  steps of burn-in and at its end, then fixed, so the recorded chain is a
+  homogeneous Markov chain with every rung's posterior invariant. Saved in the
+  checkpoint; a resumed run is bit-identical.
+
+Eligible planets have a sampled period, an RV amplitude and RV data, are not
+SB2, and the mass parametrization is not `:a_driven`. Both options off (the
+default) draw exactly what the samplers drew before.
 
 Returns a `PTemceeResult` with fields `chains`, `log_evidence` (bridge
 sampling on the cold chain when usable; else H⁺ when its ladder is quotable —

@@ -122,6 +122,7 @@ const TEST_UNITS = [
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.
     (name = "test_pt_emcee_stranded.jl", seconds = 186, files = ["test_pt_emcee_stranded.jl"]),
     (name = "test_pt_emcee_resume.jl", seconds = 39, files = ["test_pt_emcee_resume.jl"]),
+    (name = "test_period_jump.jl", seconds = 90, files = ["test_period_jump.jl"]),
     (name = "test_pt_emcee_progress.jl", seconds = 30, files = ["test_pt_emcee_progress.jl"]),
     (name = "test_burnin_hold.jl", seconds = 88, files = ["test_burnin_hold.jl"]),
     # The opt-in extended burn-in in the three samplers and through run_job.
@@ -168,6 +169,9 @@ const TEST_UNITS = [
     (name = "test_indicator_floor_ws.jl", seconds = 4, files = ["test_indicator_floor_ws.jl"]),
     (name = "test_indicator_nan_mask.jl", seconds = 60, files = ["test_indicator_nan_mask.jl"]),
     (name = "test_zero_planet_job.jl", seconds = 30, files = ["test_zero_planet_job.jl"]),
+    (name = "test_noise_kwargs_plain_vectors.jl", seconds = 10, files = ["test_noise_kwargs_plain_vectors.jl"]),
+    (name = "test_occupancy_noise_labels.jl", seconds = 10, files = ["test_occupancy_noise_labels.jl"]),
+    (name = "test_noise_swap_state.jl", seconds = 300, files = ["test_noise_swap_state.jl"]),
     (name = "test_celerite_ws.jl", seconds = 3, files = ["test_celerite_ws.jl"]),
     (name = "test_celerite_order.jl", seconds = 2, files = ["test_celerite_order.jl"]),
     (name = "test_arma_time_order.jl", seconds = 1, files = ["test_arma_time_order.jl"]),
@@ -210,6 +214,10 @@ const TEST_UNITS = [
     (name = "test_bridge_bootstrap.jl", seconds = 19, files = ["test_bridge_bootstrap.jl"]),
     # ESS, R-hat and quantiles on long chains, per parameter on threads.
     (name = "test_postfit_diagnostics.jl", seconds = 5, files = ["test_postfit_diagnostics.jl"]),
+    # Prior-only occupancy follows the documented prior on k (1/k!, slab fraction).
+    (name = "test_transdim_prior_only.jl", seconds = 60, files = ["test_transdim_prior_only.jl"]),
+    # Planet-count report, one convergence verdict, evidence reliability flag.
+    (name = "test_transdim_k_report.jl", seconds = 120, files = ["test_transdim_k_report.jl"]),
     # run_job's and fit_*'s post-fit stage lines and timings.
     (name = "test_postfit_progress.jl", seconds = 103, files = ["test_postfit_progress.jl"]),
     # summary.json provenance block: engine, version, priors.

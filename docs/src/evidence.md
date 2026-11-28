@@ -359,6 +359,19 @@ The same `log_z` is fed into the LOO/log-Z model-comparison summary
 (`loo_compare_log_z`, `runner.jl:2355`) so cross-run Bayes factors are
 consistent.
 
+### The evidence of a fit that has not converged
+
+The evidence of a fit that has not converged is reported, never withheld, and
+flagged: `evidence_reliable = false` sits next to it in `summary.json` (top level,
+`evidence`, `run_info`), `evidence_unreliable_reasons` lists the convergence checks
+that failed (the R̂/ESS gate, the fit-health convergence check, the trans-dim
+occupancy health, a MAP optimiser that did not converge, a run stopped early by a
+budget or an interrupt), and, when `log_z` is the mode-Laplace fallback, says so. A
+warning prints the same text. It applies to every estimator the summary can carry
+(TI, TI⁺, SS⁺, H⁺, bridge, nested, mode-Laplace). `evidence_reliable` is `null` when
+nothing assessed the run. The verdict is the one `converged` of the summary: see
+[Trans-dimensional sampling](transdim.md).
+
 ## Validation status
 
 `test/test_evidence_gaussian.jl` validates all four estimators against

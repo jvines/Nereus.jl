@@ -85,6 +85,16 @@ struct TransDimPTemceeResult
     # within each model, run whether or not it is on (see `PTemceeResult`).
     n_trimmed::Int
     burnin_trim::NamedTuple
+    # Noise swaps per temperature (cold first) by move: `stale_*` the move that
+    # draws only the incoming member's own parameters (`propose_noise_swap`),
+    # `state_*` the state proposals (src/transdim/proposals/state_proposals.jl).
+    # Counted since the start or the last resume.
+    noise_swaps::NamedTuple
+    # The planet<->activity-noise swap (a k-changing move of its own): proposed and
+    # accepted over the run, and the two directions (planet -> noise model,
+    # noise model -> planet). Counted in the sampling loop since the move existed;
+    # reported here so a run's k transitions are all in the result.
+    planet_noise_swap::Dict{String, Int}
 end
 
 # ------------------------------------------------------------------
@@ -720,6 +730,20 @@ selection on planet count.
   moves -- the walker's active ones, on the same scales, with the same
   Jacobian -- and leaves parked and held ones where they are. `0` is the
   stretch-only kernel, and draws exactly what it did.
+- `noise_state_swap::Bool = true`, `noise_state_min_draws::Int = 200`,
+  `noise_state_inflate::Real = 1.0`, `noise_state_share::Real = 0.8`,
+  `noise_state_tries::Int = 4`, `noise_state_seed_steps::Int = 2000` — state
+  proposals for the exclusion-group swap
+  (src/transdim/proposals/state_proposals.jl). A share `noise_state_share` of the
+  swaps propose the incoming member's whole state (its own parameters and the
+  shared jitters/offsets of its instruments) from a normal fitted to that
+  member's β = 1 draws (needs `noise_state_min_draws` of them; otherwise seeded
+  from a fixed-member ensemble run at β = 1, continued for `noise_state_seed_steps`
+  steps at each refit and started about the top of the member's conditional
+  posterior, climbed to from the stale move's informed draws), refitted at 1/2, 3/4 and the end of
+  burn-in and fixed after it; `noise_state_tries` such Metropolis-Hastings steps
+  per attempt. The rest use `propose_noise_swap`, which redraws only the
+  incoming member's own parameters. Per-move counts: `result.noise_swaps`.
 - `seed::Int = 1`
 - `thin::Int = 1`
 - `show_progress::Bool = true`
@@ -816,6 +840,12 @@ function sample_transdim_pt_emcee(
     show_progress::Bool = true,
     noise_swap::Bool = true,
     noise_swap_rate::Real = 0.5,
+    noise_state_swap::Bool = true,
+    noise_state_min_draws::Int = 200,
+    noise_state_inflate::Real = 1.0,
+    noise_state_share::Real = 0.8,
+    noise_state_tries::Int = 4,
+    noise_state_seed_steps::Int = 2000,
     adapt_ladder::Bool = true,
     ladder_adapt_window::Int = 50,
     ladder_adapt_ν0::Real = 10.0,
@@ -962,6 +992,11 @@ function sample_transdim_pt_emcee(
         inclusion_prior, moms_init_scale, informed_birth_fraction,
         target_birth_accept, n_birth_refine, n_birth_tries, n_noise_bridge,
         n_noise_relax, noise_swap, noise_swap_rate = Float64(noise_swap_rate),
+        ((noise_state_swap && noise_swap && td.noise && !isempty(td.noise_exclusion_groups)) ?
+            (; noise_state_swap, noise_state_min_draws,
+               noise_state_inflate = Float64(noise_state_inflate),
+               noise_state_share = Float64(noise_state_share), noise_state_tries,
+               noise_state_seed_steps) : (;))...,
         _burnin_hold_fp(hold, params)..., _de_fp(p_de)...)
     ck = resume ? read_checkpoint(ck_path, "transdim_pt_emcee", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
@@ -1079,6 +1114,239 @@ function sample_transdim_pt_emcee(
     # rather than mid-run or, worse, scored wrong.
     validate_noise_coactivity(params.config.noise_models,
                               do_noise ? noise_toggle_idx : Int[], noise_excl_idx)
+
+    # ---- State proposals for the noise swap (src/transdim/proposals/state_proposals.jl)
+    # One per member of an exclusion group: its own parameters plus the shared
+    # ones (jitters, offsets, trend, always-on noise terms; one shared set per
+    # group), learned from that member's β = 1 draws during burn-in and frozen at
+    # its end. `nothing` until a member has a fit or a seed; the swap then uses
+    # `propose_noise_swap`.
+    sp_members = do_noise ? sort!(unique!(reduce(vcat, noise_excl_idx; init = Int[]))) : Int[]
+    sp_on = noise_state_swap && noise_swap && !isempty(sp_members)
+    sp_props = Vector{Union{Nothing, NoiseStateProposal}}(nothing, n_noise_slots)
+    sp_slots = Dict{Int, Vector{Int}}()
+    sp_pk = Dict{Int, Vector{Tuple{Int,Int}}}()
+    sp_cap = 4000
+    sp_grp_idx = [Int[something(findfirst(==(nm), params.config.noise_models), 0) for nm in g]
+                  for g in td.noise_exclusion_groups]
+    # swaps proposed / accepted per temperature: row 1 the stale move, row 2 the state move
+    sp_cnt = [Threads.Atomic{Int}(0) for _ in 1:2, _ in 1:n_temps, _ in 1:2]
+    # Draws and proposals are kept per planet configuration as well as pooled
+    # (key SP_POOL): the jitter and GP amplitude a member needs depend on which
+    # planets are on (a planet's signal is noise to a model without it), so one
+    # normal over all configurations is far too broad. A configuration's
+    # proposals also carry the RV semi-amplitudes of the planets it has on
+    # (`noise_state_planet_slots`). The swap leaves the planet configuration
+    # alone, so proposing from, and reversing with, the proposals of the walker's
+    # current configuration keeps the move exact -- provided every member of the
+    # group uses that configuration's proposal (same slots); otherwise all use
+    # the pooled ones.
+    SP_POOL = typemax(UInt64)
+    sp_key(tds) = (k = UInt64(0); for (i, b) in enumerate(tds.planet_active); b && (k |= UInt64(1) << (i - 1)); end; k)
+    sp_buf = Dict{Tuple{Int,UInt64}, Matrix{Float64}}(); sp_n = Dict{Tuple{Int,UInt64}, Int}()
+    sp_kprops = Dict{Tuple{Int,UInt64}, NoiseStateProposal}()
+    function sp_props_for(key, gi)
+        all(j -> j == 0 || haskey(sp_kprops, (j, key)), sp_grp_idx[gi]) || return sp_props
+        return Union{Nothing, NoiseStateProposal}[get(sp_kprops, (j, key), nothing)
+                                                  for j in 1:n_noise_slots]
+    end
+    sp_upos_of = Dict(s => u for (u, s) in enumerate(unfrozen_idx))
+    # slots, unfrozen positions and bounds of member j's state under key
+    sp_info_cache = Dict{Tuple{Int,UInt64}, NTuple{4, Any}}()
+    function sp_info(j::Int, key::UInt64)
+        get!(sp_info_cache, (j, key)) do
+            sl = copy(sp_slots[j])
+            if key != SP_POOL
+                for (k, s) in sp_pk[j]
+                    (key >> (k - 1)) & 0x1 == 0x1 && push!(sl, s)
+                end
+                sort!(sl; by = s -> sp_upos_of[s])
+            end
+            up = Int[sp_upos_of[s] for s in sl]
+            bl = [bounds(layout.unfrozen_priors[u]) for u in up]
+            (sl, up, Float64[b[1] for b in bl], Float64[b[2] for b in bl])
+        end
+    end
+    if sp_on
+        for g in noise_excl_idx
+            gs = noise_state_group_slots(params, g, noise_toggle_idx)
+            pk = noise_state_planet_slots(params, g)
+            for j in g; sp_slots[j] = gs[j]; sp_pk[j] = pk; end
+        end
+    end
+    # every 5th burn-in step: the state of each walker's active member
+    function sp_collect!()
+        @inbounds for w in 1:n_walkers_eff, j in sp_members
+            td_states[1, w].noise_active[j] || continue
+            for key in (SP_POOL, sp_key(td_states[1, w]))
+                up = sp_info(j, key)[2]
+                B = get!(() -> Matrix{Float64}(undef, sp_cap, length(up)), sp_buf, (j, key))
+                k = get(sp_n, (j, key), 0)
+                row = k % sp_cap + 1
+                for (c, u) in enumerate(up)
+                    B[row, c] = state[1, w, u]
+                end
+                sp_n[(j, key)] = k + 1
+            end
+        end
+    end
+    # the planet configurations that hold at least 5% of the cold walkers
+    # (at least one walker), most populated first
+    function sp_cold_keys()
+        cnt = Dict{UInt64, Int}(); n = 0
+        for w in 1:n_walkers_eff
+            isfinite(logL_arr[1, w]) || continue
+            k = sp_key(td_states[1, w]); cnt[k] = get(cnt, k, 0) + 1; n += 1
+        end
+        n == 0 && return UInt64[]
+        ks = [k for (k, c) in cnt if c >= max(1, ceil(Int, 0.05 * n))]
+        return sort!(ks; by = k -> -cnt[k])
+    end
+    # fit each member to its β = 1 draws. Hotter rungs are not used: their
+    # draws follow the tempered posterior, far broader than the cold one, and an
+    # independence proposal that broad is almost never accepted at β = 1.
+    function sp_refit!()
+        fitted = Set{Int}()
+        for ((j, key), n) in sp_n
+            m = min(n, sp_cap)
+            m >= noise_state_min_draws || continue
+            sl, _, lo, hi = sp_info(j, key)
+            p = fit_noise_state_proposal(view(sp_buf[(j, key)], 1:m, :), sl, lo, hi;
+                    inflate = noise_state_inflate, min_draws = noise_state_min_draws)
+            p === nothing && continue
+            if key == SP_POOL
+                sp_props[j] = p; push!(fitted, j)
+            else
+                sp_kprops[(j, key)] = p
+            end
+        end
+        # A member burn-in left (nearly) unvisited has no draws to fit, and the
+        # move into it would stay the stale one, so it would stay unvisited:
+        # seed it from a fixed-member run in every planet configuration that
+        # holds a share of the cold walkers. One configuration is not enough:
+        # walkers of the incumbent split over planet sets (HD 18599, seed 203:
+        # GP-Rot with no planet 38%, with planet b 57%) use the pooled proposals
+        # in every set the incoming member was not seeded in, all members alike,
+        # and the pooled fit matches none of them, so those walkers never leave.
+        # Members fitted from draws but without a proposal for one of these
+        # configurations are seeded there too.
+        # (re-seeded at every refit, from the walkers as they now are)
+        for (ik, key) in enumerate(sp_cold_keys())
+            for j in sp_members
+                (j in fitted && haskey(sp_kprops, (j, key))) && continue
+                sp_seed!(j, key, ik == 1 && !(j in fitted))
+            end
+        end
+        # later fits use draws made under the improved swap
+        for k in keys(sp_n); sp_n[k] = 0; end
+    end
+    # Fixed-member ensembles behind seeded proposals, kept between refits
+    # (one per member and planet configuration).
+    sp_ens = Dict{Tuple{Int,UInt64}, NoiseStateEnsemble}(); sp_ens_calls = Ref(0)
+    function sp_seed!(j::Int, key::UInt64, set_pooled::Bool)
+        grp = something(findfirst(g -> j in g, noise_excl_idx), 0)
+        mates = grp == 0 ? Int[] : noise_excl_idx[grp]
+        sl, _, lo, hi = sp_info(j, key)
+        function lpost(v, tds, c)
+            th = Theta{Float64}(params, v; td = tds)
+            lp = spike_slab_log_prior(th, strategy, inclusion_prior)
+            isfinite(lp) || return -Inf
+            lp2, ll = split_ref(lp, th, c)
+            return lp2 + ll
+        end
+        srng = MersenneTwister(hash((seed, j, sp_ens_calls[], :noise_state_seed)))
+        sp_ens_calls[] += 1
+        if !haskey(sp_ens, (j, key))
+            gm = let nm = params.config.noise_models[j]
+                gi = findfirst(g -> nm in g, td.noise_exclusion_groups)
+                gi === nothing ? nothing : td.noise_exclusion_groups[gi]
+            end
+            # starts: the best cold walkers in planet configuration `key`
+            # that share one trans-dim state once the member is switched on,
+            # each with the member's own parameters set to the best of a few
+            # informed draws of the stale move (OLS for a decorrelation,
+            # periodogram hints for a GP)
+            starts = Vector{Float64}[]; lstarts = Float64[]; tdj = nothing
+            for w in sortperm(view(logL_arr, 1, :); rev = true)
+                isfinite(logL_arr[1, w]) || continue
+                (key == SP_POOL || sp_key(td_states[1, w]) == key) || continue
+                th0 = Theta{Float64}(params; td = copy(td_states[1, w]))
+                set_unfrozen!(th0, view(state, 1, w, :))
+                th = Theta{Float64}(params, copy(th0.values); td = copy(th0.td))
+                for m in mates; m == j || deactivate_noise!(th.td, m); end
+                activate_noise!(th.td, j)
+                if tdj === nothing
+                    tdj = th.td
+                elseif th.td.planet_active != tdj.planet_active ||
+                       th.td.noise_active != tdj.noise_active
+                    continue
+                end
+                best = copy(th.values); lbest = lpost(best, tdj, 1)
+                if gm !== nothing
+                    for _ in 1:40
+                        c, lq = propose_noise_swap(th0, srng, gm, td.toggleable; data = data)
+                        (isfinite(lq) && is_noise_active(c.td, j)) || continue
+                        lc = lpost(c.values, tdj, 1)
+                        lc > lbest && (best = copy(c.values); lbest = lc)
+                    end
+                end
+                push!(starts, best); push!(lstarts, lbest)
+                length(starts) >= 6 && break
+            end
+            tdj === nothing && return nothing
+            # one target for the whole ensemble: every walker shares one
+            # start's other parameters (planets' periods and phases, other
+            # noise) and differs only in the member's state. That state is
+            # first climbed to the top of its conditional posterior from the
+            # best three starts (`climb_noise_state`) and the walkers are
+            # scattered about the highest top at its widths. Without the climb
+            # the ensemble stays tens of nats under the member's mode, and so
+            # does every proposal fitted to it (HD 18599: the decorrelation's
+            # seeded proposals 40-50 nats under its own cold walkers; seeds
+            # 103 and 203 then drained into different members, neither into
+            # the decorrelation).
+            nw = max(2 * length(sl) + 2, 32); nw += isodd(nw)
+            ctop = (starts[argmax(lstarts)], -Inf, nothing)
+            for i in sortperm(lstarts; rev = true)[1:min(3, length(starts))]
+                c = climb_noise_state(v -> lpost(v, tdj, 1), starts[i], sl, lo, hi)
+                c[2] > ctop[2] && c[3] !== nothing && (ctop = c)
+            end
+            if ctop[3] !== nothing
+                X = scatter_noise_state(srng, ctop[1], sl, lo, hi, ctop[3], nw)
+            else
+                # no width settled anywhere: scatter about the starts
+                base = starts[argmax(lstarts)]
+                X = Vector{Vector{Float64}}(undef, nw)
+                for i in 1:nw
+                    v = copy(base); s0 = starts[mod1(i, length(starts))]
+                    for (k, sidx) in enumerate(sl)
+                        x = s0[sidx]
+                        x = lo[k] > 0 ? x * exp(0.05 * randn(srng)) :
+                                        x + 0.01 * max(abs(x), 0.1) * randn(srng)
+                        v[sidx] = clamp(x, nextfloat(lo[k]), prevfloat(hi[k]))
+                    end
+                    X[i] = v
+                end
+            end
+            sp_ens[(j, key)] = NoiseStateEnsemble(X, copy(tdj), 0)
+        end
+        ens = sp_ens[(j, key)]; tdj = ens.td
+        D = run_noise_state_ensemble!(ens, (v, c) -> lpost(v, tdj, c), sl, lo, hi,
+                                      srng; n_steps = noise_state_seed_steps,
+                                      nchunks = n_slots)
+        if key != SP_POOL
+            p = fit_noise_state_proposal(D, sl, lo, hi; inflate = noise_state_inflate)
+            p === nothing || (sp_kprops[(j, key)] = p)
+        end
+        if set_pooled
+            bsl, _, blo, bhi = sp_info(j, SP_POOL)
+            cols = Int[findfirst(==(s), sl) for s in bsl]
+            p = fit_noise_state_proposal(D[:, cols], bsl, blo, bhi;
+                                         inflate = noise_state_inflate)
+            p === nothing || (sp_props[j] = p)
+        end
+        return nothing
+    end
 
     td_states = Matrix{TransDimState}(undef, n_temps, n_walkers_eff)
     for t in 1:n_temps, w in 1:n_walkers_eff
@@ -1854,12 +2122,22 @@ function sample_transdim_pt_emcee(
                 if noise_swap && do_noise && !isempty(td.noise_exclusion_groups) &&
                    βs[t] > 0.3 && rand(trng) < noise_swap_rate
                     β = βs[t]
-                    grp = td.noise_exclusion_groups[
-                              rand(trng, 1:length(td.noise_exclusion_groups))]
-                    cand_s, lq_s = propose_noise_swap(theta, trng, grp,
-                                                       td.toggleable; data=data)
+                    gi = rand(trng, 1:length(td.noise_exclusion_groups))
+                    grp = td.noise_exclusion_groups[gi]
+                    # The state move is cheap to retry (one likelihood per try) and
+                    # each try is its own Metropolis-Hastings step, so a run of
+                    # `noise_state_tries` of them is still exact.
+                    use_sp = sp_on && rand(trng) < noise_state_share &&
+                             all(j -> j == 0 || sp_props[j] !== nothing, sp_grp_idx[gi])
+                    cur = theta
+                    for _try in 1:(use_sp ? noise_state_tries : 1)
+                    cand_s, lq_s = use_sp ?
+                        propose_noise_swap_state(cur, trng, grp, td.toggleable,
+                            sp_props_for(sp_key(td_states[t, w]), gi)) :
+                        propose_noise_swap(cur, trng, grp, td.toggleable; data=data)
                     if isfinite(lq_s)
                         Threads.atomic_add!(propose_ntd[t], 1)
+                        Threads.atomic_add!(sp_cnt[use_sp ? 2 : 1, t, 1], 1)
                         lpc = spike_slab_log_prior(cand_s, strategy, inclusion_prior)
                         if isfinite(lpc)
                             lpc, llc = split_ref(lpc, cand_s, slot)
@@ -1874,8 +2152,11 @@ function sample_transdim_pt_emcee(
                                          cand_s.td.noise_active)
                                 logπ_arr[t, w] = lpc; logL_arr[t, w] = llc
                                 Threads.atomic_add!(accept_ntd[t], 1)
+                                Threads.atomic_add!(sp_cnt[use_sp ? 2 : 1, t, 2], 1)
+                                cur = cand_s
                             end
                         end
+                    end
                     end
                     continue
                 end
@@ -2516,6 +2797,16 @@ function sample_transdim_pt_emcee(
         # The spin-flip axis the saved walkers were canonicalised by (src/circular.jl).
         hasproperty(ck, :spin_axis) && (params.layout.spin_axis .= ck.spin_axis)
         _informed_cache_restore!(ck.informed, rngs_td, informed_keys)
+        if hasproperty(ck, :noise_state)
+            copyto!(sp_props, ck.noise_state.props)
+            merge!(sp_buf, ck.noise_state.buf); merge!(sp_n, ck.noise_state.n)
+            hasproperty(ck.noise_state, :kprops) && merge!(sp_kprops, ck.noise_state.kprops)
+            # (a checkpoint from before the per-configuration ensembles keeps
+            # its ensembles out: they are rebuilt at the next refit)
+            hasproperty(ck.noise_state, :ens) && ck.noise_state.ens isa typeof(sp_ens) &&
+                (merge!(sp_ens, ck.noise_state.ens);
+                 sp_ens_calls[] = ck.noise_state.ens_calls)
+        end
         n_done = step0
         # Past the release, the saved walkers carry their own values.
         if hasproperty(ck, :hold_on)
@@ -2563,6 +2854,10 @@ function sample_transdim_pt_emcee(
             _np_chk("lambda_slide", step)
         end
         do_transdim_step!(step); _np_chk("transdim", step)
+        if sp_on && step <= n_burnin
+            step % 5 == 0 && sp_collect!()
+            (step == n_burnin ÷ 2 || step == (3 * n_burnin) ÷ 4 || step == n_burnin) && sp_refit!()
+        end
 
         @inbounds for t in 1:n_temps
             propose_within[t] += Threads.atomic_xchg!(propose_temp[t], 0)
@@ -2870,7 +3165,9 @@ function sample_transdim_pt_emcee(
                 spin_axis = copy(params.layout.spin_axis),
                 recut_moved, burnin_ext = (b_end, b_last, b_passes),
                 informed = _informed_cache_snapshot(rngs_td, informed_keys),
-                evidence_blocks = ev_blocks))
+                evidence_blocks = ev_blocks,
+                noise_state = (; props = sp_props, kprops = sp_kprops, buf = sp_buf, n = sp_n,
+                               ens = sp_ens, ens_calls = sp_ens_calls[])))
             last_ck = time()
         end
 
@@ -3008,6 +3305,14 @@ function sample_transdim_pt_emcee(
     drift = _td_drift(samples, keep_idx, n_walkers_eff, param_names, params;
                       sampler = "transdim_pt_emcee", de_move = p_de)
 
+    cnt(m, k) = Int[sp_cnt[m, t, k][] for t in 1:n_temps]
+    noise_swaps = (stale_proposed = cnt(1, 1), stale_accepted = cnt(1, 2),
+                   state_proposed = cnt(2, 1), state_accepted = cnt(2, 2),
+                   members_with_state_proposal = count(!isnothing, sp_props[sp_members]),
+                   members = length(sp_members))
+    if noise_swap && do_noise && !isempty(td.noise_exclusion_groups)
+        @info "noise swaps since the start or the last resume (per temperature, cold first)" noise_swaps...
+    end
     return TransDimPTemceeResult(
         chains, log_z, ev_report,
         acc_within, acc_swap, acc_td,
@@ -3019,6 +3324,9 @@ function sample_transdim_pt_emcee(
         _ladder_history(β_hist, swap_hist, smd_hist, ev_acc, n_done, n_burnin_used),
         _stop_record(stop_reason, stop_step, n_steps, keep_idx, sc),
         _de_acceptance(de_accepted, de_proposed), drift, n_burnin_used,
-        n_trimmed, burnin_trim,
+        n_trimmed, burnin_trim, noise_swaps,
+        Dict{String, Int}("proposed" => pswap_prop[], "accepted" => pswap_acc[],
+                          "planet_to_noise_proposed" => pn_prop[], "planet_to_noise_accepted" => pn_acc[],
+                          "noise_to_planet_proposed" => np_prop[], "noise_to_planet_accepted" => np_acc[]),
     )
 end
