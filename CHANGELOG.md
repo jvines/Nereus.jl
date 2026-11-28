@@ -3,6 +3,19 @@
 Changes that matter to someone fitting with Nereus. Older releases are in the
 git history (`git log --first-parent develop`).
 
+## Unreleased
+
+### Fixed
+
+- **Informed planet births placed the time anchor out of phase under the `:Mo`
+  and `:Tp` parametrizations.** The periodogram's least-squares sinusoid fixes
+  the phase of M + ω, but the birth put Mo (or Tp) there as if ω were 0, while
+  drawing the newborn's eccentricity vector near zero, so its ω, and with it the
+  phase, was effectively random. The anchor is now drawn after the
+  eccentricity pair, at Mo_LS − ω (Tp likewise); the death's reverse density
+  uses the same kernel. `:phic` (the default) and `:Tc` are ω-free and draw
+  exactly what they did.
+
 ## 0.9.13
 
 ### Added
