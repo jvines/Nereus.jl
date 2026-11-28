@@ -35,6 +35,20 @@ git history (`git log --first-parent develop`).
   when it is) and a warning. All engines and estimators; `null` when nothing assessed
   the run.
 
+- **Informed starts and period jumps for the fixed-k PT samplers** (`pt_emcee`,
+  `pt_whitening`, and `pt` without planet births), both opt-in.
+  `informed_init = true` places every walker's planets from the residual
+  periodogram, as a trans-dim informed birth proposes one: the residual after
+  the other planets' signals, its peaks and the yearly / daily aliases of the
+  strongest, K and the time anchor from the peak's least-squares sinusoid,
+  spread over the peaks rather than piled on the strongest.
+  `period_jump_prob = p` adds a move that redraws a planet's (P, K, time anchor)
+  from that mixture (an independence proposal, ratio ln q(old) − ln q(new)) or
+  multiplies its period by a harmonic ratio (ratio ln r), accepted with the
+  tempered Metropolis-Hastings ratio at every rung. Its proposal is refreshed
+  through burn-in and fixed for the recorded steps, and is checkpointed. Off by
+  default, which draws exactly what it did. Job config: `sampler.kwargs`.
+
 ### Changed
 
 - **One convergence verdict.** `run_info.convergence.pass` and the fit-health
@@ -46,6 +60,17 @@ git history (`git log --first-parent develop`).
   Chains are unchanged.
 - `TransDimPTemceeResult` gains `planet_noise_swap`, the planet-activity swap
   counters the sampler already kept.
+
+### Fixed
+
+- **Informed planet births placed the time anchor out of phase under the `:Mo`
+  and `:Tp` parametrizations.** The periodogram's least-squares sinusoid fixes
+  the phase of M + ω, but the birth put Mo (or Tp) there as if ω were 0, while
+  drawing the newborn's eccentricity vector near zero, so its ω, and with it the
+  phase, was effectively random. The anchor is now drawn after the
+  eccentricity pair, at Mo_LS − ω (Tp likewise); the death's reverse density
+  uses the same kernel. `:phic` (the default) and `:Tc` are ω-free and draw
+  exactly what they did.
 
 ## 0.9.13
 

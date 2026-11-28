@@ -1382,6 +1382,33 @@ in place.
   solutions, and swaps alone left Gaia-4 at 61/39 where the symmetry demands
   50/50, with R-hat 1.003. Costs one likelihood evaluation per proposal; never
   offered to a planet with RV, transit or any other data. `0` disables it.
+- `informed_init::Bool=false` — opt-in. Each walker of every rung places each
+  planet from its residual periodogram instead of the prior, as an informed
+  trans-dim birth proposes one (src/samplers/period_jump.jl): the residual
+  after the per-instrument medians is searched greedily for one signal per
+  planet, and planet k's period is drawn from a mixture over the peaks of the
+  residual after the OTHER planets' signals and the yearly / daily aliases of
+  the strongest three (weights flattened halfway to uniform, so walkers spread
+  over them), plus a uniform-in-log P floor; K and the time anchor are centred
+  on the drawn peak's least-squares sinusoid, the eccentricity vector near
+  zero, the rest from the prior. Needs `init = nothing` and
+  `init_strategy = :prior`; planets without a sampled period, an RV amplitude
+  or RV data, and the `:a_driven` parametrization, keep their prior draws.
+  Walkers spread over several peaks start the ensemble multimodal, where the
+  stretch and DE moves stall, so use it with `period_jump_prob`. Off draws
+  exactly what it did.
+- `period_jump_prob::Real=0.0` — opt-in. Per walker, step and eligible planet
+  (as for `informed_init`), the probability of a period jump: with probability
+  3/4 the planet's (P, K, time anchor) are redrawn from the mixture over its
+  residual periodogram's peaks and their aliases (the residual after the other
+  planets, at the cold rung's best walker; refreshed every 50 steps of burn-in
+  and at its end, then fixed for the recorded steps), an independence proposal
+  accepted with β·Δln L + Δln p + ln q(old) − ln q(new); otherwise its period
+  is multiplied by a ratio from `ALIAS_RATIOS` (2, 1/2, 3, 1/3, 3/2, 2/3),
+  accepted with β·Δln L + Δln p + ln r. Both are reversible at every rung, so
+  the chain keeps its posterior; they let a planet cross between a period and
+  its alias or harmonic, which local moves cannot. Costs one likelihood
+  evaluation per proposal. `0` (default) draws exactly what it did.
 - `burnin_hold=nothing` — parameters held at a fixed value, the same for every
   walker of every rung, for at least the first `burnin_hold_frac` of burn-in
   and until the β = 1 rung stops climbing (3/4 of burn-in at the latest), and
@@ -1485,6 +1512,8 @@ function sample_pt_emcee(
     max_burnin::Union{Nothing,Real} = nothing,
     trim_burnin::Bool = false,
     node_flip::Real = 0.1,
+    informed_init::Bool = false,
+    period_jump_prob::Real = 0.0,
     burnin_hold = nothing,
     burnin_hold_frac::Real = 0.5,
     checkpoint::Union{Nothing,AbstractString,Symbol} = nothing,
@@ -1499,6 +1528,11 @@ function sample_pt_emcee(
     node_flip       = Float64(node_flip)
     0 <= node_flip <= 1 || throw(ArgumentError(
         "node_flip is a probability; got $node_flip"))
+    # Informed starts and the period jump (src/samplers/period_jump.jl).
+    p_pj = _period_jump_check(period_jump_prob)
+    informed_init && (init !== nothing || init_strategy !== :prior) && throw(ArgumentError(
+        "informed_init places the walkers itself; it needs init = nothing and " *
+        "init_strategy = :prior"))
     # Any other Symbol used to fall through to the prior draw without a word:
     # `init_strategy = "map"` from Python ran exactly the `:prior` fit.
     init_strategy in (:prior, :pathfinder, :map_scatter) || throw(ArgumentError(
@@ -1579,13 +1613,22 @@ function sample_pt_emcee(
     # Astrometry-only planets get the (Ω, ω) → (Ω + π, ω + π) move
     # (src/samplers/node_flip.jl); empty, and never drawn for, anything else.
     flips = node_flip > 0 ? node_flips(params, data; flat_shift) : NodeFlip[]
+    # The period jump's planets (src/samplers/period_jump.jl); `nothing` when off.
+    pj_plan = p_pj > 0 ? period_jump_plan(params, data) : nothing
+    if pj_plan !== nothing && isempty(pj_plan.planets)
+        @warn "pt_emcee: period_jump_prob = $p_pj but no planet can take the jump " *
+              "(it needs a sampled period, an RV amplitude and RV data, and not the " *
+              ":a_driven parametrization); it is off."
+        pj_plan = nothing
+    end
     # Coordinates held early in burn-in (src/samplers/burnin_hold.jl). While
     # held, `held_x` pins them in `eval_bounded!` at their exact value: on the
     # flat scale exp(log(x + s)) - s need not round back to x, and a jitter
     # held at 0 must take the unjittered path. Emptied at the release.
     hold = _burnin_hold(params, burnin_hold, burnin_hold_frac, n_burnin;
-                        forbid = reduce(vcat, (vcat(f.shift, f.negate) for f in flips);
-                                        init = Int[]))
+                        forbid = vcat(reduce(vcat, (vcat(f.shift, f.negate) for f in flips);
+                                             init = Int[]),
+                                      pj_plan === nothing ? Int[] : _period_jump_dims(pj_plan)))
     held_x = Tuple{Int,Float64}[(unfrozen_idx[j], v) for (j, v) in zip(hold.dims, hold.values)]
     held_y = Float64[flat_shift[j] === nothing ? v : log(v + flat_shift[j])
                      for (j, v) in zip(hold.dims, hold.values)]
@@ -1631,7 +1674,7 @@ function sample_pt_emcee(
         n_burnin, thin, seed, stretch_a, ladder = copy(βs), adapt_ladder,
         ladder_adapt_window, ladder_adapt_ν0, ladder_adapt_K, untemper_transit,
         prune_stranded, node_flip, _burnin_hold_fp(hold, params)...,
-        _de_fp(p_de)...)
+        _de_fp(p_de)..., _period_jump_fp(pj_plan === nothing ? 0.0 : p_pj)...)
     ck = resume ? read_checkpoint(ck_path, "pt_emcee", ck_fp) : nothing
     step0 = ck === nothing ? 0 : ck.step::Int
     step0 <= n_steps || throw(ArgumentError(
@@ -1764,6 +1807,15 @@ function sample_pt_emcee(
     # [-3.05, 3.23) and fail every retry below. Relabel a copy into them.
     x_init = init === nothing ? nothing : circular_relabel_point!(copy(init), params)
     init_seeds = rand(rng_master, UInt64, n_temps * n_walkers_eff)
+    # Informed starts (`informed_init`, src/samplers/period_jump.jl): the
+    # setups each walker's planets are drawn from, built once from the data.
+    init_plan = informed_init && ck === nothing ? informed_init_plan(params, data) : nothing
+    if init_plan !== nothing && all(S -> S === nothing, init_plan.setups)
+        @warn "pt_emcee: informed_init found no residual-periodogram peak for any " *
+              "planet (it needs a sampled period, an RV amplitude and RV data, and " *
+              "not the :a_driven parametrization); walkers start from the prior."
+        init_plan = nothing
+    end
     # Buffers are keyed by CHUNK, never by `Threads.threadid()` (see
     # src/threading.jl); `:static` keeps the 1:1 chunk-to-thread mapping, but
     # the buffers no longer depend on it.
@@ -1803,6 +1855,17 @@ function sample_pt_emcee(
                     end
                 else
                     x_b = _draw_from_prior(target, rng)
+                    if init_plan !== nothing
+                        # The planets from their residual periodograms.
+                        th = thread_theta[slot]
+                        @inbounds for (d, idx) in enumerate(unfrozen_idx)
+                            th.values[idx] = x_b[d]
+                        end
+                        _informed_init_draw!(th, init_plan, data, rng)
+                        @inbounds for (d, idx) in enumerate(unfrozen_idx)
+                            x_b[d] = th.values[idx]
+                        end
+                    end
                     @inbounds for d in 1:n_dim
                         state[t, w, d] = x_b[d]
                     end
@@ -1915,6 +1978,18 @@ function sample_pt_emcee(
     flip_proposed  = zeros(Int, n_temps)
     flip_accepted  = zeros(Int, n_temps)
     flip_eval(buf, t, w, slot) = eval_bounded!(buf, slot)
+    # Period jump (`period_jump_prob`): one stream per (rung, walker), a scratch
+    # Theta per chunk slot for the proposal, and the setups' reference state.
+    # Built only when on, so every other fit draws exactly what it did.
+    rngs_pj = pj_plan === nothing ? MersenneTwister[] :
+        [MersenneTwister(_walker_seed(seed, 6, i)) for i in 1:(n_temps * n_walkers_eff)]
+    pj_thetas = pj_plan === nothing ? Theta{Float64}[] :
+        [Theta{Float64}(params) for _ in 1:n_slots]
+    pj_ref = Theta{Float64}(params)
+    pj_prop_temp = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    pj_acc_temp  = [Threads.Atomic{Int}(0) for _ in 1:n_temps]
+    pj_proposed  = zeros(Int, n_temps)
+    pj_accepted  = zeros(Int, n_temps)
     # The pruning's own evaluations (`_pt_prune_stranded!`), counted.
     prune_eval(y) = (Threads.atomic_add!(n_evals_atomic, 1); eval_bounded!(y, 1))
 
@@ -2090,6 +2165,11 @@ function sample_pt_emcee(
         copy!(rng_master, ck.rng_master)
         foreach(copy!, rngs_h1, ck.rngs_h1); foreach(copy!, rngs_h2, ck.rngs_h2)
         foreach(copy!, rngs_flip, ck.rngs_flip)
+        if pj_plan !== nothing
+            foreach(copy!, rngs_pj, ck.rngs_pj)
+            pj_plan.setups .= ck.pj_setups
+            pj_proposed .= ck.pj_proposed; pj_accepted .= ck.pj_accepted
+        end
         accept_within .= ck.accept_within; propose_within .= ck.propose_within
         accept_swap .= ck.accept_swap; propose_swap .= ck.propose_swap
         flip_proposed .= ck.flip_proposed; flip_accepted .= ck.flip_accepted
@@ -2139,6 +2219,12 @@ function sample_pt_emcee(
     try
     for step in (step0 + 1):n_steps
         cur_step = step; step_keep0 = keep_idx
+        # The period jump's setups: refreshed from the cold rung's best walker
+        # through burn-in, then fixed for the recorded steps.
+        if pj_plan !== nothing && _period_jump_refresh_due(step, b_end)
+            _period_jump_refresh!(pj_plan, _pj_best_cold!(pj_ref, state, logπ_arr,
+                                  logL_arr, unfrozen_idx, flat_shift), data)
+        end
         do_half_step!(tasks_h1, :h1)
         do_half_step!(tasks_h2, :h2)
 
@@ -2158,6 +2244,18 @@ function sample_pt_emcee(
             @inbounds for t in 1:n_temps
                 flip_proposed[t] += Threads.atomic_xchg!(flip_prop_temp[t], 0)
                 flip_accepted[t] += Threads.atomic_xchg!(flip_acc_temp[t],  0)
+            end
+        end
+
+        # ---- Period jump (threaded; src/samplers/period_jump.jl) -------
+        if pj_plan !== nothing
+            Threads.atomic_add!(n_evals_atomic,
+                _period_jump_sweep!(flip_eval, state, logπ_arr, logL_arr, βs, pj_plan,
+                                    data, p_pj, rngs_pj, thread_proposal, pj_thetas,
+                                    unfrozen_idx, flat_shift, pj_prop_temp, pj_acc_temp))
+            @inbounds for t in 1:n_temps
+                pj_proposed[t] += Threads.atomic_xchg!(pj_prop_temp[t], 0)
+                pj_accepted[t] += Threads.atomic_xchg!(pj_acc_temp[t],  0)
             end
         end
 
@@ -2463,7 +2561,8 @@ function sample_pt_emcee(
                 windows = circular_windows(params),
                 spin_axis = copy(params.layout.spin_axis),
                 recut_moved, hold_on = !isempty(held_x), hold_med = hold_med[],
-                burnin_ext = (b_end, b_last, b_passes), evidence_blocks = ev_blocks))
+                burnin_ext = (b_end, b_last, b_passes), evidence_blocks = ev_blocks,
+                _period_jump_ck(pj_plan, rngs_pj, pj_proposed, pj_accepted)...))
             last_ck = time()
         end
 
@@ -2495,6 +2594,8 @@ function sample_pt_emcee(
     show_progress && _pt_recut_info("pt_emcee", recut_moved)
     show_progress && _node_flip_info("pt_emcee", flips, params, flip_proposed,
                                      flip_accepted)
+    show_progress && pj_plan !== nothing &&
+        _period_jump_info("pt_emcee", pj_plan, params, pj_proposed, pj_accepted)
     show_progress && sum(pruned) > 0 && @info "pt_emcee: burn-in moved " *
         "$(sum(pruned)) stranded walker state(s) onto their rung's mode " *
         "($(pruned[1]) at β = 1), each from a region whose total posterior mass " *

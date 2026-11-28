@@ -122,6 +122,7 @@ const TEST_UNITS = [
     # gives it shard 1 to itself, and ci/run_tests.sh gives shard 1 more threads.
     (name = "test_pt_emcee_stranded.jl", seconds = 186, files = ["test_pt_emcee_stranded.jl"]),
     (name = "test_pt_emcee_resume.jl", seconds = 39, files = ["test_pt_emcee_resume.jl"]),
+    (name = "test_period_jump.jl", seconds = 90, files = ["test_period_jump.jl"]),
     (name = "test_pt_emcee_progress.jl", seconds = 30, files = ["test_pt_emcee_progress.jl"]),
     (name = "test_burnin_hold.jl", seconds = 88, files = ["test_burnin_hold.jl"]),
     # The opt-in extended burn-in in the three samplers and through run_job.

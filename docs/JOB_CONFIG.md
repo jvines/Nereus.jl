@@ -959,6 +959,22 @@ prior when that degeneracy is present.
   `summary.json` records `"n_burnin_used"`, the step recording started after
   (`n_burnin` unless the extension ran on); `"n_draws_kept"` counts from there.
   Needs `prune_stranded` (on by default). See `src/samplers/burnin_extend.jl`.
+- **`informed_init`** (`pt_emcee`, `pt_whitening`, `pt` without planet births;
+  default `false`) — `true` starts every walker's planets from the residual
+  periodogram, as a trans-dim informed birth proposes one: each planet's period
+  from a mixture over the peaks of the RV residual after the other planets and
+  the yearly / daily aliases of the strongest, K and the time anchor from the
+  peak's least-squares sinusoid. Needs no `init` and `init_strategy` `"prior"`.
+  Use it with `period_jump_prob`: walkers spread over several peaks leave the
+  ensemble multimodal, where its local moves stall.
+- **`period_jump_prob`** (same samplers; default `0.0`) — per walker, step and
+  planet, the probability of a period jump: an independence draw of the
+  planet's (P, K, time anchor) from that mixture, or its period times a harmonic
+  ratio, accepted with the tempered Metropolis-Hastings ratio, so the posterior
+  is unchanged while a planet can cross between a period and its alias. `0.05`
+  to `0.1` is a reasonable rate; each proposal costs one likelihood evaluation.
+  Both options off draw exactly what the samplers drew before. See
+  `src/samplers/period_jump.jl` and the sampler docs.
 - **`trim_burnin`** (`pt_emcee`, `transdim_pt_emcee`, `pt_whitening`,
   `ensemble`; default `false`) — every run tests whether its β = 1 walkers were
   still settling into the main mode during the recorded run: a walker settles
