@@ -177,6 +177,34 @@ using Test, Nereus, Random, LinearAlgebra, Statistics, Serialization
         @test Array(res.chains) == Array(full.chains)
     end
 
+    @testset "sampler: seeded proposals in every populated planet configuration" begin
+        # No member is fitted from draws (min_draws beyond any count), and the
+        # cold walkers split between planet on and off. Every member must get a
+        # proposal for each configuration holding at least 5% of them: seeded
+        # in one configuration only, the walkers in the others would use the
+        # pooled proposals, which fit neither (HD 18599, seed 203, stayed in
+        # GP-Rot that way at 18 nats below the decorrelation).
+        tgt = NereusTarget(params, data)
+        td = TransDimConfig(; max_kplanet = 1, planets = true, noise = true,
+                              toggleable = nms, noise_exclusion_groups = [nms])
+        ck = joinpath(mktempdir(), "ck.jls")
+        Nereus.sample_transdim_pt_emcee(tgt, data; td = td, n_temps = 4, n_walkers = 16,
+            n_steps = 900, n_burnin = 600, seed = 11, noise_state_min_draws = 10^9,
+            checkpoint = ck, show_progress = false)
+        st = open(deserialize, ck).state
+        ns = st.noise_state
+        @test ns.ens isa Dict{Tuple{Int,UInt64}, Nereus.NoiseStateEnsemble}
+        # the configurations seeded are those of the cold walkers at the last
+        # refit; every member has a proposal in each of them
+        seeded = unique(k for (_, k) in keys(ns.ens))
+        @test !isempty(seeded)
+        for k in seeded, j in (1, 2)
+            @test haskey(ns.kprops, (j, k))
+            @test haskey(ns.ens, (j, k))
+        end
+        @test all(j -> ns.props[j] isa Nereus.NoiseStateProposal, 1:2)
+    end
+
     @testset "sampler: seeds agree where the stale swap leaves them apart" begin
         # Two GP kernels for one quasi-periodic signal, no planet. The stale move
         # draws the incoming kernel's hyperparameters from the prior while the

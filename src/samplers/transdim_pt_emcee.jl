@@ -1189,15 +1189,17 @@ function sample_transdim_pt_emcee(
             end
         end
     end
-    # the planet configuration most cold walkers are in
-    function sp_main_key()
-        cnt = Dict{UInt64, Int}()
+    # the planet configurations that hold at least 5% of the cold walkers
+    # (at least one walker), most populated first
+    function sp_cold_keys()
+        cnt = Dict{UInt64, Int}(); n = 0
         for w in 1:n_walkers_eff
             isfinite(logL_arr[1, w]) || continue
-            k = sp_key(td_states[1, w]); cnt[k] = get(cnt, k, 0) + 1
+            k = sp_key(td_states[1, w]); cnt[k] = get(cnt, k, 0) + 1; n += 1
         end
-        isempty(cnt) && return SP_POOL
-        return argmax(cnt)
+        n == 0 && return UInt64[]
+        ks = [k for (k, c) in cnt if c >= max(1, ceil(Int, 0.05 * n))]
+        return sort!(ks; by = k -> -cnt[k])
     end
     # fit each member to its β = 1 draws. Hotter rungs are not used: their
     # draws follow the tempered posterior, far broader than the cold one, and an
@@ -1219,26 +1221,31 @@ function sample_transdim_pt_emcee(
         end
         # A member burn-in left (nearly) unvisited has no draws to fit, and the
         # move into it would stay the stale one, so it would stay unvisited:
-        # seed it from a fixed-member run in the planet configuration most cold
-        # walkers are in. Members fitted from draws but without a proposal for
-        # that configuration are seeded too, or the group would fall back to the
-        # pooled proposals there and never move the planet amplitudes.
+        # seed it from a fixed-member run in every planet configuration that
+        # holds a share of the cold walkers. One configuration is not enough:
+        # walkers of the incumbent split over planet sets (HD 18599, seed 203:
+        # GP-Rot with no planet 38%, with planet b 57%) use the pooled proposals
+        # in every set the incoming member was not seeded in, all members alike,
+        # and the pooled fit matches none of them, so those walkers never leave.
+        # Members fitted from draws but without a proposal for one of these
+        # configurations are seeded there too.
         # (re-seeded at every refit, from the walkers as they now are)
-        kmain = sp_main_key()
-        for j in sp_members
-            (j in fitted && (kmain == SP_POOL || haskey(sp_kprops, (j, kmain)))) && continue
-            sp_seed!(j, kmain, !(j in fitted))
+        for (ik, key) in enumerate(sp_cold_keys())
+            for j in sp_members
+                (j in fitted && haskey(sp_kprops, (j, key))) && continue
+                sp_seed!(j, key, ik == 1 && !(j in fitted))
+            end
         end
         # later fits use draws made under the improved swap
         for k in keys(sp_n); sp_n[k] = 0; end
     end
     # Fixed-member ensembles behind seeded proposals, kept between refits
-    # (rebuilt when the main planet configuration changes).
-    sp_ens = Dict{Int, NoiseStateEnsemble}(); sp_ens_calls = Ref(0)
-    function sp_seed!(j::Int, kmain::UInt64, set_pooled::Bool)
+    # (one per member and planet configuration).
+    sp_ens = Dict{Tuple{Int,UInt64}, NoiseStateEnsemble}(); sp_ens_calls = Ref(0)
+    function sp_seed!(j::Int, key::UInt64, set_pooled::Bool)
         grp = something(findfirst(g -> j in g, noise_excl_idx), 0)
         mates = grp == 0 ? Int[] : noise_excl_idx[grp]
-        sl, _, lo, hi = sp_info(j, kmain)
+        sl, _, lo, hi = sp_info(j, key)
         function lpost(v, tds, c)
             th = Theta{Float64}(params, v; td = tds)
             lp = spike_slab_log_prior(th, strategy, inclusion_prior)
@@ -1248,12 +1255,12 @@ function sample_transdim_pt_emcee(
         end
         srng = MersenneTwister(hash((seed, j, sp_ens_calls[], :noise_state_seed)))
         sp_ens_calls[] += 1
-        if !haskey(sp_ens, j) || (kmain != SP_POOL && sp_key(sp_ens[j].td) != kmain)
+        if !haskey(sp_ens, (j, key))
             gm = let nm = params.config.noise_models[j]
                 gi = findfirst(g -> nm in g, td.noise_exclusion_groups)
                 gi === nothing ? nothing : td.noise_exclusion_groups[gi]
             end
-            # starts: the best cold walkers in the main planet configuration
+            # starts: the best cold walkers in planet configuration `key`
             # that share one trans-dim state once the member is switched on,
             # each with the member's own parameters set to the best of a few
             # informed draws of the stale move (OLS for a decorrelation,
@@ -1261,7 +1268,7 @@ function sample_transdim_pt_emcee(
             starts = Vector{Float64}[]; lstarts = Float64[]; tdj = nothing
             for w in sortperm(view(logL_arr, 1, :); rev = true)
                 isfinite(logL_arr[1, w]) || continue
-                (kmain == SP_POOL || sp_key(td_states[1, w]) == kmain) || continue
+                (key == SP_POOL || sp_key(td_states[1, w]) == key) || continue
                 th0 = Theta{Float64}(params; td = copy(td_states[1, w]))
                 set_unfrozen!(th0, view(state, 1, w, :))
                 th = Theta{Float64}(params, copy(th0.values); td = copy(th0.td))
@@ -1303,15 +1310,15 @@ function sample_transdim_pt_emcee(
                 end
                 X[i] = v
             end
-            sp_ens[j] = NoiseStateEnsemble(X, copy(tdj), 0)
+            sp_ens[(j, key)] = NoiseStateEnsemble(X, copy(tdj), 0)
         end
-        ens = sp_ens[j]; tdj = ens.td
+        ens = sp_ens[(j, key)]; tdj = ens.td
         D = run_noise_state_ensemble!(ens, (v, c) -> lpost(v, tdj, c), sl, lo, hi,
                                       srng; n_steps = noise_state_seed_steps,
                                       nchunks = n_slots)
-        if kmain != SP_POOL
+        if key != SP_POOL
             p = fit_noise_state_proposal(D, sl, lo, hi; inflate = noise_state_inflate)
-            p === nothing || (sp_kprops[(j, kmain)] = p)
+            p === nothing || (sp_kprops[(j, key)] = p)
         end
         if set_pooled
             bsl, _, blo, bhi = sp_info(j, SP_POOL)
@@ -2776,8 +2783,11 @@ function sample_transdim_pt_emcee(
             copyto!(sp_props, ck.noise_state.props)
             merge!(sp_buf, ck.noise_state.buf); merge!(sp_n, ck.noise_state.n)
             hasproperty(ck.noise_state, :kprops) && merge!(sp_kprops, ck.noise_state.kprops)
-            hasproperty(ck.noise_state, :ens) && (merge!(sp_ens, ck.noise_state.ens);
-                                                  sp_ens_calls[] = ck.noise_state.ens_calls)
+            # (a checkpoint from before the per-configuration ensembles keeps
+            # its ensembles out: they are rebuilt at the next refit)
+            hasproperty(ck.noise_state, :ens) && ck.noise_state.ens isa typeof(sp_ens) &&
+                (merge!(sp_ens, ck.noise_state.ens);
+                 sp_ens_calls[] = ck.noise_state.ens_calls)
         end
         n_done = step0
         # Past the release, the saved walkers carry their own values.
