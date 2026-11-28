@@ -170,6 +170,7 @@ const TEST_UNITS = [
     (name = "test_zero_planet_job.jl", seconds = 30, files = ["test_zero_planet_job.jl"]),
     (name = "test_noise_kwargs_plain_vectors.jl", seconds = 10, files = ["test_noise_kwargs_plain_vectors.jl"]),
     (name = "test_occupancy_noise_labels.jl", seconds = 10, files = ["test_occupancy_noise_labels.jl"]),
+    (name = "test_noise_swap_state.jl", seconds = 300, files = ["test_noise_swap_state.jl"]),
     (name = "test_celerite_ws.jl", seconds = 3, files = ["test_celerite_ws.jl"]),
     (name = "test_celerite_order.jl", seconds = 2, files = ["test_celerite_order.jl"]),
     (name = "test_arma_time_order.jl", seconds = 1, files = ["test_arma_time_order.jl"]),
