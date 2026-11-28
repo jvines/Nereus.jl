@@ -48,7 +48,7 @@ const _DIAG_FIELDS = (
     # collective drift of the β = 1 ensemble (src/diagnostics/drift.jl)
     :drift,
     # trans-dim move bookkeeping
-    :td_proposed, :td_accepted, :noise_td_proposed, :noise_td_accepted,
+    :td_proposed, :td_accepted, :noise_td_proposed, :noise_td_accepted, :noise_swaps,
     :planet_birth_proposed, :planet_birth_accepted,
     :planet_death_proposed, :planet_death_accepted,
     # MAP trust flags
