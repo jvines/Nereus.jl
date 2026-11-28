@@ -5,6 +5,22 @@ git history (`git log --first-parent develop`).
 
 ## Unreleased
 
+### Added
+
+- **Informed starts and period jumps for the fixed-k PT samplers** (`pt_emcee`,
+  `pt_whitening`, and `pt` without planet births), both opt-in.
+  `informed_init = true` places every walker's planets from the residual
+  periodogram, as a trans-dim informed birth proposes one: the residual after
+  the other planets' signals, its peaks and the yearly / daily aliases of the
+  strongest, K and the time anchor from the peak's least-squares sinusoid,
+  spread over the peaks rather than piled on the strongest.
+  `period_jump_prob = p` adds a move that redraws a planet's (P, K, time anchor)
+  from that mixture (an independence proposal, ratio ln q(old) − ln q(new)) or
+  multiplies its period by a harmonic ratio (ratio ln r), accepted with the
+  tempered Metropolis-Hastings ratio at every rung. Its proposal is refreshed
+  through burn-in and fixed for the recorded steps, and is checkpointed. Off by
+  default, which draws exactly what it did. Job config: `sampler.kwargs`.
+
 ### Fixed
 
 - **Informed planet births placed the time anchor out of phase under the `:Mo`
