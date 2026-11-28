@@ -271,7 +271,8 @@ _flat(M) = vec(permutedims(M))
         s = Nereus.run_job(tcfg)
         td = s["run_info"]["transdim"]
         @test td["prior"]["inclusion_prior"] == 0.5
-        @test td["prior"]["p_k"] ≈ transdim_k_prior(2)
+        @test td["prior"]["p_k"] ≈ transdim_k_prior(2; slab_fraction = td["prior"]["slab_fraction"])
+        @test abs(td["prior"]["slab_fraction"] - π / 4) < 0.02
         @test haskey(td, "ln_bayes_factor_adjacent") && length(td["ln_bayes_factor_adjacent"]) == 2
         @test haskey(td, "mixture_evidence") && haskey(td["mixture_evidence"], "available")
         @test haskey(td, "occupancy_health") && haskey(td, "k_max_truncation")

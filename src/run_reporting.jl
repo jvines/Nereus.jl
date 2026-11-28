@@ -43,6 +43,7 @@ function _transdim_k_summary!(summary::AbstractDict, chains, params, result;
     K = count(n -> startswith(String(n), "planet_active_"), names(chains, :parameters))
     K = max(K, maximum(np), params === nothing ? 0 : params.config.max_kplanet)
     st = _td_run_settings(cfg, engine)
+    c_slab = transdim_slab_fraction(params)
     # Ordering is per planet mode: one 1/k_g! per group of same-mode slots.
     modes = params === nothing ? Any[] : collect(params.config.planet_modes)
     gs = length(modes) == K ? [count(==(m), modes) for m in unique(modes)] : [K]
@@ -52,6 +53,7 @@ function _transdim_k_summary!(summary::AbstractDict, chains, params, result;
     rep = transdim_k_report(np, K; nchains = size(chains, 3), n_walkers,
                             inclusion_prior = st.inclusion_prior, planets = st.planets,
                             group_sizes = gs,
+                            slab_fraction = c_slab,
                             log_evidence = lz isa Real ? Float64(lz) : NaN,
                             evidence_method = method)
     mv = transdim_move_counts(result)

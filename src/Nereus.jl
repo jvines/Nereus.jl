@@ -440,7 +440,7 @@ end
 
 
 # Public API surface (api.jl / features.jl)
-export transdim_k_prior, transdim_k_report, transdim_occupancy_health, transdim_move_counts
+export transdim_slab_fraction, transdim_k_prior, transdim_k_report, transdim_occupancy_health, transdim_move_counts
 export sampler_diagnostics, chain_convergence, ensemble_drift,
        fit_rv, fit_transit, fit_astrometry, fit_rm, fit_tomography,
     fit_ttv, fit_binary, fit_joint, run_engine, Stopping, ENGINES,

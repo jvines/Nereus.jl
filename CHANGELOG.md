@@ -9,7 +9,7 @@ git history (`git log --first-parent develop`).
 
 - **Trans-dim runs report their prior on k and what the occupancy says about it.**
   `run_info["transdim"]` carries the prior on the planet count
-  (`P(k) ∝ (p/(1-p))^k / k!`, per planet mode: it is not uniform on k, because the
+  (`P(k) ∝ (c·p/(1-p))^k / k!`, `c = π/4` the share of a planet's (√e sin ω, √e cos ω) box with e < 1, per planet mode: it is not uniform on k, because the
   chain lives on the period-ordered region, which holds 1/k! of the slab prior;
   uniform over the period-ordered evidences at `inclusion_prior = 0.5`), the
   occupancy per k, `ln B` between adjacent k with a standard error and an

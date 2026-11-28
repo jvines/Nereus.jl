@@ -20,7 +20,8 @@ const TRANSDIM_K_MIN_VISITS = 10
 const TRANSDIM_KMAX_WARN_P = 0.5
 
 """
-    transdim_k_prior(max_k; inclusion_prior = 0.5, group_sizes = [max_k]) -> Vector{Float64}
+    transdim_k_prior(max_k; inclusion_prior = 0.5, group_sizes = [max_k],
+                      slab_fraction = 1.0) -> Vector{Float64}
 
 The prior on the planet count k = 0, 1, …, `max_k` that a trans-dimensional run
 puts on the k-planet models, indexed `k + 1`: P(k) ∝ (p / (1 − p))^k / k!, with
@@ -41,17 +42,27 @@ multiplied by p/(1−p) at p = 0.3, as this formula says.) Equivalently, P(k | D
 is uniform-prior at p = 0.5 over the evidences Z_k / k! of the period-ordered
 model, which is what a fixed-k fit with the ordering gate integrates.
 
+`slab_fraction` c is the share of one planet's slab prior that the model
+allows: the default (√e sin ω, √e cos ω) parametrisation draws both uniformly
+in [-1, 1] and the likelihood rejects e ≥ 1, so c = π/4 there. The k-planet model's
+evidence under the slab prior normalised over its allowed region is the box-prior
+evidence divided by c^k, so each planet carries an extra c in the prior:
+P(k) ∝ (c p/(1−p))^k / k!. (This is the factor of about 0.75 per planet the
+prior-only run showed.) `transdim_slab_fraction(params)` computes it by Monte Carlo.
+
 `group_sizes` are the numbers of slots of each planet mode (ordering is per
 mode, so each group carries its own 1/k_g!); the default is one group. `rjmcmc`
 has no activation prior, which is the same as `inclusion_prior = 0.5`.
 """
 function transdim_k_prior(max_k::Integer; inclusion_prior::Real = 0.5,
-                          group_sizes::AbstractVector{<:Integer} = [Int(max_k)])
+                          group_sizes::AbstractVector{<:Integer} = [Int(max_k)],
+                          slab_fraction::Real = 1.0)
+    0 < slab_fraction <= 1 || throw(ArgumentError("slab_fraction must be in (0, 1]"))
     max_k >= 0 || throw(ArgumentError("max_k must be ≥ 0"))
     0 < inclusion_prior < 1 || throw(ArgumentError("inclusion_prior must be in (0, 1)"))
     sum(group_sizes) == max_k || throw(ArgumentError(
         "group_sizes $(collect(group_sizes)) must sum to max_k = $max_k"))
-    r = inclusion_prior / (1 - inclusion_prior)
+    r = slab_fraction * inclusion_prior / (1 - inclusion_prior)
     poly = [1.0]                                        # Π_g Σ_j r^j / j!
     for n in group_sizes
         c = [r^j / factorial(j) for j in 0:Int(n)]
@@ -108,7 +119,7 @@ end
 """
     transdim_k_report(np, max_k; nchains = 1, n_walkers = nothing,
                       inclusion_prior = 0.5, planets = true,
-                      group_sizes = [max_k], log_evidence = NaN, evidence_reliable = true,
+                      group_sizes = [max_k], slab_fraction = 1.0, log_evidence = NaN, evidence_reliable = true,
                       evidence_method = "") -> Dict{String,Any}
 
 The planet-count block of a trans-dim run, from the flat draws `np` of
@@ -136,17 +147,19 @@ function transdim_k_report(np::AbstractVector{<:Integer}, max_k::Integer;
                            n_walkers::Union{Nothing, Integer} = nothing,
                            inclusion_prior::Real = 0.5, planets::Bool = true,
                            group_sizes::AbstractVector{<:Integer} = [Int(max_k)],
+                           slab_fraction::Real = 1.0,
                            log_evidence::Real = NaN, evidence_reliable::Bool = true,
                            evidence_method::AbstractString = "")
     K = Int(max_k)
     M = _k_by_walker(np, Int(nchains), n_walkers)
     n = length(M)
-    prior = transdim_k_prior(K; inclusion_prior, group_sizes)
+    prior = transdim_k_prior(K; inclusion_prior, group_sizes, slab_fraction)
     p = [count(==(k), M) / n for k in 0:K]
     out = Dict{String, Any}("max_k" => K, "n_draws" => n, "n_walkers" => size(M, 2))
     out["prior"] = Dict{String, Any}(
-        "form" => "P(k) ∝ (p/(1-p))^k / k! on k = 0..max_k (per planet mode: product of the groups)",
+        "form" => "P(k) ∝ (c p/(1-p))^k / k! on k = 0..max_k (per planet mode: product of the groups)",
         "group_sizes" => collect(Int, group_sizes),
+        "slab_fraction" => Float64(slab_fraction),
         "meaning" => "the weight of the k-planet model against its evidence Z_k under the " *
                      "normalised slab prior: P(k|D) ∝ P(k) Z_k. The 1/k! is the mass of the " *
                      "period-ordered region the sampler lives on; at p = 0.5 P(k|D) is uniform-prior " *
@@ -341,4 +354,28 @@ function _warn_transdim_k(rep::AbstractDict; engine::AbstractString = "")
         @warn "Nereus: ln B(k = $(r["k_hi"]) vs $(r["k_lo"])) is not quotable: $(r["reason"])."
     end
     return nothing
+end
+
+"""
+    transdim_slab_fraction(params; n = 20_000, seed = 1) -> Float64
+
+The share c of one planet's slab prior that the model allows (the `slab_fraction`
+of [`transdim_k_prior`](@ref)), by Monte Carlo over the first planet slot's
+(√e sin ω, √e cos ω) priors: the likelihood rejects e ≥ 1, so uniform draws on
+[-1, 1]² keep π/4. `1.0` when the slot is not parametrised that way.
+"""
+function transdim_slab_fraction(params; n::Int = 20_000, seed::Integer = 1)
+    try
+        lay = params.layout
+        (haskey(lay.name_to_idx, "sesinw_k1") && haskey(lay.name_to_idx, "secosw_k1")) || return 1.0
+        pos(nm) = findfirst(==(lay.name_to_idx[nm]), lay.unfrozen_idx)
+        a, b = pos("sesinw_k1"), pos("secosw_k1")
+        (a === nothing || b === nothing) && return 1.0
+        rng = MersenneTwister(seed)
+        da, db = lay.unfrozen_priors[a].dist, lay.unfrozen_priors[b].dist
+        ok = count(_ -> rand(rng, da)^2 + rand(rng, db)^2 < 1, 1:n)
+        return ok / n
+    catch
+        return 1.0
+    end
 end

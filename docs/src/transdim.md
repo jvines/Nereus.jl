@@ -341,6 +341,7 @@ P(k) \;\propto\; \Big(\frac{p}{1-p}\Big)^{k} \frac{1}{k!},
 \qquad k = 0, \dots, k_\mathrm{max},\quad p = \texttt{inclusion\_prior},
 ```
 
+where `c` is the share of one planet's slab prior that the model allows (below)
 truncated at `k_max` (`max_kplanet`) and normalised, with one `1/k_g!` per planet
 mode when the slot menu mixes modes (`transdim_k_prior`). The `1/k!` is the mass
 of the period-ordered region of the k-planet parameter space, which is where the
@@ -353,10 +354,22 @@ P(k \mid D) \;\propto\; P(k)\, Z_k ,
 and the same statement in the fixed-k convention: at the default `p = 0.5`,
 P(k | D) is *uniform-prior* over ``Z_k/k!``, the evidences of the period-ordered
 model that a fixed-k fit with the ordering gate integrates. For `max_kplanet = 3`
-at `p = 0.5` the prior is ``(0.375, 0.375, 0.1875, 0.0625)``. A likelihood that
+at `p = 0.5` the prior is ``(0.375, 0.375, 0.1875, 0.0625)``. (with `c = 1`; see below). A likelihood that
 carries no information (all errors 10⁶ m/s) returns the occupancy ratios
-k+1 : k in the proportions 1 : 1/2 : 1/3 at `p = 0.5` and multiplied by
+k+1 : k in the proportions c : c/2 : c/3 at `p = 0.5` and multiplied by
 `p/(1-p)` at `p = 0.3`, which is this formula.
+
+**The slab fraction `c`.** The default (√e sin ω, √e cos ω) parametrisation draws
+both uniformly on [-1, 1] and the likelihood rejects e ≥ 1, so a new planet's
+prior keeps π/4 ≈ 0.785 of its box: `c = π/4`. This is a hard constraint of the
+prior, not a bug: the prior-only run's factor of about 0.75 per planet was this
+(0.76, 0.75 and 0.69 of the 1 : 1/2 : 1/3 ratios; π/4 = 0.785). The evidence of the
+k-planet model under the slab prior normalised over its allowed region is the
+box-prior evidence divided by `c^k`, so `P(k)` carries `c^k`, and the ln B between
+adjacent k is the evidence ratio under that normalised prior. `c` is computed by
+Monte Carlo over the first slot's priors (`transdim_slab_fraction`) and reported
+as `prior.slab_fraction`; other hard constraints (dynamical stability, `M_s`-dependent)
+involve several planets at once, are not a per-planet factor, and are not in `c`.
 
 The prior is recorded in `run_info["transdim"]["prior"]` (`p_k`,
 `inclusion_prior`, `group_sizes`, the form and its meaning) and in
