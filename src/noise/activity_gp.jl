@@ -530,6 +530,10 @@ function activity_gp_predict(chains, params::Params, data::Data;
     n_rv_obs = length(data.t_rv)
     n_rv_obs > 0 ||
         throw(ArgumentError("activity_gp_predict requires RV observations"))
+    # indicators_only: the RV is not coupled to G (no Vc/Vr in the layout) and
+    # the likelihood scores only the indicator block, so G is conditioned on
+    # the indicators alone and the RV activity contribution is zero.
+    n_rv_cond = agp.indicators_only ? 0 : n_rv_obs
 
     if t_pred === nothing
         t_min, t_max = extrema(data.t_rv)
@@ -619,8 +623,9 @@ function activity_gp_predict(chains, params::Params, data::Data;
         # Derivative couplings sampled as amplitudes — physical Ġ
         # coefficient = amplitude / std(Ġ) (mirrors the likelihood).
         inv_sdG = 1 / sqrt(1 / (λe * λe) + π * π / (P * P * λp * λp))
-        Vc = theta.values[layout.name_to_idx["Vc$s"]]
-        Vr = agp.use_derivative ?
+        Vc = agp.indicators_only ? 0.0 :
+             theta.values[layout.name_to_idx["Vc$s"]]
+        Vr = (agp.use_derivative && !agp.indicators_only) ?
              theta.values[layout.name_to_idx["Vr$s"]] * inv_sdG : 0.0
         Vc_samples[d] = Vc
         Vr_samples[d] = Vr
@@ -628,7 +633,7 @@ function activity_gp_predict(chains, params::Params, data::Data;
         # Build flat observation arrays — same shape as the likelihood
         # path.
         ind_meta = Tuple{Symbol, Vector{Float64}, Vector{Float64}, Float64, Float64, Float64}[]
-        n_obs_total = n_rv_obs
+        n_obs_total = n_rv_cond
         for ch in agp.channels
             ch === :rv && continue
             name = String(ch)
@@ -650,7 +655,8 @@ function activity_gp_predict(chains, params::Params, data::Data;
 
         # Re-evaluate Stage-1 predictions to get the RV mean to subtract
         # (Keplerian + offsets + activity-decorrelation mean modifier).
-        preds, vars = rv_predictions(theta, data)
+        preds, vars = n_rv_cond > 0 ? rv_predictions(theta, data) :
+                                      (Float64[], Float64[])
 
         t_obs  = Vector{Float64}(undef, n_obs_total)
         y_obs  = Vector{Float64}(undef, n_obs_total)
@@ -658,14 +664,14 @@ function activity_gp_predict(chains, params::Params, data::Data;
         a_obs  = Vector{Float64}(undef, n_obs_total)
         b_obs  = Vector{Float64}(undef, n_obs_total)
 
-        @inbounds for i in 1:n_rv_obs
+        @inbounds for i in 1:n_rv_cond
             t_obs[i]  = data.t_rv[i]
             y_obs[i]  = data.rv[i] - preds[i]
             σ²_obs[i] = vars[i]
             a_obs[i]  = Vc
             b_obs[i]  = Vr
         end
-        offset = n_rv_obs
+        offset = n_rv_cond
         for (_, vals, errs, a_coef, b_coef, jit²) in ind_meta
             n_ch = length(vals)
             @inbounds for i in 1:n_ch
@@ -679,7 +685,7 @@ function activity_gp_predict(chains, params::Params, data::Data;
         end
 
         # Σ_oo: joint covariance at observation times.
-        ch_obs = vcat(fill(:rv, n_rv_obs),
+        ch_obs = vcat(fill(:rv, n_rv_cond),
                        vcat(fill.(getindex.(ind_meta, 1),
                                     length.(getindex.(ind_meta, 2)))...))
         if any(isinf, σ²_obs)   # missing indicator entries out

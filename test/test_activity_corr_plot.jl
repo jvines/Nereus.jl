@@ -70,6 +70,31 @@ _texts(fig) = String[string(p.text[]) for ax in filter(c -> c isa Axis, fig.cont
     @test q[4, :] ≈ a .+ b .* (xs .- xm) atol = 0.03  # median line = WLS line
 end
 
+@testset "line covariance scaled to the scatter; jitter in the weights" begin
+    # Errors that understate the scatter (the top row still holds the planets):
+    # with scale_to_scatter the slope's σ grows by sqrt(χ²_red); it never shrinks.
+    rng = MersenneTwister(3)
+    x = randn(rng, 80); σ = fill(0.5, 80)
+    y = 0.3 .* x .+ 4.0 .* randn(rng, 80)
+    a0, b0, c0, _ = Nereus._wls_line(x, y, σ)
+    a1, b1, c1, _ = Nereus._wls_line(x, y, σ; scale_to_scatter = true)
+    w = 1 ./ σ .^ 2; A = hcat(ones(80), x .- sum(w .* x) / sum(w))
+    χ2r = sum(w .* (y .- A * [a0, b0]) .^ 2) / 78
+    @test b1 == b0 && a1 == a0
+    @test c1[2, 2] ≈ c0[2, 2] * χ2r rtol = 1e-10
+    yy = 0.3 .* x .+ 0.05 .* randn(rng, 80)            # overestimated errors: unchanged
+    @test Nereus._wls_line(x, yy, σ; scale_to_scatter = true)[3] ≈ Nereus._wls_line(x, yy, σ)[3]
+    # the panel prints b/σ_b, computed with the fitted jitter (3 m/s) added to the 3 m/s errors
+    params, data, chains = _corr_fixture()
+    fig = first(plot_rv_activity_corr(chains, params, data))
+    @test any(s -> occursin("b/σ = ", s), _texts(fig))
+    m = data.rv_inst .== 1
+    _, bb, cc, _ = Nereus._wls_line(data.indicators["bis"][m], data.rv[m], fill(sqrt(18.0), count(m));
+                                    scale_to_scatter = true)
+    @test any(s -> occursin(replace(Printf.@sprintf("b/σ = %.1f", bb / sqrt(cc[2, 2])), "-" => "−"), s),
+              _texts(fig))
+end
+
 @testset "activity-correlation figure" begin
     @testset "produced per instrument when indicators exist" begin
         params, data, chains = _corr_fixture()
